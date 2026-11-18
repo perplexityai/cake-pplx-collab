@@ -758,12 +758,15 @@ def cake_rmsnorm_det_train_backward(
         feature dimension, 16-byte aligned storage and a row stride that is a
         multiple of 16 bytes (expanded or sliced autograd gradients included) are
         read in place; other layouts are materialized once.  An N-D gradient,
-        ``[..., H]``, takes ``x``'s shape and collapses its leading dimensions
-        into rows under the forward's rule.
+        ``[..., H]``, takes ``x``'s shape; its leading dimensions collapse into
+        rows under the forward's rule, and a layout that rule rejects (the
+        gradient of a transposed consumer of ``y``, for example) is copied once
+        into a contiguous ``[rows, H]`` tensor instead of raising ``ValueError``.
     x : torch.Tensor
         The BF16 ``[T, H]`` (or ``[..., H]``) tensor that was normalized (``x`` of
         the plain forward, ``h_new`` of the residual forward); same layout rules
-        as the forward's ``x``.
+        as ``g``, except that an N-D ``x`` whose layout the forward's rule
+        rejects raises ``ValueError`` (it is not copied).
     w : torch.Tensor
         BF16 or FP32 ``[H]`` weight (the forward's).  BF16 is read in place when
         contiguous and 16-byte aligned, FP32 when contiguous and 32-byte aligned;
@@ -780,7 +783,9 @@ def cake_rmsnorm_det_train_backward(
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_rmsnorm_det_train_backward_workspace` sized for at least this
-        many rows; allocated when omitted.
+        many rows; allocated when omitted.  ``workspace`` must not share memory
+        with ``g``, ``x``, ``w``, ``rstd`` or ``g_residual``; the call does not
+        check this.
     dx, dw : torch.Tensor, optional
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout

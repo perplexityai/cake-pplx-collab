@@ -20,12 +20,17 @@ loader and the generated CUDA sources under ``csrc/``).
 
 This package runs its own kernels only: the forward programs of the
 deterministic package (rendered here; the forward has no cross-row reduction)
-and, per token-count window, the backward form the registry lists for it: in
-the windows that ship it, one kernel whose CTAs add their ``dw`` sums into FP32
-workspace sums (one word per column) in the order they finish, so ``dw`` is not
-guaranteed bitwise
-reproducible; in the others, the deterministic package's backward pair (main
-kernel and fixed-order ``dw`` reduce) rendered here.  The mode is part of the
+and, per token-count window, the backward form the registry lists for it.
+Two forms sum ``dw`` in an order that depends on scheduling, so their ``dw`` is
+not guaranteed bitwise reproducible: the single kernel, whose CTAs add their
+``dw`` sums into replicated FP32 column sums in the workspace in the order
+they finish, and the part-row single kernel, whose CTAs write their ``dw`` sums as
+one FP32 row each into workspace scratch that its helper CTAs fold.  Every
+other window runs a fixed-order form, whose ``dw`` is bitwise reproducible for
+a given token count on devices with the same SM count: the one-cluster kernel
+of small token counts, a column-task program (its CTAs sum whole columns of
+``dw`` over every row) or the deterministic package's backward pair (main
+kernel and fixed-order ``dw`` reduce), rendered here.  The mode is part of the
 name only: every public name carries ``nondet`` (the constants excepted) and no
 entry point takes a ``deterministic`` keyword (passing one raises Python's
 ``TypeError`` for an unexpected keyword argument); the deterministic package is
@@ -1057,13 +1062,29 @@ def cake_rmsnorm_nondet_train_backward(
     r"""Fused BF16 RMSNorm backward: ``dx`` and the FP32 weight gradient ``dw``.
 
     The call runs, per window of ``T``, the form the "Program selection by
-    token count" notes list for that window: in the windows that ship it, one
-    kernel that writes ``dx`` and adds the ``dw`` sums of its CTAs into FP32
-    sums in the workspace (one word per column), which the CTA that finishes
-    last adds into ``dw`` (``dx`` is bitwise reproducible; the order of the
-    FP32 additions depends on scheduling, so ``dw`` is not guaranteed bitwise
-    reproducible); in the others, the deterministic package's backward pair
-    rendered into this package.
+    token count" notes list for that window; ``dx`` is bitwise reproducible
+    in every form.  Two forms add the ``dw`` sums of their CTAs in an order
+    that depends on scheduling, so their ``dw`` is not guaranteed bitwise
+    reproducible: the single kernel adds them into replicated FP32 column
+    sums in the workspace, and the CTA that finishes last stores ``dw``, the
+    FP32 sum of the replicas; the part-row single kernel writes them as one
+    FP32 row per CTA into scratch in the workspace, which its helper CTAs
+    add in FP32 and store as ``dw`` once every row is in (no column sums and
+    no atomic add of a sum).  Every other window runs a fixed-order form:
+    the one-cluster kernel (one launch that reads no workspace and uses no
+    atomic) up to a top of T 2 to 16 (64 rows on the H = 256 routes), a
+    column-task program (its CTAs sum whole columns of ``dw`` over every
+    row, each in a fixed order) or the deterministic package's backward pair
+    (main kernel and fixed-order ``dw`` reduce) rendered into this package.
+    Their ``dw`` is bitwise reproducible for a given token count on devices
+    with the same SM count.  The notes' table marks only the ``(one
+    cluster)`` and ``(det pair)`` windows, and its legend says that the
+    other windows run the single kernel and that ``dw`` is not bitwise
+    reproducible.  Both statements hold only for the windows whose registry
+    record (``cake_jit.MODULES``) has the ``workspace_rule``
+    ``claim_sum_f32`` with a nonzero ``sum_bytes`` (the single kernel) or
+    ``claim_part_f32`` (the part-row single kernel); the other unmarked
+    windows run a column-task program.
 
     While ``torch.use_deterministic_algorithms(True)`` is in effect every call
     raises ``RuntimeError`` naming
@@ -1081,11 +1102,15 @@ def cake_rmsnorm_nondet_train_backward(
         feature dimension, 16-byte aligned storage and a row stride that is a
         multiple of 16 bytes (expanded or sliced autograd gradients included) are
         read in place; other layouts are materialized once.  An N-D gradient,
-        ``[..., H]``, takes ``x``'s shape and collapses its leading dimensions
-        into rows under the forward's rule.
+        ``[..., H]``, takes ``x``'s shape; its leading dimensions collapse into
+        rows under the forward's rule, and a layout that rule rejects (the
+        gradient of a transposed consumer of ``y``, for example) is copied once
+        into a contiguous ``[rows, H]`` tensor instead of raising ``ValueError``.
     x : torch.Tensor
         The BF16 tensor that was normalized (``x`` of the plain forward,
-        ``h_new`` of the residual forward); same layout rules as ``g``.
+        ``h_new`` of the residual forward); same layout rules as ``g``, except
+        that an N-D ``x`` whose layout the forward's rule rejects raises
+        ``ValueError`` (it is not copied).
     w : torch.Tensor
         The forward's weight: BF16 ``[H]`` (read in place when contiguous and
         16-byte aligned), or, on the FP32-weight routes, FP32 ``[H]`` (in place
@@ -1107,6 +1132,8 @@ def cake_rmsnorm_nondet_train_backward(
         allocates and zero-fills one: a caching-allocator call, one fill kernel
         (about 3 us on B200) and about 35 us of host time per call.  One buffer
         per backward that may run concurrently (on another stream).
+        ``workspace`` must not share memory with ``g``, ``x``, ``w``, ``rstd``
+        or ``g_residual``; the call does not check this.
     dx, dw : torch.Tensor, optional
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout
