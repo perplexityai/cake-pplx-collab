@@ -577,6 +577,7 @@ kernel_cake_lm_head_det_loss_aa0003a3f2f72697433f(const __grid_constant__ CUtens
                 float dz_d = dlogp[d_off + rin_r];
                 int dz_skip = ((rin_lbl < 0ll) ? 1 : 0);
                 int dz_col = (int)rin_lbl - ep_off_n;
+                int dz_res = (((unsigned long long)rin_lbl < (unsigned long long)ldc) ? 1 : 0);
                 #pragma unroll 1
                 for (int ep_kc = 0; ep_kc < 1; ep_kc++) {
                     int lane_addr = taddr + (unsigned int)(epi_warp * 32 << 16) + epi_stage * 256;
@@ -637,7 +638,7 @@ kernel_cake_lm_head_det_loss_aa0003a3f2f72697433f(const __grid_constant__ CUtens
                                 }
                             }
                             if (global_row < M) {
-                                if (dz_skip == 0) {
+                                if (dz_res != 0) {
                                     if ((unsigned int)(dz_col - fcol) < 16) {
                                         rlab[rin_t] = dzf_r;
                                     }
