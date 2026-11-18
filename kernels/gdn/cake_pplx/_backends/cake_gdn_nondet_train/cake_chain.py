@@ -2470,11 +2470,11 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
     (its longest other piece) and its fixed cost; the serial table pays its longest sequence at the step of its fill.
     ``select`` where the split is cheaper; ``segment_len`` is ``L`` (0 without a split); ``one_stream`` where wave 1
     runs on the caller's stream: it has summaries and the shorter of its two launches is at most the ``fork`` cost.
-    Where wave 1 runs on one stream and the pieces do not fit one wave, ``one_stream_us`` prices that route (its
-    summaries, last pieces' walks, stitch and other pieces' walks in series) and ``one_wave_us`` the one-wave route on
-    the pieces of :func:`bwd_one_wave_table` (the summaries of every piece but each sequence's first, the stitch and one
-    walk of every piece); ``one_wave_len`` is that table's ``L`` where it prices no higher (0 elsewhere).  The other
-    keys do not depend on these."""
+    Where wave 1 runs on one stream and the pieces do not fit one wave, ``one_stream_us`` prices that route (the
+    summaries of every piece but each sequence's first, the last pieces' walks, the stitch and the other pieces' walks
+    in series) and ``one_wave_us`` the one-wave route on the pieces of :func:`bwd_one_wave_table` (the summaries of
+    every piece but each sequence's first, the stitch and one walk of every piece); ``one_wave_len`` is that table's
+    ``L`` where it prices no higher (0 elsewhere).  The other keys do not depend on these."""
     chunks = tuple(int(n) for n in chunks)
     hv, sms = int(num_v_heads), int(sm_count)
     out: dict[str, Any] = {
@@ -2497,7 +2497,7 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
     length = bwd_piece_table(chunks, hv, sms)
     if length is None:
         return out
-    last = middle = front = count = 0
+    last = middle = front = summary = count = 0
     pieces = 1
     for n in chunks:
         bounds = segment_bounds(n, length)
@@ -2509,6 +2509,7 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
             middle = max(middle, max(lens[1:-1]))
         if len(lens) > 1:
             front = max(front, max(lens[:-1]))
+            summary = max(summary, max(lens[1:]))
     split = (
         max(last * costs["walk"], middle * costs["summary"])
         + costs["stitch"]
@@ -2530,9 +2531,10 @@ def adjoint_split_pricing(chunks, num_v_heads: int, sm_count: int, arch: str) ->
     )
     if length1 is not None:
         # wave 1 on one stream runs its summaries, the last pieces' walks, the stitch and the other walks in series;
-        # the one-wave route runs the summaries, the stitch and one walk of every piece (every piece fits one wave)
+        # the one-wave route runs the summaries, the stitch and one walk of every piece (every piece fits one wave);
+        # both price the summary launch at its longest piece, every piece of a split sequence but its first
         series = (
-            middle * costs["summary"]
+            summary * costs["summary"]
             + last * costs["walk"]
             + costs["stitch"]
             + costs["stitch_piece"] * (pieces - 1)

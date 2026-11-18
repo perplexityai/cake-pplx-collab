@@ -5200,9 +5200,9 @@ def test_bwd_one_wave_table_rule() -> None:
 # bwd_piece_table do not fit one wave, (that table's L, the one-wave table's L, wave 1 in series on one stream (us), the
 # one-wave route (us)); 0 on every other row (B300's h1 pieces of 11 chunks fit one wave, 144 CTAs on 148 SMs)
 ONE_WAVE_TABLE_ROWS = {
-    "GB200": {"h2": (20, 22, 198.03, 162.84), "h1": (10, 11, 155.6, 133.87)},
-    "B300": {"h2": (20, 22, 189.22, 155.96)},
-    "GB300": {"h2": (20, 22, 189.22, 155.96), "h1": (10, 11, 150.8, 130.18)},
+    "GB200": {"h2": (20, 22, 200.82, 162.84), "h1": (10, 11, 155.6, 133.87)},
+    "B300": {"h2": (20, 22, 191.86, 155.96)},
+    "GB300": {"h2": (20, 22, 191.86, 155.96), "h1": (10, 11, 150.8, 130.18)},
 }
 ONE_STREAM_CLASSES = frozenset({"GB200", "B300", "GB300"})
 # The pricing's keys of the piece table on the bench rows of PIECE_ROWS by device class, as before the one-wave table:
@@ -5275,7 +5275,7 @@ def test_one_wave_table_on_one_stream_rows(name) -> None:
 
 def test_one_wave_table_kept_only_where_it_prices_no_higher(monkeypatch) -> None:
     # GB300's h2 row with a summary step of 10 us per chunk and a walk step of 0.1 us: the one-wave route (summaries of
-    # 22 chunks) prices above wave 1 in series (summaries of 19 chunks), so the pricing keeps the piece table and so
+    # 22 chunks) prices above wave 1 in series (summaries of 20 chunks), so the pricing keeps the piece table and so
     # does the host layout
     _device_class(monkeypatch, "GB300")
     chunks = cake_plan.chunk_counts(_PAIR_LAYOUT)
@@ -5284,7 +5284,7 @@ def test_one_wave_table_kept_only_where_it_prices_no_higher(monkeypatch) -> None
     monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_COSTS", {"sm_103a": costs})
     rec = cake_chain.adjoint_split_pricing(chunks, 6, 152, "sm_103a")
     assert rec["select"] and rec["one_stream"] and rec["segment_len"] == 20, rec
-    assert abs(rec["one_stream_us"] - 245.6) < 0.01, rec
+    assert abs(rec["one_stream_us"] - 255.6) < 0.01, rec
     assert abs(rec["one_wave_us"] - 270.8) < 0.01, rec
     assert rec["one_wave_len"] == 0, rec
     options = cake_chain.make_options()
