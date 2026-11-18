@@ -4238,7 +4238,7 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "00a2beef7d0025616eadbc2db060bc7bd59bf9ac6bef4a7f78c3a66a5a9341ca",
+      "closure_sha256": "2436c3e3755dc9491289d91e56f305113f4af7d856998ca54879a9bd6eb9a175",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
@@ -4247,7 +4247,7 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_sm_100a.so",
       "sha256": {
-        "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_binding.cu": "885c4ebbfcd65df465cbf7387c7a421be542683fefaf8011690adae828109dfd",
+        "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_binding.cu": "5c123b557644a32eddb52fc5e6dfce74e3d35e6b2d282511568d85940d10e031",
         "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "71a32b3aba9909382914376daaacad4882d6f3166ac94348cc5067ec7e959080"
       },
       "sources": [
@@ -4257,7 +4257,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "a3d1b5a80583d14c929c2d5b404bfd487961a232fe7d6bcf30b91d5c38812932",
+      "closure_sha256": "ce1a2cdbdb5d4b30b0a9affda8bbd99be5dc64486d2c8fc8f8ca6a8cb2135bbb",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -4266,7 +4266,7 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_sm_103a.so",
       "sha256": {
-        "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_binding.cu": "885c4ebbfcd65df465cbf7387c7a421be542683fefaf8011690adae828109dfd",
+        "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_binding.cu": "5c123b557644a32eddb52fc5e6dfce74e3d35e6b2d282511568d85940d10e031",
         "csrc/cake_dsa_indexer_det_topk/cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "71a32b3aba9909382914376daaacad4882d6f3166ac94348cc5067ec7e959080"
       },
       "sources": [

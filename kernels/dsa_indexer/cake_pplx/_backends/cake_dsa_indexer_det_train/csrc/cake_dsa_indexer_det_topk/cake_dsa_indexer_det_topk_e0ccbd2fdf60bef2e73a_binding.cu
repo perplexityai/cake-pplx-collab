@@ -154,7 +154,7 @@ CUtensorMap EncodeTma_K8(const TensorView& t) {
   cuuint64_t global_strides[2] = {Stride(s2, "K8"), Stride(128LL, "K8")};
   cuuint32_t box_dim[3] = {64u, 8u, 1u};
   cuuint32_t elem_strides[3] = {1u, 1u, 1u};
-  const bool allow_oob_box[3] = {false, false, false};
+  const bool allow_oob_box[3] = {false, true, false};
   for (int axis = 0; axis < 3; ++axis) {
     TVM_FFI_CHECK(allow_oob_box[axis] || box_dim[axis] <= global_dim[axis], ValueError)
         << KERNEL_NAME << ": descriptor 'K8' axis " << axis << " (0 is the innermost) has a TMA box of "
