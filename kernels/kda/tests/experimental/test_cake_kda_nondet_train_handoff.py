@@ -15,14 +15,19 @@ limitations under the License.
 
 Checkpoint hand-off suite of the Cake non-deterministic packed KDA chunked training package
 (``cake_pplx._backends.cake_kda_nondet_train``: ``cake_kda_nondet(..., checkpoint_handoff="auto" | "on" |
-"off")``).  On a GPU: the gradients under both checkpoint modes are bitwise those of
-``"off"`` on every plan family of the device the packs below reach, with both kinds of record (a tape record: the
-tapes; a row record: the recompute launches the intra twin, ``cake_jit.HANDOFF_TWINS``, and the record also keeps the
-prep's rows), also with the tape WY twin (``cake_jit.TAPE_TWINS``) on the rows whose record keeps no ``w``, the
-record is taken, stale or refused records fall back, the byte budget demotes and refuses, and ``"auto"`` engages
-exactly where ``HANDOFF_HEADS``, ``HANDOFF_VERIFIED``, the size bounds (``HANDOFF_MIN_HEAD_TOKENS``,
-``HANDOFF_MIN_DOC_TOKENS``) and ``HANDOFF_ROWS_VERIFIED`` say.  Host only: the rules, the admission, the mode parsing
-and torch's recompute, capture, compile and dispatch-mode state as the hand-off reads it.
+"off")``).  On a GPU: under both checkpoint modes the hand-off's arm and ``"off"``'s arm (``out`` and the five
+gradients) are each judged against the exact FP64 reference beside the naive BF16 tier (``tests/cake_naive.py``) over
+the judge's draws, on every plan family of the device the packs below reach, with both kinds of record (a tape
+record: the tapes; a row record: the recompute launches the intra twin, ``cake_jit.HANDOFF_TWINS``, and the record
+also keeps the prep's rows), also with the tape WY twin (``cake_jit.TAPE_TWINS``) on the rows whose record keeps no
+``w``; stacked layers are judged layer by layer on the operands each node read.  The plumbing stays exact: the record
+is taken (the counters), its tape fields are the tape forward's, its pointers and bytes are the plan's, the launch
+lists, stale or refused records fall back, the byte budget demotes and refuses, and ``"auto"`` engages exactly where
+``HANDOFF_HEADS``, ``HANDOFF_VERIFIED``, the size bounds (``HANDOFF_MIN_HEAD_TOKENS``, ``HANDOFF_MIN_DOC_TOKENS``) and
+``HANDOFF_ROWS_VERIFIED`` say.  A row above ``JUDGE_MAX_TOKENS`` tokens (P8 and a few others) keeps its exact checks
+only, its results finite; each such test names the rows that judge its route.  The package has no bit contract: no
+result is compared with another result.  Host only: the rules, the admission, the mode parsing and torch's recompute,
+capture, compile and dispatch-mode state as the hand-off reads it.
 
 Like the backend suite it names its package through the shared alias helper and imports nothing else from
 ``cake_pplx``.
@@ -32,6 +37,7 @@ import contextlib
 import dataclasses
 import json
 import os
+import random
 import re
 import sys
 import types
@@ -41,8 +47,21 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
-from tests.experimental.test_helpers.cake_kda_det_train_reference import make_inputs
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed, seed_all
+from tests.experimental.test_helpers import cake_kda_known_gaps as known_gaps
+from tests.experimental.test_helpers.cake_kda_det_train_reference import (
+    LOWER_BOUND,
+    make_inputs,
+)
+from tests.experimental.test_helpers.cake_kda_naive import (
+    draw_case,
+    flat_inputs,
+    judge_arms,
+    lengths_of,
+    naive_of,
+    oracle_with_grads,
+)
 
 cake_backend = cake_package("cake.cake_kda_nondet_train", "cake_backend")
 cake_build = cake_package("cake.cake_kda_nondet_train", "cake_build")
@@ -57,6 +76,15 @@ ENV = "CAKE_KDA_CKPT_HANDOFF"
 LEAVES = ("q", "k", "v", "g", "beta")
 # the gradient of each leaf, in LEAVES order
 GRAD_OF_LEAF = ("dq", "dk", "dv", "dg", "dbeta")
+# the order the backward returns its results
+RETURN_ORDER = ("dq", "dk", "dv", "dbeta", "dg")
+# A judged draw runs the FP64 reference and the naive BF16 tier token by token: rows of up to this many tokens are
+# judged at any head count, and the production-size rows below (one per route, up to about 16k tokens at up to four
+# heads); a larger row keeps its exact checks only, its results finite.
+JUDGE_MAX_TOKENS = 4096
+PRODUCTION_ROWS = frozenset({((65,) * 257, 2)})
+# the seed of every judged case and of the inputs of the exact-only rows (each draw's seed derives from it)
+SEED = 7818
 TAIL_STAGES = ("dqkg", "glm_intra", "gate_epilogue")
 
 # A four-document pack of 261k tokens (P8) and its head counts.
@@ -332,12 +360,54 @@ def _checkpointed_step(inputs: dict, *, reentrant: bool, handoff, workspace=None
     return out.detach(), _grads(leaves)
 
 
-def _check_grads(got: dict, want: dict, tag) -> None:
-    for name in want:
-        assert _bits_equal(got[name], want[name]), (tag, name)
+def _results(out: torch.Tensor, grads: dict) -> dict:
+    """One arm's results for the judge: ``out`` and the gradients by name."""
+    return {"out": out, **grads}
 
 
-def _check_handoff_against_off(
+def _inputs(lengths, heads: int, device, seed: int = SEED) -> dict:
+    """The operands of draw seed ``seed`` (:func:`draw_case`: the activated FP32 gate)."""
+    return draw_case(lengths, heads, "g", False, seed, device)
+
+
+def _judged(lengths, heads: int) -> bool:
+    """Whether a row is judged: up to :data:`JUDGE_MAX_TOKENS` tokens, or a production-size row of
+    :data:`PRODUCTION_ROWS`; a larger row keeps its exact checks only."""
+    return (
+        sum(lengths) <= JUDGE_MAX_TOKENS or (tuple(lengths), heads) in PRODUCTION_ROWS
+    )
+
+
+def _finite(t: torch.Tensor) -> bool:
+    """Whether every element of ``t`` is finite, in blocks of rows (bounded temporaries on the large rows)."""
+    rows = t.reshape(t.shape[0], -1) if t.dim() and t.numel() else t.reshape(-1, 1)
+    step = max(1, (1 << 24) // max(1, rows.shape[1]))
+    return all(
+        bool(torch.isfinite(rows[i : i + step]).all())
+        for i in range(0, rows.shape[0], step)
+    )
+
+
+def _check_finite(results: dict, tag) -> None:
+    """Every result of an arm too large to judge is finite: its contract (the oracle of finite inputs is finite)."""
+    assert results, tag
+    for name, t in results.items():
+        assert _finite(t), (tag, name)
+
+
+def _judge(record_property, draw) -> None:
+    """Judge a case's arms against the FP64 reference beside the naive BF16 tier over the judge's draws."""
+    judge_arms(record_property, draw, seed=SEED, scale=SCALE)
+
+
+def _run_exact(draw) -> None:
+    """A row too large to judge: its draw once, with its exact checks, and every result it returns finite."""
+    arms, _ = draw(0, SEED)
+    for arm, results in arms.items():
+        _check_finite(results, arm)
+
+
+def _handoff_arms(
     inputs,
     device,
     lengths,
@@ -345,96 +415,252 @@ def _check_handoff_against_off(
     *,
     reentrant: bool,
     record_kind: str | None = None,
-    host_reference: bool = False,
-) -> None:
+    keep: bool = True,
+    prefix: str = "",
+) -> dict:
     """``"off"`` then ``"on"`` (the record's per-call tensors and the backward's ``dv2`` NaN-filled before the
     launches that write them) under one checkpoint mode: the off arm publishes nothing, the on arm publishes one
-    record (of ``record_kind`` where the test forces one) and its backward takes it, the registry is empty after each
-    backward, and ``out`` and the five gradients are bitwise equal.  ``host_reference`` keeps the off arm's ``out``
-    and gradients on the host while the on arm runs (two sets of 64-head gradients do not fit a 180 GB part)."""
-    tag = (
-        _shape_id((lengths, heads)),
-        "reentrant" if reentrant else "nonreentrant",
-        f"kind={record_kind}",
-    )
+    record (of ``record_kind`` where the test forces one) and its backward takes it, and the registry is empty after
+    each backward.  Returns the arms ``<prefix><mode>.off`` / ``<prefix><mode>.on`` (``mode`` the checkpoint mode:
+    ``out`` and the five gradients) for the judge; with ``keep=False`` (a row too large to judge) each arm's results
+    are checked finite as soon as they exist and dropped, and nothing is returned."""
+    mode = "reentrant" if reentrant else "nonreentrant"
+    tag = (_shape_id((lengths, heads)), mode, f"kind={record_kind}")
     cake_backend._handoff_reset()
-    off_out, off = _checkpointed_step(inputs, reentrant=reentrant, handoff="off")
-    if host_reference:
-        off_out, off = off_out.cpu(), {name: g.cpu() for name, g in off.items()}
-        torch.cuda.empty_cache()
+    off = _results(*_checkpointed_step(inputs, reentrant=reentrant, handoff="off"))
     s = _stats(device)
     assert s["published"] == 0 and s["live_records"] == 0, (tag, "off", s)
+    if not keep:
+        _check_finite(off, (*tag, "off"))
+        off = None
     with _poisoned():
-        on_out, on = _checkpointed_step(inputs, reentrant=reentrant, handoff="on")
-    if host_reference:
-        on_out, on = on_out.cpu(), {name: g.cpu() for name, g in on.items()}
+        on = _results(*_checkpointed_step(inputs, reentrant=reentrant, handoff="on"))
     s = _stats(device)
     assert s["published"] == 1 and s["hits"] == 1 and s["misses"] == 0, (tag, s)
     assert s["live_records"] == 0 and s["live_bytes"] == 0, (tag, s)
     if record_kind is not None:
         with_rows = _with_rows(_plan(lengths, heads, device), record_kind)
         assert s["published_rows"] == int(with_rows) and s["demoted"] == 0, (tag, s)
-    assert _bits_equal(on_out, off_out), (tag, "out")
-    _check_grads(on, off, tag)
+    if not keep:
+        _check_finite(on, (*tag, "on"))
+        return {}
+    return {f"{prefix}{mode}.off": off, f"{prefix}{mode}.on": on}
 
 
-# --------------------------------------------------------------------------- bitwise gate
+def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    # the reference's / the tier's tensor in the result's shape (a reshape of the same elements), else unchanged
+    if t.shape != actual.shape and t.numel() == actual.numel():
+        return t.reshape(actual.shape)
+    return t
+
+
+# the operands the FP64 reference and the naive tier read
+ORACLE_OPERANDS = ("q", "k", "v", "g", "beta", "dout", "cu_seqlens")
+
+
+def _judge_layers(record_property, draw) -> None:
+    """:func:`judge_arms` for stacks of KDA layers, whose layers read different operands: ``draw(j, s)`` returns
+    ``(arms, inputs)`` pairs, each ``inputs`` the operands of one layer's call (its ``v`` the previous layer's output,
+    its ``dout`` the gradient that reached its output: :func:`_tapped`) and each output name of each arm in one pair
+    only; every pair is judged against the FP64 reference of its own operands beside the naive BF16 tier
+    (formed once per draw for each distinct set of operands).  The judge, its records and the settling against the
+    owner-accepted gaps are :func:`judge_arms`'s."""
+    judge = TierJudge(DRAWS)
+    failures: list[str] = []
+    lengths = None
+    cuda = torch.cuda.get_rng_state_all()
+    state = (random.getstate(), torch.get_rng_state())
+    try:
+        for j in range(judge.draws):
+            s = draw_seed(SEED, j)
+            seed_all(s)
+            formed: list[tuple[dict, dict, dict]] = []
+            for arms, inputs in draw(j, s):
+                flat = flat_inputs(inputs)
+                if lengths is None:
+                    lengths = lengths_of(flat)
+                # operand identity (not a result): the reference and the tier of the same operands are formed once
+                found = next(
+                    (
+                        (ref, tier)
+                        for seen, ref, tier in formed
+                        if all(torch.equal(seen[n], flat[n]) for n in ORACLE_OPERANDS)
+                    ),
+                    None,
+                )
+                if found is None:
+                    found = (
+                        oracle_with_grads(flat, SCALE, LOWER_BOUND, False),
+                        naive_of(flat, SCALE, LOWER_BOUND, False),
+                    )
+                    formed.append((flat, *found))
+                ref, tier = found
+                for arm, results in arms.items():
+                    for name, actual in results.items():
+                        key = f"{arm}.{name}"
+                        want = _like(ref[name], actual)
+                        if message := contract(key, actual, want):
+                            failures.append(f"draw {j}: {message}")
+                            if actual.shape != want.shape:
+                                continue
+                        judge.add(
+                            key, j, actual, want, {"bf16": _like(tier[name], actual)}
+                        )
+    finally:
+        random.setstate(state[0])
+        torch.set_rng_state(state[1])
+        torch.cuda.set_rng_state_all(cuda)
+    failures += judge.failures()
+    judge.record(record_property)
+    known_gaps.settle(judge.verdicts(), failures, lengths=lengths)
+
+
+class _Tap(torch.autograd.Function):
+    """A copy that records the gradient reaching it in ``sink[key]``: on a layer's ``v`` operand the ``dv`` its node
+    returns, on its output the ``dout`` its node receives."""
+
+    @staticmethod
+    def forward(ctx, x, sink, key):
+        ctx.sink, ctx.key = sink, key
+        return x.clone()
+
+    @staticmethod
+    def backward(ctx, grad):
+        ctx.sink[ctx.key] = grad.detach().clone()
+        return grad, None, None
+
+
+def _tapped(i: int, sink: dict, kda, v_in: torch.Tensor) -> torch.Tensor:
+    """``kda(v)`` of layer ``i`` with its ``v`` operand and its output tapped (:class:`_Tap`).  ``sink`` keeps the ``v``
+    of the last call that reached the node (a checkpoint's recompute, whose saved ``v`` the backward reads; a
+    recompute may stop early, once the node's tensors are saved), the ``out`` of the last call that returned with
+    that call's ``v``, and the gradients that reach the tapped ``v`` and output (the node's ``dv`` and its
+    ``dout``)."""
+    v = _Tap.apply(v_in, sink, (i, "dv"))
+    seen = v.detach().clone()
+    sink[(i, "v")] = seen
+    o = kda(v)
+    sink[(i, "out")] = (seen, o.detach().clone())
+    return _Tap.apply(o, sink, (i, "dout"))
+
+
+def _layer_results(sets, leaves, sink: dict, layers: int, prefix: str) -> list:
+    """Per layer, two ``({"<prefix>layer<i>": results}, operands)`` pairs for :func:`_judge_layers`: ``out`` with the
+    operands of the call that returned it, and the five gradients (``dv`` the gradient the node returned for its
+    ``v``) with the operands the node's backward read."""
+    pairs = []
+    for i in range(layers):
+        q, k, _v, g, beta = leaves[i]
+        grads_inputs = {**sets[i], "v": sink[(i, "v")], "dout": sink[(i, "dout")]}
+        out_v, out = sink[(i, "out")]
+        arm = f"{prefix}layer{i}"
+        pairs.append(({arm: {"out": out}}, {**grads_inputs, "v": out_v}))
+        grads = {
+            "dq": q.grad,
+            "dk": k.grad,
+            "dv": sink[(i, "dv")],
+            "dg": g.grad,
+            "dbeta": beta.grad,
+        }
+        pairs.append(({arm: grads}, grads_inputs))
+    return pairs
+
+
+# --------------------------------------------------------------------------- the hand-off judged beside off
 
 
 @pytest.mark.parametrize("heads", P8_HEADS, ids=lambda h: f"P8-h{h}")
-def test_handoff_gradients_are_bitwise_off_on_the_p8_pack(
+def test_handoff_takes_its_record_on_the_p8_pack(
     device, manifest, heads, record_kind
 ) -> None:
-    """The P8 pack with both kinds of record: under non-reentrant and reentrant checkpointing the hand-off's gradients
-    are bitwise the light path's (``checkpoint_handoff="off"``), and the record was taken."""
-    inputs = make_inputs(P8, heads, device)
+    """The P8 pack (261k tokens) with both kinds of record, under non-reentrant and reentrant checkpointing: the off
+    arm publishes nothing, the on arm (its record's per-call tensors and the backward's ``dv2`` NaN-filled)
+    publishes one record of the kind and its backward takes it, the registry is empty after each backward, and every
+    result is finite.  The exact checks only: a judged draw runs the FP64 and the BF16 token recurrences, so the
+    hand-off of both routes at these head counts is judged on the short packs
+    (:func:`test_handoff_gradients_are_judged_on_short_packs`)."""
+    inputs = _inputs(P8, heads, device)
     for reentrant in (False, True):
-        _check_handoff_against_off(
-            inputs, device, P8, heads, reentrant=reentrant, record_kind=record_kind
+        _handoff_arms(
+            inputs,
+            device,
+            P8,
+            heads,
+            reentrant=reentrant,
+            record_kind=record_kind,
+            keep=False,
         )
 
 
 @pytest.mark.parametrize("reentrant", (False, True), ids=("nonreentrant", "reentrant"))
-def test_handoff_gradients_are_bitwise_off_on_the_p8_pack_at_64_heads(
+def test_handoff_takes_its_record_on_the_p8_pack_at_64_heads(
     device, manifest, reentrant, record_kind
 ) -> None:
-    """P8 at 64 heads: the same gate, one (checkpoint mode, record kind) per process (each id in its own pytest process,
-    for memory).  Opt-in by ``CAKE_KDA_HANDOFF_TEST_P8_H64=1``.  It also measures tape == light at 64 heads."""
+    """P8 at 64 heads: the same exact checks, one (checkpoint mode, record kind) per process (each id in its own
+    pytest process, for memory).  Opt-in by ``CAKE_KDA_HANDOFF_TEST_P8_H64=1``.  The 64-head hand-off is judged on
+    the short pack ``(63, 1, 65)`` at 64 heads."""
     if os.environ.get(P8_H64_ENV) != "1":
         pytest.skip(f"opt-in: {P8_H64_ENV}=1, one id per process")
-    inputs = make_inputs(P8, 64, device)
-    _check_handoff_against_off(
+    inputs = _inputs(P8, 64, device)
+    _handoff_arms(
         inputs,
         device,
         P8,
         64,
         reentrant=reentrant,
         record_kind=record_kind,
-        host_reference=True,
+        keep=False,
     )
 
 
 @pytest.mark.parametrize("shape", SHORT_ROWS, ids=_shape_id)
-def test_handoff_gradients_are_bitwise_off_on_short_packs(
-    device, manifest, shape, record_kind
+def test_handoff_gradients_are_judged_on_short_packs(
+    device, manifest, shape, record_kind, record_property
 ) -> None:
-    """Short documents, unaligned tails, zero-length documents, pad chunks and more than 256 documents: the same
-    gate on both routes (forward w kept or not, w from the light set, the transfers per call, the table launches,
-    and with row records both intra twins and the ``dv2`` pad-row fill kernel)."""
+    """Short documents, unaligned tails, zero-length documents, pad chunks and more than 256 documents on both routes
+    (forward w kept or not, w from the light set, the transfers per call, the table launches, and with row records
+    both intra twins and the ``dv2`` pad-row fill kernel): under non-reentrant and reentrant checkpointing the off arm
+    and the hand-off's on arm (``<mode>.off`` / ``<mode>.on``: ``out`` and the five gradients) are judged, with the
+    record's exact checks on every draw.  The 257 documents at two heads (about 16k tokens) are the one
+    production-size row judged here.  The 256 documents at 16 heads and the 257 documents at 16 and 32 heads keep the
+    exact checks only (their results finite): the one document of 65 tokens at 4 heads judges the ``wy_fwd`` record
+    of 148- / 152-SM ``sm_100a``, the rows at 16 and 32 heads judge those routes, and the 257 documents at two heads
+    judge the more-than-256-documents form."""
     lengths, heads = shape
-    inputs = make_inputs(lengths, heads, device)
-    for reentrant in (False, True):
-        _check_handoff_against_off(
-            inputs, device, lengths, heads, reentrant=reentrant, record_kind=record_kind
-        )
+    keep = _judged(lengths, heads)
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        arms = {}
+        for reentrant in (False, True):
+            arms.update(
+                _handoff_arms(
+                    inputs,
+                    device,
+                    lengths,
+                    heads,
+                    reentrant=reentrant,
+                    record_kind=record_kind,
+                    keep=keep,
+                )
+            )
+        return arms, inputs
+
+    if keep:
+        _judge(record_property, draw)
+    else:
+        _run_exact(draw)
 
 
-def test_handoff_is_bitwise_off_on_every_plan_family_of_the_device(
-    device, manifest, record_kind
+def test_handoff_is_judged_on_every_plan_family_of_the_device(
+    device, manifest, record_kind, record_property
 ) -> None:
     """The plan families (:func:`_family`) the device's plans reach over ``FAMILY_PACKS`` x ``FAMILY_HEADS``: each
-    has a row up to P8 at 32 heads, and the cheapest row of each family passes the gate under both checkpoint
-    modes with the test's kind of record.  Every family is checked and every failure reported together."""
+    has a row up to P8 at 32 heads, and the cheapest row of each family runs the off arm and the hand-off's on arm
+    under both checkpoint modes with the test's kind of record, with the record's exact checks.  A row of up to
+    ``JUDGE_MAX_TOKENS`` tokens is judged (``<row>.<mode>.off`` / ``<row>.<mode>.on``); a larger one keeps the exact
+    checks only (its results finite; the hand-off of its route is judged on the short packs).  Every family is
+    checked and every failure reported together."""
     sms, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     families: dict[tuple, tuple[int, tuple[int, ...], int]] = {}
     for lengths in FAMILY_PACKS:
@@ -451,74 +677,110 @@ def test_handoff_is_bitwise_off_on_every_plan_family_of_the_device(
     too_big = [_shape_id(row[1:]) for row in families.values() if row[0] > FAMILY_CAP]
     assert not too_big, ("families without a row up to the cap", too_big)
     failures = []
+    judged = 0
     for _cost, lengths, heads in sorted(families.values()):
-        inputs = make_inputs(lengths, heads, device)
-        for reentrant in (False, True):
-            try:
-                _check_handoff_against_off(
-                    inputs,
-                    device,
-                    lengths,
-                    heads,
-                    reentrant=reentrant,
-                    record_kind=record_kind,
+        sid = _shape_id((lengths, heads))
+        keep = sum(lengths) <= JUDGE_MAX_TOKENS
+
+        def draw(j, s, lengths=lengths, heads=heads, sid=sid, keep=keep):
+            inputs = _inputs(lengths, heads, device, s)
+            arms = {}
+            for reentrant in (False, True):
+                arms.update(
+                    _handoff_arms(
+                        inputs,
+                        device,
+                        lengths,
+                        heads,
+                        reentrant=reentrant,
+                        record_kind=record_kind,
+                        keep=keep,
+                        prefix=f"{sid}.",
+                    )
                 )
-            except AssertionError as exc:
-                failures.append(
-                    (_shape_id((lengths, heads)), reentrant, str(exc)[:200])
-                )
-        del inputs
+            return arms, inputs
+
+        try:
+            if keep:
+                _judge(record_property, draw)
+                judged += 1
+            else:
+                _run_exact(draw)
+        except AssertionError as exc:
+            failures.append((sid, str(exc)[:1000]))
         torch.cuda.empty_cache()
     assert not failures, (
-        f"{len(failures)} of {2 * len(families)} family checks failed",
+        f"{len(failures)} of {len(families)} family checks failed",
         failures,
     )
+    assert judged > 0
 
 
 @pytest.mark.parametrize("shape", TAPE_WY_ROWS, ids=_shape_id)
-def test_the_tape_wy_twin_hands_off_bitwise_off(
-    device, manifest, monkeypatch, shape, record_kind
+def test_the_tape_wy_twin_hand_off_is_judged(
+    device, manifest, monkeypatch, shape, record_kind, record_property
 ) -> None:
-    """The rows whose record may keep no forward ``w`` (P8 at 32 heads among them) with the tape WY twin forced
-    (``_TAPE_WY = True``), with both kinds of record: under both checkpoint modes the gradients are bitwise the light
-    path's (``"off"``), and the backward from the record launches the twin in place of its WY record exactly where
-    the record keeps no ``w`` (one launch per backward, as the record's)."""
+    """The rows whose record may keep no forward ``w`` with the tape WY twin forced (``_TAPE_WY = True``), with both
+    kinds of record: under both checkpoint modes the off arm and the hand-off's on arm are judged, with the record's
+    exact checks, and the backward from the record launches the twin in place of its WY record exactly where the
+    record keeps no ``w`` (one launch per backward, as the record's).  P8 at 32 heads and the 257 documents at 32 heads
+    keep the exact checks only (their results finite): the twin's hand-off on the serial route is judged on
+    ``(65, 200)`` at 32 heads and ``(63, 1, 65)`` at 64 heads."""
     lengths, heads = shape
     p = _plan(lengths, heads, device)
     launches = p.dispatched("wy", "tape") and not p.handoff_keeps_w
     assert not launches or p.tape_wy_twin is not None, (p.arch, p.record("wy", "tape"))
     monkeypatch.setattr(cake_backend, "_TAPE_WY", True)
     runs = _tape_wy_runs(monkeypatch)
-    inputs = make_inputs(lengths, heads, device)
-    for reentrant in (False, True):
-        runs.clear()
-        _check_handoff_against_off(
-            inputs, device, lengths, heads, reentrant=reentrant, record_kind=record_kind
-        )
-        assert runs == ([p.tape_wy_twin] if launches else []), (reentrant, runs)
+    keep = _judged(lengths, heads)
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        arms = {}
+        for reentrant in (False, True):
+            runs.clear()
+            arms.update(
+                _handoff_arms(
+                    inputs,
+                    device,
+                    lengths,
+                    heads,
+                    reentrant=reentrant,
+                    record_kind=record_kind,
+                    keep=keep,
+                )
+            )
+            assert runs == ([p.tape_wy_twin] if launches else []), (reentrant, runs)
+        return arms, inputs
+
+    if keep:
+        _judge(record_property, draw)
+    else:
+        _run_exact(draw)
 
 
 @pytest.mark.parametrize("reentrant", (False, True), ids=("nonreentrant", "reentrant"))
-def test_the_tape_wy_twin_hands_off_bitwise_off_on_p8_h64(
+def test_the_tape_wy_twin_hands_off_on_p8_h64(
     device, manifest, monkeypatch, reentrant, record_kind
 ) -> None:
-    """P8 at 64 heads with the tape WY twin forced: the same gate, one (checkpoint mode, record kind) per process
-    (each id in its own pytest process, for memory).  Opt-in by ``CAKE_KDA_HANDOFF_TEST_P8_H64=1``."""
+    """P8 at 64 heads with the tape WY twin forced: the exact checks (results finite), one (checkpoint mode, record
+    kind) per process (each id in its own pytest process, for memory).  Opt-in by ``CAKE_KDA_HANDOFF_TEST_P8_H64=1``.
+    The twin's hand-off at 64 heads is judged on ``(63, 1, 65)``."""
     if os.environ.get(P8_H64_ENV) != "1":
         pytest.skip(f"opt-in: {P8_H64_ENV}=1, one id per process")
     p = _plan(P8, 64, device)
     launches = p.dispatched("wy", "tape") and not p.handoff_keeps_w
     monkeypatch.setattr(cake_backend, "_TAPE_WY", True)
     runs = _tape_wy_runs(monkeypatch)
-    inputs = make_inputs(P8, 64, device)
-    _check_handoff_against_off(
+    inputs = _inputs(P8, 64, device)
+    _handoff_arms(
         inputs,
         device,
         P8,
         64,
         reentrant=reentrant,
         record_kind=record_kind,
-        host_reference=True,
+        keep=False,
     )
     assert runs == ([p.tape_wy_twin] if launches else []), runs
 
@@ -526,24 +788,47 @@ def test_the_tape_wy_twin_hands_off_bitwise_off_on_p8_h64(
 # --------------------------------------------------------------------------- the recompute's writes
 
 
+def _check_layout(x, y, tag) -> None:
+    """``x`` a tensor of ``y``'s dtype and shape; an integer tensor (a table) bitwise ``y``."""
+    assert isinstance(x, torch.Tensor), tag
+    assert (x.dtype, x.shape) == (y.dtype, y.shape), tag
+    if not y.is_floating_point():
+        assert _bits_equal(x, y), tag
+
+
+def _check_set_layout(a, b, tag) -> None:
+    """Two saved sets field for field: the same metadata, the same present tensors of the same dtypes and shapes, and
+    the integer tensors (the tables) bitwise.  A floating tensor's values are judged through the backward that reads
+    the set."""
+    for field in dataclasses.fields(b):
+        x, y = getattr(a, field.name), getattr(b, field.name)
+        if isinstance(y, torch.Tensor):
+            _check_layout(x, y, (tag, field.name))
+        elif isinstance(y, tuple):
+            assert isinstance(x, tuple) and len(x) == len(y), (tag, field.name)
+            for i, (xi, yi) in enumerate(zip(x, y, strict=True)):
+                _check_layout(xi, yi, (tag, field.name, i))
+        else:
+            assert x == y, (tag, field.name)
+
+
 @pytest.mark.parametrize("shape", LAUNCH_ROWS, ids=_shape_id)
-def test_the_recompute_writes_change_neither_out_nor_the_saved_set(
-    device, manifest, monkeypatch, shape, record_kind
+def test_the_recompute_writes_are_the_tape_fields_and_out_is_judged(
+    device, manifest, shape, record_kind, record_property
 ) -> None:
     """The forward with a hand-off request (``write_tapes = 1`` on the ``fwd`` records, the extras in per-call
-    tensors; for a row record the intra twin) gives bitwise the light forward's ``out`` and saved set; its ``h`` /
-    ``v_new`` (and transfers) are the tape forward's; it keeps ``w`` exactly where the plan says; a row record
-    keeps ``gk`` / ``kg`` / ``beta_int`` of the plan's shapes and ``kb`` exactly where it keeps no ``w`` (a tape
-    record none of them); its bytes are ``Plan.handoff_bytes(rows)`` and ``memory_report``'s.  Every floating-point
-    per-call tensor starts NaN-filled (``_alloc``), so an element one forward writes and the other does not differs
-    (a zero fill would hide written zeros)."""
+    tensors; for a row record the intra twin), every floating-point per-call tensor NaN-filled at allocation
+    (``_alloc``): its saved set has the light forward's metadata, present tensors, dtypes, shapes and tables; its
+    record's ``h`` / ``v_new`` (and transfers) are bitwise the tape forward's (the record's tape fields); it keeps
+    ``w`` exactly where the plan says; a row record keeps ``gk`` / ``kg`` / ``beta_int`` of the plan's shapes (``gk``
+    fully written: no NaN of the fill left) and ``kb`` exactly where it keeps no ``w`` (a tape record none of them);
+    its bytes are ``Plan.handoff_bytes(rows)`` and ``memory_report``'s.  ``out`` of the light forward and of the
+    forward with the request and the gradients of the light backward from each forward's saved set (``light`` /
+    ``request``) are judged.  P8 at 4 heads keeps the exact checks only (its results finite)."""
     lengths, heads = shape
     S, N = sum(lengths), len(lengths)
-    inputs = make_inputs(lengths, heads, device)
     p = _plan(lengths, heads, device)
     with_rows = _with_rows(p, record_kind)
-    monkeypatch.setattr(cake_backend, "_alloc", _nan_alloc)
-    ops = [inputs[n] for n in (*LEAVES, "cu_seqlens")]
     common = dict(
         scale=SCALE,
         save_for_backward=True,
@@ -551,68 +836,86 @@ def test_the_recompute_writes_change_neither_out_nor_the_saved_set(
         arena=None,
         doc_lengths=None,
     )
-    out, saved = cake_backend._fwd_call(*ops, save_mode=None, **common)
-    request = {"task": 0, "index": device.index, "mode": "on"}
-    out_h, saved_h = cake_backend._fwd_call(
-        *ops, save_mode=None, handoff=request, **common
-    )
-    assert "tensors" in request, (lengths, heads)
-    assert _bits_equal(out_h, out)
-    for field in dataclasses.fields(saved):
-        a, b = getattr(saved_h, field.name), getattr(saved, field.name)
-        if isinstance(b, torch.Tensor):
-            assert _bits_equal(a, b), field.name
-        elif isinstance(b, tuple):
-            assert len(a) == len(b) and all(
-                _bits_equal(x, y) for x, y in zip(a, b, strict=True)
-            ), field.name
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        ops = [inputs[n] for n in (*LEAVES, "cu_seqlens")]
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(cake_backend, "_alloc", _nan_alloc)
+            out, saved = cake_backend._fwd_call(*ops, save_mode=None, **common)
+            request = {"task": 0, "index": device.index, "mode": "on"}
+            out_h, saved_h = cake_backend._fwd_call(
+                *ops, save_mode=None, handoff=request, **common
+            )
+            assert "tensors" in request, (lengths, heads)
+            _check_set_layout(saved_h, saved, "request set")
+            tensors = request["tensors"]
+            _, tape = cake_backend._fwd_call(*ops, save_mode="tape", **common)
+        # the record's tape fields: the tape forward's tapes bit for bit, the light set's own transfers and w
+        assert _bits_equal(tensors["h"], tape.h)
+        assert _bits_equal(tensors["v_new"], tape.v_new)
+        if p.recur == "seg":
+            assert _bits_equal(tensors["seg_m"], tape.seg_m)
+            if p.seg_save:  # the record keeps the light set's own transfers
+                assert tensors["seg_m"].data_ptr() == saved_h.seg_state[1].data_ptr()
         else:
-            assert a == b, field.name
-    tensors = request["tensors"]
-    _, tape = cake_backend._fwd_call(*ops, save_mode="tape", **common)
-    assert _bits_equal(tensors["h"], tape.h)
-    assert _bits_equal(tensors["v_new"], tape.v_new)
-    if p.recur == "seg":
-        assert _bits_equal(tensors["seg_m"], tape.seg_m)
-        if p.seg_save:  # the record keeps the light set's own transfers
-            assert tensors["seg_m"].data_ptr() == saved_h.seg_state[1].data_ptr()
-    else:
-        assert tensors["seg_m"] is None
-    assert (tensors["w"] is not None) is p.handoff_keeps_w
-    if p.light_saves_wu:  # the light set's own w
-        assert tensors["w"].data_ptr() == saved_h.w.data_ptr()
-    rows = (p.R, heads, D)
-    row_names = ("gk", "kg", "beta_int", "kb")
-    if with_rows:
-        for name, shape_, dtype in (
-            ("gk", rows, torch.float32),
-            ("kg", rows, torch.bfloat16),
-            ("beta_int", (p.R, heads), torch.float32),
-            ("kb", rows, torch.bfloat16),
-        ):
-            if name in tensors:
-                t = tensors[name]
-                assert tuple(t.shape) == shape_ and t.dtype == dtype, name
-        assert {"gk", "kg", "beta_int"} <= set(tensors)
-        assert ("kb" in tensors) is not p.handoff_keeps_w
-        # the twin writes every gk row, the pad chunks' too (zeros): no NaN of the fill is left
-        assert not torch.isnan(tensors["gk"]).any()
-        extra = sum(
-            tensors[n].numel() * tensors[n].element_size()
-            for n in row_names
-            if n in tensors
+            assert tensors["seg_m"] is None
+        assert (tensors["w"] is not None) is p.handoff_keeps_w
+        if p.light_saves_wu:  # the light set's own w
+            assert tensors["w"].data_ptr() == saved_h.w.data_ptr()
+        rows = (p.R, heads, D)
+        row_names = ("gk", "kg", "beta_int", "kb")
+        if with_rows:
+            for name, shape_, dtype in (
+                ("gk", rows, torch.float32),
+                ("kg", rows, torch.bfloat16),
+                ("beta_int", (p.R, heads), torch.float32),
+                ("kb", rows, torch.bfloat16),
+            ):
+                if name in tensors:
+                    t = tensors[name]
+                    assert tuple(t.shape) == shape_ and t.dtype == dtype, name
+            assert {"gk", "kg", "beta_int"} <= set(tensors)
+            assert ("kb" in tensors) is not p.handoff_keeps_w
+            # the twin writes every gk row, the pad chunks' too (zeros): no NaN of the fill is left
+            assert not torch.isnan(tensors["gk"]).any()
+            extra = sum(
+                tensors[n].numel() * tensors[n].element_size()
+                for n in row_names
+                if n in tensors
+            )
+            assert extra == p.handoff_bytes(rows=True) - p.handoff_bytes()
+        else:
+            assert not set(row_names) & set(tensors), sorted(tensors)
+        report = cake_backend.memory_report(
+            S, N, heads, sm_count=p.sm_count, arch=p.arch
         )
-        assert extra == p.handoff_bytes(rows=True) - p.handoff_bytes()
+        assert request["nbytes"] == p.handoff_bytes(rows=with_rows)
+        assert (
+            request["nbytes"]
+            == report["handoff_bytes_rows" if with_rows else "handoff_bytes"]
+        )
+        assert request["key"] == cake_backend._handoff_key(p, SCALE)
+        assert _stats(device)["published"] == 0  # filling a request publishes nothing
+        del request, tensors, tape
+        arms = {}
+        for label, o, source in (("light", out, saved), ("request", out_h, saved_h)):
+            grads = cake_backend._bwd_call(
+                *ops,
+                inputs["dout"],
+                saved=source,
+                scale=SCALE,
+                workspace=None,
+                arena=None,
+                doc_lengths=None,
+            )
+            arms[label] = _results(o, dict(zip(RETURN_ORDER, grads, strict=True)))
+        return arms, inputs
+
+    if _judged(lengths, heads):
+        _judge(record_property, draw)
     else:
-        assert not set(row_names) & set(tensors), sorted(tensors)
-    report = cake_backend.memory_report(S, N, heads, sm_count=p.sm_count, arch=p.arch)
-    assert request["nbytes"] == p.handoff_bytes(rows=with_rows)
-    assert (
-        request["nbytes"]
-        == report["handoff_bytes_rows" if with_rows else "handoff_bytes"]
-    )
-    assert request["key"] == cake_backend._handoff_key(p, SCALE)
-    assert _stats(device)["published"] == 0  # filling a request publishes nothing
+        _run_exact(draw)
 
 
 @pytest.mark.parametrize("shape", WY_ROWS, ids=_shape_id)
@@ -738,16 +1041,17 @@ def _expected_bwd(
 
 @pytest.mark.parametrize("shape", LAUNCH_ROWS, ids=_shape_id)
 def test_the_handoff_backward_launches_the_tape_path_with_the_light_prep(
-    device, manifest, shape, record_kind, tape_wy
+    device, manifest, shape, record_kind, tape_wy, record_property
 ) -> None:
     """On a caller workspace: the original forward launches the saving forward's records, a recompute with a tape
     record too and one with a row record the intra twin in place of the intra record (on the record's grid); the
     backward from a tape record launches the tape path's records with the light path's prep record (no qg; no kb on
     the rows whose light set carries w), from a row record the same without any prep, and no ``wy`` where the
     record carries the forward's ``w`` (elsewhere its WY record, or with ``tape_wy`` the record's w-only twin, one
-    launch either way); ``"off"`` launches the light path; the gradients agree bitwise."""
+    launch either way); ``"off"`` launches the light path.  The launches are checked on every draw and both arms
+    (``off`` / ``on``: ``out`` and the five gradients) judged; P8 at 4 heads keeps the exact checks only (its results
+    finite)."""
     lengths, heads = shape
-    inputs = make_inputs(lengths, heads, device)
     p = _plan(lengths, heads, device)
     with_rows = _with_rows(p, record_kind)
     launched: list[str] = []
@@ -760,7 +1064,6 @@ def test_the_handoff_backward_launches_the_tape_path_with_the_light_prep(
         cake_jit.run_module(name, values, grid=grid, device_index=device_index)
 
     ws = CakeKDANondetWorkspace(p, device, backward=True, launcher=recording)
-    cu = inputs["cu_seqlens"]
     fwd = _expected_fwd(p)
     recompute = _expected_fwd(p, intra=p.handoff_twin if with_rows else None)
     handoff_bwd = _expected_bwd(
@@ -774,36 +1077,45 @@ def test_the_handoff_backward_launches_the_tape_path_with_the_light_prep(
     preps = [n for n in handoff_bwd if cake_jit.MODULES[n]["stage"] == "bwd_prep"]
     assert preps == ([] if with_rows else [p.record("bwd_prep", p.light_path)])
     intra_grid = tuple(p.grid("fwd_intra", "fwd"))
-    grads = {}
-    for mode, bwd in (
-        ("off", _expected_bwd(p, p.light_path)),
-        ("on", handoff_bwd),
-    ):
-        cake_backend._handoff_reset()
-        leaves = _leaves(inputs)
-        launched.clear()
-        out = checkpoint(
-            lambda *a, m=mode: cake_kda_nondet(
-                *a, cu, workspace=ws, checkpoint_handoff=m
-            ),
-            *leaves,
-            use_reentrant=False,
-        )
-        assert launched == fwd, mode
-        # the original forward publishes nothing
-        assert _stats(device)["published"] == 0
-        launched.clear()
-        intra_grids.clear()
-        out.backward(inputs["dout"])
-        want = (recompute if mode == "on" else fwd) + bwd
-        assert launched == want, (mode, launched)
-        # the twin runs on the intra record's grid
-        assert [g for _, g in intra_grids] == [intra_grid], (mode, intra_grids)
-        s = _stats(device)
-        assert s["hits"] == (mode == "on") and s["live_records"] == 0, (mode, s)
-        assert s["published_rows"] == int(mode == "on" and with_rows), (mode, s)
-        grads[mode] = _grads(leaves)
-    _check_grads(grads["on"], grads["off"], (lengths, heads))
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        cu = inputs["cu_seqlens"]
+        arms = {}
+        for mode, bwd in (
+            ("off", _expected_bwd(p, p.light_path)),
+            ("on", handoff_bwd),
+        ):
+            cake_backend._handoff_reset()
+            leaves = _leaves(inputs)
+            launched.clear()
+            out = checkpoint(
+                lambda *a, m=mode: cake_kda_nondet(
+                    *a, cu, workspace=ws, checkpoint_handoff=m
+                ),
+                *leaves,
+                use_reentrant=False,
+            )
+            assert launched == fwd, mode
+            # the original forward publishes nothing
+            assert _stats(device)["published"] == 0
+            launched.clear()
+            intra_grids.clear()
+            out.backward(inputs["dout"])
+            want = (recompute if mode == "on" else fwd) + bwd
+            assert launched == want, (mode, launched)
+            # the twin runs on the intra record's grid
+            assert [g for _, g in intra_grids] == [intra_grid], (mode, intra_grids)
+            st = _stats(device)
+            assert st["hits"] == (mode == "on") and st["live_records"] == 0, (mode, st)
+            assert st["published_rows"] == int(mode == "on" and with_rows), (mode, st)
+            arms[mode] = _results(out.detach(), _grads(leaves))
+        return arms, inputs
+
+    if _judged(lengths, heads):
+        _judge(record_property, draw)
+    else:
+        _run_exact(draw)
 
 
 # --------------------------------------------------------------------------- stale records and misses
@@ -833,19 +1145,20 @@ STALE_ROWS = [((100, 640, 77, 1000, 129), 2), ((129, 300, 70), 16), ((65, 200), 
 
 @pytest.mark.parametrize("shape", STALE_ROWS, ids=_shape_id)
 def test_a_stale_record_falls_back_and_stays_correct(
-    device, manifest, shape, record_kind
+    device, manifest, shape, record_kind, record_property
 ) -> None:
     """An operand changed in place between the recompute (which published the record, of the test's kind) and the
     KDA node's backward: ``cu_seqlens`` bumped to a new version with the same values, or the gate ``g`` halved.
     The record's stamp no longer matches, the backward drops it (one miss, an empty registry) and runs the light
-    path: the gradients are bitwise those of ``"off"`` under the same change.  Without a change the record is
-    taken.  (Non-reentrant only: under reentrant checkpointing torch's own saved-tensor version check raises
-    first; the failed-backward test covers that mode.)"""
+    path.  Without a change the record is taken.  The off and on arms of the unchanged inputs and of the version bump
+    (``unchanged.*`` / ``cu_version.*``) are judged; with the halved gate the backward reads the recompute's set with
+    the changed gate, which has no FP64 reference, so those arms' ``out`` (the forward of the unchanged inputs) is
+    judged and their gradients are checked finite.  (Non-reentrant only: under reentrant checkpointing torch's own
+    saved-tensor version check raises first; the failed-backward test covers that mode.)"""
     lengths, heads = shape
-    inputs = make_inputs(lengths, heads, device)
     with_rows = _with_rows(_plan(lengths, heads, device), record_kind)
 
-    def run(mode: str, change: str | None):
+    def run(inputs, mode: str, change: str | None) -> dict:
         leaves = _leaves(inputs)
         cu = inputs["cu_seqlens"].clone()
         g_leaf = leaves[3]
@@ -863,35 +1176,45 @@ def test_a_stale_record_falls_back_and_stays_correct(
 
         out = checkpoint(layer, *leaves, use_reentrant=False)
         out.backward(inputs["dout"])
-        return _grads(leaves)
+        return _results(out.detach(), _grads(leaves))
 
-    for change in (None, "cu_version", "g_values"):
-        cake_backend._handoff_reset()
-        off = run("off", change)
-        assert _stats(device)["published"] == 0
-        cake_backend._handoff_reset()
-        on = run("on", change)
-        s = _stats(device)
-        assert s["published"] == 1 and s["live_records"] == 0, (change, s)
-        assert s["published_rows"] == int(with_rows), (change, s)
-        if change is None:
-            assert s["hits"] == 1 and s["misses"] == 0, s
-        else:
-            assert s["hits"] == 0 and s["misses"] == 1, (change, s)
-        _check_grads(on, off, (lengths, heads, change))
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        arms = {}
+        for change in (None, "cu_version", "g_values"):
+            cake_backend._handoff_reset()
+            off = run(inputs, "off", change)
+            assert _stats(device)["published"] == 0
+            cake_backend._handoff_reset()
+            on = run(inputs, "on", change)
+            st = _stats(device)
+            assert st["published"] == 1 and st["live_records"] == 0, (change, st)
+            assert st["published_rows"] == int(with_rows), (change, st)
+            if change is None:
+                assert st["hits"] == 1 and st["misses"] == 0, st
+            else:
+                assert st["hits"] == 0 and st["misses"] == 1, (change, st)
+            label = change or "unchanged"
+            for mode, results in (("off", off), ("on", on)):
+                if change == "g_values":
+                    _check_finite(results, (lengths, heads, change, mode))
+                    results = {"out": results["out"]}
+                arms[f"{label}.{mode}"] = results
+        return arms, inputs
+
+    _judge(record_property, draw)
 
 
 @pytest.mark.parametrize("reentrant", (False, True), ids=("nonreentrant", "reentrant"))
 def test_inputs_changed_in_place_before_the_checkpointed_call_still_hand_off(
-    device, manifest, reentrant
+    device, manifest, reentrant, record_property
 ) -> None:
     """Inputs whose version counters moved before the checkpointed call (``cu_seqlens`` written in place, ``q``
-    scaled in place): the take compares versions through the record's own aliases of the recompute's inputs, not
-    through the tensors checkpoint unpacks, so the record is taken and the gradients are bitwise ``"off"``'s."""
+    scaled in place by one): the take compares versions through the record's own aliases of the recompute's inputs,
+    not through the tensors checkpoint unpacks, so the record is taken; the off and on arms are judged."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    inputs = make_inputs(lengths, heads, device)
 
-    def run(mode: str):
+    def run(inputs, mode: str):
         cake_backend._handoff_reset()
         leaves = _leaves(inputs)
         cu = inputs["cu_seqlens"].clone()
@@ -905,68 +1228,84 @@ def test_inputs_changed_in_place_before_the_checkpointed_call_still_hand_off(
             use_reentrant=reentrant,
         )
         out.backward(inputs["dout"])
-        return _grads(leaves), _stats(device)
+        return _results(out.detach(), _grads(leaves)), _stats(device)
 
-    off, _ = run("off")
-    on, s = run("on")
-    assert s["published"] == 1 and s["hits"] == 1 and s["misses"] == 0, s
-    _check_grads(on, off, ("versions before the call", reentrant))
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        off, _ = run(inputs, "off")
+        on, st = run(inputs, "on")
+        assert st["published"] == 1 and st["hits"] == 1 and st["misses"] == 0, st
+        return {"off": off, "on": on}, inputs
+
+    _judge(record_property, draw)
 
 
 def test_a_record_the_backward_refuses_is_released_and_stays_correct(
-    device, manifest, monkeypatch, record_kind
+    device, manifest, record_kind, record_property
 ) -> None:
     """A record of the test's kind the node takes but the backward refuses (here: a plan key that differs from the
     forward's): one miss, the record's tensors released before the light path allocates its own (``h`` / ``v_new``
     / ``w`` / ``Aqk`` references cleared, and a row record's ``gk`` / ``kg`` / ``beta_int`` / ``kb``), the
-    backward on the light path's own workspace (no hand-off layout: the full backward arena), an empty registry and
-    the gradients bitwise ``"off"``'s."""
+    backward on the light path's own workspace (no hand-off layout: the full backward arena) and an empty registry,
+    on every draw; the off arm and the refused on arm are judged."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    inputs = make_inputs(lengths, heads, device)
     p = _plan(lengths, heads, device)
-    _, off = _checkpointed_step(inputs, reentrant=False, handoff="off")
     real_key, real_take = cake_backend._handoff_key, cake_backend._handoff_take
     real_acquire = cake_backend._entry_acquire
-    calls: list[int] = []
-    taken: list = []
-    backward_arenas: list = []
 
-    def acquire(*args, **kwargs):
-        ws, key = real_acquire(*args, **kwargs)
-        if kwargs.get("backward"):
-            backward_arenas.append((kwargs.get("layout"), type(ws).__name__, ws.bytes))
-        return ws, key
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        off = _results(*_checkpointed_step(inputs, reentrant=False, handoff="off"))
+        calls: list[int] = []
+        taken: list = []
+        backward_arenas: list = []
 
-    def key(p, scale):  # the recompute's key, then another one in the backward
-        calls.append(1)
-        k = real_key(p, scale)
-        return k if len(calls) == 1 else (*k, "mismatch")
+        def acquire(*args, **kwargs):
+            ws, key = real_acquire(*args, **kwargs)
+            if kwargs.get("backward"):
+                backward_arenas.append(
+                    (kwargs.get("layout"), type(ws).__name__, ws.bytes)
+                )
+            return ws, key
 
-    def take(*args):
-        rec = real_take(*args)
-        taken.append(rec)
-        return rec
+        def key(p, scale):  # the recompute's key, then another one in the backward
+            calls.append(1)
+            k = real_key(p, scale)
+            return k if len(calls) == 1 else (*k, "mismatch")
 
-    monkeypatch.setattr(cake_backend, "_handoff_key", key)
-    monkeypatch.setattr(cake_backend, "_handoff_take", take)
-    monkeypatch.setattr(cake_backend, "_entry_acquire", acquire)
-    cake_backend._handoff_reset()
-    _, on = _checkpointed_step(inputs, reentrant=False, handoff="on")
-    s = _stats(device)
-    assert len(calls) == 2, calls
-    assert s["published"] == 1 and s["hits"] == 0 and s["misses"] == 1, s
-    assert s["published_rows"] == int(_with_rows(p, record_kind)), s
-    assert s["live_records"] == 0, s
-    # taken by the node, refused by the backward's acceptance before its workspace
-    assert len(taken) == 1 and taken[0] is not None
-    rec = taken[0]
-    assert rec.h is None and rec.v_new is None and rec.w is None and rec.aqk is None
-    assert rec.seg_m is None and rec.aliases == ()
-    assert rec.gk is None and rec.kg is None and rec.beta_int is None and rec.kb is None
-    assert backward_arenas == [(None, "CakeKDANondetWorkspace", p.arena_bytes())], (
-        backward_arenas
-    )
-    _check_grads(on, off, "refused in _backward")
+        def take(*args):
+            rec = real_take(*args)
+            taken.append(rec)
+            return rec
+
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(cake_backend, "_handoff_key", key)
+            m.setattr(cake_backend, "_handoff_take", take)
+            m.setattr(cake_backend, "_entry_acquire", acquire)
+            cake_backend._handoff_reset()
+            on = _results(*_checkpointed_step(inputs, reentrant=False, handoff="on"))
+        st = _stats(device)
+        assert len(calls) == 2, calls
+        assert st["published"] == 1 and st["hits"] == 0 and st["misses"] == 1, st
+        assert st["published_rows"] == int(_with_rows(p, record_kind)), st
+        assert st["live_records"] == 0, st
+        # taken by the node, refused by the backward's acceptance before its workspace
+        assert len(taken) == 1 and taken[0] is not None
+        rec = taken[0]
+        assert rec.h is None and rec.v_new is None and rec.w is None and rec.aqk is None
+        assert rec.seg_m is None and rec.aliases == ()
+        assert (
+            rec.gk is None
+            and rec.kg is None
+            and rec.beta_int is None
+            and rec.kb is None
+        )
+        assert backward_arenas == [(None, "CakeKDANondetWorkspace", p.arena_bytes())], (
+            backward_arenas
+        )
+        return {"off": off, "on": on}, inputs
+
+    _judge(record_property, draw)
 
 
 class _HandoffTestFailure(Exception):
@@ -1011,48 +1350,57 @@ def test_records_of_a_failed_backward_are_dropped_by_the_next_forward(
 
 @pytest.mark.parametrize("reentrant", (False, True), ids=("nonreentrant", "reentrant"))
 def test_an_untaken_record_is_dropped_and_repeated_misses_turn_the_handoff_off(
-    device, manifest, monkeypatch, reentrant
+    device, manifest, monkeypatch, reentrant, record_property
 ) -> None:
     """A backward that re-runs a checkpointed region but never reaches its KDA node (the gradient of another
     output only) leaves the record untaken: it is dropped at the end of its graph task (``queue_callback``) as a
     miss.  ``_HANDOFF_MAX_MISSES`` misses in a row turn the hand-off off on the device: the next checkpointed step
-    publishes nothing and its gradients are the light path's."""
+    publishes nothing (it runs the light path), and after a reset the hand-off is back on.  On every draw; the
+    disabled step (``disabled.on``), the off step (``off``) and the step after the reset (``reenabled.on``) are
+    judged."""
     lengths, heads = (100, 640, 77), 2
-    inputs = make_inputs(lengths, heads, device)
-    cu = inputs["cu_seqlens"]
     monkeypatch.setattr(cake_backend, "_HANDOFF_MAX_MISSES", 2)
 
-    def pruned_step():
-        leaves = _leaves(inputs)
-        x = torch.randn(64, device=device, requires_grad=True)
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        cu = inputs["cu_seqlens"]
+        cake_backend._handoff_reset()
 
-        def region(q, k, v, g, beta, x_):
-            # the KDA output leaves the graph (a reentrant region would otherwise run its node with a zero
-            # gradient): the recompute publishes, no backward takes the record
-            o = cake_kda_nondet(q, k, v, g, beta, cu, checkpoint_handoff="on")
-            return o.detach(), x_ * x_
+        def pruned_step():
+            leaves = _leaves(inputs)
+            x = torch.randn(64, device=device, requires_grad=True)
 
-        _o, y = checkpoint(region, *leaves, x, use_reentrant=reentrant)
-        y.sum().backward()
-        assert torch.equal(x.grad, 2 * x.detach())
-        assert all(leaf.grad is None for leaf in leaves)
+            def region(q, k, v, g, beta, x_):
+                # the KDA output leaves the graph (a reentrant region would otherwise run its node with a zero
+                # gradient): the recompute publishes, no backward takes the record
+                o = cake_kda_nondet(q, k, v, g, beta, cu, checkpoint_handoff="on")
+                return o.detach(), x_ * x_
 
-    pruned_step()
-    s = _stats(device)
-    assert s["published"] == 1 and s["hits"] == 0, s
-    assert s["live_records"] == 0 and s["misses"] == 1 and not s["disabled"], s
-    pruned_step()
-    s = _stats(device)
-    assert s["misses"] == 2 and s["disabled"], s
-    # turned off: no record, the light path's gradients
-    _, on = _checkpointed_step(inputs, reentrant=reentrant, handoff="on")
-    s = _stats(device)
-    assert s["published"] == 2 and s["hits"] == 0 and s["refused_disabled"] == 1, s
-    _, off = _checkpointed_step(inputs, reentrant=reentrant, handoff="off")
-    _check_grads(on, off, "disabled")
-    cake_backend._handoff_reset()  # back on
-    _checkpointed_step(inputs, reentrant=reentrant, handoff="on")
-    assert _stats(device)["hits"] == 1
+            _o, y = checkpoint(region, *leaves, x, use_reentrant=reentrant)
+            y.sum().backward()
+            # torch's own gradient of x * x (not this package's)
+            assert torch.equal(x.grad, 2 * x.detach())
+            assert all(leaf.grad is None for leaf in leaves)
+
+        pruned_step()
+        st = _stats(device)
+        assert st["published"] == 1 and st["hits"] == 0, st
+        assert st["live_records"] == 0 and st["misses"] == 1 and not st["disabled"], st
+        pruned_step()
+        st = _stats(device)
+        assert st["misses"] == 2 and st["disabled"], st
+        # turned off: no record, the light path
+        on = _results(*_checkpointed_step(inputs, reentrant=reentrant, handoff="on"))
+        st = _stats(device)
+        assert st["published"] == 2 and st["hits"] == 0, st
+        assert st["refused_disabled"] == 1, st
+        off = _results(*_checkpointed_step(inputs, reentrant=reentrant, handoff="off"))
+        cake_backend._handoff_reset()  # back on
+        back = _results(*_checkpointed_step(inputs, reentrant=reentrant, handoff="on"))
+        assert _stats(device)["hits"] == 1
+        return {"disabled.on": on, "off": off, "reenabled.on": back}, inputs
+
+    _judge(record_property, draw)
 
 
 # --------------------------------------------------------------------------- checkpoint variants
@@ -1062,110 +1410,157 @@ def test_an_untaken_record_is_dropped_and_repeated_misses_turn_the_handoff_off(
     "outer_reentrant", (False, True), ids=("outer-nonreentrant", "outer-reentrant")
 )
 def test_nested_checkpoint_regions_publish_only_the_recompute(
-    device, manifest, outer_reentrant
+    device, manifest, outer_reentrant, record_property
 ) -> None:
     """Three blocks, each an outer checkpoint region (non-reentrant or reentrant) around an inner non-reentrant
     region with the KDA layer, followed by an op that saves the KDA output (so the outer recompute re-runs the
     inner region's original forward inside the backward).  That forward runs under the inner region's pack hook
     and publishes nothing (``refused_hooks``); each inner recompute publishes one record its node takes: three
-    hits, no miss, no budget refusal, never more than one live record, and every gradient bitwise ``"off"``'s."""
+    hits, no miss, no budget refusal, never more than one live record.  Each block's KDA layer is judged on the
+    operands its node read (its ``v`` the previous block's output, its ``dout`` the gradient that reached its output:
+    :func:`_judge_layers`), with the hand-off off and on (``<mode>.layer<i>``)."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    first, second = _two_layer_inputs(lengths, heads, device)
-    cu = first["cu_seqlens"]
     blocks = 3
 
-    def run(mode: str):
+    def run(first, second, mode: str):
         cake_backend._handoff_reset()
+        cu = first["cu_seqlens"]
         sets = [first] + [second] * (blocks - 1)
         leaves = [_leaves(s) for s in sets]
+        sink: dict = {}
 
-        def kda(v_in, q, k, g, beta):
-            return cake_kda_nondet(q, k, v_in, g, beta, cu, checkpoint_handoff=mode)
+        def kda(i, v_in, q, k, g, beta):
+            return _tapped(
+                i,
+                sink,
+                lambda v: cake_kda_nondet(
+                    q, k, v, g, beta, cu, checkpoint_handoff=mode
+                ),
+                v_in,
+            )
 
-        def block(v_in, q, k, g, beta):
-            o = checkpoint(kda, v_in, q, k, g, beta, use_reentrant=False)
+        def block(i, v_in, q, k, g, beta):
+            o = checkpoint(
+                lambda *a: kda(i, *a), v_in, q, k, g, beta, use_reentrant=False
+            )
             return torch.nn.functional.silu(o)
 
         x = leaves[0][2]
         for i in range(blocks):
             q, k, _v, g, beta = leaves[i]
-            x = checkpoint(block, x, q, k, g, beta, use_reentrant=outer_reentrant)
+            x = checkpoint(
+                lambda *a, i=i: block(i, *a),
+                x,
+                q,
+                k,
+                g,
+                beta,
+                use_reentrant=outer_reentrant,
+            )
         x.backward(second["dout"])
-        grads = {
-            (i, name): leaf.grad
-            for i in range(blocks)
-            for name, leaf in zip(GRAD_OF_LEAF, leaves[i], strict=True)
-            if not (i > 0 and name == "dv")
-        }
-        return grads, _stats(device)
+        return _layer_results(sets, leaves, sink, blocks, f"{mode}."), _stats(device)
 
-    off, s_off = run("off")
-    assert s_off["published"] == 0, s_off
-    on, s = run("on")
-    assert s["published"] == blocks and s["hits"] == blocks and s["misses"] == 0, s
-    assert s["refused_budget"] == 0 and s["max_live_records"] <= 1, s
-    assert s["live_records"] == 0, s
-    for key in off:
-        assert _bits_equal(on[key], off[key]), (outer_reentrant, key)
+    def draw(j, s):
+        first, second = _two_layer_inputs(lengths, heads, device, s)
+        off, st_off = run(first, second, "off")
+        assert st_off["published"] == 0, st_off
+        on, st = run(first, second, "on")
+        assert st["published"] == blocks and st["hits"] == blocks, st
+        assert st["misses"] == 0, st
+        assert st["refused_budget"] == 0 and st["max_live_records"] <= 1, st
+        assert st["live_records"] == 0, st
+        return off + on
+
+    _judge_layers(record_property, draw)
 
 
-def test_handoff_with_checkpoint_early_stop_off(device, manifest) -> None:
+def test_handoff_with_checkpoint_early_stop_off(
+    device, manifest, record_property
+) -> None:
     """``torch.utils.checkpoint.set_checkpoint_early_stop(False)``: the recompute runs the whole region; the record
-    is taken and the gradients are bitwise ``"off"``'s."""
+    is taken (the record's exact checks on every draw), and the off and on arms are judged."""
     set_early_stop = getattr(torch.utils.checkpoint, "set_checkpoint_early_stop", None)
     if set_early_stop is None:
         pytest.skip("this torch has no set_checkpoint_early_stop")
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    inputs = make_inputs(lengths, heads, device)
-    with set_early_stop(False):
-        _check_handoff_against_off(inputs, device, lengths, heads, reentrant=False)
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        with set_early_stop(False):
+            arms = _handoff_arms(inputs, device, lengths, heads, reentrant=False)
+        return arms, inputs
+
+    _judge(record_property, draw)
 
 
-def test_a_second_backward_with_retain_graph_hands_off_again(device, manifest) -> None:
+def test_a_second_backward_with_retain_graph_hands_off_again(
+    device, manifest, record_property
+) -> None:
     """Non-reentrant checkpointing with ``retain_graph=True``: each backward recomputes, publishes and takes its own
-    record; the accumulated gradients are bitwise ``"off"``'s."""
+    record.  The leaves' gradients are cleared between the two backwards, and each backward's gradients are judged
+    with the hand-off off and on (``<mode>.first`` with ``out``, ``<mode>.second``)."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    inputs = make_inputs(lengths, heads, device)
-    cu = inputs["cu_seqlens"]
 
-    def run(mode: str):
+    def run(inputs, mode: str):
         cake_backend._handoff_reset()
         leaves = _leaves(inputs)
+        cu = inputs["cu_seqlens"]
         out = checkpoint(
             lambda *a: cake_kda_nondet(*a, cu, checkpoint_handoff=mode),
             *leaves,
             use_reentrant=False,
         )
         out.backward(inputs["dout"], retain_graph=True)
+        first = _results(out.detach(), _grads(leaves))
+        for leaf in leaves:
+            leaf.grad = None
         out.backward(inputs["dout"])
-        return _grads(leaves), _stats(device)
+        return first, _grads(leaves), _stats(device)
 
-    off, _ = run("off")
-    on, s = run("on")
-    assert s["published"] == 2 and s["hits"] == 2 and s["misses"] == 0, s
-    assert s["live_records"] == 0, s
-    _check_grads(on, off, "retain_graph")
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        arms = {}
+        for mode in ("off", "on"):
+            first, second, st = run(inputs, mode)
+            if mode == "on":
+                assert st["published"] == 2 and st["hits"] == 2, st
+                assert st["misses"] == 0 and st["live_records"] == 0, st
+            arms[f"{mode}.first"] = first
+            arms[f"{mode}.second"] = second
+        return arms, inputs
+
+    _judge(record_property, draw)
 
 
 # --------------------------------------------------------------------------- layers sharing a workspace
 
 
-def _two_layer_inputs(lengths, heads, device):
-    first = make_inputs(lengths, heads, device)
-    second = make_inputs(lengths, heads, device, seed=12345)
+def _two_layer_inputs(lengths, heads, device, seed: int):
+    """The operands of the first layer and of the later layers, both functions of the draw seed ``seed``."""
+    first = _inputs(lengths, heads, device, seed)
+    second = _inputs(lengths, heads, device, seed + 12345)
     return first, second
 
 
-def _layer_step(first, second, *, ws, handoff, reentrant, regions, layers=2):
+def _layer_step(
+    first, second, *, ws, handoff, reentrant, regions, layers=2, prefix=""
+) -> list:
     """``layers`` KDA layers on one caller workspace (the output of each is the next one's ``v``), checkpointed
-    per layer (``regions="each"``) or as one region (``"one"``); gradients of every leaf by (layer, name)."""
+    per layer (``regions="each"``) or as one region (``"one"``): per layer, its results and the operands its node read
+    (:func:`_layer_results`)."""
     cu = first["cu_seqlens"]
     sets = [first] + [second] * (layers - 1)
     leaves = [_leaves(s) for s in sets]
+    sink: dict = {}
 
-    def layer(v_in, q, k, g, beta):
-        return cake_kda_nondet(
-            q, k, v_in, g, beta, cu, workspace=ws, checkpoint_handoff=handoff
+    def layer(i, v_in, q, k, g, beta):
+        return _tapped(
+            i,
+            sink,
+            lambda v: cake_kda_nondet(
+                q, k, v, g, beta, cu, workspace=ws, checkpoint_handoff=handoff
+            ),
+            v_in,
         )
 
     def args(i):
@@ -1175,101 +1570,117 @@ def _layer_step(first, second, *, ws, handoff, reentrant, regions, layers=2):
     if regions == "each":
         x = leaves[0][2]
         for i in range(layers):
-            x = checkpoint(layer, x, *args(i), use_reentrant=reentrant)
+            x = checkpoint(
+                lambda *a, i=i: layer(i, *a), x, *args(i), use_reentrant=reentrant
+            )
     else:
 
         def stack(v0, *flat):
             x = v0
             for i in range(layers):
                 q, k, g, beta = flat[4 * i : 4 * i + 4]
-                x = layer(x, q, k, g, beta)
+                x = layer(i, x, q, k, g, beta)
             return x
 
         flat = [t for i in range(layers) for t in args(i)]
         x = checkpoint(stack, leaves[0][2], *flat, use_reentrant=reentrant)
     x.backward(second["dout"])
-    out = {}
-    for i in range(layers):
-        for name, leaf in zip(GRAD_OF_LEAF, leaves[i], strict=True):
-            if i > 0 and name == "dv":
-                continue  # the v of a later layer is the previous output, not a leaf
-            out[(i, name)] = leaf.grad
-    return out
+    return _layer_results(sets, leaves, sink, layers, prefix)
 
 
 @pytest.mark.parametrize("shape", LAYER_ROWS, ids=_shape_id)
 @pytest.mark.parametrize("reentrant", (False, True), ids=("nonreentrant", "reentrant"))
 def test_two_checkpointed_layers_share_one_workspace(
-    device, manifest, shape, reentrant, record_kind
+    device, manifest, shape, reentrant, record_kind, record_property
 ) -> None:
     """Two KDA layers on one caller-owned workspace, checkpointed per layer or as one region (the recompute then
     publishes both records before either backward runs; the records live outside the arena the second layer's
-    backward overwrites): two records published and taken, an empty registry, and every gradient bitwise
-    ``"off"``'s.  With row records, per layer: two row records; as one region: the first record is published as a
-    row record, the second's admission demotes it (two row records exceed the budget) and is published as a tape
-    record, so both backwards take tape records."""
+    backward overwrites): two records published and taken and an empty registry.  With row records, per layer: two
+    row records; as one region: the first record is published as a row record, the second's admission demotes it
+    (two row records exceed the budget) and is published as a tape record, so both backwards take tape records.
+    Each layer is judged on the operands its node read (:func:`_judge_layers`), with the hand-off off and on (the
+    record's per-call tensors NaN-filled): ``<regions>.<mode>.layer<i>``."""
     lengths, heads = shape
     with_rows = int(_with_rows(_plan(lengths, heads, device), record_kind))
-    first, second = _two_layer_inputs(lengths, heads, device)
     ws = CakeKDANondetWorkspace.for_problem(sum(lengths), len(lengths), heads, device)
-    for regions in ("each", "one"):
-        tag = (lengths, heads, reentrant, regions)
-        cake_backend._handoff_reset()
-        off = _layer_step(
-            first, second, ws=ws, handoff="off", reentrant=reentrant, regions=regions
-        )
-        assert _stats(device)["published"] == 0, tag
-        with _poisoned():
-            on = _layer_step(
-                first, second, ws=ws, handoff="on", reentrant=reentrant, regions=regions
+
+    def draw(j, s):
+        first, second = _two_layer_inputs(lengths, heads, device, s)
+        pairs = []
+        for regions in ("each", "one"):
+            tag = (lengths, heads, reentrant, regions)
+            cake_backend._handoff_reset()
+            kw = dict(ws=ws, reentrant=reentrant, regions=regions)
+            pairs += _layer_step(
+                first, second, handoff="off", prefix=f"{regions}.off.", **kw
             )
-        s = _stats(device)
-        assert s["published"] == 2 and s["hits"] == 2 and s["misses"] == 0, (tag, s)
-        assert s["live_records"] == 0 and s["refused_budget"] == 0, (tag, s)
-        if regions == "each":
-            assert s["published_rows"] == 2 * with_rows and s["demoted"] == 0, (tag, s)
-        else:
-            assert s["published_rows"] == with_rows == s["demoted"], (tag, s)
-        for key in off:
-            assert _bits_equal(on[key], off[key]), (tag, key)
+            assert _stats(device)["published"] == 0, tag
+            with _poisoned():
+                pairs += _layer_step(
+                    first, second, handoff="on", prefix=f"{regions}.on.", **kw
+                )
+            st = _stats(device)
+            assert st["published"] == 2 and st["hits"] == 2, (tag, st)
+            assert st["misses"] == 0, (tag, st)
+            assert st["live_records"] == 0 and st["refused_budget"] == 0, (tag, st)
+            if regions == "each":
+                assert st["published_rows"] == 2 * with_rows, (tag, st)
+                assert st["demoted"] == 0, (tag, st)
+            else:
+                assert st["published_rows"] == with_rows == st["demoted"], (tag, st)
+        return pairs
+
+    _judge_layers(record_property, draw)
 
 
 def test_the_byte_budget_admits_two_records_of_the_shape(
-    device, manifest, record_kind
+    device, manifest, record_kind, record_property
 ) -> None:
     """Three layers of one shape in one checkpointed region: the recompute publishes the first two records and
     the budget (two tape records of the shape, or one row record where larger) refuses the third before its
     extra writes; that layer's backward runs the light path.  With row records the first record is published as a
-    row record and demoted by the second's admission (both then tape records).  Every gradient is bitwise
-    ``"off"``'s and the registry is empty after the backward."""
+    row record and demoted by the second's admission (both then tape records).  The registry is empty after the
+    backward.  Each layer is judged on the operands its node read (:func:`_judge_layers`), under both checkpoint
+    modes with the hand-off off and on: ``<mode>.<handoff>.layer<i>``."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
     with_rows = int(_with_rows(_plan(lengths, heads, device), record_kind))
-    first, second = _two_layer_inputs(lengths, heads, device)
     ws = CakeKDANondetWorkspace.for_problem(sum(lengths), len(lengths), heads, device)
-    for reentrant in (False, True):
-        cake_backend._handoff_reset()
-        kwargs = dict(ws=ws, reentrant=reentrant, regions="one", layers=3)
-        off = _layer_step(first, second, handoff="off", **kwargs)
-        on = _layer_step(first, second, handoff="on", **kwargs)
-        s = _stats(device)
-        assert s["published"] == 2 and s["refused_budget"] == 1, (reentrant, s)
-        assert s["hits"] == 2 and s["misses"] == 0 and s["live_records"] == 0, s
-        assert s["published_rows"] == with_rows == s["demoted"], (reentrant, s)
-        for key in off:
-            assert _bits_equal(on[key], off[key]), (reentrant, key)
+
+    def draw(j, s):
+        first, second = _two_layer_inputs(lengths, heads, device, s)
+        pairs = []
+        for reentrant in (False, True):
+            mode = "reentrant" if reentrant else "nonreentrant"
+            cake_backend._handoff_reset()
+            kw = dict(ws=ws, reentrant=reentrant, regions="one", layers=3)
+            pairs += _layer_step(
+                first, second, handoff="off", prefix=f"{mode}.off.", **kw
+            )
+            pairs += _layer_step(
+                first, second, handoff="on", prefix=f"{mode}.on.", **kw
+            )
+            st = _stats(device)
+            assert st["published"] == 2 and st["refused_budget"] == 1, (reentrant, st)
+            assert st["hits"] == 2 and st["misses"] == 0, (reentrant, st)
+            assert st["live_records"] == 0, (reentrant, st)
+            assert st["published_rows"] == with_rows == st["demoted"], (reentrant, st)
+        return pairs
+
+    _judge_layers(record_property, draw)
 
 
 # --------------------------------------------------------------------------- switches and the quiet paths
 
 
 def test_auto_follows_the_head_counts_and_the_verified_devices(
-    device, manifest, monkeypatch
+    device, manifest, monkeypatch, record_property
 ) -> None:
     """The default (``"auto"``, no keyword) with the toolkit, the verified set and the size bounds patched, so the
     test runs on any device: it hands off at a ``HANDOFF_HEADS`` head count on a verified device with the problem at
     both size bounds (``H * S == HANDOFF_MIN_HEAD_TOKENS``, ``S // N == HANDOFF_MIN_DOC_TOKENS``), and stays off on
     another device (counting ``unverified``), at a head count outside ``HANDOFF_HEADS`` and with either bound raised by
-    one (no request: nothing counted).  The gradients are bitwise ``"off"``'s in every case."""
+    one (no request: nothing counted), on every draw.  Each case's off and default arms (``<case>.off`` /
+    ``<case>.auto``) are judged, one judge per head count."""
     lengths = (100, 640, 77, 1000, 129)
     S, N = sum(lengths), len(lengths)
     arch, sms = cake_jit.device_arch(device.index), cake_jit.sm_count(device.index)
@@ -1282,34 +1693,50 @@ def test_auto_follows_the_head_counts_and_the_verified_devices(
     # the largest bounds the problem meets at that head count, and each one past it
     at = (heads * S, S // N)
     assert at[1] * N <= S < (at[1] + 1) * N, (S, N)
-    # (heads, toolkit, (min head-tokens, min mean document length), published and hits, unverified)
+    # (case, heads, toolkit, (min head-tokens, min mean document length), published and hits, unverified)
     cases = (
-        (heads, "9.9", at, 1, 0),
-        (heads, "9.8", at, 0, 1),
-        (1, "9.9", at, 0, 0),
-        (heads, "9.9", (at[0] + 1, at[1]), 0, 0),
-        (heads, "9.9", (at[0], at[1] + 1), 0, 0),
+        ("verified", heads, "9.9", at, 1, 0),
+        ("other_toolkit", heads, "9.8", at, 0, 1),
+        ("one_head", 1, "9.9", at, 0, 0),
+        ("head_token_bound_raised", heads, "9.9", (at[0] + 1, at[1]), 0, 0),
+        ("doc_bound_raised", heads, "9.9", (at[0], at[1] + 1), 0, 0),
     )
-    for H, toolkit, (min_head_tokens, min_doc), engaged, unverified in cases:
-        monkeypatch.setattr(cake_backend, "_handoff_toolkit", lambda a, t=toolkit: t)
-        monkeypatch.setattr(cake_backend, "HANDOFF_MIN_HEAD_TOKENS", min_head_tokens)
-        monkeypatch.setattr(cake_backend, "HANDOFF_MIN_DOC_TOKENS", min_doc)
-        inputs = make_inputs(lengths, H, device)
-        _, off = _checkpointed_step(inputs, reentrant=False, handoff="off")
-        cake_backend._handoff_reset()
-        _, auto = _checkpointed_step(inputs, reentrant=False, handoff=None)
-        s = _stats(device)
-        tag = (H, toolkit, min_head_tokens, min_doc)
-        assert s["published"] == s["hits"] == engaged, (tag, s)
-        assert s["unverified"] == unverified, (tag, s)
-        assert s["live_records"] == 0, (tag, s)
-        twin = _plan(lengths, H, device).handoff_twin
-        assert s["published_rows"] == 0, (tag, s)
-        assert s["rows_unverified"] == engaged * (twin is not None), (tag, s)
-        if not engaged and not unverified:
-            nonzero = [name for name in cake_backend._HANDOFF_COUNTERS if s[name]]
-            assert not nonzero, (tag, nonzero, s)
-        _check_grads(auto, off, tag)
+    for H in sorted({case[1] for case in cases}):
+
+        def draw(j, s, H=H):
+            inputs = _inputs(lengths, H, device, s)
+            arms = {}
+            for label, h, toolkit, bounds, engaged, unverified in cases:
+                if h != H:
+                    continue
+                min_head_tokens, min_doc = bounds
+                monkeypatch.setattr(
+                    cake_backend, "_handoff_toolkit", lambda a, t=toolkit: t
+                )
+                monkeypatch.setattr(
+                    cake_backend, "HANDOFF_MIN_HEAD_TOKENS", min_head_tokens
+                )
+                monkeypatch.setattr(cake_backend, "HANDOFF_MIN_DOC_TOKENS", min_doc)
+                off = _checkpointed_step(inputs, reentrant=False, handoff="off")
+                cake_backend._handoff_reset()
+                auto = _checkpointed_step(inputs, reentrant=False, handoff=None)
+                st = _stats(device)
+                tag = (H, toolkit, min_head_tokens, min_doc)
+                assert st["published"] == st["hits"] == engaged, (tag, st)
+                assert st["unverified"] == unverified, (tag, st)
+                assert st["live_records"] == 0, (tag, st)
+                twin = _plan(lengths, H, device).handoff_twin
+                assert st["published_rows"] == 0, (tag, st)
+                assert st["rows_unverified"] == engaged * (twin is not None), (tag, st)
+                if not engaged and not unverified:
+                    nonzero = [n for n in cake_backend._HANDOFF_COUNTERS if st[n]]
+                    assert not nonzero, (tag, nonzero, st)
+                arms[f"{label}.off"] = _results(*off)
+                arms[f"{label}.auto"] = _results(*auto)
+            assert arms
+            return arms, inputs
+
+        _judge(record_property, draw)
 
 
 def test_the_shipped_rule_on_this_device(device, manifest) -> None:
@@ -1319,9 +1746,12 @@ def test_the_shipped_rule_on_this_device(device, manifest) -> None:
     this device (architecture, SM count, toolkit) is in ``HANDOFF_VERIFIED``, else it counts ``unverified``.  The
     toolkit of the one build of the twin, its intra record and the light prep reads as ``major.minor.patch``; the
     record (the call's own workspace) is a row record exactly when the device with that toolkit is in
-    ``HANDOFF_ROWS_VERIFIED`` (else ``rows_unverified``) and the twin loads (else ``rows_unready``); the gradients
-    are bitwise ``"off"``'s.  With one token fewer, and with the same tokens in more documents than the mean-length
-    bound allows, the default makes no request on any device: nothing is published or counted."""
+    ``HANDOFF_ROWS_VERIFIED`` (else ``rows_unverified``) and the twin loads (else ``rows_unready``).  With one token
+    fewer, and with the same tokens in more documents than the mean-length bound allows, the default makes no request
+    on any device: nothing is published or counted.  The problem (about 98k tokens at two heads with the shipped
+    bounds) keeps the exact checks only (the results of the off and default steps finite): the hand-off at this head
+    count is judged on ``(100, 640, 77, 1000, 129)``
+    (:func:`test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it`)."""
     heads = min(cake_backend.HANDOFF_HEADS)
     min_doc = cake_backend.HANDOFF_MIN_DOC_TOKENS
     S = _smallest_admitted(heads)
@@ -1341,10 +1771,12 @@ def test_the_shipped_rule_on_this_device(device, manifest) -> None:
     assert re.fullmatch(r"\d+\.\d+\.\d+", toolkit or ""), (key, toolkit)
     assert toolkit.rsplit(".", 1)[0] == key[2], (key, toolkit)
     listed = (p.arch, p.sm_count, toolkit) in cake_backend.HANDOFF_ROWS_VERIFIED
-    inputs = make_inputs(lengths, heads, device)
-    _, off = _checkpointed_step(inputs, reentrant=False, handoff="off")
+    inputs = _inputs(lengths, heads, device)
+    off = _results(*_checkpointed_step(inputs, reentrant=False, handoff="off"))
+    _check_finite(off, (key, "off"))
+    del off
     cake_backend._handoff_reset()
-    _, auto = _checkpointed_step(inputs, reentrant=False, handoff=None)
+    auto = _results(*_checkpointed_step(inputs, reentrant=False, handoff=None))
     s = _stats(device)
     assert s["published"] == s["hits"] == engaged, (key, s)
     assert s["unverified"] == 1 - engaged, (key, s)
@@ -1352,7 +1784,8 @@ def test_the_shipped_rule_on_this_device(device, manifest) -> None:
     assert s["published_rows"] == int(engaged and listed), (key, toolkit, s)
     assert s["rows_unverified"] == int(engaged and not listed), (key, toolkit, s)
     assert s["rows_unready"] == 0, (key, toolkit, s)
-    _check_grads(auto, off, key)
+    _check_finite(auto, (key, "auto"))
+    del auto
     # below the bounds: one token fewer (under the token-head bound, or the mean-length bound where that one binds),
     # and the S tokens in one document more than S // HANDOFF_MIN_DOC_TOKENS (under the mean-length bound)
     n_docs = S // min_doc + 1
@@ -1392,7 +1825,7 @@ def _fresh_rows_toolkit():
     ("unverified", "mixed_build", "load_fails", "caller_workspace", "verified"),
 )
 def test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it(
-    device, manifest, monkeypatch, _fresh_rows_toolkit, case
+    device, manifest, monkeypatch, _fresh_rows_toolkit, case, record_property
 ) -> None:
     """The rule (``_HANDOFF_ROWS`` unset) with ``"on"`` at a ``HANDOFF_HEADS`` head count, this device listed in
     ``HANDOFF_ROWS_VERIFIED`` with this build's toolkit (another patch version in the ``unverified`` case): a row
@@ -1400,7 +1833,7 @@ def test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it(
     launched, no prep); otherwise a tape record (the prep launched) and the counter of the refusal: another
     toolkit listed (``rows_unverified``), one of the three libraries prebuilt and another not (``mixed_build``:
     ``rows_unready``), the twin's load failing (``load_fails``: ``rows_unready``), a caller workspace (no
-    counter).  The gradients are bitwise ``"off"``'s in every case."""
+    counter).  On every draw; the off and on arms are judged in every case."""
     lengths, heads = (100, 640, 77, 1000, 129), min(cake_backend.HANDOFF_HEADS)
     p = _plan(lengths, heads, device)
     twin = p.handoff_twin
@@ -1453,91 +1886,121 @@ def test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it(
         runs.append((stage, kwargs.get("record")))
         return real_run(self, stage, values, path=path, **kwargs)
 
-    inputs = make_inputs(lengths, heads, device)
-    _, off = _checkpointed_step(inputs, reentrant=False, handoff="off")
-    cake_backend._handoff_reset()
-    monkeypatch.setattr(CakeKDANondetWorkspace, "run", run)
-    _, on = _checkpointed_step(
-        inputs, reentrant=False, handoff="on", workspace=workspace
-    )
-    monkeypatch.setattr(CakeKDANondetWorkspace, "run", real_run)
-    s = _stats(device)
-    with_rows = case == "verified"
-    assert s["published"] == s["hits"] == 1 and s["live_records"] == 0, (case, s)
-    assert s["published_rows"] == int(with_rows), (case, s)
-    assert s["rows_unverified"] == int(case == "unverified"), (case, s)
-    assert s["rows_unready"] == int(case in ("mixed_build", "load_fails")), (case, s)
-    # the "on" step: the backward from a tape record runs the light prep, from a row record none; the recompute
-    # launches the twin exactly for a row record
-    preps = [stage for stage, _ in runs if stage == "bwd_prep"]
-    assert len(preps) == int(not with_rows), runs
-    assert (("fwd_intra", twin) in runs) is with_rows, runs
-    _check_grads(on, off, case)
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        off = _results(*_checkpointed_step(inputs, reentrant=False, handoff="off"))
+        cake_backend._handoff_reset()
+        runs.clear()
+        monkeypatch.setattr(CakeKDANondetWorkspace, "run", run)
+        on = _results(
+            *_checkpointed_step(
+                inputs, reentrant=False, handoff="on", workspace=workspace
+            )
+        )
+        monkeypatch.setattr(CakeKDANondetWorkspace, "run", real_run)
+        st = _stats(device)
+        with_rows = case == "verified"
+        assert st["published"] == st["hits"] == 1 and st["live_records"] == 0, (
+            case,
+            st,
+        )
+        assert st["published_rows"] == int(with_rows), (case, st)
+        assert st["rows_unverified"] == int(case == "unverified"), (case, st)
+        assert st["rows_unready"] == int(case in ("mixed_build", "load_fails")), (
+            case,
+            st,
+        )
+        # the "on" step: the backward from a tape record runs the light prep, from a row record none; the recompute
+        # launches the twin exactly for a row record
+        preps = [stage for stage, _ in runs if stage == "bwd_prep"]
+        assert len(preps) == int(not with_rows), runs
+        assert (("fwd_intra", twin) in runs) is with_rows, runs
+        return {"off": off, "on": on}, inputs
+
+    _judge(record_property, draw)
 
 
 def test_the_environment_changes_nothing_end_to_end(
-    device, manifest, monkeypatch
+    device, manifest, monkeypatch, record_property
 ) -> None:
     """Through ``cake_kda_nondet``, with ``"auto"`` engaging nowhere (an empty verified set): the keyword alone
-    decides; ``CAKE_KDA_CKPT_HANDOFF=off`` leaves ``"on"`` on and ``=on`` leaves ``"auto"`` off.  The gradients agree
-    bitwise.  The host tests cover the other combinations."""
+    decides; ``CAKE_KDA_CKPT_HANDOFF=off`` leaves ``"on"`` on and ``=on`` leaves ``"auto"`` off, on every draw.  Both
+    arms (``env_off.on`` / ``env_on.auto``) are judged.  The host tests cover the other combinations."""
     monkeypatch.setattr(cake_backend, "HANDOFF_VERIFIED", frozenset())
-    inputs = make_inputs((63, 1, 65), 2, device)
-    grads = []
-    for env, keyword, published in (("off", "on", 1), ("on", "auto", 0)):
-        cake_backend._handoff_reset()
-        monkeypatch.setenv(ENV, env)
-        grads.append(_checkpointed_step(inputs, reentrant=False, handoff=keyword)[1])
-        s = _stats(device)
-        assert s["published"] == s["hits"] == published, (env, keyword, s)
-        assert s["live_records"] == 0, (env, keyword, s)
-    _check_grads(grads[1], grads[0], "environment")
+
+    def draw(j, s):
+        inputs = _inputs((63, 1, 65), 2, device, s)
+        arms = {}
+        for env, keyword, published in (("off", "on", 1), ("on", "auto", 0)):
+            cake_backend._handoff_reset()
+            monkeypatch.setenv(ENV, env)
+            arms[f"env_{env}.{keyword}"] = _results(
+                *_checkpointed_step(inputs, reentrant=False, handoff=keyword)
+            )
+            st = _stats(device)
+            assert st["published"] == st["hits"] == published, (env, keyword, st)
+            assert st["live_records"] == 0, (env, keyword, st)
+        monkeypatch.delenv(ENV, raising=False)
+        return arms, inputs
+
+    _judge(record_property, draw)
 
 
-def test_plain_and_original_forwards_publish_nothing(device, manifest) -> None:
+def test_plain_and_original_forwards_publish_nothing(
+    device, manifest, record_property
+) -> None:
     """No record outside a checkpoint recompute: a plain forward and backward, a forward under ``no_grad``, the
     original forward of a checkpoint (before its backward), an explicit saved-set call; a plain backward takes
-    nothing and the checkpointed forward retains no record."""
+    nothing and the checkpointed forward retains no record; on every draw.  The plain step (``plain``) and the
+    checkpointed step (``checkpoint``) are judged."""
     lengths, heads = (100, 640, 77, 1000, 129), 2
-    inputs = make_inputs(lengths, heads, device)
-    cu = inputs["cu_seqlens"]
-    leaves = _leaves(inputs)
-    out = cake_kda_nondet(*leaves, cu, checkpoint_handoff="on")
-    assert _stats(device)["published"] == 0
-    out.backward(inputs["dout"])
-    s = _stats(device)
-    assert s["published"] == 0 and s["hits"] == 0 and s["misses"] == 0, s
-    assert s["live_records"] == 0
-    plain = _grads(leaves)
-    with torch.no_grad():
-        cake_kda_nondet(*_leaves(inputs), cu, checkpoint_handoff="on")
-    assert _stats(device)["published"] == 0
-    cake_backend.cake_kda_nondet_train_forward(
-        *(inputs[n] for n in (*LEAVES, "cu_seqlens"))
-    )
-    assert _stats(device)["published"] == 0
-    # the plain call's output: freed before the baseline, not inside the measured window
-    del out
-    leaves = _leaves(inputs)
-    torch.cuda.synchronize(device)
-    before = torch.cuda.memory_allocated(device)
-    out = checkpoint(
-        lambda *a: cake_kda_nondet(*a, cu, checkpoint_handoff="on"),
-        *leaves,
-        use_reentrant=False,
-    )
-    torch.cuda.synchronize(device)
-    s = _stats(device)
-    # the original forward runs outside any backward (graph task -1)
-    assert s["published"] == 0 and s["live_records"] == 0 and s["live_bytes"] == 0, s
-    # the checkpointed forward keeps its output and nothing more (no record, no tapes); the allocator may also have
-    # released earlier per-call temporaries inside the window, so the bound is one-sided
-    grown = torch.cuda.memory_allocated(device) - before
-    assert grown <= out.untyped_storage().nbytes(), grown
-    out.backward(inputs["dout"])
-    s = _stats(device)
-    assert s["published"] == 1 and s["hits"] == 1 and s["live_records"] == 0, s
-    _check_grads(_grads(leaves), plain, "checkpoint vs plain")
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        cu = inputs["cu_seqlens"]
+        cake_backend._handoff_reset()
+        leaves = _leaves(inputs)
+        out = cake_kda_nondet(*leaves, cu, checkpoint_handoff="on")
+        assert _stats(device)["published"] == 0
+        out.backward(inputs["dout"])
+        st = _stats(device)
+        assert st["published"] == 0 and st["hits"] == 0 and st["misses"] == 0, st
+        assert st["live_records"] == 0
+        plain = _results(out.detach(), _grads(leaves))
+        with torch.no_grad():
+            cake_kda_nondet(*_leaves(inputs), cu, checkpoint_handoff="on")
+        assert _stats(device)["published"] == 0
+        cake_backend.cake_kda_nondet_train_forward(
+            *(inputs[n] for n in (*LEAVES, "cu_seqlens"))
+        )
+        assert _stats(device)["published"] == 0
+        # the plain call's output (its storage held by ``plain``): never released inside the measured window
+        del out
+        leaves = _leaves(inputs)
+        torch.cuda.synchronize(device)
+        before = torch.cuda.memory_allocated(device)
+        out = checkpoint(
+            lambda *a: cake_kda_nondet(*a, cu, checkpoint_handoff="on"),
+            *leaves,
+            use_reentrant=False,
+        )
+        torch.cuda.synchronize(device)
+        st = _stats(device)
+        # the original forward runs outside any backward (graph task -1)
+        assert st["published"] == 0 and st["live_records"] == 0, st
+        assert st["live_bytes"] == 0, st
+        # the checkpointed forward keeps its output and nothing more (no record, no tapes); the allocator may also
+        # have released earlier per-call temporaries inside the window, so the bound is one-sided
+        grown = torch.cuda.memory_allocated(device) - before
+        assert grown <= out.untyped_storage().nbytes(), grown
+        out.backward(inputs["dout"])
+        st = _stats(device)
+        assert st["published"] == 1 and st["hits"] == 1 and st["live_records"] == 0, st
+        return {"plain": plain, "checkpoint": _results(out.detach(), _grads(leaves))}, (
+            inputs
+        )
+
+    _judge(record_property, draw)
 
 
 def test_capture_blocks_the_handoff(device) -> None:
