@@ -859,13 +859,34 @@ class ArmCake:
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
             )
-        module_name, _record = cake_backend.record_for(self.inp.q_latent.device)
-        return dict(
+        inp = self.inp
+        module_name, _record = cake_backend.record_for(inp.q_latent.device)
+        facts = dict(
             module=module_name,
             stages=list(cake_jit.registered_stages()),
             entry="cake_dsa_sparse_attention_nondet_varlen",
             layout=self.layout.describe(),
         )
+        if self.layout.dkv_acc:
+            # the varlen entry's segment count (``len(cu_seqlens_k) - 1``); the arm passes no ``dkv_direct``, so
+            # the entry resolves ``CAKE_PPLX_DSA_DKV_DIRECT`` (``auto``: the record's rule of this device;
+            # ``1`` / ``0``: forced).  Without ``dkv_acc`` the backward takes the cast path.
+            row = (
+                inp.q_latent.device,
+                inp.total_q,
+                inp.total_k,
+                inp.topk,
+                int(inp.cu_seqlens_k.numel()) - 1,
+            )
+            facts.update(
+                # the route the backward takes (the environment override resolved)
+                dkv_direct=_record_dkv_direct(
+                    *row, dkv_direct=_dkv_direct_from_environment()
+                ),
+                # the record's rule for the row, whatever the environment says
+                dkv_direct_rule=_record_dkv_direct(*row),
+            )
+        return facts
 
     def forward(self):
         if self.runner is not None:
