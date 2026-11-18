@@ -15,8 +15,8 @@ limitations under the License.
 
 Workspace reuse across token counts of the Cake four-stream mHC training
 package ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096,
-5120 and 7168, 4 streams; SM100 / SM103 at the three hidden sizes, SM107 at
-4096), in the
+5120 and 7168, 4 streams; SM100 / SM103 / SM107 at the three hidden sizes), in
+the
 form of ``test_cake_mhc_det_train_workspace.py``.  Every case runs at each
 hidden size the device's architecture routes, its buffers sized with
 ``hidden=``; a size it does not route is skipped.
@@ -37,27 +37,32 @@ every token count up to ``T_max`` (at its ``hidden``) and CUDA Graph replays
 at a smaller ``T``.
 Before every call the bytes of the backward buffer past the zero prefix are
 overwritten with 0xFF (no call may depend on what an earlier call left there).
-Every call is compared with the same call on fresh zeroed exact-size
-workspaces (every output bitwise, ``dfn`` included) and with the deterministic
-package (``cake_pplx._backends.cake_mhc_det_train``) on the same
-inputs: every output but ``dfn`` bitwise; ``dfn`` within ``F u sum_t |dz'_t|
-|x_t|`` per element (``F`` = ``test_cake_mhc_nondet_train.py``'s
-``_dfn_factor``: ``2 P`` with ``P`` the chunk count of the column-slab pass,
-``u = 2^-24``, ``dz'`` the FP64 reference's).  On one buffer reused over
-realistic token-count sequences:
+The package makes no bit promise: no call is compared bit for bit with a call
+on fresh workspaces or with the deterministic package.  Each test runs its
+calls on 32 inputs, new inputs for every call, and judges every output of
+every call with ``tests/cake_naive.py`` against the naive BF16 tier: its
+error against the float64 oracle
+(``tests/cake/test_helpers/cake_mhc_naive.py``), in the L2 and the max norm,
+median and max over the 32 inputs, is at most 1.005 times the tier's, and zero
+where the tier's is zero (the outputs of each call of a sequence under the name
+prefix ``call <n> T=<T>``).  On one buffer reused over realistic token-count
+sequences:
 
 * every call finds the zero prefix of its layout zero and leaves it zero;
 * a CUDA Graph captured at a smaller token count on the large buffers, its
-  replays interleaved with eager calls at the large token count, keeps both
-  properties at every replay;
+  replays (new inputs copied in place) interleaved with eager calls at the
+  large token count, keeps both properties at every replay;
 * the default workspaces (``workspace=None``: one buffer per hidden size and
-  power-of-two token-count bucket) across the token counts of one bucket;
-* the reported sequence (``backward_finish`` at 7832 tokens,
-  then at 7435 tokens, on the default workspace of a fresh process, and the
-  reverse order), each sequence in its own process;
+  power-of-two token-count bucket) across the token counts of one bucket, the
+  reported sequences (7832 then 7435 tokens, and the reverse order) among
+  them;
+* the reported sequence on the default workspace of a fresh process, each
+  sequence in its own process (its fixed inputs are not the records of a
+  forward, so no oracle applies: the shapes, finite outputs and the zero
+  prefix);
 * no default buffer is created during a CUDA graph capture (``ValueError``,
-  nothing cached), and the eager call after it creates the buffer and matches
-  the caller-owned workspace's call;
+  nothing cached), and the eager call after it creates the buffer and returns
+  finite outputs of the call's shapes;
 * with two devices, the capture check reads the workspace device's current
   stream, not the current device's: a capture on the workspace device raises
   while another device is current, and a capture on another device does not
@@ -74,7 +79,6 @@ from __future__ import annotations
 
 import gc
 import json
-import math
 import subprocess
 import sys
 from pathlib import Path
@@ -82,12 +86,18 @@ from pathlib import Path
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_mhc_naive import (
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+    stats_outputs,
+)
 from tests.cake.test_helpers.cake_package import PACKAGES, cake_package
 
 KEY = "cake.cake_mhc_nondet_train"
 pkg = cake_package(KEY)
 loader = cake_package(KEY, "cake_jit")
-# The deterministic package: the same-input comparison point.
+# The deterministic package: its workspace layouts and sizes (this package's layout extends them).
 det = cake_package("cake.cake_mhc_det_train")
 det_loader = cake_package("cake.cake_mhc_det_train", "cake_jit")
 backward_finish = pkg.cake_mhc_nondet_train_backward_finish
@@ -95,11 +105,6 @@ backward_finish = pkg.cake_mhc_nondet_train_backward_finish
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 STREAMS, HIDDEN, MAPPING_ROWS = 4, 4096, 24
 HIDDEN_SIZES = (4096, 5120, 7168)
-RMS_EPS, HC_EPS, SINKHORN_ITERS = 1e-5, 1e-6, 20
-BLOCK_TOKENS = 8192
-FP32_REL_L2_MAX = 1e-5
-FP32_UNIT_ROUNDOFF = 2.0**-24
-ABS_SLACK = 1.02
 # The backward workspace's zero prefix: the ticket region (256 bytes) and the column slab's arrival counts (512 bytes),
 # first for every token count and hidden size; every call finds it zero and leaves it zero.
 ZERO_PREFIX_BYTES = 768
@@ -116,14 +121,17 @@ SEQUENCES = {
     "glm_rows": (16263, 14928, 15566, 16263, 15288, 16164),
 }
 GRAPHS = ((4096, 3000), (8192, 4500), (16263, 14928))
-DEFAULT_BUCKETS = ((4096, 3000, 2100, 4096), (8192, 6000, 4500, 8192))
 # The reported backward token-count sequences (one 8192-token default bucket).
 REPORTED_SEQUENCES = ((7832, 7435), (7435, 7832))
+DEFAULT_BUCKETS = (
+    (4096, 3000, 2100, 4096),
+    (8192, 6000, 4500, 8192),
+    *REPORTED_SEQUENCES,
+)
 # One caller workspace over token counts within and across the 64-token tiles, down to one token.
 RAGGED_SEQUENCE = (4096, 1, 777, 2049, 4096)
 OUTPUTS = ("U", "stats", "Y", "dB", "gstats", "dX", "dfn", "dscale", "dbase")
 _BACKWARD = ("dX", "dfn", "dscale", "dbase")
-_EXACT = ("dX", "dscale", "dbase")
 
 
 def _device() -> torch.device:
@@ -153,8 +161,8 @@ pytestmark = pytest.mark.skipif(
 
 @pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
-    # Both packages' libraries of the local architecture (this package's, and the deterministic package's for the
-    # same-input comparisons); a prebuilt or cached library loads without compiling.
+    # Both packages' libraries of the local architecture (this package's, and the deterministic package's, whose
+    # layouts this package's extend); a prebuilt or cached library loads without compiling.
     if _supported():
         arch = _arch()
         for spec in [*det_loader.specs_for_arch(arch), *loader.specs_for_arch(arch)]:
@@ -203,160 +211,53 @@ def _parts(T: int, hidden: int = HIDDEN) -> int:
     return parts
 
 
-def _lpt_runs(T: int, hidden: int = HIDDEN) -> bool:
-    """Whether the column slab runs a two-size record of ``hidden`` (``lpt`` or its slab-fastest copy ``lpt_os``) at
-    ``T`` on this device (at hidden 5120 and 7168 only where the size's table calibrates the architecture)."""
-    program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
-    return program.startswith("lpt")
-
-
-def _slab_parts(T: int, hidden: int = HIDDEN) -> int:
-    """The chunk count the column slab launches: ``slab_plan``'s ``lpt_parts`` under ``lpt`` / ``lpt_os``, else
-    :func:`_parts`."""
-    if not _lpt_runs(T, hidden):
-        return _parts(T, hidden)
-    parts = loader.slab_plan(T, _sm_count(), _arch(), hidden)["lpt_parts"]
-    assert 1 <= parts <= 32, (T, hidden, parts)
-    return parts
-
-
-def _dfn_factor(T: int, hidden: int = HIDDEN) -> float:
-    """F of the dfn bound F u (|carried| + ABS_SLACK sum_t |dz'_t| |x_t|) at T (``test_cake_mhc_nondet_train.py``'s
-    ``_dfn_factor``, which derives it): 2 P where the column slab runs dynr or dynr_os (both sides fold the same
-    per-chunk partials), 2 max(P, P_k7) + 10 where it runs lpt or lpt_os (the partials are another partition's)."""
-    if not _lpt_runs(T, hidden):
-        return 2.0 * _parts(T, hidden)
-    return 2.0 * max(_slab_parts(T, hidden), _parts(T, hidden)) + 10.0
-
-
 def _round256(n: int) -> int:
     return 256 * (-(-n // 256))
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The dfn bound (test_cake_mhc_nondet_train.py's)
+# Inputs, steps and checks
 
 
-def _sinkhorn(logits: torch.Tensor, hc_eps: float, iters: int) -> torch.Tensor:
-    C = torch.softmax(logits, dim=-1) + hc_eps
-    C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    for _ in range(iters - 1):
-        C = C / (C.sum(dim=2, keepdim=True) + hc_eps)
-        C = C / (C.sum(dim=1, keepdim=True) + hc_eps)
-    return C
+def _make_inputs(T: int, hidden: int, seed: int) -> dict:
+    g = torch.Generator(device=_device()).manual_seed(seed)
 
+    def randn(*shape: int, dtype: torch.dtype = F32) -> torch.Tensor:
+        return torch.randn(*shape, generator=g, device=_device(), dtype=F32).to(dtype)
 
-def _coefficients(z, scale, base, hc_eps: float = HC_EPS, iters: int = SINKHORN_ITERS):
-    T = z.shape[0]
-    pre = torch.sigmoid(z[:, 0:4] * scale[0] + base[0:4]) + hc_eps
-    post = 2 * torch.sigmoid(z[:, 4:8] * scale[1] + base[4:8])
-    C = _sinkhorn(
-        (z[:, 8:] * scale[2] + base[8:]).reshape(T, STREAMS, STREAMS), hc_eps, iters
-    )
-    return pre, post, C
-
-
-def _dzp(i: dict) -> torch.Tensor:
-    """The FP64 ``dz' = r dL/dz`` of the reference, ``[T, 24]`` (the backward of the coefficients alone, so no
-    ``[T, 4H]`` autograd graph is held)."""
-    T, n = i["X"].shape[0], STREAMS * i["X"].shape[2]
-    fn, scale, base = (i[k].double() for k in ("fn", "scale", "base"))
-    blocks = [torch.zeros((0, MAPPING_ROWS), dtype=F64, device=_device())]
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        X = i["X"][lo:hi].double()
-        dY = i["dY"][lo:hi].double()
-        dU = i["dU"][lo:hi].double()
-        B = i["B"][lo:hi].double()
-        u = X.reshape(hi - lo, n)
-        r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + RMS_EPS)
-        with torch.enable_grad():
-            z = ((u * r) @ fn.T).requires_grad_(True)
-            pre, post, C = _coefficients(z, scale, base)
-            (dz,) = torch.autograd.grad(
-                [pre, post, C],
-                [z],
-                grad_outputs=[
-                    torch.einsum("tid,td->ti", X, dU),
-                    torch.einsum("tjd,td->tj", dY, B),
-                    torch.einsum("tid,tjd->tij", X, dY),
-                ],
-            )
-        blocks.append(dz * r)
-    return torch.cat(blocks, dim=0)
-
-
-def _dfn_bound(i: dict) -> torch.Tensor:
-    """Per-element bound of ``|dfn_a - dfn_b|`` for two folds of per-chunk partials:
-    ``F u * 1.02 sum_t |dz'_t| |x_t|`` with ``F`` = :func:`_dfn_factor` (``test_cake_mhc_nondet_train.py``'s
-    ``_dfn_bound``)."""
-    T, hidden = i["X"].shape[0], i["X"].shape[2]
-    dzp = _dzp(i).abs()
-    A = torch.zeros((MAPPING_ROWS, STREAMS * hidden), dtype=F64, device=_device())
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        A += dzp[lo:hi].T @ i["X"][lo:hi].reshape(hi - lo, -1).double().abs()
-    return _dfn_factor(T, hidden) * FP32_UNIT_ROUNDOFF * ABS_SLACK * A
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# Inputs, steps and comparisons
+    return {
+        "X": randn(T, STREAMS, hidden, dtype=BF16),
+        "fn": (randn(MAPPING_ROWS, STREAMS * hidden) * 1e-2).contiguous(),
+        "scale": 1.0 + 0.1 * randn(3),
+        "base": 0.1 * randn(MAPPING_ROWS),
+        "B": randn(T, hidden, dtype=BF16),
+        "dY": randn(T, STREAMS, hidden, dtype=BF16),
+        "dU": randn(T, hidden, dtype=BF16),
+    }
 
 
 _INPUTS: dict[tuple[int, int], dict] = {}
 
 
 def _inputs(T: int, hidden: int = HIDDEN) -> dict:
+    """The fixed inputs of ``(T, hidden)`` (one pair's at a time: 16263 tokens hold ~1.3 GB at H 4096, ~2.3 GB at
+    7168)."""
     if (T, hidden) not in _INPUTS:
-        g = torch.Generator(device=_device()).manual_seed(SEED + T)
-
-        def randn(*shape: int, dtype: torch.dtype = F32) -> torch.Tensor:
-            return torch.randn(*shape, generator=g, device=_device(), dtype=F32).to(
-                dtype
-            )
-
-        # One (token count, hidden size)'s inputs at a time (16263 tokens hold ~1.3 GB at H 4096, ~2.3 GB at 7168).
         _INPUTS.clear()
-        _INPUTS[(T, hidden)] = {
-            "X": randn(T, STREAMS, hidden, dtype=BF16),
-            "fn": (randn(MAPPING_ROWS, STREAMS * hidden) * 1e-2).contiguous(),
-            "scale": 1.0 + 0.1 * randn(3),
-            "base": 0.1 * randn(MAPPING_ROWS),
-            "B": randn(T, hidden, dtype=BF16),
-            "dY": randn(T, STREAMS, hidden, dtype=BF16),
-            "dU": randn(T, hidden, dtype=BF16),
-        }
+        _INPUTS[(T, hidden)] = _make_inputs(T, hidden, SEED + T)
     return _INPUTS[(T, hidden)]
 
 
-def _bound(i: dict) -> torch.Tensor:
-    """The ``dfn`` bound of the inputs ``i`` (kept with them)."""
-    if "bound" not in i:
-        i["bound"] = _dfn_bound(i)
-    return i["bound"]
-
-
-def _step(i: dict, fwd_ws, bwd_ws, *, det_package: bool = False) -> dict:
-    """One forward + backward of this package or of the deterministic package."""
-    if det_package:
-        entries = (
-            det.cake_mhc_det_train_forward_prepare,
-            det.cake_mhc_det_train_forward_finish,
-            det.cake_mhc_det_train_backward_prepare,
-            det.cake_mhc_det_train_backward_finish,
-        )
-    else:
-        entries = (
-            pkg.cake_mhc_nondet_train_forward_prepare,
-            pkg.cake_mhc_nondet_train_forward_finish,
-            pkg.cake_mhc_nondet_train_backward_prepare,
-            backward_finish,
-        )
-    fwd_prepare, fwd_finish, bwd_prepare, bwd_finish = entries
-    U, stats = fwd_prepare(i["X"], i["fn"], i["scale"], i["base"], workspace=fwd_ws)
-    Y = fwd_finish(i["X"], i["B"], stats)
-    dB, gstats = bwd_prepare(i["dY"], i["B"], i["X"], stats)
-    dX, dfn, dscale, dbase = bwd_finish(
+def _step(i: dict, fwd_ws, bwd_ws) -> dict:
+    """One forward + backward of this package."""
+    U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
+        i["X"], i["fn"], i["scale"], i["base"], workspace=fwd_ws
+    )
+    Y = pkg.cake_mhc_nondet_train_forward_finish(i["X"], i["B"], stats)
+    dB, gstats = pkg.cake_mhc_nondet_train_backward_prepare(
+        i["dY"], i["B"], i["X"], stats
+    )
+    dX, dfn, dscale, dbase = backward_finish(
         i["X"], i["dY"], i["dU"], i["B"], i["fn"], i["scale"], i["base"], stats, gstats,
         workspace=bwd_ws,
     )  # fmt: skip
@@ -367,6 +268,17 @@ def _step(i: dict, fwd_ws, bwd_ws, *, det_package: bool = False) -> dict:
 
 def _snapshot(out: dict) -> dict:
     return {k: v.detach().clone() for k, v in out.items()}
+
+
+def _judged(prefix: str, i: dict, got: dict) -> tuple[list, dict, dict]:
+    """One call's judged outputs ``got`` (name -> tensor) under the name prefix ``prefix``, with the oracle's and the
+    naive tier's values on the call's inputs ``i``: a triple of :func:`judge_draws`."""
+    expected, naive = expected_and_naive(i, got)
+    return (
+        [{prefix + k: v for k, v in got.items()}],
+        {prefix + k: v for k, v in expected.items()},
+        {prefix + k: v for k, v in naive.items()},
+    )
 
 
 def _layout(kind: str, T: int, hidden: int) -> dict:
@@ -389,23 +301,6 @@ def _nd_workspace_exact(T: int, hidden: int = HIDDEN) -> torch.Tensor:
         dtype=torch.uint8,
         device=_device(),
     )
-
-
-def _fresh(T: int, hidden: int = HIDDEN) -> dict:
-    """The outputs of one call of this package on fresh zeroed exact-size workspaces."""
-    fwd_ws = torch.zeros(
-        _layout("fwd", T, hidden)["total_bytes"], dtype=torch.uint8, device=_device()
-    )
-    out = _snapshot(_step(_inputs(T, hidden), fwd_ws, _nd_workspace_exact(T, hidden)))
-    torch.cuda.synchronize()
-    return out
-
-
-def _deterministic(T: int, hidden: int = HIDDEN) -> dict:
-    """The outputs of the deterministic package on its default workspaces."""
-    out = _snapshot(_step(_inputs(T, hidden), None, None, det_package=True))
-    torch.cuda.synchronize()
-    return out
 
 
 def _poison_workspace(ws: torch.Tensor) -> None:
@@ -442,78 +337,43 @@ def _assert_zero_words(fwd_ws, bwd_ws, T: int, hidden: int, what: str) -> None:
         )
 
 
-def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
-    return torch.equal(
-        a.detach().contiguous().reshape(-1).view(torch.uint8),
-        b.detach().contiguous().reshape(-1).view(torch.uint8),
-    )
-
-
-def _assert_dfn_within(
-    got: torch.Tensor, want: torch.Tensor, bound: torch.Tensor, label: str
-) -> None:
-    assert got.dtype == F32 and tuple(got.shape) == tuple(want.shape), label
-    assert tuple(got.shape) == tuple(bound.shape) and got.shape[0] == MAPPING_ROWS, (
-        label
-    )
-    assert torch.isfinite(got).all(), f"{label}: non-finite dfn"
-    diff = (got.double() - want.double()).abs()
-    over = int((diff > bound).sum())
-    ratio = float((diff / bound.clamp_min(torch.finfo(F64).tiny)).max())
-    assert over == 0, (
-        f"{label}: {over} dfn elements beyond 2 P u sum_t |dz'_t| |x_t| (largest ratio {ratio:.3e})"
-    )
-
-
-def _assert_matches(ref: dict, got: dict, bound: torch.Tensor, what: str) -> None:
-    """Every output of ``ref`` (the deterministic package's) but ``dfn`` bitwise; ``dfn`` within the bound."""
-    for k, v in ref.items():
-        if k == "dfn":
-            _assert_dfn_within(got[k], v, bound, f"{what}: dfn")
-        else:
-            assert _same_bits(v, got[k]), (
-                f"{what}: {k} differs in {int((v != got[k]).sum())} elements"
-            )
-
-
-def _assert_same_call(ref: dict, got: dict, what: str) -> None:
-    """Every output of ``ref`` (the same call of this package), ``dfn`` included, bitwise."""
-    for k, v in ref.items():
-        assert _same_bits(v, got[k]), (
-            f"{what}: {k} differs in {int((v != got[k]).sum())} elements"
-        )
-
-
 # ----------------------------------------------------------------------------------------------------------------
 # Tests
 
 
 @pytest.mark.parametrize("name", sorted(SEQUENCES))
-def test_caller_workspace_reused_across_token_counts(name: str, hidden: int) -> None:
+def test_caller_workspace_reused_across_token_counts(
+    name: str, hidden: int, record_property
+) -> None:
     Ts = SEQUENCES[name]
     t_max = max(Ts)
     fwd_ws, bwd_ws = _workspaces(t_max, hidden)
-    for n, T in enumerate(Ts):
-        bound = _bound(_inputs(T, hidden))
-        ref, want = _fresh(T, hidden), _deterministic(T, hidden)
-        what = f"{name} H={hidden} call {n} (T={T} on a buffer of T={t_max})"
-        _poison_workspace(bwd_ws)
-        _assert_zero_words(fwd_ws, bwd_ws, T, hidden, what + " before the call")
-        got = _snapshot(_step(_inputs(T, hidden), fwd_ws, bwd_ws))
-        _assert_zero_words(fwd_ws, bwd_ws, T, hidden, what + " after the call")
-        _assert_same_call(ref, got, what + " vs the fresh workspaces")
-        _assert_matches(want, got, bound, what + " vs deterministic")
-        del ref, want, got
+
+    def case(j: int, s: int):
+        for n, T in enumerate(Ts):
+            i = _make_inputs(T, hidden, s + n)
+            what = (
+                f"{name} H={hidden} draw {j} call {n} (T={T} on a buffer of T={t_max})"
+            )
+            _poison_workspace(bwd_ws)
+            _assert_zero_words(fwd_ws, bwd_ws, T, hidden, what + " before the call")
+            got = package_outputs(_snapshot(_step(i, fwd_ws, bwd_ws)))
+            _assert_zero_words(fwd_ws, bwd_ws, T, hidden, what + " after the call")
+            yield _judged(f"call {n} T={T} ", i, got)
+
+    judge_draws(case, record_property, seed=SEED)
 
 
 @pytest.mark.parametrize(("t_max", "t_small"), GRAPHS)
 def test_graph_captured_at_a_smaller_token_count(
-    t_max: int, t_small: int, hidden: int
+    t_max: int, t_small: int, hidden: int, record_property
 ) -> None:
+    """A graph of one forward + backward captured at ``t_small`` on the buffers of ``t_max``; on each of 32 inputs an
+    eager call at ``t_max`` on the same buffers, then a replay on new inputs copied in place: both keep the zero
+    words zero, and the outputs of both are judged (the eager call's under ``eager T=<t_max>``, the replay's under
+    ``replay T=<t_small>``)."""
     fwd_ws, bwd_ws = _workspaces(t_max, hidden)
-    small = _inputs(t_small, hidden)
-    bound_small = _bound(small)
-    ref_small, want_small = _fresh(t_small, hidden), _deterministic(t_small, hidden)
+    small = _make_inputs(t_small, hidden, SEED + t_small)
     side = torch.cuda.Stream()
     side.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(side):
@@ -525,75 +385,75 @@ def test_graph_captured_at_a_smaller_token_count(
     with torch.cuda.graph(graph):
         out = _step(small, fwd_ws, bwd_ws)
     torch.cuda.synchronize()
-    big = _inputs(t_max, hidden)
-    bound_big = _bound(big)
-    ref_big, want_big = _fresh(t_max, hidden), _deterministic(t_max, hidden)
-    for r in range(3):
-        what = f"H={hidden} replay {r} at T={t_small} after an eager call at T={t_max}"
-        eager = f"H={hidden} eager T={t_max} before replay {r}"
+
+    def case(j: int, s: int):
+        what = f"H={hidden} replay {j} at T={t_small} after an eager call at T={t_max}"
+        eager = f"H={hidden} eager T={t_max} before replay {j}"
+        big = _make_inputs(t_max, hidden, s + 1)
         _poison_workspace(bwd_ws)
-        got_big = _snapshot(_step(big, fwd_ws, bwd_ws))
+        got = package_outputs(_snapshot(_step(big, fwd_ws, bwd_ws)))
         _assert_zero_words(fwd_ws, bwd_ws, t_max, hidden, eager)
-        _assert_same_call(ref_big, got_big, eager)
-        _assert_matches(want_big, got_big, bound_big, eager + " vs deterministic")
-        del got_big
+        yield _judged(f"eager T={t_max} ", big, got)
+        del big, got
+        new = _make_inputs(t_small, hidden, s)
+        for k, v in new.items():
+            small[k].copy_(v)
         _poison_workspace(bwd_ws)
         _assert_zero_words(fwd_ws, bwd_ws, t_small, hidden, what + " (before)")
         for t in out.values():
             t.fill_(float("nan"))
         graph.replay()
         _assert_zero_words(fwd_ws, bwd_ws, t_small, hidden, what + " (after)")
-        got = _snapshot(out)
-        _assert_same_call(ref_small, got, what)
-        _assert_matches(want_small, got, bound_small, what + " vs deterministic")
-    del graph
+        yield _judged(f"replay T={t_small} ", new, package_outputs(_snapshot(out)))
+
+    judge_draws(case, record_property, seed=SEED + t_small)
 
 
 @pytest.mark.parametrize("Ts", DEFAULT_BUCKETS)
-def test_default_workspace_bucket_across_token_counts(Ts: tuple, hidden: int) -> None:
-    """``workspace=None`` over the token counts of one power-of-two bucket: the bucket's default buffer of the hidden
-    size (keyed by device, kind, hidden size and bucket; allocated on the first call) has its bytes past the zero
-    prefix overwritten with 0xFF before every later call and its zero prefix zero before and after every call."""
+def test_default_workspace_bucket_across_token_counts(
+    Ts: tuple, hidden: int, record_property
+) -> None:
+    """``workspace=None`` over the token counts of one power-of-two bucket (the reported sequences among them): the
+    bucket's default buffer of the hidden size (keyed by device, kind, hidden size and bucket; allocated on the first
+    call) has its bytes past the zero prefix overwritten with 0xFF before every later call and its zero prefix zero
+    before and after every call; every output of every call is judged over 32 inputs."""
     index = _device().index
-    for n, T in enumerate(Ts):
-        bound = _bound(_inputs(T, hidden))
-        ref, want = _fresh(T, hidden), _deterministic(T, hidden)
-        what = f"default workspace call {n} (T={T}, H={hidden}) of {Ts}"
-        key = (index, "bwd", hidden, 1 << (T - 1).bit_length())
-        default = pkg._DEFAULT_WORKSPACES.get(key)
-        if default is not None:
-            _poison_workspace(default)
-            _assert_zero_prefix(default, what + " before the call")
-        got = _snapshot(_step(_inputs(T, hidden), None, None))
-        _assert_zero_prefix(pkg._DEFAULT_WORKSPACES[key], what + " after the call")
-        _assert_same_call(ref, got, what)
-        _assert_matches(want, got, bound, what + " vs deterministic")
+
+    def case(j: int, s: int):
+        for n, T in enumerate(Ts):
+            i = _make_inputs(T, hidden, s + n)
+            what = f"default workspace draw {j} call {n} (T={T}, H={hidden}) of {Ts}"
+            key = (index, "bwd", hidden, 1 << (T - 1).bit_length())
+            default = pkg._DEFAULT_WORKSPACES.get(key)
+            if default is not None:
+                _poison_workspace(default)
+                _assert_zero_prefix(default, what + " before the call")
+            got = package_outputs(_snapshot(_step(i, None, None)))
+            _assert_zero_prefix(pkg._DEFAULT_WORKSPACES[key], what + " after the call")
+            yield _judged(f"call {n} T={T} ", i, got)
+
+    judge_draws(case, record_property, seed=SEED + Ts[0])
 
 
 # One process per sequence: the inputs of the issue's reproduction (one CPU generator seeded 0, drawn in call order)
-# at the hidden size of the case, each ``backward_finish(...)`` on the default workspace (keyed by
-# device, kind, hidden size and power-of-two token bucket), then the same call on a fresh zeroed exact-size workspace
-# (every output the same bits) and the deterministic call.  The inputs are not the records of a forward (``stats`` and
-# ``grad_stats`` are random), so no FP64 reference applies: ``dfn`` is compared with the deterministic one by its
-# rel-L2.
+# at the hidden size of the case, each ``backward_finish(...)`` on the default workspace (keyed by device, kind, hidden
+# size and power-of-two token bucket).  The inputs are not the records of a forward (``stats`` and ``grad_stats`` are
+# random) and do not change with a seed, so no oracle applies: each call is held to its contract (the output shapes,
+# finite outputs) and to the zero prefix.  The judged default-workspace calls at these token counts are
+# test_default_workspace_bucket_across_token_counts's.
 _REPORTED_CHILD = r"""
 import importlib, json, sys
 import torch
 pkg = importlib.import_module(sys.argv[1])
 loader = importlib.import_module(sys.argv[1] + ".cake_jit")
-det = importlib.import_module(sys.argv[2])
-H = int(sys.argv[4])
+H = int(sys.argv[3])
 dev = torch.device("cuda:0")
 arch = loader.arch_for_capability(tuple(torch.cuda.get_device_capability(dev)))
 sm = loader.sm_count(0)
 gen = torch.Generator(device="cpu").manual_seed(0)
 def r(*shape, dtype=torch.float32, scale=1.0):
     return (torch.randn(shape, generator=gen) * scale).to(dtype).to(dev)
-def rel_l2(a, b):
-    num, den = (a.double() - b.double()).norm().item(), b.double().norm().item()
-    return num / den if den > 0 else (0.0 if num == 0 else float("inf"))
-names = ("dX", "dfn", "dscale", "dbase")
-for T in (int(t) for t in sys.argv[3].split(",")):
+for T in (int(t) for t in sys.argv[2].split(",")):
     args = [r(T, 4, H, dtype=torch.bfloat16), r(T, 4, H, dtype=torch.bfloat16, scale=1e-3),
             r(T, H, dtype=torch.bfloat16, scale=1e-3), None, r(24, 4 * H, scale=0.05), r(3, scale=0.1),
             r(24), r(T, 64), r(T, 32, scale=1e-3)]
@@ -610,16 +470,15 @@ for T in (int(t) for t in sys.argv[3].split(",")):
     got = [t.clone() for t in pkg.cake_mhc_nondet_train_backward_finish(*args)]
     call["prefix_after"] = nonzero()
     call["default_found"] = key in pkg._DEFAULT_WORKSPACES
-    fresh = torch.zeros(layout["total_bytes"], dtype=torch.uint8, device=dev)
-    ref = [t.clone() for t in pkg.cake_mhc_nondet_train_backward_finish(*args, workspace=fresh)]
-    want = det.cake_mhc_det_train_backward_finish(*args)
-    torch.cuda.synchronize()
+    call["shapes"] = [list(t.shape) for t in got]
     call["finite"] = all(bool(torch.isfinite(t).all()) for t in got)
-    call["differs"] = [n for n, a, b in zip(names, got, ref) if not torch.equal(a.view(-1).view(torch.uint8), b.view(-1).view(torch.uint8))]
-    call["differs_det"] = [n for n, a, b in zip(names, got, want) if n != "dfn" and not torch.equal(a, b)]
-    call["dfn_rel_l2_det"] = rel_l2(got[1], want[1])
     print(json.dumps(call), flush=True)
 """
+
+
+def _shapes(T: int, hidden: int) -> list[list[int]]:
+    """The shapes of ``backward_finish``'s outputs ``dX``, ``dfn``, ``dscale``, ``dbase``."""
+    return [[T, STREAMS, hidden], [MAPPING_ROWS, STREAMS * hidden], [3], [MAPPING_ROWS]]
 
 
 @pytest.mark.parametrize(
@@ -632,7 +491,6 @@ def test_default_workspace_reported_sequence(Ts: tuple, hidden: int) -> None:
             "-c",
             _REPORTED_CHILD,
             PACKAGES[KEY],
-            PACKAGES["cake.cake_mhc_det_train"],
             ",".join(map(str, Ts)),
             str(hidden),
         ],
@@ -648,7 +506,7 @@ def test_default_workspace_reported_sequence(Ts: tuple, hidden: int) -> None:
     assert run.returncode == 0, (
         f"backward_finish() over {Ts} on the default workspace: exit {run.returncode}\n{tail}"
     )
-    done = [c for c in calls if "differs" in c]
+    done = [c for c in calls if "finite" in c]
     assert [c["T"] for c in done] == list(Ts), tail
     for c in done:
         what = f"default workspace, backward_finish() at T={c['T']} H={hidden} of {Ts}"
@@ -663,24 +521,13 @@ def test_default_workspace_reported_sequence(Ts: tuple, hidden: int) -> None:
         assert c["prefix_after"] == 0, (
             f"{what}: {c['prefix_after']} non-zero bytes in the zero prefix after the call"
         )
+        assert c["shapes"] == _shapes(c["T"], hidden), (what, c["shapes"])
         assert c["finite"], f"{what}: non-finite outputs"
-        assert not c["differs"], (
-            f"{what}: {c['differs']} differ from the fresh-workspace call"
-        )
-        assert not c["differs_det"], (
-            f"{what}: {c['differs_det']} differ from the deterministic call"
-        )
-        assert (
-            math.isfinite(c["dfn_rel_l2_det"])
-            and c["dfn_rel_l2_det"] <= FP32_REL_L2_MAX
-        ), (
-            f"{what}: dfn rel-L2 {c['dfn_rel_l2_det']:.3e} to the deterministic call > {FP32_REL_L2_MAX:.0e}"
-        )
 
 
-# A fresh process at the hidden size of the case: ``backward_finish(...)`` on a caller-owned
-# workspace (every module loaded), then the same call with ``workspace=None`` inside a CUDA graph capture, before any
-# default buffer of its bucket exists, then the same call eagerly.
+# A fresh process at the hidden size of the case: ``backward_finish(...)`` on a caller-owned workspace (every module
+# loaded), then the same call with ``workspace=None`` inside a CUDA graph capture, before any default buffer of its
+# bucket exists, then the same call eagerly (fixed inputs that are not the records of a forward: held to the contract).
 _CAPTURE_CHILD = r"""
 import importlib, json, sys
 import torch
@@ -695,7 +542,7 @@ args = [r(T, 4, H, dtype=torch.bfloat16), r(T, 4, H, dtype=torch.bfloat16, scale
         r(24), r(T, 64), r(T, 32, scale=1e-3)]
 key = (0, "bwd", H, 1 << (T - 1).bit_length())
 ws = pkg.cake_mhc_nondet_train_backward_workspace(T, dev, hidden=H)
-ref = [t.clone() for t in pkg.cake_mhc_nondet_train_backward_finish(*args, workspace=ws)]
+pkg.cake_mhc_nondet_train_backward_finish(*args, workspace=ws)
 torch.cuda.synchronize()
 out = {"cached_before": key in pkg._DEFAULT_WORKSPACES, "raised": None}
 graph = torch.cuda.CUDAGraph()
@@ -710,7 +557,7 @@ out["cached_after_capture"] = key in pkg._DEFAULT_WORKSPACES
 got = [t.clone() for t in pkg.cake_mhc_nondet_train_backward_finish(*args)]
 torch.cuda.synchronize()
 out["cached_after_eager"] = key in pkg._DEFAULT_WORKSPACES
-out["differs"] = [n for n, a, b in zip(("dX", "dfn", "dscale", "dbase"), got, ref) if not torch.equal(a.view(-1).view(torch.uint8), b.view(-1).view(torch.uint8))]
+out["shapes"] = [list(t.shape) for t in got]
 out["finite"] = all(bool(torch.isfinite(t).all()) for t in got)
 print(json.dumps(out), flush=True)
 """
@@ -743,10 +590,8 @@ def test_default_workspace_is_not_created_during_capture(hidden: int) -> None:
         f"{what}: the capture cached a default buffer"
     )
     assert out["cached_after_eager"], f"{what}: the eager call cached no default buffer"
+    assert out["shapes"] == _shapes(T, hidden), (what, out["shapes"])
     assert out["finite"], f"{what}: non-finite outputs"
-    assert not out["differs"], (
-        f"{what}: {out['differs']} differ from the caller-owned workspace's call"
-    )
 
 
 # A fresh process with two devices at the hidden size of the case: ``backward_finish(...)`` on a
@@ -767,14 +612,11 @@ host = [r(T, 4, H, dtype=torch.bfloat16), r(T, 4, H, dtype=torch.bfloat16, scale
         r(24), r(T, 64), r(T, 32, scale=1e-3)]
 def on(dev):
     return [None if t is None else t.to(dev) for t in host]
-names = ("dX", "dfn", "dscale", "dbase")
 bucket = 1 << (T - 1).bit_length()
 for dev in (dev0, dev1):
     ws = pkg.cake_mhc_nondet_train_backward_workspace(T, dev, hidden=H)
     pkg.cake_mhc_nondet_train_backward_finish(*on(dev), workspace=ws)
 args1 = on(dev1)
-ws1 = pkg.cake_mhc_nondet_train_backward_workspace(T, dev1, hidden=H)
-ref = [t.clone() for t in pkg.cake_mhc_nondet_train_backward_finish(*args1, workspace=ws1)]
 torch.cuda.synchronize(dev0)
 torch.cuda.synchronize(dev1)
 out = {"cached_before": [(i, "bwd", H, bucket) in pkg._DEFAULT_WORKSPACES for i in (0, 1)], "raised_a": None, "raised_b": None}
@@ -813,7 +655,7 @@ torch.cuda.synchronize(dev1)
 out["cached_after_b"] = [(i, "bwd", H, bucket) in pkg._DEFAULT_WORKSPACES for i in (0, 1)]
 out["ran_b"] = got is not None
 if got is not None:
-    out["differs"] = [n for n, a, b in zip(names, got, ref) if not torch.equal(a.view(-1).view(torch.uint8), b.view(-1).view(torch.uint8))]
+    out["shapes"] = [list(t.shape) for t in got]
     out["finite"] = all(bool(torch.isfinite(t).all()) for t in got)
 print(json.dumps(out), flush=True)
 """
@@ -867,10 +709,8 @@ def test_default_workspace_capture_check_uses_workspace_device(hidden: int) -> N
     assert out["ran_b"] and out["cached_after_b"] == [False, True], (
         f"{what}: the call during a capture on cuda:0 cached {out['cached_after_b']}"
     )
+    assert out["shapes"] == _shapes(T, hidden), (what, out["shapes"])
     assert out["finite"], f"{what}: non-finite outputs"
-    assert not out["differs"], (
-        f"{what}: {out['differs']} differ from the caller-owned workspace's call"
-    )
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -888,19 +728,11 @@ def _forward(i: dict) -> dict:
     return {"stats": stats, "gstats": gstats}
 
 
-def _backward(entry, i: dict, prep: dict, **kwargs) -> dict:
-    out = entry(
+def _nd_backward(i: dict, prep: dict, **kwargs) -> dict:
+    out = backward_finish(
         i["X"], i["dY"], i["dU"], i["B"], i["fn"], i["scale"], i["base"], prep["stats"], prep["gstats"], **kwargs,
     )  # fmt: skip
     return dict(zip(_BACKWARD, out, strict=True))
-
-
-def _nd_backward(i: dict, prep: dict, **kwargs) -> dict:
-    return _backward(backward_finish, i, prep, **kwargs)
-
-
-def _det_backward(i: dict, prep: dict) -> dict:
-    return _backward(det.cake_mhc_det_train_backward_finish, i, prep)
 
 
 def _poisoned_outputs(T: int, hidden: int = HIDDEN) -> dict:
@@ -916,45 +748,37 @@ def _poisoned_outputs(T: int, hidden: int = HIDDEN) -> dict:
     }
 
 
-def _assert_exact_outputs(got: dict, want: dict, label: str) -> None:
-    """``dX``, ``dscale``, ``dbase``: bitwise the reference."""
-    for k in _EXACT:
-        assert _same_bits(got[k], want[k]), f"{k} {label}: bits differ"
-
-
-def test_one_workspace_serves_a_ragged_token_sequence(hidden: int) -> None:
+def test_one_workspace_serves_a_ragged_token_sequence(
+    hidden: int, record_property
+) -> None:
     """One caller workspace of this package's sizing for the largest token count, its bytes past the zero prefix
     0xFF before every call, over ``RAGGED_SEQUENCE`` with caller outputs holding NaN: every call finds the zero
-    prefix zero and leaves it zero; every output is bitwise the fresh exact-size workspace's; ``dX``, ``dscale``,
-    ``dbase`` are bitwise the deterministic backward's and ``dfn`` is within the bound of it."""
+    prefix zero and leaves it zero, and every output of every call is judged over 32 inputs."""
     t_max = max(RAGGED_SEQUENCE)
     _fwd_ws, ws = _workspaces(t_max, hidden)
     assert ws.numel() == loader.workspace_bytes_upto(
         "bwd", t_max, _sm_count(), _arch(), hidden
     )
-    for n, T in enumerate(RAGGED_SEQUENCE):
-        i = _inputs(T, hidden)
-        prep = _forward(i)
-        fresh = _snapshot(
-            _nd_backward(i, prep, workspace=_nd_workspace_exact(T, hidden))
-        )
-        want = _snapshot(_det_backward(i, prep))
-        bound = _bound(i)
-        what = f"call {n} (T={T} H={hidden} on a buffer of T={t_max})"
-        _poison_workspace(ws)
-        _assert_zero_prefix(ws, what + " before the call")
-        got = _snapshot(
-            _nd_backward(i, prep, workspace=ws, **_poisoned_outputs(T, hidden))
-        )
-        _assert_zero_prefix(ws, what + " after the call")
-        _assert_same_call(fresh, got, what + " vs the fresh workspace")
-        _assert_exact_outputs(got, want, what + " vs deterministic")
-        _assert_dfn_within(
-            got["dfn"], want["dfn"], bound, f"dfn {what} vs deterministic"
-        )
+
+    def case(j: int, s: int):
+        for n, T in enumerate(RAGGED_SEQUENCE):
+            i = _make_inputs(T, hidden, s + n)
+            prep = _forward(i)
+            what = f"draw {j} call {n} (T={T} H={hidden} on a buffer of T={t_max})"
+            _poison_workspace(ws)
+            _assert_zero_prefix(ws, what + " before the call")
+            got = _snapshot(
+                _nd_backward(i, prep, workspace=ws, **_poisoned_outputs(T, hidden))
+            )
+            _assert_zero_prefix(ws, what + " after the call")
+            yield _judged(f"call {n} T={T} ", i, got)
+
+    judge_draws(case, record_property, seed=SEED + 1)
 
 
-def test_workspace_sizes_and_which_sizing_serves_which_backward(hidden: int) -> None:
+def test_workspace_sizes_and_which_sizing_serves_which_backward(
+    hidden: int, record_property
+) -> None:
     """At the hidden size ``H`` of the case, this package's backward workspace is the ticket region, the column slab's
     arrival counts (``SLAB_CNT_WORDS`` uint32 at offset 256: the zero prefix), the deterministic regions but the
     per-chunk ``dfn`` partials (their sizes and shapes, the parameter region the deterministic one: the group rows
@@ -963,7 +787,7 @@ def test_workspace_sizes_and_which_sizing_serves_which_backward(hidden: int) -> 
     workspace is the deterministic one.  The size helper takes no ``deterministic`` keyword (``TypeError``).  A
     workspace of the deterministic sizing (``cake_mhc_det_train_backward_workspace``) is smaller than this package's
     exact layout and refused by its backward, as is one of this package's sizing for a smaller token count; one of this
-    package's sizing serves the backward."""
+    package's sizing serves the backward (its outputs judged over 32 inputs, its zero prefix zero after each call)."""
     dev, sm, arch = _device(), _sm_count(), _arch()
     shift = ZERO_PREFIX_BYTES - 256
     for T in (1, 7, 63, 64, 65, 129, 257, 1000, 2049, 4096, 8192, 16263, 32768, 65536):
@@ -1033,18 +857,18 @@ def test_workspace_sizes_and_which_sizing_serves_which_backward(hidden: int) -> 
     assert int(torch.count_nonzero(allocated)) == 0
 
     T = 2049
-    i = _inputs(T, hidden)
-    prep = _forward(i)
-    want = _snapshot(_det_backward(i, prep))
-    bound = _bound(i)
     det_sized = det.cake_mhc_det_train_backward_workspace(T, dev, hidden=hidden)
     nd_sized = pkg.cake_mhc_nondet_train_backward_workspace(T, dev, hidden=hidden)
-    got = _snapshot(_nd_backward(i, prep, workspace=nd_sized))
-    _assert_exact_outputs(got, want, f"workspace nd-sized H={hidden}")
-    _assert_dfn_within(
-        got["dfn"], want["dfn"], bound, f"dfn workspace nd-sized H={hidden}"
-    )
-    _assert_zero_prefix(nd_sized, f"workspace nd-sized H={hidden}")
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden, s)
+        got = _snapshot(_nd_backward(i, _forward(i), workspace=nd_sized))
+        _assert_zero_prefix(nd_sized, f"workspace nd-sized H={hidden} draw {j}")
+        return _judged("", i, got)
+
+    judge_draws(case, record_property, seed=SEED + T)
+    i = _inputs(T, hidden)
+    prep = _forward(i)
     with pytest.raises(ValueError, match="workspace holds"):
         _nd_backward(i, prep, workspace=det_sized)
     small = pkg.cake_mhc_nondet_train_backward_workspace(64, dev, hidden=hidden)
@@ -1100,13 +924,14 @@ def test_workspace_bytes_per_hidden_size() -> None:
 
 
 @pytest.mark.parametrize("T", (129, 2049))
-def test_workspace_sized_for_another_hidden_size(T: int) -> None:
+def test_workspace_sized_for_another_hidden_size(T: int, record_property) -> None:
     """A caller workspace serves a call of this package when it holds the call's ``(T, H)`` layout and is refused
     (``ValueError``) when it is too small (``test_cake_mhc_det_train.py``'s test of the same name): buffers sized
     for ``(T, 4096)`` used by an H 7168 call at the same ``T`` are refused where smaller than its layout and
-    otherwise give the default-workspace outputs; buffers one 256-byte block short of the H 7168 layout are refused
-    and exact-size buffers serve it.  Every output, ``dfn`` included, is bitwise the default-workspace call's, and
-    the zero prefix is zero after every backward."""
+    otherwise serve it; buffers one 256-byte block short of the H 7168 layout are refused and exact-size buffers
+    serve it.  Over 32 inputs, the default-workspace call (under the name prefix ``default``) and every call a buffer
+    serves (the forward statistics on a forward buffer, the backward outputs on a backward buffer, under the
+    buffer's name) are judged, and the zero prefix is zero after every backward."""
     if not {4096, 7168} <= set(_hidden_sizes()):
         pytest.skip(f"hidden 4096 and 7168 are not both routed on {_arch()}")
     dev = _device()
@@ -1131,9 +956,9 @@ def test_workspace_sized_for_another_hidden_size(T: int) -> None:
     }
     args = (i["X"], i["fn"], i["scale"], i["base"])
     prep = {"stats": ref["stats"], "gstats": ref["gstats"]}
+    serving = []
     for label, buffers in (("H 4096", sized_4096), ("short", short), ("exact", exact)):
         fwd_ws, bwd_ws = buffers["fwd"], buffers["bwd"]
-        what = f"T={T} H=7168 on a {label} buffer"
         if fwd_ws.numel() < need["fwd"]:
             for entry in (
                 pkg.cake_mhc_nondet_train_forward_prepare,
@@ -1142,14 +967,29 @@ def test_workspace_sized_for_another_hidden_size(T: int) -> None:
                 with pytest.raises(ValueError, match="workspace holds"):
                     entry(*args, workspace=fwd_ws)
         else:
-            _U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
-                *args, workspace=fwd_ws
-            )
-            assert _same_bits(stats, ref["stats"]), f"{what}: forward stats"
+            serving.append((f"{label} fwd ", "fwd", fwd_ws))
         if bwd_ws.numel() < need["bwd"]:
             with pytest.raises(ValueError, match="workspace holds"):
                 _nd_backward(i, prep, workspace=bwd_ws)
         else:
-            got = _snapshot(_nd_backward(i, prep, workspace=bwd_ws))
-            _assert_zero_prefix(bwd_ws, f"{what}: backward")
-            _assert_same_call({k: ref[k] for k in _BACKWARD}, got, f"{what}: backward")
+            serving.append((f"{label} bwd ", "bwd", bwd_ws))
+    del ref, prep
+
+    def case(j: int, s: int):
+        c = _make_inputs(T, 7168, s)
+        out = _snapshot(_step(c, None, None))
+        yield _judged("default ", c, package_outputs(out))
+        cprep = {"stats": out["stats"], "gstats": out["gstats"]}
+        for prefix, kind, ws in serving:
+            what = f"T={T} H=7168 on the {prefix}buffer, draw {j}"
+            if kind == "fwd":
+                _U, stats = pkg.cake_mhc_nondet_train_forward_prepare(
+                    c["X"], c["fn"], c["scale"], c["base"], workspace=ws
+                )
+                got = stats_outputs(stats.clone())
+            else:
+                got = _snapshot(_nd_backward(c, cprep, workspace=ws))
+                _assert_zero_prefix(ws, f"{what}: backward")
+            yield _judged(prefix, c, got)
+
+    judge_draws(case, record_property, seed=SEED + 7168 + T)

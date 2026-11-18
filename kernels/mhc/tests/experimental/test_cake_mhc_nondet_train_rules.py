@@ -19,10 +19,8 @@ nothing is built or launched).
 
 The package is a standalone copy of the deterministic package
 (``cake_pplx._backends.cake_mhc_det_train``) under the ``cake_mhc_train_``
-prefix at its own hidden sizes (4096 on every architecture, 5120 and 7168 on
-sm_100a / sm_103a: ``ND_HIDDEN_SIZES``), except the ``bwd_finish`` routes.  The
-deterministic package also exports 5120 and 7168 on sm_107a, which this package
-does not copy.  This module checks the registry ``cake_jit.py`` against the
+prefix at its hidden sizes (4096, 5120 and 7168 on every architecture:
+``ND_HIDDEN_SIZES``), except the ``bwd_finish`` routes.  This module checks the registry ``cake_jit.py`` against the
 deterministic registry's records, routes and record scalars of this package's
 (architecture, hidden size) pairs on its boards of record
 (``RULES_BOARDS``) and token counts of record (``RULES_T_VALUES``):
@@ -37,10 +35,14 @@ deterministic registry's records, routes and record scalars of this package's
   alone waits for the token-owner pass: ``SPLIT_CHAIN``),
   ``cake_mhc_train_bwd_slab_fold__dynr`` and its slab-fastest copy
   ``cake_mhc_train_bwd_slab_fold__dynr_os`` on all three; at 5120
-  and 7168 ``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>``,
-  ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` and
+  and 7168 ``cake_mhc_train_fn_split_atomic__tv128_dep__h<H>`` on sm_100a /
+  sm_103a, ``cake_mhc_train_fn_split_atomic__tv128_t128_dep__h<H>`` on sm_107a,
+  ``cake_mhc_train_bwd_slab_fold__dynr__h<H>`` on all three and
   ``cake_mhc_train_bwd_slab_fold__dynr_os__h<H>`` on sm_100a / sm_103a (no
-  two-size record, ``lpt`` / ``lpt_os``: no two-size calibration of record).  Their
+  two-size record, ``lpt`` / ``lpt_os``: no two-size calibration of record); the
+  two-word column slab ``cake_mhc_train_bwd_slab_fold__dynr_pair`` (hidden 4096,
+  all three; in no route: only ``accumulation="fp32x2"`` selects it, beside the
+  copied two-word records of the mapping pass and the token owner).  Their
   records keep the launch, grid and roles of the deterministic records they
   replace (the fn splits with the static PDL attribute: they follow the
   token-owner pass; the column slab with its fold arguments ``dfn_slot``,
@@ -56,7 +58,7 @@ deterministic registry's records, routes and record scalars of this package's
   count), the atomic fn split of the architecture and size, the column slab's
   forms (one per call by ``bwd_slab_atomic_program``: ``dynr`` and
   ``dynr_os`` at hidden 4096 on every architecture and at 5120 and 7168 on
-  sm_100a and sm_103a), no
+  sm_100a and sm_103a, ``dynr`` at 5120 and 7168 on sm_107a), no
   reduction; every program the column slab's tables and board cells can name
   has a record on the route, and every ``_os`` record a band of them that names
   it; the route plans bind the column slab's parameter rows (``prow`` and
@@ -64,7 +66,7 @@ deterministic registry's records, routes and record scalars of this package's
   per-CTA rows);
 * the PDL bands without an SM count are the deterministic ones, but on sm_107a,
   whose column slab keeps the attribute on at hidden 4096 (a cell without a
-  band); this package's own bands (``PDL_BAND_OVERRIDES``: B200 with 148 SMs,
+  band; at 5120 and 7168 it takes the deterministic bands); this package's own bands (``PDL_BAND_OVERRIDES``: B200 with 148 SMs,
   GB200 and GB300 with 152) replace them on their board alone, the most
   specific key first (the order of the keys under a test table), and the route
   plan passes the device's SM count;
@@ -103,9 +105,8 @@ deterministic registry's records, routes and record scalars of this package's
   public callable has a ``deterministic`` parameter (the autograd
   ``Function.forward`` included) and a ``deterministic`` keyword is the
   interpreter's ``TypeError`` before any operand check; every entry point has
-  the deterministic package's counterpart of the same verb; every output of
-  the package repeats bit for bit on one device, so no call of the package
-  raises PyTorch's alert of a non-deterministic operation, and under
+  the deterministic package's counterpart of the same verb; no call of the
+  package raises PyTorch's alert of a non-deterministic operation, and under
   ``torch.use_deterministic_algorithms(True)`` (strict and ``warn_only``) every
   entry point refuses CPU operands with its operand error and no alert;
 * the top-level module ``cake_pplx.cake_mhc_nondet_train`` (read as source):
@@ -154,10 +155,12 @@ PACKAGE_DIR = Path(nd.__file__).resolve().parent
 REPO = Path(__file__).resolve().parents[2]
 HIDDEN = 4096
 # The package's hidden sizes: 4096 on every architecture, 5120 and 7168 on the architectures of NEW_HIDDEN_ARCHES
-# (the deterministic package also exports 5120 and 7168 on sm_107a; this package does not).
+# (all three, like the deterministic package).
 HIDDEN_SIZES = (4096, 5120, 7168)
 NEW_HIDDEN_SIZES = HIDDEN_SIZES[1:]
-NEW_HIDDEN_ARCHES = ("sm_100a", "sm_103a")
+NEW_HIDDEN_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
+# The architectures whose token owner writes group rows (``BWD_ROW_BANDS``, hidden 4096 above 14927 tokens).
+GROUP_ROW_ARCHES = ("sm_100a", "sm_103a")
 # The hidden sizes this package exports per architecture: the (architecture, hidden size) pairs on which it is
 # compared with the deterministic records, routes and record scalars (test_exported_hidden_sizes_per_architecture).
 ND_HIDDEN_SIZES = {
@@ -171,10 +174,17 @@ OWN = {
     "cake_mhc_train_fn_split_atomic__tv128_t128_dep1": ("sm_107a",),
     "cake_mhc_train_bwd_slab_fold__dynr": ("sm_100a", "sm_103a", "sm_107a"),
     **{
-        f"cake_mhc_train_{program}__h{hidden}": NEW_HIDDEN_ARCHES
+        f"cake_mhc_train_{program}__h{hidden}": arches
         for hidden in NEW_HIDDEN_SIZES
-        for program in ("fn_split_atomic__tv128_dep", "bwd_slab_fold__dynr")
+        for program, arches in (
+            ("fn_split_atomic__tv128_dep", ("sm_100a", "sm_103a")),
+            ("fn_split_atomic__tv128_t128_dep", ("sm_107a",)),
+            ("bwd_slab_fold__dynr", NEW_HIDDEN_ARCHES),
+        )
     },
+    # The two-word column slab of the opt-in accumulation="fp32x2" (hidden 4096; in no route: only that mode selects
+    # it, by the program key dynr_pair, which bwd_slab_atomic_program never names).
+    "cake_mhc_train_bwd_slab_fold__dynr_pair": ("sm_100a", "sm_103a", "sm_107a"),
     # The slab-fastest copies of dynr, on the architectures whose BWD_SLAB_ORDER bands of the size, or a board cell of
     # BWD_SLAB_ORDER_OVERRIDES at the size (sm_107a: the 212-SM board's), hold a "slab" band. No two-size record
     # (lpt, lpt_os) ships: no two-size calibration of record is other than None (LPT_OF_RECORD), so no table can name
@@ -408,8 +418,8 @@ GROUP_ROW_KEYS = ("groups", "group_rows", "param_dim0", "param_dim1")
 RUN_TIME_ITERS = (1, 7, 64)
 T_VALUES = tuple(T for T in det.RULES_T_VALUES if T > 0)
 # The deterministic records, routes and record scalars of this package's (architecture, hidden size) pairs
-# (ND_HIDDEN_SIZES): a record keeps the architectures that export its hidden size here; a record left with none (the
-# deterministic sm_107a records at 5120 and 7168) has no copy in this package.
+# (ND_HIDDEN_SIZES): a record keeps the architectures that export its hidden size here (every architecture exports
+# every size, so every deterministic record keeps all its architectures).
 DET_MODULES = {
     name: {
         **record,
@@ -691,8 +701,7 @@ def test_program_set_is_the_deterministic_set_without_slab_reduce_and_backward_s
     assert tuple(det.HIDDEN_SIZES) == HIDDEN_SIZES
     assert {record["hidden"] for record in det.MODULES.values()} == set(HIDDEN_SIZES)
     assert {record["hidden"] for record in DET_MODULES.values()} == set(HIDDEN_SIZES)
-    # every deterministic record at the architectures that export its size in this package; a record with none of
-    # them (sm_107a at 5120 and 7168) has no copy
+    # every deterministic record at the architectures that export its size in this package
     for name, record in det.MODULES.items():
         arches = [a for a in record["arches"] if record["hidden"] in _arch_sizes(a)]
         want = {**record, "arches": arches} if arches else None
@@ -975,12 +984,13 @@ def test_records_speak_the_vocabulary() -> None:
 
 @pytest.mark.cpu_only
 def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
-    """``ROUTES``: the deterministic architectures and route keys of every hidden size (5120 and 7168 on sm_100a /
-    sm_103a only); every route the renamed deterministic route except ``bwd_finish``, which is the deterministic
+    """``ROUTES``: the deterministic architectures and route keys of every hidden size (4096, 5120 and 7168 on every
+    architecture); every route the renamed deterministic route except ``bwd_finish``, which is the deterministic
     token-owner records (renamed, in route order: the group-row forms ``_trows_dyn`` where the deterministic route
     holds them), the atomic fn split of the architecture and size and the column slab's forms of the size (``dynr``,
     ``lpt``, ``dynr_os``, ``lpt_os``; on sm_103a at 5120 and 7168 ``dynr`` and ``dynr_os``).  Every record is routed,
-    on exactly its architectures."""
+    on exactly its architectures, but the two-word programs of ``accumulation="fp32x2"``, which the two-word table
+    (``ACC_WORDS_PROGRAMS``) names on exactly theirs."""
     assert set(nd.ROUTES) == set(det.ROUTES) == set(det.ARCHES)
     routed: dict[str, set] = {}
     for arch in det.ARCHES:
@@ -1012,9 +1022,16 @@ def test_routes_are_the_deterministic_routes_but_bwd_finish() -> None:
                 "bwd_token",
                 *DROPPED_ROLES,
             }, (arch, key)
-    for name, arches in routed.items():
+    two_word: dict[str, set] = {}
+    for by_arch in nd.ACC_WORDS_PROGRAMS.values():
+        for arch, name in by_arch.items():
+            two_word.setdefault(name, set()).add(arch)
+    assert not set(two_word) & set(routed), sorted(set(two_word) & set(routed))
+    for name, arches in {**routed, **two_word}.items():
         assert arches == set(nd.MODULES[name]["arches"]), name
-    assert set(nd.MODULES) == set(routed), sorted(set(nd.MODULES) ^ set(routed))
+    assert set(nd.MODULES) == set(routed) | set(two_word), sorted(
+        set(nd.MODULES) ^ (set(routed) | set(two_word))
+    )
 
 
 @pytest.mark.cpu_only
@@ -1550,21 +1567,26 @@ def test_pdl_band_overrides_at_the_measured_points_gb300() -> None:
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("sm", (208, 212, 216, None))
 def test_pdl_sm107a_column_slab_keeps_pdl_on(sm: int | None) -> None:
-    """On sm_107a at hidden 4096 (its one size), with every R200 SM count and without one, every column-slab record
-    of the ``bwd_finish`` route reads 1 on the checkpointed backward at the edges of the deterministic column slab's
+    """On sm_107a at hidden 4096 (the size of its cell of ``PDL_BAND_OVERRIDES``; at 5120 and 7168 the column slab
+    takes the deterministic bands), with every R200 SM count and without one, every column-slab record of the hidden
+    size (the ``bwd_finish`` route's and the two-word one) reads 1 on the checkpointed backward at the edges of the deterministic column slab's
     band (``PDL_OFF_BANDS``, ``K6->K7``, checkpointed backward), inside it, beside it and away from it, where the
     deterministic column slab reads 0 exactly inside that band; on the other paths the column slab, and on every path
     the other records that take the per-call argument (the collapse and the backward prepare), read the deterministic
     values."""
     arch = "sm_107a"
-    assert _arch_sizes(arch) == (HIDDEN,)
+    assert HIDDEN in _arch_sizes(arch)
     band = det.PDL_OFF_BANDS[arch]["K6->K7"]["checkpoint"]
     edges = {
         T for above, at_most in band for T in (above, above + 1, at_most, at_most + 1)
     }
     tokens = sorted(T for T in {1, 2048, 8192, *edges} if T > 0)
     assert any(_pdl_value(T, band) == 0 for T in tokens), band
-    slabs = _slabs(arch)
+    slabs = _slabs(arch) + [
+        name
+        for name in _runtime_pdl_records(arch, HIDDEN)
+        if nd.MODULES[name]["role"] == "bwd_slab" and name not in _slabs(arch)
+    ]
     det_slabs = [
         n
         for n in det.route_modules(arch, HIDDEN, "bwd_finish")
@@ -2006,7 +2028,9 @@ def test_host_rules_at_the_new_hidden_sizes(arch: str, sm: int) -> None:
             assert nd.k7_chunks(T, sm, hidden=hidden) == det.k7_chunks(
                 T, sm, hidden=hidden
             ), what
-            assert nd.k6_grid(T, sm, hidden) == det.k6_grid(T, sm, hidden), what
+            assert nd.k6_grid(T, sm, hidden, arch) == det.k6_grid(
+                T, sm, hidden, arch
+            ), what
             assert nd.k3_grid(T, hidden) == det.k3_grid(T, hidden), what
     for name in nd.H_TABLE_NAMES:
         assert nd._tab(name, HIDDEN) is getattr(nd, name), name
@@ -2022,8 +2046,12 @@ def test_host_rules_at_the_new_hidden_sizes(arch: str, sm: int) -> None:
         for hidden in HIDDEN_SIZES:
             with pytest.raises(KeyError):
                 nd._tab(name, hidden)
-    # the token owner's resident CTAs per SM (G6 = min(K6_CTAS_PER_SM x SMs, ceil(T / 8))): two at 5120, one at 7168
-    assert nd._tab("K6_CTAS_PER_SM", 5120) == 2 and nd._tab("K6_CTAS_PER_SM", 7168) == 1
+    # the token owner's resident CTAs per SM per architecture (G6 = min(K6_CTAS_PER_SM x SMs, ceil(T / 8))): two at
+    # 5120, one at 7168 (two on sm_107a, in its oversized shared-memory mode)
+    assert nd._tab("K6_CTAS_PER_SM", 5120) == {"sm_100a": 2, "sm_103a": 2, "sm_107a": 2}
+    assert nd._tab("K6_CTAS_PER_SM", 7168) == {"sm_100a": 1, "sm_103a": 1, "sm_107a": 2}
+    with pytest.raises(ValueError):
+        nd.k6_grid(4096, 212, 7168)  # the count differs by architecture there: name it
     table = nd.rules_table()
     per_size = len(set(det.RULES_T_VALUES)) * len(det.RULES_BOARDS)
     assert [row["hidden"] for row in table] == [
@@ -2471,8 +2499,8 @@ def test_workspace_envelope_never_runs_the_screen(monkeypatch) -> None:
         assert nd.rules_row(T, sm, arch, hidden) == row, (hidden, T)
 
 
-# (arch, sm, hidden): the boards and sizes other than 4096 whose architecture has no lpt record of the size (sm_103a:
-# no calibration of these sizes yet; sm_107a: no route of these sizes).
+# (arch, sm, hidden): the boards and sizes other than 4096 whose architecture has no lpt record of the size (no
+# calibration of these sizes yet).
 _ONE_SIZE_CASES = [
     pytest.param(arch, sm, hidden, id=f"{arch}-{sm}-H{hidden}")
     for arch, sm in det.RULES_BOARDS
@@ -3106,10 +3134,10 @@ def test_route_plan_binds_the_parameter_rows(monkeypatch, arch: str, sm: int) ->
             assert bound["param_rows"] == (
                 -(-T // det.TOKEN_GROUP)
                 if group_rows
-                else det.k6_grid(T, sm, hidden)[0]
+                else det.k6_grid(T, sm, hidden, arch)[0]
             ), (what, bound)
             checked.add(group_rows)
-    assert checked == ({False, True} if arch in NEW_HIDDEN_ARCHES else {False}), checked
+    assert checked == ({False, True} if arch in GROUP_ROW_ARCHES else {False}), checked
 
 
 @pytest.mark.cpu_only
@@ -3191,12 +3219,12 @@ def test_route_plan_binds_the_gb300_cell(monkeypatch) -> None:
 @pytest.mark.cpu_only
 def test_exported_hidden_sizes_per_architecture() -> None:
     """The (architecture, hidden size) pairs this package exports, on which the tests of this module compare it with
-    the deterministic records and routes: 4096, 5120 and 7168 on sm_100a / sm_103a, 4096 alone on sm_107a.  The
-    deterministic package exports each of them (and 5120 and 7168 on sm_107a too, which have no copy here)."""
+    the deterministic records and routes: 4096, 5120 and 7168 on every architecture.  The deterministic package
+    exports each of them."""
     assert ND_HIDDEN_SIZES == {
         "sm_100a": (4096, 5120, 7168),
         "sm_103a": (4096, 5120, 7168),
-        "sm_107a": (4096,),
+        "sm_107a": (4096, 5120, 7168),
     }
     for arch in det.ARCHES:
         assert tuple(nd.supported_hidden_sizes(arch)) == ND_HIDDEN_SIZES[arch], arch
@@ -3206,8 +3234,8 @@ def test_exported_hidden_sizes_per_architecture() -> None:
 @pytest.mark.cpu_only
 def test_route_glue_and_supported_hidden_sizes() -> None:
     """The hidden sizes of each architecture are this package's (``ND_HIDDEN_SIZES``): 4096, 5120 and 7168 on
-    sm_100a / sm_103a, 4096 on sm_107a, none on another architecture; a route applies exactly where the
-    deterministic one does at those sizes (the deterministic package also routes 5120 and 7168 on sm_107a); a size
+    every architecture, none on another architecture; a route applies exactly where the deterministic one does at
+    those sizes; a size
     or architecture without a route is a ``ValueError`` of the selection, and a size the package does
     not list one of the column slab's rules (``lpt_chunks``, ``bwd_slab_order``, ``bwd_slab_atomic_program``,
     ``slab_plan``; as in ``host_plan``)."""
@@ -3215,7 +3243,7 @@ def test_route_glue_and_supported_hidden_sizes() -> None:
         sizes = nd.supported_hidden_sizes(arch)
         assert sizes == _arch_sizes(arch), arch
         assert sizes == (HIDDEN_SIZES if arch in NEW_HIDDEN_ARCHES else (HIDDEN,)), arch
-        # the sizes the architecture does not route (sm_107a: 5120 and 7168)
+        # the sizes the architecture does not route
         for hidden in (2048, 6144, *(h for h in HIDDEN_SIZES if h not in sizes)):
             with pytest.raises(ValueError):
                 nd.selected_modules(arch, hidden, "bwd_finish", rows=129, sm_count=148)
@@ -3659,8 +3687,7 @@ def _called_names(path: Path) -> list[tuple[int, str]]:
 
 @pytest.mark.cpu_only
 def test_no_call_raises_the_determinism_alert() -> None:
-    """Every output of the package repeats bit for bit on one device, so nothing alerts under PyTorch's deterministic
-    algorithms: no source file of the package (nor the top-level module, where it is beside this test) calls an
+    """Nothing alerts under PyTorch's deterministic algorithms: no source file of the package (nor the top-level module, where it is beside this test) calls an
     alert (a function or method whose name holds ``alert``, as PyTorch's ``_alert_not_deterministic`` and a package
     helper around it would) or reads the mode (``are_deterministic_algorithms_enabled``,
     ``is_deterministic_algorithms_warn_only_enabled``)."""
@@ -3684,7 +3711,7 @@ def test_no_call_raises_the_determinism_alert() -> None:
 def test_no_entry_alerts_under_deterministic_algorithms(monkeypatch) -> None:
     """Under PyTorch's deterministic algorithms (strict and ``warn_only=True``, warnings are errors) every entry
     point, ``backward_finish`` included, refuses the CPU operands here with its operand error, no alert, and
-    launches nothing (the GPU suite checks that every entry point runs and gives the bits it gives with the mode off);
+    launches nothing (the GPU suite checks that every entry point runs and judges its outputs with the mode on);
     ``cake_mhc_nondet_train_finish`` refuses the handle its prepare did not make with a ``TypeError`` that names the
     deterministic finish."""
     launched = []
@@ -3740,6 +3767,31 @@ def test_package_wiring() -> None:
     assert not (REPO / "cake_pplx/_backends/cake_mhc_train.py").exists()
 
 
+# The token-owner programs whose sm_107a binding ships as that architecture's own unit
+# (csrc/<library>_sm_107a_binding.cu): at hidden 7168 sm_107a launches them in its oversized shared-memory mode (two
+# CTAs per SM), unlike the program's sm_100a / sm_103a binding.
+OWN_BINDING_UNITS = {("cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168", "sm_107a")}
+
+
+def _binding_source(library: str, arch: str) -> str:
+    """The binding unit of ``library`` on ``arch``: the architecture's own unit where it ships one
+    (:data:`OWN_BINDING_UNITS`), else the program's ``csrc/<library>_binding.cu``."""
+    if (library, arch) in OWN_BINDING_UNITS:
+        return f"csrc/{library}_{arch}_binding.cu"
+    return f"csrc/{library}_binding.cu"
+
+
+def _own_binding_units(package) -> set:
+    """``(library, arch)`` of every ``csrc/<library>_<arch>_binding.cu`` of the package."""
+    units = set()
+    for path in (package / "csrc").glob("*_binding.cu"):
+        stem = path.name[: -len("_binding.cu")]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            if stem.endswith("_" + arch):
+                units.add((stem[: -len(arch) - 1], arch))
+    return units
+
+
 @pytest.mark.cpu_only
 def test_build_manifest_lists_every_program() -> None:
     """``build.json`` (schema ``cake-build/1``) names this package and carries exactly one entry per (record library,
@@ -3764,7 +3816,7 @@ def test_build_manifest_lists_every_program() -> None:
             assert entry["arch"] == arch and entry["entry"] == "run", (name, arch)
             assert entry["sources"] == [
                 f"csrc/{record['library']}_kernel.cu",
-                f"csrc/{record['library']}_binding.cu",
+                _binding_source(record["library"], arch),
             ]
             assert "--use_fast_math" not in entry["nvcc_flags"]
             assert "--prec-div=true" in entry["nvcc_flags"]
@@ -3772,8 +3824,12 @@ def test_build_manifest_lists_every_program() -> None:
                 assert (PACKAGE_DIR / source).is_file(), source
             assert set(entry["sha256"]) == set(entry["sources"])
     stems = {record["library"] for record in nd.MODULES.values()}
+    # an architecture's own binding unit exists exactly where the manifest lists it
+    assert _own_binding_units(PACKAGE_DIR) == OWN_BINDING_UNITS, sorted(_own_binding_units(PACKAGE_DIR))
     for path in (PACKAGE_DIR / "csrc").glob("*.cu"):
         stem = path.name.rsplit("_", 1)[0]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):  # an architecture's own unit
+            stem = stem.removesuffix("_" + arch)
         assert stem in stems and stem.startswith(ND_PREFIX), path.name
 
 

@@ -14,15 +14,20 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Single-GPU tests of the non-deterministic ``cake_causal_conv1d_nondet_kcp_multi`` (several tensors of one layer with
-one halo exchange per direction), on the deterministic multi suite's rows: ``y``, ``hist`` and ``dx`` are bitwise one
-non-deterministic single call per tensor and the deterministic multi call; each ``dweight`` is within the package
-budget of the single call's and the deterministic one -- through the explicit functions, the autograd entry, the
-facade, a checkpoint with and without a recompute handle (2 x forward + backward), gradient accumulation and graph
-replay.  The NCCL rows are in ``test_cake_causal_conv1d_nondet_train_kcp_multi_dist.py``.  Every test skips until the
-exporter has rendered the non-deterministic package.
+one halo exchange per direction), on the deterministic multi suite's rows.  The ``y``, ``dx`` and ``dweight`` of every
+tensor are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``; 32 random draws, each tensor against
+the float64 oracle of its own unpartitioned problem and PyTorch's BF16 naive convolution) -- through the explicit
+functions (also into caller-owned outputs), one single call per tensor, the autograd entry, the facade, a checkpoint
+with and without a recompute handle (2 x forward + backward), gradient accumulation, graph replay and torch's
+deterministic mode.  No bit rule holds the package: its outputs are never compared bit for bit with another launch
+and never with the deterministic package.  The NCCL rows are in
+``test_cake_causal_conv1d_nondet_train_kcp_multi_dist.py``.  Every test skips until the exporter has rendered the
+non-deterministic package.
 """
 
 from __future__ import annotations
+
+import contextlib
 
 import pytest
 import torch
@@ -31,102 +36,38 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
-from tests.cake.test_helpers.cake_package import cake_package
-from tests.test_cake_causal_conv1d_det_train_kcp import (
-    DW_ATOL,
-    DW_RTOL,
-    WIDTH,
-    Y_ATOL,
-    Y_RTOL,
-    _assert_within,
-    _context,
-    _reference,
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import (
+    assert_judged,
+    naive_bf16,
+    oracle,
+    problem,
 )
-from tests.test_cake_causal_conv1d_det_train_kcp_multi import MROWS, _problem, _same
+from tests.cake.test_helpers.cake_naive import (
+    DRAWS,
+    TierJudge,
+    contract,
+    draw_seed,
+    seed_all,
+)
+from tests.test_cake_causal_conv1d_det_train_kcp import WIDTH, _context
+from tests.test_cake_causal_conv1d_det_train_kcp_multi import MROWS, _problem
 
-# the deterministic package's KCP backend, through the one place the suites name packages
-det_kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
+# The seed of the multi suite's problems (``_problem``'s default): draw 0 is its problem.
+SEED = 7815
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
     or not pkg.is_cake_causal_conv1d_nondet_train_supported(torch.device("cuda")),
     reason=(
         "the non-deterministic cake_causal_conv1d_nondet_train package needs a supported CUDA device (SM100 / SM103 / "
-        "SM107) and its rendered build.json / csrc (TODO-EXPORT until the exporter renders it)"
+        "SM107) and its rendered build.json / csrc"
     ),
 )
 
 
-def _close(a, b, label, *, scale=1.0) -> None:
-    assert a.dtype == b.dtype and a.shape == b.shape, label
-    torch.testing.assert_close(
-        a, b, atol=scale * DW_ATOL, rtol=scale * DW_RTOL, msg=label
-    )
+def _global(lens, cuts, device):
+    """``(l2g, cu)``: the global token of each local token of the one-rank layout and the documents' ``cu_seqlens``."""
 
-
-def _singles(ctx, xs, ws, dys, *, det=False):
-    """One explicit single forward / backward per tensor: the non-deterministic calls, or (``det``) the
-    deterministic ones."""
-
-    out = []
-    if det:
-        forward, backward = (
-            det_kcp.cake_causal_conv1d_det_train_kcp_forward,
-            det_kcp.cake_causal_conv1d_det_train_kcp_backward,
-        )
-    else:
-        forward, backward = (
-            conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward,
-            conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward,
-        )
-    for x, w, dy in zip(xs, ws, dys, strict=True):
-        y, hist = forward(x, w, ctx)
-        dx, dw = backward(x, w, ctx, dy, hist)
-        out.append({"y": y, "hist": hist, "dx": dx, "dw": dw})
-    return out
-
-
-@pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
-def test_multi_matches_single_calls(name, lens, cuts, Cs) -> None:
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
-    ref = _singles(ctx, xs, ws, dys)
-    det = _singles(ctx, xs, ws, dys, det=True)
-    ys, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
-    dxs, dws = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
-        xs, ws, ctx, dys, hists
-    )
-    torch.cuda.synchronize()
-    assert len(ys) == len(hists) == len(dxs) == len(dws) == len(Cs)
-    for i, (r, d) in enumerate(zip(ref, det, strict=True)):
-        for t in ("y", "hist", "dx"):
-            got = {"y": ys, "hist": hists, "dx": dxs}[t][i]
-            assert _same(got, r[t]) and _same(got, d[t]), (name, i, t)
-        _close(dws[i], r["dw"], f"{name} {i} dweight vs single")
-        _close(dws[i], d["dw"], f"{name} {i} dweight vs deterministic")
-    outs = [torch.empty_like(x) for x in xs]
-    ys2, _ = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(
-        xs, ws, ctx, outs=outs
-    )
-    dx_o = [torch.full_like(x, float("nan")) for x in xs]
-    dw_o = [torch.full_like(w, float("nan")) for w in ws]
-    dxs2, dws2 = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
-        xs, ws, ctx, dys, hists, dxs=dx_o, dweights=dw_o
-    )
-    for i, r in enumerate(ref):
-        assert ys2[i] is outs[i] and dxs2[i] is dx_o[i] and dws2[i] is dw_o[i]
-        assert _same(outs[i], r["y"]) and _same(dx_o[i], r["dx"])
-        _close(dw_o[i], r["dw"], f"{name} {i} caller-owned dweight")
-
-
-@pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
-def test_multi_matches_the_fp64_reference(name, lens, cuts, Cs) -> None:
-    """One rank (W = 1), an independent reference per tensor: ``y`` and ``dx`` within one BF16 ulp of the global
-    FP64 oracle of the pack (the KCP SiLU' policy; the rank's local tokens mapped to the global ones) and
-    ``dweight`` within the package budget of the FP64 ``dweight``."""
-
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
     _, S, cu_global, frags = _context(lens, cuts, device)
     l2g = torch.tensor(
         [cu_global[d] + off + t for d, off, ln in frags for t in range(ln)],
@@ -134,66 +75,135 @@ def test_multi_matches_the_fp64_reference(name, lens, cuts, Cs) -> None:
         device=device,
     )
     assert l2g.numel() == S and int(torch.unique(l2g).numel()) == S
-    cu = torch.tensor(cu_global, dtype=torch.int32, device=device)
-    ys, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
-    dxs, dws = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
-        xs, ws, ctx, dys, hists
-    )
-    torch.cuda.synchronize()
-    for i in range(len(Cs)):
-        x_g, dy_g = torch.empty_like(xs[i]), torch.empty_like(dys[i])
-        x_g[l2g], dy_g[l2g] = xs[i], dys[i]
-        y_ref, dx_ref, dw_ref = _reference(x_g, ws[i], cu, dy_g)
-        label = f"{name} tensor {i} (C={Cs[i]})"
-        _assert_within(
-            ys[i], y_ref[l2g], atol=Y_ATOL, rtol=Y_RTOL, label=f"y vs FP64 {label}"
+    return l2g, torch.tensor(cu_global, dtype=torch.int32, device=device)
+
+
+def _unpartitioned(local: torch.Tensor, l2g: torch.Tensor) -> torch.Tensor:
+    """The rows of the rank's local layout ``local`` in global order."""
+
+    out = torch.empty_like(local)
+    out[l2g] = local
+    return out
+
+
+def judge_multi(lens, cuts, Cs, run, *, label: str, seed: int = SEED) -> None:
+    """``run(ctx, xs, ws, dys)`` on each draw's multi problem (``_problem`` of the draw's seed) returns one entry per
+    tensor: its outputs by name (``y`` / ``dx`` in the rank's local order, as ``[S, C]`` or ``[1, S, C]``,
+    ``dweight``; a value or a list of several launches' values).  Each tensor is judged against the naive tier of its
+    own unpartitioned problem."""
+
+    device = torch.device("cuda")
+    l2g, cu = _global(lens, cuts, device)
+
+    def launch(_draw: int, draw_seed: int):
+        ctx, xs, ws, dys = _problem(lens, cuts, Cs, device, seed=draw_seed)
+        found = run(ctx, xs, ws, dys)
+        assert len(found) == len(Cs), (label, len(found))
+        return [
+            (
+                {f"{name}[{i}]": value for name, value in outputs.items()},
+                problem(
+                    _unpartitioned(xs[i], l2g),
+                    ws[i],
+                    cu,
+                    None,
+                    _unpartitioned(dys[i], l2g),
+                    rows=l2g,
+                ),
+            )
+            for i, outputs in enumerate(found)
+        ]
+
+    assert_judged(launch, seed=seed, label=label)
+
+
+def _singles(ctx, xs, ws, dys):
+    """One explicit single forward / backward per tensor."""
+
+    out = []
+    for x, w, dy in zip(xs, ws, dys, strict=True):
+        y, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(x, w, ctx)
+        dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(x, w, ctx, dy, hist)
+        out.append({"y": y, "hist": hist, "dx": dx, "dweight": dw})
+    return out
+
+
+def _by_tensor(*runs: list[dict]) -> list[dict]:
+    """Per tensor, the ``y`` / ``dx`` / ``dweight`` of every run (each run a list with one dict per tensor)."""
+
+    return [
+        {name: [r[i][name] for r in runs] for name in ("y", "dx", "dweight")}
+        for i in range(len(runs[0]))
+    ]
+
+
+@pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
+def test_multi_and_single_calls_match_reference(name, lens, cuts, Cs) -> None:
+    """The explicit multi functions (into new outputs and into caller-owned ones) and one single call per tensor:
+    every tensor's ``y``, ``dx`` and ``dweight`` judged against the naive tier."""
+
+    def run(ctx, xs, ws, dys):
+        single = _singles(ctx, xs, ws, dys)
+        ys, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
+        dxs, dws = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
+            xs, ws, ctx, dys, hists
         )
-        _assert_within(
-            dxs[i], dx_ref[l2g], atol=Y_ATOL, rtol=Y_RTOL, label=f"dx vs FP64 {label}"
+        assert len(ys) == len(hists) == len(dxs) == len(dws) == len(Cs)
+        outs = [torch.empty_like(x) for x in xs]
+        ys2, hists2 = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(
+            xs, ws, ctx, outs=outs
         )
-        _assert_within(
-            dws[i], dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label=f"dweight vs FP64 {label}"
+        dx_o = [torch.full_like(x, float("nan")) for x in xs]
+        dw_o = [torch.full_like(w, float("nan")) for w in ws]
+        dxs2, dws2 = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
+            xs, ws, ctx, dys, hists2, dxs=dx_o, dweights=dw_o
         )
+        torch.cuda.synchronize()
+        for i in range(len(Cs)):
+            assert ys2[i] is outs[i] and dxs2[i] is dx_o[i] and dws2[i] is dw_o[i]
+        multi = [{"y": ys[i], "dx": dxs[i], "dweight": dws[i]} for i in range(len(Cs))]
+        owned = [{"y": outs[i], "dx": dx_o[i], "dweight": dw_o[i]} for i in range(len(Cs))]
+        return _by_tensor(multi, owned, single)
+
+    judge_multi(lens, cuts, Cs, run, label=name)
 
 
 @pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
 @pytest.mark.parametrize("batched", [False, True], ids=["2d", "3d"])
-def test_multi_autograd_and_facade_match_single_calls(
+def test_multi_autograd_and_facade_match_reference(
     name, lens, cuts, Cs, batched
 ) -> None:
+    """The facade's single entry per tensor and two passes through its multi entry (``[S, C]`` or ``[1, S, C]``
+    tensors): every tensor's ``y``, ``dx`` and ``dweight`` judged against the naive tier."""
+
     import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
-    if batched:
-        xs = [x.unsqueeze(0) for x in xs]
-        dys = [d.unsqueeze(0) for d in dys]
+    def run(ctx, xs, ws, dys):
+        if batched:
+            xs = [x.unsqueeze(0) for x in xs]
+            dys = [d.unsqueeze(0) for d in dys]
 
-    def run(multi: bool):
-        xl = [x.clone().requires_grad_(True) for x in xs]
-        wl = [w.clone().requires_grad_(True) for w in ws]
-        if multi:
-            ys = facade.cake_causal_conv1d_nondet_kcp_multi(xl, wl, ctx)
-        else:
-            ys = [
-                facade.cake_causal_conv1d_nondet_kcp(x, w, ctx)
-                for x, w in zip(xl, wl, strict=True)
+        def once(multi: bool):
+            xl = [x.clone().requires_grad_(True) for x in xs]
+            wl = [w.clone().requires_grad_(True) for w in ws]
+            if multi:
+                ys = facade.cake_causal_conv1d_nondet_kcp_multi(xl, wl, ctx)
+            else:
+                ys = [
+                    facade.cake_causal_conv1d_nondet_kcp(x, w, ctx)
+                    for x, w in zip(xl, wl, strict=True)
+                ]
+            torch.autograd.backward(list(ys), list(dys))
+            for y, x in zip(ys, xs, strict=True):
+                assert y.shape == x.shape
+            return [
+                {"y": y.detach(), "dx": x.grad, "dweight": w.grad}
+                for y, x, w in zip(ys, xl, wl, strict=True)
             ]
-        torch.autograd.backward(list(ys), list(dys))
-        return [
-            {"y": y.detach(), "dx": x.grad, "dw": w.grad}
-            for y, x, w in zip(ys, xl, wl, strict=True)
-        ]
 
-    single, multi, again = run(False), run(True), run(True)
-    for i in range(len(Cs)):
-        for t in ("y", "dx"):
-            assert _same(multi[i][t], single[i][t]) and _same(
-                again[i][t], multi[i][t]
-            ), (name, i, t)
-        _close(multi[i]["dw"], single[i]["dw"], f"{name} {i} dweight")
-        _close(again[i]["dw"], multi[i]["dw"], f"{name} {i} repeated dweight")
-        assert multi[i]["y"].shape == xs[i].shape
+        return _by_tensor(once(False), once(True), once(True))
+
+    judge_multi(lens, cuts, Cs, run, label=f"{name} {'3d' if batched else '2d'}")
 
 
 def _ckpt(fn, args, *, reentrant):
@@ -210,79 +220,96 @@ HROWS = MROWS[:3] + MROWS[-3:-1]
 @pytest.mark.parametrize("name,lens,cuts,Cs", HROWS, ids=[r[0] for r in HROWS])
 @pytest.mark.parametrize("reentrant", [False, True], ids=["nonreentrant", "reentrant"])
 def test_multi_checkpoint_and_recompute_handle(name, lens, cuts, Cs, reentrant) -> None:
+    """The multi entry directly, checkpointed and checkpointed with a recompute handle (which keeps one history
+    pool per tensor): every tensor's ``y``, ``dx`` and ``dweight`` of each judged against the naive tier."""
+
     import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
     n = len(Cs)
 
-    def run(handle, *, ckpt=True):
-        xl = [x.clone().requires_grad_(True) for x in xs]
-        wl = [w.clone().requires_grad_(True) for w in ws]
+    def run(ctx, xs, ws, dys):
+        def once(handle, *, ckpt=True):
+            xl = [x.clone().requires_grad_(True) for x in xs]
+            wl = [w.clone().requires_grad_(True) for w in ws]
 
-        def fn(*args):
-            return facade.cake_causal_conv1d_nondet_kcp_multi(
-                args[:n], args[n : 2 * n], ctx, recompute_handle=args[2 * n]
-            )
+            def fn(*args):
+                return facade.cake_causal_conv1d_nondet_kcp_multi(
+                    args[:n], args[n : 2 * n], ctx, recompute_handle=args[2 * n]
+                )
 
-        args = (*xl, *wl, handle)
-        ys = _ckpt(fn, args, reentrant=reentrant) if ckpt else fn(*args)
-        torch.autograd.backward(list(ys), list(dys))
-        return [
-            {"y": y.detach(), "dx": x.grad, "dw": w.grad}
-            for y, x, w in zip(ys, xl, wl, strict=True)
-        ]
+            args = (*xl, *wl, handle)
+            ys = _ckpt(fn, args, reentrant=reentrant) if ckpt else fn(*args)
+            torch.autograd.backward(list(ys), list(dys))
+            return [
+                {"y": y.detach(), "dx": x.grad, "dweight": w.grad}
+                for y, x, w in zip(ys, xl, wl, strict=True)
+            ]
 
-    direct = run(None, ckpt=False)
-    plain = run(None)
-    h = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
-    conv_kcp.LAST_CALL.pop("recompute_handle", None)
-    handled = run(h)
-    assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay", "n": n}
-    for i in range(n):
-        for got in (plain, handled):
-            assert _same(got[i]["y"], direct[i]["y"]) and _same(
-                got[i]["dx"], direct[i]["dx"]
-            ), (name, i)
-            _close(got[i]["dw"], direct[i]["dw"], f"{name} {i} checkpointed dweight")
-    assert len(h.entries[conv_kcp.HANDLE_KEY]["hists"]) == n
-    assert h.nbytes() == sum(int(ctx.halo.n_hist_rows) * C * 2 for C in Cs)
+        direct = once(None, ckpt=False)
+        plain = once(None)
+        h = conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle()
+        conv_kcp.LAST_CALL.pop("recompute_handle", None)
+        handled = once(h)
+        assert conv_kcp.LAST_CALL["recompute_handle"] == {"fwd": "replay", "n": n}
+        assert len(h.entries[conv_kcp.HANDLE_KEY]["hists"]) == n
+        assert h.nbytes() == sum(int(ctx.halo.n_hist_rows) * C * 2 for C in Cs)
+        return _by_tensor(direct, plain, handled)
+
+    judge_multi(
+        lens, cuts, Cs, run, label=f"{name} {'reentrant' if reentrant else 'nonreentrant'}"
+    )
 
 
 def test_multi_gradient_accumulation_with_retain_graph() -> None:
+    """A checkpointed multi call with a recompute handle, ``retain_graph`` and a second backward of the same
+    ``dy``: every tensor's accumulated ``dx`` and ``dweight`` judged against the naive tier's two-pass sums (the
+    float64 oracle's sum of the two passes, twice one pass)."""
+
     from torch.utils.checkpoint import checkpoint
 
     import cake_pplx.cake_causal_conv1d_nondet_train_kcp as facade
 
     device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(
-        (5000, 1003), (1, 2, 4997, 1003), (512, 512, 256), device
-    )
+    lens, cuts, Cs = (5000, 1003), (1, 2, 4997, 1003), (512, 512, 256)
+    l2g, cu = _global(lens, cuts, device)
+    judge = TierJudge(DRAWS)
+    failures = []
+    for j in range(DRAWS):
+        seed = draw_seed(SEED, j)
+        seed_all(seed)
+        ctx, xs, ws, dys = _problem(lens, cuts, Cs, device, seed=seed)
 
-    def fn(xq, xk, xv, wq, wk, wv, h):
-        return facade.cake_causal_conv1d_nondet_kcp_multi(
-            (xq, xk, xv), (wq, wk, wv), ctx, recompute_handle=h
-        )
+        def fn(xq, xk, xv, wq, wk, wv, h, ctx=ctx):
+            return facade.cake_causal_conv1d_nondet_kcp_multi(
+                (xq, xk, xv), (wq, wk, wv), ctx, recompute_handle=h
+            )
 
-    def leaves():
-        return [x.clone().requires_grad_(True) for x in xs] + [
+        a = [x.clone().requires_grad_(True) for x in xs] + [
             w.clone().requires_grad_(True) for w in ws
         ]
-
-    a = leaves()
-    torch.autograd.backward(list(fn(*a, None)), list(dys))
-    direct = [t.grad for t in a]
-    a = leaves()
-    ys = checkpoint(
-        fn, *a, conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), use_reentrant=False
-    )
-    torch.autograd.backward(list(ys), list(dys), retain_graph=True)
-    torch.autograd.backward(list(ys), list(dys))
-    for k, (g, d) in enumerate(zip((t.grad for t in a), direct, strict=True)):
-        if k < 3:
-            assert _same(g, d + d), k  # dx: the same bits doubled exactly
-        else:
-            _close(g, d + d, f"accumulated dweight {k}", scale=2.0)
+        ys = checkpoint(
+            fn, *a, conv_kcp.CakeCausalConv1dNondetKcpRecomputeHandle(), use_reentrant=False
+        )
+        torch.autograd.backward(list(ys), list(dys), retain_graph=True)
+        torch.autograd.backward(list(ys), list(dys))
+        for i in range(len(Cs)):
+            x_g, dy_g = _unpartitioned(xs[i], l2g), _unpartitioned(dys[i], l2g)
+            want = oracle(x_g, ws[i], cu, None, dy_g, outputs=("dx", "dweight"))
+            naive = naive_bf16(x_g, ws[i], cu, None, dy_g, outputs=("dx", "dweight"))
+            for out, actual, rows in (
+                ("dx", a[i].grad, l2g),
+                ("dweight", a[len(Cs) + i].grad, None),
+            ):
+                expected, tier = want[out] + want[out], naive[out] + naive[out]
+                if rows is not None:
+                    expected, tier = expected[rows], tier[rows]
+                name = f"{out}[{i}]"
+                if message := contract(name, actual, expected):
+                    failures.append(f"draw {j}: {message}")
+                    continue
+                judge.add(name, j, actual, expected, {"bf16": tier})
+    failures += judge.failures()
+    assert not failures, "\n".join(failures)
 
 
 def test_multi_empty_rank_returns_empty_outputs() -> None:
@@ -301,30 +328,28 @@ def test_multi_empty_rank_returns_empty_outputs() -> None:
 
 
 def test_multi_graph_replay() -> None:
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem(
-        (5000, 1003), (1, 2, 4997, 1003), (512, 512, 256), device
-    )
-    ref = _singles(ctx, xs, ws, dys)
-    try:
+    """Graph replay of the multi calls on each draw's inputs (the graphs of the previous draw dropped first): the
+    single entry's event sequence; every call's ``y``, ``dx`` and ``dweight`` judged against the naive tier."""
+
+    def run(ctx, xs, ws, dys):
+        conv_kcp._GRAPHS.clear()
+        found = [{"y": [], "dx": [], "dweight": []} for _ in xs]
         events = []
         for _ in range(4):
             ys, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(
                 xs, ws, ctx, graph="replay"
             )
             events.append(conv_kcp.LAST_CALL["fwd_multi"]["graph_event"])
+            for i, y in enumerate(ys):
+                found[i]["y"].append(y.clone())
             dxs, dws = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
                 xs, ws, ctx, dys, hists, graph="replay"
             )
             events.append(conv_kcp.LAST_CALL["bwd_multi"]["graph_event"])
             torch.cuda.synchronize()
-            for i, r in enumerate(ref):
-                assert (
-                    _same(ys[i], r["y"])
-                    and _same(hists[i], r["hist"])
-                    and _same(dxs[i], r["dx"])
-                )
-                _close(dws[i], r["dw"], f"replayed dweight {i}")
+            for i, (dx, dw) in enumerate(zip(dxs, dws, strict=True)):
+                found[i]["dx"].append(dx.clone())
+                found[i]["dweight"].append(dw.clone())
         assert events == [
             "eager",
             "eager",
@@ -335,6 +360,10 @@ def test_multi_graph_replay() -> None:
             "replay",
             "replay",
         ], events
+        return found
+
+    try:
+        judge_multi((5000, 1003), (1, 2, 4997, 1003), (512, 512, 256), run, label="graph")
     finally:
         conv_kcp._GRAPHS.clear()
 
@@ -354,32 +383,45 @@ def test_multi_one_rank_issues_no_exchange(monkeypatch) -> None:
     assert calls == []
 
 
-def test_multi_torch_deterministic_mode_alerts() -> None:
-    device = torch.device("cuda")
-    ctx, xs, ws, dys = _problem((65,), (64, 1), (256, 128), device)
-    _, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
+@contextlib.contextmanager
+def _torch_deterministic(*, warn_only: bool = False):
+    """Torch's deterministic mode (``warn_only`` as given) inside the block, the previous mode restored after it (the
+    oracle and the naive tier run outside the block)."""
+
     prev, prev_warn = (
         torch.are_deterministic_algorithms_enabled(),
         torch.is_deterministic_algorithms_warn_only_enabled(),
     )
+    torch.use_deterministic_algorithms(True, warn_only=warn_only)
     try:
-        torch.use_deterministic_algorithms(True)
-        with pytest.raises(
-            RuntimeError, match="cake_causal_conv1d_nondet_train_kcp_multi_backward"
-        ):
-            conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
-                xs, ws, ctx, dys, hists
-            )
-        torch.use_deterministic_algorithms(True, warn_only=True)
-        with pytest.warns(
+        yield
+    finally:
+        torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+
+
+def test_multi_torch_deterministic_mode_alerts() -> None:
+    """Under torch's deterministic mode the multi backward raises; ``warn_only``: it warns and runs (every tensor's
+    ``dx`` and ``dweight`` judged against the naive tier)."""
+
+    device = torch.device("cuda")
+    lens, cuts, Cs = (65,), (64, 1), (256, 128)
+    ctx, xs, ws, dys = _problem(lens, cuts, Cs, device)
+    _, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
+    with _torch_deterministic(), pytest.raises(
+        RuntimeError, match="cake_causal_conv1d_nondet_train_kcp_multi_backward"
+    ):
+        conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
+            xs, ws, ctx, dys, hists
+        )
+
+    def warned(ctx, xs, ws, dys):
+        _, hists = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_forward(xs, ws, ctx)
+        with _torch_deterministic(warn_only=True), pytest.warns(
             UserWarning, match="cake_causal_conv1d_nondet_train_kcp_multi_backward"
         ):
             dxs, dws = conv_kcp.cake_causal_conv1d_nondet_train_kcp_multi_backward(
                 xs, ws, ctx, dys, hists
             )
-        ref = _singles(ctx, xs, ws, dys)
-        for i, r in enumerate(ref):
-            assert _same(dxs[i], r["dx"]), i
-            _close(dws[i], r["dw"], f"warn_only dweight {i}")
-    finally:
-        torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
+        return [{"dx": dx, "dweight": dw} for dx, dw in zip(dxs, dws, strict=True)]
+
+    judge_multi(lens, cuts, Cs, warned, label="warn_only")

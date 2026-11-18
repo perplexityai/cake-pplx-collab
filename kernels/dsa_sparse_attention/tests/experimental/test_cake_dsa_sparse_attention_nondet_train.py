@@ -463,13 +463,14 @@ def test_plan_dkv_direct_rule_and_env():
 
 
 # The registered direct-accumulation rule per program, written out apart from the parser: the base
-# ``min_keys_per_query`` (4 RoPE, 1 NoPE) everywhere; on sm_107a, whose natural-layout drain costs extra in proportion
-# to the main stage's query x selected-slot work, the record's ``rules["sm_107a"]`` adds the work test -- the cast
-# path when T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) -- and, on the NoPE record
-# only, the key cap: above S = 163,840 keys (the total, whatever the segment count) the natural drain.
+# ``min_keys_per_query`` (4 RoPE, 1 NoPE) everywhere; on sm_107a, whose natural-layout drain the rule models as
+# costing extra in proportion to the main stage's query x selected-slot work, the record's ``rules["sm_107a"]`` adds
+# the work test -- the cast path when T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) --
+# and, on the NoPE record only, the key cap: above S = 131,072 keys (the total, whatever the segment count) the
+# natural drain.
 _DKV_DIRECT_BASE = {cake_jit.PROGRAM: 4, cake_jit.NOPE_PROGRAM: 1}
 _DKV_DIRECT_SM107A = dict(cast_slots_per_key=112, cast_min_slots=1 << 20)
-_DKV_DIRECT_SM107A_CAP = {cake_jit.PROGRAM: None, cake_jit.NOPE_PROGRAM: 163840}
+_DKV_DIRECT_SM107A_CAP = {cake_jit.PROGRAM: None, cake_jit.NOPE_PROGRAM: 131072}
 
 
 def _dkv_direct_expected(program, arch, T, S, K, segments=1):
@@ -492,9 +493,9 @@ def _dkv_direct_expected(program, arch, T, S, K, segments=1):
 # Decision-table rows: (T, S, K_slots, num_segments) -> the sm_107a decision of (RoPE, NoPE).  The rows at T = 960,
 # K_slots = 2048 sit on the work bound: T * K_slots = 1,966,080 = 112 * 8192 + 2^20.  The named rows are measured
 # rows of both programs' benchmark (sm_107a: the cast path where it measured faster, the natural drain on small
-# rows, small top-k and short-document packs, and NoPE rows above the 163,840-key cap).  Every key-cap row is on the
-# cast side of the work test (at T = 16,384, K_slots 2176 up to S = 308,955), so the NoPE decision there is the
-# cap's alone; RoPE carries no cap.
+# rows, small top-k and short-document packs, and NoPE rows above the 131,072-key cap).  Every key-cap row is on the
+# cast side of the work test (K_slots 2176: up to S = 149,796 at T = 8192, 308,955 at T = 16,384 and 627,273 at
+# T = 32,768), so the NoPE decision there is the cap's alone; RoPE carries no cap.
 _DKV_DIRECT_ROWS = {
     "S < T": ((960, 959, 2048, 1), (False, False)),
     "S = T (K_eff = S < K_slots)": ((960, 960, 2048, 1), (False, True)),
@@ -521,13 +522,17 @@ _DKV_DIRECT_ROWS = {
     "tail_4096x65536": ((4096, 65536, 2176, 1), (False, False)),
     "short_4096_k512": ((4096, 4096, 512, 1), (False, False)),
     "short_2048_k256": ((2048, 2048, 256, 1), (False, True)),
-    # the NoPE key cap (163,840 keys, the total S): at the cap the work test decides, one key above it the natural
+    # the NoPE key cap (131,072 keys, the total S): at the cap the work test decides, one key above it the natural
     # drain, for one segment and for packed rows alike
-    "key cap: S = 163,840": ((16384, 163840, 2176, 1), (False, False)),
-    "key cap: S = 163,841": ((16384, 163841, 2176, 1), (False, True)),
-    "key cap: 32768x163840": ((32768, 163840, 2176, 1), (False, False)),
-    "key cap: 2 segments, S = 163,840": ((16384, 163840, 2176, 2), (False, False)),
-    "key cap: 2 segments, S = 163,841": ((16384, 163841, 2176, 2), (False, True)),
+    "key cap: S = 131,072": ((16384, 131072, 2176, 1), (False, False)),
+    "key cap: S = 131,073": ((16384, 131073, 2176, 1), (False, True)),
+    "key cap: 2 segments, S = 131,072": ((16384, 131072, 2176, 2), (False, False)),
+    "key cap: 2 segments, S = 131,073": ((16384, 131073, 2176, 2), (False, True)),
+    "key cap: 32768x131072": ((32768, 131072, 2176, 1), (False, False)),
+    "key cap: 32768x163840": ((32768, 163840, 2176, 1), (False, True)),
+    "key cap: 8192x147456": ((8192, 147456, 2176, 1), (False, True)),
+    "key cap: 16384x163840": ((16384, 163840, 2176, 1), (False, True)),
+    "key cap: 2 segments, 16384x163840": ((16384, 163840, 2176, 2), (False, True)),
     "key cap: 16384x172032": ((16384, 172032, 2176, 1), (False, True)),
     "key cap: 16384x262144": ((16384, 262144, 2176, 1), (False, True)),
     "key cap: 16384x303104": ((16384, 303104, 2176, 1), (False, True)),
@@ -554,7 +559,7 @@ def test_dkv_direct_rule_by_architecture(program, arch):
     also where T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots, ceil(S / num_segments)) -- both sides of the bound
     and its equality (the cast path), the 2^20 floor, K_eff bounded by S and by the mean segment rounded up (rows
     that S // num_segments would send to the natural drain), measured rows; on the NoPE record only, the key cap
-    ``cast_max_keys`` 163,840 -- the work test at S = 163,840, the natural drain from S = 163,841 on, one segment or
+    ``cast_max_keys`` 131,072 -- the work test at S = 131,072, the natural drain from S = 131,073 on, one segment or
     packed (the total S) -- while the RoPE rule has no cap and keeps the cast path above it.
     ``dkv_direct=True`` / ``False`` override the rule on every architecture; without ``dkv_acc`` a RoPE binding
     never accumulates directly; a NoPE plan applies the same rule to the fresh ``dkv`` and ``dkv_acc``."""
@@ -574,9 +579,9 @@ def test_dkv_direct_rule_by_architecture(program, arch):
             **_DKV_DIRECT_SM107A,
             **({} if cap is None else dict(cast_max_keys=cap)),
         )
-        # the RoPE rule carries no key cap; the NoPE rule's is 163,840 keys
+        # the RoPE rule carries no key cap; the NoPE rule's is 131,072 keys
         assert policy.rule_for(arch).get("cast_max_keys") == cap
-        assert cap == (None if program == cake_jit.PROGRAM else 163840)
+        assert cap == (None if program == cake_jit.PROGRAM else 131072)
     else:
         assert policy.rule_for(arch) is None
     rope = program == cake_jit.PROGRAM
@@ -788,7 +793,7 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
         ({"min_keys_per_query": 4, "cast_slots_per_key": 112}, "unknown fields"),
         ({"min_keys_per_query": 4, "cast_min_slots": 0}, "unknown fields"),
         # the key cap too
-        ({"min_keys_per_query": 4, "cast_max_keys": 163840}, "unknown fields"),
+        ({"min_keys_per_query": 4, "cast_max_keys": 131072}, "unknown fields"),
         (
             {"min_keys_per_query": 4, "rules": [("sm_107a", good)]},
             "must map architectures",
@@ -806,13 +811,13 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
         ),
         # the key cap is the one optional field: never alone, never with an unknown one
         (
-            {"min_keys_per_query": 4, "rules": {"sm_107a": {"cast_max_keys": 163840}}},
+            {"min_keys_per_query": 4, "rules": {"sm_107a": {"cast_max_keys": 131072}}},
             "must map exactly",
         ),
         (
             {
                 "min_keys_per_query": 4,
-                "rules": {"sm_107a": dict(good, cast_max_keys=163840, extra=1)},
+                "rules": {"sm_107a": dict(good, cast_max_keys=131072, extra=1)},
             },
             "must map exactly",
         ),
@@ -832,7 +837,7 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
             (
                 {
                     "min_keys_per_query": 4,
-                    "rules": {"sm_107a": dict(partial, cast_max_keys=163840)},
+                    "rules": {"sm_107a": dict(partial, cast_max_keys=131072)},
                 },
                 "must map exactly",
             )
@@ -860,7 +865,7 @@ def test_dkv_direct_policy_rules_parse_and_refuse_malformed_rules():
             )
         )
     # a present key cap is a positive integer (``None`` is not "no cap": leave the field out)
-    for value in (0, -1, True, False, 2.5, 163840.0, "163840", None):
+    for value in (0, -1, True, False, 2.5, 131072.0, "131072", None):
         bad_records.append(
             (
                 {
@@ -991,7 +996,7 @@ def test_backward_binding_keys_follow_the_nope_key_cap(monkeypatch, arch):
     """Host only (``arch_for`` stood in per target; one-element stand-ins broadcast over the long operands, since a
     key reads shapes, strides and dtypes only): the multi-segment backward keys of packed rows at T = 16,384,
     K_slots 2176 -- every one on the cast side of the work test -- hold on sm_107a the NoPE key cap's decision: the
-    cast path at S = 163,840, the natural drain at S = 163,841 and 270,336 for 2, 4, 8 and 16 segments
+    cast path at S = 131,072, the natural drain at S = 131,073 and 270,336 for 2, 4, 8 and 16 segments
     (the cap reads the total S, not the mean segment), while the RoPE keys, without a cap, hold the cast path on
     every row.  sm_100a / sm_103a keep the class alone."""
     monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)
@@ -1004,7 +1009,7 @@ def test_backward_binding_keys_follow_the_nope_key_cap(monkeypatch, arch):
     q, q_rope = wide(T, NUM_HEADS, D_LATENT), wide(T, NUM_HEADS, D_ROPE)
     idx = wide(T, K, dtype=torch.int32)
     lse = wide(T, NUM_HEADS, dtype=torch.float32)
-    for S in (163840, 163841, 270336):
+    for S in (131072, 131073, 270336):
         kv, k_rope = wide(S, D_LATENT), wide(S, D_ROPE)
         for n in (2, 4, 8, 16):
             rope = backward_binding_key(
@@ -1020,7 +1025,7 @@ def test_backward_binding_keys_follow_the_nope_key_cap(monkeypatch, arch):
                 want = _dkv_direct_expected(program, arch, T, S, K, n)
                 assert key == (2, want), (program, S, n)
             assert rope == (2, False), (S, n)
-            assert nope == (2, S > 163840), (S, n)
+            assert nope == (2, S > 131072), (S, n)
 
 
 def test_backward_binding_keys_resolve_the_direct_rule_once_per_record_and_device(
@@ -3437,7 +3442,7 @@ def test_registry_programs_are_well_formed(program):
     """Both records: declared stages in the program's order with physical entries, every library named in
     ``build.json`` for every arch, five launch leaves per stage, launchers and grids for every stage; the NoPE
     record carries its own policies (2048 B per key, one pass by default, natural accumulation from one key per
-    query; on sm_107a only below the work bound 112 S + 2^20 of T * K_eff or above the 163,840-key cap) and may be
+    query; on sm_107a only below the work bound 112 S + 2^20 of T * K_eff or above the 131,072-key cap) and may be
     partial until its libraries are exported (a registered forward stage comes first); the RoPE record accumulates
     directly from 4 keys per query, on sm_107a only below the same work bound (no key cap)."""
     assert cake_jit.PROGRAMS == (cake_jit.PROGRAM, NOPE_PROGRAM)
@@ -3460,11 +3465,12 @@ def test_registry_programs_are_well_formed(program):
     direct = cake_backend.DkvDirectPolicy.from_record(record)
     assert direct is not None
     if program == NOPE_PROGRAM:
-        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured
-        # faster than the permuted drain on every row there); on sm_107a (its natural-layout drain costs extra in
-        # proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 163,840 keys (the key
-        # cap: beyond it the cast path measured no faster on long single-segment rows); and one pass by default
-        # (measured fastest on every row): no per-arch key-pass rules
+        # natural accumulation whenever the row has at least one key per query on sm_100a / sm_103a (measured faster
+        # than the permuted drain on every row there); on sm_107a (the rule models its natural-layout drain as
+        # costing extra in proportion to the main stage's work) only while T * K_eff < 112 S + 2^20 or above 131,072
+        # keys (the key cap: on long single-segment rows the cast path's backward median was slower at 163,840 keys
+        # with T = 32,768 in both runs); and one pass by default (measured fastest on every row): no per-arch key-pass
+        # rules
         assert direct.min_keys_per_query == 1
         assert {a: direct.min_keys_for(a) for a in record["arches"]} == {
             "sm_100a": 1,
@@ -3472,12 +3478,12 @@ def test_registry_programs_are_well_formed(program):
             "sm_107a": 1,
         }
         assert direct.min_keys_for(None) == 1
-        assert direct.rules == (("sm_107a", (1, 112, 1 << 20, 163840)),)
+        assert direct.rules == (("sm_107a", (1, 112, 1 << 20, 131072)),)
         assert direct.rule_for("sm_107a") == dict(
             min_keys_per_query=1,
             cast_slots_per_key=112,
             cast_min_slots=1 << 20,
-            cast_max_keys=163840,
+            cast_max_keys=131072,
         )
         assert policy.key_bytes == 2048
         assert policy.dq_partial_bytes_per_token == NOPE_DQ_PARTIAL_BYTES_PER_TOKEN

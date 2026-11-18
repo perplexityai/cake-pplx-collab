@@ -29,16 +29,16 @@ for bit.  The backward is ONE ordinary launch of a program built from the det
 backward body of the same route and channel rule: every per-thread and
 per-CTA FP32 step is the det program's and ``dx`` is the det ``dx`` bit for
 bit; only the cross-CTA reduction of ``dweight`` / ``dbias`` differs.  Each
-CTA adds its CTA row into an accumulator with unordered global reductions --
-FP32 where the det reduce program sums in FP32 (the ``bwd``, ``bwd_dt`` and
-``bwd_bias`` routes), FP64 where it sums in FP64 (``bwd_fp32g`` and
-``bwd_bias_fp32g``, the ``silu_grad_preactivation="fp32"`` routes, whose
-gradient is then rounded once from FP64) -- and the last CTA of each channel
-tile stores the gradients and zeroes its accumulators.  The order of that
-cross-CTA sum depends on the CTAs' timing, so ``dweight`` / ``dbias`` are not
-bitwise reproducible run to run; that is the only relaxed property (the
-accumulation dtypes, rounding boundaries and accuracy budgets are the det
-package's).  No reduce program, no host synchronization, no cooperative
+CTA adds its CTA row into an accumulator with unordered global reductions in
+plain FP32 words, as the det reduce program sums on every route (the
+``bwd_fp32g`` and ``bwd_bias_fp32g`` routes, the
+``silu_grad_preactivation="fp32"`` ones, spread the adds over sixteen
+copies of the accumulator, added in copy order at the end) -- and the last
+CTA of each channel tile stores the gradients and zeroes its accumulators.
+The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
+``dbias`` are not bitwise reproducible run to run; that is the only relaxed
+property (the accumulation dtypes, plain FP32 words, and rounding boundaries
+are the det package's).  No reduce program, no host synchronization, no cooperative
 launch, no grid barrier.
 
 Numerical mode: the package is chosen by its module name and no entry point
@@ -59,7 +59,14 @@ Host design (the knobs are keywords; no environment variable):
   to the parameter's dtype and may be preallocated as FP32 or BF16 (the
   ``flags`` bit mask tells the kernels which).
 - ``silu_grad_preactivation``: ``"bf16"`` (default) or ``"fp32"`` (SiLU' at
-  the unrounded FP32 preactivation; FP64 accumulators).
+  the unrounded FP32 preactivation; sixteen FP32 accumulator copies).
+- ``dweight_sum``: ``"fp32"`` (default: one plain FP32 word per ``dweight`` /
+  ``dbias`` sum) or ``"fp32_pair"`` (opt-in, with ``silu_grad_preactivation=
+  "fp32"`` only: the pair routes ``cake_jit.PAIR_ROUTES``, every accumulator
+  word an FP32 (hi, lo) pair -- the CTA's fold Kahan-compensated, each add's
+  rounding error kept in lo, one final rounding; FP32 operations only).  The
+  default never selects a pair route; ``"fp32_pair"`` without the FP32 SiLU'
+  policy is a ``ValueError``.
 - A call's arguments select its route (``cake_jit.forward_route`` /
   ``backward_route``) and the channel count the route's program, the det
   package's rules.
@@ -153,6 +160,9 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
 PARAMETER_DTYPES = (torch.float32, torch.bfloat16)
 # The two SiLU'-evaluation policies of the weight gradient (``silu_grad_preactivation``).
 SILU_GRAD_PREACTIVATIONS = ("bf16", "fp32")
+# The sum forms of ``dweight`` / ``dbias`` (``dweight_sum``): one FP32 word per sum (the default) or an FP32 (hi, lo)
+# pair (the opt-in pair routes).
+DWEIGHT_SUMS: tuple[str, ...] = tuple(_loader.DWEIGHT_SUMS)
 # The backward grid multiples a call may choose (``bwd_grid_mult``): 1 is the default grid; 2, 3 and 4 launch that
 # many times its untrimmed CTA count.  The deterministic package's ``BWD_GRID_MULTS`` (a test checks they agree).
 BWD_GRID_MULTS: tuple[int, ...] = (1, 2, 3, 4)
@@ -303,6 +313,15 @@ def _check_placement(
         raise ValueError(f"{name} must be contiguous")
 
 
+# The largest token count ``S`` a call takes.  The kernels split a channel
+# tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
+# streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
+# few thousand on any supported device and far below MAX_TOKEN_STREAMS, so
+# ``S <= INT32_MAX - MAX_TOKEN_STREAMS + 1`` keeps that sum in range.
+MAX_TOKEN_STREAMS = 1 << 16
+MAX_TOKENS = INT32_MAX - MAX_TOKEN_STREAMS + 1
+
+
 def _tokens(
     tensor: object,
     name: str,
@@ -316,7 +335,7 @@ def _tokens(
     against ``x``).  Both kernels read the packed rows as 16-byte vectors of eight
     channels, so ``C`` is a multiple of eight; ``S`` and ``C`` are 32-bit kernel
     scalars (``S x C`` itself may exceed 2^31: the kernels address with 64-bit
-    offsets).
+    offsets), and ``S`` is at most :data:`MAX_TOKENS`.
     """
 
     t = _require_tensor(tensor, name)
@@ -336,9 +355,11 @@ def _tokens(
             f"{name} must have a channel count C that is a positive multiple of "
             f"{CHANNEL_MULTIPLE}, got C={C}"
         )
-    if S > INT32_MAX or C > INT32_MAX:
+    if S > MAX_TOKENS or C > INT32_MAX:
         raise ValueError(
-            f"{name}: S={S} and C={C} must each fit a 32-bit kernel scalar"
+            f"{name}: S={S} must be at most {MAX_TOKENS} and C={C} must fit a "
+            "32-bit kernel scalar (the kernels split S over at most "
+            f"{MAX_TOKEN_STREAMS} token streams with the 32-bit S + streams - 1)"
         )
     return S, C, t.view(S, C)
 
@@ -448,6 +469,23 @@ def _silu_grad_preactivation(value: object) -> str:
     if value not in SILU_GRAD_PREACTIVATIONS:
         raise ValueError(
             f"silu_grad_preactivation must be one of {SILU_GRAD_PREACTIVATIONS}, got {value!r}"
+        )
+    return str(value)
+
+
+def _dweight_sum(value: object, policy: str) -> str:
+    """Validate ``dweight_sum``: a ``str`` (``TypeError`` otherwise), one of ``DWEIGHT_SUMS`` (``ValueError``
+    otherwise); ``"fp32_pair"`` needs the ``"fp32"`` SiLU' policy (``ValueError`` otherwise: only the FP32-SiLU'
+    routes have a pair form)."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}")
+    if value not in DWEIGHT_SUMS:
+        raise ValueError(f"dweight_sum must be one of {DWEIGHT_SUMS}, got {value!r}")
+    if value == "fp32_pair" and policy != "fp32":
+        raise ValueError(
+            'dweight_sum="fp32_pair" needs silu_grad_preactivation="fp32": only the FP32-SiLU\' '
+            f"routes have an FP32 (hi, lo) pair form, got silu_grad_preactivation={policy!r}"
         )
     return str(value)
 
@@ -694,10 +732,10 @@ def cake_causal_conv1d_nondet_train_backward_workspace_bytes(
     """Bytes of the caller-owned backward workspace for ``C`` channels on ``device``.
 
     The workspace holds the backward's accumulators and per channel tile ticket
-    counters (``cake_jit.accumulator_layout``): ``taps x C`` FP32 words (FP64
-    on the ``_fp32g`` routes; ``taps`` 5 on the bias routes) and one uint32
-    counter per channel tile, sized by the largest over every backward
-    program of every backward route of the architecture
+    counters (``cake_jit.accumulator_layout``): ``slots x taps x C`` FP32 words
+    (``slots`` 16 on the ``_fp32g`` routes, else 1; ``taps`` 5 on the bias
+    routes) and one uint32 counter per channel tile, sized by the largest
+    over every backward program of every backward route of the architecture
     (``cake_jit.backward_workspace_bytes``), so one buffer serves every route.
     It depends on ``C`` and the architecture only (``S`` is checked and
     otherwise unused): one buffer serves every token count.  ``bwd_grid_mult``
@@ -948,8 +986,8 @@ def _backward_accumulators(
     module keeps for the device and the current stream, replaced by a larger
     zeroed one when it is too small.
     Every launch leaves the bytes it uses zero, so a zeroed buffer stays zero
-    whatever ``C`` or route the next call has.  ``acc`` is a ``float32`` /
-    ``float64`` view of ``layout["acc_elems"]`` words at offset 0, ``work`` a
+    whatever ``C`` or route the next call has.  ``acc`` is a ``float32`` view
+    (the rule's dtype) of ``layout["acc_elems"]`` words at offset 0, ``work`` a
     ``uint32`` view of ``layout["work_words"]`` counters at
     ``layout["work_offset"]``; both are built once per workspace and layout
     (``_ACCUMULATOR_VIEWS``), except for the buffers of a capture.
@@ -1110,6 +1148,7 @@ def cake_causal_conv1d_nondet_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward, ONE ordinary launch with unordered
     cross-CTA ``dweight`` / ``dbias`` reductions.
@@ -1128,10 +1167,12 @@ def cake_causal_conv1d_nondet_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation (FP32
-        accumulators), ``"fp32"`` at the unrounded FP32 preactivation with FP64
-        accumulators (the det FP64 reduction's accuracy).  ``dx`` is within one
-        BF16 ulp of exact either way, and bitwise the det package's.
+        ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and at the unrounded FP32 preactivation with a BF16
+        ``weight``, ``"fp32"`` at
+        the unrounded FP32 preactivation; both accumulate in plain FP32 words.
+        ``dx`` is within one BF16 ulp of exact either way, and bitwise the det
+        package's.
     workspace : torch.Tensor, optional
         Caller-owned ZEROED ``uint8`` buffer from
         :func:`cake_causal_conv1d_nondet_train_backward_workspace` (the
@@ -1154,21 +1195,32 @@ def cake_causal_conv1d_nondet_train_backward(
         default grid): the program launches ``bwd_grid_mult`` times its
         untrimmed grid, so each CTA streams that much fewer tokens.  ``dx`` is
         bitwise the default's; more CTAs add into the same accumulators, so
-        ``dweight`` / ``dbias`` keep the route's budget.  The workspace size does
+        ``dweight`` / ``dbias`` are summed the same way.  The workspace size does
         not depend on it.  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``: ``"fp32"`` (default) one
+        plain FP32 word per sum; ``"fp32_pair"`` (opt-in, with
+        ``silu_grad_preactivation="fp32"`` only, ``ValueError`` otherwise; a
+        non-``str`` is a ``TypeError``, another ``str`` a ``ValueError``) an
+        FP32 (hi, lo) pair per sum -- the pair route of the call's ``_fp32g``
+        route: the same ``dx``, the CTA's fold Kahan-compensated and every
+        accumulator word a pair that keeps each add's rounding error, rounded
+        once (the CTAs' order still varies, so the last bits are not bitwise
+        reproducible run to run).  The default workspace serves it.
 
     Returns
     -------
     ``(dx, dweight)``, or ``(dx, dweight, dbias)`` when ``bias`` is given: BF16
     ``dx`` of ``x``'s shape (the det program's bits) and the ``[C, 4]`` weight
     gradient (and ``[C]`` bias gradient), accumulated across CTAs in an
-    unordered order in FP32 (FP64 under ``"fp32"``) and rounded once into the
+    unordered order in plain FP32 words and rounded once into the
     requested dtype.  ``S == 0`` returns the empty ``dx`` and zero gradients
     without launching.
     """
 
     policy = _silu_grad_preactivation(silu_grad_preactivation)
+    sum_form = _dweight_sum(dweight_sum, policy)
     bwd_grid_mult = _bwd_grid_mult(bwd_grid_mult)
     x = _require_tensor(x, "x")
     device = x.device
@@ -1218,7 +1270,9 @@ def cake_causal_conv1d_nondet_train_backward(
     kind = backward_route(
         bias=b is not None,
         fp32_grad=policy == "fp32",
-        bf16_taps_or_dweight=torch.bfloat16 in (w.dtype, dw_out.dtype),
+        bf16_taps=w.dtype == torch.bfloat16,
+        bf16_dweight=dw_out.dtype == torch.bfloat16,
+        pair=sum_form == "fp32_pair",
     )
     device_index = _device_index(device)
     names, record, scalars, grid, per_tiles = _call_plan(
@@ -1266,7 +1320,8 @@ def cake_causal_conv1d_nondet_train_backward(
 class CakeCausalConv1dNondetFunction(torch.autograd.Function):
     """Autograd wrapper saving only ``(x, weight, cu_seqlens, bias)`` for the backward.
 
-    ``forward(x, weight, cu_seqlens, bias=None, silu_grad_preactivation="bf16", bwd_grid_mult=1)`` returns ``y``;
+    ``forward(x, weight, cu_seqlens, bias=None, silu_grad_preactivation="bf16", bwd_grid_mult=1,
+    dweight_sum="fp32")`` returns ``y``;
     the backward runs the one-launch ``dx`` + unordered ``dweight`` (+ ``dbias``) program of
     :func:`cake_causal_conv1d_nondet_train_backward` (with ``bwd_grid_mult``; it alerts under torch's deterministic
     mode) on the incoming gradient (materialized as a contiguous BF16 tensor when autograd hands over another layout
@@ -1282,13 +1337,16 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
         bias=None,
         silu_grad_preactivation="bf16",
         bwd_grid_mult=1,
+        dweight_sum="fp32",
     ):
         policy = _silu_grad_preactivation(silu_grad_preactivation)
+        sum_form = _dweight_sum(dweight_sum, policy)
         bwd_grid_mult = _bwd_grid_mult(bwd_grid_mult)
         y = cake_causal_conv1d_nondet_train_forward(x, weight, cu_seqlens, bias=bias)
         ctx.save_for_backward(x, weight, cu_seqlens, bias)
         ctx.silu_grad_preactivation = policy
         ctx.bwd_grid_mult = bwd_grid_mult
+        ctx.dweight_sum = sum_form
         return y
 
     @staticmethod
@@ -1305,9 +1363,10 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
             bias=bias,
             silu_grad_preactivation=ctx.silu_grad_preactivation,
             bwd_grid_mult=ctx.bwd_grid_mult,
+            dweight_sum=ctx.dweight_sum,
         )
         dbias = grads[2] if bias is not None else None
-        return grads[0], grads[1], None, dbias, None, None
+        return grads[0], grads[1], None, dbias, None, None, None
 
 
 def cake_causal_conv1d_nondet(
@@ -1318,6 +1377,7 @@ def cake_causal_conv1d_nondet(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU, non-deterministic backward.
 
@@ -1339,6 +1399,11 @@ def cake_causal_conv1d_nondet(
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_nondet_train_backward`); checked here, used by
         the backward.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_nondet_train_backward`); checked here, used by
+        the backward.
 
     Returns
     -------
@@ -1350,13 +1415,14 @@ def cake_causal_conv1d_nondet(
     """
 
     return CakeCausalConv1dNondetFunction.apply(
-        x, weight, cu_seqlens, bias, silu_grad_preactivation, bwd_grid_mult
+        x, weight, cu_seqlens, bias, silu_grad_preactivation, bwd_grid_mult, dweight_sum
     )
 
 
 __all__ = [
     "ARCHES",
     "BWD_GRID_MULTS",
+    "DWEIGHT_SUMS",
     "PARAMETER_DTYPES",
     "SILU_GRAD_PREACTIVATIONS",
     "SUPPORTED_COMPUTE_CAPABILITIES",

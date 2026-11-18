@@ -81,11 +81,11 @@ The pass form of each pass is a host rule on host-known sizes (:data:`SUPPORT_DE
 deterministic, no synchronization.  The programs of these entries are the deterministic package's
 (every sum has one owner and one order; the bits depend on the pass form, ``chunk_size``, the dense
 vocabulary block and the sparse split) except the dense dX: its blocks add into the chunk sum through
-the reduction form of the dX GEMM, bitwise the deterministic dX at one K slice and the same vocabulary
-block (this package's default block, :data:`DENSE_VOCAB_BLOCK_TARGET`, is wider than the deterministic
-package's) and, above one, a slab sum of the slices in slice order (fixed order: the same bits every run).  As
+the reduction form of the dX GEMM, the deterministic dX's arithmetic in its order at one K slice and the same
+vocabulary block (this package's default block, :data:`DENSE_VOCAB_BLOCK_TARGET`, is wider than the deterministic
+package's) and, above one, a slab sum of the slices in slice order (one fixed order, no run-to-run promise).  As
 part of the non-deterministic package the entries take no ``deterministic`` keyword and make no run-to-run
-bitwise promise for the gradients, and they keep PyTorch's alert as part of that contract.  Under torch's
+bit-equality promise, and they keep PyTorch's alert as part of that contract.  Under torch's
 deterministic algorithms the
 backward raises PyTorch's alert (:func:`cake_backend._alert_nondeterministic`) when its dense dX runs a block of more
 than one K slice (:func:`_dense_dx_unordered`; only inside a cell of :data:`SUPPORT_DX_SLICE_CELLS`), before its first
@@ -950,9 +950,9 @@ class SupportDxCell(NamedTuple):
 # (``gemm_dx_red``) -- instead of writing an FP32 product block that a separate pass adds into ``dX_c``.  Per block
 # GEMM: ``S`` K slices and ``F`` split-tail items.  With ``S = 1`` the chunk's first block stores and the later ones add
 # from the epilogue (TMA ``.add.f32``, round to nearest, subnormals kept): one FP32 add per element per block in block
-# order, the deterministic package's bits; with ``S > 1`` the slices store into a slab and the slab sum sums them in
-# slice order and stores the sum (the chunk's first block) or adds it once (a later block): the same bits in every
-# run.
+# order, the deterministic package's arithmetic in its order; with ``S > 1`` the slices store into a slab and the slab
+# sum sums them in slice order and stores the sum (the chunk's first block) or adds it once (a later block): one fixed
+# order (no run-to-run promise).
 # ``S > 1`` runs only inside a cell of SUPPORT_DX_SLICE_CELLS: a shape class where the
 # whole-step time of the call at ``S`` over ``S = 1`` (each call after a GPU delay as long as one back-to-back call)
 # has its 95 % CI below 1 at the class's smallest and largest token chunk in each of two independent runs, each
@@ -1471,10 +1471,10 @@ def _dense_backward(
     order is :func:`_dense_order`'s: chunk-outer (``dX_c`` of one chunk, ``dW_acc`` ``[V, H]``) or block-outer
     (``dX_c`` of every chunk, ``dW_acc`` of one block); in both every chunk sees its blocks in ascending order and
     every block its chunks in ascending order, so each FP32 element takes the same adds in the same order.  With one
-    slice on every block the adds run in block order (the deterministic package's bits); above one, the block's GEMM
+    slice on every block the adds run in block order (the deterministic package's order); above one, the block's GEMM
     stores its slices into the slab and the slab sum launched right after it sums them in slice order and stores the
     sum (the chunk's first block, :data:`.cake_backend.DX_SLAB_SUM_STAGE`) or adds it once (a later block,
-    :data:`.cake_backend.DX_SLAB_SUM_ACC_STAGE`): the ordered reduction, the same bits in every run."""
+    :data:`.cake_backend.DX_SLAB_SUM_ACC_STAGE`): the ordered reduction, one fixed order (no run-to-run promise)."""
     T, H, V, M = problem.num_rows, problem.hidden, problem.vocab, problem.num_pairs
     device = cx.device
     C, vb = min(plan.dense_chunk, T), plan.vocab_block

@@ -33,8 +33,8 @@ from . import cake_build
 # ``rules`` that replace it on their target with a rule of three fields --
 # ``min_keys_per_query``, ``cast_slots_per_key`` and ``cast_min_slots``, which
 # weigh the cast path's extra cost, proportional to the key count, against
-# the natural drain's, proportional to the main stage's query x selected-slot
-# work -- and an optional key cap ``cast_max_keys``, above which the rule
+# the natural drain's, modelled as proportional to the main stage's query x
+# selected-slot work -- and an optional key cap ``cast_max_keys``, above which the rule
 # keeps the natural drain whatever the work; the base test still applies),
 # and one physical entry per stage: the
 # ``library`` stem of its ``build.json`` entries (``<library>_<arch>``, see
@@ -97,9 +97,9 @@ MODULES: dict[str, dict[str, Any]] = {
                 },
             },
         },
-        # direct accumulation from 4 keys per query token.  On sm_107a the
-        # natural-layout drain costs extra in proportion to the main stage's
-        # query x selected-slot work, the cast path a zero fill and a cast over
+        # direct accumulation from 4 keys per query token.  On sm_107a the rule
+        # models the natural-layout drain's extra cost as proportional to the main
+        # stage's query x selected-slot work, the cast path's as a zero fill and a cast over
         # the S accumulator rows plus two launches: the cast path also serves
         # rows with T * K_eff >= 112 * S + 2^20, K_eff = min(K_slots,
         # ceil(S / num_segments)), without a key cap: the single-segment
@@ -227,21 +227,23 @@ MODULES: dict[str, dict[str, Any]] = {
     # form, whose stages and scratch stay registered) and, on ``sm_100a`` /
     # ``sm_103a``, the natural-layout main stage beats the permuted accumulator
     # plus cast whenever the row has at least one key per query
-    # (``min_keys_per_query`` 1).  On ``sm_107a`` the natural-layout drain costs
-    # extra in proportion to the main stage's work (T x K_eff query x
+    # (``min_keys_per_query`` 1).  On ``sm_107a`` the rule models the natural-layout
+    # drain's extra cost as proportional to the main stage's work (T x K_eff query x
     # selected-slot pairs, K_eff = min(K_slots, ceil(S / num_segments))), the
     # cast path a zero fill and a cast proportional to S plus two launches, so
     # the ``sm_107a`` rule takes the permuted accumulator plus cast where
     # S < T (the base test) or where T * K_eff >= 112 * S + 2^20 and
-    # S <= 163,840 (``cast_max_keys``), and the natural stage otherwise.  On
-    # long single-segment rows the cast path's advantage shrinks as S grows
-    # and turns into a loss (one segment, T = 16,384, K_slots 2176: natural /
-    # cast backward 9.520 / 9.272 ms at S = 131,072, 10.781 / 11.209 ms at
-    # 262,144); the cap counts the total S, since the planners do not know
-    # the longest segment of a packed row.  On VR200 the rule picks the cast
-    # path on no measured row where it was slower, and keeps the natural stage on
-    # small rows, small top-k and short-document packs, where the cast path
-    # measured up to 8 % slower in backward, and on rows above the cap.  The
+    # S <= 131,072 (``cast_max_keys``), and the natural stage otherwise.  On
+    # long single-segment rows the cast path's advantage is smaller at the
+    # largest key counts and turns into a loss (one segment, K_slots 2176, natural / cast
+    # backward: T = 32,768, 19.660 / 19.156 ms at S = 131,072 and
+    # 19.520 / 19.910 ms at 163,840; T = 16,384, 9.940 / 9.791 ms at 163,840
+    # and 10.781 / 11.209 ms at 262,144); the cap counts the total S, since
+    # the planners do not know the longest segment of a packed row.  On VR200
+    # the rule picks the cast path on no measured row where it was slower, and
+    # keeps the natural stage on small rows, small top-k and short-document
+    # packs, where the cast path measured up to 8 % slower in backward, and on
+    # rows above the cap.  The
     # compaction and cast stages are rope-independent kernels shared with the
     # RoPE program (same libraries, same launch geometry; the cast runs over the
     # one 512-wide accumulator, 16 groups per key); the delta stage is the strided delta
@@ -292,7 +294,7 @@ MODULES: dict[str, dict[str, Any]] = {
                     "min_keys_per_query": 1,
                     "cast_slots_per_key": 112,
                     "cast_min_slots": 1048576,
-                    "cast_max_keys": 163840,
+                    "cast_max_keys": 131072,
                 },
             },
         },

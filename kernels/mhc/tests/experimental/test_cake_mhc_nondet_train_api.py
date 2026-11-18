@@ -22,9 +22,13 @@ The mode is part of the names: every entry point runs the package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (imported on the first
 call or attribute access), no entry point takes a ``deterministic`` keyword
 (passing one is a ``TypeError``), and nothing falls back to the deterministic
-package.  Every output repeats bit for bit on one device, so with PyTorch's
-deterministic algorithms on every entry point, the backward included, runs
-unchanged.  This module checks:
+package.  With PyTorch's deterministic algorithms on, every entry point, the
+backward included, runs without an alert.  The package makes no bit promise:
+its outputs are judged with ``tests/cake_naive.py`` against the naive BF16 tier
+over 32 inputs (the error against the float64 oracle of
+``tests/cake/test_helpers/cake_mhc_naive.py``, in the L2 and the max norm,
+median and max, at most 1.005 times the tier's), never compared bit for bit
+with another call or with the deterministic package.  This module checks:
 
 * the surface without a device: the exports (no head name; every name but the
   ALL_CAPS constants carries the ``nondet`` mode token and no other), the
@@ -42,21 +46,20 @@ unchanged.  This module checks:
   ``TypeError`` of ``cake_mhc_nondet_train_finish`` for any other handle
   (naming the deterministic finish);
 * on a device, at every hidden size the device's architecture routes (4096,
-  5120 and 7168 on SM100 / SM103, 4096 on SM107): the module, the
+  5120 and 7168 on SM100 / SM103 / SM107): the module, the
   deterministic package's launches refused, gives the backend's workspace sizes
-  and results (every output the backend's bits; the forward entry points and
-  the backward's ``dX`` / ``dscale`` / ``dbase`` bitwise the deterministic
-  package's, ``dfn`` within FP32 rounding);
+  and judged results (the forward entry points, the backward, the autograd
+  functions);
   under ``torch.use_deterministic_algorithms(True)``
   ``is_cake_mhc_nondet_train_supported``, the workspace helpers, the forward
   entry points, ``backward_prepare``, ``backward_finish`` and the prepare
-  node's backward run without an alert or a warning and give the bits they
-  give with the mode off (with ``warn_only``, ``backward_finish`` gives no
-  alert and the same bits); a deterministic backward workspace (smaller than
-  this package's layout) is refused; a deterministic prepare handle is refused
-  by ``cake_mhc_nondet_train_finish``; on sm_100a / sm_103a a hidden size runs
-  exactly where the deterministic package runs it; on sm_107a this package
-  runs hidden 4096 only.
+  node's backward run without an alert or a warning and give judged results
+  (with ``warn_only``, ``backward_finish`` gives no alert); a deterministic
+  backward workspace (smaller than this package's layout) is refused; a
+  deterministic prepare handle is refused by ``cake_mhc_nondet_train_finish``
+  (the deterministic finish then gives the deterministic package's bits, run
+  to run); on every architecture a hidden size runs exactly where the
+  deterministic package runs it.
 
 Training with this package composed with the model's deterministic head
 (``cake_pplx.cake_mhc_head_det_train``, family ``mhc_head``) is checked in
@@ -87,6 +90,13 @@ import cake_pplx._backends.cake_mhc_det_train as det_backend
 import cake_pplx._backends.cake_mhc_nondet_train as backend
 from cake_pplx._backends.cake_mhc_det_train import cake_jit as det_loader
 from cake_pplx._backends.cake_mhc_nondet_train import cake_jit as loader
+from tests.cake.test_helpers.cake_mhc_naive import (
+    OUTPUTS,
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+    stats_outputs,
+)
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 # The hidden sizes of both packages; a device case of a size runs where the device's architecture routes it.
@@ -98,11 +108,7 @@ BF16 = torch.bfloat16
 # again after every completed launch).
 ZERO_PREFIX_BYTES = 4 * (loader.TICKET_WORDS + loader.SLAB_CNT_WORDS)
 _OUTPUTS = ("dX", "dfn", "dscale", "dbase")
-_EXACT = ("dX", "dscale", "dbase")
 _LEAVES = ("X", "fn", "scale", "base")
-# The ``dfn`` of this package's backward against the deterministic one: per-chunk partials, the same or another
-# partition's, folded in FP32 here and in FP64 there (the per-element bound is test_cake_mhc_nondet_train.py's).
-DFN_REL_L2_MAX = 1e-6
 # PyTorch's wording of the alert of a non-deterministic operation (no call of this package raises it).
 _ALERT = "does not have a deterministic implementation"
 # The interpreter's refusal of a ``deterministic`` keyword: no entry point has that parameter.
@@ -585,6 +591,7 @@ def hidden(request) -> int:
 
 
 def _inputs(T: int, seed: int = SEED, hidden: int = 4096) -> dict[str, torch.Tensor]:
+    """A case's inputs and this package's forward records of them (``stats``, ``gstats``)."""
     generator = torch.Generator(device=_device()).manual_seed(seed)
 
     def randn(*shape: int, dtype: torch.dtype = torch.float32) -> torch.Tensor:
@@ -601,10 +608,10 @@ def _inputs(T: int, seed: int = SEED, hidden: int = 4096) -> dict[str, torch.Ten
         "dY": randn(T, 4, hidden, dtype=BF16),
         "dU": randn(T, hidden, dtype=BF16),
     }
-    _U, i["stats"] = det_facade.cake_mhc_det_train_forward_prepare(
+    _U, i["stats"] = facade.cake_mhc_nondet_train_forward_prepare(
         i["X"], i["fn"], i["scale"], i["base"]
     )
-    _dB, i["gstats"] = det_facade.cake_mhc_det_train_backward_prepare(
+    _dB, i["gstats"] = facade.cake_mhc_nondet_train_backward_prepare(
         i["dY"], i["B"], i["X"], i["stats"]
     )
     return i
@@ -617,42 +624,11 @@ def _args(i: dict) -> tuple:
     return tuple(i[k] for k in _ARG_KEYS)
 
 
-def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
-    return float((a.double() - b.double()).norm() / b.double().norm())
-
-
 def _same_bits(a: torch.Tensor, b: torch.Tensor) -> bool:
     return a.dtype == b.dtype and torch.equal(
         a.detach().contiguous().reshape(-1).view(torch.uint8),
         b.detach().contiguous().reshape(-1).view(torch.uint8),
     )
-
-
-def _assert_backward(got, want, what: str) -> None:
-    """``dX`` / ``dscale`` / ``dbase`` of this package's backward bitwise ``want``'s (the deterministic package's),
-    ``dfn`` finite and within ``DFN_REL_L2_MAX`` of it."""
-    for k, g, w in zip(_OUTPUTS, got, want, strict=True):
-        if k in _EXACT:
-            assert _same_bits(g, w), f"{k} {what}: bits differ"
-    assert bool(torch.isfinite(got[1]).all()), f"dfn {what}"
-    assert _rel_l2(got[1], want[1]) <= DFN_REL_L2_MAX, f"dfn {what}"
-
-
-def _assert_same_bits(got, want, what: str) -> None:
-    """Every output or gradient of two calls of this package bitwise (``dfn`` / the ``fn`` gradient included)."""
-    for n, (g, w) in enumerate(zip(got, want, strict=True)):
-        assert _same_bits(g, w), f"output {n} {what}: bits differ"
-
-
-def _assert_grads(got: list, want: list, what: str) -> None:
-    """The ``X`` / ``scale`` / ``base`` gradients of this package's backward bitwise ``want``'s (the deterministic
-    package's), the ``fn`` gradient finite and within ``DFN_REL_L2_MAX`` of it."""
-    for name, g, w in zip(_LEAVES, got, want, strict=True):
-        if name == "fn":
-            assert bool(torch.isfinite(g).all()), f"grad fn {what}"
-            assert _rel_l2(g, w) <= DFN_REL_L2_MAX, f"grad fn {what}"
-        else:
-            assert _same_bits(g, w), f"grad {name} {what}"
 
 
 def _assert_zero_prefix(ws: torch.Tensor, what: str) -> None:
@@ -714,6 +690,72 @@ def _autograd(prepare, finish, i: dict, **kwargs) -> tuple:
     return handle, Y.detach(), [t.grad for t in leaves]
 
 
+def _connection(i: dict, **kwargs) -> dict:
+    """This package's residual connection ``Y = finish(X, U + B, prepare(X, fn, scale, base))`` and its loss
+    ``sum(Y * dY)``, not yet differentiated (``U``'s gradient retained); ``kwargs`` go to the prepare."""
+    leaves = [i[k].clone().requires_grad_(True) for k in _LEAVES]
+    U, handle = _nd_prepare(*leaves, **kwargs)
+    U.retain_grad()
+    B = (U.float() + i["B"].float()).to(BF16)
+    Y = _nd_finish(leaves[0], B, handle)
+    return {
+        "leaves": leaves,
+        "handle": handle,
+        "U": U,
+        "B": B,
+        "Y": Y,
+        "loss": (Y.float() * i["dY"].float()).sum(),
+    }
+
+
+def _connection_part(prefix: str, i: dict, c: dict) -> tuple[dict, dict, dict]:
+    """The judged outputs of a differentiated :func:`_connection` ``c`` under ``prefix``: ``U``, ``Y``, ``U``'s
+    gradient as ``dB`` (the residual branch hands ``dB`` on as ``dU``) and the gradients of the leaves, with the
+    oracle's and the naive tier's values on the branch output and the ``dU`` the graph produced."""
+    U, leaves = c["U"], c["leaves"]
+    got = {
+        "U": U.detach(), "Y": c["Y"].detach(), "dB": U.grad, "dX": leaves[0].grad, "dfn": leaves[1].grad,
+        "dscale": leaves[2].grad, "dbase": leaves[3].grad,
+    }  # fmt: skip
+    e, t = expected_and_naive({**i, "B": c["B"].detach(), "dU": U.grad.detach()}, got)
+    return _part(prefix, got, e, t)
+
+
+def _forward_judged(got: dict) -> dict:
+    """The judged outputs of :func:`_forward_outputs`' results (the statistics replay's under ``replay``)."""
+    out = package_outputs(got)
+    out.update({"replay " + k: v for k, v in stats_outputs(got["replay"]).items()})
+    return out
+
+
+def _backward_judged(got) -> dict:
+    """``backward_finish``'s outputs by name."""
+    return {k: t.clone() for k, t in zip(_OUTPUTS, got, strict=True)}
+
+
+def _part(
+    prefix: str, got: dict, expected: dict, naive: dict
+) -> tuple[dict, dict, dict]:
+    """``got`` under the name prefix ``prefix`` with the oracle's and the naive tier's values of its outputs (a
+    ``replay <statistic>`` output: the statistic's)."""
+    base = {k: k.removeprefix("replay ") for k in got}
+    return (
+        {prefix + k: v for k, v in got.items()},
+        {prefix + k: expected[b] for k, b in base.items()},
+        {prefix + k: naive[b] for k, b in base.items()},
+    )
+
+
+def _merge(*parts) -> tuple[list, dict, dict]:
+    """One launch of the parts' outputs, with their oracle and naive values (a triple of ``judge_draws``)."""
+    outputs, expected, naive = {}, {}, {}
+    for o, e, t in parts:
+        outputs.update(o)
+        expected.update(e)
+        naive.update(t)
+    return [outputs], expected, naive
+
+
 def _refuse_launches(m, module) -> None:
     """Every launch of ``module`` (all go through its ``_launch_route`` / ``_run_route``) fails the test."""
 
@@ -722,24 +764,6 @@ def _refuse_launches(m, module) -> None:
 
     m.setattr(module, "_launch_route", refuse)
     m.setattr(module, "_run_route", refuse)
-
-
-def _det_backward(i: dict) -> list[torch.Tensor]:
-    return [t.clone() for t in det_facade.cake_mhc_det_train_backward_finish(*_args(i))]
-
-
-def _references(i: dict) -> dict:
-    """The deterministic package's outputs of ``i``: the forward entry points, the backward, the autograd ``Y`` and
-    gradients."""
-    _h, Y, grads = _autograd(
-        det_facade.cake_mhc_det_train_prepare, det_facade.cake_mhc_det_train_finish, i
-    )
-    return {
-        "forward": _forward_outputs(_entries(det_facade, "cake_mhc_det_train"), i),
-        "backward": _det_backward(i),
-        "Y": Y,
-        "grads": grads,
-    }
 
 
 def _workspace_sizes(T: int, hidden: int) -> dict[str, int]:
@@ -755,21 +779,14 @@ def _workspace_sizes(T: int, hidden: int) -> dict[str, int]:
 @requires_device
 @pytest.mark.parametrize("T", (7, 2049))
 def test_module_runs_the_nondeterministic_backend(
-    T: int, hidden: int, monkeypatch
+    T: int, hidden: int, monkeypatch, record_property
 ) -> None:
     """The module, with the deterministic package's launches refused: the backend's workspace sizes (the
     forward one the deterministic package's, the backward one larger: it adds the column slab's arrival counts and
-    per-chunk ``dfn`` slots) and zeroed buffers; the forward entry points bitwise the backend's and the
-    deterministic package's; ``backward_finish`` (default and caller workspaces) with the backend's bits (every
-    output) and the deterministic ``dX`` / ``dscale`` / ``dbase`` bits and a ``dfn`` within FP32 rounding of them;
-    the autograd prepare makes the backend's handle (``Y`` and the ``X`` / ``scale`` / ``base`` gradients the
-    deterministic bits, the ``fn`` gradient within FP32 rounding)."""
-    i = _inputs(T, hidden=hidden)
-    ref = _references(i)
-    direct_forward = _forward_outputs(_entries(backend), i)
-    direct = [
-        t.clone() for t in backend.cake_mhc_nondet_train_backward_finish(*_args(i))
-    ]
+    per-chunk ``dfn`` slots) and zeroed buffers; the autograd prepare makes the backend's handle.  Over 32 inputs,
+    the outputs of the forward entry points (the statistics replay's under ``replay``), of ``backward_finish`` on
+    the default and on a caller workspace (under ``backward workspace=<bool>``) and of the autograd functions (under
+    ``autograd``) are judged against the naive BF16 tier."""
     dev = _device()
     nd_bytes = loader.workspace_bytes_upto("bwd", T, _sm_count(), _arch(), hidden)
     what = f"T={T} H={hidden}"
@@ -796,51 +813,55 @@ def test_module_runs_the_nondeterministic_backend(
         ws = facade.cake_mhc_nondet_train_backward_workspace(T, dev, hidden=hidden)
         assert ws.dtype == torch.uint8 and ws.numel() == nd_bytes, what
         assert int(torch.count_nonzero(ws)) == 0, what
-        got = _forward_outputs(_entries(facade), i)
-        for k, v in ref["forward"].items():
-            assert _same_bits(got[k], v), f"{k} {what} vs deterministic"
-            assert _same_bits(got[k], direct_forward[k]), f"{k} {what} vs the backend"
-        for workspace in (None, ws):
-            got = facade.cake_mhc_nondet_train_backward_finish(
-                *_args(i), workspace=workspace
-            )
-            label = f"{what} workspace={workspace is not None}"
-            _assert_backward(got, ref["backward"], f"{label} vs deterministic")
-            _assert_same_bits(got, direct, f"{label} vs the backend")
-        handle, Y, grads = _autograd(_nd_prepare, _nd_finish, i)
-    assert isinstance(handle, backend._MHCTrainHandle), what
-    assert _same_bits(Y, ref["Y"]), f"Y {what}"
-    _assert_grads(grads, ref["grads"], what)
+
+        def case(j: int, s: int):
+            i = _inputs(T, seed=s, hidden=hidden)
+            e, t = expected_and_naive(i, OUTPUTS)
+            parts = [
+                _part("", _forward_judged(_forward_outputs(_entries(facade), i)), e, t)
+            ]
+            for workspace in (None, ws):
+                got = facade.cake_mhc_nondet_train_backward_finish(
+                    *_args(i), workspace=workspace
+                )
+                parts.append(
+                    _part(
+                        f"backward workspace={workspace is not None} ",
+                        _backward_judged(got),
+                        e,
+                        t,
+                    )
+                )
+            c = _connection(i)
+            c["loss"].backward()
+            assert isinstance(c["handle"], backend._MHCTrainHandle), what
+            parts.append(_connection_part("autograd ", i, c))
+            return _merge(*parts)
+
+        judge_draws(case, record_property, seed=SEED + T)
 
 
 @requires_device
 def test_strict_mode_runs_every_entry_point(
-    hidden: int, deterministic_algorithms, monkeypatch
+    hidden: int, deterministic_algorithms, monkeypatch, record_property
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True)``, with the deterministic package's launches refused (nothing
     falls back to it), warnings are errors: ``is_cake_mhc_nondet_train_supported``, the workspace helpers, the
     forward entry points, ``backward_prepare``, the prepare / finish forwards, ``backward_finish`` (on a caller
     workspace whose bytes past the zero prefix are 0xAB, with caller outputs) and the backward of a prepare node,
-    recorded with the mode on or off, run without an alert or a warning and give what they give with the mode off
-    (every output and gradient bitwise); the zero prefix is zero after the backward."""
+    recorded with the mode on or off, run without an alert or a warning; the support answer and the sizes are those
+    of the mode off, the zero prefix is zero after the backward, and over 32 inputs every output and gradient is
+    judged against the naive BF16 tier (the oracle and the tier evaluated with the mode off)."""
     T = 129
     dev = _device()
-    i = _inputs(T, hidden=hidden)
     want_supported = facade.is_cake_mhc_nondet_train_supported(dev, hidden)
     want_sizes = _workspace_sizes(T, hidden)
-    want = _forward_outputs(_entries(facade), i)
-    want_backward = [
-        t.clone() for t in facade.cake_mhc_nondet_train_backward_finish(*_args(i))
-    ]
-    _handle, want_Y, want_grads = _autograd(_nd_prepare, _nd_finish, i)
-    leaves_off, _handle_off, _Y_off, recorded_off = _graph(_nd_prepare, _nd_finish, i)
     ws = facade.cake_mhc_nondet_train_backward_workspace(T, dev, hidden=hidden)
-    ws[ZERO_PREFIX_BYTES:].fill_(0xAB)
     outputs = {
-        "dX": torch.full((T, 4, hidden), 3.0, dtype=BF16, device=dev),
-        "dfn": torch.full((24, 4 * hidden), 3.0, device=dev),
-        "dscale": torch.full((3,), 3.0, device=dev),
-        "dbase": torch.full((24,), 3.0, device=dev),
+        "dX": torch.empty((T, 4, hidden), dtype=BF16, device=dev),
+        "dfn": torch.empty((24, 4 * hidden), device=dev),
+        "dscale": torch.empty((3,), device=dev),
+        "dbase": torch.empty((24,), device=dev),
     }
     with monkeypatch.context() as m:
         _refuse_launches(m, det_backend)
@@ -855,79 +876,89 @@ def test_strict_mode_runs_every_entry_point(
                 )
                 for kind in ("forward", "backward")
             }
-            got = _forward_outputs(_entries(facade), i)
-            backward = [
-                t.clone()
-                for t in facade.cake_mhc_nondet_train_backward_finish(
-                    *_args(i), workspace=ws, **outputs
-                )
-            ]
-            leaves_on, _handle_on, Y, recorded_on = _graph(_nd_prepare, _nd_finish, i)
-            for loss in (recorded_on, recorded_off):
-                loss.backward()
         deterministic_algorithms(False)
-    _assert_zero_prefix(ws, "backward_finish under the strict mode")
     assert supported is True and want_supported is True
     assert sizes == want_sizes, (sizes, want_sizes)
     for kind, buffer in buffers.items():
         assert buffer.dtype == torch.uint8 and buffer.numel() == sizes[kind], kind
         assert int(torch.count_nonzero(buffer)) == 0, kind
-    for k, v in want.items():
-        assert _same_bits(got[k], v), f"{k} under the strict mode"
-    _assert_same_bits(backward, want_backward, "backward_finish under the strict mode")
-    assert _same_bits(Y, want_Y), "Y under the strict mode"
-    for name, leaves in (("recorded on", leaves_on), ("recorded off", leaves_off)):
-        _assert_same_bits(
-            [t.grad for t in leaves],
-            want_grads,
-            f"gradients {name}, strict at backward",
+
+    def case(j: int, s: int):
+        i = _inputs(T, seed=s, hidden=hidden)
+        recorded_off = _connection(i)
+        ws[ZERO_PREFIX_BYTES:].fill_(0xAB)
+        for v in outputs.values():
+            v.fill_(3.0)
+        with monkeypatch.context() as m:
+            _refuse_launches(m, det_backend)
+            deterministic_algorithms(True)
+            try:
+                with warnings.catch_warnings():
+                    warnings.simplefilter("error")
+                    fwd = _forward_outputs(_entries(facade), i)
+                    backward = facade.cake_mhc_nondet_train_backward_finish(
+                        *_args(i), workspace=ws, **outputs
+                    )
+                    recorded_on = _connection(i)
+                    for c in (recorded_on, recorded_off):
+                        c["loss"].backward()
+            finally:
+                deterministic_algorithms(False)
+        _assert_zero_prefix(ws, f"backward_finish under the strict mode, draw {j}")
+        e, t = expected_and_naive(i, OUTPUTS)
+        return _merge(
+            _part("", _forward_judged(fwd), e, t),
+            _part("backward ", _backward_judged(backward), e, t),
+            _connection_part("recorded on ", i, recorded_on),
+            _connection_part("recorded off, strict at backward ", i, recorded_off),
         )
+
+    judge_draws(case, record_property, seed=SEED + 1)
 
 
 @requires_device
 def test_warn_only_runs_the_backend_without_a_warning(
-    hidden: int, deterministic_algorithms, monkeypatch
+    hidden: int, deterministic_algorithms, monkeypatch, record_property
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True, warn_only=True)``, with the deterministic package's launches
-    refused, ``backward_finish`` gives no warning that carries PyTorch's alert and runs the backend's backward:
-    every output the bits of the call with the mode off, ``dX`` / ``dscale`` / ``dbase`` bitwise the deterministic
-    package's, ``dfn`` within FP32 rounding of it."""
+    refused, ``backward_finish`` gives no warning that carries PyTorch's alert and runs the backend's backward: over
+    32 inputs its outputs are judged against the naive BF16 tier (evaluated with the mode off)."""
     T = 129
-    i = _inputs(T, hidden=hidden)
-    want = _det_backward(i)
-    want_off = [
-        t.clone() for t in facade.cake_mhc_nondet_train_backward_finish(*_args(i))
-    ]
-    with monkeypatch.context() as m:
-        _refuse_launches(m, det_backend)
-        deterministic_algorithms(True, warn_only=True)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            got = [
-                t.clone()
-                for t in facade.cake_mhc_nondet_train_backward_finish(*_args(i))
-            ]
-        deterministic_algorithms(False)
-    alerts = [str(w.message) for w in caught if _ALERT in str(w.message)]
-    assert alerts == [], alerts
-    _assert_same_bits(got, want_off, f"warn_only H={hidden} vs the mode off")
-    _assert_backward(got, want, f"warn_only H={hidden}")
+
+    def case(j: int, s: int):
+        i = _inputs(T, seed=s, hidden=hidden)
+        with monkeypatch.context() as m:
+            _refuse_launches(m, det_backend)
+            deterministic_algorithms(True, warn_only=True)
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    got = _backward_judged(
+                        facade.cake_mhc_nondet_train_backward_finish(*_args(i))
+                    )
+            finally:
+                deterministic_algorithms(False)
+        alerts = [str(w.message) for w in caught if _ALERT in str(w.message)]
+        assert alerts == [], alerts
+        expected, naive = expected_and_naive(i, _OUTPUTS)
+        return [got], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 2)
 
 
 @requires_device
 @pytest.mark.parametrize("T", (7, 2049))
 def test_deterministic_backward_workspace_is_refused(
-    T: int, hidden: int, monkeypatch
+    T: int, hidden: int, monkeypatch, record_property
 ) -> None:
     """A backward workspace of the deterministic package
     (``cake_pplx.cake_mhc_det_train.cake_mhc_det_train_backward_workspace``) is smaller than this package's layout
     of the call (which adds the column slab's arrival counts and per-chunk ``dfn`` slots), so ``backward_finish`` and
     a prepare node's ``backward_workspace`` refuse it (``ValueError``) with the deterministic package's launches
-    refused; this package's own workspace of the call serves both: ``dX`` / ``dscale`` / ``dbase``, ``Y`` and the
-    ``X`` / ``scale`` / ``base`` gradients the deterministic bits, ``dfn`` and the ``fn`` gradient within FP32
-    rounding, the zero prefix zero after every call."""
+    refused; this package's own workspace of the call serves both: the zero prefix is zero after every call, and over
+    32 inputs the outputs of ``backward_finish`` (under ``backward``) and of the autograd functions (under
+    ``autograd``) are judged against the naive BF16 tier."""
     i = _inputs(T, hidden=hidden)
-    ref = _references(i)
     what = f"T={T} H={hidden}"
     det_ws = det_facade.cake_mhc_det_train_backward_workspace(
         T, _device(), hidden=hidden
@@ -944,19 +975,23 @@ def test_deterministic_backward_workspace_is_refused(
         )
         with pytest.raises(ValueError, match="workspace holds"):
             loss.backward()
-        got = [
-            t.clone()
-            for t in facade.cake_mhc_nondet_train_backward_finish(
-                *_args(i), workspace=ws
+
+        def case(j: int, s: int):
+            c_i = _inputs(T, seed=s, hidden=hidden)
+            got = _backward_judged(
+                facade.cake_mhc_nondet_train_backward_finish(*_args(c_i), workspace=ws)
             )
-        ]
-        _assert_zero_prefix(ws, f"backward_finish {what}")
-        handle, Y, grads = _autograd(_nd_prepare, _nd_finish, i, backward_workspace=ws)
-        _assert_zero_prefix(ws, f"prepare node {what}")
-    _assert_backward(got, ref["backward"], what)
-    assert isinstance(handle, backend._MHCTrainHandle), what
-    assert _same_bits(Y, ref["Y"]), f"Y {what}"
-    _assert_grads(grads, ref["grads"], what)
+            _assert_zero_prefix(ws, f"backward_finish {what} draw {j}")
+            c = _connection(c_i, backward_workspace=ws)
+            c["loss"].backward()
+            _assert_zero_prefix(ws, f"prepare node {what} draw {j}")
+            assert isinstance(c["handle"], backend._MHCTrainHandle), what
+            e, t = expected_and_naive(c_i, _OUTPUTS)
+            return _merge(
+                _part("backward ", got, e, t), _connection_part("autograd ", c_i, c)
+            )
+
+        judge_draws(case, record_property, seed=SEED + 3 + T)
 
 
 @requires_device
@@ -1005,34 +1040,18 @@ def test_nondeterministic_workspace_helpers_reject_other_hidden_sizes() -> None:
 
 @requires_device
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES[1:], ids=lambda h: f"H{h}")
-def test_hidden_sizes_follow_the_device(hidden: int) -> None:
-    """On sm_100a / sm_103a this package takes a hidden size exactly where the deterministic package does: 5120 and
-    7168 size their workspaces (the forward one the deterministic package's, the backward one larger than its, both
-    other than the H 4096 sizes) and the entry points run on them.  On sm_107a this package takes hidden 4096 only,
-    while the deterministic package also takes 5120 and 7168: this package's workspace helpers and entry points
-    refuse them with ``ValueError``."""
+def test_hidden_sizes_follow_the_device(hidden: int, record_property) -> None:
+    """On every architecture (sm_100a, sm_103a and sm_107a) this package takes a hidden size exactly where the
+    deterministic package does: 5120 and 7168 size their workspaces (the forward one the deterministic package's, the
+    backward one larger than its, both other than the H 4096 sizes) and the entry points run on them
+    (``backward_finish``'s outputs judged against the naive BF16 tier over 32 inputs)."""
     dev = _device()
     exported = facade.is_cake_mhc_nondet_train_supported(dev, hidden)
-    assert exported == (hidden in _hidden_sizes()) == (_arch() != "sm_107a")
+    assert exported and hidden in _hidden_sizes(), (_arch(), hidden)
     assert backend.is_cake_mhc_nondet_train_supported(dev, hidden) == exported
-    if exported:
-        assert det_facade.is_cake_mhc_det_train_supported(dev, hidden)
-    i = _inputs(7, hidden=hidden) if exported else None
+    assert det_facade.is_cake_mhc_det_train_supported(dev, hidden)
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        if not exported:
-            for name in _WORKSPACE_HELPERS:
-                for module in (facade, backend):
-                    with pytest.raises(ValueError):
-                        getattr(module, name)(300, dev, hidden=hidden)
-            X = torch.zeros(7, 4, hidden, dtype=BF16, device=dev)
-            fn = torch.zeros(24, 4 * hidden, device=dev)
-            scale = torch.ones(3, device=dev)
-            base = torch.zeros(24, device=dev)
-            for module in (facade, backend):
-                with pytest.raises(ValueError):
-                    module.cake_mhc_nondet_train_forward_prepare(X, fn, scale, base)
-            return
         for kind in ("forward", "backward"):
             nbytes = getattr(facade, f"cake_mhc_nondet_train_{kind}_workspace_bytes")
             reference_nbytes = getattr(
@@ -1046,5 +1065,15 @@ def test_hidden_sizes_follow_the_device(hidden: int) -> None:
                 300, dev, hidden=hidden
             )
             assert ws.numel() == got and int(torch.count_nonzero(ws)) == 0, kind
-        got = facade.cake_mhc_nondet_train_backward_finish(*_args(i))
-        _assert_backward(got, _det_backward(i), f"H={hidden}")
+
+    def case(j: int, s: int):
+        c = _inputs(7, seed=s, hidden=hidden)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            got = _backward_judged(
+                facade.cake_mhc_nondet_train_backward_finish(*_args(c))
+            )
+        expected, naive = expected_and_naive(c, _OUTPUTS)
+        return [got], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + hidden)

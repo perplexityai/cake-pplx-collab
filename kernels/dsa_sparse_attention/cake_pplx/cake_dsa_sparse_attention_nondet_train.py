@@ -310,8 +310,8 @@ def cake_dsa_sparse_attention_nondet(
         workspace accumulators, zero fill or cast launch) when the row has at
         least ``dkv_direct.min_keys_per_query`` (4) keys per query token and,
         on ``sm_100a`` / ``sm_103a``, whatever its work; on ``sm_107a``, whose
-        natural-layout drain costs extra in proportion to the main stage's
-        work, only while ``T * K_eff < 112 * S + 2**20`` with ``K_eff =
+        natural-layout drain the rule models as costing extra in proportion to
+        the main stage's work, only while ``T * K_eff < 112 * S + 2**20`` with ``K_eff =
         min(K_slots, ceil(S / num_segments))`` --, ``1``
         forces the direct path whenever the stages are registered, ``0`` always
         takes the accumulate-and-cast path; any other value raises
@@ -603,13 +603,14 @@ def cake_dsa_sparse_attention_nondet_nope(
         query token, 1 for this program: on ``sm_100a`` / ``sm_103a`` every
         row with at least as many keys as query tokens (the direct path
         measured faster than the permuted drain on every such row); on
-        ``sm_107a``, whose natural-layout drain costs extra in proportion to
-        the main stage's work, only while ``T * K_eff < 112 * S + 2**20`` with
+        ``sm_107a``, whose natural-layout drain the rule models as costing extra
+        in proportion to the main stage's work, only while ``T * K_eff < 112 * S + 2**20`` with
         ``K_eff = min(K_slots, ceil(S / num_segments))`` (the permuted
         accumulator plus cast was faster on the measured rows with more
-        work) or ``S > 163840`` (``cast_max_keys``: beyond it the cast path
-        measured no faster on long single-segment rows, at parity and then
-        slower); any other row takes
+        work) or ``S > 131072`` (``cast_max_keys``: on long single-segment
+        rows the cast path's backward median was slower at 163,840 keys
+        with ``T = 32768`` in both runs, and from 262,144 keys with
+        ``T = 16384``); any other row takes
         the cast --, ``1`` forces the direct path whenever the stages are
         registered, ``0`` always
         takes the accumulate-and-cast path; any
