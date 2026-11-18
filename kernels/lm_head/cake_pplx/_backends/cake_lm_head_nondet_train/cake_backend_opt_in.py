@@ -2234,7 +2234,9 @@ def prepare_lm_head_loss(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2428,12 +2430,22 @@ def prepare_lm_head_loss(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -2675,7 +2687,9 @@ def prepare_lm_head_loss_temperature(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2895,12 +2909,22 @@ def prepare_lm_head_loss_temperature(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
