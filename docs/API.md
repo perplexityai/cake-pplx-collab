@@ -35,7 +35,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | dsa_sparse_attention | `dkv` uses unordered FP32 atomics. No output is promised to repeat bit for bit. | Backward raises |
 | dense_gemm | Some routes add partials in arrival order. No run-to-run guarantee. | Alerts only for order-varying launches (explicit split counts) |
 | moe_grouped_gemm | Every shipped launch has a fixed order. `dW` can differ from det on a split 512 tail. | No shipped launch alerts |
-| lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for gradients. | Alerts before a K-sliced `dX` reduction |
+| lm_head | `dX` is slab-summed and row skips can change bits. No run-to-run promise for any output. | Alerts before a K-sliced `dX` reduction |
 | gated_act_mxfp8 | Has no nondet module | — |
 
 ---
@@ -1494,7 +1494,7 @@ No vocab-sized tensor larger than `chunk_size` rows is ever materialized.
 - The logprob backward recomputes the logits per chunk.
 - The family also computes log-probabilities, and the unreduced forward KL from a detached teacher, over a ragged per-token candidate support, with an optional per-row temperature.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.4 for `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.5 for `sm_107a`.
 
 **Inputs.**
 
@@ -1527,10 +1527,10 @@ The module exports exactly these five functions. The backend `cake_pplx._backend
 
 Same computation, arguments and precision boundaries as det, with these differences:
 
-- A sliced `dX` GEMM stores K slices into FP32 slabs that are summed in slice order. `dX` repeats run to run but may differ from det's bits.
-- Zero-weight policy rows and zero-`dlogp` rows skip the gradient GEMMs, so loss and `dW` bits may differ from det within the accuracy budget.
+- A sliced `dX` GEMM stores K slices into FP32 slabs that are summed in slice order. That fixed order is a design note, not a run-to-run promise, and `dX` bits may differ from det's.
+- Both packages leave zero-weight policy rows out of the gradient path and skip the GEMM work of zero-`dlogp` rows. Nondet adds no loss term for a zero-weight row (det's default `"exact"` loss mode keeps the loss bits of the unsplit call), and its zero-`dlogp` skip starts at 1946 valid rows on `sm_107a` (det: 4097), so loss and `dW` bits may differ from det. Both modules are judged against the BF16 naive tier.
 - A one-row CE call at H=6144 can run one-pass programs.
-- The module makes no run-to-run bitwise promise for gradients.
+- The module makes no run-to-run bit-equality promise for any output.
 - Under deterministic algorithms, the backend raises PyTorch's alert before a K-sliced `dX` reduction (`RuntimeError`, or `UserWarning` with `warn_only`).
 - There is no automatic memory form: `memory_mode=None` is the fastest form.
 
@@ -1541,7 +1541,7 @@ There is no KCP module. Source: [`kernels/lm_head/cake_pplx/cake_lm_head_nondet_
 | `cake_lm_head_nondet_train_loss` | Same as the det loss | As det. `dx_finalize` here only selects the one-pass scatter of the compacted `dX` output. | Returns the FP32 loss, plus `logp` with `return_logp=True`. |
 | `cake_lm_head_nondet_train_logprob` | Same as the det logprob | As det. `None`, or a number whose FP32 value is 1.0, runs without temperature. A bool temperature raises `ValueError`. With `'keep_logits'`, a `hidden_count` left at `None` is passed down as `None` unless `CAKE_PPLX_LM_HEAD_LOSS_HIDDEN_COUNT` is `'0'`. | Returns FP32 `logp [T]`. |
 | `cake_lm_head_nondet_train_preload` | `(device=None, *, temperature=False)` | As det | Per-thread state (side streams, events, count cells) belongs to the calling thread. |
-| `cake_lm_head_nondet_train_support_logprob` | Same as det | As det | No run-to-run promise for gradients. The backward alerts before a dense `dX` of more than one K slice. |
+| `cake_lm_head_nondet_train_support_logprob` | Same as det | As det | No run-to-run bit promise for any output. The backward alerts before a dense `dX` of more than one K slice. |
 | `cake_lm_head_nondet_train_support_kl` | Same as det | As det | Gradients behave as in `support_logprob`. |
 
 The module exports exactly these five functions. The nondet backend also provides `set_gradient_placement`, `set_one_pass_rows`, `set_kept_logits_form` (which decides `hidden_count` for `'keep_logits'` when it is left at `None`), `memory_report`, `BINDING_CACHE` and `SUPPORTED_COMPUTE_CAPABILITIES`.
@@ -1591,6 +1591,6 @@ logp2.sum().backward()
 - A wrong `num_valid_rows` value ends the CUDA context through a device-side assertion, unless `check_num_valid_rows=True`. An `sm_103a` call whose library was built with CUDA 13.0 keeps the host-count schedule and reads the count back once.
 - An invalid temperature tensor or support layout also ends the CUDA context through a device assertion, unless `check_temperature` / `check_inputs` is `True`.
 - `memory_mode='budget'` (or an automatic budget form) releases the saved accumulators after a graph-freeing backward, so a second backward raises.
-- Nondet: the deterministic-algorithms alert is part of the contract. The zero-weight and zero-`dlogp` row skips can change loss and `dW` bits relative to det, within the accuracy budgets.
+- Nondet: the deterministic-algorithms alert is part of the contract. Its zero-weight loss sum and its `sm_107a` zero-`dlogp` floor differ from det's, so loss and `dW` bits can differ from det; both modules are judged against the BF16 naive tier.
 - The binding-cache environment variables are read once at import, so a malformed capacity fails at import.
 - Each backend package's README (`cake_pplx/_backends/<pkg>/README.md`) holds the memory-margin and toolchain notes that the docstrings refer to.
