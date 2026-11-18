@@ -24,14 +24,17 @@ again after it stores an output.  The SM107 H = 2048 programs do so at a row
 whose ``rstd`` their fast path leaves open: they read the row's ``x`` again
 after storing its ``y``.
 
-The GPU test runs every program window of the H = 2048 forward (BF16 and FP32
-weights) with such rows among random ones: ``x = +-1`` in every column and
-``eps = h - 1``, so ``mean + eps`` is exactly ``h``, an FP32 value whose
-``h^(-1/2)`` lies within ``2^-45`` of a midpoint of two FP32 values; and zero
-rows at ``eps = 0``.  It compares each overlapping call with the call on fresh
-outputs: ``out=x``, ``out`` one row past ``x`` in one buffer, ``out`` holding
-``w`` and, on the residual route, ``residual_out=x`` and ``out=residual``.
-The test without a device checks the decision itself on CPU tensors.
+The GPU tests run every program window of a forward route (BF16 and FP32
+weights) with such rows among random ones: ``x = +-1`` in every column (and
+``residual = 0`` on those rows) and ``eps = h - 1``, so ``mean + eps`` is
+exactly ``h``, an FP32 value whose ``h^(-1/2)`` lies within ``2^-45`` of a
+midpoint of two FP32 values; and zero rows at ``eps = 0``.  They compare each
+overlapping call with the call on fresh outputs.  The plain H = 2048 route
+runs ``out=x``, ``out`` one row past ``x`` in one buffer and ``out`` holding
+``w``.  Every width with a residual route (the registry's) runs
+``residual_out=x``, ``out=residual`` and ``residual_out=residual``.  The test
+without a device checks the decision itself on CPU tensors, with and without
+a residual.
 """
 
 from __future__ import annotations
@@ -41,6 +44,8 @@ import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 
+# The width of the plain forward cases (its SM107 programs read x again after
+# storing y); the residual cases run at every width with a residual route.
 HIDDEN = 2048
 # FP32 inputs ``h`` in [2, 4) whose h^(-1/2) lies within 2^-45 (relative) of a
 # midpoint of two FP32 values (bit patterns); h - 1 is exact in FP32.
@@ -118,6 +123,30 @@ def test_the_overlap_decision_without_a_device(mode: str) -> None:
     assert not _through_temporary(mode, fresh, reads)
     assert not _through_temporary(mode, buf[:0].view(0, hidden), reads)
     assert not _through_temporary(mode, x, ())
+    # With a residual its rows are read too: an output that meets them is
+    # written through a temporary, one beside them directly.
+    other = torch.zeros(3 * size, dtype=torch.bfloat16)
+    residual = other[size : 2 * size].view(rows, hidden)
+    with_residual = pkg._read_ranges(x, residual, w, rows=rows, hidden=hidden)
+    assert len(with_residual) == 3
+    assert _through_temporary(mode, residual, with_residual)
+    row_before = other[size - hidden : 2 * size - hidden].view(rows, hidden)
+    assert _through_temporary(mode, row_before, with_residual)
+    last_element = other[2 * size - 1 : 3 * size - 1].view(rows, hidden)
+    assert _through_temporary(mode, last_element, with_residual)
+    assert _through_temporary(mode, x, with_residual)
+    before_residual = other[:size].view(rows, hidden)
+    after_residual = other[2 * size :].view(rows, hidden)
+    assert not _through_temporary(mode, before_residual, with_residual)
+    assert not _through_temporary(mode, after_residual, with_residual)
+    assert not _through_temporary(mode, beside, with_residual)
+    assert not _through_temporary(mode, residual, reads)
+    # A row-strided residual is read from its first row to the end of its last.
+    wide = torch.zeros(rows, 2 * hidden, dtype=torch.bfloat16)
+    strided = pkg._read_ranges(x, wide[:, :hidden], w, rows=rows, hidden=hidden)
+    end = (rows - 1) * 2 * hidden + hidden
+    assert _through_temporary(mode, wide.view(-1)[end - hidden : end], strided)
+    assert not _through_temporary(mode, wide.view(-1)[end : end + hidden], strided)
 
 
 def _device_or_skip(mode: str) -> torch.device:
@@ -125,44 +154,54 @@ def _device_or_skip(mode: str) -> torch.device:
         pytest.skip("needs a CUDA device")
     device = torch.device("cuda:0")
     supported = getattr(_package(mode), f"is_cake_rmsnorm_{mode}_train_supported")
-    if not supported(device, HIDDEN):
-        pytest.skip(f"H = {HIDDEN} has no exported route on this device")
+    if not supported(device):
+        pytest.skip("this device has no exported route")
     return device
 
 
-def _rows_of_windows(loader, arch: str, w_dtype: str) -> list[int]:
-    """One row count in every program window of the plain forward route: the
-    window's top row, or a few rows past the open window's lower edge."""
-    windows = loader.program_windows(arch, HIDDEN, "fwd", False, w_dtype)
+def _rows_of_windows(
+    loader, arch: str, hidden: int, residual: bool, w_dtype: str
+) -> list[int]:
+    """One row count in every program window of a forward route: the window's
+    top row, or a few rows past the open window's lower edge."""
+    windows = loader.program_windows(arch, hidden, "fwd", residual, w_dtype)
     return [
         low + OPEN_WINDOW_EXTRA if high is None else high for low, high, _ in windows
     ]
 
 
-def _inputs(rows: int, w_dtype: torch.dtype, eps: float, device: torch.device):
+def _eps_values() -> list[float]:
+    """``h - 1`` for each near-midpoint ``h``, and 0."""
+    near = torch.tensor(NEAR_MIDPOINT, dtype=torch.int32).view(torch.float32)
+    return [h - 1.0 for h in near.tolist()] + [0.0]
+
+
+def _inputs(
+    rows: int, hidden: int, w_dtype: torch.dtype, eps: float, device: torch.device
+):
     """Random ``x``, ``u`` and ``w`` with every ``EVERY``-th row constructed:
     ``x = +-1`` and ``u = 0``, or both zero at ``eps = 0``."""
     generator = torch.Generator(device=device).manual_seed(SEED + rows)
-    x = torch.randn(rows, HIDDEN, device=device, generator=generator).bfloat16()
-    u = torch.randn(rows, HIDDEN, device=device, generator=generator).bfloat16()
-    w = 1.0 + 0.1 * torch.randn(HIDDEN, device=device, generator=generator)
+    x = torch.randn(rows, hidden, device=device, generator=generator).bfloat16()
+    u = torch.randn(rows, hidden, device=device, generator=generator).bfloat16()
+    w = 1.0 + 0.1 * torch.randn(hidden, device=device, generator=generator)
     picked = torch.arange(0, rows, EVERY, device=device)
     u[picked] = 0
     if eps == 0.0:
         x[picked] = 0
     else:
         signs = torch.randint(
-            0, 2, (picked.numel(), HIDDEN), device=device, generator=generator
+            0, 2, (picked.numel(), hidden), device=device, generator=generator
         )
         x[picked] = (2 * signs - 1).bfloat16()
     return x, u, w.bfloat16().to(w_dtype)
 
 
-def _check(mode: str, w_name: str, rows: int, eps: float, residual_route: bool):
-    """The failures of the overlapping calls on one problem."""
+def _check(mode: str, w_name: str, rows: int, eps: float):
+    """The failures of the overlapping calls of the plain route on one problem."""
     device = torch.device("cuda:0")
     forward = getattr(_package(mode), f"cake_rmsnorm_{mode}_train_forward")
-    x0, u0, w0 = _inputs(rows, W_DTYPES[w_name], eps, device)
+    x0, _u0, w0 = _inputs(rows, HIDDEN, W_DTYPES[w_name], eps, device)
     y_ref, r_ref = forward(x0, w0, eps)
     failures = []
 
@@ -185,17 +224,31 @@ def _check(mode: str, w_name: str, rows: int, eps: float, residual_route: bool):
     y, r = forward(x0, w_in, eps, out=out)
     if not (_same(out, y_ref) and _same(r, r_ref)):
         failures.append("out holding w")
+    return failures
 
-    if residual_route:
-        y_ref, r_ref, h_ref = forward(x0, w0, eps, residual=u0)
-        h = x0.clone()
-        y, r, h_new = forward(h, w0, eps, residual=u0, residual_out=h)
-        if not (h_new is h and _same(h, h_ref) and _same(y, y_ref)):
-            failures.append("residual_out=x")
-        u = u0.clone()
-        y, r, h_new = forward(x0, w0, eps, residual=u, out=u)
-        if not (y is u and _same(u, y_ref) and _same(h_new, h_ref)):
-            failures.append("out=residual")
+
+def _check_residual(mode: str, w_name: str, hidden: int, rows: int, eps: float):
+    """The failures of the overlapping calls of the residual route on one problem."""
+    device = torch.device("cuda:0")
+    forward = getattr(_package(mode), f"cake_rmsnorm_{mode}_train_forward")
+    x0, u0, w0 = _inputs(rows, hidden, W_DTYPES[w_name], eps, device)
+    y_ref, r_ref, h_ref = forward(x0, w0, eps, residual=u0)
+    failures = []
+
+    h = x0.clone()
+    y, r, h_new = forward(h, w0, eps, residual=u0, residual_out=h)
+    if not (h_new is h and _same(h, h_ref) and _same(y, y_ref) and _same(r, r_ref)):
+        failures.append("residual_out=x")
+
+    u = u0.clone()
+    y, r, h_new = forward(x0, w0, eps, residual=u, out=u)
+    if not (y is u and _same(u, y_ref) and _same(h_new, h_ref) and _same(r, r_ref)):
+        failures.append("out=residual")
+
+    u = u0.clone()
+    y, r, h_new = forward(x0, w0, eps, residual=u, residual_out=u)
+    if not (h_new is u and _same(u, h_ref) and _same(y, y_ref) and _same(r, r_ref)):
+        failures.append("residual_out=residual")
     return failures
 
 
@@ -204,22 +257,50 @@ def _check(mode: str, w_name: str, rows: int, eps: float, residual_route: bool):
 def test_outputs_sharing_memory_with_an_input_match_fresh_outputs(
     mode: str, w_name: str
 ) -> None:
-    """Every overlapping call of the module docstring returns, and leaves in the
-    caller's buffers, the bits of the call with fresh outputs, in every program
-    window of the H = 2048 forward."""
+    """Every overlapping call of the plain route in the module docstring
+    returns, and leaves in the caller's buffers, the bits of the call with
+    fresh outputs, in every program window of the H = 2048 forward."""
     device = _device_or_skip(mode)
     loader = _loader(mode)
     arch = loader.arch_for_capability(torch.cuda.get_device_capability(device))
     if w_name not in loader.weight_dtypes(arch, HIDDEN, "fwd", False):
         pytest.skip(f"no {w_name}-weight forward at H = {HIDDEN} on {arch}")
-    residual_route = w_name in loader.weight_dtypes(arch, HIDDEN, "fwd", True)
-    near = torch.tensor(NEAR_MIDPOINT, dtype=torch.int32).view(torch.float32)
-    eps_values = [h - 1.0 for h in near.tolist()] + [0.0]
     failures = []
-    for rows in _rows_of_windows(loader, arch, w_name):
-        for eps in eps_values:
-            for name in _check(mode, w_name, rows, eps, residual_route):
+    for rows in _rows_of_windows(loader, arch, HIDDEN, False, w_name):
+        for eps in _eps_values():
+            for name in _check(mode, w_name, rows, eps):
                 failures.append(
                     f"{arch} {mode} w={w_name} rows={rows} eps={eps}: {name}"
                 )
+    assert not failures, "\n".join(failures)
+
+
+@pytest.mark.parametrize("w_name", list(W_DTYPES))
+@pytest.mark.parametrize("mode", MODES)
+def test_residual_outputs_sharing_memory_with_an_input_match_fresh_outputs(
+    mode: str, w_name: str
+) -> None:
+    """Every overlapping call of the residual route in the module docstring
+    returns, and leaves in the caller's buffers, the bits of the call with
+    fresh outputs, in every program window of the residual forward of every
+    width the registry ships it for."""
+    device = _device_or_skip(mode)
+    loader = _loader(mode)
+    arch = loader.arch_for_capability(torch.cuda.get_device_capability(device))
+    widths = [
+        hidden
+        for hidden in loader.supported_hidden_sizes(arch)
+        if w_name in loader.weight_dtypes(arch, hidden, "fwd", True)
+    ]
+    if not widths:
+        pytest.skip(f"no {w_name}-weight residual forward on {arch}")
+    failures = []
+    for hidden in widths:
+        for rows in _rows_of_windows(loader, arch, hidden, True, w_name):
+            for eps in _eps_values():
+                for name in _check_residual(mode, w_name, hidden, rows, eps):
+                    failures.append(
+                        f"{arch} {mode} w={w_name} H={hidden} rows={rows} "
+                        f"eps={eps}: {name}"
+                    )
     assert not failures, "\n".join(failures)
