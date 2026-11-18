@@ -2119,12 +2119,13 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # before it (212 SMs, CUPTI cold L2, 2026-11-08).  The sm_100a 5120 -> 64 / 128 bf16 weight-gradient keys floor the
 # rule's synchronised split at T 32768.  On B200 and GB200 (148 and 152 SMs) that split was 2 to 3 % slower at T 16231
 # and faster at T 32768 (1.04 to 1.06 times), 65535 and 131072.  Its margin of 16 K steps makes the main parts 264 K
-# blocks long at T 32768, so they run the promoted twin, within the naive tier there; the same split with margin 0
-# (parts of 256 K blocks, no promoted chunks) missed the naive tier on 5120 -> 64 at T 32768, and from T 31744 down the
-# rule's own parts hold at most 256 K blocks.  Below T 32768 these rows keep their 64-row program.  The 4096 x 4096
-# bf16 weight-gradient keys of sm_100a and sm_103a floor the rule's ``wave_yield`` at T 8192, the shortest token count
-# it was measured at on B200 and B300 (148 SMs, T 8192 - 32768); below it the rows plan without it, as before.  An
-# exact (N, K, M) key has no tiers.
+# blocks long at T 32768, so they run the promoted twin, within the naive tier there.  Under the promotion threshold of
+# versions up to 0.3.5 (256 K blocks) the same split with margin 0 (parts of 256 K blocks, no promoted chunks) missed
+# the naive tier on 5120 -> 64 at T 32768, and from T 31744 down the rule's own parts held at most 256 K blocks, without
+# promoted chunks.  Below T 32768 these rows keep their 64-row program, which runs its promoted twin where the longest
+# segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` (128) K blocks.  The 4096 x 4096 bf16 weight-gradient keys of
+# sm_100a and sm_103a floor the rule's ``wave_yield`` at T 8192, the shortest token count it was measured at on B200 and
+# B300 (148 SMs, T 8192 - 32768); below it the rows plan without it, as before.  An exact (N, K, M) key has no tiers.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # q_b 2048 x 16384 input gradient: slower at 11, flat at 3, faster at 1 of the 15 measured T 1 - 1025; faster at
@@ -2247,14 +2248,38 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
 #: segment of more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`.
 K1_PROMOTE_BLOCKS = 128
 #: The longest segment (:func:`segment_blocks`) above which :func:`k1_promote_blocks` names the promoted twin, in K
-#: blocks of 64 tokens: the twin runs where a segment holds more than this many, 256 (16384 tokens in one
-#: accumulator).  The promoted twin costs up to 1.7 % kernel time on some forms of the plans whose segments hold up to
-#: 256 K blocks, so no plan changes where no segment holds more than 16384 tokens.  This length alone does not keep a
-#: plan within the naive BF16 tier: plans whose longest segment holds 254 to 256 K blocks missed it on some BF16 weight
-#: gradients (errors up to 1.0055 times the tier's): 5120 -> 128 at T 16231 and 5120 -> 32 / 48 at T 32768 on B200 or
-#: GB200, and 5120 -> 48 / 64 at T 32768 on VR200.  At :data:`K1_PROMOTE_BLOCKS` (8192 tokens) a plan would promote
-#: wherever the twin's bits differ from the program's.
-K1_PROMOTE_MIN_SEGMENT = 256
+#: blocks of 64 tokens: the twin runs where a segment holds more than this many, 128 (8192 tokens in one accumulator,
+#: one chunk of :data:`K1_PROMOTE_BLOCKS`).  So, where the architecture registers the twin, the plan holds the twin's
+#: stream-K contract (:func:`check_stream_k_plan`) and the row is no row of :data:`K1_PROMOTE_EXEMPT_ROWS`, a plan runs
+#: the twin wherever a segment holds more than one chunk.  A plan whose program has no registered twin keeps that
+#: program at any length.  Up to version 0.3.5 the threshold was 256 K blocks, and plans whose longest segment held 129
+#: to 256 K blocks without promoted chunks missed the naive BF16 tier on some BF16 weight gradients (errors up to 1.0090
+#: times the tier's; the tests allow 1.005 times).  A cell is a row at one token count on one seed (32 draws).  The cost
+#: is the twin's over the timed rows and modes (eager launches, CUDA graph replays) whose plan changes, 11 rounds, cold
+#: L2, against the noise of repeated runs of one plan.
+#: B200 (sm_100a, 148 SMs; 1885 cells, 5 seeds): at 256 K blocks 77 cells missed, on segments of 129 to 160 (2), 161 to
+#: 192 (3) and 193 to 256 (72) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768, 5120 -> 32 / 48 at
+#: T 28672 - 32768, and 5120 -> 64 / 128 and 6144 -> 32 / 128 at T 12288 - 16384.  At 128 K blocks none missed (the
+#: promoted plans up to 1.0043, segments of at most 128 K blocks up to 1.0040); at 160 and 192 K blocks 2 and 5 missed
+#: (up to 1.0054 and 1.0063).  Cost: 490 of 546 within the noise, 48 slower by 0.3 to 1.5 %, 8 faster by 0.4 to 0.7 %.
+#: GB200 (sm_100a, 152 SMs; one seed): at 256 K blocks 5120 -> 128 at T 16231 and 5120 -> 32 at T 32768 missed.
+#: B300 (sm_103a, 148 SMs; 1975 cells, 5 seeds): at 256 K blocks 61 cells missed, on segments of 129 to 160 (2), 161 to
+#: 192 (3) and 193 to 256 (56) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768, 5120 -> 32 / 48 / 64
+#: at T 28672 - 31744, and 6144 -> 32 / 128 at T 12288 - 16384.  At 128 K blocks none missed (the promoted plans up to
+#: 1.0040, segments of at most 128 K blocks up to 1.0040); at 160 and 192 K blocks 2 and 5 missed (up to 1.0054 and
+#: 1.0063).  Cost: 561 of 590 within the noise, 23 slower by 0.4 to 1.2 %, 6 faster by 0.6 to 2.5 %.
+#: GB300 (sm_103a, 152 SMs; 1875 cells, 5 seeds): at 256 K blocks 51 cells missed, on segments of 129 to 160 (2), 161
+#: to 192 (2) and 193 to 256 (47) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768,
+#: 5120 -> 32 / 48 / 64 / 128 at T 12288 - 31744, and 6144 -> 32 / 128 at T 15360 - 16384.  At 128 K blocks none missed
+#: (the promoted plans up to 1.0041, segments of at most 128 K blocks up to 1.0039); at 160 and 192 K blocks 2 and 4
+#: missed (up to 1.0065).  Cost: 581 of 598 within the noise, 13 slower by 0.5 to 1.3 %, 4 faster by 0.6 to 0.9 %.
+#: VR200 (sm_107a, 212 SMs; 1680 cells, 5 seeds): at 256 K blocks 61 cells missed, all on segments of 193 to 256 K
+#: blocks: 5120 -> 32 / 48 / 64 / 128, 6144 -> 128 and 8192 -> 128 at T 31744 - 32768, 4096 -> 16 / 96 and
+#: 6144 -> 48 / 64 at T 28672 - 32768, 4096 -> 512 at T 16172 / 16231, 4096 -> 32 at T 40960 and 6144 -> 32 at
+#: T 40960 / 49152.  At 128 K blocks none missed (the promoted plans up to 1.0040, segments of at most 128 K blocks up
+#: to 1.0036); at 160 and 192 K blocks none missed, but those segments scored up to 1.0044 and 1.0050, above the
+#: promoted plans.  Cost: 385 of 478 within the noise, 93 slower, mostly by 0.5 to 1.5 % (at most 6.5 %).
+K1_PROMOTE_MIN_SEGMENT = 128
 #: Rows whose plans keep the program without promotion where :func:`k1_promote_blocks` names the twin, keyed as
 #: ``ROW_RULES`` (the planned orientation): an exact ``(N, K, M)`` key holds at that token count ``K`` only, a ragged
 #: ``(N, None, M)`` key at every token count.  ``promote=True`` runs the twin on these rows too.
@@ -3257,13 +3282,13 @@ def cake_dense_gemm_det_train_projection_plan(
     columns go to the 64-row tile of the transposed store instead of one padded 224- / 256-column tile).
 
     A fifth package-only deviation, the promoted chunks (``promote``, ``plan.promote_blocks``): once the program and the
-    plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks (256:
-    16384 tokens; :func:`segment_blocks`) runs the promoted twin of its program (``_kc128``, :data:`K1_PROMOTE_BLOCKS`) where the
+    plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks (128:
+    8192 tokens; :func:`segment_blocks`) runs the promoted twin of its program (``_kc128``, :data:`K1_PROMOTE_BLOCKS`) where the
     architecture registers it (:func:`k1_promote_blocks`), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`: the
     same plan, each segment summed in chunks of at most 128 K blocks added in a fixed order, so the bits stay the same
-    on every run.  No plan changes where no segment holds more than that.  ``promote=False`` never runs the twin,
-    ``promote=True`` runs it at any length (on the exempt rows too) and raises ``ValueError`` where the program has no
-    registered twin (:func:`promote_refusal`); neither changes the program or the plan.
+    on every run.  A plan whose segments hold at most 128 K blocks (one chunk) keeps its program.  ``promote=False``
+    never runs the twin, ``promote=True`` runs it at any length (on the exempt rows too) and raises ``ValueError`` where
+    the program has no registered twin (:func:`promote_refusal`); neither changes the program or the plan.
 
     A sixth package-only deviation, the exact-split fit: a rule's ``sk_exact_fit`` names the CTA pair count on which
     the rule's exact split, where admitted and its ``parts * tail`` units exceed the pairs, takes ``max(2, pairs //
@@ -4218,7 +4243,7 @@ def _promote_twin_refusal(arch: str, key: tuple) -> str:
 def k1_promote_blocks(arch: str, key: tuple, segment: int) -> int:
     """The promoted chunk of a plan of instance key ``key`` (without promotion) on ``arch`` whose longest segment
     holds ``segment`` K blocks (:func:`segment_blocks`): :data:`K1_PROMOTE_BLOCKS` where the segment holds more than
-    :data:`K1_PROMOTE_MIN_SEGMENT` blocks (256) and the architecture registers the program's promoted twin; else ``0`` (the
+    :data:`K1_PROMOTE_MIN_SEGMENT` blocks (128) and the architecture registers the program's promoted twin; else ``0`` (the
     program without promotion).  The rule reads the segment's length and the registry only; the planner keeps the rows
     of :data:`K1_PROMOTE_EXEMPT_ROWS` without it."""
     if int(segment) <= K1_PROMOTE_MIN_SEGMENT or _promote_twin_refusal(arch, key):
