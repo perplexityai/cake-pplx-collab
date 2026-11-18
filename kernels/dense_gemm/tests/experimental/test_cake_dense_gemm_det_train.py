@@ -617,6 +617,15 @@ def _transposed_template(template: str) -> bool:
     return _TRANSPOSED_STEM.search(template) is not None
 
 
+def _key_knobs(knobs: dict) -> dict:
+    """The instance-key keywords of a decoded template (``_template_knobs``): the knobs it sets, ``sk_exact`` as a flag
+    and the planner's ``promote`` as the instance-key field ``promote_blocks``."""
+    key_knobs = {k: v for k, v in knobs.items() if v is not None}
+    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs["promote_blocks"] = cake_backend.K1_PROMOTE_BLOCKS if key_knobs.pop("promote", False) else 0
+    return key_knobs
+
+
 def _nopro(template: str) -> str:
     """``template`` without the round-33 pair prologue / cleanup sync suffix (``_pro<n>``, the LAST knob suffix of every
     planned pair program since round 33) and the promoted-chunk token before it (``_kc<KC>``: the planner's promoted twin
@@ -1718,8 +1727,9 @@ def test_round15_pd_sh_knobs():
             0,
             "",
             0,
+            0,
         )
-    )  # ... followed by the round-18 sk_sync flag, the round-19 sk_slab / cta1 fields, the round-21 cgrp flag, the round-24 ovr flag, the round-27 stt flag, the round-33 pro knob (0 = off), the round-2 shapes tranche's sk_first / lw flags, the whole-tile tile resolve flag mg and the paced output-store step count sw, the CTA form token ("" = the default form) and the serpentine K walk kser (0 = off)
+    )  # ... followed by the round-18 sk_sync flag, the round-19 sk_slab / cta1 fields, the round-21 cgrp flag, the round-24 ovr flag, the round-27 stt flag, the round-33 pro knob (0 = off), the round-2 shapes tranche's sk_first / lw flags, the whole-tile tile resolve flag mg and the paced output-store step count sw, the CTA form token ("" = the default form), the serpentine K walk kser (0 = off) and the promoted chunk promote_blocks (0 = off)
     assert (
         instance_symbol(
             instance_key(a_mn=False, b_mn=True, epi="tma", slots=2, pd=2, sh=1000)
@@ -6811,12 +6821,7 @@ def test_template_knobs_invert_instance_symbol():
             knobs = cake_backend._template_knobs(template)
             assert knobs is not None, (arch, template)
             layout, out_f32, out_t = cake_backend._template_class(tokens)
-            key_knobs = {k: v for k, v in knobs.items() if v is not None}
-            key_knobs["sk_exact"] = bool(knobs["sk_exact"])
-            # the planner's ``promote`` names the promoted twin: instance-key field ``promote_blocks``
-            key_knobs["promote_blocks"] = (
-                cake_backend.K1_PROMOTE_BLOCKS if key_knobs.pop("promote") else 0
-            )
+            key_knobs = _key_knobs(knobs)
             key = cake_backend.instance_key(
                 a_mn=layout[0] == "n",
                 b_mn=layout[1] == "n",
@@ -8222,8 +8227,7 @@ def test_round2_knobs_name_their_programs():
         knobs = cake_backend._template_knobs(template, sk_exact_parts=16)
         assert knobs is not None, template
         layout, out_f32, out_t = cake_backend._template_class(tokens)
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         key = cake_backend.instance_key(
             a_mn=layout[0] == "n",
             b_mn=layout[1] == "n",
@@ -8574,8 +8578,7 @@ def test_mg_rules_plan_the_whole_tile_programs(T):
         # the symbol decoder reads the knob back (the registry fallback's inverse) and names the program again
         knobs = cake_backend._template_knobs(template)
         assert knobs is not None and knobs["mg"] and knobs["lw"] == lw, template
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         assert (
             cake_backend.instance_symbol(
                 cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -8724,8 +8727,7 @@ def test_sw_rules_plan_the_paced_store_programs(T):
         # the symbol decoder reads the step count back and names the program again
         knobs = cake_backend._template_knobs(template)
         assert knobs is not None and knobs["sw"] == 25 and knobs["mg"] == mg, template
-        key_knobs = {k: v for k, v in knobs.items() if v is not None}
-        key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+        key_knobs = _key_knobs(knobs)
         assert (
             cake_backend.instance_symbol(
                 cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -9093,8 +9095,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
         0,
         False,
     )
-    key_knobs = {k: v for k, v in knobs.items() if v is not None}
-    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs = _key_knobs(knobs)
     assert (
         cake_backend.instance_symbol(
             cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
@@ -9103,8 +9104,7 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
     )
     knobs = cake_backend._template_knobs("dense_proj_det_gemm_kn_n256_tma1_w8r_pro15")
     assert knobs is not None and knobs["form"] == "w8r" and knobs["pro"] == 15
-    key_knobs = {k: v for k, v in knobs.items() if v is not None}
-    key_knobs["sk_exact"] = bool(knobs["sk_exact"])
+    key_knobs = _key_knobs(knobs)
     with pytest.raises(ValueError, match=r"form"):
         cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
     # the form is a class for the registry fallback: a ten-warp row never falls onto an eight-warp program, nor the
