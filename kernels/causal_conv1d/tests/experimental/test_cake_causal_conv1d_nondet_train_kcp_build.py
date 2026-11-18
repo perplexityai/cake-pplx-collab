@@ -241,6 +241,70 @@ def test_single_rank_forward_main_launches_without_pdl(monkeypatch) -> None:
 
 
 @pytest.mark.cpu_only
+def test_single_call_forward_single_rank_launch_without_pdl(monkeypatch) -> None:
+    """The single-call forward's previous host path (``kcp._kcp_forward`` with the private ``host_trim`` knob 0) launches
+    the single-rank main program of the ``sr`` form on every architecture with the ``enable_pdl`` launch scalar 0, as
+    the trimmed path's ``kcp._fwd_main`` does, and with every logical argument of that record, with and without
+    token-chunk counters.  The device side (tensor checks, context tables, the plan and grid of the program, the launch)
+    is stubbed; the form, the scalars and the launch values are the module's."""
+
+    kcp = cake_package(KEY, "kcp")
+    S, C = 16, 64
+    seen: list[dict] = []
+    counters: list = []
+    monkeypatch.setitem(kcp._TEST_KNOBS, "host_trim", 0)
+    monkeypatch.setattr(kcp, "LAST_CALL", {})
+    monkeypatch.setattr(kcp, "_wait_ready", lambda ctx: None)
+    monkeypatch.setattr(kcp, "_tokens", lambda x, what, *, device: (S, C, x.view(S, C)))
+    monkeypatch.setattr(kcp, "_weight", lambda weight, C, *, device: weight)
+    monkeypatch.setattr(
+        kcp, "_context", lambda ctx, *, device, T_r: (torch.tensor([0, T_r], dtype=torch.int32), 1)
+    )
+    monkeypatch.setattr(
+        kcp, "_output", lambda out, what, *, shape, dtype, device: torch.zeros(shape, dtype=dtype)
+    )
+    monkeypatch.setattr(
+        kcp, "_table", lambda ctx, what, *, shape, dtype, device: torch.zeros(shape, dtype=dtype)
+    )
+    monkeypatch.setattr(kcp, "_device_index", lambda device: 0)
+    monkeypatch.setattr(
+        kcp,
+        "_sr_main",
+        lambda arch, *, S, C, n_frag, device_index: (
+            cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)[0],
+            dict.fromkeys(cake_jit.PLAN_SCALARS, 1),
+            (1, 1, 1),
+            8,
+        ),
+    )
+    monkeypatch.setattr(
+        kcp, "_forward_work", lambda workspace, words, *, device, device_index: counters[0]
+    )
+    monkeypatch.setattr(kcp, "_zero_history_plan", lambda name, grid, device_index: name)
+    monkeypatch.setattr(
+        kcp, "_launch_trim", lambda name, values, device_index: seen.append((name, dict(values)))
+    )
+    ctx = type("Ctx", (), {"halo": type("Halo", (), {"n_hist_rows": 0})()})()
+    x = torch.zeros(S, C, dtype=torch.bfloat16)
+    w = torch.zeros(C, 4, dtype=torch.float32)
+    hist = torch.zeros(0, C, dtype=torch.bfloat16)
+    for arch in ARCHES:
+        monkeypatch.setattr(kcp, "_device_arch", lambda device, arch=arch: arch)
+        assert kcp._fwd_form(arch)[0], arch
+        for work in (torch.zeros(8, dtype=torch.int32), None):
+            seen.clear()
+            counters[:] = [work]
+            kcp._kcp_forward(x, w, ctx, _hist=hist)
+            assert kcp.LAST_CALL["fwd"]["main"] == "sr", arch
+            ((name, values),) = seen
+            assert values["enable_pdl"] == 0, (arch, work is None)
+            if work is None:
+                continue
+            missing = set(cake_jit.MODULES[name]["logical"].values()) - set(values)
+            assert not missing, (arch, name, missing)
+
+
+@pytest.mark.cpu_only
 def test_main_backward_records_are_ordinary_launches_with_accumulators() -> None:
     vocabulary = set(kcp_jit.LOGICAL_TENSORS) | set(kcp_jit.LOGICAL_SCALARS)
     for arch, kind, name, det_name in _pairs():
