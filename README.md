@@ -121,7 +121,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 
 [ARCHITECTURE.md](ARCHITECTURE.md) describes the repository layout, the isolation rules, the CI, how to run the tests and the release procedure.
 
-To run a family's tests, first install the family with its `test` extra. Then copy its `tests`, `benchmarks` and `pyproject.toml` to a directory outside the source tree, and run pytest there:
+To run a family's tests, first install the family with its `test` extra. Then copy its `tests`, `benchmarks` (if the family has one; mok has none) and `pyproject.toml` to a directory outside the source tree, and run pytest there:
 
 ```bash
 # from the repository root
