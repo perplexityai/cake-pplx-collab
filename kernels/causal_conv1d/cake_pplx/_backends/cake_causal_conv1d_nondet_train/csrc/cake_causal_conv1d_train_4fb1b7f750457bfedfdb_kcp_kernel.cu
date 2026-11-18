@@ -310,7 +310,6 @@ kernel_cake_causal_conv1d_train_4fb1b7f750457bfedfdb_kcp(__nv_bfloat16* __restri
             float dyf[8];
             float dp[8];
             float a4[4];
-            float lo4[4];
             float lw[128];
             unsigned int fin = 0;
             int cur_ct = -1;
@@ -1246,16 +1245,10 @@ kernel_cake_causal_conv1d_train_4fb1b7f750457bfedfdb_kcp(__nv_bfloat16* __restri
                             #pragma unroll
                             for (int e6 = 0; e6 < 4; e6++) {
                                 a4[e6] = lw[j6 * 4 * 4 + e6];
-                                lo4[e6] = 0.0f;
                                 #pragma unroll
                                 for (int q6 = 1; q6 < 4; q6++) {
-                                    float df_s = a4[e6] + lw[(j6 * 4 + q6) * 4 + e6];
-                                    float df_b = df_s - a4[e6];
-                                    float df_r = a4[e6] - (df_s - df_b) + (lw[(j6 * 4 + q6) * 4 + e6] - df_b);
-                                    a4[e6] = df_s;
-                                    lo4[e6] = lo4[e6] + df_r;
+                                    a4[e6] = a4[e6] + lw[(j6 * 4 + q6) * 4 + e6];
                                 }
-                                a4[e6] = a4[e6] + lo4[e6];
                             }
                             {
                                 float4 _v4 = make_float4(a4[0 + 0], a4[0 + 1], a4[0 + 2], a4[0 + 3]);

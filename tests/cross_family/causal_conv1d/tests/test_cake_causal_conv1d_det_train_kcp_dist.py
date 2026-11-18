@@ -37,9 +37,10 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
 - the two-launch forward (knobs ``fwd_main`` x ``fwd_overlap``, the same on every rank): ``LAST_CALL["fwd"]`` names
   the form the rank ran (the overlapped form on a rank with tokens, the history-row program when the rank receives
   history rows) and ``y`` / ``hist`` are bitwise the one-launch forward's;
-- against the global FP64 oracle of the whole pack and the shipped zero-history backward of the whole pack (no CP),
-  at the single-GPU suite's tolerances: ``y`` / ``dx`` within one BF16 ulp of FP64, ``dx`` within the no-CP clause,
-  and the ranks' ``dweight`` partials summed in rank order within the ``dweight`` budget of the FP64 ``dweight``;
+- the direct pass on 32 independent draws of the whole pack, judged against the naive BF16 tier of the whole pack
+  (``tests.cake.test_helpers.cake_naive``): ``y`` / ``dx`` on the rank's rows and the ranks' ``dweight`` partials
+  added in rank order, each by its error against the float64 oracle in the L2 and the max norm (median and largest
+  over the draws at most 1.005 times the tier's, 0 wherever the tier's is 0);
 - a steady explicit forward + backward of each form issues no host-to-device copy, no synchronizing operation and
   no device allocation (``tests/experimental/test_helpers/cake_host_sync.py``), bitwise the first call;
 - per-document zigzag rows: the longest document is a chain of ``2 W`` fragments over every rank.
@@ -511,48 +512,35 @@ def _run_rank(
     flags["fwd_forms_bitwise"] = fwd_bitwise
     flags["fwd_forms_recorded"] = fwd_recorded
 
-    # Against the global FP64 oracle of the whole pack (the KCP SiLU' policy; the rank's tokens gathered from it) and
-    # the shipped zero-history backward of the whole pack (no CP), at the single-GPU suite's tolerances.  The ranks'
-    # dweight partials are all-gathered and added in rank order (the same order on every rank).
-    from tests.test_cake_causal_conv1d_det_train_kcp import (
-        DW_ATOL,
-        DW_RTOL,
-        NOCP_ATOL,
-        NOCP_RTOL,
-        Y_ATOL,
-        Y_RTOL,
-        _reference,
-    )
+    # Against the naive tier of the whole pack over the draws: every rank draws the same pack from the draw's seed (draw
+    # 0 is the pack above), runs the direct pass on its tokens and judges ``y`` / ``dx`` on its rows and the ranks'
+    # dweight partials, all-gathered and added in rank order (the same order on every rank).
+    from tests.cake.test_helpers.cake_causal_conv1d_oracle import judge_draws, problem
 
-    def ratio(a: torch.Tensor, b: torch.Tensor, atol: float, rtol: float) -> float:
-        """The worst ``|a - b| / (atol + rtol |b|)`` (``<= 1``: no element outside the tolerance)."""
-        if a.numel() == 0:
-            return 0.0
-        a, b = a.double(), b.double()
-        if not torch.isfinite(a).all():
-            return float("inf")
-        return float(((a - b).abs() / (atol + rtol * b.abs())).max())
+    rows = _local(part, rank, cu, torch.arange(T)).to(device)
 
-    x_dev, dy_dev = x_all.to(device), dy_all.to(device)
-    y_ref, dx_ref, dw_ref = _reference(x_dev, w, cu_dev, dy_dev)
-    dx_nocp, _ = conv.cake_causal_conv1d_det_train_backward(x_dev, w, cu_dev, dy_dev)
-    partials = [torch.empty_like(direct["dw"]) for _ in range(W)]
-    dist.all_gather(partials, direct["dw"].contiguous())
-    dw_sum = partials[0].clone()
-    for partial in partials[1:]:
-        dw_sum += partial
-    info["ratio_to_tolerance"] = {
-        "y_vs_fp64": ratio(direct["y"], _local(part, rank, cu, y_ref), Y_ATOL, Y_RTOL),
-        "dx_vs_fp64": ratio(
-            direct["dx"], _local(part, rank, cu, dx_ref), Y_ATOL, Y_RTOL
-        ),
-        "dx_vs_nocp": ratio(
-            direct["dx"], _local(part, rank, cu, dx_nocp), NOCP_ATOL, NOCP_RTOL
-        ),
-        "dw_rank_sum_vs_fp64": ratio(dw_sum, dw_ref, DW_ATOL, DW_RTOL),
-    }
-    for key, value in info["ratio_to_tolerance"].items():
-        flags[f"{key}_within_tolerance"] = value <= 1.0
+    def launch(_draw: int, seed: int):
+        gd = torch.Generator(device="cpu").manual_seed(seed)
+        xa = torch.randn(T, C, generator=gd).to(torch.bfloat16)
+        wa = (torch.randn(C, WIDTH, generator=gd) * 0.5).contiguous()
+        dya = torch.randn(T, C, generator=gd).to(torch.bfloat16)
+        xl = _local(part, rank, cu, xa).to(device).requires_grad_(True)
+        wl = wa.to(device).requires_grad_(True)
+        y_d = kcp_api.cake_causal_conv1d_det_kcp(xl, wl, ctx)
+        y_d.backward(_local(part, rank, cu, dya).to(device))
+        partials = [torch.empty_like(wl.grad) for _ in range(W)]
+        dist.all_gather(partials, wl.grad.contiguous())
+        dw_sum = partials[0].clone()
+        for partial in partials[1:]:
+            dw_sum += partial
+        outputs = {"y": y_d.detach(), "dx": xl.grad, "dweight": dw_sum}
+        return outputs, problem(
+            xa.to(device), wa.to(device), cu_dev, None, dya.to(device), rows=rows
+        )
+
+    judged = judge_draws(launch, seed=7815, label=_row_id(row))
+    info["judge_failures"] = judged[:8]
+    flags["judged_against_the_naive_tier"] = not judged
 
     # Steady state: an explicit forward + backward of each form after the calls above issues no host-to-device copy,
     # no synchronizing operation (the probe queued before it still runs when the host returns) and no device
@@ -660,7 +648,7 @@ def _skip_without_allocator_counts(report: dict) -> None:
 @pytest.mark.parametrize("row", ROWS + ROWS_SCALE, ids=_row_id)
 def test_recompute_handle_rows(row) -> None:
     """Bitwise and per-phase collective counts of the checkpoint with / without a recompute handle, repeats per launch
-    form, FP64 / no-CP tolerances and the steady-state census (module docstring)."""
+    form, the direct pass judged against the naive tier and the steady-state census (module docstring)."""
     W = row[1]
     ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
     if os.environ.get("SLURM_PROCID") is not None and ntasks > 1:

@@ -38,23 +38,25 @@ with or without ``warn_only=True``::
       (cake_pplx.cake_causal_conv1d_det_
       train[_kcp])
 
-The forward is fixed-order (the deterministic package's programs) and never
+The forward is fixed-order (this package's copies of the deterministic package's programs) and never
 alerts; only the backward's unordered ``dweight`` / ``dbias`` reduction does,
 and it reads torch's deterministic setting when it runs (the autograd backward
 included).  The package is chosen by name, so a checkpoint recompute
 (``torch.utils.checkpoint``, reentrant or not) runs the same package.
 
-Numerical contract: only the run-to-run bitwise reproducibility of
-``dweight`` / ``dbias`` is relaxed.  ``y`` is bitwise the deterministic
-forward's (the same programs).  ``dx`` is bitwise the deterministic backward's
-for the same route and channel count (the same per-thread FP32 arithmetic and
-one BF16 rounding).  ``dweight`` / ``dbias`` accumulate in FP32 where the
-deterministic reduce sums in FP32 (the default
-``silu_grad_preactivation="bf16"``: within about 3e-5 rel-L2 of the exact FP64
-gradient) and in FP64 on the ``silu_grad_preactivation="fp32"`` routes (the
-deterministic FP64 reduction's accuracy, about 2e-7 rel-L2), are rounded once
-into the requested dtype, and stay within the deterministic package's error
-budgets; the accumulation order across CTAs varies run to run.  The inputs,
+Numerical contract: the non-deterministic package makes no bit promise (no
+output is promised to repeat bit for bit run to run or to match the
+deterministic package's bits).  The forward runs this package's copies of the
+deterministic package's programs.  ``dx`` uses the deterministic backward's per-thread FP32 arithmetic
+and one BF16 rounding.  By default (``dweight_sum="fp32"``) ``dweight`` /
+``dbias`` accumulate in plain FP32 words on every route, as the deterministic
+reduce sums (the default ``silu_grad_preactivation="bf16"``: within about
+3e-5 rel-L2 of the exact FP64 gradient; the ``silu_grad_preactivation="fp32"``
+routes spread the adds over sixteen FP32 copies of the accumulators, added in
+copy order at the end; no FP64 and no compensated sums; the opt-in
+``dweight_sum="fp32_pair"`` keeps FP32 (hi, lo) pairs instead), and are
+rounded once into the requested dtype; the accumulation order across CTAs
+varies run to run.  The inputs,
 output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
@@ -79,8 +81,8 @@ non-int, ``ValueError`` for another value): the backward launches
 ``bwd_grid_mult`` times its default untrimmed CTA count, a finer static
 partition of the token axis for a backward that overlaps kernels of other
 streams.  The CTAs of each channel tile split its tokens among themselves at
-any grid size, so ``dx`` is still bitwise the deterministic one and
-``dweight`` / ``dbias`` keep their budgets; the workspace size does not depend
+any grid size, so ``dx`` is computed the same way and
+``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
 grid).
 
@@ -116,6 +118,11 @@ Usage::
     dx, dweight = cake_causal_conv1d_nondet_train_backward(
         x, weight, cu_seqlens, dy, bwd_grid_mult=3
     )
+
+    # opt-in: dweight / dbias accumulated as FP32 (hi, lo) pairs (FP32 SiLU' only)
+    dx, dweight = cake_causal_conv1d_nondet_train_backward(
+        x, weight, cu_seqlens, dy, silu_grad_preactivation="fp32", dweight_sum="fp32_pair"
+    )
 """
 
 from __future__ import annotations
@@ -133,6 +140,7 @@ from ._cake_pplx_api_causal_conv1d import cake_api
 _FROM_BACKEND = (
     "ARCHES",
     "BWD_GRID_MULTS",
+    "DWEIGHT_SUMS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "CakeCausalConv1dNondetFunction",
 )
@@ -290,8 +298,8 @@ def cake_causal_conv1d_nondet_train_forward(
 ) -> torch.Tensor:
     r"""Packed width-4 depthwise causal convolution + SiLU, training forward.
 
-    The package's copy of the deterministic forward programs: ``y`` is bitwise the deterministic package's, and
-    the forward runs (without an alert) under torch's deterministic mode.
+    The package's copy of the deterministic forward programs; the forward runs (without an alert) under torch's
+    deterministic mode.
 
     Parameters
     ----------
@@ -342,6 +350,7 @@ def cake_causal_conv1d_nondet_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward (one launch, unordered
     ``dweight`` / ``dbias`` reductions).
@@ -357,9 +366,11 @@ def cake_causal_conv1d_nondet_train_backward(
     dy : torch.Tensor
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
-        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation (FP32
-        accumulators).  ``"fp32"``: at the unrounded FP32 preactivation with
-        FP64 accumulators.
+        ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
+        FP32 ``weight``, at the unrounded FP32 preactivation with a BF16
+        ``weight``.
+        ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
+        plain FP32 words by default (see ``dweight_sum``).
     workspace : torch.Tensor, optional
         Caller-owned buffer from :func:`cake_causal_conv1d_nondet_train_backward_workspace`.
     dx, dweight, dbias : torch.Tensor, optional
@@ -372,10 +383,19 @@ def cake_causal_conv1d_nondet_train_backward(
         default grid): the backward launches ``bwd_grid_mult`` times its
         default untrimmed CTA count, so each CTA streams that much fewer tokens
         (for a backward that overlaps kernels of other streams: a CTA that
-        starts late trails by a shorter stream).  ``dx`` is bitwise the
-        default's; more CTAs add into the same accumulators (same budgets, same
-        workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
+        starts late trails by a shorter stream).  ``dx`` is computed as by
+        the default; more CTAs add into the same accumulators (same sum form,
+        same workspace size).  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``.  ``"fp32"`` (default): one
+        plain FP32 word per sum.  ``"fp32_pair"`` (opt-in): an FP32 (hi, lo)
+        pair per sum -- the CTA's fold Kahan-compensated and every accumulator
+        word a pair that keeps each add's rounding error, rounded once to the
+        output dtype; FP32 operations only, ``dx`` computed as by the default
+        and the same workspace (the CTAs' order still varies run to run).  Only with
+        ``silu_grad_preactivation="fp32"``; ``ValueError`` otherwise and for
+        another ``str``, ``TypeError`` for a non-``str``.
 
     Returns
     -------
@@ -396,6 +416,7 @@ def cake_causal_conv1d_nondet_train_backward(
         dweight=dweight,
         dbias=dbias,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -408,6 +429,7 @@ def cake_causal_conv1d_nondet(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU, non-deterministic backward.
 
@@ -431,6 +453,11 @@ def cake_causal_conv1d_nondet(
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_nondet_train_backward`); checked at the forward
         call, used by the backward.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_nondet_train_backward`); checked at the
+        forward call, used by the backward.
 
     Returns
     -------
@@ -447,6 +474,7 @@ def cake_causal_conv1d_nondet(
         bias,
         silu_grad_preactivation=silu_grad_preactivation,
         bwd_grid_mult=bwd_grid_mult,
+        dweight_sum=dweight_sum,
     )
 
 
@@ -463,6 +491,7 @@ def __dir__() -> list[str]:
 __all__ = [
     "ARCHES",  # noqa: F822 - resolved by __getattr__
     "BWD_GRID_MULTS",  # noqa: F822 - resolved by __getattr__
+    "DWEIGHT_SUMS",  # noqa: F822 - resolved by __getattr__
     "SUPPORTED_COMPUTE_CAPABILITIES",  # noqa: F822 - resolved by __getattr__
     "CakeCausalConv1dNondetFunction",  # noqa: F822 - resolved by __getattr__
     "cake_causal_conv1d_nondet",

@@ -45,7 +45,7 @@ from cake_pplx._backends.cake_causal_conv1d_det_train import (
 )
 from tests.test_cake_causal_conv1d_det_train_kcp import (
     ROWS,
-    ROWS_8365,
+    PRODUCTION_ROWS,
     _bits,
     _problem,
 )
@@ -155,7 +155,7 @@ def _want(ctx, *, overlap: bool, cooperative: bool, n: int = 1) -> list[str]:
 
 
 @pytest.mark.parametrize(
-    "name,lens,cuts,C", ROWS + ROWS_8365, ids=[r[0] for r in ROWS + ROWS_8365]
+    "name,lens,cuts,C", ROWS + PRODUCTION_ROWS, ids=[r[0] for r in ROWS + PRODUCTION_ROWS]
 )
 @pytest.mark.parametrize("host_trim", [1, 0])
 def test_overlapped_backward_order_and_bits(

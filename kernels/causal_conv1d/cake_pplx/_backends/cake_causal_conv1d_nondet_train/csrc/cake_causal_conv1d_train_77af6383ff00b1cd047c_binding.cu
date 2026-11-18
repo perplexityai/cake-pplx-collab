@@ -37,6 +37,28 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
+[[noreturn]] void NoInt64(int64_t a, const char* op, int64_t b) {
+  TVM_FFI_THROW(ValueError) << KERNEL_NAME << ": " << a << " " << op << " " << b
+                            << " has no int64 value in a host check";
+}
+
+int64_t CheckedSub(int64_t a, int64_t b) {
+  int64_t difference;
+  if (__builtin_sub_overflow(a, b, &difference)) NoInt64(a, "-", b);
+  return difference;
+}
+
+int64_t CheckedMul(int64_t a, int64_t b) {
+  int64_t product;
+  if (__builtin_mul_overflow(a, b, &product)) NoInt64(a, "*", b);
+  return product;
+}
+
+int64_t CMod(int64_t a, int64_t b) {
+  if (b == 0) NoInt64(a, "%", b);
+  return b == -1 ? 0 : a % b;
+}
+
 void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, TensorView a_b, TensorView a_work, int64_t a_S, int64_t a_C, int64_t a_num_docs, int64_t a_search_steps, int64_t a_ct_vec, int64_t a_n_sub, int64_t a_n_ch_tiles, int64_t a_flags, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_x.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
@@ -85,6 +107,24 @@ void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, Tensor
   check_same_device(a_b, a_x, "b", "x");
   check_contiguous(a_work, "work");
   check_same_device(a_work, a_x, "work", "x");
+  TVM_FFI_CHECK((a_ct_vec >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (ct_vec >= 1)";
+  TVM_FFI_CHECK((a_ct_vec <= 128LL), ValueError)
+      << KERNEL_NAME << ": requires (ct_vec <= 128)";
+  TVM_FFI_CHECK((a_n_sub >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (n_sub >= 1)";
+  TVM_FFI_CHECK((CheckedMul(a_n_sub, a_ct_vec) <= 128LL), ValueError)
+      << KERNEL_NAME << ": requires ((n_sub * ct_vec) <= 128)";
+  TVM_FFI_CHECK((a_n_ch_tiles >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (n_ch_tiles >= 1)";
+  TVM_FFI_CHECK((a_n_ch_tiles <= 65536LL), ValueError)
+      << KERNEL_NAME << ": requires (n_ch_tiles <= 65536)";
+  TVM_FFI_CHECK((a_C >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (C >= 1)";
+  TVM_FFI_CHECK((CMod(a_C, 8LL) == 0LL), ValueError)
+      << KERNEL_NAME << ": requires (CMod(C, 8) == 0)";
+  TVM_FFI_CHECK((CheckedMul(CheckedMul(CheckedSub(a_n_ch_tiles, 1LL), a_ct_vec), 8LL) < a_C), ValueError)
+      << KERNEL_NAME << ": requires ((((n_ch_tiles - 1) * ct_vec) * 8) < C)";
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
