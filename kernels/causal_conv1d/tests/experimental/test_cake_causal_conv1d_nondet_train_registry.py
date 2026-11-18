@@ -91,6 +91,7 @@ TOKENS = (1, 1000, 65536, 98304, 147456, 250340, 262143, 262144)
 # on sm_107a (264 <= C < 512) and the SM-wide row-group programs of route ``bwd`` on sm_100a, sm_103a and sm_107a
 # (channel bands of 264 <= C < 512, from a token floor), and the copy of route ``bwd``'s fallback program on sm_107a
 # (the channel band of 520 <= C < 1024).  Every other record pairs with this package's at the same route position.
+# This package carries its own channel-band copy of its route's fallback for the last of them (:data:`OWN_COPIES`).
 DET_ONLY = frozenset(
     {
         "cake_causal_conv1d_det_train_50aa818e2b2338fb34a4",
@@ -100,6 +101,13 @@ DET_ONLY = frozenset(
         "cake_causal_conv1d_det_train_0d99ef0e0ed10b11dfd5",
     }
 )
+# The deterministic channel-band programs of :data:`DET_ONLY` whose rows this package runs on its own channel-band copy
+# of the same route's fallback (the fallback's build keywords with the same ``c_band``, under this package's name):
+# deterministic program -> this package's copy.  The copy is listed after the deterministic route's programs, as a
+# channel-band program, but its twin (the fallback) keeps no channel threshold to give it.
+OWN_COPIES = {
+    "cake_causal_conv1d_det_train_0d99ef0e0ed10b11dfd5": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
+}
 # The route whose ``TILE_OVERRIDES`` / ``NARROW_TILES`` rows each ``_bf16_taps`` route plans by: its base route, whose
 # body it runs with SiLU' at the unrounded FP32 preactivation; every other route plans by its own rows.
 TILE_ROUTE = {"bwd_dt_bf16_taps": "bwd_dt", "bwd_bias_bf16_taps": "bwd_bias"}
@@ -165,9 +173,10 @@ def _channels(registry, name: str, arch: str) -> int | None:
 
 def _bands():
     """``(arch, kind, band name, twin name, det twin name)`` of every channel-band program: a program a route lists
-    after the deterministic route's programs.  Its twin is the program of the route whose channel threshold on
-    ``arch`` is no longer the deterministic one: the band program owns the twin's lowest channel counts there, from
-    the deterministic threshold up to the twin's new one."""
+    after the deterministic route's programs (but this package's copies of deterministic programs,
+    :data:`OWN_COPIES`).  Its twin is the program of the route whose channel threshold on ``arch`` is no longer the
+    deterministic one: the band program owns the twin's lowest channel counts there, from the deterministic threshold
+    up to the twin's new one."""
 
     for arch in ARCHES:
         for kind in cake_jit.KINDS:
@@ -178,6 +187,8 @@ def _bands():
                 if _channels(cake_jit, name, arch) != _channels(det_jit, det_name, arch)
             ]
             for band in new[len(det) :]:
+                if band in OWN_COPIES.values():
+                    continue
                 (twin,) = [
                     pair
                     for pair in moved
@@ -356,12 +367,46 @@ def test_channel_band_programs_take_their_twins_lowest_channels() -> None:
 
 
 @pytest.mark.cpu_only
+def test_own_copies_take_the_deterministic_band_rows() -> None:
+    """Each copy of :data:`OWN_COPIES` is a channel-band program of the deterministic program's route and
+    architecture: listed after the deterministic route's programs, its record the route's fallback's under its own
+    name and selection rule (the rendered occupancy and shared memory aside), which owns the calls from the
+    deterministic program's lowest channel threshold."""
+
+    for det_name, copy in OWN_COPIES.items():
+        det_record = det_jit.MODULES[det_name]
+        (arch,) = det_record["arches"]
+        (kind,) = [k for k, names in det_jit.ROUTES[arch].items() if det_name in names]
+        new = cake_jit.ROUTES[arch][kind]
+        label = (arch, kind, copy)
+        assert copy in new[len(_det_route(arch, kind)) :], label
+        (fallback,) = [n for n in new if cake_jit.select_rule(cake_jit.MODULES[n]) is None]
+        record, twin_record = cake_jit.MODULES[copy], cake_jit.MODULES[fallback]
+        assert copy not in det_jit.MODULES and record["arches"] == [arch], label
+        assert record["library"] == record["kernel"] == copy, label
+        assert record["kernel_symbol"] == f"kernel_{copy}", label
+        assert cake_jit.select_rule(twin_record) is None, label
+        assert cake_jit.select_rule(record) == {
+            "channels": {arch: _channels(det_jit, det_name, arch)},
+            "kind": "channels_at_least",
+        }, label
+        grid, twin_grid = record["grid_rule"], twin_record["grid_rule"]
+        derived = ("grid_mult", "ctas_per_sm")
+        assert grid["grid_mult"] == {arch: twin_grid["grid_mult"][arch]}, label
+        assert _strip(grid, *derived) == _strip(twin_grid, *derived), label
+        launch = _strip(record["launch"], "dynamic_smem_bytes")
+        assert launch == _strip(twin_record["launch"], "dynamic_smem_bytes"), label
+        own = ("arches", "select_rule", "grid_rule", "launch", *NAME_FIELDS)
+        assert _strip(record, *own) == _strip(twin_record, *own), label
+
+
+@pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     """A call selects the program at the same route position as the deterministic package for every ``(S, C)``,
     and plans the same scalars (``y`` / ``dx`` keep their per-element arithmetic).  Where the deterministic package
     selects a det-only program, this package selects what the deterministic package selects without its det-only
-    records."""
+    records but those this package copies (:data:`OWN_COPIES`), and its copy where that is one of them."""
 
     twin_of = {
         band: twin for band_arch, _, band, twin, _ in _bands() if band_arch == arch
@@ -375,12 +420,21 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
                 (det_name,) = det_jit.selected_modules(arch, kind, C=C, S=S)
                 if det_name in DET_ONLY:
                     det_only_hits.add(det_name)
+                    copied = [
+                        d
+                        for d in det_jit.ROUTES[arch][kind]
+                        if d not in DET_ONLY or d in OWN_COPIES
+                    ]
                     with monkeypatch.context() as m:
-                        m.setitem(det_jit.ROUTES[arch], kind, det)
+                        m.setitem(det_jit.ROUTES[arch], kind, copied)
                         (det_name,) = det_jit.selected_modules(arch, kind, C=C, S=S)
-                # A channel-band program serves its twin's route position.
-                position = new.index(twin_of.get(name, name))
-                assert position == det.index(det_name), (arch, kind, C, S)
+                if det_name in OWN_COPIES:
+                    # This package's copy of the deterministic channel-band program.
+                    assert name == OWN_COPIES[det_name], (arch, kind, C, S, name)
+                else:
+                    # A channel-band program serves its twin's route position.
+                    position = new.index(twin_of.get(name, name))
+                    assert position == det.index(det_name), (arch, kind, C, S)
                 record, det_record = cake_jit.MODULES[name], det_jit.MODULES[det_name]
                 geometry = record["grid_rule"]["geometry"]
                 assert cake_jit.plan(

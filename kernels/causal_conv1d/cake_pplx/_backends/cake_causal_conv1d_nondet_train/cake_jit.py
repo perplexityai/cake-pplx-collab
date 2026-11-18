@@ -604,6 +604,94 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``bwd``: the channel-band copy of the route's sm_107a fallback program
+    # ``cake_causal_conv1d_train_a79ed3e33712abf525ad`` (the same build keywords and kernel with ``c_band=520``,
+    # under its own name), selected from C = 520 on sm_107a in place of
+    # ``cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab``, which keeps 512 <= C < 520 there.  ``dx`` and every
+    # per-CTA FP32 step are the fallback's; ``acc`` / ``work`` are zero before and after every launch.
+    "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 2,
+            "geometry": {
+                "threads": 128,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 66560,
+            "use_pdl": False,
+        },
+        "library": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "channels": {
+                "sm_107a": 520,
+            },
+            "kind": "channels_at_least",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
     # Route ``bwd``: the single-launch build of the det program
     # ``cake_causal_conv1d_det_train_d46036aa2bc5f90bb0f6`` (the same build keywords, body and grid; selected
     # from C = 512 on sm_103a, 512 on sm_107a).  Every per-thread and per-CTA FP32 step and ``dx`` are bitwise
@@ -4069,6 +4157,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_c798878a383c652c428d",
             "cake_causal_conv1d_train_5ed71ee5908c07376183",
             "cake_causal_conv1d_train_06cfd917a14c30ce8ebc",
+            "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
         ],
         "bwd_bias": [
             "cake_causal_conv1d_train_17d30c46fe34f0266e26",
