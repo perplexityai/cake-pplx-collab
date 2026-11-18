@@ -31,6 +31,8 @@ packed row (q / k / v as head views of one row that requires grad).
 * The host time of a steady-state call: each forward call and each backward call returns to the caller within
   ``HOST_CALL_MAX_US``.  The package takes tensors and keywords only (no context object), so this is the whole
   per-call host cost a wrapper such as ``fully_shard`` adds around the module.
+* Recorded forwards (``cake_chain.FWD_PLAN``): the general path's call and the calls that record the forward's launches
+  and replay them, plain and checkpointed, are judged; the device route records none.
 * PyTorch's deterministic algorithms (strict and ``warn_only``) raise no alert and no warning on the packed row and
   under checkpointing either.
 
@@ -539,6 +541,55 @@ def test_steady_state_host_time_per_call(route, device) -> None:
         fwd_us,
         bwd_us,
     )
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# Recorded forwards
+
+
+@pytest.mark.parametrize("checkpointed", [False, True], ids=["plain", "checkpoint"])
+@pytest.mark.parametrize("route", ROUTES)
+def test_recorded_forwards_naive_tier_verdict(
+    route, checkpointed, device, monkeypatch, record_property
+) -> None:
+    # the first forward of a host-table call (every route but the device route) records its launches and the later
+    # ones replay them (under checkpointing the first pass and the recompute record one plan each; the first draw
+    # records, every later step replays).  Per draw, a step on the general path (FWD_PLAN off) and three steps with
+    # the plans (the worst judged) are judged.  The device route records and replays nothing
+    monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+    replays = []
+    replay = cake_chain._replay_forward
+
+    def counted(plan, *args):
+        replays.append(plan)
+        return replay(plan, *args)
+
+    monkeypatch.setattr(cake_chain, "_replay_forward", counted)
+    passes = 2 if checkpointed else 1
+
+    def step(problem) -> dict:
+        leaves = problem.leaves()
+        o, final = problem.step(leaves, checkpointed)
+        torch.cuda.synchronize()
+        return problem.results(leaves, o, final)
+
+    def draw(j, s):
+        problem = _Problem(route, device, seed=s)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            general = step(problem)
+        replays.clear()
+        planned = [step(problem) for _ in range(3)]
+        plans = list(cake_chain._FWD_PLANS.values())
+        if route == "device":
+            assert not plans and not replays, (plans, replays)
+        else:
+            assert len(plans) == passes and all(p.ops is not None for p in plans), plans
+            assert len(replays) == (2 if j == 0 else 3) * passes, (j, len(replays))
+            assert {id(p) for p in replays} == {id(p) for p in plans}
+        return {"general": general, "plan": planned}, _oracle(problem)
+
+    _judge(record_property, 37, draw)
 
 
 # ---------------------------------------------------------------------------------------------------------------------

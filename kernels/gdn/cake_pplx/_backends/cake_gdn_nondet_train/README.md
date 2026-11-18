@@ -450,6 +450,34 @@ records a plan (a plan's launches read the pooled workspaces of its stream):
 it runs the general path on the capture's own workspaces.
 `cake_chain.BWD_PLAN = False` keeps every call on the general path.
 
+The autograd forward of a host-table or equal-length call with
+`host_cache=True` is planned the same way, with or without the kept tape
+(`cake_gdn_nondet_train_forward` always runs the general path).  Its first
+call for a layout, stream, tape mode and set of arguments records its
+allocations and views, the PyTorch operations it runs between its launches
+(input copies and casts, the split forward's index fills, selects and
+copies), its launches, its stream switches and the event records and waits
+between its streams.  A checkpoint's first pass, which keeps no tape, and its
+recompute have separate records.  Later calls replay that record: their `q`,
+`k`, `v`, `g`, `beta` and `initial_state` and the tensors they allocate fill
+its slots, and every other argument is a pooled workspace of the stream, a
+chunk table of the layout, the cached identity walk or a scalar.  The record
+holds no tensor of a call.  A replay needs inputs of the recorded shapes,
+strides, dtypes and 16-byte base alignment, the same inputs given as one
+tensor (such as `k` given as `q`), and the stream's pool tables and side
+stream, the cached tables and the module tables and settings the record was
+made with; otherwise the call runs the general path and records again.  A
+replay makes the general path's allocations, PyTorch operations, launches and
+event records and waits in the same order on the same streams, so its output,
+final state and saved tensors have the same bits as the general path's, and
+it leaves the caller's current device and stream as the general path does.
+A call whose steps the record cannot hold runs the general path, and so do
+the later calls of its key.  A forward inside a CUDA graph capture neither
+replays nor records a plan: it runs the general path on the capture's own
+workspaces.  A call with a host `q` (its first launch refuses it) runs the
+general path too.
+`cake_chain.FWD_PLAN = False` keeps every forward on the general path.
+
 On the host-table route the long sequences start first.  The tables list the
 sequences by chunk count, longest first (ties in the caller's order); every
 chunk keeps its token offset, the initial-state rows are gathered into that
@@ -504,8 +532,8 @@ device synchronization covers only work queued before the capture: while one
 thread captures calls of this package, another thread's call on the same
 device that builds a table must have its stream synchronized before the
 capture reads that layout.  A capture also takes its own workspaces instead of
-the pooled per-stream ones, and its backward neither replays nor records a
-plan.
+the pooled per-stream ones, and neither its forward nor its backward replays
+or records a plan.
 
 The one-wave split of the adjoint walk runs on `sm_100a`, `sm_103a` and
 `sm_107a` (`ADJOINT_SPLIT_ARCHS`), on a host-built table without plan or
@@ -636,7 +664,7 @@ is 0.05-0.06 ms larger in this package than in the deterministic package.
 | `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan; the same bits as `"reg"` on `dhu_tc2`, other bits on `dhu_tc2_dvl32`) |
 | `prep` | rule | forward prep: `"plain"` or `"tma"` (`prep_tma`; Q or K not 16-byte aligned still take the plain prep); a pin also keeps the call off the forwards on `wy_a`'s `A` (see Chain) |
 | `save_state` | `True` | keep the forward state of the architecture's tape level for the backward (`T_full`: `w`, `h`, `v_new`; `u`, read only to rebuild `h` / `v_new`, is freed when the forward returns); `False` recomputes them |
-| `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections, the per-stream workspaces and the backward's launch record between calls (a CUDA graph capture takes its own workspaces and no launch record) |
+| `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections, the per-stream workspaces and the forward's and the backward's launch records between calls (a CUDA graph capture takes its own workspaces and no launch record) |
 | `lpt` | `True` | host-table route: dispatch the sequences and the forward segments longest first; `False` keeps the caller's order |
 | `streams` | `2` | host-table route: `2` lets a serial scan run as two sequence groups on two streams where the rule above splits it (the adjoint scan, and the scan of the prep forward; the serial A form keeps one stream), and lets the split forward and the one-wave split of the adjoint walk run their first wave beside a side stream, and, on B200, lets a one-round serial adjoint scan fork its shortest sequences' walk and tail onto the side stream; `1` keeps one stream |
 | `tail` | rule | backward tail (see Chain): `"tail"`, `"tail_g2_f32x"` or `"tail_g2"` (`HV == 2 * H` only), `"tail_g3_f32x"` or `"tail_g3"` (`HV == 3 * H` only) or `"unfused"` |
