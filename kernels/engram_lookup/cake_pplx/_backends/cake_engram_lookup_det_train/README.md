@@ -14,8 +14,11 @@ backend package is experimental (no compatibility guarantee for its internal
 names).  SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the
 supported architectures; another device raises `RuntimeError` for a non-empty
 lookup.  Its library is loaded prebuilt from `aot/` when a builder compiled it
-and JIT-built from the sources and flags `build.json` records otherwise.  The
-package reads no environment variable.
+and JIT-built from the sources and flags `build.json` records otherwise.  Only
+the JIT shim (`_cake_pplx_jit.py`) reads environment variables, and only to
+build or find a library: `CUDA_HOME` / `CUDA_PATH` (else `nvcc` on `PATH`),
+`CAKE_PPLX_NVCC`, `CXX`, `CAKE_PPLX_CACHE_DIR`, `CAKE_PPLX_DISABLE_JIT` and
+`CAKE_PPLX_JIT_WORKERS`.  The rest of the package reads none.
 
 The family has a forward step only: no backward kernel and no autograd entry.
 The table's gradient does not depend on its storage format; the caller sums it.
@@ -62,7 +65,8 @@ step and walks the rows grid-stride, so any grid covers every row.  For each
 row a lane reads 8 value bytes and the scale byte of its 32-column group,
 decodes them to FP32, multiplies in FP32 and stores 16 bytes of BF16.  The
 row strides of `weight` and `scale` come from the tensors (264 for the packed
-views), and byte offsets are 64-bit (tables past 2^31 bytes and outputs past
+views; a one-row table goes in with 256 and 8, which change no address since
+its only valid id is 0), and byte offsets are 64-bit (tables past 2^31 bytes and outputs past
 2^31 elements are served).  The grid is one CTA per 32 looked-up rows, capped
 at 8 CTAs per SM.
 

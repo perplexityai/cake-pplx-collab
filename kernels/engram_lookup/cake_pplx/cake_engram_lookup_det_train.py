@@ -35,8 +35,9 @@ non-deterministic variant to offer.  No call alerts under
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of a thin wrapper:
 the checks, the launch plan and the generated kernel live in the backend
 package ``cake_pplx._backends.cake_engram_lookup_det_train``, imported on
-first use; this module forwards every argument.  No environment variable is
-read.
+first use; this module forwards every argument and reads no environment
+variable.  Only the backend's JIT shim reads environment variables, to build or
+find the library when no prebuilt one is installed (see the backend README).
 
 Operands: ``weight`` ``float8_e4m3fn [R, 256]`` and ``scale``
 ``float8_e8m0fnu [R, 8]``, each with a unit column stride, a row stride that
@@ -126,7 +127,8 @@ def cake_engram_lookup_det_train_forward(
         ``row_ids`` not contiguous or with ``2**31 - 8`` or more elements; a non-empty ``row_ids`` with ``R == 0``.
     RuntimeError
         A device other than SM100 (``sm_100a``), SM103 (``sm_103a``) or SM107 (``sm_107a``) when ``row_ids`` is not
-        empty; a local CUDA toolkit older than the library's ``build.json`` minimum when it is built.
+        empty; a local CUDA toolkit older than the library's ``build.json`` minimum when it is built; no prebuilt
+        library and ``CAKE_PPLX_DISABLE_JIT`` set.
 
     Notes
     -----

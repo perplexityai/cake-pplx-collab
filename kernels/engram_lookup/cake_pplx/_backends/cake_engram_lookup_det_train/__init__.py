@@ -24,8 +24,9 @@ limitations under the License.
 # step; the family has no backward and no autograd entry), and
 # ``cake_engram_lookup_det_train_split_packed`` makes the two views of a packed
 # table.  The registry and the launch grid live in ``cake_jit``, the loader,
-# checks and launch in ``cake_backend``.  The package reads no environment
-# variable.
+# checks and launch in ``cake_backend``.  Only the JIT shim
+# ``_cake_pplx_jit.py`` reads environment variables (the toolchain, the cache
+# directory and the JIT switches), to build or find a library.
 
 from .cake_backend import (
     ARCHES,

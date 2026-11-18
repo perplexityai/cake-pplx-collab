@@ -40,7 +40,8 @@ The one program serves both table layouts and every ``row_ids`` shape: the
 binding reads the row strides of ``weight`` and ``scale`` from the tensors
 (two contiguous tensors, or two views into one packed ``[R, 264]`` byte
 buffer), and the number of looked-up rows is a run-time value.  Nothing here
-reads an environment variable, reads device memory or synchronizes; the grid
+reads device memory or synchronizes, and only the JIT shim the loader calls
+reads environment variables (to build or find the library); the grid
 and the output size come from tensor shapes, and the output is the only
 allocation.  The row ids must lie in ``[0, R)``.  An id outside the range (a
 negative id included) stops the launch with a device-side trap before its row
@@ -106,9 +107,9 @@ _DTYPES = {"weight": _E4M3, "scale": _E8M0, "row_ids": torch.int64}
 # strides are multiples of 8 elements (one byte each).
 _ALIGNMENT = 8
 
-# The number of looked-up rows is a 32-bit kernel parameter; the kernel's last step of ROWS_PER_WARP rows may reach
-# past the last row by up to ROWS_PER_WARP - 1 (at most 7) before it clamps, so ``row_ids.numel()`` stays below
-# 2^31 - 8.
+# The number of looked-up rows is a 32-bit kernel parameter; the kernel's last step of ROWS_PER_WARP (4) rows may
+# reach past the last row by up to ROWS_PER_WARP - 1 (3) before it clamps, so ``row_ids.numel()`` stays below
+# 2^31 - 8, which leaves room for a step of up to 8 rows.
 _MAX_POSITIONS = 2**31 - 8
 
 # The kernel parameters of the lookup program, in launch order (the registry's argument plan without the grid).
@@ -231,8 +232,21 @@ def _launch(
     argument list is spelled: the table operands go in as byte views of the same strides (the binding reads the row
     strides from them), then the ids, the output, the row count and the grid.  tvm-ffi runs the call on the current
     torch stream of the device of its first CUDA tensor argument (every operand is on that device), and the binding
-    makes that device current for the launch."""
-    _entry(arch)(weight.view(torch.uint8), scale.view(torch.uint8), row_ids, out, positions, grid_x, 1, 1)
+    makes that device current for the launch.
+
+    A one-row table goes in with its compact row strides (256 and 8) instead.  Its row stride changes no address: the
+    kernel multiplies it by the row id, the only valid id is 0, and any other id traps before a row is read.  The
+    stride of a size-1 dimension carries no layout information, so a DLPack exporter may report another value for it,
+    and the binding requires row strides that are multiples of 8.  The compact strides guard against an exporter that
+    keeps a compact view's strides and rewrites other size-1 strides; an exporter that writes 1 for every size-1
+    stride would fail the check either way.  With torch 2.14.1 and apache-tvm-ffi 0.1.16 the binding accepts both a
+    one-row view's own stride (264, say) and the compact strides."""
+    w = weight.view(torch.uint8)
+    s = scale.view(torch.uint8)
+    if w.shape[0] == 1:
+        w = w.as_strided((1, ROW_DIM), (ROW_DIM, 1))
+        s = s.as_strided((1, GROUPS), (GROUPS, 1))
+    _entry(arch)(w, s, row_ids, out, positions, grid_x, 1, 1)
 
 
 # ----------------------------------------------------------------------------------------------------------------

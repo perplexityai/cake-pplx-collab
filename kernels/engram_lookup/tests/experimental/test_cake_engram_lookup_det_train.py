@@ -27,7 +27,7 @@ Without a device: the registry (one record ``lookup`` delivered for the three ar
 facts, its argument plan in the launch order of the host code), the launch grid, the launch's arguments (byte views
 of the table operands with their strides, then the ids, the output, the row count and the grid), the build manifest
 (the record's library per architecture, the recorded source digests), the standalone loader, the prebuilt libraries
-served first, and no environment read outside the JIT shim.
+served first, no environment read outside the JIT shim, and a one-row table launched with its compact row strides.
 
 On SM100 / SM103 / SM107, each request acceptance item, in both table layouts (two contiguous tensors; two views of
 one packed ``uint8 [R, 264]`` buffer):
@@ -40,6 +40,8 @@ one packed ``uint8 [R, 264]`` buffer):
 * contiguous and packed tables of the same bytes give the same output bytes;
 * random tables and ids of the shapes ``[T, 24]``, ``[M]`` (tails that are not a multiple of the CTA's rows) and a
   rank-3 shape; ``T = 0`` and ``M = 0`` (an empty output, no launch, no library load); ``M = 1``; repeated ids;
+  one-row tables (``R = 1``): two contiguous tensors, a packed ``[1, 264]`` buffer and one-row slices of tables with
+  the row strides 264 and 272;
 * every ``T`` and ``M`` without a rebuild (the loader's cache misses do not move), and the same bits over five runs;
 * row byte offsets past 2^31 (a 9,000,000-row table) and output offsets past 2^31 elements (8,388,616 looked-up rows,
   every row checked).  The second test skips only when the device lacks the memory, with the reason; the
@@ -68,8 +70,10 @@ from tests.cake.test_helpers.cake_engram_lookup_ref import (
     EXHAUSTIVE_COUNTS,
     LAYOUTS,
     N_COLS,
+    NUM_GROUPS,
     PACKED_ROW_BYTES,
     ROW_DIM,
+    Table,
     assert_same_bits,
     empty_table,
     exhaustive_bytes,
@@ -242,6 +246,24 @@ def test_the_launch_passes_byte_views_and_the_grid(monkeypatch) -> None:
     assert ids is row_ids and o is out
     assert (positions, gx, gy, gz) == (72, 3, 1, 1)
     assert all(type(v) is int for v in (positions, gx, gy, gz))
+
+
+def test_a_one_row_table_goes_in_with_compact_strides(monkeypatch) -> None:
+    """A one-row table goes in as byte views of the same storage with the compact row strides 256 and 8, not its own
+    (the packed 264 here): a DLPack exporter may report another stride for a size-1 dimension, and the binding requires
+    multiples of 8 (no device: the FFI entry is a recorder)."""
+    calls = []
+    monkeypatch.setattr(cake_backend, "_entry", lambda arch: lambda *args: calls.append(args))
+    buf = torch.zeros(1, PACKED_ROW_BYTES, dtype=torch.uint8)
+    weight, scale = buf[:, :ROW_DIM].view(torch.float8_e4m3fn), buf[:, ROW_DIM:].view(torch.float8_e8m0fnu)
+    assert weight.stride() == (PACKED_ROW_BYTES, 1) and scale.stride() == (PACKED_ROW_BYTES, 1)
+    ids, out = torch.zeros(4, dtype=torch.int64), torch.empty(4, ROW_DIM, dtype=torch.bfloat16)
+    cake_backend._launch("sm_100a", weight, scale, ids, out, 4, 1)
+    [args] = calls
+    w, s = args[:2]
+    assert w.dtype == torch.uint8 and s.dtype == torch.uint8
+    assert (w.data_ptr(), tuple(w.shape), w.stride()) == (weight.data_ptr(), (1, ROW_DIM), (ROW_DIM, 1))
+    assert (s.data_ptr(), tuple(s.shape), s.stride()) == (scale.data_ptr(), (1, NUM_GROUPS), (NUM_GROUPS, 1))
 
 
 def test_the_package_exports_the_backend_entries() -> None:
@@ -565,6 +587,41 @@ def test_single_row(layout, shape, device) -> None:
     out = _lookup(table, ids)
     assert tuple(out.shape) == (*shape, ROW_DIM)
     assert_same_bits(out, oracle(table, ids), f"single {layout} {shape}")
+
+
+def _one_row_table(form: str, device: torch.device) -> Table:
+    """Row 5 of a random 16-row table as a one-row table (``R = 1``) in ``form``: the two contiguous tensors, the
+    views of a packed ``[1, 264]`` buffer, a one-row slice of a packed ``[16, 264]`` table, or a one-row slice of a
+    table with a 272-byte row stride."""
+    weight_bytes, scale_bytes = random_bytes(16, seed=71, nan_every=7)
+    if form in LAYOUTS:
+        return make_table(weight_bytes[5:6], scale_bytes[5:6], form, device)
+    if form == "packed-slice":
+        full = make_table(weight_bytes, scale_bytes, "packed", device)
+        return Table("packed", full.weight[5:6], full.scale[5:6])
+    buf = torch.zeros(16, 272, dtype=torch.uint8, device=device)
+    buf[:, :ROW_DIM] = weight_bytes.to(device)
+    buf[:, ROW_DIM:PACKED_ROW_BYTES] = scale_bytes.to(device)
+    weight = buf[5:6, :ROW_DIM].view(torch.float8_e4m3fn)
+    return Table("packed", weight, buf[5:6, ROW_DIM:PACKED_ROW_BYTES].view(torch.float8_e8m0fnu))
+
+
+@pytest.mark.parametrize("shape", ((5,), (3, N_COLS)), ids=("M5", "T3"))
+@pytest.mark.parametrize(
+    ("form", "row_stride"),
+    (("contiguous", ROW_DIM), ("packed", PACKED_ROW_BYTES), ("packed-slice", PACKED_ROW_BYTES), ("stride-272", 272)),
+)
+def test_one_row_tables(form, row_stride, shape, device) -> None:
+    """A one-row table (``R = 1``) in each form, its one id repeated through ``[M]`` and ``[T, 24]`` ids: the oracle's
+    bits.  The packed and strided forms have a row stride other than the compact 256; the launch passes the compact
+    strides, which change no address (the one valid id is 0)."""
+    table = _one_row_table(form, device)
+    assert table.rows == 1 and table.weight.stride(0) == row_stride
+    assert table.scale.stride(0) == (NUM_GROUPS if form == "contiguous" else row_stride)
+    ids = torch.zeros(shape, dtype=torch.int64, device=device)
+    out = _lookup(table, ids)
+    assert tuple(out.shape) == (*shape, ROW_DIM)
+    assert_same_bits(out, oracle(table, ids), f"one row {form} {shape}")
 
 
 @pytest.mark.parametrize("layout", LAYOUTS)

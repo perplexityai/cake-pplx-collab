@@ -37,7 +37,9 @@ Bit gate (before any timing; ``--no-gate`` skips it): every arm but ``copy`` loo
 E4M3 code / E8M0 byte pairs) in both layouts through ``[M]`` and ``[T, 24]`` ids, random tables with NaN scale bytes,
 one row, repeated ids and empty ids, compared bit for bit with the FP64 reference (NaN at the same elements).  A
 compiled arm that fails any case is reported "not equal" and is not timed; the other arms are timed and carry their
-gate result.
+gate result.  Each timed row checks the code it times as well: before the timing, every arm's output of the row's own
+table and ids (a compiled arm's specialization for that shape) is compared bit for bit with the FP64 reference, and a
+compiled arm that differs there is not timed on that row.
 
 Rows (``--rows``; R = ``--shard-rows``, default 6,000,000; every row in both layouts with the same bytes and ids):
 
@@ -251,8 +253,9 @@ def _random_table_bytes(rows: int, gen: torch.Generator, device: torch.device, c
     136."""
     for start in range(0, rows, chunk):
         n = min(chunk, rows - start)
-        weight = torch.randint(0, 256, (n, ROW_DIM), generator=gen, device=device, dtype=torch.uint8)
-        weight = torch.where((weight & 0x7F) == 0x7F, weight - 1, weight)
+        # 0 .. 253 onto the codes 0 .. 126 and 128 .. 254: every non-NaN code once (0x7F and 0xFF are the NaN codes)
+        weight = torch.randint(0, 254, (n, ROW_DIM), generator=gen, device=device, dtype=torch.uint8)
+        weight += (weight >= 0x7F).to(torch.uint8)
         scale = torch.randint(118, 137, (n, 8), generator=gen, device=device, dtype=torch.uint8)
         yield start, weight, scale
 
@@ -376,14 +379,32 @@ def time_row(
             calls[name] = lambda lookup=lookup: lookup(table.weight, table.scale, ids)
     result: dict[str, Any] = {"row": row, "layout": layout, "positions": positions, "rows": table.rows, "arms": {}}
     ready = []
+    want: Optional[torch.Tensor] = None
     for name, call in calls.items():
         try:
-            call()  # compiles / loads outside the timing
+            out = call()  # compiles / loads outside the timing
             torch.cuda.synchronize(device)
+            bits = None
+            if name != "copy":
+                # The code that is timed (a compiled arm specializes on this row's shapes) against the FP64 bits.
+                if want is None:
+                    want = oracle_bits(table, ids)
+                try:
+                    assert_same_bits(out, want, f"{row} {layout} {name}")
+                    bits = "equal"
+                except AssertionError as e:
+                    bits = f"differs: {str(e)[:400]}"
+            del out
             result["arms"][name] = {"extra_bytes": extra_memory(call, device)}
+            if bits is not None:
+                result["arms"][name]["bits"] = bits
+                if bits != "equal" and name in COMPILE_MODES:
+                    result["arms"][name]["status"] = "not equal"
+                    continue
             ready.append(name)
         except Exception as e:  # noqa: BLE001 -- an arm that refuses a row is reported, not timed
             result["arms"][name] = {"status": "unsupported", "reason": f"{type(e).__name__}: {str(e)[:500]}"}
+    del want
     result["modes"] = {}
     for mode in args.modes:
         fns: dict[str, Callable] = {}
@@ -475,6 +496,12 @@ def _fmt(value: Optional[float], digits: int = 2) -> str:
 
 def markdown(report: dict) -> str:
     ident = report["identity"]
+    differing = [
+        f"`{name}` {row['row']} {row['layout']} NOT EQUAL"
+        for row in report["rows"]
+        for name, arm in row["arms"].items()
+        if arm.get("bits", "equal") != "equal"
+    ]
     smi = ident.get("nvidia_smi", {})
     lines = [
         f"## {ident['gpu']} ({ident['arch']}, {ident['sms']} SMs)",
@@ -490,6 +517,9 @@ def markdown(report: dict) -> str:
             ", ".join(f"`{name}` {'equal' if g['passed'] else 'NOT EQUAL'}" for name, g in report["gate"].items())
             or "not run"
         ),
+        "",
+        "Timed outputs (each arm's output of each row and layout, before its timing, against the FP64 bits): "
+        + (", ".join(differing) if differing else "all equal"),
         "",
         "| Row | ids | R | Layout | Mode | Cake (us) | Eager (us) | Eager / Cake | Compile (us) | Compile / Cake "
         "| Cake TB/s | Copy roof (us) | Roof / Cake | A/A | Noise |",
