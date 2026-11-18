@@ -26,7 +26,7 @@ The family has a deterministic module only and a forward step only (no backward,
 | Determinism | Bitwise reproducible run to run: every output element is one product rounded once, and nothing is summed. No alert under `torch.use_deterministic_algorithms(True)`. |
 | Modes | `det` only. There is no `nondet` module: a gather has no sums, so det is the only mode. |
 | KCP | No KCP form: the lookup is a single-rank local lookup. |
-| Row ids | <<ROW_ID_RANGE: Nothing checks the ids: an id outside `[0, R)` reads memory outside the table, and its output row is undefined.>> |
+| Row ids | In `[0, R)`. An id outside (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize). |
 
 Install this family alone, pinned to a commit:
 

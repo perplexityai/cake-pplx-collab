@@ -49,7 +49,7 @@ out_m = cake_engram_lookup_det_train_forward(w, s, ids)             # int64 [N] 
 | Empty `row_ids` | Empty `out`, no launch, before the device's architecture is looked up |
 | Programs | One per architecture (record `lookup`), for both layouts and every `row_ids` shape |
 | Minimum CUDA | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` (`build.json`); an older local toolkit raises `RuntimeError` when the library is built |
-| Row ids | <<ROW_ID_RANGE: Nothing checks them (a host check would synchronize): an id outside `[0, R)` reads memory outside the table, and its output row is undefined.>> |
+| Row ids | In `[0, R)`. An id outside (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize). |
 
 A violation of the operand rules is a `ValueError` before any launch.
 

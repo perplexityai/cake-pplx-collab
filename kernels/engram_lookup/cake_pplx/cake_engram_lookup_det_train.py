@@ -106,8 +106,9 @@ def cake_engram_lookup_det_train_forward(
         contiguous tensor or the scale view of the same packed table.
     row_ids : torch.Tensor
         Contiguous int64 of any shape (``[T, 24]`` or ``[M]``): the rows to look up, in ``[0, R)``; repeats are
-        allowed.  <<ROW_ID_RANGE: Nothing checks them (a host check would synchronize): an id outside ``[0, R)``
-        reads memory outside the table, and its output row is undefined.>>
+        allowed.  An id outside ``[0, R)`` (a negative id included) stops the launch with a
+        device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the
+        process's CUDA context is unusable afterwards.  The host checks no id (that would synchronize).
 
     Returns
     -------

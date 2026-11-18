@@ -27,7 +27,7 @@ Arms (``--arms``; default every arm but ``torch_eager_u8``):
   without CUDA indexing of ``float8_e8m0fnu``; reported as such).
 * ``torch_compile`` / ``torch_compile_max_autotune``: the same function under ``torch.compile(fullgraph=True,
   dynamic=False)``, modes ``default`` and ``max-autotune-no-cudagraphs``, compiled for each row and layout before
-  timing.  On sm_107a, Triton needs the CUDA 13.5 ``ptxas`` (``TRITON_PTXAS_PATH``).
+  timing.  On sm_107a, Triton needs the CUDA 13.5 ``ptxas``: point ``TRITON_PTXAS_BLACKWELL_PATH`` at it.
 * ``copy``: a device-to-device copy of the bytes the lookup moves (``P * 784`` bytes read and written for ``P``
   looked-up rows: 264 table bytes, 8 id bytes, 512 output bytes; a copy of ``P * 392`` bytes), the same-node roof.
 * ``cake_det_mode``: ``cake`` under ``torch.use_deterministic_algorithms(True)``, where PyTorch fills each new

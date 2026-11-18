@@ -42,9 +42,11 @@ binding reads the row strides of ``weight`` and ``scale`` from the tensors
 buffer), and the number of looked-up rows is a run-time value.  Nothing here
 reads an environment variable, reads device memory or synchronizes; the grid
 and the output size come from tensor shapes, and the output is the only
-allocation.  The row ids must lie in ``[0, R)``.  <<ROW_ID_RANGE: Nothing
-checks them (a host check would synchronize): an id outside the range reads
-memory outside the table, and its output row is undefined.>>
+allocation.  The row ids must lie in ``[0, R)``.  An id outside the range (a
+negative id included) stops the launch with a device-side trap before its row
+is read; the error surfaces at the call or the next synchronizing CUDA call and
+leaves the CUDA context unusable.  The host checks no id (that would
+synchronize).
 
 This is the deterministic package of its family, and the family has no
 non-deterministic package: every output element is one product rounded once

@@ -1513,7 +1513,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 
 - `weight`: `float8_e4m3fn [R, 256]`. `scale`: `float8_e8m0fnu [R, 8]` with `weight`'s `R`.
 - Each of `weight` and `scale` has a unit column stride, a row stride that is a multiple of 8 elements and a start on an 8-byte boundary. They are two contiguous tensors, or two views into one packed `uint8 [R, 264]` buffer (row stride 264), as rows fetched from other ranks arrive. Both layouts give the same output bytes.
-- `row_ids`: contiguous int64 of any shape, fewer than 2^31 - 8 elements: `[T, 24]` for a direct lookup, `[M]` for deduplicated or routed rows. Values in `[0, R)`; repeats are allowed. <<ROW_ID_RANGE: Nothing checks the ids (a host check would synchronize): an id outside `[0, R)` reads memory outside the table, and its output row is undefined.>>
+- `row_ids`: contiguous int64 of any shape, fewer than 2^31 - 8 elements: `[T, 24]` for a direct lookup, `[M]` for deduplicated or routed rows. Values in `[0, R)`; repeats are allowed. An id outside `[0, R)` (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize).
 - All operands are on one CUDA device.
 
 ### `cake_pplx.cake_engram_lookup_det_train`

@@ -34,7 +34,9 @@ of ``[T, 24]`` and ``[M]`` ids in both layouts (the packed one through the publi
 under ``torch.cuda.set_sync_debug_mode("error")``); a call captured in a CUDA graph replays to the eager bits and reads
 the table and ids it is replayed on; under ``torch.utils.checkpoint(..., use_reentrant=False)`` the lookup runs twice
 (once without) and a BF16 linear layer after it has the same outputs and weight gradients, under
-``torch.use_deterministic_algorithms(True)`` with ``CUBLAS_WORKSPACE_CONFIG=:4096:8``, in a fresh process; the call
+``torch.use_deterministic_algorithms(True)`` with ``CUBLAS_WORKSPACE_CONFIG=:4096:8``, in a fresh process; an id outside
+the table (``R``, ``-1``, ``2**62``; first, middle and tail-step positions) raises, in a fresh process, and ``R - 1``
+does not; the call
 allocates exactly its output (the workspace is 0 bytes); under ``torch.use_deterministic_algorithms(True)``, strict or
 ``warn_only``, no alert, no warning and the same bits (the output allocated in the mode is NaN-filled first, so every
 element is written); with two devices, operands on the device that is not current give the reference's bits there.
@@ -589,6 +591,53 @@ def test_checkpoint_non_reentrant_repeats_the_lookup_bitwise() -> None:
         "grad_nonzero": True,
         "grad_finite": True,
     }, report
+
+
+# An id outside the table, in a fresh process (the trap leaves the process's CUDA context unusable): the lookup of
+# 1001 ids into a 64-row table with the id at position ``at`` replaced by ``bad`` (position 1000 sits in the tail
+# step), then a synchronize.  argv: the facade module, the id, its position.
+TRAP_SCRIPT = r"""
+import importlib, json, sys
+import torch
+
+facade = importlib.import_module(sys.argv[1])
+bad, at = int(sys.argv[2]), int(sys.argv[3])
+device = torch.device("cuda:0")
+rows = 64
+weight = torch.zeros(rows, 256, dtype=torch.uint8, device=device).view(torch.float8_e4m3fn)
+scale = torch.full((rows, 8), 127, dtype=torch.uint8, device=device).view(torch.float8_e8m0fnu)
+ids = torch.arange(1001, device=device) % rows
+ids[at] = bad
+try:
+    facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
+    torch.cuda.synchronize(device)
+except Exception as error:  # noqa: BLE001
+    print(json.dumps({"raised": True, "error": f"{type(error).__name__}: {str(error)[:300]}"}))
+else:
+    print(json.dumps({"raised": False, "error": ""}))
+"""
+
+
+@pytest.mark.parametrize(
+    ("bad", "at", "raised"),
+    ((64, 0, True), (64, 1000, True), (-1, 500, True), (2**62, 7, True), (63, 1000, False)),
+    ids=("R-first", "R-tail-step", "negative", "huge", "R-minus-1-in-range"),
+)
+def test_an_id_outside_the_table_traps(bad, at, raised) -> None:
+    """An id outside ``[0, R)`` (a negative id included) stops the launch with a device-side trap, so the call or the
+    next synchronize raises instead of returning rows read from outside the table; the last row, ``R - 1``, does
+    not."""
+    _device_or_skip()
+    result = subprocess.run(
+        [sys.executable, "-c", TRAP_SCRIPT, api.__name__, str(bad), str(at)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report["raised"] is raised, report
 
 
 @pytest.mark.parametrize("positions", (1, 1001, 393_216))
