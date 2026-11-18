@@ -155,6 +155,11 @@ CLUSTER_CTAS = 4
 # CTAs per SM the persistent grid fills, per stage.  The grid is sized from the
 # SM count only (no device query and no host synchronization per call).
 CTAS_PER_SM = {"fwd": 4, "bwd": 2}
+# A cluster's four CTAs share one GPC, so a device holds fewer whole clusters
+# than CTAS_PER_SM * SMs / 4 (152 SMs at four CTAs per SM hold 148).  The grid
+# holds back one cluster per CLUSTER_SLACK_SMS SMs: a cluster that is not
+# resident starts its tokens only after a resident cluster has ended.
+CLUSTER_SLACK_SMS = 32
 # Columns of the flattened [4 * 5120] weight gradient one CTA of ``dw_reduce``
 # sums (32 lanes of four columns; its eight warps split the partial rows).
 DW_REDUCE_COLUMNS_PER_CTA = 128
@@ -174,9 +179,11 @@ def record(stage: str, acc: str) -> str:
 
 def clusters(stage: str, tokens: int, sm_count: int) -> int:
     """The cluster count of the persistent ``fwd`` / ``bwd`` grid: about
-    ``CTAS_PER_SM[stage]`` CTAs per SM, at least one cluster and never more
-    clusters than tokens."""
-    return max(1, min(tokens, CTAS_PER_SM[stage] * sm_count // CLUSTER_CTAS))
+    ``CTAS_PER_SM[stage]`` CTAs per SM less one cluster per
+    ``CLUSTER_SLACK_SMS`` SMs, at least one cluster and never more clusters
+    than tokens."""
+    resident = CTAS_PER_SM[stage] * sm_count // CLUSTER_CTAS - sm_count // CLUSTER_SLACK_SMS
+    return max(1, min(tokens, resident))
 
 
 def grid(record_name: str, tokens: int, sm_count: int) -> tuple[int, int, int]:

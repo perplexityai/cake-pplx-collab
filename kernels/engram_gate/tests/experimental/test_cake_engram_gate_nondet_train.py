@@ -141,15 +141,19 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
         cake_backend.record("bwd_main")
 
 
-@pytest.mark.parametrize("sms", (1, 148, 160))
+@pytest.mark.parametrize("sms", (1, 148, 152, 160, 212))
 @pytest.mark.parametrize("T", (1, 2, 3, 129, 4096, 16384, 65536, 2**31 - 1))
 def test_grids_are_persistent_clusters(T, sms) -> None:
-    """``fwd`` and ``bwd`` run ``min(T, CTAs per SM * SMs / 4)`` clusters (at least one) of four CTAs; ``dw_reduce``
-    covers the 20480 weight-gradient columns."""
+    """``fwd`` and ``bwd`` run ``min(T, CTAs per SM * SMs / 4 - SMs / 32)`` clusters (at least one) of four CTAs, so
+    152 SMs run at most the 148 clusters they hold at four CTAs per SM; ``dw_reduce`` covers the 20480 weight-gradient
+    columns."""
     for stage in ("fwd", "bwd"):
         clusters = cake_jit.clusters(stage, T, sms)
         assert 1 <= clusters <= T
-        assert clusters == max(1, min(T, cake_jit.CTAS_PER_SM[stage] * sms // cake_jit.CLUSTER_CTAS))
+        resident = cake_jit.CTAS_PER_SM[stage] * sms // cake_jit.CLUSTER_CTAS - sms // cake_jit.CLUSTER_SLACK_SMS
+        assert clusters == max(1, min(T, resident))
+        if sms == 152:
+            assert clusters <= 148 * cake_jit.CTAS_PER_SM[stage] // 4
         for acc in ACC_MODES:
             assert cake_jit.grid(cake_jit.record(stage, acc), T, sms) == (cake_jit.CLUSTER_CTAS * clusters, 1, 1)
     assert cake_jit.grid("dw_reduce", T, sms) == (STREAMS * HIDDEN // cake_jit.DW_REDUCE_COLUMNS_PER_CTA, 1, 1)

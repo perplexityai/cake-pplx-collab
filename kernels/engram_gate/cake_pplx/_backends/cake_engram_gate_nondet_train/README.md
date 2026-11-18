@@ -58,7 +58,8 @@ Output rows must not overlap.
 | `bwd` | `bwd_f32`, `bwd_dot2` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
 | `dw_reduce` | `dw_reduce` | over the `4 * 5120` weight-gradient columns | sum the partial rows, multiply by `k_weight` / `q_weight` |
 
-`clusters = min(T, CTAs per SM * SM count / 4)` (`cake_jit.clusters`); a cluster walks the tokens `c, c + clusters, ...`.
+`clusters = min(T, CTAs per SM * SM count / 4 - SM count / 32)` (`cake_jit.clusters`); a cluster walks the tokens
+`c, c + clusters, ...`. A 4-CTA cluster stays in one GPC, so 152 SMs at four CTAs per SM hold 148 clusters, not 152.
 The `_f32` and `_dot2` records differ only in the summation of `P`: one FP32 word, or a compensated FP32 dot product
 (products split by an FMA, running sums by an error-free two-sum, the error words added once at the end). The backend
 launches one choice, `cake_backend._DOT_ACC`. Every launch is a plain stream-ordered launch on the current torch
