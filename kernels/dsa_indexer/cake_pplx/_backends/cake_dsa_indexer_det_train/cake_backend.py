@@ -147,20 +147,27 @@ from .cake_jit import (
 )
 from .cake_policy import (
     BF16,
+    CAND_MAX_TOP_K,
+    CAND_ROLE,
+    CAND_TICKET_BYTES,
+    CAND_WIDTH_MAX,
     CB_MAX_TOP_K,
     CB_ROLE,
     CB_SLOTS,
+    FINALIZE_ROLE,
     FP8,
     MERGE_KEY,
     SAMPLE_SHIFT_PERMILLE_BOUNDS,
     TICKET_TAIL_BYTES,
     CandidateBlocksChoice,
+    CandidateTopKChoice,
     DispatchPolicy,
     ProgramChoice,
     finalize_grid,
     fp8_policy_record,
     fp8_scan_programs,
     scan_key_form,
+    select_cand_program,
     select_cb_program,
     select_fp8_program,
     select_program,
@@ -214,7 +221,10 @@ CONTRACT_TENSORS = (
     "TicketWord",  # the scan's 16-byte ticket block (uint32 view): its own, or a zeroed placeholder it never reads
     "K_scale",  # the FP8 form's per-key FP32 scales k_scale [Tkv]; a never-dereferenced float32 placeholder for a BF16 program
     "CandBlk",  # scan_blocks: the block entries behind the workspace's ticket tail (int64), or a never-read placeholder
-    "CandBlocks",  # scan_blocks: the candidate-block rows [T, 2048] int32 (the caller's candidate_blocks)
+    "CandBlocks",  # scan_blocks: the candidate-block rows [T, 2048] int32 (the caller's candidate_blocks); cand: the
+    # caller's candidate_blocks [T, W] int32 (W <= 2048)
+    "Kraw",  # cand: k [Tkv, 128] as its plain rows (the binding encodes the program's block tensor map from them)
+    "Lists",  # cand: the per-CTA block lists in the workspace (int32)
 )
 SCAN_SCALARS = (
     "num_segments",
@@ -234,12 +244,14 @@ SCAN_SCALARS = (
 MERGE_SCALARS = ("top_k", "n_split")
 # scan_blocks: the block entries per query slot, beside the scan's scalars
 CB_SCALARS = ("blk_cap",)
+# cand: the candidate-restricted top-k's own scalar beside the scan's names it shares
+CAND_SCALARS = ("cand_width",)
 FINALIZE_SCALARS = ("top_k", "key_bits")  # the CUB block radix sort programs
 FINALIZE_RANK_SCALARS = (
     "top_k",
     "num_segments",
 )  # the prefix-popcount rank finalize programs (+ cu_seqlens_q / cu_seqlens_k)
-CONTRACT_SCALARS = SCAN_SCALARS + CB_SCALARS + ("key_bits",)
+CONTRACT_SCALARS = SCAN_SCALARS + CB_SCALARS + CAND_SCALARS + ("key_bits",)
 # Kernel-side spellings of the contract names (a renamed kernel argument
 # resolves through this table; any other name fails closed at bind time).
 CONTRACT_ALIASES = {
@@ -1898,10 +1910,481 @@ def cake_dsa_indexer_det_train_topk_with_candidates(
     return runner.run()
 
 
+# ---------------------------------------------------------------------------
+# Candidate-restricted top-k (``*_topk_in_candidates``)
+# ---------------------------------------------------------------------------
+
+
+def _check_cand_form(top_k: int, ratio: int, q: torch.Tensor) -> None:
+    """The candidate-restricted call's own rules checked before the family's: ``1 <= top_k <= CAND_MAX_TOP_K``,
+    blocks of 8 keys (``ratio == 1``) and the BF16 form (the call takes no ``k_scale``)."""
+    _check_int("top_k", top_k, 1, CAND_MAX_TOP_K)
+    if isinstance(ratio, bool) or not isinstance(ratio, int) or ratio != 1:
+        raise ValueError(
+            f"the candidate-restricted top-k needs ratio == 1 (blocks of 8 keys), got {ratio!r}"
+        )
+    if not isinstance(q, torch.Tensor) or q.dtype != torch.bfloat16:
+        raise ValueError("the candidate-restricted top-k takes bfloat16 q / k")
+
+
+def _check_cand_call(
+    k: torch.Tensor,
+    candidate_blocks: Optional[torch.Tensor],
+    num_queries: int,
+    device: torch.device,
+) -> int:
+    """The candidate-restricted call's rules after the family's: key rows of 128 contiguous elements and
+    ``candidate_blocks`` an int32 ``[T, W]`` contiguous tensor on ``device`` with ``W <= CAND_WIDTH_MAX``; returns
+    ``W``."""
+    if k.shape[0] > 0 and (k.stride(1) != 1 or k.stride(0) != HEAD_DIM):
+        raise ValueError(
+            "the candidate-restricted top-k reads k as contiguous [Tkv, 128] rows (row stride 128 elements)"
+        )
+    if not isinstance(candidate_blocks, torch.Tensor):
+        raise ValueError("candidate_blocks must be an int32 [T, W] tensor")
+    if (
+        candidate_blocks.dtype != torch.int32
+        or candidate_blocks.dim() != 2
+        or candidate_blocks.shape[0] != num_queries
+        or candidate_blocks.shape[1] > CAND_WIDTH_MAX
+    ):
+        raise ValueError(
+            f"candidate_blocks must be an int32 [T, W] tensor with T = {num_queries} and W <= {CAND_WIDTH_MAX}, got "
+            f"{tuple(candidate_blocks.shape)} {candidate_blocks.dtype}"
+        )
+    if not candidate_blocks.is_contiguous():
+        raise ValueError("candidate_blocks must be contiguous")
+    if not candidate_blocks.is_cuda or candidate_blocks.device != device:
+        raise ValueError(f"candidate_blocks must be on {device}")
+    return int(candidate_blocks.shape[1])
+
+
+def plan_dsa_indexer_det_topk_in_candidates(
+    num_queries: int,
+    num_keys: int,
+    num_segments: int,
+    *,
+    top_k: int = CB_DEFAULT_TOP_K,
+    ratio: int = 1,
+    candidate_width: int = CAND_WIDTH_MAX,
+    device: Optional[torch.device] = None,
+    arch: Optional[str] = None,
+    grid_ctas: Optional[int] = None,
+    num_sms: Optional[int] = None,
+    cand_cap: Optional[int] = None,
+    check_period: Optional[int] = None,
+    finalize_threads: Optional[int] = None,
+) -> CandidateTopKChoice:
+    """The host plan of a candidate-restricted call from host-known integers (no tensor is read): the ``cand``
+    program on ``grid_ctas`` (default: the SM count) persistent CTAs (``cake_policy.select_cand_program``).  BF16,
+    ``ratio == 1``, ``1 <= top_k <= 2048``, ``0 <= candidate_width <= 2048``.  Raises ``NotImplementedError`` where
+    the architecture registers no ``cand`` program."""
+    _check_int("num_queries", num_queries, 0)
+    _check_int("num_keys", num_keys, 0)
+    _check_int("num_segments", num_segments, 0)
+    _check_int("top_k", top_k, 1, CAND_MAX_TOP_K)
+    _check_int("candidate_width", candidate_width, 0, CAND_WIDTH_MAX)
+    if isinstance(ratio, bool) or not isinstance(ratio, int) or ratio != 1:
+        raise ValueError(
+            f"the candidate-restricted top-k needs ratio == 1 (blocks of 8 keys), got {ratio!r}"
+        )
+    for name, value in (
+        ("grid_ctas", grid_ctas),
+        ("num_sms", num_sms),
+        ("cand_cap", cand_cap),
+        ("check_period", check_period),
+    ):
+        if value is not None:
+            _check_int(name, value, 1)
+    if arch is None:
+        arch = arch_for(device)
+        if arch is None:
+            raise ValueError(
+                "the candidate-restricted top-k needs an sm_100a / sm_103a device (or an explicit arch)"
+            )
+    if arch not in PROGRAM_KEYS:
+        raise NotImplementedError(
+            f"no generated DSA indexer program is registered for {arch}"
+        )
+    if grid_ctas is None:
+        grid_ctas = num_sms if num_sms is not None else _num_sms(device)
+    return select_cand_program(
+        num_queries=num_queries,
+        num_keys=num_keys,
+        num_segments=num_segments,
+        top_k=top_k,
+        grid=int(grid_ctas),
+        program_keys=PROGRAM_KEYS.get(arch, {}),
+        cand_width=candidate_width,
+        cand_cap=cand_cap,
+        check_period=check_period,
+        policy=policy_for(arch),
+        finalize_threads=finalize_threads,
+    )
+
+
+def cake_dsa_indexer_det_train_topk_in_candidates_workspace_size(
+    num_queries: int,
+    num_keys: int,
+    num_segments: int,
+    *,
+    top_k: int = CB_DEFAULT_TOP_K,
+    ratio: int = 1,
+    device: Optional[torch.device] = None,
+    arch: Optional[str] = None,
+    grid_ctas: Optional[int] = None,
+    num_sms: Optional[int] = None,
+) -> int:
+    """Explicit workspace bound in bytes of one candidate-restricted call on ``device``: ``grid x 4 x cand_cap x 8``
+    bytes of candidate buffers (``cand_cap = max(4096, 4 top_k)``), ``grid x 64 KiB`` of block lists and a 16-byte
+    ticket word (:func:`plan_dsa_indexer_det_topk_in_candidates`).  It depends on the grid and ``top_k`` alone, not
+    on ``T``, ``Tkv``, the segments or the candidate content.  Never consults torch's deterministic algorithms
+    setting."""
+    return int(
+        plan_dsa_indexer_det_topk_in_candidates(
+            num_queries,
+            num_keys,
+            num_segments,
+            top_k=top_k,
+            ratio=ratio,
+            device=device,
+            arch=arch,
+            grid_ctas=grid_ctas,
+            num_sms=num_sms,
+        ).workspace_bytes
+    )
+
+
+@dataclass
+class DSAIndexerDetCandidateRunner:
+    """The prepared launches of one candidate-restricted tensor binding: ``run()`` launches the ``cand`` program
+    and the CUB finalize that writes each row in ascending id order on torch's current stream and returns ``(indices, scores)``.  The program draws its work units from a
+    16-byte ticket word at the workspace's end, which every completed launch leaves at 0: a backend-owned workspace
+    zeroes it once at prepare, a caller-owned one (which others may write between runs) before every run, and a run
+    after one that raised zeroes it first."""
+
+    arch: str
+    abi: str
+    choice: CandidateTopKChoice
+    programs: dict[str, str]
+    tensors: dict[str, torch.Tensor] = field(repr=False)
+    scalars: dict[str, Any] = field(repr=False)
+    launches: tuple[_Launch, ...] = field(repr=False)
+    stages: tuple[str, ...]
+    device_index: int = 0
+    workspace: torch.Tensor = field(default=None, repr=False)
+    workspace_bytes: int = 0
+    _ticket: Optional[torch.Tensor] = field(default=None, repr=False)
+    _ticket_each_run: bool = field(default=False, repr=False)
+    _ticket_dirty: bool = field(default=False, repr=False)
+
+    @property
+    def indices(self) -> torch.Tensor:
+        return self.tensors["Indices"]
+
+    @property
+    def scores(self) -> torch.Tensor:
+        return self.tensors["Scores"]
+
+    @property
+    def candidate_blocks(self) -> torch.Tensor:
+        return self.tensors["CandBlocks"]
+
+    def run(self) -> tuple[torch.Tensor, torch.Tensor]:
+        with _ffi_stream_context(self.device_index):
+            if self._ticket is not None and (
+                self._ticket_each_run or self._ticket_dirty
+            ):
+                self._ticket.zero_()
+                self._ticket_dirty = False
+            try:
+                for launch in self.launches:
+                    launch()
+            except BaseException:
+                self._ticket_dirty = self._ticket is not None
+                raise
+        return self.tensors["Indices"], self.tensors["Scores"]
+
+    __call__ = run
+
+
+def _prepare_cand_runner(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    *,
+    top_k: int = CB_DEFAULT_TOP_K,
+    softmax_scale: Optional[float] = None,
+    q_causal_offsets: Optional[torch.Tensor] = None,
+    ratio: int = 1,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    workspace_buffer: Optional[torch.Tensor] = None,
+    indices: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
+    grid_ctas: Optional[int] = None,
+    cand_cap: Optional[int] = None,
+    check_period: Optional[int] = None,
+    backend: str = "cake",
+    one_shot: bool = False,
+) -> DSAIndexerDetCandidateRunner:
+    """:func:`prepare_dsa_indexer_det_topk_in_candidates`; ``one_shot``: the eager entry's runner."""
+    if backend != "cake":
+        raise ValueError("DSA indexer top-k supports backend='cake'")
+    _check_cand_form(top_k, ratio, q)
+    if softmax_scale is None:
+        softmax_scale = default_softmax_scale()
+    num_queries, num_keys, num_segments = validate_dsa_indexer_det_inputs(
+        q,
+        k,
+        w,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        q_causal_offsets,
+        top_k,
+        softmax_scale,
+        ratio,
+        max_seqlen_q,
+        max_seqlen_k,
+        None,
+    )
+    device = q.device
+    width = _check_cand_call(k, candidate_blocks, num_queries, device)
+    for name, tensor in (
+        ("workspace_buffer", workspace_buffer),
+        ("indices", indices),
+        ("scores", scores),
+    ):
+        if tensor is not None and (not tensor.is_cuda or tensor.device != device):
+            raise ValueError(f"{name} must be on {device}")
+    _check_output(indices, "indices", (num_queries, int(top_k)), torch.int32, device)
+    _check_output(scores, "scores", (num_queries, int(top_k)), torch.float32, device)
+    arch = arch_for(device)
+    if arch is None:
+        raise ValueError(
+            f"DSA indexer top-k needs compute capability 10.0 / 10.3 / 10.7, got {device}"
+        )
+    abi = registry_abi()
+    device_index = _device_index(device)
+    choice = plan_dsa_indexer_det_topk_in_candidates(
+        num_queries,
+        num_keys,
+        num_segments,
+        top_k=top_k,
+        ratio=ratio,
+        candidate_width=width,
+        device=device,
+        arch=arch,
+        grid_ctas=grid_ctas,
+        cand_cap=cand_cap,
+        check_period=check_period,
+    )
+    # every program of the call must be registered before anything is allocated (fail closed by name)
+    programs = {CAND_ROLE: program_for(arch, choice.cand_key)}
+    programs[FINALIZE_ROLE] = program_for(arch, choice.finalize_key)
+    workspace_bytes = int(choice.workspace_bytes)
+    caller_owned_workspace = workspace_buffer is not None
+    if caller_owned_workspace:
+        flat = workspace_buffer.view(-1).view(torch.uint8)
+        if flat.numel() < workspace_bytes:
+            raise ValueError(
+                f"workspace_buffer needs {workspace_bytes} bytes, got {flat.numel()}"
+            )
+        if flat.data_ptr() % 8:
+            raise ValueError("workspace_buffer must be 8-byte aligned")
+    # a call without queries, keys or candidate slots launches nothing: every row's pool is empty
+    launching = num_queries > 0 and num_keys > 0 and width > 0
+    if not caller_owned_workspace:
+        flat = torch.empty(workspace_bytes, dtype=torch.uint8, device=device)
+    ticket = flat[choice.ticket_at : choice.ticket_at + CAND_TICKET_BYTES]
+    t: dict[str, torch.Tensor] = {
+        "Q": q.view(num_queries * NUM_HEADS, HEAD_DIM),
+        "Kraw": k,
+        "W": w,
+        "cu_seqlens_q": cu_seqlens_q,
+        "cu_seqlens_k": cu_seqlens_k,
+        "q_offsets": q_causal_offsets
+        if q_causal_offsets is not None
+        else _offsets_placeholder(device_index),
+        "CandBlocks": candidate_blocks,
+        "Indices": indices
+        if indices is not None
+        else torch.empty((num_queries, int(top_k)), dtype=torch.int32, device=device),
+        "Scores": scores
+        if scores is not None
+        else torch.empty((num_queries, int(top_k)), dtype=torch.float32, device=device),
+        "Lists": flat[choice.lists_at : choice.lists_at + choice.lists_bytes].view(
+            torch.int32
+        ),
+        "Cand": flat[: choice.cand_bytes].view(torch.int64),
+        "TicketWord": ticket.view(torch.uint32),
+    }
+    scalars: dict[str, Any] = dict(
+        num_segments=num_segments,
+        top_k=int(top_k),
+        has_offsets=int(q_causal_offsets is not None),
+        cand_width=width,
+        cand_cap=int(choice.cand_cap),
+        check_period=int(choice.check_period),
+        grid_ctas=int(choice.grid_ctas),
+        softmax_scale=float(softmax_scale),
+        num_queries=num_queries,
+        num_keys=num_keys,
+        key_bits=int(choice.key_bits),
+    )
+    launches: list[_Launch] = []
+    stages: list[str] = []
+    if launching:
+        values: dict[str, Any] = dict(t)
+        values.update(scalars)
+        launches.append(
+            bind_program(
+                programs[CAND_ROLE],
+                arch,
+                CAND_ROLE,
+                values,
+                (int(choice.grid_ctas), 1, 1),
+            )
+        )
+        stages.append(CAND_ROLE)
+        launches.append(
+            bind_program(
+                programs[FINALIZE_ROLE],
+                arch,
+                FINALIZE_ROLE,
+                values,
+                (max(1, num_queries), 1, 1),
+            )
+        )
+        stages.append(FINALIZE_ROLE)
+        if not caller_owned_workspace:
+            # backend-owned: nothing else writes the ticket word, and every completed launch leaves it 0
+            ticket.zero_()
+    elif num_queries > 0:
+        _padded_outputs(num_queries, int(top_k), device, t["Indices"], t["Scores"])
+    return DSAIndexerDetCandidateRunner(
+        arch=arch,
+        abi=abi,
+        choice=choice,
+        programs=programs,
+        tensors=t,
+        scalars=scalars,
+        launches=tuple(launches),
+        stages=tuple(stages),
+        device_index=device_index,
+        workspace=flat,
+        workspace_bytes=workspace_bytes,
+        _ticket=ticket if launching else None,
+        _ticket_each_run=caller_owned_workspace,
+    )
+
+
+def prepare_dsa_indexer_det_topk_in_candidates(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    *,
+    top_k: int = CB_DEFAULT_TOP_K,
+    softmax_scale: Optional[float] = None,
+    q_causal_offsets: Optional[torch.Tensor] = None,
+    ratio: int = 1,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    workspace_buffer: Optional[torch.Tensor] = None,
+    indices: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
+    grid_ctas: Optional[int] = None,
+    cand_cap: Optional[int] = None,
+    check_period: Optional[int] = None,
+    backend: str = "cake",
+) -> DSAIndexerDetCandidateRunner:
+    """Prepare a candidate-restricted top-k: per query row ``t`` the top ``min(top_k, |P_t|)`` of the pool ``P_t``
+    of visible keys ``j`` with ``j // 8`` in ``candidate_blocks[t]`` (int32 ``[T, W]``, ``W <= 2048``, contiguous;
+    any order, ``-1`` and ids at or past the visible blocks name no key; non-negative ids of a row distinct), ranked
+    as the family ranks keys.  BF16 only, ``ratio == 1``, ``1 <= top_k <= 2048`` (default 512), ``k`` as contiguous
+    ``[Tkv, 128]`` rows.  ``cand_cap`` / ``check_period`` are partition knobs that never change the selected set.
+    Rows are written in ascending id order with a ``-1`` / ``-inf`` tail, and identical inputs give identical
+    bits."""
+    return _prepare_cand_runner(
+        q,
+        k,
+        w,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        candidate_blocks,
+        top_k=top_k,
+        softmax_scale=softmax_scale,
+        q_causal_offsets=q_causal_offsets,
+        ratio=ratio,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        workspace_buffer=workspace_buffer,
+        indices=indices,
+        scores=scores,
+        grid_ctas=grid_ctas,
+        cand_cap=cand_cap,
+        check_period=check_period,
+        backend=backend,
+    )
+
+
+def cake_dsa_indexer_det_train_topk_in_candidates(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    *,
+    top_k: int = CB_DEFAULT_TOP_K,
+    softmax_scale: Optional[float] = None,
+    q_causal_offsets: Optional[torch.Tensor] = None,
+    ratio: int = 1,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    workspace_buffer: Optional[torch.Tensor] = None,
+    indices: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
+    backend: str = "cake",
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Eager entry point of the candidate-restricted top-k: prepare a binding and run it once; returns ``(indices,
+    scores)``.  See :func:`prepare_dsa_indexer_det_topk_in_candidates`.  No host synchronization; the outputs and
+    the workspace are allocated through the caching allocator unless given."""
+    runner = _prepare_cand_runner(
+        q,
+        k,
+        w,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        candidate_blocks,
+        top_k=top_k,
+        softmax_scale=softmax_scale,
+        q_causal_offsets=q_causal_offsets,
+        ratio=ratio,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        workspace_buffer=workspace_buffer,
+        indices=indices,
+        scores=scores,
+        backend=backend,
+        one_shot=True,
+    )
+    return runner.run()
+
+
 __all__ = [
     "ABI_CONTRACT",
     "CB_DEFAULT_TOP_K",
     "CB_SCALARS",
+    "CAND_MAX_TOP_K",
+    "CAND_SCALARS",
+    "CAND_WIDTH_MAX",
     "CB_SLOTS",
     "CONTRACT_ALIASES",
     "CONTRACT_SCALARS",
@@ -1919,6 +2402,7 @@ __all__ = [
     "SUPPORTED_ABIS",
     "SUPPORTED_COMPUTE_CAPABILITIES",
     "ZERO_SIGN_POLICIES",
+    "DSAIndexerDetCandidateRunner",
     "DSAIndexerDetRunner",
     "DispatchPolicy",
     "FORM_DTYPES",
@@ -1930,14 +2414,18 @@ __all__ = [
     "cake_dsa_indexer_det_train_topk_with_candidates",
     "cake_dsa_indexer_det_train_topk_workspace_size",
     "cake_dsa_indexer_det_train_topk_with_candidates_workspace_size",
+    "cake_dsa_indexer_det_train_topk_in_candidates",
+    "cake_dsa_indexer_det_train_topk_in_candidates_workspace_size",
     "effective_offsets",
     "form_for",
     "fp8_programs_for",
     "generated_program_available",
     "plan_dsa_indexer_det_topk",
+    "plan_dsa_indexer_det_topk_in_candidates",
     "plan_dsa_indexer_det_topk_with_candidates",
     "policy_for",
     "prepare_dsa_indexer_det_topk",
+    "prepare_dsa_indexer_det_topk_in_candidates",
     "prepare_dsa_indexer_det_topk_with_candidates",
     "program_for",
     "reads_ticket_word",

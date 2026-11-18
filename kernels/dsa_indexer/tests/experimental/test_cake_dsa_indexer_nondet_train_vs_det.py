@@ -93,11 +93,11 @@ def _det_name(name: str) -> str:
 
 def _shipped_keys(keys: dict) -> dict:
     """The keys of a deterministic registry that this package ships: the scan keys of both forms, the candidate-block
-    scan keys and the plain merge."""
+    scan keys, the candidate-restricted top-k and the plain merge."""
     return {
         key: name
         for key, name in keys.items()
-        if key.startswith(("scan:", "scan_blocks:")) or key == MERGE_KEY
+        if key.startswith(("scan:", "scan_blocks:")) or key in (MERGE_KEY, "cand")
     }
 
 

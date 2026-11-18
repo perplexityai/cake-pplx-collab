@@ -2427,6 +2427,44 @@
     },
     {
       "arch": "sm_100a",
+      "closure_sha256": "557675c92645343e85dac9fb13f1cd0f50889c3078abb2cd18bb2f956033f2f0",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_100a,code=sm_100a",
+      "min_cuda": "12.8",
+      "name": "cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_100a",
+      "nvcc_flags": [],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_100a.so",
+      "sha256": {
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "d4fa4c10bfba9ee06b40a36d453982296826170743326a185ac7549d780d3bf1",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "84870adcddc74d14c1d96a6aba4f0042ca3eb4b3bd8e38ae1fafbc8b7fbd426e"
+      },
+      "sources": [
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_103a",
+      "closure_sha256": "eca2308afc6ea0e45385c1e93d0abf2c15047e88e49e9613d0671b03f8ef8dd8",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_103a,code=sm_103a",
+      "min_cuda": "12.9",
+      "name": "cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_103a",
+      "nvcc_flags": [],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_sm_103a.so",
+      "sha256": {
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu": "d4fa4c10bfba9ee06b40a36d453982296826170743326a185ac7549d780d3bf1",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu": "84870adcddc74d14c1d96a6aba4f0042ca3eb4b3bd8e38ae1fafbc8b7fbd426e"
+      },
+      "sources": [
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_kernel.cu",
+        "csrc/cake_dsa_indexer_nondet_topk/cake_dsa_indexer_nondet_topk_e0ccbd2fdf60bef2e73a_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_100a",
       "closure_sha256": "99471cdfa92f4c84568a6085b5274f2545f141e51720e9c34a70c537148c4e2c",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",

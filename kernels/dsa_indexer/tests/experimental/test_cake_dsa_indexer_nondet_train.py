@@ -332,8 +332,8 @@ def test_registry_records_are_well_formed():
     assert cake_jit.ABI == ABI_CONTRACT
     assert record_zero_sign_policy() in ZERO_SIGN_POLICIES
     # the scan and the plain split merge, positionally as the deterministic package binds them; no ordering pass;
-    # then the additive candidate-block scan (``scan_blocks``)
-    assert cake_jit.STAGES == ["scan", "merge", "scan_blocks"]
+    # then the additive candidate-block scan (``scan_blocks``) and candidate-restricted top-k (``cand``)
+    assert cake_jit.STAGES == ["scan", "merge", "scan_blocks", "cand"]
     assert set(cake_jit.ARG_PLANS) == set(cake_jit.STAGES)
     for role, plan in cake_jit.ARG_PLANS.items():
         for kind, arg in plan:
@@ -397,9 +397,11 @@ def test_registry_records_are_well_formed():
         assert set(cake_jit.POLICY[arch]) == set(POLICY_FIELDS)
         scan_keys = sorted(k for k in keys if k.startswith("scan:"))
         cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
-        assert scan_keys and set(keys) == set(scan_keys) | set(cb_keys) | {MERGE_KEY}, (
-            arch
-        )
+        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a)
+        cand_keys = sorted(k for k in keys if k == "cand")
+        assert scan_keys and set(keys) == set(scan_keys) | set(cb_keys) | set(
+            cand_keys
+        ) | {MERGE_KEY}, arch
         assert keys[MERGE_KEY] == MERGE_PROGRAM, arch
         # every scan key follows the key grammar; an FP8 key (``:fp8`` before ``:lsf``) runs the sampled-fit form, in
         # the plain unit order or as the snake copy of a registered plain FP8 program, and the BF16 record's rules
@@ -1163,14 +1165,21 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
             # every drawing program reads it, no static one does
             assert all(r != s for r, s in rows), arch
     # the scan and the candidate-block scan (``scan_blocks``: the scan's plan with its block arguments before
-    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; no other role does
+    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; the candidate-restricted
+    # top-k (``cand``) takes a self-resetting TicketWord of its own, no K_scale and no zero region; no other role
+    # takes either
     for role in ("scan", "scan_blocks"):
         assert cake_jit.ARG_PLANS[role][-5] == ["buffer", "TicketWord"], role
         assert cake_jit.ARG_PLANS[role][-6] == ["buffer", "K_scale"], role
+    cand_plan = cake_jit.ARG_PLANS.get("cand")
+    if cand_plan is not None:
+        assert cand_plan.count(["buffer", "TicketWord"]) == 1
+        assert ["buffer", "K_scale"] not in cand_plan
+        assert not any(kind == "zero" for kind, _ in cand_plan)
     assert all(
         ["buffer", "TicketWord"] not in plan and ["buffer", "K_scale"] not in plan
         for role, plan in cake_jit.ARG_PLANS.items()
-        if role not in ("scan", "scan_blocks")
+        if role not in ("scan", "scan_blocks", "cand")
     )
 
 

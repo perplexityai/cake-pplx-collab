@@ -334,6 +334,105 @@ def near_cutoff_only(
     return all(abs(vals[j] - cutoff) <= 2 * e for j in got.symmetric_difference(best))
 
 
+def restricted_topk(
+    s_rows: torch.Tensor,
+    ns: Sequence[int],
+    cand: torch.Tensor,
+    top_k: int,
+    block: int = BLOCK,
+) -> torch.Tensor:
+    """The candidate-restricted top-k of rows with scores ``s_rows [R, L]`` that see ``ns`` keys: the top
+    ``min(top_k, |pool|)`` keys ``j < n`` of the blocks of ``cand[r]`` (any order, ``-1`` anywhere; an id ``>= nb``
+    names no key), ascending, ``-1`` tail."""
+    dev = s_rows.device
+    ids = torch.full((len(ns), top_k), -1, dtype=torch.long, device=dev)
+    lanes = torch.arange(block, device=dev)
+    for r, n in enumerate(map(int, ns)):
+        b = cand[r].long()
+        b = b[b >= 0]
+        pos = (b[:, None] * block + lanes).flatten()
+        pos = pos[pos < n]
+        top = rank(s_rows[r, pos], pos)[:top_k].sort().values
+        ids[r, : len(top)] = top
+    return ids
+
+
+def in_candidates(
+    q,
+    k,
+    w,
+    cu_seqlens_q,
+    cu_seqlens_k,
+    candidate_blocks,
+    *,
+    softmax_scale: float,
+    top_k: int,
+    q_causal_offsets=None,
+    rows=None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The oracle of the candidate-restricted top-k over a packed batch: ``(rows [R], indices [R, top_k])``, int64,
+    segment-local, for the global query rows ``rows`` (default: all, in order)."""
+    want = None if rows is None else sorted({int(r) for r in rows})
+    out_rows, out_ids = [], []
+    for q0, Lq, k0, Lk, offset in segments(
+        cu_seqlens_q, cu_seqlens_k, q_causal_offsets
+    ):
+        local = None if want is None else [r - q0 for r in want if q0 <= r < q0 + Lq]
+        for chunk in _chunks(Lq, Lk, local):
+            if not chunk:
+                continue
+            g = torch.tensor([q0 + u for u in chunk], device=q.device)
+            s = scores64(q[g], k[k0 : k0 + Lk], w[g], softmax_scale)
+            out_rows.append(g)
+            out_ids.append(
+                restricted_topk(
+                    s,
+                    [visible(u, offset, Lk) for u in chunk],
+                    candidate_blocks[g],
+                    top_k,
+                )
+            )
+    if not out_rows:
+        empty = torch.empty(0, dtype=torch.long, device=q.device)
+        return empty, empty.view(0, top_k)
+    return torch.cat(out_rows), torch.cat(out_ids)
+
+
+def synthetic_rows(
+    ns: Sequence[int], width: int, kind: str, *, seed: int, device
+) -> torch.Tensor:
+    """``[R, width]`` int32 candidate rows for rows that see ``ns`` keys: ``"subset"`` a random subset of the visible
+    blocks in shuffled order with ``-1`` scattered; ``"past"`` the same plus ids at and past the visible blocks (and
+    past any segment's keys); ``"newest"`` the newest (maybe partial) block and a few older ones; ``"few"`` at most
+    three blocks (fewer than ``top_k`` candidate keys); ``"empty"`` all ``-1``; ``"all"`` every visible block when it
+    fits, else the newest ``width``."""
+    gen = torch.Generator().manual_seed(int(seed))
+    out = torch.full((len(ns), width), -1, dtype=torch.int32)
+    for r, n in enumerate(map(int, ns)):
+        nb = (n + BLOCK - 1) // BLOCK
+        if kind == "empty" or width == 0:
+            continue
+        if kind == "all":
+            ids = torch.arange(max(0, nb - width), nb)
+        else:
+            take = {"subset": width // 2, "past": width // 2, "newest": 4, "few": 3}[
+                kind
+            ]
+            ids = (
+                torch.randperm(max(nb, 1), generator=gen)[: min(take, nb)]
+                if nb
+                else torch.empty(0, dtype=torch.long)
+            )
+            if kind == "newest" and nb:
+                ids = torch.unique(torch.cat([ids[:3], torch.tensor([nb - 1])]))
+            if kind == "past":
+                extra = torch.tensor([nb, nb + 1, nb + 7, 1 << 20, (1 << 31) - 1])
+                ids = torch.cat([ids[: max(0, width - len(extra))], extra])
+        slots = torch.randperm(width, generator=gen)[: len(ids)]
+        out[r, slots] = ids.to(torch.int32)
+    return out.to(device)
+
+
 __all__ = [
     "BLOCK",
     "EXACT_CASES",
@@ -346,13 +445,16 @@ __all__ = [
     "cut_tie",
     "exact_inputs",
     "exact_segment",
+    "in_candidates",
     "mx",
     "near_cutoff_only",
     "rank",
+    "restricted_topk",
     "row_scores64",
     "scores64",
     "segments",
     "source_pass",
+    "synthetic_rows",
     "visible",
     "with_candidates",
 ]

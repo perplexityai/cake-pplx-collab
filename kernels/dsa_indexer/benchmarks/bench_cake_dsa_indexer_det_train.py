@@ -54,6 +54,14 @@ peaked variant):
   ``cake``, the plain call of the same ``top_k``; ``same_bits`` holds their
   ``indices`` / ``scores`` bit for bit, and ``candidate_blocks`` records each
   candidate-block arm's block structure (counts, newest block, containment).
+  ``cake_in`` / ``cake_in_aa`` time ``prepare_dsa_indexer_det_topk_in_candidates``
+  (the top-k restricted to the row's own candidate blocks, computed once by
+  the candidate-block call outside the timed span; its workspace bound from
+  ``cake_dsa_indexer_det_train_topk_in_candidates_workspace_size``) next to
+  ``cake``: with the same ``q`` / ``w`` and ``top_k`` they select the plain
+  call's set (``rows_identical_to_cake``), and ``in_candidates`` records that
+  every id lies in a consumed block.  Their bits are compared with each other
+  only (the restricted scores are computed by another program).
 
 Arms (``--arms``): ``cake`` (this backend, a prepared runner over caller-owned
 outputs and workspace), ``cake_nosample`` (the same runner with
@@ -767,12 +775,16 @@ class CakeArm(Arm):
         fp8_fallback=None,
         fp8_hidden=None,
         with_candidates=False,
+        in_candidates=False,
     ):
         super().__init__(inputs)
         self.backend = cake_backend if backend is None else backend
         # the candidate-block call (this package only): its own workspace bound, plan and [T, 2048] output
         self.with_candidates = bool(with_candidates)
         self.blocks = None
+        # the candidate-restricted call (this package only): the candidate blocks it consumes
+        self.in_candidates = bool(in_candidates)
+        self.source_blocks = None
         self.knobs = dict(knobs or {})
         # forced dispatch: registry fields replaced for this arm (empty: the package's own policy), FP8 kind
         # fallback entries replaced (empty: the package's own) and the FP8 programs of these physical kinds hidden
@@ -793,6 +805,9 @@ class CakeArm(Arm):
         with scope:  # one scope: the workspace bound, the plan record and prepare see the same policy
             if self.with_candidates:
                 self._prepare_with_candidates(inputs)
+                return
+            if self.in_candidates:
+                self._prepare_in_candidates(inputs)
                 return
             self.workspace_bytes = backend_api(
                 self.backend,
@@ -901,6 +916,64 @@ class CakeArm(Arm):
             candidate_blocks=self.blocks,
         )
 
+    def _prepare_in_candidates(self, inputs):
+        dev = inputs.device
+        extra = row_extra(inputs)
+        args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+        # the consumed candidate blocks: the row's own candidate-block call (the source layer), once, outside the
+        # timed span; with the same q / w and top_k the restricted call selects the plain call's set
+        self.source_blocks = (
+            self.backend.cake_dsa_indexer_det_train_topk_with_candidates(
+                *args, **inputs.kwargs(), **extra
+            )[2].clone()
+        )
+        self.workspace_bytes = (
+            self.backend.cake_dsa_indexer_det_train_topk_in_candidates_workspace_size(
+                inputs.num_queries,
+                inputs.num_keys,
+                inputs.num_segments,
+                top_k=inputs.top_k,
+                ratio=inputs.ratio,
+                device=dev,
+            )
+        )
+        self.workspace = torch.empty(
+            self.workspace_bytes, dtype=torch.uint8, device=dev
+        )
+        self.indices = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.int32, device=dev
+        )
+        self.scores = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.float32, device=dev
+        )
+        plan = self.backend.plan_dsa_indexer_det_topk_in_candidates(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            candidate_width=int(self.source_blocks.shape[1]),
+            device=dev,
+        )
+        self.plan = dict(
+            scan_key=plan.cand_key,
+            finalize_key=plan.finalize_key,
+            n_split=1,
+            grid_ctas=int(plan.grid_ctas),
+            cand_cap=int(plan.cand_cap),
+            check_period=int(plan.check_period),
+            key_bits=int(plan.key_bits),
+        )
+        self.runner = self.backend.prepare_dsa_indexer_det_topk_in_candidates(
+            *args,
+            self.source_blocks,
+            **inputs.kwargs(),
+            **extra,
+            workspace_buffer=self.workspace,
+            indices=self.indices,
+            scores=self.scores,
+        )
+
     def __call__(self):
         return self.runner()
 
@@ -930,6 +1003,17 @@ def candidate_block_record(inputs, indices, blocks) -> dict:
         blocks_sha256=hashlib.sha256(
             blocks.contiguous().cpu().numpy().tobytes()
         ).hexdigest(),
+    )
+
+
+def in_candidates_record(inputs, indices, blocks) -> dict:
+    """The containment of one candidate-restricted result in the candidate blocks it consumed: rows with an id outside
+    their blocks (0 when it holds) and the SHA-256 of the consumed blocks."""
+    cb = candidate_block_record(inputs, indices, blocks)
+    return dict(
+        rows=cb["rows"],
+        ids_outside_blocks=cb["ids_outside_blocks"],
+        source_blocks_sha256=cb["blocks_sha256"],
     )
 
 
@@ -995,6 +1079,7 @@ def _cake(
     fp8_fallback=None,
     fp8_hidden=None,
     with_candidates=False,
+    in_candidates=False,
 ):
     def make(inputs):
         return CakeArm(
@@ -1006,6 +1091,7 @@ def _cake(
             fp8_fallback=fp8_fallback,
             fp8_hidden=fp8_hidden,
             with_candidates=with_candidates,
+            in_candidates=in_candidates,
         )
 
     return make
@@ -1065,7 +1151,12 @@ ARMS = {
     # the candidate-block call of the same top_k (``--rows candidates``) and its A/A twin
     "cake_cb": _cake("cake_cb", with_candidates=True),
     "cake_cb_aa": _cake("cake_cb_aa", with_candidates=True),
+    # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``) and its A/A twin
+    "cake_in": _cake("cake_in", in_candidates=True),
+    "cake_in_aa": _cake("cake_in_aa", in_candidates=True),
 }
+# the candidate-restricted arms: compared bitwise with each other only
+IN_ARMS = ("cake_in", "cake_in_aa")
 MAIN_ARMS = ("cake_main", "cake_main_nosample", "cake_main_aa")
 # arms that take the FP8 inputs in ``--form fp8``; every other arm takes the same data dequantized to BF16
 FP8_ARMS = (
@@ -1332,6 +1423,13 @@ def measure_row(name, inputs, arms, args, bf16_inputs=None):
             record["candidate_blocks"] = cb
             if cb["bad_counts"] or cb["missing_newest"] or cb["ids_outside_blocks"]:
                 record["structure_failures"].append(f"candidate_blocks {cb}")
+        if getattr(arm, "source_blocks", None) is not None:
+            rec = in_candidates_record(
+                arm_inputs[arm_name], outputs[arm_name][0], arm.source_blocks
+            )
+            record["in_candidates"] = rec
+            if rec["ids_outside_blocks"]:
+                record["structure_failures"].append(f"in_candidates {rec}")
         if isinstance(arm, CakeArm):
             record["plan"] = arm.plan
             record["knobs"] = arm.knobs
@@ -1393,13 +1491,14 @@ def _same_package(a: str, b: str) -> bool:
 
 
 def _cake_pair(key: str) -> bool:
-    """``a|b`` names two cake arms of one form and one package."""
+    """``a|b`` names two cake arms of one form and one package, both or neither of them candidate-restricted."""
     a, b = key.split("|")
     return (
         a.startswith("cake")
         and b.startswith("cake")
         and arm_form(a) == arm_form(b)
         and _same_package(a, b)
+        and (a in IN_ARMS) == (b in IN_ARMS)
     )
 
 
