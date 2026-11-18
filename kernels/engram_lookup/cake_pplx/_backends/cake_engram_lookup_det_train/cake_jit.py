@@ -68,7 +68,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [],
         "ffi_entry": "run",
-        "kernel_symbol": "PLACEHOLDER",
+        "kernel_symbol": "kernel_cake_engram_lookup_det_train_50c6822299d93af1d6a6",
         "launch": {
             "block": (1, 1, 1),
             "cluster": (1, 1, 1),
@@ -76,7 +76,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "PLACEHOLDER",
+        "library": "cake_engram_lookup_det_train_50c6822299d93af1d6a6",
         "stage": "lookup",
     },
 }
