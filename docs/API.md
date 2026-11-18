@@ -1494,7 +1494,7 @@ No vocab-sized tensor larger than `chunk_size` rows is ever materialized.
 - The logprob backward recomputes the logits per chunk.
 - The family also computes log-probabilities, and the unreduced forward KL from a detached teacher, over a ragged per-token candidate support, with an optional per-row temperature.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.4 for `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The `build.json` minimum CUDA toolkit is 12.9 for `sm_100a`/`sm_103a` and 13.5 for `sm_107a`.
 
 **Inputs.**
 
