@@ -23,9 +23,8 @@ the context-free forward, FP32 weight-gradient accumulation, native MXFP8) and t
 scratch lifetime.  Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case
 (the whole group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
-own under a strict expected-failure marker, from the same group run: the MXFP8 score gradient of the MXFP8 feature
-cases, and the BF16 routed weight gradients of the cases whose experts' rows cross a macrobatch boundary and miss the
-tier.
+own under a strict expected-failure marker, from the same group run: the BF16 routed weight gradients of the cases
+whose experts' rows cross a macrobatch boundary and miss the tier.
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -86,22 +85,18 @@ def test_unequal_sources(record_property, part):
     _record(_run(4, workers.unequal_sources), record_property, part, [name for name, _ in UNEQUAL_GAPS])
 
 
-_MXFP8_FEATURE_GAPS = tuple(
-    (f"{case}:d_scores", gaps.mxfp8_d_scores) for case in ("mxfp8", "mxfp8-fp32-wgrad", "mxfp8-clamped-recompute")
-)
-#: The known-gap outputs of the training features per world: the MXFP8 score gradient, and at EP1 (1031 tokens, 768-row
-#: macrobatches: experts cross a macrobatch boundary) the BF16 routed dW that misses the tier, the down projection
-#: of the clamped cases and all three projections of the plain recompute case.
+#: The known-gap outputs of the training features per world: at EP1 (1031 tokens, 768-row macrobatches: experts cross a
+#: macrobatch boundary) the BF16 routed dW that misses the tier, the down projection of the clamped cases and all three
+#: projections of the plain recompute case.  The MXFP8 score gradient of these cases meets the tier.
 FEATURE_GAPS = {
     1: (
-        *_MXFP8_FEATURE_GAPS,
         ("bf16-clamped:dw_routed_down", gaps.bf16_straddle_dw),
         ("bf16-recompute:dw_routed_gate", gaps.bf16_straddle_dw),
         ("bf16-recompute:dw_routed_up", gaps.bf16_straddle_dw),
         ("bf16-recompute:dw_routed_down", gaps.bf16_straddle_dw),
         ("bf16-clamped-recompute:dw_routed_down", gaps.bf16_straddle_dw),
     ),
-    4: _MXFP8_FEATURE_GAPS,
+    4: (),
 }
 
 
