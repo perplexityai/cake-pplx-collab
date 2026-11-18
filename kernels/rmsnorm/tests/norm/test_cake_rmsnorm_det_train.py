@@ -1054,6 +1054,21 @@ RECUT_FP32_BACKWARD_TWINS: dict[
     },
 }
 
+# The backward windows of the swapped FP32-weight routes (``SWAPPED_FP32_ROUTES`` of the pairs test), where the
+# FP32-weight route runs, under a record of the BF16 route's host plan, the twin of another program than the BF16
+# route's: (arch, hidden, residual) -> {FP32-weight window: the first 8 hex digits of the BF16 program whose record over
+# that window (no route selects it) is the BF16 twin of the FP32-weight window's}.  SM100 H = 5120 runs the twin of
+# c145ef19 above 6144 rows where the BF16 route runs b482c84d, SM103 H = 4096 the twin of 850eec3a over
+# (48640, 51200] where it runs 24643edc, and SM100 H = 6144 with a residual keeps the twin of c1a3be94 above 42496
+# rows where the BF16 route runs 84385468.
+SWAPPED_FP32_BACKWARD_TWINS: dict[
+    tuple[str, int, bool], dict[tuple[int, int | None], str]
+] = {
+    ("sm_100a", 5120, False): {(6144, 50688): "c145ef19", (50688, None): "c145ef19"},
+    ("sm_103a", 4096, False): {(48640, 51200): "850eec3a"},
+    ("sm_100a", 6144, True): {(42496, None): "c1a3be94"},
+}
+
 
 def _twin_records(names, twin: tuple[int, int], program: str) -> list[str]:
     """The records among ``names`` whose window is ``twin``: the program ``program`` (the first 8 hex digits of its
@@ -1076,18 +1091,48 @@ def _twin_records(names, twin: tuple[int, int], program: str) -> list[str]:
     ]
 
 
-def _recut_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ...]:
-    """The BF16 twin modules (the main program and its dw reduce, or a column-task program alone) of the FP32-weight
-    backward program a call of ``rows`` tokens launches in a window of ``RECUT_FP32_BACKWARD_TWINS``; empty elsewhere.
-    The twin records are the BF16 route's where it runs the twin's window, else the registry's records of that
-    window."""
+def _swapped_backward_twin(
+    arch: str, hidden: int, residual: bool, rows: int
+) -> tuple[str, ...]:
+    """The BF16 twin modules of the FP32-weight backward program a call of ``rows`` tokens launches in a window of
+    ``SWAPPED_FP32_BACKWARD_TWINS``: the BF16 record of the window's program over that window, with the role, grid
+    rule and workspace rule of the FP32-weight record, then the dw reduce of the FP32-weight call; empty elsewhere."""
 
-    if residual:
-        return ()
-    arch = loader.arch_for_capability(_capability())
-    for (above, at_most), (twin, program) in RECUT_FP32_BACKWARD_TWINS.get(
-        (arch, hidden), {}
+    for (above, at_most), program in SWAPPED_FP32_BACKWARD_TWINS.get(
+        (arch, hidden, residual), {}
     ).items():
+        if above < rows and (at_most is None or rows <= at_most):
+            selected = loader.selected_modules(
+                arch, hidden, "bwd", residual, rows=rows, w_dtype="f32"
+            )
+            reduces = [n for n in selected if loader.MODULES[n]["role"] == "bwd_reduce"]
+            (main,) = [n for n in selected if n not in reduces]
+            fp32 = loader.MODULES[main]
+            twins = [
+                name
+                for name, record in loader.MODULES.items()
+                if record["library"].startswith(f"cake_rmsnorm_det_train_{program}")
+                and arch in record["arches"]
+                and (record["select_rule"] or {}).get("above") == above
+                and (record["select_rule"] or {}).get("at_most") == at_most
+                and record["role"] == fp32["role"].replace("_w32", "")
+                and record["grid_rule"] == fp32["grid_rule"]
+                and record["workspace_rule"] == fp32["workspace_rule"]
+            ]
+            assert len(twins) == 1, (arch, hidden, residual, program, twins)
+            return (twins[0], *reduces)
+    return ()
+
+
+def _fp32_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ...]:
+    """The BF16 twin modules (the main program and its dw reduce, or a column-task program alone) of the FP32-weight
+    backward program a call of ``rows`` tokens launches in a window of ``RECUT_FP32_BACKWARD_TWINS`` or
+    ``SWAPPED_FP32_BACKWARD_TWINS``; empty elsewhere.  The twin records of a re-cut window are the BF16 route's
+    where it runs the twin's window, else the registry's records of that window."""
+
+    arch = loader.arch_for_capability(_capability())
+    recut = {} if residual else RECUT_FP32_BACKWARD_TWINS.get((arch, hidden), {})
+    for (above, at_most), (twin, program) in recut.items():
         if above < rows <= at_most:
             names = _twin_records(
                 loader.route_modules(arch, hidden, "bwd", False), twin, program
@@ -1111,7 +1156,7 @@ def _recut_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, .
             reduces = [n for n in names if loader.MODULES[n]["role"] == "bwd_reduce"]
             assert len(reduces) == 1, (arch, hidden, twin, names)
             return (mains[0], reduces[0])
-    return ()
+    return _swapped_backward_twin(arch, hidden, residual, rows)
 
 
 def _launching(twin: tuple[str, ...]):
@@ -1153,8 +1198,10 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
     window of the route: the FP32-weight programs are the BF16 programs with the weight loaded
     at FP32, selected over the same windows.  In the backward windows of
     ``RECUT_FP32_BACKWARD_TWINS`` the FP32-weight route keeps a program of the BF16 route's
-    earlier windows, so there its dx and dw are bitwise those of a BF16 call that launches the
-    BF16 twin of that program (and its dw reduce) over the same rows."""
+    earlier windows, and in those of ``SWAPPED_FP32_BACKWARD_TWINS`` it runs the twin of a
+    program the BF16 route does not run there, so there its dx and dw are bitwise those of a
+    BF16 call that launches the BF16 twin of that program (and its dw reduce) over the same
+    rows."""
 
     _skip_unless_fp32_routes(hidden, residual)
     for rows in _window_rows(hidden, residual):
@@ -1175,7 +1222,7 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
             )
         label = f"hidden={hidden} residual={residual} rows={rows}"
         assert torch.equal(dx16, dx32), f"{label}: dx differs"
-        twin = _recut_backward_twin(hidden, residual, rows)
+        twin = _fp32_backward_twin(hidden, residual, rows)
         if twin:
             with pytest.MonkeyPatch.context() as patch:
                 patch.setattr(pkg, "selected_modules", _launching(twin))
