@@ -168,7 +168,7 @@ calls = [
     lambda: pkg.cake_mhc_head_det(bf16(T, 4, H)),
     # the routes: no module outside the exported architectures and hidden sizes
     lambda: cake_jit.route_module("sm_90a", "head_fwd", H, T),
-    lambda: cake_jit.route_module("sm_107a", "head_fwd", 5120, T),
+    lambda: cake_jit.route_module("sm_107a", "head_fwd", 8192, T),
     # the record: built for one hidden size only
     lambda: cake_jit.vectors_per_token(record, 5120),
     # the grid rule: the hidden size is a whole number of vectors
