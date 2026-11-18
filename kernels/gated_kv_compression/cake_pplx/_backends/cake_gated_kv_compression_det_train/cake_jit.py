@@ -20,9 +20,13 @@ are :mod:`.cake_backend`.
 
 Every record of ``MODULES`` is one mechanically generated program: a CUDA
 device translation unit plus a tvm-ffi binding, compiled once per
-architecture.  A record is keyed by its role and carries the host plan: the
-``role`` it serves, the architectures it is delivered for, the ``run`` entry
-and its ``grid_rule``.  The derived leaves (``library``, ``kernel_symbol``,
+architecture.  A record is keyed by its role name (or ``<role>_<arch>`` for a
+role that ships a different program per architecture) and carries the host
+plan: the ``role`` it serves, the architectures it is delivered for, the
+``run`` entry and its ``grid_rule``.  Every role is served on every
+architecture of ``ARCHES`` by exactly one record; :func:`role_record` names
+it, and :func:`run_module` launches the record of the device's
+architecture.  The derived leaves (``library``, ``kernel_symbol``,
 ``launch``, ``arg_plan``) are written by the generator from the rendered
 binding; ``library`` is the program identity
 (``cake_gated_kv_compression_det_train_<20 hex>``), so a kernel swap renames
@@ -44,7 +48,12 @@ The roles, in launch order:
   ``t0 = cu_seqlens[s] + 2 (r - cu_pairs[s])`` and ``t1 = t0 + 1``, and
   ``out[r] = BF16(softmax-weighted sum of C[t0], C[t1])`` in FP32.  A row
   ``r >= cu_pairs[S]`` (a caller ``G`` above the pair count) is stored as
-  zeros and reads nothing.
+  zeros and reads nothing.  The role has two records, one kernel with two
+  schedules, each the faster on its architectures: ``fwd`` on ``sm_100a``
+  and ``sm_103a`` reads ``C`` and ``Z`` in 128-bit lanes (4 FP32 channels,
+  128 lanes a row); ``fwd_sm_107a`` on ``sm_107a`` reads them in 256-bit
+  lanes (8 channels, 64 lanes a row), with the same FP32 operations per
+  element.
 * ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
   the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
   ``v >= cu_pairs[S]``).  Row ``v >= G`` is document ``s = v - G``: when its
@@ -73,7 +82,8 @@ PACKAGE = "cake_pplx._backends.cake_gated_kv_compression_det_train"
 LIBRARY_PREFIX = "cake_gated_kv_compression_det_train"
 MANIFEST = "build.json"
 
-# The roles of the package's programs, in launch order (the pair table first, then the forward or the backward).
+# The roles of the package's programs, in launch order (the pair table first, then the forward or the backward).  Every
+# role is served on every architecture by exactly one record of MODULES (``role_record``).
 ROLES = ("pair_table", "fwd", "bwd")
 GRID_KINDS = ("one_cta", "rows")
 
@@ -81,13 +91,14 @@ GRID_KINDS = ("one_cta", "rows")
 WIDTH = 512
 CZ_WIDTH = 2 * WIDTH
 # Row strides of the strided FP32 operands (C, Z, dC, dZ) are multiples of this many elements (32 bytes), so every
-# row starts on the 32-byte boundary of the backward's 256-bit accesses.  The forward reads C and Z as 128-bit vectors
-# (a multiple of 4 elements would do); the host keeps the backward's rule for both, so an input the forward takes is
-# one the backward takes.
+# row starts on the 32-byte boundary of the 256-bit accesses of the backward and of the sm_107a forward.  The sm_100a /
+# sm_103a forward reads C and Z as 128-bit vectors (a multiple of 4 elements would do there); the host keeps one rule on
+# every architecture, so an input one record takes is one every record takes.
 ROW_STRIDE_MULTIPLE = 8
 # Base alignment of each operand (bytes).  The backward reads C and Z and writes dC and dZ as 256-bit vectors and reads
-# dout as 128-bit vectors; the forward reads C and Z as 128-bit vectors and writes out as 64-bit vectors (16 bytes kept
-# for out, as for dout); the int32 tables are read as words.
+# dout as 128-bit vectors; the forward reads C and Z as 128-bit vectors and writes out as 64-bit vectors on sm_100a /
+# sm_103a, and reads 256-bit and writes 128-bit vectors on sm_107a (16 bytes for out, as for dout); the int32 tables
+# are read as words.
 ALIGNMENT_BYTES: dict[str, int] = {
     "c": 32,
     "z": 32,
@@ -135,7 +146,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "pair_table",
     },
     "fwd": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [
             ["buffer", "c"],
             ["buffer", "z"],
@@ -162,6 +173,36 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "role": "fwd",
+    },
+    "fwd_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_4996bf21a2138f378939",
         "role": "fwd",
     },
     "bwd": {
@@ -223,6 +264,15 @@ def device_arch(device_index: int) -> str:
             f"the delivered architectures are {ARCHES}"
         )
     return arch
+
+
+@functools.cache
+def role_record(role: str, arch: str) -> str:
+    """The record of ``MODULES`` serving ``role`` on ``arch`` (``KeyError`` when none does); cached per pair."""
+    for name, found in MODULES.items():
+        if found["role"] == role and arch in found["arches"]:
+            return name
+    raise KeyError(f"no record of the Cake gated KV compression registry serves role {role!r} on {arch}")
 
 
 def record(name: str) -> dict[str, Any]:
@@ -334,9 +384,10 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
-def run_module(name: str, values: Mapping[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch record ``name`` with its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives
-    ``rows``, on the current torch stream of device ``device_index``.
+def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int) -> None:
+    """Launch the record serving ``role`` on the architecture of device ``device_index`` (:func:`role_record`) with
+    its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives ``rows``, on the current torch
+    stream of that device.
 
     ``values`` maps the kernel parameter names of the record (through its ``logical`` map when the record has one) to
     tensors and Python scalars.  A ``["launch", "enable_pdl"]`` entry of the argument plan (a binding whose PDL launch
@@ -344,6 +395,8 @@ def run_module(name: str, values: Mapping[str, Any], *, rows: int, device_index:
     memory or synchronizes."""
     import torch  # noqa: PLC0415
 
+    arch = device_arch(device_index)
+    name = role_record(role, arch)
     found = record(name)
     logical = found.get("logical", {})
     grid = launch_grid(name, rows)
@@ -359,7 +412,7 @@ def run_module(name: str, values: Mapping[str, Any], *, rows: int, device_index:
             if want not in values:
                 raise ValueError(f"record {name} needs {want!r} (kernel parameter {key!r})")
             args.append(values[want])
-    run = _entry(name, device_arch(device_index))
+    run = _entry(name, arch)
     stream = torch.cuda.current_stream(device_index).cuda_stream
     with _tvm_ffi().use_raw_stream(_tvm_device(device_index), stream):
         run(*args)
@@ -389,6 +442,7 @@ __all__ = [
     "load",
     "parameters",
     "record",
+    "role_record",
     "rows_per_cta",
     "run_module",
     "specs_for_arch",

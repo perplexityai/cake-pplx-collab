@@ -462,14 +462,14 @@ def test_a_non_tensor_operand_is_a_type_error() -> None:
 
 @pytest.fixture
 def launches(monkeypatch):
-    """The records launched while the test runs (a spy on the registry's launch)."""
+    """The roles launched while the test runs (a spy on the registry's launch)."""
     jit = _jit()
     found = []
     original = jit.run_module
 
-    def spy(name, values, *, rows, device_index):
-        found.append(name)
-        return original(name, values, rows=rows, device_index=device_index)
+    def spy(role, values, *, rows, device_index):
+        found.append(role)
+        return original(role, values, rows=rows, device_index=device_index)
 
     monkeypatch.setattr(jit, "run_module", spy)
     return found
@@ -700,7 +700,8 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: ``build.json`` holds an ``sm_107a``
-    library for every record (nothing is built or launched here)."""
+    library for every record that serves it, one per role, the forward's being ``fwd_sm_107a`` (nothing is built or
+    launched here)."""
     jit = _jit()
     path = Path(jit.__file__).parent / "build.json"
     if not path.is_file():
@@ -714,8 +715,9 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         jit.device_arch.cache_clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
     assert sorted(entry["name"] for entry in entries) == sorted(
-        f"{rec['library']}_sm_107a" for rec in jit.MODULES.values()
+        f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in jit.ROLES
     )
+    assert jit.role_record("fwd", "sm_107a") == "fwd_sm_107a"
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 

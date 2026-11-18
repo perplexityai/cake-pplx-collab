@@ -17,9 +17,11 @@ Checks, launches and autograd nodes of the Cake ratio-2 gated KV compression
 (width 512; SM100 / SM103 / SM107).
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
-one record per program (``pair_table``, ``fwd``, ``bwd``; the ``build.json``
-entries are ``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids
-and :func:`.cake_jit.run_module` the launch.  :mod:`.cake_build` serves a
+one record per program (``pair_table``, ``fwd`` on SM100 / SM103,
+``fwd_sm_107a`` on SM107, ``bwd``; the ``build.json`` entries are
+``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
+:func:`.cake_jit.run_module` the launch of a role: the record serving it on
+the device's architecture (:func:`.cake_jit.role_record`).  :mod:`.cake_build` serves a
 library from a prebuilt ``aot/`` file when a builder compiled it and otherwise
 through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources
 and flags of ``build.json``.
@@ -310,8 +312,9 @@ def launch_fwd(
     c_ld: int,
     z_ld: int,
 ) -> None:
-    """Launch ``fwd``: ``out [G, 512]`` (BF16) from the FP32 ``c`` and ``z`` rows (row strides ``c_ld`` and ``z_ld``
-    elements), ``cu_seqlens`` and its pair table ``cu_pairs`` (``S >= 1``, ``G >= 1``)."""
+    """Launch the ``fwd`` role (record ``fwd`` on SM100 / SM103, ``fwd_sm_107a`` on SM107): ``out [G, 512]`` (BF16)
+    from the FP32 ``c`` and ``z`` rows (row strides ``c_ld`` and ``z_ld`` elements), ``cu_seqlens`` and its pair table
+    ``cu_pairs`` (``S >= 1``, ``G >= 1``)."""
     S, G = int(cu_seqlens.numel()) - 1, int(out.shape[0])
     values = {
         "c": c,

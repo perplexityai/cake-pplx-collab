@@ -81,6 +81,13 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 | `fwd` | per output row `r < G`: the document by a binary search of `cu_pairs`, the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros | rows `G` |
 | `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
 
+Each role has one registry record per architecture.  The forward has two, one kernel in two
+schedules, each the faster on its architectures: record `fwd` on SM100 / SM103 reads `C` and
+`Z` in 128-bit lanes (4 FP32 channels, 128 lanes a row, 2 rows per 256-thread CTA); record
+`fwd_sm_107a` on SM107 reads them in 256-bit lanes (8 channels, 64 lanes a row, 4 rows per
+CTA).  `pair_table` and `bwd` (256-bit lanes) are one record each on all three.  A launch
+picks the record of the operands' device.
+
 A forward call launches `pair_table` then `fwd`; a backward call launches `pair_table` (not
 when `pair_offsets` is given, as the autograd backward does) then `bwd`.  Every launch is a
 plain stream-ordered launch on the current torch stream of the operands' device; nothing
@@ -120,5 +127,5 @@ context parallelism the caller moves a boundary token so that every rank holds w
 ## Limitations
 
 - Ratio 2 and width 512 only.
-- `G <= 4194303` (`G * 512 < 2^31`), `S + 1` and `T` within int32.
+- `G <= 2^26` (67108864), `S <= 2^24` (16777216), `T` within int32.
 - No build for any architecture other than SM100, SM103 and SM107.

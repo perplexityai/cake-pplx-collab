@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "1fc275fb122a615e693bb2bba0e0442b16c309d7",
+    "cake_revision": "724eb938954f4ac25340c5050c5928f483985ed1",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-18T00:56:07Z"
+    "rendered_at": "2026-11-18T05:54:50Z"
   },
   "libraries": [
     {
@@ -177,25 +177,25 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "efa706939994ba790f46cf77fc19c850d0a6edfefaa57d641a6fe0a6032f8736",
+      "closure_sha256": "157d14d482a4babaac9643abfdf1b869aef0c70dda6d6e87376674f32702518c",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
-      "name": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_sm_107a",
+      "name": "cake_gated_kv_compression_det_train_4996bf21a2138f378939_sm_107a",
       "nvcc_flags": [
         "--prec-div=true",
         "--prec-sqrt=true",
         "--ftz=false"
       ],
       "nvcc_flags_if": [],
-      "path": "aot/cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_sm_107a.so",
+      "path": "aot/cake_gated_kv_compression_det_train_4996bf21a2138f378939_sm_107a.so",
       "sha256": {
-        "csrc/cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_binding.cu": "7f4830a5f350ee349bbd883c0a6a54e5ad94a421304d456fc003323a63415f89",
-        "csrc/cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_kernel.cu": "b02a804afe8c85f40d09860590fa4f50e21db19d8935f6f32e28a77cdb1764be"
+        "csrc/cake_gated_kv_compression_det_train_4996bf21a2138f378939_binding.cu": "6f87c19ecdb0455bd5cfe00eb549fc6d44fc731b273b1de416f48f1cbd2ddf67",
+        "csrc/cake_gated_kv_compression_det_train_4996bf21a2138f378939_kernel.cu": "ac140a40a3d2bffe911b42454eb9ebcef7a6f71bdd27579ec24fa397c19a6865"
       },
       "sources": [
-        "csrc/cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_kernel.cu",
-        "csrc/cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9_binding.cu"
+        "csrc/cake_gated_kv_compression_det_train_4996bf21a2138f378939_kernel.cu",
+        "csrc/cake_gated_kv_compression_det_train_4996bf21a2138f378939_binding.cu"
       ]
     },
     {

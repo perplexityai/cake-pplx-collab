@@ -996,6 +996,7 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - **Backward:** with `g = float32(dout[r, d])`, `dC[t0, d] = p0 * g`, `dC[t1, d] = p1 * g`, `dZ[t0, d] = p0 * p1 * (C[t0, d] - C[t1, d]) * g` and `dZ[t1, d] = -dZ[t0, d]`. The BF16 cast counts as the identity. The pairwise form of `dZ` stays accurate when the two values of a pair are close.
 - The last token of an odd-length document belongs to no pair. It changes no output, and its `dC` and `dZ` rows are exactly zero.
 - Three kernels run on the current stream: a pair table (the int32 `[S + 1]` exclusive prefix of the pair counts), the forward (one row per pair) and the backward (every token row written once). The kernels compute in FP32 only, with IEEE round to nearest and no FP64. Gate gaps of 100 and more and exact ties give finite outputs.
+- The forward ships one schedule per architecture, the faster one on each: 128-bit loads of `C` and `Z` on `sm_100a` and `sm_103a`, 256-bit loads on `sm_107a`. The call picks the build of the operands' device. The backward uses 256-bit loads on all three.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` (12.9 for the backward library, which uses 256-bit loads and stores), 12.9 for `sm_103a` and 13.5 for `sm_107a`. Not yet validated on GB200, GB300 or VR200; results pending.
 

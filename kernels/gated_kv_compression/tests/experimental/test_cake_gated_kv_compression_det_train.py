@@ -18,12 +18,13 @@ Backend suite of the Cake deterministic (``det``) ratio-2 gated KV compression p
 ``cake_pplx.cake_gated_kv_compression_det_train``): width 512, packed documents bounded by a device ``cu_seqlens``, on
 SM100, SM103 and SM107.
 
-Without a device: the registry (the pair-table, forward and backward records, each delivered for the three
-architectures and no other, the launch facts, the kernel parameters each record takes), the launch grids (every row
-covered, the pair table on one CTA), the launchers' keywords and the kernel arguments they pass, the exact overlap
-rule of two row-strided views (the two column halves of one buffer share no element), the memory report, the build
-manifest (every record's library, the recorded source digests), the standalone loader, the prebuilt libraries served
-first, and no environment read outside the JIT shim.
+Without a device: the registry (the pair-table, forward and backward roles, each served on each of the three
+architectures by exactly one record and delivered for no other: the forward by ``fwd`` on sm_100a / sm_103a and
+``fwd_sm_107a`` on sm_107a; the launch facts, the kernel parameters each record takes), the record each role launches on
+each architecture, the launch grids (every row covered, the pair table on one CTA), the launchers' keywords and the
+kernel arguments they pass, the exact overlap rule of two row-strided views (the two column halves of one buffer share
+no element), the memory report, the build manifest (every record's library, the recorded source digests), the standalone
+loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107: the pair table equal to the exclusive prefix of the pair counts (an integer table: exactly);
 each kernel judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error against an FP64 oracle
@@ -42,6 +43,7 @@ The suite names its package once, through the shared alias helper, and imports n
 from __future__ import annotations
 
 import ast
+import contextlib
 import hashlib
 import inspect
 import json
@@ -49,6 +51,7 @@ import random
 import re
 import subprocess
 import sys
+import types
 from pathlib import Path
 
 import pytest
@@ -82,7 +85,15 @@ PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 ROLES = ("pair_table", "fwd", "bwd")
-# The kernel parameters of each record (the argument plan without the grid), in any order: the host passes them by name.
+# Record -> (its role, the architectures it serves, the lanes of a 512-wide row): the forward ships 128-bit lanes
+# (4 FP32 channels) on sm_100a / sm_103a and 256-bit lanes (8 channels) on sm_107a.
+RECORDS = {
+    "pair_table": ("pair_table", ARCHES, None),
+    "fwd": ("fwd", ("sm_100a", "sm_103a"), 128),
+    "fwd_sm_107a": ("fwd", ("sm_107a",), 64),
+    "bwd": ("bwd", ARCHES, 64),
+}
+# The kernel parameters of each role (the argument plan without the grid), in any order: the host passes them by name.
 PARAMETERS = {
     "pair_table": {"cu_seqlens", "cu_pairs", "num_docs"},
     "fwd": {"c", "z", "cu_seqlens", "cu_pairs", "out", "num_docs", "G", "c_ld", "z_ld"},
@@ -185,12 +196,15 @@ def test_registry_records_are_well_formed() -> None:
     assert tuple(cake_jit.ARCHES) == ARCHES
     assert cake_jit.WIDTH == WIDTH and cake_jit.CZ_WIDTH == 2 * WIDTH
     assert cake_jit.LIBRARY_PREFIX == "cake_gated_kv_compression_det_train"
-    assert set(cake_jit.MODULES) == set(ROLES)
+    assert list(cake_jit.MODULES) == list(RECORDS)
     rendered = (PACKAGE_DIR / "build.json").is_file()
     libraries = set()
     for name, rec in cake_jit.MODULES.items():
-        assert rec["role"] == name, name
-        assert tuple(rec["arches"]) == ARCHES, (name, rec["arches"])
+        role, arches, lanes = RECORDS[name]
+        assert rec["role"] == role, name
+        assert tuple(rec["arches"]) == arches, (name, rec["arches"])
+        if lanes is not None:
+            assert rec["grid_rule"]["lanes_per_row"] == lanes, name
         assert rec["ffi_entry"] == "run", name
         assert rec["grid_rule"]["kind"] in cake_jit.GRID_KINDS, name
         launch = rec["launch"]
@@ -202,12 +216,34 @@ def test_registry_records_are_well_formed() -> None:
             assert rec["kernel_symbol"] == "kernel_" + rec["library"], name
         libraries.add(rec["library"])
     assert cake_jit.MODULES["pair_table"]["grid_rule"]["kind"] == "one_cta"
-    assert cake_jit.MODULES["fwd"]["grid_rule"]["kind"] == cake_jit.MODULES["bwd"]["grid_rule"]["kind"] == "rows"
+    for name in ("fwd", "fwd_sm_107a", "bwd"):
+        assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "rows", name
     if rendered:
         assert len(libraries) == len(cake_jit.MODULES)
 
 
-@pytest.mark.parametrize("name", ROLES)
+def test_each_role_has_one_record_per_architecture() -> None:
+    """Every role is served on every architecture by exactly one record: the forward by ``fwd`` (128-bit lanes) on
+    sm_100a and sm_103a and by ``fwd_sm_107a`` (256-bit lanes) on sm_107a; no record serves another architecture."""
+    for role in ROLES:
+        for arch in ARCHES:
+            serving = [name for name, rec in cake_jit.MODULES.items() if rec["role"] == role and arch in rec["arches"]]
+            assert serving == [cake_jit.role_record(role, arch)], (role, arch, serving)
+    assert [cake_jit.role_record("fwd", arch) for arch in ARCHES] == ["fwd", "fwd", "fwd_sm_107a"]
+    assert {cake_jit.role_record(role, arch) for role in ("pair_table", "bwd") for arch in ARCHES} == {
+        "pair_table",
+        "bwd",
+    }
+    for arch in ("sm_110a", "sm_90a", "sm_120a"):
+        with pytest.raises(KeyError):
+            cake_jit.role_record("fwd", arch)
+    with pytest.raises(KeyError):
+        cake_jit.role_record("pool", "sm_100a")
+    # 256 threads a CTA: two forward rows on sm_100a / sm_103a, four on sm_107a
+    assert cake_jit.rows_per_cta("fwd") * 2 == cake_jit.rows_per_cta("fwd_sm_107a")
+
+
+@pytest.mark.parametrize("name", list(RECORDS))
 def test_each_record_takes_its_kernel_parameters(name) -> None:
     """The argument plan of each record names the kernel parameters of its role (the host passes them by name), then
     the grid."""
@@ -216,14 +252,14 @@ def test_each_record_takes_its_kernel_parameters(name) -> None:
         pytest.skip("the record's argument plan is not rendered yet")
     found = set(cake_jit.parameters(name)) - {"enable_pdl"}
     logical = cake_jit.MODULES[name].get("logical", {})
-    assert {logical.get(key, key) for key in found} == PARAMETERS[name]
+    assert {logical.get(key, key) for key in found} == PARAMETERS[RECORDS[name][0]]
 
 
-def test_no_record_is_delivered_outside_the_architectures() -> None:
+def test_no_record_is_delivered_outside_its_architectures() -> None:
     for name, rec in cake_jit.MODULES.items():
-        for arch in ARCHES:
+        for arch in rec["arches"]:
             assert cake_jit.library_name(name, arch) == f"{rec['library']}_{arch}"
-        for arch in ("sm_110a", "sm_90a", "sm_120a"):
+        for arch in ("sm_110a", "sm_90a", "sm_120a", *(arch for arch in ARCHES if arch not in rec["arches"])):
             with pytest.raises(RuntimeError):
                 cake_jit.library_name(name, arch)
 
@@ -234,7 +270,7 @@ def test_grids_cover_every_row() -> None:
     assert cake_jit.launch_grid("pair_table", 1) == (1, 1, 1)
     assert cake_jit.launch_grid("pair_table", 10**6) == (1, 1, 1)
     rng = random.Random(7091)
-    for name in ("fwd", "bwd"):
+    for name in ("fwd", "fwd_sm_107a", "bwd"):
         per = cake_jit.rows_per_cta(name)
         assert per >= 1
         for rows in [1, 2, per - 1, per, per + 1, *[rng.randint(1, 1 << 22) for _ in range(200)]]:
@@ -284,6 +320,48 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     assert fwd["out"] is out and bwd["dout"] is out and bwd["dc"] is dc and bwd["dz"] is dz
 
 
+def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -> None:
+    """``run_module`` takes a role and launches the record that serves it on the device's architecture, on that
+    record's grid: the forward of ``G`` rows runs ``fwd`` (two rows a CTA) on sm_100a / sm_103a and ``fwd_sm_107a``
+    (four rows a CTA) on sm_107a; the pair table and the backward run their one record everywhere (no device: the
+    architecture is given and the binding entry is a recorder)."""
+    if not all(rec["arg_plan"] for rec in cake_jit.MODULES.values()):
+        pytest.skip("the records' argument plans are not rendered yet")
+    launched = []
+
+    def entry(name, arch):
+        return lambda *args: launched.append((name, arch, len(args), tuple(args[-3:])))
+
+    monkeypatch.setattr(cake_jit, "_entry", entry)
+    tvm_ffi = types.SimpleNamespace(use_raw_stream=lambda device, stream: contextlib.nullcontext())
+    monkeypatch.setattr(cake_jit, "_tvm_ffi", lambda: tvm_ffi)
+    monkeypatch.setattr(cake_jit, "_tvm_device", lambda index: None)
+    monkeypatch.setattr(torch.cuda, "current_stream", lambda index=None: types.SimpleNamespace(cuda_stream=0))
+    S, G, T = 5, 9, 23
+    cu = torch.zeros(S + 1, dtype=torch.int32)
+    table = torch.zeros(S + 1, dtype=torch.int32)
+    cz = torch.zeros(T, 2 * WIDTH)
+    c, z = cz[:, :WIDTH], cz[:, WIDTH:]
+    out = torch.zeros(G, WIDTH, dtype=torch.bfloat16)
+    dc, dz = torch.zeros(T, WIDTH), torch.zeros(T, WIDTH)
+    for arch in ARCHES:
+        monkeypatch.setattr(cake_jit, "device_arch", lambda index, arch=arch: arch)
+        cake_backend.launch_pair_table(cu_seqlens=cu, cu_pairs=table)
+        cake_backend.launch_fwd(c=c, z=z, cu_seqlens=cu, cu_pairs=table, out=out, c_ld=1024, z_ld=1024)
+        cake_backend.launch_bwd(
+            dout=out, c=c, z=z, cu_seqlens=cu, cu_pairs=table, dc=dc, dz=dz, c_ld=1024, z_ld=1024, dc_ld=512, dz_ld=512
+        )
+    expected = []
+    for arch in ARCHES:
+        forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
+        for name, rows in (("pair_table", 1), (forward, G), ("bwd", G + S)):
+            grid = cake_jit.launch_grid(name, rows)
+            expected.append((name, arch, len(cake_jit.MODULES[name]["arg_plan"]), grid))
+    assert launched == expected
+    # nine forward rows: five CTAs of two rows on sm_100a / sm_103a, three CTAs of four rows on sm_107a
+    assert [grid for name, _, _, grid in launched if name.startswith("fwd")] == [(5, 1, 1), (5, 1, 1), (3, 1, 1)]
+
+
 def test_the_overlap_rule_is_exact_for_column_halves() -> None:
     """The two column halves of one ``[T, 1024]`` buffer share no element; a view overlaps itself, a shifted window,
     a row of the other half's buffer region, and a dense alias; separate allocations never overlap."""
@@ -322,7 +400,10 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     entries = {entry["name"]: entry for entry in manifest["libraries"]}
     wanted = {f"{rec['library']}_{arch}" for rec in cake_jit.MODULES.values() for arch in rec["arches"]}
     assert set(entries) == wanted
-    assert len(entries) == len(cake_jit.MODULES) * len(ARCHES)
+    assert len(entries) == sum(len(rec["arches"]) for rec in cake_jit.MODULES.values())
+    assert sorted(entry["arch"] for entry in entries.values()) == sorted(
+        arch for _, arches, _ in RECORDS.values() for arch in arches
+    )
     for name, entry in entries.items():
         assert entry["arch"] in ARCHES, name
         assert name.endswith("_" + entry["arch"]), name
@@ -466,10 +547,12 @@ def test_the_host_never_reads_device_values() -> None:
 
 
 def test_every_record_loads(device) -> None:
+    """Every record serving the device's architecture loads: one per role."""
     arch = cake_jit.device_arch(device.index)
     assert arch in ARCHES
-    for name, rec in cake_jit.MODULES.items():
-        assert callable(getattr(cake_jit.load(name, arch), rec["ffi_entry"])), name
+    names = [cake_jit.role_record(role, arch) for role in ROLES]
+    for name in names:
+        assert callable(getattr(cake_jit.load(name, arch), cake_jit.MODULES[name]["ffi_entry"])), name
 
 
 @pytest.mark.parametrize("pack", TABLE_PACKS, ids=[p.id for p in TABLE_PACKS])
@@ -671,20 +754,30 @@ def test_the_tail_tokens_change_no_output(pack, device) -> None:
 
 
 def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
-    """The forward launches ``pair_table`` then ``fwd``; the backward ``pair_table`` then ``bwd``, or ``bwd`` alone
-    with ``pair_offsets``; the autograd entries launch no pair table in the backward.  No call writes its inputs."""
+    """The forward launches ``pair_table`` then ``fwd`` (the record of the device's architecture: ``fwd`` on sm_100a /
+    sm_103a, ``fwd_sm_107a`` on sm_107a); the backward ``pair_table`` then ``bwd``, or ``bwd`` alone with
+    ``pair_offsets``; the autograd entries launch no pair table in the backward.  No call writes its inputs."""
     launched = []
+    entries = []
     original = cake_jit.run_module
+    entry_of = cake_jit._entry
 
-    def spy(name, values, *, rows, device_index):
-        launched.append(name)
-        return original(name, values, rows=rows, device_index=device_index)
+    def spy(role, values, *, rows, device_index):
+        launched.append(role)
+        return original(role, values, rows=rows, device_index=device_index)
+
+    def entry_spy(name, arch):
+        entries.append((name, arch))
+        return entry_of(name, arch)
 
     monkeypatch.setattr(cake_jit, "run_module", spy)
+    monkeypatch.setattr(cake_jit, "_entry", entry_spy)
+    arch = cake_jit.device_arch(device.index)
     x = make_inputs(MIXED, seed=37, device=device, layout="halves")
     before = [t.clone() for t in (x.cz, x.cu, x.dout)]
     pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
     assert launched == ["pair_table", "fwd"]
+    assert entries == [("pair_table", arch), ("fwd_sm_107a" if arch == "sm_107a" else "fwd", arch)]
     launched.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu)
     assert launched == ["pair_table", "bwd"]
