@@ -136,6 +136,7 @@ from .cake_backend import (
     _chunk_view_layout,
     _check_temperature_arms,
     _check_temperature_operands,
+    _chunk_rows,
     _deferred_operands,
     _device_constants,
     _dw_stream,
@@ -1961,10 +1962,10 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         )
     elif stage == "slab_sum":
         values.update(
-            dx=t["dx_acc"][row0:stop],
+            dx=_chunk_rows(t["dx_acc"], row0, stop),
             ws=t["dx_ws"] if _slab_count(plan, index) else t["f32_dummy"],
-            labels=t["labels"][row0:stop],
-            rlab=t["rlab"][row0:stop],
+            labels=_chunk_rows(t["labels"], row0, stop),
+            rlab=_chunk_rows(t["rlab"], row0, stop),
             W=t["W"],
         )
     elif base == "gemm_dw_acc":
@@ -2083,10 +2084,10 @@ def _slot_values_temperature(
         )
     elif stage == "slab_sum":
         values.update(
-            dx=t["dx_acc"][row0:stop],
+            dx=_chunk_rows(t["dx_acc"], row0, stop),
             ws=t["dx_ws"] if _slab_count(plan, index) else t["f32_dummy"],
-            labels=t["labels"][row0:stop],
-            rlab=t["rlab"][row0:stop],
+            labels=_chunk_rows(t["labels"], row0, stop),
+            rlab=_chunk_rows(t["rlab"], row0, stop),
             W=t["W"],
         )
     elif base == "gemm_dw_acc":

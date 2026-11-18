@@ -1591,6 +1591,56 @@ def test_default_module_template_only_runner_takes_the_cake_backend():
             )
 
 
+def test_slab_sum_slots_form_only_the_tensors(monkeypatch):
+    """The per-call slots of a slab sum (``_slot_values``) bind what ``stage_values`` binds -- one K slice and two (the
+    call's slab), one chunk and three -- without forming the stage's scalars (``_dx_slab_sum_operands`` is not
+    called); the rows of a chunk that are all of ``dX_acc`` / ``labels`` / ``rlab`` are those tensors themselves, and
+    the counted form also binds the chunk's count cell."""
+    inp = _host_inputs(37)
+    stage = cake_backend.DX_SLAB_SUM_STAGE
+    counted_stage = cake_backend.DX_SLAB_SUM_DCNT_STAGE
+    names = cake_backend.STAGE_TENSORS[stage]
+    rows_of = (("dx", "dx_acc"), ("labels", "labels"), ("rlab", "rlab"))
+    same = cake_backend._same_view
+    operands = cake_backend._dx_slab_sum_operands
+
+    def unformed(*args, **kwargs):
+        raise AssertionError("a slab sum's slots formed its operands")
+
+    for sliced in (False, True):
+        for chunk in (64, 16):
+            with _forced_dx_slices() if sliced else contextlib.nullcontext():
+                runner = cake_backend.prepare_lm_head_loss(
+                    inp.X,
+                    inp.W,
+                    inp.labels,
+                    loss_div=1.0,
+                    chunk_size=chunk,
+                    backend="reference",
+                )
+            plan, t = runner.plan, runner.tensors
+            assert plan.num_chunks == (1 if chunk == 64 else 3)
+            assert plan.dx_slices_of(0) == (2 if sliced else 1)
+            whole = plan.num_chunks == 1
+            for i in range(plan.num_chunks):
+                full = cake_backend.stage_values(stage, t, plan, i)
+                monkeypatch.setattr(cake_backend, "_dx_slab_sum_operands", unformed)
+                v = cake_backend._slot_values(stage, t, plan, i)
+                monkeypatch.setattr(cake_backend, "_dx_slab_sum_operands", operands)
+                for name in names:
+                    assert same(v[name], full[name]), (sliced, chunk, i, name)
+                assert v["ws"] is (t["dx_slab"] if sliced else t["f32_dummy"])
+                for name, rows in rows_of:
+                    assert (v[name] is t[rows]) is whole, (sliced, chunk, i, name)
+    dcnt = torch.zeros((plan.num_chunks,), dtype=torch.int32, device=t["W"].device)
+    counted = dict(t, dcnt=dcnt)
+    values: dict = {}
+    cake_backend._dx_slab_sum_slots(counted_stage, counted, plan, 1, values)
+    assert set(values) == set(cake_backend.STAGE_TENSORS[counted_stage])
+    assert values["CNT"].data_ptr() == counted["dcnt"][1:].data_ptr()
+    assert tuple(values["CNT"].shape) == (1,)
+
+
 def test_reference_slab_sum_folds_the_label_residual():
     """The reference slab sums' fold (``lr = 1``): after the slabs' sum (or, with ``n_slabs`` 0, the rows as they are),
     each row whose label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a

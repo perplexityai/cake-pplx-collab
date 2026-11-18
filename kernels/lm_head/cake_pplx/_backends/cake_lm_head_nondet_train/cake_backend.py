@@ -6750,6 +6750,12 @@ def _dx_slots(
         values.update(STATS_OUT=t["stats"], WS=t["f32_dummy"])
 
 
+def _chunk_rows(x: torch.Tensor, row0: int, stop: int) -> torch.Tensor:
+    """``x[row0:stop]`` as a per-call slot binds it: ``x`` itself when the rows are all of it (a one-chunk plan's),
+    which has the address, shape, strides, dtype and device of that view (:func:`_same_view`), so no view is formed."""
+    return x if row0 == 0 and stop == x.shape[0] else x[row0:stop]
+
+
 def _dx_slab_sum_operands(t: dict[str, Any], plan: Plan, index: int) -> dict[str, Any]:
     """:func:`dx_slab_sum_operands` of chunk ``index``: its rows of ``dX_acc`` and the call's slab (:func:`_dx_slab`) at
     the ``m_tiles`` / ``ldc`` of the chunk's dX launch (one slice: no slab, the FP32 dummy stands in), the fold's
@@ -6806,9 +6812,30 @@ def _dx_slab_sum_slots(
 ) -> None:
     """:func:`_slot_values` of the slab sum ``stage`` of chunk ``index`` (the per-call tensor views of a remembered
     launch: ``dx``, ``ws``, the fold's ``labels`` / ``rlab`` / ``W`` and, counted, ``CNT``), added to ``values`` in
-    place."""
-    operands = _dx_slab_sum_operands(t, plan, index)
-    values.update({name: operands[name] for name in STAGE_TENSORS[stage]})
+    place: the tensors of :func:`_dx_slab_sum_operands`, without its scalars and checks (the binding fixed them when
+    it was prepared; the slab is the call's, at the chunk's ``m_tiles`` / ``ldc``), the rows of a chunk that covers a
+    whole tensor being that tensor (:func:`_chunk_rows`)."""
+    row0, rows_c = plan.chunks[index]
+    stop = row0 + rows_c
+    k = plan.dx_slices_of(index)
+    dx_acc = t["dx_acc"]
+    if k > 1:
+        g = plan.geometry
+        need = dx_slab_bytes(
+            k, g.row_tiles(rows_c, g.dx_cluster_ctas), plan.problem.hidden
+        )
+        ws = _dx_slab(t, plan, need, dx_acc.device)
+    else:
+        ws = t["f32_dummy"]
+    values.update(
+        dx=_chunk_rows(dx_acc, row0, stop),
+        ws=ws,
+        labels=_chunk_rows(t["labels"], row0, stop),
+        rlab=_chunk_rows(t["rlab"], row0, stop),
+        W=t["W"],
+    )
+    if "CNT" in STAGE_TENSORS[stage]:
+        values.update(CNT=t["dcnt"][index : index + 1])
 
 
 def recompute_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:

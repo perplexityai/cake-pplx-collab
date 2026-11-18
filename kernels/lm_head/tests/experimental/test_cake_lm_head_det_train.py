@@ -6954,6 +6954,41 @@ def test_default_module_template_only_runner_takes_the_cake_backend():
             )
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_slab_sum_slots_of_a_whole_tensor_chunk_form_no_view(module):
+    """The per-call slots of a slab sum (``_slot_values``, and the opt-in module's temperature form) bind what
+    ``stage_values`` binds -- the same address, shape, strides, dtype and device -- and, where the chunk's rows are all
+    of ``dX_acc`` / ``labels`` / ``rlab`` (a one-chunk plan), those tensors themselves rather than a view of them."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    slot_forms = [mod._slot_values]
+    if mod is opt_in:
+        slot_forms.append(mod._slot_values_temperature)
+    rows_of = (("dx", "dx_acc"), ("labels", "labels"), ("rlab", "rlab"))
+    same = cake_backend._same_view
+    inp = _host_inputs(37)
+    for chunk in (64, 16):
+        runner = mod.prepare_lm_head_det_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            objective="ce",
+            loss_div=inp.loss_div,
+            chunk_size=chunk,
+            backend="reference",
+        )
+        plan, t = runner.plan, runner.tensors
+        assert plan.num_chunks == (1 if chunk == 64 else 3)
+        whole = plan.num_chunks == 1
+        for i in range(plan.num_chunks):
+            full = mod.stage_values("slab_sum", t, plan, i)
+            for slots in slot_forms:
+                v = slots("slab_sum", t, plan, i)
+                for name in STAGE_TENSORS["slab_sum"]:
+                    assert same(v[name], full[name]), (chunk, i, name)
+                for name, rows in rows_of:
+                    assert (v[name] is t[rows]) is whole, (chunk, i, name)
+
+
 _ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),
