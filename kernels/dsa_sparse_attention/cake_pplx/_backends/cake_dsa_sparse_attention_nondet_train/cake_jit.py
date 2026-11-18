@@ -428,7 +428,7 @@ MODULES: dict[str, dict[str, Any]] = {
                 "block": [256, 1, 1],
                 "cluster": [1, 1, 1],
                 "cooperative": False,
-                "dynamic_smem_bytes": 0,
+                "dynamic_smem_bytes": 1152,
                 "use_pdl": False,
             },
         },
