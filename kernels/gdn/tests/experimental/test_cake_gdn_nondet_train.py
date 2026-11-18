@@ -5519,6 +5519,41 @@ def test_speed_rows_keep_their_routes(name, monkeypatch) -> None:
         assert shipped[row] == ("split_one_wave", length1), (row, shipped[row])
 
 
+# The bench rows over four sequences of 4,096 tokens at HV 16 (r01_4x4096_h8, g1_4x4096_h16, g4_4x4096_h4): the piece
+# table cuts each sequence into pieces of 21, 21 and 22 chunks (192 CTAs, not one wave) and wave 1 runs on the caller's
+# stream; on GB200 and GB300 the one-wave route over pieces of 32 chunks (128 CTAs) prices below that series (whose
+# summary launch takes the last piece of 22 chunks), so those boards take it: (L of the piece table, L of the one-wave
+# table, the series (us), the one-wave route (us)).  Every other device class keeps its route.
+HV16_4X4096_ONE_WAVE = {
+    "GB200": (22, 32, 194.22, 192.84),
+    "GB300": (22, 32, 184.4, 183.06),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_one_wave_table_on_the_4x4096_hv16_rows(name, monkeypatch) -> None:
+    arch, sm_count = _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    seq_lens = (4096,) * 4
+    rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 16, sm_count, arch)  # fmt: skip
+    for num_heads in (16, 8, 4):
+        heads = (num_heads, 16)
+        shipped = _adjoint_route(seq_lens, heads, options)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+            emptied = _adjoint_route(seq_lens, heads, options)
+        if name not in HV16_4X4096_ONE_WAVE:
+            assert shipped == emptied, (heads, shipped, emptied)
+            continue
+        length, length1, series, wave = HV16_4X4096_ONE_WAVE[name]
+        assert emptied == ("split_one_stream", length), (heads, emptied)
+        assert shipped == ("split_one_wave", length1), (heads, shipped)
+    if name in HV16_4X4096_ONE_WAVE:
+        assert (rec["segment_len"], rec["one_stream"], rec["one_wave_len"]) == (length, True, length1), rec  # fmt: skip
+        assert abs(rec["one_stream_us"] - series) < 0.01, rec
+        assert abs(rec["one_wave_us"] - wave) < 0.01, rec
+
+
 # A layout the split cuts on a device of SPLIT_SMS SMs with HV 4: sequences of 11, 24 and 4 chunks take pieces of 4
 # chunks (3, 6 and 1 pieces: wave 1 walks 3 pieces beside 5 summaries, wave 2 walks 7 pieces); partial last chunks.
 SPLIT_LAYOUT = (700, 1500, 230)
