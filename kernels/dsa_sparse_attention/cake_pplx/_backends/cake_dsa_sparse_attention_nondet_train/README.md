@@ -307,8 +307,8 @@ both records keeps the base test and also takes the cast path where
 
     T * K_eff >= cast_slots_per_key * S + cast_min_slots    (112 and 2^20)
 
-and the natural drain otherwise (the NoPE rule only up to its key cap, see
-below); equality takes the cast path.  Small rows,
+(on the NoPE record only while `S <= 163,840`, see below) and the natural
+drain otherwise; equality takes the cast path.  Small rows,
 small top-k and short-document packs have little main-stage work and keep
 the natural drain whatever their `S / T`.  Backward medians of the two paths
 on VR200 (8 fresh processes per path, 20 steps each, cold L2, eager):
@@ -343,11 +343,11 @@ At `K_slots` 2176 and one segment the work test takes the cast path up to
 the bound to `S / T` 10 at `T = 16,384` (163,840 keys).
 
 The NoPE rule also carries a key cap, `cast_max_keys` 163,840: a NoPE row
-with more keys takes the natural drain whatever its work.  Once a segment's
-FP32 dK / dV rows no longer stay in L2, the cast path's main stage grows
-faster with the key count than the natural one: the natural drain's extra
-cost hides behind the memory traffic, while the cast path's fill and cast
-remain.  Backward medians of the two paths on single-segment NoPE rows at
+with more keys (and at least one key per query) takes the natural drain
+whatever its work.  On long single-segment rows the cast path's advantage
+shrinks as `S` grows and becomes a loss above about 196,608 keys at
+`T = 16,384`; the backward times below are what was measured, the stages
+behind them were not timed separately.  Backward medians of the two paths on single-segment NoPE rows at
 `T = 16,384` and `K_slots` 2176, every one on the cast side of the work test
 (VR200, 8 fresh processes per path, 20 steps each, cold L2, eager):
 

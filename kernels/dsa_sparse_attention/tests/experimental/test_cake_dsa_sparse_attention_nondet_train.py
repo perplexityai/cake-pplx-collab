@@ -991,7 +991,7 @@ def test_backward_binding_keys_follow_the_nope_key_cap(monkeypatch, arch):
     """Host only (``arch_for`` stood in per target; one-element stand-ins broadcast over the long operands, since a
     key reads shapes, strides and dtypes only): the multi-segment backward keys of packed rows at T = 16,384,
     K_slots 2176 -- every one on the cast side of the work test -- hold on sm_107a the NoPE key cap's decision: the
-    cast path at S = 163,840, the natural drain at S = 163,841 and 270,336 for every count from 2 to 16 segments
+    cast path at S = 163,840, the natural drain at S = 163,841 and 270,336 for 2, 4, 8 and 16 segments
     (the cap reads the total S, not the mean segment), while the RoPE keys, without a cap, hold the cast path on
     every row.  sm_100a / sm_103a keep the class alone."""
     monkeypatch.setattr(cake_backend, "arch_for", lambda device=None: arch)

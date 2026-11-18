@@ -409,9 +409,9 @@ def key_pass_dq_mode(index: int, passes: int) -> int:
 # drain otherwise: small rows, small top-k and short-document packs have little
 # main-stage work and keep the natural drain whatever their S / T.  A rule's
 # optional key cap ``cast_max_keys`` limits the work test to S <= cast_max_keys
-# (natural drain above it; no cap without the field): once a segment's FP32
-# dK/dV rows no longer stay in L2 the cast path's main stage grows faster with
-# the key count than the natural one.  The cap reads the total S, not
+# (natural drain above it; no cap without the field): on long single-segment
+# rows the cast path's advantage shrinks as S grows and turns into a measured
+# loss (see the README).  The cap reads the total S, not
 # S / num_segments: the planners do not know the longest segment, and a packed
 # row can hold one long segment next to short ones.  The registered records
 # carry one rule, for ``sm_107a`` (their base ``min_keys_per_query``, 112 slots

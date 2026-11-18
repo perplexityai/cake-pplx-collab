@@ -232,12 +232,11 @@ MODULES: dict[str, dict[str, Any]] = {
     # cast path a zero fill and a cast proportional to S plus two launches, so
     # the ``sm_107a`` rule takes the permuted accumulator plus cast where
     # T * K_eff >= 112 * S + 2^20 and S <= 163,840 (``cast_max_keys``), and the
-    # natural stage otherwise.  Once a segment's FP32 dK / dV rows no longer
-    # stay in L2 the cast path's main stage grows faster with the key count
-    # than the natural one (one segment, T = 16,384, K_slots 2176: natural /
-    # cast backward 9.520 / 9.272 ms at S = 131,072, 10.781 / 11.209 ms at
-    # 262,144); the cap counts the total S, since the planners do not know the
-    # longest segment of a packed row.  On VR200 the rule picks the cast path
+    # natural stage otherwise.  On long single-segment rows the cast path's
+    # advantage shrinks as S grows and turns into a loss (one segment,
+    # T = 16,384, K_slots 2176: natural / cast backward 9.520 / 9.272 ms at
+    # S = 131,072, 10.781 / 11.209 ms at 262,144); the cap counts the total
+    # S, since the planners do not know the longest segment of a packed row.  On VR200 the rule picks the cast path
     # on no measured row where it was slower, and keeps the natural stage on
     # small rows, small top-k and short-document packs, where the cast path
     # measured up to 8 % slower in backward, and on rows above the cap.  The
