@@ -204,7 +204,7 @@ Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
 package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
 is destroyed). Only eager calls that omit `workspace=` zero these buffers, the forward's and the backward's
-separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory zeroes no
+separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory keeps no
 new buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
 the `_POOL_DEPTH` ready buffers, or needing more, or begun before their zero fills completed
 (`CUDAGraph.capture_begin` right after such an eager call with no synchronization; `torch.cuda.graph`

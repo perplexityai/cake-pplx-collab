@@ -257,8 +257,9 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # The pre-zeroed capture buffers.  An eager call that omits ``workspace=`` keeps, per
 # (device index, kind) -- kind ``"fwd"`` (int32 counter words) or ``"bwd"`` (uint8
 # accumulator and counter bytes) -- up to ``_POOL_DEPTH`` idle zeroed buffers of
-# ``_POOL_SIZE`` elements, the largest need of a refill on the device that did not
-# run out of memory (``_ZEROED_POOL``).  Each idle buffer carries (``_PoolBuffer``) a
+# ``_POOL_SIZE`` elements (``_ZEROED_POOL``), the size set by the device's last
+# refill of that kind that did not run out of memory (a turned-off kind's idle
+# buffers keep their earlier size).  Each idle buffer carries (``_PoolBuffer``) a
 # slot of a pinned host flag array that a device-to-host copy, queued on the eager
 # call's stream behind the buffer's zero fill, sets to 1, and a CUDA user object,
 # made on the eager call (outside any capture), whose destructor posts the buffer's
@@ -288,20 +289,19 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # memory pool) they stay.  A dropped buffer's memory stays cached in the package's
 # memory pool.  ``_POOL_READY[kind][device index]`` is the need up to which an eager
 # call does not refill: the pool's size after a refill that succeeded, 0 (or absent:
-# the next eager call refills) once a capture took a buffer or found none, the
-# call's need after a refill that ran out of memory (that refill zeroes no new buffer and
+# the next eager call refills) once a capture took a buffer or found none, the call's
+# need after a refill that ran out of memory (that refill keeps no new buffer and
 # keeps the pool's size, but its drain has already run) and ``sys.maxsize`` once
 # ``_pool_off`` turned the kind off: the one lookup of an eager call while the pool
-# needs nothing.
-# ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards the take
-# (``_pool_take``), the refill and its drain (``_pool_refill``), every entry into the
-# package's memory pool (the refill's and ``_package_zeros``': two threads never
-# route their allocations to one pool at once) and the writes and drops of the
+# needs nothing.  ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards
+# the take (``_pool_take``), the refill and its drain (``_pool_refill``), every entry
+# into the package's memory pool (the refill's and ``_package_zeros``': two threads
+# never route their allocations to one pool at once) and the writes and drops of the
 # ``_CAPTURE_*WORKSPACES`` entries.  Nothing that runs under it may call a function
 # that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
 # ``_capture_buffer``): the thread would wait for itself.
 _POOL_DEPTH = 4
-# torch's out-of-memory error: a refill that meets it zeroes no new buffer, frees no
+# torch's out-of-memory error: a refill that meets it keeps no new buffer, frees no
 # idle buffer and keeps the pool's size.
 _OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
 _POOL_DTYPES: dict[str, torch.dtype] = {"fwd": torch.int32, "bwd": torch.uint8}
@@ -1204,7 +1204,7 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
     ``_POOL_READY[kind][device_index]``: return the buffers released by their graphs (to the pool, with a new user
     object, or freed), raise the device's pool size to ``need``, free idle buffers below it and zero new buffers on
     the current stream until the pool holds ``_POOL_DEPTH``; each new buffer's flag is set by a device-to-host copy,
-    queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error zeroes no new
+    queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error keeps no new
     buffer, frees no idle buffer and keeps the pool's size (the drain before it has already returned or dropped the
     released buffers) and sets ``_POOL_READY[kind][device_index]`` to ``need`` (the next refill comes at a larger
     need or after the next take); any other failure leaves the device without pre-zeroed buffers of ``kind``."""
