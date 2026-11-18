@@ -104,21 +104,21 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
 
 Known gaps are judged in test items of their own. On an architecture where a gap's miss is accepted, the item
 carries a strict expected-failure marker with caps (`tests/experimental/_mok_gaps.py`), one for each norm the miss is
-accepted in: the largest ratio measured there of the kernel's median and largest error over the naive
-implementation's, rounded up to 4 decimals. A ratio above a cap fails the item, and so does a miss in a norm without a
-cap. A fix makes the item pass, and the strict marker then fails the item until the marker is removed. On an
-architecture without caps the item is judged like any output, and a miss fails it.
+accepted in there: the largest ratio of the kernel's median and largest error over the naive implementation's, over
+every recorded run on every GPU model, rounded up to 4 decimals (at least 1.005). A ratio above a cap fails the item,
+and so does a miss in a norm without a cap. A fix makes the item pass, and the strict marker then fails the item
+until the marker is removed. On an architecture without caps the item is judged like any output, and a miss fails it.
 Every other output of the same case stays judged in the case's main item. The outputs that miss the rule, with their
 ratios (kernel error / naive error, median / largest over the inputs):
 
 | Outputs | Items | `sm_100a`, `sm_103a` (GB200, GB300) | `sm_107a` (VR200) |
 |---|---|---|---|
-| MXFP8 `d_scores` | every MXFP8 case, single GPU | L2 1.46-1.83 / 1.44-1.86, max 1.36-1.79 / 1.21-1.88 | L2 1.44-1.84 / 1.46-1.84, max 1.39-1.89 / 1.26-2.28 |
-| MXFP8 `d_scores` | every MXFP8 case, EP1 and EP4 | L2 1.71-1.73 / 1.71-1.75, max 1.65-1.80 / 1.51-2.09 (EP4: GB300) | EP1: L2 1.72 / 1.70-1.72, max 1.55-1.75 / 1.45-1.83 |
-| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03 / 1.03-1.07, max 1.22-1.33 / 1.16-1.42 (unequal sources: GB300) | EP1: L2 1.03-1.04 / 1.07, max 1.23-1.29 / 1.16-1.28 |
-| same | single-GPU empty-experts cases with 768-row macrobatches; EP1 plain recompute (gate, up, down) | max 1.05-1.14 / 0.96-1.24 | max 1.05-1.14 / 0.93-1.24 |
+| MXFP8 `d_scores`, unclamped SwiGLU | every unclamped MXFP8 case, single GPU | L2 1.02 / 1.02-1.05 | L2 1.03 / 1.01-1.02 |
+| MXFP8 `d_scores`, clamped SwiGLU | every clamped MXFP8 case and the local-experts cases, single GPU | L2 1.15-1.16 / 1.10-1.15, max 1.12-1.20 / 0.91-1.34 | L2 1.14-1.15 / 1.14-1.17, max 1.10-1.17 / 0.98-1.23 |
+| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03 / 1.03-1.07, max 1.22-1.33 / 1.16-1.42 | EP1: L2 1.03-1.04 / 1.07, max 1.23-1.29 / 1.16-1.28 |
+| same | single-GPU empty-experts cases with 768-row macrobatches; EP1 unclamped recompute (gate, up, down) | max 1.05-1.14 / 0.96-1.24 | max 1.05-1.14 / 0.93-1.24 |
 
-GB200 and GB300 give the same ratios (single GPU and EP1).
+GB200 and GB300 give the same ratios (single GPU, EP1 and EP4).
 
 The MXFP8 score gradient is formed as `sum(dh * hidden) / score` from the kernel's own intermediate values, and the
 BF16 routed weight gradient is rounded to BF16 per macrobatch; follow-up kernel changes remove both gaps.

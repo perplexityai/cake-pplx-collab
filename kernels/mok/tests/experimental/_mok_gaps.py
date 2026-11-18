@@ -22,12 +22,12 @@ On an architecture where the output is a known gap (:data:`CAPS`), the item carr
 that expects only the tier miss (an ``AssertionError``); on the others it is judged like any output and must meet the
 tier.  A known gap has caps per architecture, one for each norm the owner accepts the output's miss in: the largest
 ratio of its median and of its largest error over the naive tier's (kernel error / naive error against the float64
-oracle, over the draws the verdict counts in that norm) measured on that architecture, rounded up to 4 decimals.  A
-known-gap output that misses a norm without a cap, misses beyond a cap, fails the zero rule, or misses where it has no
-caps fails its item (:class:`GapCapError`, not the expected miss).  When the fix lands the item meets the tier, the
-strict marker turns that into a failure, and the marker and its caps go with the fix.  Every output, a known gap or not, is
-judged by the same rule (:class:`tests.cake_naive.TierJudge`, its two-stage max-norm rule included): an output that
-meets the tier on an architecture is no known gap there.
+oracle, over the draws the verdict counts in that norm) over every recorded run on every GPU model, rounded up to 4
+decimals and at least the near tie.  A known-gap output that misses a norm without a cap, misses beyond a cap, fails the
+zero rule, or misses where it has no caps fails its item (:class:`GapCapError`, not the expected miss).  When the fix
+lands the item meets the tier, the strict marker turns that into a failure, and the marker and its caps go with the
+fix.  Every output, a known gap or not, is judged by the same rule (:class:`tests.cake_naive.TierJudge`, its two-stage
+max-norm rule included): an output that meets the tier on an architecture is no known gap there.
 """
 
 from __future__ import annotations
@@ -49,10 +49,148 @@ OUTPUTS = "outputs"
 TARGETS = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 
 #: The caps of the known gaps: per known-gap item (``<test function>[<id>]``) and architecture, ``{norm: cap}`` for each
-#: norm the owner accepts the output's miss in, the largest ratio of its median and of its largest error over the
-#: tier's measured there, rounded up to 4 decimals (a float, at least the near tie).  An item is marked on exactly the
-#: architectures it lists.
-CAPS: dict[str, dict[str, dict[str, float]]] = {}
+#: norm the owner accepts the output's miss in there, the largest ratio of its median and of its largest error over the
+#: tier's over every recorded run on every GPU model, rounded up to 4 decimals (a float, at least the near tie).  An
+#: item is marked on exactly the architectures it lists.
+CAPS: dict[str, dict[str, dict[str, float]]] = {
+    "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_down]": {
+        "sm_100a": {"max": 1.1186},
+        "sm_103a": {"max": 1.1186},
+        "sm_107a": {"max": 1.1186},
+    },
+    "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_gate]": {
+        "sm_100a": {"max": 1.2124},
+        "sm_103a": {"max": 1.2124},
+        "sm_107a": {"max": 1.2124},
+    },
+    "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_up]": {
+        "sm_100a": {"max": 1.245},
+        "sm_103a": {"max": 1.245},
+        "sm_107a": {"max": 1.245},
+    },
+    "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_down]": {
+        "sm_100a": {"max": 1.081},
+        "sm_103a": {"max": 1.081},
+        "sm_107a": {"max": 1.081},
+    },
+    "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_gate]": {
+        "sm_100a": {"max": 1.1026},
+        "sm_103a": {"max": 1.1026},
+        "sm_107a": {"max": 1.1026},
+    },
+    "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_up]": {
+        "sm_100a": {"max": 1.1913},
+        "sm_103a": {"max": 1.1913},
+        "sm_107a": {"max": 1.1913},
+    },
+    "test_mxfp8_training_accuracy[h512-i256-m512-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1538, "max": 1.1246},
+        "sm_103a": {"l2": 1.1538, "max": 1.1246},
+        "sm_107a": {"l2": 1.1538, "max": 1.1246},
+    },
+    "test_mxfp8_training_accuracy[h512-i256-m512-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0357},
+        "sm_103a": {"l2": 1.0357},
+        "sm_107a": {"l2": 1.0357},
+    },
+    "test_mxfp8_training_accuracy[h512-i256-m768-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1734, "max": 1.1502},
+        "sm_103a": {"l2": 1.1734, "max": 1.1502},
+        "sm_107a": {"l2": 1.1734, "max": 1.1502},
+    },
+    "test_mxfp8_training_accuracy[h512-i256-m768-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0259},
+        "sm_103a": {"l2": 1.0259},
+        "sm_107a": {"l2": 1.0259},
+    },
+    "test_mxfp8_training_accuracy[h512-i512-m1536-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1486, "max": 1.1987},
+        "sm_103a": {"l2": 1.1486, "max": 1.1987},
+        "sm_107a": {"l2": 1.1486, "max": 1.1987},
+    },
+    "test_mxfp8_training_accuracy[h512-i512-m1536-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0452},
+        "sm_103a": {"l2": 1.0452},
+        "sm_107a": {"l2": 1.0452},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m512-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1538, "max": 1.1246},
+        "sm_103a": {"l2": 1.1538, "max": 1.1246},
+        "sm_107a": {"l2": 1.1538, "max": 1.1246},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m512-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0357},
+        "sm_103a": {"l2": 1.0357},
+        "sm_107a": {"l2": 1.0357},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m768-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1734, "max": 1.1502},
+        "sm_103a": {"l2": 1.1734, "max": 1.1502},
+        "sm_107a": {"l2": 1.1734, "max": 1.1502},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m768-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0259},
+        "sm_103a": {"l2": 1.0259},
+        "sm_107a": {"l2": 1.0259},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i512-m1536-clamped-d_scores]": {
+        "sm_100a": {"l2": 1.1486, "max": 1.1987},
+        "sm_103a": {"l2": 1.1486, "max": 1.1987},
+        "sm_107a": {"l2": 1.1486, "max": 1.1987},
+    },
+    "test_mxfp8_training_fp32_wgrad_accuracy[h512-i512-m1536-plain-d_scores]": {
+        "sm_100a": {"l2": 1.0452},
+        "sm_103a": {"l2": 1.0452},
+        "sm_107a": {"l2": 1.0452},
+    },
+    "test_mxfp8_training_local_experts_accuracy[local36-d_scores]": {
+        "sm_100a": {"l2": 1.1587, "max": 1.2336},
+        "sm_103a": {"l2": 1.1587, "max": 1.2336},
+        "sm_107a": {"l2": 1.1587, "max": 1.2336},
+    },
+    "test_mxfp8_training_local_experts_accuracy[local9-d_scores]": {
+        "sm_100a": {"l2": 1.1556, "max": 1.3397},
+        "sm_103a": {"l2": 1.1556, "max": 1.3397},
+        "sm_107a": {"l2": 1.1556, "max": 1.3397},
+    },
+    "test_training_features[ep1-bf16-clamped-recompute.dw_routed_down]": {
+        "sm_100a": {"l2": 1.071, "max": 1.3012},
+        "sm_103a": {"l2": 1.071, "max": 1.3012},
+        "sm_107a": {"l2": 1.071, "max": 1.3012},
+    },
+    "test_training_features[ep1-bf16-clamped.dw_routed_down]": {
+        "sm_100a": {"l2": 1.0719, "max": 1.2315},
+        "sm_103a": {"l2": 1.0719, "max": 1.2315},
+        "sm_107a": {"l2": 1.0719, "max": 1.2315},
+    },
+    "test_training_features[ep1-bf16-recompute.dw_routed_down]": {
+        "sm_100a": {"max": 1.1083},
+        "sm_103a": {"max": 1.1083},
+        "sm_107a": {"max": 1.1083},
+    },
+    "test_training_features[ep1-bf16-recompute.dw_routed_gate]": {
+        "sm_100a": {"max": 1.1819},
+        "sm_103a": {"max": 1.1819},
+        "sm_107a": {"max": 1.1819},
+    },
+    "test_training_features[ep1-bf16-recompute.dw_routed_up]": {
+        "sm_100a": {"max": 1.1847},
+        "sm_103a": {"max": 1.1847},
+        "sm_107a": {"max": 1.1847},
+    },
+    "test_unequal_sources[counts-0-513-769-8193.dw_routed_down]": {
+        "sm_100a": {"l2": 1.0348, "max": 1.4219},
+        "sm_103a": {"l2": 1.0348, "max": 1.4219},
+    },
+    "test_unequal_sources[counts-0-513-769-8193.dw_routed_gate]": {
+        "sm_100a": {"l2": 1.0347, "max": 1.3122},
+        "sm_103a": {"l2": 1.0347, "max": 1.3122},
+    },
+    "test_unequal_sources[counts-0-513-769-8193.dw_routed_up]": {
+        "sm_100a": {"l2": 1.034, "max": 1.2753},
+        "sm_103a": {"l2": 1.034, "max": 1.2753},
+    },
+}
 
 MXFP8_D_SCORES_WHAT = (
     "the MXFP8 kernels' score gradient (the fused form sum(dh * hidden) / score) misses the naive tier "
