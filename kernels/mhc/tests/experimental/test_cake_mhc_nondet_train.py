@@ -1728,8 +1728,8 @@ def test_argument_validation() -> None:
     be a 1-D, 256-byte aligned ``uint8`` CUDA tensor of this package's size (a non-tensor a ``TypeError``).
     An operand or output of another hidden size than ``X``, and a call whose hidden size the package does not list
     (6144) or the architecture does not route (none of the three sizes on the architectures of record), is a
-    ``ValueError``.  ``B`` is optional:
-    ``None`` gives the same bits of every output, ``dfn`` included.  ``finish`` takes
+    ``ValueError``.  ``B`` is optional: ``None`` gives every output (``dfn`` included) in the same dtype and shape as
+    with ``B``, all finite; the test makes no bit comparison.  ``finish`` takes
     only this package's handles (any other object, a deterministic package's handle included, is a ``TypeError``
     naming the deterministic finish); a ``deterministic`` keyword is a ``TypeError`` too."""
     T = 8
