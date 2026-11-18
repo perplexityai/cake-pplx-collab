@@ -115,7 +115,7 @@ ratios (kernel error / naive error, median / largest over the inputs):
 |---|---|---|---|
 | MXFP8 `d_scores`, unclamped SwiGLU | every unclamped MXFP8 case, single GPU | L2 1.02 / 1.02-1.05 | L2 1.03 / 1.01-1.02 |
 | MXFP8 `d_scores`, clamped SwiGLU | every clamped MXFP8 case and the local-experts cases, single GPU | L2 1.15-1.16 / 1.10-1.15, max 1.12-1.20 / 0.91-1.34 | L2 1.14-1.15 / 1.14-1.17, max 1.10-1.17 / 0.98-1.23 |
-| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03 / 1.03-1.07, max 1.22-1.33 / 1.16-1.42 | EP1: L2 1.03-1.04 / 1.07, max 1.23-1.29 / 1.16-1.28 |
+| BF16 routed weight gradients of experts whose rows cross a macrobatch boundary | unequal sources 0 / 513 / 769 / 8193 at EP4 (gate, up, down); EP1 clamped cases (down) | L2 1.03 / 1.03-1.07, max 1.22-1.33 / 1.16-1.42 | L2 1.03-1.04 / 1.03-1.07, max 1.23-1.34 / 1.16-1.89 |
 | same | single-GPU empty-experts cases with 768-row macrobatches; EP1 unclamped recompute (gate, up, down) | max 1.05-1.14 / 0.96-1.24 | max 1.05-1.14 / 0.93-1.24 |
 
 GB200 and GB300 give the same ratios (single GPU, EP1 and EP4).

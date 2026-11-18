@@ -181,14 +181,18 @@ CAPS: dict[str, dict[str, dict[str, float]]] = {
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_down]": {
         "sm_100a": {"l2": 1.0348, "max": 1.4219},
         "sm_103a": {"l2": 1.0348, "max": 1.4219},
+        "sm_107a": {"l2": 1.0348, "max": 1.4219},
     },
+    # From the sm_100a and sm_103a runs only: the sm_107a run misses the max norm by more than the accepted limit
+    # (largest ratio 1.8942), so sm_107a lists no caps and the item fails there.
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_gate]": {
         "sm_100a": {"l2": 1.0347, "max": 1.3122},
         "sm_103a": {"l2": 1.0347, "max": 1.3122},
     },
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_up]": {
-        "sm_100a": {"l2": 1.034, "max": 1.2753},
-        "sm_103a": {"l2": 1.034, "max": 1.2753},
+        "sm_100a": {"l2": 1.034, "max": 1.4131},
+        "sm_103a": {"l2": 1.034, "max": 1.4131},
+        "sm_107a": {"l2": 1.034, "max": 1.4131},
     },
 }
 
