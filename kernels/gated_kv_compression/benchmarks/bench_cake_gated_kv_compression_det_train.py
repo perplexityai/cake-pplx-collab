@@ -28,8 +28,9 @@ math, on one GPU, single rank.
   A-A noise band), ``compile_default`` and ``compile_max_autotune`` (``torch.compile`` of the same pairwise math, a
   custom ``autograd.Function`` with a compiled forward and a compiled token-major backward, on the same operands:
   device ``cu_seqlens``, the caller's ``G``), ``eager`` (the same functions uncompiled: the reference),
-  ``compile_autograd`` (the reference forward with autograd's softmax backward: informational) and ``copy`` (a
-  device-to-device copy of the bytes each phase must move: the bandwidth context).
+  ``compile_autograd`` (the reference forward with autograd's softmax backward: informational) and ``copy`` (an SM
+  elementwise kernel that reads and writes the bytes each phase must move: the bandwidth context; see
+  :func:`copy_calls`).
 * phases (``--phases``): ``fwd`` (the training forward, its graph recorded), ``bwd`` (the backward of a recorded
   forward), ``step`` (both) and ``ckpt`` (``torch.utils.checkpoint(..., use_reentrant=False)`` around the entry,
   then its backward: two forwards and one backward).
@@ -230,14 +231,18 @@ def autograd_calls(layer: Callable[..., torch.Tensor], leaves: Sequence[torch.Te
 
 
 def copy_calls(nbytes: dict[str, int], device: torch.device) -> Calls:
-    """One device-to-device copy per phase of half the phase's bytes (a copy reads and writes each byte)."""
-    n = max(nbytes.values()) // 2
-    src = torch.ones(n, dtype=torch.uint8, device=device)
+    """Per phase, one SM elementwise kernel that reads half of the phase's minimal bytes and writes the other half:
+    ``torch.neg(src, out=dst)`` on FP32 slices of ``nbytes // 8`` elements each (``fwd`` reads and writes
+    ``2048 T + 512 G`` bytes, ``4096 T + 1024 G`` in all; ``bwd`` ``4096 T + 512 G`` each way, ``8192 T + 1024 G`` in
+    all; ``step`` and ``ckpt`` their sums).  It is the same kernel launch in eager mode and in a CUDA graph, unlike a
+    ``copy_``, which a graph records as a memcpy node (a copy-engine transfer, not an SM kernel)."""
+    n = max(nbytes.values()) // 8
+    src = torch.ones(n, dtype=torch.float32, device=device)
     dst = torch.empty_like(src)
 
     def phase(key: str) -> Callable[[], torch.Tensor]:
-        m = nbytes[key] // 2
-        return lambda: dst[:m].copy_(src[:m])
+        m = nbytes[key] // 8
+        return lambda: torch.neg(src[:m], out=dst[:m])
 
     calls = Calls({key: phase(key) for key in PHASES}, record=lambda: None)
     calls.release = lambda: None
@@ -263,7 +268,10 @@ def describe(name: str, layout: str, args) -> dict:
         entry = "cake_gated_kv_compression_det_cz" if layout == "halves" else "cake_gated_kv_compression_det"
         return {"implementation": f"Cake det autograd entry {entry}"}
     if name == "copy":
-        return {"implementation": "device-to-device copy (torch copy_) of half of each phase's minimal bytes"}
+        return {
+            "implementation": "SM elementwise kernel (torch.neg, out=, FP32) reading half and writing half of each "
+            "phase's minimal bytes; the same kernel in graph and eager mode"
+        }
     return baselines.describe(name, args.compile_dynamic)
 
 
