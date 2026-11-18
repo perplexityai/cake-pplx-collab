@@ -51,20 +51,39 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
+
+__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
+    float r;
+    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+    return r;
+}
+
 extern "C" {
 
 __global__ __launch_bounds__(128, LAUNCH_MIN_BLOCKS) void
-kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ d, int row0, int d_off, int V)
+kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, long long* __restrict__ labels, float* __restrict__ lse, float* __restrict__ d, float* __restrict__ rlab, int row0, int d_off, int V)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
     const int lane = tid % 32;
 
+    extern __shared__ __align__(1024) char smem_raw[];
+    int smem;
+#if __CUDA_ARCH__ == 1000
+    asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }" : "=r"(smem) : "l"(smem_raw));
+    smem = make_warp_uniform(smem);
+#else
+    smem = (int)(unsigned long long)__cvta_generic_to_shared(smem_raw);
+#endif
 
     const int bid = blockIdx.x;
     const int num_bids = gridDim.x;
 
     const int cta_rank = 0;
+
+    // Prologue
+    float* res = reinterpret_cast<float*>(smem_raw + 0);
+    const int res_addr = smem + 0;
 
     // === Task calls (declaration order) ===
     int r = blockIdx.y;
@@ -75,6 +94,8 @@ kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, lon
     unsigned long long row_base = (unsigned long long)r * (unsigned long long)V;
     int num_vecs = V / 8;
     int vi0 = blockIdx.x * 1024 + tid;
+    float rg_s = 0.0f;
+    float rg_r = 0.0f;
     if (lbl < 0ll) {
         float zero_out[8];
         #pragma unroll
@@ -150,16 +171,22 @@ kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, lon
                     #pragma unroll
                     for (int wl = 0; wl < 4; wl++) {
                         if (col0 + 2 * wl == lbl32) {
-                            uint32_t _prmt_4;
-                            asm("prmt.b32 %0, %1, %2, 0x1044;" : "=r"(_prmt_4) : "r"(zw[k * 4 + wl]), "r"(zero32));
-                            float _exp_3 = expf(__uint_as_float(_prmt_4) - lse_t);
-                            out[2 * wl] = d_raw * (1.0f - _exp_3);
+                            uint32_t _prmt_5;
+                            asm("prmt.b32 %0, %1, %2, 0x1044;" : "=r"(_prmt_5) : "r"(zw[k * 4 + wl]), "r"(zero32));
+                            float _exp_4 = expf(__uint_as_float(_prmt_5) - lse_t);
+                            float _sub_3;
+                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_3) : "f"(1.0f), "f"(_exp_4));
+                            out[2 * wl] = mul_f32_rn_noftz(d_raw, _sub_3);
+                            rg_s = out[2 * wl];
                         }
                         if (col0 + 2 * wl + 1 == lbl32) {
-                            uint32_t _prmt_6;
-                            asm("prmt.b32 %0, %1, %2, 0x3244;" : "=r"(_prmt_6) : "r"(zw[k * 4 + wl]), "r"(zero32));
-                            float _exp_5 = expf(__uint_as_float(_prmt_6) - lse_t);
-                            out[2 * wl + 1] = d_raw * (1.0f - _exp_5);
+                            uint32_t _prmt_8;
+                            asm("prmt.b32 %0, %1, %2, 0x3244;" : "=r"(_prmt_8) : "r"(zw[k * 4 + wl]), "r"(zero32));
+                            float _exp_7 = expf(__uint_as_float(_prmt_8) - lse_t);
+                            float _sub_6;
+                            asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_6) : "f"(1.0f), "f"(_exp_7));
+                            out[2 * wl + 1] = mul_f32_rn_noftz(d_raw, _sub_6);
+                            rg_s = out[2 * wl + 1];
                         }
                     }
                 }
@@ -185,6 +212,28 @@ kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, lon
                     _packed_1[_lp + 3] = *(uint32_t*)&_bf2;
                 }
                 reinterpret_cast<int4*>(z + (row_base + (unsigned long long)vi * 8ull))[0] = reinterpret_cast<int4*>(_packed_1)[0];
+            }
+        }
+        float lr_hi = (float)(__nv_bfloat16)rg_s;
+        float _abs_9;
+        asm("abs.f32 %0, %1;" : "=f"(_abs_9) : "f"(lr_hi));
+        float _sub_10;
+        asm("sub.rn.f32 %0, %1, %2;" : "=f"(_sub_10) : "f"(rg_s), "f"(lr_hi));
+        float lr_r = ((_abs_9 <= 3.4028235e+38f) ? _sub_10 : 0.0f);
+        rg_r = lr_r;
+    }
+    res[tid] = rg_r;
+    __syncthreads();
+    if (tid == 0) {
+        if (lbl >= 0ll) {
+            if (lbl < (long long)num_vecs * 8ll) {
+                int own_vec = (int)lbl >> 3;
+                int first_vec = blockIdx.x * 1024;
+                if (own_vec >= first_vec) {
+                    if (own_vec < first_vec + 1024) {
+                        rlab[t] = res[own_vec & 127];
+                    }
+                }
             }
         }
     }

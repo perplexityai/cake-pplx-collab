@@ -325,10 +325,10 @@ kernel_cake_fmha_train_1f0c2f01d6f6b42a6b60(float* __restrict__ dQ_accum, float*
     const int ds_buf_addr = smem + 82944;
     float* dq_stage = reinterpret_cast<float*>(smem_raw + 115712);
     const int dq_stage_addr = smem + 115712;
-    float* lse_buf = reinterpret_cast<float*>(smem_raw + 148480);
-    const int lse_buf_addr = smem + 148480;
-    float* dpsum_buf = reinterpret_cast<float*>(smem_raw + 149504);
-    const int dpsum_buf_addr = smem + 149504;
+    float* lse_buf = reinterpret_cast<float*>(smem_raw + 181248);
+    const int lse_buf_addr = smem + 181248;
+    float* dpsum_buf = reinterpret_cast<float*>(smem_raw + 182272);
+    const int dpsum_buf_addr = smem + 182272;
 
     // Kernel setup ops
     if (warp == 13) { asm volatile("prefetch.tensormap [%0];" :: "l"((uint64_t)((&Q))) : "memory"); }
@@ -1591,6 +1591,7 @@ kernel_cake_fmha_train_1f0c2f01d6f6b42a6b60(float* __restrict__ dQ_accum, float*
                 m_start_3 = n_block_3;
             }
             int m_blk_1 = 0;
+            unsigned int dq_slot = 0;
             unsigned int _phase_dq_full_0 = 0;
             #pragma unroll 1
             for (int m_iter_3 = m_start_3; m_iter_3 < num_m_blocks; m_iter_3++) {
@@ -1620,23 +1621,22 @@ kernel_cake_fmha_train_1f0c2f01d6f6b42a6b60(float* __restrict__ dQ_accum, float*
                     mbarrier_arrive(dq_reduce_done_addr);
                 }
                 #pragma unroll
-                for (int g = 0; g < HEAD_DIM / 8; g++) {
-                    int smem_stage = g & 7;
-                    int stage_base = dq_stage_addr + (unsigned int)(smem_stage * 4096);
+                for (int g = 0; g < HEAD_DIM / 16; g++) {
+                    int stage_base = dq_stage_addr + dq_slot * 8192;
                     int thread_vec_base = stage_base + (warp % 4 * 32 + lane) * 16;
                     #pragma unroll
-                    for (int v4 = 0; v4 < 2; v4++) {
-                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(thread_vec_base + v4 * 128 * 16), "f"(dq_all[g * 8 + v4 * 4]), "f"(dq_all[g * 8 + v4 * 4 + 1]), "f"(dq_all[g * 8 + v4 * 4 + 2]), "f"(dq_all[g * 8 + v4 * 4 + 3]) : "memory");
+                    for (int v4 = 0; v4 < 4; v4++) {
+                        asm volatile("st.shared.v4.f32 [%0], {%1,%2,%3,%4};" :: "r"(thread_vec_base + v4 * 128 * 16), "f"(dq_all[g * 16 + v4 * 4]), "f"(dq_all[g * 16 + v4 * 4 + 1]), "f"(dq_all[g * 16 + v4 * 4 + 2]), "f"(dq_all[g * 16 + v4 * 4 + 3]) : "memory");
                     }
                     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                     asm volatile("barrier.sync 4, 128;" ::: "memory");
                     if (warp == 0) {
                         if (elect_sync()) {
                             {
-                                void* _cpred_dst_0 = reinterpret_cast<void*>(dQ_accum + (off_q_2 * HEAD_DIM + g * BLOCK_M * 8));
+                                void* _cpred_dst_0 = reinterpret_cast<void*>(dQ_accum + (off_q_2 * HEAD_DIM + g * BLOCK_M * 16));
                                 asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                                     " [%0], [%1], %2;"
-                                    :: "l"(_cpred_dst_0), "r"(stage_base), "r"((uint32_t)(4096))
+                                    :: "l"(_cpred_dst_0), "r"(stage_base), "r"((uint32_t)(8192))
                                     : "memory");
                             }
                             asm volatile("cp.async.bulk.commit_group;");
@@ -1644,6 +1644,8 @@ kernel_cake_fmha_train_1f0c2f01d6f6b42a6b60(float* __restrict__ dQ_accum, float*
                         }
                     }
                     asm volatile("barrier.sync 4, 128;" ::: "memory");
+                    dq_slot += 1;
+                    if (dq_slot == 8) { dq_slot = 0; }
                 }
                 m_blk_1 += 1;
             }
