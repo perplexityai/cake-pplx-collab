@@ -360,13 +360,13 @@ K1_CHAINS_CHOICES: tuple[int, ...] = (1, 3)
 #: :data:`K1_PROMOTE_EXEMPT_ROWS`.  Not the TMA L2 promotion of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`.
 K1_PROMOTE_BLOCKS = 128
 #: Rows whose plans :func:`plan_atomic_gemm` keeps without promotion where :func:`k1_promote_blocks` names the promoted
-#: program, keys as in :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles (on
-#: 212 SMs from 512 to 12288 tokens, on 216 SMs and more at every token count of its verdict); the verdicts were
-#: measured without promotion.  Measured on a 212-SM VR200 part: without promotion its output met the naive BF16 tier at
-#: 10240, 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and the max norm, its
-#: median and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to 1.015 times its time
-#: at 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20 launches).  The row
-#: keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
+#: program, keys as in :data:`K1_SPLIT_RULES`.  ``sm_107a`` ``5120 -> 1024`` BF16 runs one split of 256-wide tiles on
+#: 216 SMs and more at every token count of its verdict (up to version 0.3.0 also on 212 SMs from 512 to 12288 tokens);
+#: the verdicts were measured without promotion.  Measured on a 212-SM VR200 part: without promotion its output met the
+#: naive BF16 tier at 10240, 12288, 16384, 24576, 32768, 65536 and 131072 tokens (32 random inputs each; in the L2 and
+#: the max norm, its median and largest error equal to those of PyTorch BF16), and the promoted program took 1.012 to
+#: 1.015 times its time at 10240 and 12288 tokens (CUPTI, cold L2, eager launches and CUDA graph replays, 5 rounds of 20
+#: launches).  The row keeps the program of version 0.2.0; ``promote=True`` runs the promoted program.
 K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple[str, int, int, int, str]] = frozenset(
     {("sm_107a", 1, 5120, 1024, "bf16")}
 )
@@ -732,8 +732,8 @@ K1_SPLIT_ODD_BLOCK_EXCLUDED_TOKENS: dict[
 #: sm_107a rule for the row (160-wide tiles at every token count) is faster than this package's 256-wide tiles at one
 #: split there in every run.  Not faster than the deterministic plan in every run on 208 SMs (one of the parts runs at
 #: a lower SM clock): ``8192 -> 128``, ``4096 -> 4096`` FP32 and ``5120 -> 1024`` BF16; the last also runs the
-#: deterministic program on 212 SMs at 16172 to 16384 tokens, where it is 1.3 to 2.5 % faster (its 212-SM range in
-#: :data:`K1_SPLIT_RANGE_OVERRIDES_BY_SM` runs this package's program).  On 212 SMs ``4096 -> 1024`` FP32 takes the
+#: deterministic program on 212 SMs at every token count (1.3 to 2.5 % faster at 16172 to 16384 tokens;
+#: :data:`K1_SPLIT_RANGE_OVERRIDES_BY_SM` has no entry).  On 212 SMs ``4096 -> 1024`` FP32 takes the
 #: 192-wide row-major program at one split (88 tiles of 256 ``d_out`` rows by 192 ``d_in`` columns, 176 CTAs, one wave
 #: next to a kernel holding 32 SMs), which keeps more SMs busy than the 128 CTAs of the 256-wide transposed tile.  The
 #: token counts of :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` for a part's SM count run the deterministic program.  The FP32
@@ -822,20 +822,22 @@ K1_SPLIT_RULES_BY_SM_TOKEN_RANGES: dict[
 #: :data:`K1_SPLIT_RULE_EXCLUDED_TOKENS` for the part.  A range lies outside :data:`K1_SPLIT_RULES_BY_SM_TOKENS` and
 #: outside the row's ranges in :data:`K1_SPLIT_RULES_BY_SM_TOKEN_RANGES`; every other token count, part and row keeps
 #: those tables.  Measured as those ranges (the protocol and the rule are in the 212-SM K1 token-range table of the
-#: README).  On 212 SMs ``5120 -> 1024`` BF16 runs the 256-wide program at one split (its :data:`K1_SPLIT_RULES`
-#: verdict) from 512 to 12288 tokens; it stays on the deterministic program at 16172 to 16384 tokens, where the
-#: deterministic plan is faster, and from 32768 tokens up: at 32768 tokens it failed the K1 rule in every run (0.1 to
-#: 0.6 % faster than the deterministic plan alone), and its checkpointed step measured 2.5 to 4.3 % slower, as did a
-#: second deterministic launch against the first there (1.9 to 4.4 %).
+#: README).  The table has no entry.  Up to version 0.3.0 its one entry ran ``5120 -> 1024`` BF16 on 212 SMs on the
+#: 256-wide program at one split (its :data:`K1_SPLIT_RULES` verdict) from 512 to 12288 tokens.  A re-measurement of
+#: that range under the same protocol on a 212-SM VR200 part (the four GPUs of one node, driver 620.62, two runs, both
+#: launch layouts in both arm orders, eager launches and CUDA graph replays, at 512, 1024, 2048, 4096, 8192, 10240 and
+#: 12288 tokens) found no token count where the program met the rule: it was 1.7 to 8.5 % slower than the deterministic
+#: plan from 4096 tokens up (median time ratios; by the ratios of the medians over the runs, the checkpointed step 1.7
+#: to 2.1 % and the backward pass 3.1 to 3.8 % slower), not faster in every run at 2048 tokens (median time ratios 0.996
+#: to 1.017), and not 0.99 times the deterministic plan's time or less in every run at 512 and 1024 tokens (medians
+#: 0.968 to 1.006).  It replaces the measurement of version 0.2.0 (R200 parts, driver 620.43), and the timing runs of
+#: version 0.3.0 had found the deterministic plan faster at 10240 and 12288 tokens too.  The row runs the deterministic
+#: program at every token count on 212 SMs.
 # fmt: off
 K1_SPLIT_RANGE_OVERRIDES_BY_SM: dict[
     tuple[str, int],
     dict[tuple[str, int, int, int, str], tuple[tuple[int, int, tuple[int, int]], ...]],
-] = {
-    ("sm_107a", 212): {
-        ("sm_107a", 1, 5120, 1024, "bf16"): ((512, 12288, (256, 1)),),
-    },
-}
+] = {}
 # fmt: on
 #: Verdicts of rows on a part of exactly one SM count at further token ranges,
 #: ``(arch, sm_count) -> {key: ((min_tokens, max_tokens, (block_n, num_splits)), ...)}`` (keys and values as in
