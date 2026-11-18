@@ -12972,8 +12972,9 @@ SM107A_212_TRANCHE_TIERS = {
 
 
 def test_sm107a_212_tranche_floor_table():
-    # the sm_107a tiers are the tranche's; the sm_100a ones are the long-token 5120 -> 64 / 128 weight gradients
-    # (test_sm100a_5120_wgrad_long_token_rule)
+    # the sm_107a tiers are the tranche's; the others are the long-token 5120 -> 64 / 128 weight gradients of sm_100a
+    # (test_sm100a_5120_wgrad_long_token_rule) and the 4096 x 4096 weight gradients of sm_100a and sm_103a
+    # (test_wave_yield_plans_the_synchronised_tail_on_148_sms)
     assert {
         key: tiers
         for key, tiers in cake_backend.ROW_RULE_MIN_T.items()
@@ -12983,7 +12984,7 @@ def test_sm107a_212_tranche_floor_table():
         key: tiers
         for key, tiers in cake_backend.ROW_RULE_MIN_T.items()
         if key[0] != "sm_107a"
-    } == SM100A_5120_WGRAD_TIERS
+    } == {**SM100A_5120_WGRAD_TIERS, **WAVE_YIELD_TIERS}
     for key, tiers in SM107A_212_TRANCHE_TIERS.items():
         # ragged tranche keys only: one token dimension left out, the training T at or above the floor
         assert key in SM107A_212_TRANCHE and (key[7] is None) != (key[8] is None), key
@@ -13044,6 +13045,12 @@ def test_sm107a_212_tranche_token_floors(monkeypatch, key):
 SM100A_5120_WGRAD_TIERS = {
     ("sm_100a", True, True, False, True, False, 64, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
     ("sm_100a", True, True, False, True, False, 128, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
+}
+#: The token tiers of the 4096 x 4096 BF16 weight gradients of sm_100a and sm_103a (cake_backend.ROW_RULE_MIN_T): below
+#: T 8192, the shortest measured token count of the exact-wave yield, the rule without its ``wave_yield``.
+WAVE_YIELD_TIERS = {
+    (arch, True, True, False, False, False, 4096, None, 4096): ((8192, {"cta_rows": 256, "pro": 7, "block_n": 224}),)
+    for arch in ("sm_100a", "sm_103a")
 }
 # fmt: on
 #: The rules that carry the exact-split fit (``sk_exact_fit``, 74 CTA pairs): the 12288 -> 4096 and 4096 -> 12288
@@ -13110,8 +13117,8 @@ def _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype="bf16", **knobs):
 
 def _pre_034_tables(m):
     """Put the routing tables of version 0.3.3 in place (``m``: a monkeypatch context): the rules without the
-    exact-split fit and the exact-wave yield, no part rules, and the 5120 -> 64 / 128 BF16 weight-gradient rule of
-    sm_100a without its token tier."""
+    exact-split fit and the exact-wave yield (and without the token tier of the latter), no part rules, and the
+    5120 -> 64 / 128 BF16 weight-gradient rule of sm_100a without its token tier."""
     for key, rule in list(ROW_RULES.items()):
         if "sk_exact_fit" in rule or "wave_yield" in rule:
             m.setitem(
@@ -13127,6 +13134,8 @@ def _pre_034_tables(m):
     for key, tiers in SM100A_5120_WGRAD_TIERS.items():
         m.setitem(ROW_RULES, key, dict(tiers[0][1]))
         m.delitem(cake_backend.ROW_RULE_MIN_T, key)
+    for key in WAVE_YIELD_TIERS:
+        m.delitem(cake_backend.ROW_RULE_MIN_T, key)
 
 
 # The rows and token counts of the sweep below: (op, d_in, d_out, out dtype, token counts).
@@ -13134,7 +13143,7 @@ def _pre_034_tables(m):
 ROUTING_034_SWEEP = (
     *(("wgrad", d_in, d_out, "bf16", (1001, 4096, 7680, 7681, 8192, 8256, 16231, 16384))
       for d_in, d_out in ((12288, 4096), (4096, 12288))),
-    ("wgrad", 4096, 4096, "bf16", (1001, 4032, 4033, 8192, 16231, 16384, 32768)),
+    ("wgrad", 4096, 4096, "bf16", (1001, 4032, 4033, 8191, 8192, 16231, 16384, 32768)),
     *(("wgrad", 5120, d_out, "bf16", (16231, 32768, 65534, 65535, 98304)) for d_out in (32, 48, 64, 128)),
     ("wgrad", 5120, 64, "f32", (65534, 65535)),
     *(("dgrad", d_in, d_out, "f32", (16171, 16172, 16231, 16232, 16384, 16385))
@@ -13157,8 +13166,9 @@ def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
         # 384 tiles on 74 pairs: a 14-tile tail; the fit replaces an admitted 16-way split
         return EXACT_FIT_PROGRAM if sk_exact_plan(384, k_blocks, 74, 16) else None
     if gb and sm_count == 148 and (d_in, d_out) == (4096, 4096):
-        # 128 tiles on 74 pairs: a 54-tile tail; the synchronised split where admitted
-        return WAVE_YIELD_PROGRAM if sk_sync_plan(128, k_blocks, 74, None, 32) else None
+        # 128 tiles on 74 pairs: a 54-tile tail; the synchronised split from the token tier's floor on, where admitted
+        held = T >= 8192 and sk_sync_plan(128, k_blocks, 74, None, 32)
+        return WAVE_YIELD_PROGRAM if held else None
     if arch == "sm_100a" and d_in == 5120 and d_out in (64, 128) and T >= 65535:
         return LONG_5120_WGRAD_PROGRAM
     return None
@@ -13169,9 +13179,9 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
     neighbours and the token counts around each bound, on sm_100a and sm_103a at 148 and 152 SMs, sm_103a at 160 SMs and
     sm_107a at 212 SMs: a plan changes exactly where ``_changed_034`` names a program, and runs that program - the
     exact-split fit and the exact-wave yield on the 148-SM parts of both architectures where the rule's split is
-    admitted, the part rules on the 148-SM sm_100a part at their token counts, the 5120 -> 64 / 128 BF16 weight
-    gradients of sm_100a from T 65535 on.  Every other plan (the 152- and 160-SM parts but for the last, sm_107a, the
-    FP32 output, the other rows and token counts) is the plan of version 0.3.3."""
+    admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a part at their token counts, the
+    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 65535 on.  Every other plan (the 152- and 160-SM parts
+    but for the last, sm_107a, the FP32 output, the other rows and token counts) is the plan of version 0.3.3."""
     changed = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_034_SWEEP:
         for T in token_counts:
@@ -13193,8 +13203,8 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
                     assert plan.template == program, (where, plan.template)
                     assert _plan_signature(plan) != _plan_signature(before), where
                     assert program in _registered(arch), (where, program)
-    # 2 rows x 4 T x 2 architectures + 5 T x 2 architectures + 19 part keys + 2 rows x 2 T x 2 parts
-    assert changed == 16 + 10 + 19 + 8
+    # 2 rows x 4 T x 2 architectures + 4 T x 2 architectures + 19 part keys + 2 rows x 2 T x 2 parts
+    assert changed == 16 + 8 + 19 + 8
 
 
 def test_exact_split_fit_plans_one_wave_of_units(monkeypatch):
@@ -13286,9 +13296,9 @@ def test_exact_split_fit_plans_one_wave_of_units(monkeypatch):
 def test_wave_yield_plans_the_synchronised_tail_on_148_sms():
     """The exact-wave yield (``wave_yield``): on a 148-SM part the 4096 x 4096 BF16 weight-gradient rules of sm_100a and
     sm_103a drop their 224-column tile (the exact-wave gate) and plan the synchronised split of the 54-tile tail of
-    their 128 tall tiles (20 collectors, slab path 2, margin 32: s = ceil((3 k_blocks + 32) / 4)) wherever it is
-    admitted (64 K blocks and more), the whole-tile plan below; on 152 SMs (and 160 on sm_103a) the 224-column tile
-    stays."""
+    their 128 tall tiles (20 collectors, slab path 2, margin 32: s = ceil((3 k_blocks + 32) / 4)) from T 8192 on, the
+    shortest measured token count (where 128 K blocks admit the split); below it their token tier plans the rule
+    without ``wave_yield``, the whole-tile plan.  On 152 SMs (and 160 on sm_103a) the 224-column tile stays."""
     for arch in ("sm_100a", "sm_103a"):
         key = (arch, True, True, False, False, False, 4096, None, 4096)
         assert ROW_RULES[key] == {
@@ -13297,14 +13307,15 @@ def test_wave_yield_plans_the_synchronised_tail_on_148_sms():
             "block_n": 224,
             "wave_yield": {"sk_sync": True, "sk_slab": 2, "sk_sync_m": 32},
         }, key
-        for T in (4032, 4033, 8192, 16231, 16384, 32768):
+        assert cake_backend.ROW_RULE_MIN_T[key] == WAVE_YIELD_TIERS[key], key
+        for T in (4032, 4033, 8191, 8192, 16231, 16384, 32768):
             k_blocks = -(-T // 64)
             plan = _rows_plan("wgrad", arch, 148, 4096, 4096, T)
             where = (arch, T, plan.template)
             assert (
                 plan.wave_fallback and plan.block_n == 256 and plan.cta_rows == 256
             ), where
-            if k_blocks < 64:
+            if T < 8192:
                 assert not plan.sk_sync, where
                 assert plan.template == "dense_proj_det_gemm_nn_n256_m256_pro7", where
                 continue

@@ -1786,8 +1786,9 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_100a', True, True, True, True, False, 128, None, 5120): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, True, True, False, 128, None, 8192): {"cta_rows": 64, "pro": 15},
     # ``wave_yield``: the knobs the 4096 x 4096 weight gradient plans with where the exact-wave gate drops its 224-column
-    # tile (148 SMs); ``sk_exact_fit``: the CTA pair count on which an exact split whose units exceed the pairs takes
-    # max(2, pairs // tail) parts (see the planner); both measured on B200 and B300
+    # tile (148 SMs), from T 8192 on (ROW_RULE_MIN_T); ``sk_exact_fit``: the CTA pair count on which an exact split
+    # whose units exceed the pairs takes max(2, pairs // tail) parts (see the planner); both measured on B200 and B300
+    # at T 8192 - 32768
     ('sm_100a', True, True, False, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "block_n": 224, "wave_yield": {"sk_sync": True, "sk_slab": 2, "sk_sync_m": 32}},
     ('sm_100a', True, True, False, False, False, 4096, None, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74},
     ('sm_100a', True, True, False, False, False, 5120, None, 512): {"block_n": 192, "b_swz": 64, "sk_sync": True, "sk_slab": 2, "sk_sync_m": 39, "pro": 15, "hints": ('none', 'evict_first')},
@@ -2115,9 +2116,13 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # the key's own rule applies.  A tier rule is the rule the row planned with before the key's rule changed (``{}``:
 # none).  The sm_107a keys are the 212-SM tranche (measured at T 16172 - 16384); the fp32 5120 -> 5120 weight gradient
 # plans with no rule up to T 257.  Their counts are the R200 A/B of every plan the tranche changed against the plan
-# before it (212 SMs, CUPTI cold L2, 2026-11-08).  The sm_100a keys are the 5120 -> 64 / 128 bf16 weight gradients,
-# whose synchronised split was faster from T 65535 on and slower at T 16231 and 32768 on B200 and GB200 (148 and 152
-# SMs): below T 65535 they keep their 64-row program.  An exact (N, K, M) key has no tiers.
+# before it (212 SMs, CUPTI cold L2, 2026-11-08).  The sm_100a 5120 -> 64 / 128 bf16 weight-gradient keys floor the
+# rule's synchronised split at T 65535.  On B200 and GB200 (148 and 152 SMs) that split was slower at T 16231 and
+# faster at T 32768, 65535 and 131072; it is not adopted at T 32768, where the same split with margin 0 (segments of
+# 256 K blocks, no promoted chunks) missed the naive tier on 5120 -> 64.  Below T 65535 these rows keep their 64-row
+# program.  The 4096 x 4096 bf16 weight-gradient keys of sm_100a and sm_103a floor the rule's ``wave_yield`` at
+# T 8192, the shortest token count it was measured at on B200 and B300 (148 SMs, T 8192 - 32768); below it the rows
+# plan without it, as before.  An exact (N, K, M) key has no tiers.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # q_b 2048 x 16384 input gradient: slower at 11, flat at 3, faster at 1 of the 15 measured T 1 - 1025; faster at
@@ -2146,6 +2151,9 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # 5120 -> 64 / 128 weight gradient: the 64-row program below T 65535
     ('sm_100a', True, True, False, True, False, 64, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
     ('sm_100a', True, True, False, True, False, 128, None, 5120): ((65535, {"cta_rows": 64, "pro": 15}),),
+    # 4096 x 4096 weight gradient: the rule without its ``wave_yield`` below T 8192
+    ('sm_100a', True, True, False, False, False, 4096, None, 4096): ((8192, {"cta_rows": 256, "pro": 7, "block_n": 224}),),
+    ('sm_103a', True, True, False, False, False, 4096, None, 4096): ((8192, {"cta_rows": 256, "pro": 7, "block_n": 224}),),
 }
 # fmt: on
 
@@ -3174,7 +3182,8 @@ def cake_dense_gemm_det_train_projection_plan(
     stay, a caller-forced ``block_n`` is never touched, and the plan is the launcher's wherever the fit is exact or both
     tiles need the same waves (152 and 160 SMs).  A rule's ``wave_yield`` names the knobs the row joins where its
     BLOCK_N yields (the 4096 x 4096 BF16 weight gradient on 148 SMs: the synchronised split of its 54-tile tail, slab
-    path 2, margin 32, measured on B200 and B300).
+    path 2, margin 32, measured on B200 and B300 at T 8192 - 32768; below T 8192 its ``ROW_RULE_MIN_T`` tier plans the
+    rule without it).
 
     A third package-only deviation, the synchronised TMA-store gate (:func:`_serves`): the synchronised stream-K
     programs that store their bf16 tiles through the TMA store (``_tma<slots>_sks``) were generated for measured
@@ -3206,8 +3215,8 @@ def cake_dense_gemm_det_train_projection_plan(
     tail)`` parts instead (one wave of units; the rule's ``sk_first`` and other knobs stay, a caller-forced
     ``sk_exact`` keeps its parts, and the rule's split stays where the fitted one is not admitted).  The 12288 -> 4096
     and 4096 -> 12288 BF16 weight gradients of sm_100a and sm_103a name 74 pairs (148 SMs): their 16-way split of a
-    14-tile tail (224 units) becomes a 5-way split (70 units), measured on B200 and B300; their plans on every other pair
-    count are the launcher's.  A seventh, the per-part rules (:data:`ROW_RULES_BY_SM`): an exact key of the table for
+    14-tile tail (224 units) becomes a 5-way split (70 units), measured on B200 and B300 at T 8192 - 32768; their
+    plans on every other pair count are the launcher's.  A seventh, the per-part rules (:data:`ROW_RULES_BY_SM`): an exact key of the table for
     the device's architecture and SM count replaces the row's rule on that part alone."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
