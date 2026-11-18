@@ -4603,6 +4603,34 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 # The roles whose programs plan their channel tiles with :func:`channel_split`
 # (the KCP programs plan with ``legacy=True``): each has its own rule.
 SPLIT_ROLES = ("fwd", "bwd")
+# The forward's narrow rows: the deterministic package's forward rule over the
+# same forward programs, so a forward call plans the tiles the deterministic
+# forward plans for its route, ``S`` and architecture.  On a route of
+# :data:`FORWARD_NARROW_ROUTES` the single-tile rows at 72 <= cv <= 96 (C =
+# 576 to 768) run 32-vector tiles (``ct_vec`` 32, four token sub-tiles, the
+# last tile partial) at :data:`FORWARD_NARROW_THREADS` threads, or, from the
+# token floor of :data:`FORWARD_WIDTH_FLOORS` on the call's architecture, the
+# whole tiles of :data:`FORWARD_NARROW_WIDTHS` (``cv -> ct_vec``, a divisor of
+# ``cv``): C = 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  One tile of cv
+# vectors leaves 128 - cv lanes of every CTA idle over the whole token axis;
+# the programs are unchanged and ``y`` keeps its bits in every plan.  Below a
+# floor, in a plan made without ``S`` or without the architecture, and on an
+# architecture or row the floors do not list, the 32-vector tiles stay; a
+# call without a route keeps the single tile.  The tables are the
+# deterministic package's forward rows (``NARROW_TILE_ROUTES["fwd"]``,
+# ``NARROW_TILE_THREADS``, ``NARROW_TILE_WIDTHS["fwd"]`` and
+# ``NARROW_WIDTH_FLOORS["fwd"]``, measured there on the forward programs both
+# packages run) and are kept in sync with them and with the forward kernel
+# generator.  The backward plans its narrower rows by :data:`TILE_OVERRIDES`
+# and :data:`NARROW_TILES` instead.
+FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
+FORWARD_NARROW_THREADS = 128
+FORWARD_NARROW_WIDTHS: dict[int, int] = {72: 18, 80: 40}
+FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
+    "sm_100a": {72: 32768, 80: 24576},
+    "sm_103a": {72: 32768, 80: 24576},
+    "sm_107a": {72: 40960, 80: 36864},
+}
 
 
 def channel_split(
@@ -4611,8 +4639,12 @@ def channel_split(
     geometry: dict[str, int],
     role: str | None = None,
     legacy: bool = False,
+    route: str | None = None,
+    S: int | None = None,
+    arch: str | None = None,
 ) -> tuple[int, int, int]:
-    """``(ct_vec, n_sub, n_ch_tiles)`` of ``C`` channels under a record's build geometry and role.
+    """``(ct_vec, n_sub, n_ch_tiles)`` of ``C`` channels under a record's build geometry, role, route, token count
+    and architecture.
 
     ``ct_vec`` channel vectors per channel tile (one thread each), ``n_sub =
     threads // ct_vec`` token sub-tiles per CTA and ``n_ch_tiles = ceil(C / vec
@@ -4641,30 +4673,99 @@ def channel_split(
     from ``ct_vec`` on the device and are measured under this rule).  Each
     role's rule is kept in sync with its copies (the kernel generator of
     that role and the test plan of that kind).
+
+    ``route`` is the launch's route (one of :data:`KINDS` of the role, a
+    ``ValueError`` otherwise; the host passes its record's).  On a route of
+    :data:`FORWARD_NARROW_ROUTES` the forward's single-tile rows at C = 576 to
+    768 run 32-vector tiles, ``(32, threads // 32, ceil(cv / 32))``: C = 576,
+    640 and 768 as (32, 4, 3) instead of one tile of 72, 80 and 96 vectors.
+    A row of :data:`FORWARD_NARROW_WIDTHS` runs whole tiles of its width
+    instead when the call names its token count ``S`` and its architecture
+    ``arch`` (one of :data:`ARCHES`, a ``ValueError`` otherwise) and ``S`` is
+    at least the row's floor on ``arch`` in :data:`FORWARD_WIDTH_FLOORS`: C =
+    576 as (18, 7, 4) and C = 640 as (40, 3, 2).  Without ``S`` or ``arch``,
+    below the floor and on an architecture or row the table does not list,
+    the 32-vector tiles stay; ``y`` keeps its bits in every plan.  Without a
+    route, under ``legacy`` and for the backward role the split above stays
+    (the backward's narrower rows are :func:`plan`'s :data:`TILE_OVERRIDES`
+    and :data:`NARROW_TILES`).  This is the deterministic package's
+    ``channel_split`` for the forward role.
     """
 
+    if arch is not None and arch not in ARCHES:
+        raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
+    vec = int(geometry["vec"])
     return _channel_split(
-        int(C), int(geometry["vec"]), int(geometry["threads"]), role, bool(legacy)
+        int(C),
+        vec,
+        int(geometry["threads"]),
+        role,
+        bool(legacy),
+        route,
+        _narrow_width(int(C) // vec, role, bool(legacy), route, S, arch),
     )
+
+
+def _narrow_width(
+    channel_vectors: int,
+    role: str | None,
+    legacy: bool,
+    route: str | None,
+    S: int | None,
+    arch: str | None,
+) -> bool:
+    """Whether a row of :data:`FORWARD_NARROW_WIDTHS` runs its width: a forward
+    call on a route of :data:`FORWARD_NARROW_ROUTES` that names ``S`` and
+    ``arch``, ``S`` at least the row's floor on ``arch`` in
+    :data:`FORWARD_WIDTH_FLOORS`.  The memoized plan takes this flag, not
+    ``S``, so its keys stay one or two per row."""
+
+    if legacy or S is None or arch is None or role != "fwd":
+        return False
+    if route not in FORWARD_NARROW_ROUTES:
+        return False
+    if channel_vectors not in FORWARD_NARROW_WIDTHS:
+        return False
+    floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
+    return floor is not None and int(S) >= floor
 
 
 @functools.lru_cache(maxsize=4096)
 def _channel_split(
-    C: int, vec: int, threads: int, role: str | None, legacy: bool
+    C: int,
+    vec: int,
+    threads: int,
+    role: str | None,
+    legacy: bool,
+    route: str | None = None,
+    wide: bool = False,
 ) -> tuple[int, int, int]:
     """:func:`channel_split` of plain arguments, memoized: a model's channel
     counts are few, so every call after a channel count's first reuses its
-    plan (a backward call plans its row up to twice)."""
+    plan (a backward call plans its row up to twice).  ``wide`` is
+    :func:`_narrow_width`: whether a row of :data:`FORWARD_NARROW_WIDTHS` runs
+    its width (else its 32-vector tiles)."""
 
     if (role is None and not legacy) or (role is not None and role not in SPLIT_ROLES):
         raise ValueError(
             f"role must be one of {SPLIT_ROLES} (or legacy=True), got {role!r}"
         )
+    if route is not None and (
+        route not in KINDS or role is None or route_role(route) != role
+    ):
+        raise ValueError(f"route={route!r} is not a route of role {role!r}")
     if C <= 0 or C % vec:
         raise ValueError(f"C={C} must be a positive multiple of {vec}")
     channel_vectors = C // vec
     if legacy or channel_vectors <= threads:
         ct_vec = min(channel_vectors, threads)
+        if (
+            not legacy
+            and role == "fwd"
+            and route in FORWARD_NARROW_ROUTES
+            and _forward_narrow_tile(channel_vectors, threads)
+        ):
+            ct_vec = FORWARD_NARROW_WIDTHS[channel_vectors] if wide else 32
     else:
         candidates = [
             width
@@ -4702,6 +4803,12 @@ def _fallback_split(channel_vectors: int, threads: int, role: str) -> int:
             width,
         ),
     )
+
+
+def _forward_narrow_tile(channel_vectors: int, threads: int) -> bool:
+    """Whether a forward single-tile row runs narrower tiles on the routes of :data:`FORWARD_NARROW_ROUTES`."""
+
+    return threads == FORWARD_NARROW_THREADS and 72 <= channel_vectors <= 96
 
 
 def _lane_use(channel_vectors: int, width: int, threads: int) -> float:
@@ -4944,8 +5051,12 @@ def plan(
     (:func:`tile_override`) replaces the split by ``(ct_vec, threads //
     ct_vec, ceil(C / vec / ct_vec))``, else a row of :data:`NARROW_TILES`
     (:func:`narrow_tile_row`, at 128 threads) by ``(32, threads // 32, ceil(C
-    / vec / 32))``; without them, for the forward role and under ``legacy``
-    the split is :func:`channel_split`'s.
+    / vec / 32))``; without them and under ``legacy`` the split is
+    :func:`channel_split`'s.  For the forward role ``route``, ``S`` and
+    ``arch`` are passed on to :func:`channel_split` (not under ``legacy``):
+    the forward record's route runs the 32-vector tiles of its narrow rows,
+    and a row of :data:`FORWARD_NARROW_WIDTHS` its width from its token floor
+    on ``arch``, as the deterministic package's forward plans them.
     """
 
     S, C, num_docs = int(S), int(C), int(num_docs)
@@ -4970,7 +5081,8 @@ def _plan_split(
     """:func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)`` of one call: for a
     backward call given ``arch`` and ``route`` (not ``legacy``), the
     :data:`TILE_OVERRIDES` row's split, else the :data:`NARROW_TILES` row's,
-    else :func:`channel_split`'s."""
+    else :func:`channel_split`'s; for a forward call (not ``legacy``),
+    :func:`channel_split`'s of its route, ``S`` and ``arch``."""
 
     if role == "bwd" and not legacy and arch is not None and route is not None:
         override = tile_override(arch, route, C, S)
@@ -4980,6 +5092,10 @@ def _plan_split(
             narrow = _narrow_split(arch, route, C, geometry)
             if narrow is not None:
                 return narrow
+    if role == "fwd" and not legacy:
+        return channel_split(
+            C, geometry=geometry, role=role, route=route, S=S, arch=arch
+        )
     return channel_split(C, geometry=geometry, role=role, legacy=legacy)
 
 
@@ -5269,8 +5385,9 @@ class RowPlan(NamedTuple):
     C: int
     # :func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)`` outside the override's token range.
     split: tuple[int, int, int]
-    # ``(S_min, S_max, split)`` of the record's :data:`TILE_OVERRIDES` row, else of its :data:`NARROW_TILES` row (the
-    # two tables share no ``(route, C)``), ``None`` without one.
+    # ``(S_min, S_max, split)`` of the backward record's :data:`TILE_OVERRIDES` row, else of its :data:`NARROW_TILES`
+    # row (the two tables share no ``(route, C)``), or of the forward record's :data:`FORWARD_NARROW_WIDTHS` row from
+    # its token floor (``S_max`` :data:`INT32_MAX`); ``None`` without one.
     override: tuple[int, int, tuple[int, int, int]] | None
     # The launch grid, ``None`` where :func:`launch_grid` may trim it by ``S`` (planned per call).
     grid: tuple[int, int, int] | None
@@ -5285,14 +5402,15 @@ def plan_row(
 
     ``S`` enters a call's host plan only through a token floor of the
     route's selection rules, the ``[S_min, S_max]`` range of the record's
-    :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row and the trim of
+    :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floor of
+    a forward row of :data:`FORWARD_NARROW_WIDTHS` and the trim of
     :func:`launch_grid` (an
     ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs``
     only through :func:`search_steps`; so with this row :func:`row_launch`
     returns what :func:`plan` and :func:`launch_grid` return for the call
-    (the planning a backward ``_launch`` does: ``plan(..., arch=, route=)``
-    with the record's route) without selecting, splitting or sizing the grid
-    again.  Registry errors raise as in :func:`selected_modules`.
+    (the planning ``_launch`` does: ``plan(..., arch=, route=)`` with the
+    record's route) without selecting, splitting or sizing the grid again.
+    Registry errors raise as in :func:`selected_modules`.
     """
 
     C = int(C)
@@ -5302,9 +5420,20 @@ def plan_row(
     record = MODULES[names[0]]
     rule = record["grid_rule"]
     geometry, role = rule["geometry"], record["role"]
-    split = channel_split(C, geometry=geometry, role=role)
     override = None
-    if role == "bwd":
+    if role == "fwd":
+        # The route's plan below the token floor (or without one), and from the floor the width's tiles.
+        route = record_route(record, arch)
+        split = channel_split(C, geometry=geometry, role=role, route=route)
+        floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(C // int(geometry["vec"]))
+        if floor is not None:
+            wide = channel_split(
+                C, geometry=geometry, role=role, route=route, S=floor, arch=arch
+            )
+            if wide != split:
+                override = (floor, INT32_MAX, wide)
+    else:
+        split = channel_split(C, geometry=geometry, role=role)
         route = record_route(record, arch)
         entry = TILE_OVERRIDES.get(arch, {}).get((TILE_ROUTE.get(route, route), C))
         if entry is not None:
@@ -5481,21 +5610,33 @@ def forward_workspace_words(arch: str, C: int) -> int:
 
     The largest :func:`counter_words` over every forward program of every
     forward route of the architecture (each planned with its own geometry and
-    role), so one buffer serves every forward route; it depends on ``C`` only
+    role on its route), so one buffer serves every forward route.  A row of
+    :data:`FORWARD_NARROW_WIDTHS` takes one plan below its token floor and
+    another from it (C = 576: 3 tiles, then 4), so each program is planned
+    without ``S`` and at every floor of :data:`FORWARD_WIDTH_FLOORS` on the
+    architecture, and the buffer serves every ``S``: it depends on ``C`` only
     (never on ``S`` or the device's SM count).  0 when no forward program of
-    the architecture takes ``work``.
+    the architecture takes ``work``.  This is the deterministic package's
+    rule over the same programs.
     """
 
     words = 0
+    floors = sorted(set(FORWARD_WIDTH_FLOORS.get(arch, {}).values()))
     for kind in forward_kinds(arch):
         for name in route_modules(arch, kind):
             record = MODULES[name]
             if record["workspace_rule"] is None:
                 continue
-            _, _, n_ch_tiles = channel_split(
-                C, geometry=record["grid_rule"]["geometry"], role=record["role"]
-            )
-            words = max(words, counter_words(record, n_ch_tiles))
+            for S in (None, *floors):
+                _, _, n_ch_tiles = channel_split(
+                    C,
+                    geometry=record["grid_rule"]["geometry"],
+                    role=record["role"],
+                    route=kind,
+                    S=S,
+                    arch=arch,
+                )
+                words = max(words, counter_words(record, n_ch_tiles))
     return words
 
 

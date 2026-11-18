@@ -607,7 +607,8 @@ def test_tile_override_bounds_and_plan() -> None:
     """A row's ``ct_vec`` applies from ``S_min`` through ``S_max`` (both included) and to no other token count,
     route or architecture; ``plan`` of a backward record given its architecture and route then plans ``(ct_vec,
     threads // ct_vec, ceil(C / vec / ct_vec))``, and :func:`cake_jit.channel_split`'s split outside the range, for
-    the forward role, under ``legacy`` and without the architecture or the route."""
+    the forward role without a route, under ``legacy`` and without the architecture or the route; the forward role
+    refuses a backward route (``ValueError``, as the deterministic plan does)."""
 
     for arch, rows in cake_jit.TILE_OVERRIDES.items():
         for (base, C), (ct_vec, s_min, s_max) in rows.items():
@@ -649,7 +650,7 @@ def test_tile_override_bounds_and_plan() -> None:
                         {"role": "bwd"},
                         {"role": "bwd", "arch": arch},
                         {"role": "bwd", "route": route},
-                        {"role": "fwd", "arch": arch, "route": route},
+                        {"role": "fwd", "arch": arch},
                     ):
                         got = cake_jit.plan(s_min, C, 3, geometry=geometry, **kwargs)
                         want = cake_jit.channel_split(
@@ -659,6 +660,11 @@ def test_tile_override_bounds_and_plan() -> None:
                             label,
                             kwargs,
                         )
+                    for registry in (cake_jit, det_jit):
+                        with pytest.raises(ValueError, match="is not a route of role"):
+                            registry.plan(
+                                s_min, C, 3, geometry=geometry, role="fwd", arch=arch, route=route
+                            )
                     got = cake_jit.plan(
                         s_min, C, 3, geometry=geometry, legacy=True, arch=arch, route=route
                     )
@@ -868,6 +874,211 @@ def test_backward_workspace_covers_every_narrow_row(narrow_table) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# The forward plan: the deterministic package's forward rule (route, ``S`` and architecture) over the same programs.
+
+# The forward's narrow rows at 128 threads x 8 channels: C -> (ct_vec, n_sub, n_ch_tiles) on every forward route
+# below the token floor of ``FWD_FLOORS`` (and in a plan without ``S`` or the architecture), and from that floor on
+# the call's architecture; a call without a route and the legacy rule keep one tile of C / 8 vectors.
+FWD_NARROW_SPLITS = {576: (32, 4, 3), 640: (32, 4, 3), 768: (32, 4, 3)}
+FWD_WIDE_SPLITS = {576: (18, 7, 4), 640: (40, 3, 2), 768: (32, 4, 3)}
+# The token count from which each width row runs its width, per architecture: arch -> {C / 8: S}.
+FWD_FLOORS = {
+    "sm_100a": {72: 32768, 80: 24576},
+    "sm_103a": {72: 32768, 80: 24576},
+    "sm_107a": {72: 40960, 80: 36864},
+}
+# The forward workspace's channel tiles of the narrow rows: the larger tile count of the two plans (C 576: 3, then 4).
+FWD_NARROW_WORKSPACE_TILES = {576: 4, 640: 3, 768: 3}
+
+
+def _forward_tokens() -> tuple[int, ...]:
+    """Token counts on both sides of every forward token floor of either package and of every token floor of the
+    forward selection rules, plus a few others."""
+
+    tokens = {1, 2, 1000, 16384, 250340, 262144, 500680, 1 << 20}
+    for table in (cake_jit.FORWARD_WIDTH_FLOORS, det_jit.NARROW_WIDTH_FLOORS["fwd"]):
+        for floors in table.values():
+            for S in floors.values():
+                tokens |= {S - 1, S, S + 1}
+    for registry in (cake_jit, det_jit):
+        for record in registry.MODULES.values():
+            if record["role"] != "fwd":
+                continue
+            rule = registry.select_rule(record)
+            for S in (rule or {}).get("tokens", {}).values():
+                tokens |= {int(S) - 1, int(S)}
+    return tuple(sorted(S for S in tokens if S > 0))
+
+
+@pytest.mark.cpu_only
+def test_forward_narrow_rows_are_the_deterministic_forward_rows() -> None:
+    """The forward's narrow tables are the deterministic package's forward rows: every forward route, the thread
+    count, the widths and the token floors of every architecture."""
+
+    forward = tuple(kind for kind in cake_jit.KINDS if cake_jit.route_role(kind) == "fwd")
+    assert cake_jit.FORWARD_NARROW_ROUTES == det_jit.NARROW_TILE_ROUTES["fwd"] == forward
+    assert cake_jit.FORWARD_NARROW_THREADS == det_jit.NARROW_TILE_THREADS == 128
+    assert cake_jit.FORWARD_NARROW_WIDTHS == det_jit.NARROW_TILE_WIDTHS["fwd"] == {72: 18, 80: 40}
+    assert cake_jit.FORWARD_WIDTH_FLOORS == det_jit.NARROW_WIDTH_FLOORS["fwd"] == FWD_FLOORS
+    assert set(FWD_FLOORS) == set(ARCHES)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
+    """Every forward record plans what the deterministic record it copies plans, for every multiple of 8 up to 8192
+    channels and every token count of :func:`_forward_tokens`: ``plan`` given the record's architecture and route
+    (as ``_launch`` and the KCP forward's single-rank main program call it), ``channel_split`` with and without the
+    route, ``S`` and the architecture, and the legacy rule.  At 128 x 8 the narrow rows run the 32-vector tiles below
+    the token floor of ``arch`` and their width from it (the literal tables); without a route and under ``legacy``
+    one tile of C / 8 vectors stays; both packages refuse a route of the other role and an unknown architecture."""
+
+    tokens = _forward_tokens()
+    literal = 0
+    for pair_arch, kind, name, det_name in _pairs("fwd"):
+        if pair_arch != arch:
+            continue
+        record, det = cake_jit.MODULES[name], det_jit.MODULES[det_name]
+        geometry, det_geometry = record["grid_rule"]["geometry"], det["grid_rule"]["geometry"]
+        route = cake_jit.record_route(record, arch)
+        assert route == kind == det_jit.record_route(det, arch), (name, det_name)
+        for C in range(8, 8193, 8):
+            label = (kind, name, C)
+            for kwargs in (
+                {},
+                {"route": route},
+                {"route": route, "arch": arch},
+                {"route": route, "S": tokens[-1]},
+                {"arch": arch, "S": tokens[-1]},
+            ):
+                got = cake_jit.channel_split(C, geometry=geometry, role="fwd", **kwargs)
+                want = det_jit.channel_split(C, geometry=det_geometry, role="fwd", **kwargs)
+                assert got == want, (label, kwargs)
+            legacy = det_jit.channel_split(C, geometry=det_geometry, legacy=True)
+            assert cake_jit.channel_split(C, geometry=geometry, legacy=True) == legacy, label
+            got = cake_jit.plan(
+                tokens[-1], C, 3, geometry=geometry, role="fwd", legacy=True, arch=arch, route=route
+            )
+            assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == legacy, label
+            for S in tokens:
+                got = cake_jit.plan(
+                    S, C, 3, geometry=geometry, role=record["role"], arch=arch, route=route
+                )
+                want = det_jit.plan(
+                    S, C, 3, geometry=det_geometry, role=det["role"], route=route, arch=arch
+                )
+                assert got == want, (label, S)
+        if (geometry["threads"], geometry["vec"]) != (128, 8):
+            continue
+        for C, narrow in FWD_NARROW_SPLITS.items():
+            one_tile = (C // 8, 128 // (C // 8), 1)
+            assert cake_jit.channel_split(C, geometry=geometry, role="fwd") == one_tile
+            assert cake_jit.channel_split(C, geometry=geometry, legacy=True) == one_tile
+            assert cake_jit.channel_split(C, geometry=geometry, role="fwd", route=route) == narrow
+            floor = FWD_FLOORS[arch].get(C // 8)
+            steps = [(1, narrow), (1 << 20, FWD_WIDE_SPLITS[C])]
+            if floor is not None:
+                steps += [(floor - 1, narrow), (floor, FWD_WIDE_SPLITS[C])]
+            for S, want in steps:
+                got = cake_jit.plan(S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route)
+                assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, (kind, C, S)
+                literal += 1
+    assert literal, arch
+    geometry = {"threads": 128, "vec": 8}
+    for registry in (cake_jit, det_jit):
+        for kwargs in (
+            {"role": "fwd", "route": "bwd"},
+            {"role": "bwd", "route": "fwd_dt"},
+            {"legacy": True, "route": "fwd"},
+            {"role": "fwd", "route": "fwd", "S": 1 << 20, "arch": "sm_90a"},
+        ):
+            with pytest.raises(ValueError):
+                registry.channel_split(576, geometry=geometry, **kwargs)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_forward_workspace_is_the_deterministic_forward_workspace(arch) -> None:
+    """``forward_workspace_words`` is the deterministic package's for every multiple of 8 up to 8192 channels: two
+    int32 counters per channel tile, the most over every forward program and both plans of a row whose tiles change
+    at a token floor (``FWD_NARROW_WORKSPACE_TILES``: C 576 holds 4 tiles); every forward program's plan at every
+    token count of :func:`_forward_tokens` fits it, so a buffer of the public size never trips the ``work`` size
+    check."""
+
+    tokens = _forward_tokens()
+    records = [
+        (kind, cake_jit.MODULES[name])
+        for kind in cake_jit.forward_kinds(arch)
+        for name in cake_jit.route_modules(arch, kind)
+    ]
+    assert records
+    for _, record in records:
+        assert record["workspace_rule"] == {"kind": "tile_counters", "words_per_tile": 2}
+    for C in range(8, 8193, 8):
+        words = cake_jit.forward_workspace_words(arch, C)
+        assert words == det_jit.forward_workspace_words(arch, C), C
+        for kind, record in records:
+            for S in tokens:
+                tiles = cake_jit.plan(
+                    S,
+                    C,
+                    1,
+                    geometry=record["grid_rule"]["geometry"],
+                    role="fwd",
+                    arch=arch,
+                    route=kind,
+                )["n_ch_tiles"]
+                assert cake_jit.counter_words(record, tiles) <= words, (kind, C, S)
+    for C, tiles in FWD_NARROW_WORKSPACE_TILES.items():
+        assert cake_jit.forward_workspace_words(arch, C) == 2 * tiles, C
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_kcp_forward_main_program_plans_the_single_rank_forward(arch, fake_device) -> None:
+    """The KCP two-launch forward's single-rank main program (``kcp._sr_main``) runs the single-rank ``fwd`` route
+    record ``selected_modules`` picks with that record's forward plan (its role, route and architecture: the narrow
+    rows' 32-vector tiles below the token floor, the width from it) and its counter words, which the forward
+    workspace rule covers; the KCP forward program keeps the legacy plan, one tile of C / 8 vectors at C 576 to
+    768."""
+
+    kcp = cake_package(KEY, "kcp")
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    for C in (512, 568, 576, 640, 768, 776, 1024):
+        for S in _forward_tokens():
+            name, scalars, grid, words = kcp._sr_main(
+                arch, S=S, C=C, n_frag=3, device_index=FAKE_DEVICE
+            )
+            assert (name,) == cake_jit.selected_modules(arch, "fwd", C=C, S=S), (C, S)
+            record = cake_jit.MODULES[name]
+            want = cake_jit.plan(
+                S, C, 3, geometry=record["grid_rule"]["geometry"], role="fwd", arch=arch, route="fwd"
+            )
+            assert scalars == want, (C, S)
+            assert grid[0] >= scalars["n_ch_tiles"], (C, S)
+            assert words == cake_jit.counter_words(record, want["n_ch_tiles"]), (C, S)
+            assert words <= cake_jit.forward_workspace_words(arch, C), (C, S)
+            if C in FWD_NARROW_SPLITS and (
+                record["grid_rule"]["geometry"] == {"threads": 128, "vec": 8}
+            ):
+                floor = FWD_FLOORS[arch].get(C // 8)
+                split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
+                wide = floor is not None and S >= floor
+                assert split == (FWD_WIDE_SPLITS[C] if wide else FWD_NARROW_SPLITS[C]), (C, S)
+    (name,) = kcp_jit.route_modules(arch, kcp.KCP_FWD)
+    geometry = kcp_jit.MODULES[name]["grid_rule"]["geometry"]
+    for C in FWD_NARROW_SPLITS:
+        cv = C // geometry["vec"]
+        got = cake_jit.plan(1 << 20, C, 3, geometry=geometry, legacy=True)
+        threads = geometry["threads"]
+        assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == (
+            min(cv, threads),
+            threads // min(cv, threads),
+            -(-cv // min(cv, threads)),
+        ), C
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # The host plan of a call row (``_ROW_PLANS``): planned by the row's first call, the same values as a per-call plan.
 
 # The SM counts of the fake devices of the sweep, per architecture (B200 / GB300 / R200 boards first: the counts the
@@ -881,10 +1092,11 @@ FULL_PLAN_SWEEP = os.environ.get("CAKE_CONV1D_FULL_PLAN_SWEEP") == "1"
 
 def _plan_sweep_channels() -> tuple[int, ...]:
     """``CHANNELS``, rows off the 32-channel grid, and every selection threshold and ``TILE_OVERRIDES`` channel count
-    of the registry with the multiple of 8 below it, and both ends of every ``NARROW_TILES`` key with their
-    neighbours outside it."""
+    of the registry with the multiple of 8 below it, both ends of every ``NARROW_TILES`` key with their neighbours
+    outside it, and the forward's narrow rows (C 576 to 768) with their neighbours."""
 
     channels = {*CHANNELS, 16, 24, 248, 520, 640, 1048, 1152, 3072}
+    channels |= {568, *FWD_NARROW_SPLITS, 776}
     for record in cake_jit.MODULES.values():
         rule = cake_jit.select_rule(record)
         for C in (rule or {}).get("channels", {}).values():
@@ -900,9 +1112,13 @@ def _plan_sweep_channels() -> tuple[int, ...]:
 
 def _plan_sweep_tokens() -> tuple[int, ...]:
     """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES`` and
-    ``NARROW_TILES`` ranges, the grid-trim minimums and the selection rules' token floors, plus a few others."""
+    ``NARROW_TILES`` ranges, the forward's ``FORWARD_WIDTH_FLOORS``, the grid-trim minimums and the selection rules'
+    token floors, plus a few others."""
 
     tokens = {1, 2, 63, 64, 1000, 250340, 1 << 20}
+    for floors in cake_jit.FORWARD_WIDTH_FLOORS.values():
+        for S in floors.values():
+            tokens |= {S - 1, S}
     for table in (cake_jit.TILE_OVERRIDES, cake_jit.NARROW_TILES):
         for rows in table.values():
             for value in rows.values():
@@ -1009,9 +1225,9 @@ def _sweep_row_plans(arch: str) -> int:
 def test_row_plans_match_the_per_call_plan(arch, fake_device, record_property) -> None:
     """A call planned from its ``_ROW_PLANS`` row launches the programs, plan scalars and grid a per-call plan
     (``_route`` + ``_launch``) gives, and raises the same errors, on fake devices of the architecture: every route,
-    channel counts at every selection threshold and ``C % 32`` rows (whose grid ``launch_grid`` may trim by ``S``),
-    token counts at every ``TILE_OVERRIDES`` / ``NARROW_TILES`` bound, grid-trim minimum and token floor, document
-    counts and every ``bwd_grid_mult``.  ``CAKE_CONV1D_FULL_PLAN_SWEEP=1`` runs the full sweep."""
+    channel counts at every selection threshold, the forward's narrow rows and ``C % 32`` rows (whose grid
+    ``launch_grid`` may trim by ``S``), token counts at every ``TILE_OVERRIDES`` / ``NARROW_TILES`` bound, forward
+    width floor, grid-trim minimum and token floor, document counts and every ``bwd_grid_mult``.  ``CAKE_CONV1D_FULL_PLAN_SWEEP=1`` runs the full sweep."""
 
     checked = 0
     for sms in PLAN_SWEEP_SMS[arch][: None if FULL_PLAN_SWEEP else 1]:
