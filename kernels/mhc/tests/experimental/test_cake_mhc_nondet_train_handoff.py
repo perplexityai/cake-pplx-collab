@@ -23,14 +23,17 @@ VJP and returns ``dpre_in = sum_d dU_d X_id``.  The final collapse ``(X, pre_in)
 Every floating output is judged against the naive BF16 tier over 32 inputs (``tests/cake_naive.py``; the oracles of
 ``tests/cake/test_helpers/cake_mhc_naive.py`` with ``pre_in`` / ``dpre_next`` and of ``cake_mhc_handoff.py``), and
 ``dpre_in`` also against the issue's criterion: its relative L2 error at most 2 x that of the IEEE-FP32 evaluation of
-the reference, median and largest over the draws (:class:`~tests.cake.test_helpers.cake_mhc_handoff.Fp32Gate`).  This
+the reference, in the median over the draws at every ``T`` and in the largest at ``T >= 257`` (the issue owner's answer
+on #79; :class:`~tests.cake.test_helpers.cake_mhc_handoff.Fp32Gate`).  This
 package makes no bit promise: two runs are compared by format and finiteness, and each against the oracle.
 
 * accuracy of one sublayer (default and poisoned caller workspaces, NaN-filled caller outputs) and of the standalone
   collapse, at T = 1, 7 and irregular counts up to 65536;
-* two sublayers from the one-hot start through the final collapse (the issue's chain), and three mutations of it that
-  the judge must reject (a collapse with the sublayer's own ``pre``, a detached handoff, a coefficient VJP that
-  ignores ``dpre_next``);
+* two sublayers from the one-hot start through the final collapse (the issue's chain), per the issue owner's answer on
+  #79: each sublayer and the final collapse judged on the inputs it received in the chain (every rule of the tier),
+  the chain's own outputs against the FP64 chain in the median, and three wrong forms (a collapse with the sublayer's
+  own ``pre``, a detached handoff, a coefficient VJP that ignores ``dpre_next``) that must exceed the chain bound by a
+  wide margin (``tests/cake/test_helpers/cake_mhc_handoff.py``);
 * the exact cases: ``dY = 0`` with ``dpre_next`` and ``dpre_next = 0`` with ``dY``, one-hot ``pre_in`` (``U`` equal to
   stream 0), ``dU = 0`` (``dpre_in`` exactly 0), the single-cast cancellation driven by ``dpre_next``, saturated
   ``pre`` tails through ``dpre_next``, a zero row of ``X`` (the ``rms_eps`` path), ``T = 0``;
@@ -47,21 +50,26 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from tests.cake.test_helpers.cake_mhc_handoff import (
+    CHAIN_WRONG_FORM_MARGIN,
     CONSTANTS,
     HIDDEN,
     MUTATIONS,
     PRE_COLUMNS,
     SUBLAYER_OUTPUTS,
+    WRONG_FORM_OUTPUT,
     Api,
+    ChainMedian,
     Fp32Gate,
     autograd_sublayer,
     chain_expected_and_naive,
     chain_inputs,
     chain_names,
     chain_package,
+    chain_sublayer_cases,
     collapse_expected_and_naive,
     make_inputs,
     nan_outputs,
+    over_draws,
     sublayer_forward_backward,
 )
 from tests.cake.test_helpers.cake_mhc_naive import (
@@ -236,7 +244,8 @@ def _judge_sublayer(
 def test_handoff_matches_fp64(T: int, record_property) -> None:
     """One handoff sublayer at ``T`` tokens: ``U``, ``Y``, ``dB``, ``dX``, the statistics, the gradient statistics,
     the parameter gradients, ``pre_next`` and ``dpre_in`` judged against the naive BF16 tier over 32 inputs (default
-    and poisoned caller workspaces); ``dpre_in`` within 2 x the IEEE-FP32 evaluation's error."""
+    and poisoned caller workspaces); ``dpre_in`` within 2 x the IEEE-FP32 evaluation's error (median at every ``T``,
+    largest at ``T >= 257``)."""
     _judge_sublayer(
         lambda s: make_inputs(T, device=_device(), seed=s),
         record_property,
@@ -248,7 +257,7 @@ def test_handoff_matches_fp64(T: int, record_property) -> None:
 def test_collapse_matches_fp64(T: int, record_property) -> None:
     """The standalone collapse (``collapse_forward`` / ``collapse_backward``, and the autograd ``collapse``): ``U``,
     ``dX`` and ``dpre_in`` judged against the naive BF16 tier over 32 inputs; ``dpre_in`` within 2 x the IEEE-FP32
-    evaluation's error."""
+    evaluation's error (median at every ``T``, largest at ``T >= 257``)."""
     gate = Fp32Gate()
 
     def case(j: int, s: int):
@@ -289,42 +298,70 @@ def test_two_sublayer_handoff_chain_matches_fp64(
     T: int, save_stats: bool, checkpointed: bool, record_property
 ) -> None:
     """Two sublayers with distinct parameters and branches ``tanh(U W)``, from the one-hot start through the
-    standalone final collapse, an asymmetric upstream gradient ``G`` on the final ``U``: the final ``U``, both
-    ``pre_next`` and the gradients of ``X0`` and of both sublayers' parameters judged against the FP64 chain (the BF16
-    chain the tier) over 32 inputs, each sublayer plain or in its own non-reentrant checkpoint; every gradient is
-    non-zero."""
+    standalone final collapse, an asymmetric upstream gradient ``G`` on the final ``U``, each sublayer plain or in its
+    own non-reentrant checkpoint, over 32 inputs; every gradient is non-zero.  Judged as the issue owner's answer on
+    #79 asks: "Judge each sublayer, including its max draw, against FP64 evaluated on its own inputs, with the
+    family's per-output budgets" (each sublayer and the final collapse on the inputs it received in the chain, every
+    rule of the naive tier, ``dpre_in`` also with the FP32 gate), and "At chain level, compare the median against the
+    FP64 chain with a bound loose enough to absorb BF16 rounding carried between sublayers" (the final ``U``, both
+    ``pre_next``, ``dX0`` and both sublayers' parameter gradients:
+    :class:`~tests.cake.test_helpers.cake_mhc_handoff.ChainMedian`)."""
+    names = chain_names(2)
+    chain, gates = ChainMedian(), {}
 
     def case(j: int, s: int):
         i = chain_inputs(T, device=_device(), seed=s)
-        out = chain_package(api, i, save_stats=save_stats, checkpointed=checkpointed)
-        names = chain_names(2)
+        out = chain_package(
+            api, i, save_stats=save_stats, checkpointed=checkpointed, capture=True
+        )
         for k in names[3:]:
             assert bool(out[k].abs().max() > 0), f"{k} is zero"
         expected, naive = chain_expected_and_naive(i)
-        return [{k: out[k] for k in names}], expected, naive
+        chain.add(j, [{k: out[k] for k in names}], expected, naive)
+        del expected, naive
+        yield from chain_sublayer_cases(out, j, gates)
 
     judge_draws(case, record_property, seed=SEED + 300 + T)
+    for gate in gates.values():
+        gate.check(record_property, DRAWS)
+    chain.check(record_property)
 
 
+@pytest.mark.parametrize("T", (7, 2049))
 @pytest.mark.parametrize("mutation", MUTATIONS)
-def test_two_sublayer_chain_rejects_mutations(mutation: str) -> None:
-    """The chain test detects the issue's three mutations: a collapse with the sublayer's own ``pre`` (the final
-    ``U`` moves), a detached handoff and a coefficient VJP that ignores ``dpre_next`` (the parameter gradients move):
-    the judge of :func:`test_two_sublayer_handoff_chain_matches_fp64` fails on each."""
+def test_two_sublayer_chain_rejects_mutations(
+    mutation: str, T: int, record_property
+) -> None:
+    """The issue owner's answer on #79: "Check that the three wrong forms still fail it by a wide margin."  Each
+    wrong form of the chain of :func:`test_two_sublayer_handoff_chain_matches_fp64` (a collapse with the sublayer's
+    own ``pre``, a detached handoff, a coefficient VJP that ignores ``dpre_next``) is judged by the chain-level
+    median check over 32 inputs: the output it moves (the final ``U``, or the first sublayer's ``fn`` gradient)
+    exceeds the bound by at least ``CHAIN_WRONG_FORM_MARGIN`` x in the l2 norm (the margin is recorded)."""
+    names = chain_names(2)
+    chain = ChainMedian()
 
-    def case(j: int, s: int):
-        i = chain_inputs(7, device=_device(), seed=s)
+    def case(j: int, s: int) -> None:
+        i = chain_inputs(T, device=_device(), seed=s)
         out = chain_package(api, i, mutation=mutation)
-        names = chain_names(2)
         expected, naive = chain_expected_and_naive(i)
-        return [{k: out[k] for k in names}], expected, naive
+        chain.add(j, [{k: out[k] for k in names}], expected, naive)
 
-    with pytest.raises(AssertionError) as caught:
-        judge_draws(case, None, seed=SEED + 400)
-    moved = "U_final" if mutation == "own_pre" else "dfn1"
-    assert f"{moved}: misses the naive tier" in str(caught.value), str(caught.value)[
-        :2000
-    ]
+    over_draws(case, seed=SEED + 400 + T)
+    moved = WRONG_FORM_OUTPUT[mutation]
+    margin = chain.margin(moved)
+    record_property(
+        "chain_wrong_form",
+        {
+            "mutation": mutation,
+            "T": T,
+            "output": moved,
+            "margin": margin,
+            "ratios": chain.ratios(),
+        },
+    )
+    assert margin >= CHAIN_WRONG_FORM_MARGIN, (
+        f"{mutation}: {moved} exceeds the chain bound by only x{margin:.4g} (need x{CHAIN_WRONG_FORM_MARGIN})"
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -744,14 +781,20 @@ def test_checkpoint_across_pre_next(T: int, save_stats: bool, record_property) -
     """Two layers of two handoff sublayers each, every layer one non-reentrant checkpoint region (the first
     sublayer's ``pre_next`` stays inside the region, the layer's last ``pre_next`` crosses into the next region),
     then the final collapse: the forward outputs (the final ``U`` and the crossing ``pre_next``) equal the plain
-    run's bit for bit (the forward programs promise their bits), the gradients have the plain run's formats, and
-    the final ``U`` and all gradients of both runs are judged against the FP64 chain over 32 inputs."""
+    run's bit for bit (the forward programs promise their bits), the gradients have the plain run's formats; over 32
+    inputs each sublayer and the final collapse of both runs are judged on the inputs they received (every rule of
+    the tier, ``dpre_in`` also with the FP32 gate) and the final ``U`` and all gradients against the FP64 chain in the
+    median (the issue owner's answer on #79)."""
     names = tuple(n for n in chain_names(4) if not n.startswith("pre"))
+
+    chain, gates = ChainMedian(), {}
 
     def case(j: int, s: int):
         i = chain_inputs(T, device=_device(), seed=s, sublayers=4)
-        plain = chain_package(api, i, save_stats=save_stats, region=2)
-        ckpt = chain_package(api, i, save_stats=save_stats, checkpointed=True, region=2)
+        plain = chain_package(api, i, save_stats=save_stats, region=2, capture=True)
+        ckpt = chain_package(
+            api, i, save_stats=save_stats, checkpointed=True, region=2, capture=True
+        )
         assert torch.equal(ckpt["U_final"], plain["U_final"]), (
             "the final U differs from the plain run"
         )
@@ -761,13 +804,20 @@ def test_checkpoint_across_pre_next(T: int, save_stats: bool, record_property) -
             [ckpt[k] for k in names[1:]], [plain[k] for k in names[1:]], f"T={T}"
         )
         expected, naive = chain_expected_and_naive(i)
-        return (
+        chain.add(
+            j,
             [{k: plain[k] for k in names}, {k: ckpt[k] for k in names}],
             expected,
             naive,
         )
+        del expected, naive
+        yield from chain_sublayer_cases(plain, j, gates, prefix="plain.")
+        yield from chain_sublayer_cases(ckpt, j, gates, prefix="ckpt.")
 
     judge_draws(case, record_property, seed=SEED + 1600 + T)
+    for gate in gates.values():
+        gate.check(record_property, DRAWS)
+    chain.check(record_property)
 
 
 @pytest.mark.parametrize("T", (129, 2049))

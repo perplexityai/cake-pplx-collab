@@ -27,16 +27,42 @@ and 20 Sinkhorn iterations (:data:`CONSTANTS`, passed to the package and to the 
   (branch ``tanh(U W)`` per sublayer, distinct parameters), and the gradients of an upstream ``G`` on the final ``U``
   by autograd, in a dtype (float64: the oracle; BF16: the naive tier).
 * :class:`Fp32Gate`: the ``dpre_in`` criterion: the relative L2 error against the oracle is at most
-  :data:`DPRE_IN_FACTOR` x that of the IEEE-FP32 evaluation of the reference ``(dU X_i).sum(-1)`` on the CPU (median
-  and largest over the draws).
+  :data:`DPRE_IN_FACTOR` x that of the IEEE-FP32 evaluation of the reference ``(dU X_i).sum(-1)`` on the CPU, in the
+  median over the draws at every ``T`` and in the largest at ``T >= ``:data:`DPRE_IN_MAX_FROM_T`.
+* :func:`chain_sublayer_cases` and :class:`ChainMedian`: the chain check (below).
 * :class:`Api`: one package's entry points under their mode's names.
+
+The issue owner's answer on #79 sets the ``dpre_in`` rule and the chain check (quoted):
+
+    Please apply the median part at every T, and the max part only at T ≥ 257. Training runs at thousands of local
+    tokens per rank, so small T only has to be correct, not tail-tight.
+
+    "Match the FP64 chain" is there to catch wrong semantics: a collapse with the sublayer's own ``pre``, a detached
+    handoff, or a coefficient VJP that ignores ``dpre_next``. All of those give O(1) errors. So:
+
+    - Judge each sublayer, including its max draw, against FP64 evaluated on its own inputs, with the family's
+      per-output budgets.
+    - At chain level, compare the median against the FP64 chain with a bound loose enough to absorb BF16 rounding
+      carried between sublayers. Check that the three wrong forms still fail it by a wide margin.
+    - The max-draw tail on chained dscale/dbase isn't required, since the existing standard chain shows the same
+      tail.
+
+So a chain is judged twice.  Each sublayer (and the final collapse) is judged on the inputs it actually received in
+the chain, recorded by :func:`chain_package` with ``capture=True`` (its ``X``, ``pre_in``, parameters and branch
+``B``, and the gradients that reached its ``U``, ``Y``, ``B`` and ``pre_next``): every output against the FP64 oracle
+of one sublayer on those inputs, with the naive tier's median and largest rules (``tests/cake_naive.py``), and its
+``dpre_in`` with :class:`Fp32Gate`.  The chain's own outputs (the final ``U``, each ``pre_next``, ``dX0`` and every
+parameter gradient) are judged against the FP64 chain in the median only (:class:`ChainMedian`): in each norm, the
+median of their errors over the draws is at most :data:`CHAIN_MEDIAN_FACTOR` x that of the naive BF16 chain; and the
+three wrong forms (:data:`MUTATIONS`) must exceed that bound by at least :data:`CHAIN_WRONG_FORM_MARGIN` x.
 """
 
 from __future__ import annotations
 
 import math
+import random
 import statistics
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
 from types import ModuleType
 
 import torch
@@ -49,6 +75,16 @@ from tests.cake.test_helpers.cake_mhc_naive import (
     NAIVE_DTYPE,
     STREAMS,
     _sinkhorn,
+    expected_and_naive,
+)
+from tests.cake_naive import (
+    DRAWS,
+    NORMS,
+    TIERS,
+    TierJudge,
+    contract,
+    draw_seed,
+    seed_all,
 )
 
 HIDDEN = 5120
@@ -58,6 +94,22 @@ CONSTANTS = {"rms_eps": RMS_EPS, "hc_eps": HC_EPS, "sinkhorn_iters": SINKHORN_IT
 DPRE_IN_FACTOR = 2.0
 #: The device of the IEEE-FP32 evaluation of the ``dpre_in`` reference (pinned: torch's CPU sum).
 DPRE_IN_REFERENCE_DEVICE = "cpu"
+#: The smallest token count at which the largest-draw part of the ``dpre_in`` criterion applies (the issue owner's
+#: answer on #79); the median part applies at every ``T``.
+DPRE_IN_MAX_FROM_T = 257
+#: The chain-level bound: in each norm, the median over the draws of a chain output's error against the FP64 chain is
+#: at most this times the median of the naive BF16 chain's error.  The naive BF16 chain carries the same BF16 rounding
+#: between sublayers, so 1.0 is the naive tier itself with no widening.  Derived from measurement on GB300 (152 SMs),
+#: both backends: 8 seed sets of 32 draws (set 0 = the test's seed) over every chain configuration of these tests
+#: (two sublayers at T 7 / 65 / 129 / 257 / 2049 with and without saved statistics and checkpointing, four
+#: sublayers in two checkpoint regions at T 129 / 2049), every chain output in l2 and max, 2656 ratios per backend.
+#: The largest ratio was 0.914 (det, dscale2 l2, four sublayers at T 2049; the largest of any other det output 0.846)
+#: and 0.850 (nondet, dscale3 max).  A smaller factor would rest on the one largest set of one GPU; the wrong forms
+#: exceed 1.0 by 43 x to 193 x (l2), so the bound does not cost the check its power.
+CHAIN_MEDIAN_FACTOR = 1.0
+#: How far each wrong form must exceed the chain-level bound: its median error over the bound, in the l2 norm, on the
+#: output the wrong form moves (:data:`WRONG_FORM_OUTPUT`).
+CHAIN_WRONG_FORM_MARGIN = 10.0
 BLOCK_TOKENS = 8192
 #: The judged outputs of one handoff sublayer (the forward, the statistics, the gradients).
 SUBLAYER_OUTPUTS = (
@@ -295,13 +347,17 @@ def relative_l2(actual: torch.Tensor, expected: torch.Tensor) -> float:
 
 class Fp32Gate:
     """The ``dpre_in`` criterion over the draws of a case: per draw the relative L2 error of the kernel's ``dpre_in``
-    (the largest over the draw's launches) and of :func:`dpre_in_fp32`, both against the float64 oracle; the median
-    and the largest of the kernel's errors are at most :data:`DPRE_IN_FACTOR` x those of the FP32 evaluation."""
+    (the largest over the draw's launches) and of :func:`dpre_in_fp32`, both against the float64 oracle; the median of
+    the kernel's errors is at most :data:`DPRE_IN_FACTOR` x that of the FP32 evaluation at every ``T``, and the largest
+    at most :data:`DPRE_IN_FACTOR` x the FP32 evaluation's largest at ``T >= ``:data:`DPRE_IN_MAX_FROM_T` (the issue
+    owner's answer on #79: "apply the median part at every T, and the max part only at T >= 257"; at ``T = 1`` a draw
+    has 4 ``dpre_in`` values, and the reference's own alternative FP32 orders miss the largest-draw part as often)."""
 
     def __init__(self, name: str = "dpre_in") -> None:
         self.name = name
         self.ours: dict[int, float] = {}
         self.fp32: dict[int, float] = {}
+        self.tokens: set[int] = set()
 
     def add(
         self,
@@ -313,17 +369,21 @@ class Fp32Gate:
     ) -> None:
         ours = relative_l2(actual, expected)
         self.ours[draw] = max(self.ours.get(draw, 0.0), ours)
+        self.tokens.add(int(X.shape[0]))
         if draw not in self.fp32:
             self.fp32[draw] = relative_l2(dpre_in_fp32(X, dU), expected)
 
     def verdict(self) -> dict:
         ours, fp32 = list(self.ours.values()), list(self.fp32.values())
+        (T,) = self.tokens
         return {
             "output": self.name,
             "draws": len(ours),
+            "T": T,
             "ours": [statistics.median(ours), max(ours)],
             "fp32": [statistics.median(fp32), max(fp32)],
             "factor": DPRE_IN_FACTOR,
+            "largest_judged": T >= DPRE_IN_MAX_FROM_T,
         }
 
     def check(
@@ -336,9 +396,13 @@ class Fp32Gate:
             f"{self.name}: gated on {v['draws']} of {draws} draws"
         )
         (om, ox), (fm, fx) = v["ours"], v["fp32"]
-        assert om <= DPRE_IN_FACTOR * fm and ox <= DPRE_IN_FACTOR * fx, (
-            f"{self.name}: relative L2 error median / largest {om:.3e} / {ox:.3e} exceeds {DPRE_IN_FACTOR} x "
-            f"the IEEE-FP32 evaluation's {fm:.3e} / {fx:.3e} over {v['draws']} draws"
+        assert om <= DPRE_IN_FACTOR * fm, (
+            f"{self.name}: relative L2 error median {om:.3e} exceeds {DPRE_IN_FACTOR} x the IEEE-FP32 "
+            f"evaluation's {fm:.3e} over {v['draws']} draws at T={v['T']}"
+        )
+        assert not v["largest_judged"] or ox <= DPRE_IN_FACTOR * fx, (
+            f"{self.name}: relative L2 error largest {ox:.3e} exceeds {DPRE_IN_FACTOR} x the IEEE-FP32 "
+            f"evaluation's {fx:.3e} over {v['draws']} draws at T={v['T']}"
         )
 
 
@@ -450,6 +514,7 @@ def chain_package(
     checkpointed: bool = False,
     region: int = 1,
     mutation: str | None = None,
+    capture: bool = False,
 ) -> dict:
     """The chain of :func:`chain_inputs` through the package's autograd entry points: per sublayer
     ``handoff_prepare`` (``pre_in`` the previous ``pre_next``, one-hot first), the branch ``tanh(U W)`` and ``finish``;
@@ -458,16 +523,39 @@ def chain_package(
     pre_next)``.  ``mutation`` (:data:`MUTATIONS`): ``own_pre`` collapses each sublayer with its own ``pre`` (the
     standard prepare) and hands on a torch ``pre``; ``detached`` detaches every handoff; ``ignores_dpre_next`` passes
     every handoff through a node whose backward is zero.  Returns the outputs of :func:`chain_names` and, under
-    ``"leaves"`` / ``"pres"``, the leaves and the handed-on ``pre_next`` tensors."""
+    ``"leaves"`` / ``"pres"``, the leaves and the handed-on ``pre_next`` tensors.
+
+    ``capture`` (no mutation) also records what each sublayer received and produced, under ``"sublayers"``: per
+    sublayer ``(inputs, outputs)``, the inputs in the form of :func:`make_inputs` (its ``X``, ``pre_in``, ``fn``,
+    ``scale``, ``base``, its branch ``B = tanh(U W)``, and the gradients ``dY``, ``dU``, ``dpre_next`` that reached its
+    ``Y``, ``U`` and ``pre_next``) and its outputs ``U``, ``Y``, ``pre_next``, ``dX``, ``dpre_in``, ``dfn``,
+    ``dscale``, ``dbase`` and ``dB`` (the gradient of its ``B``); and under ``"collapse"`` the final collapse's
+    ``({X, pre_in, dU = G}, {U, dX, dpre_in})``.  The one-hot start then takes a gradient, so the first sublayer's
+    ``dpre_in`` exists.  The forward values are those of the first evaluation (a checkpoint's recomputation records
+    nothing) and the gradients are read with tensor hooks during the backward, so the record holds the values the
+    backward used when the recomputation gives the forward's bits."""
     from torch.utils.checkpoint import checkpoint
 
+    assert not (capture and mutation), "capture records the chain without a mutation"
     T = int(i["X"].shape[0])
     X0 = i["X"].detach().clone().requires_grad_(True)
     params = [
         [p.detach().clone().requires_grad_(True) for p in ps] for ps in i["params"]
     ]
+    record: dict[int, dict] = {}
 
-    def sublayer(X, pre_in, fn, scale, base, W):
+    def keep(k: int, **values: torch.Tensor) -> None:
+        rec = record.setdefault(k, {})
+        for name, t in values.items():
+            rec[name] = t.detach().clone()
+
+    def hook(k: int, name: str):
+        def store(g: torch.Tensor) -> None:
+            record[k][name] = g.detach().clone()
+
+        return store
+
+    def sublayer(k, X, pre_in, fn, scale, base, W):
         if mutation == "own_pre":
             U, handle = api.prepare(
                 X, fn, scale, base, save_stats=save_stats, **CONSTANTS
@@ -477,19 +565,37 @@ def chain_package(
             U, pre_next, handle = api.handoff_prepare(
                 X, pre_in, fn, scale, base, save_stats=save_stats, **CONSTANTS
             )
-        Y = api.finish(X, torch.tanh(U @ W), handle)
+        B = torch.tanh(U @ W)
+        Y = api.finish(X, B, handle)
+        # the first evaluation only (a checkpoint's recomputation records nothing)
+        if capture and k not in record:
+            keep(
+                k,
+                X=X,
+                pre_in=pre_in,
+                fn=fn,
+                scale=scale,
+                base=base,
+                B=B,
+                U=U,
+                Y=Y,
+                pre_next=pre_next,
+            )
+            for t, name in ((U, "dU"), (B, "dB"), (Y, "dY"), (pre_next, "dpre_next")):
+                t.register_hook(hook(k, name))
         if mutation == "detached":
             pre_next = pre_next.detach()
         elif mutation == "ignores_dpre_next":
             pre_next = _ZeroGrad.apply(pre_next)
         return Y, pre_next
 
-    def run(X, pre_in, *flat):
+    def run(lo, X, pre_in, *flat):
         for k in range(0, len(flat), 4):
-            X, pre_in = sublayer(X, pre_in, *flat[k : k + 4])
+            X, pre_in = sublayer(lo + k // 4, X, pre_in, *flat[k : k + 4])
         return X, pre_in
 
-    X, pre_in = X0, one_hot(T, X0.device)
+    pre0 = one_hot(T, X0.device).requires_grad_(capture)
+    X, pre_in = X0, pre0
     pres = []
     for lo in range(0, len(params), region):
         flat = [
@@ -498,9 +604,9 @@ def chain_package(
             for t in (*params[k], i["W"][k])
         ]
         if checkpointed:
-            X, pre_in = checkpoint(run, X, pre_in, *flat, use_reentrant=False)
+            X, pre_in = checkpoint(run, lo, X, pre_in, *flat, use_reentrant=False)
         else:
-            X, pre_in = run(X, pre_in, *flat)
+            X, pre_in = run(lo, X, pre_in, *flat)
         pres.append(pre_in)
     U_final = api.collapse(X, pre_in)
     U_final.backward(i["G"])
@@ -513,7 +619,166 @@ def chain_package(
             out[f"{n}{k + 1}"] = p.grad
     out["leaves"] = [X0, *(p for ps in params for p in ps)]
     out["pres"] = pres
+    if capture:
+        out["sublayers"] = []
+        for k, ps in enumerate(params):
+            r = record[k]
+            inputs = {
+                n: r[n]
+                for n in (
+                    "X",
+                    "pre_in",
+                    "fn",
+                    "scale",
+                    "base",
+                    "B",
+                    "dY",
+                    "dU",
+                    "dpre_next",
+                )
+            }
+            outputs = {n: r[n] for n in ("U", "Y", "pre_next")}
+            outputs["dX"] = X0.grad if k == 0 else record[k - 1]["dY"]
+            outputs["dpre_in"] = pre0.grad if k == 0 else record[k - 1]["dpre_next"]
+            outputs.update(
+                dfn=ps[0].grad, dscale=ps[1].grad, dbase=ps[2].grad, dB=r["dB"]
+            )
+            out["sublayers"].append(({**inputs, **CONSTANTS}, outputs))
+        last = record[len(params) - 1]
+        out["collapse"] = (
+            {"X": last["Y"], "pre_in": last["pre_next"], "dU": i["G"]},
+            {"U": U_final.detach(), "dX": last["dY"], "dpre_in": last["dpre_next"]},
+        )
     return out
+
+
+def chain_sublayer_cases(
+    out: Mapping, draw: int, gates: dict, prefix: str = ""
+) -> Iterator[tuple[list[dict], dict, dict]]:
+    """The per-sublayer judgement of a captured chain (:func:`chain_package` with ``capture``): for each sublayer
+    ``k`` (names ``<prefix>s<k>.<output>``) and for the final collapse (``<prefix>collapse.<output>``), one
+    ``(launches, expected, naive)`` triple for :func:`~tests.cake.test_helpers.cake_mhc_naive.judge_draws`: its
+    outputs against the FP64 oracle and the naive tier evaluated on the inputs it received in the chain; its
+    ``dpre_in`` is added to ``gates[<name>]`` (an :class:`Fp32Gate`, made on first use).  One triple is made at a
+    time (a generator)."""
+    parts = [
+        (f"{prefix}s{k}.", inputs, outputs, lambda i, o: expected_and_naive(i, o))
+        for k, (inputs, outputs) in enumerate(out["sublayers"], start=1)
+    ]
+    inputs, outputs = out["collapse"]
+    parts.append(
+        (
+            f"{prefix}collapse.",
+            inputs,
+            outputs,
+            lambda i, o: collapse_expected_and_naive(i),
+        )
+    )
+    for p, inputs, outputs, oracle in parts:
+        expected, naive = oracle(inputs, outputs)
+        gate = gates.setdefault(p + "dpre_in", Fp32Gate(p + "dpre_in"))
+        gate.add(
+            draw, outputs["dpre_in"], inputs["X"], inputs["dU"], expected["dpre_in"]
+        )
+        yield (
+            [{p + n: v for n, v in outputs.items()}],
+            {p + n: expected[n] for n in outputs},
+            {p + n: naive[n] for n in outputs},
+        )
+        del expected, naive
+
+
+def over_draws(
+    case: Callable[[int, int], None], *, seed: int, draws: int = DRAWS
+) -> None:
+    """``case(j, s)`` for each draw ``j`` with the random state seeded like
+    :func:`~tests.cake.test_helpers.cake_mhc_naive.judge_draws` (``draw_seed(seed, j)``), the state restored after."""
+    cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
+    state = (random.getstate(), torch.get_rng_state())
+    try:
+        for j in range(draws):
+            s = draw_seed(seed, j)
+            seed_all(s)
+            case(j, s)
+    finally:
+        random.setstate(state[0])
+        torch.set_rng_state(state[1])
+        if cuda is not None:
+            torch.cuda.set_rng_state_all(cuda)
+
+
+#: The chain output each wrong form moves: the final ``U`` (a collapse with the sublayer's own ``pre``) and the first
+#: sublayer's ``fn`` gradient (a handoff that passes no gradient back to its producer's coefficient VJP).
+WRONG_FORM_OUTPUT = {
+    "own_pre": "U_final",
+    "detached": "dfn1",
+    "ignores_dpre_next": "dfn1",
+}
+
+
+class ChainMedian:
+    """The chain-level check: the chain's outputs (:func:`chain_names`) against the FP64 chain over the draws, in
+    the median only.  :meth:`add` records each draw (every launch held to its contract; a second launch of a draw
+    keeps the larger error), :meth:`ratios` gives per output and norm the median of its errors over that of the naive
+    BF16 chain, and :meth:`check` asserts each ratio at most :data:`CHAIN_MEDIAN_FACTOR` (an output whose naive median
+    error is 0 needs a median error of 0)."""
+
+    def __init__(self, draws: int = DRAWS) -> None:
+        self.judge = TierJudge(draws)
+        self.draws = draws
+
+    def add(
+        self, draw: int, launches: Sequence[Mapping], expected: Mapping, naive: Mapping
+    ) -> None:
+        (tier,) = TIERS
+        for launch in launches:
+            for name, actual in launch.items():
+                message = contract(name, actual, expected[name])
+                assert message is None, f"draw {draw}: {message}"
+                self.judge.add(name, draw, actual, expected[name], {tier: naive[name]})
+
+    def ratios(self) -> dict[str, dict[str, float]]:
+        (tier,) = TIERS
+        found: dict[str, dict[str, float]] = {}
+        for name, verdict in self.judge.verdicts().items():
+            assert verdict["draws"] == self.draws, (
+                f"{name}: judged on {verdict['draws']} of {self.draws} draws"
+            )
+            for norm in NORMS:
+                ours, theirs = (
+                    verdict["norms"][norm]["ours"][0],
+                    verdict["norms"][norm][tier],
+                )
+                if theirs is None:
+                    ratio = math.inf
+                elif theirs[0] == 0:
+                    ratio = 0.0 if ours == 0 else math.inf
+                else:
+                    ratio = ours / theirs[0]
+                found.setdefault(name, {})[norm] = ratio
+        return found
+
+    def check(self, record_property: Callable[[str, object], None] | None) -> dict:
+        ratios = self.ratios()
+        if record_property is not None:
+            record_property(
+                "chain_median", {"factor": CHAIN_MEDIAN_FACTOR, "ratios": ratios}
+            )
+        over = [
+            f"{name} {norm} x{r:.4g}"
+            for name, by_norm in ratios.items()
+            for norm, r in by_norm.items()
+            if not r <= CHAIN_MEDIAN_FACTOR
+        ]
+        assert not over, (
+            f"chain median over the FP64 chain exceeds {CHAIN_MEDIAN_FACTOR} x the naive BF16 chain's median: "
+            + ", ".join(over)
+        )
+        return ratios
+
+    def margin(self, name: str) -> float:
+        """The wrong form's excess over the bound on ``name``: its l2 median ratio over :data:`CHAIN_MEDIAN_FACTOR`."""
+        return self.ratios()[name]["l2"] / CHAIN_MEDIAN_FACTOR
 
 
 def assert_equal(got: Mapping, want: Mapping, names: Sequence[str], label: str) -> None:

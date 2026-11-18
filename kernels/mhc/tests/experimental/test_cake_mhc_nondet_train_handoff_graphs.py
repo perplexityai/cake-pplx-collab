@@ -23,7 +23,8 @@ Each iteration is captured whole with ``torch.cuda.graph`` after three warm-up i
   ``backward_prepare`` -> ``handoff_backward_finish``), on the default workspaces and on caller workspaces (poisoned
   before every replay, the backward workspace's zero prefix zero after it);
 * the same sublayer through the autograd entry points (``handoff_prepare`` / ``finish``, ``save_stats`` both ways);
-* two sublayers from the one-hot start through the autograd final ``collapse`` (the issue's chain);
+* two sublayers from the one-hot start through the autograd final ``collapse`` (the issue's chain, judged per sublayer on
+  the inputs each received and at chain level in the median, the issue owner's answer on #79);
 * the standalone collapse and its VJP.
 
 Each captured iteration is replayed on 32 inputs copied into its static inputs, after its static outputs were
@@ -42,10 +43,12 @@ from tests.cake.test_helpers.cake_mhc_handoff import (
     HIDDEN,
     SUBLAYER_OUTPUTS,
     Api,
+    ChainMedian,
     chain_expected_and_naive,
     chain_inputs,
     chain_names,
     chain_package,
+    chain_sublayer_cases,
     collapse_expected_and_naive,
     make_inputs,
     sublayer_forward_backward,
@@ -56,6 +59,7 @@ from tests.cake.test_helpers.cake_mhc_naive import (
     package_outputs,
 )
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS
 
 KEY = "cake.cake_mhc_nondet_train"
 pkg = cake_package(KEY)
@@ -252,15 +256,33 @@ def test_captured_autograd_handoff_sublayer(save_stats: bool, record_property) -
 
 def test_captured_two_sublayer_chain(record_property) -> None:
     """Two handoff sublayers from the one-hot start through the autograd final collapse (branches ``tanh(U W)``,
-    ``U_final.backward(G)``) captured whole and replayed on 32 inputs: the chain's outputs and gradients judged
-    against the FP64 chain (the BF16 chain the tier)."""
+    ``U_final.backward(G)``) captured whole and replayed on 32 inputs, judged as the issue owner's answer on #79 asks:
+    each sublayer and the final collapse on the inputs it received in the replayed chain (recorded inside the graph;
+    every rule of the naive tier, ``dpre_in`` also with the FP32 gate), and the chain's outputs and gradients against
+    the FP64 chain in the median (:class:`~tests.cake.test_helpers.cake_mhc_handoff.ChainMedian`)."""
     T = 129
     statics = chain_inputs(T, device=_device(), seed=SEED + 3)
     names = chain_names(2)
+    sublayers = len(statics["params"])
 
     def step():
-        out = chain_package(api, statics)
-        return {k: out[k] for k in names}
+        out = chain_package(api, statics, capture=True)
+        flat = {k: out[k] for k in names}
+        for k, (inputs, outputs) in enumerate(out["sublayers"]):
+            flat.update(
+                {
+                    f"s{k}.in.{n}": v
+                    for n, v in inputs.items()
+                    if isinstance(v, torch.Tensor)
+                }
+            )
+            flat.update({f"s{k}.out.{n}": v for n, v in outputs.items()})
+        inputs, outputs = out[
+            "collapse"
+        ]  # its dU is the static G (an input: not poisoned)
+        flat.update({"c.in.X": inputs["X"], "c.in.pre_in": inputs["pre_in"]})
+        flat.update({f"c.out.{n}": v for n, v in outputs.items()})
+        return flat
 
     graph, out = _capture(step)
 
@@ -273,15 +295,35 @@ def test_captured_two_sublayer_chain(record_property) -> None:
         for W, V in zip(statics["W"], new["W"], strict=True):
             W.copy_(V)
 
-    _replay_judged(
-        graph,
-        out,
-        load,
-        lambda s: chain_inputs(T, device=_device(), seed=s),
-        lambda new, got: chain_expected_and_naive(new),
-        record_property,
-        seed=SEED + 4,
-    )
+    def part(got: dict, head: str) -> dict:
+        return {n[len(head) :]: v for n, v in got.items() if n.startswith(head)}
+
+    chain, gates = ChainMedian(), {}
+
+    def case(j: int, s: int):
+        new = chain_inputs(T, device=_device(), seed=s)
+        with torch.no_grad():
+            load(new)
+        _poison(out)
+        graph.replay()
+        torch.cuda.synchronize()
+        got = {k: v.detach().clone() for k, v in out.items()}
+        expected, naive = chain_expected_and_naive(new)
+        chain.add(j, [{k: got[k] for k in names}], expected, naive)
+        del expected, naive
+        rebuilt = {
+            "sublayers": [
+                ({**part(got, f"s{k}.in."), **CONSTANTS}, part(got, f"s{k}.out."))
+                for k in range(sublayers)
+            ],
+            "collapse": ({**part(got, "c.in."), "dU": new["G"]}, part(got, "c.out.")),
+        }
+        yield from chain_sublayer_cases(rebuilt, j, gates)
+
+    judge_draws(case, record_property, seed=SEED + 4)
+    for gate in gates.values():
+        gate.check(record_property, DRAWS)
+    chain.check(record_property)
 
 
 def test_captured_standalone_collapse(record_property) -> None:
