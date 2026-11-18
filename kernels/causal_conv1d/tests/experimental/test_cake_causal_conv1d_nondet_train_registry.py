@@ -554,8 +554,8 @@ _KERNEL_SIGNATURE = re.compile(r"__global__[^;{]*?\b(kernel_\w+)\s*\(")
 
 def _kernel_waits_first(text: str, library: str) -> int:
     """Check every ``__global__`` function of a kernel unit: its body executes ``griddepcontrol.wait`` and, before the
-    first one, names none of its pointer or tensor-map parameters (the text before it, comments dropped).  Returns
-    the number of functions checked."""
+    first one, names none of its pointer or tensor-map parameters (the text before it, comments dropped; a member
+    access such as ``threadIdx.x`` is not the parameter ``x``).  Returns the number of functions checked."""
 
     checked = 0
     for match in _KERNEL_SIGNATURE.finditer(text):
@@ -574,7 +574,7 @@ def _kernel_waits_first(text: str, library: str) -> int:
         label = (library, match.group(1))
         assert guarded and wait > body_start, label
         before = re.sub(r"//[^\n]*", "", text[body_start:wait])
-        named = [name for name in guarded if re.search(rf"\b{re.escape(name)}\b", before)]
+        named = [name for name in guarded if re.search(rf"(?<!\.)(?<!->)\b{re.escape(name)}\b", before)]
         assert not named, (label, named)
         checked += 1
     return checked
