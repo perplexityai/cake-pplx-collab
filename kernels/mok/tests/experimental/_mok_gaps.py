@@ -107,7 +107,8 @@ def marker(item: str, what: str, fix: str) -> pytest.MarkDecorator:
     caps = _checked(item, CAPS.get(item, {}))
     reason = (
         f"known gap on {', '.join(sorted(caps)) or 'no architecture'}: {what}; caps (largest ratio of the median and of "
-        f"the largest error, ours / naive, in each norm the miss is accepted in): {_caps_text(caps) or 'none'}.  {fix}"
+        f"the largest error, ours / naive, in each norm the miss is accepted in): {_caps_text(caps) or 'none'}.  {fix}  "
+        "An item that meets the tier fails under this strict marker: remove its caps."
     )
     return pytest.mark.xfail(arch() in caps, strict=True, raises=AssertionError, reason=reason)
 
@@ -115,32 +116,6 @@ def marker(item: str, what: str, fix: str) -> pytest.MarkDecorator:
 def mxfp8_d_scores(item: str) -> pytest.MarkDecorator:
     """The marker of an MXFP8 score-gradient item."""
     return marker(item, MXFP8_D_SCORES_WHAT, MXFP8_D_SCORES_FIX)
-
-
-def mxfp8_d_scores_of(function: str) -> pytest.MarkDecorator:
-    """The marker of the score-gradient items of MXFP8 test ``function``, whose ``part`` parameter is shared by its
-    cases: active on the architectures :data:`CAPS` lists for any of them (``<function>[...-d_scores]``), its reason
-    naming each with the range of the items' caps.  Each item is still held to its own cap (:func:`check`)."""
-    caps: dict[str, dict[str, list[float]]] = {}
-    for item, item_caps in CAPS.items():
-        if item.startswith(f"{function}[") and item.endswith("-d_scores]"):
-            for target, norms in _checked(item, item_caps).items():
-                for norm, cap in norms.items():
-                    caps.setdefault(target, {}).setdefault(norm, []).append(cap)
-    text = "; ".join(
-        f"{target} "
-        + ", ".join(
-            f"{norm} {min(found):.4f}" + (f"-{max(found):.4f}" if max(found) > min(found) else "")
-            for norm, found in norms.items()
-        )
-        for target, norms in sorted(caps.items())
-    )
-    reason = (
-        f"known gap on {', '.join(sorted(caps)) or 'no architecture'}: {MXFP8_D_SCORES_WHAT}; caps of the items "
-        f"(largest ratio of the median and of the largest error, ours / naive, in each norm the miss is accepted in): "
-        f"{text or 'none'}.  {MXFP8_D_SCORES_FIX}"
-    )
-    return pytest.mark.xfail(arch() in caps, strict=True, raises=AssertionError, reason=reason)
 
 
 def bf16_straddle_dw(item: str) -> pytest.MarkDecorator:

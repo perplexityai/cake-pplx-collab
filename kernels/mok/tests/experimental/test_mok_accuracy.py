@@ -421,12 +421,15 @@ def _mxfp8_case(
 MXFP8_GAPS = ("d_scores",)
 
 
-def _mxfp8_parts(function):
-    """The ``part`` parameter of MXFP8 test ``function``: the main item, then the score gradient under its marker."""
-    mark = gaps.mxfp8_d_scores_of(function)
-    return pytest.mark.parametrize(
-        "part", [gaps.OUTPUTS, *(pytest.param(name, marks=mark, id=gaps.item_id(name)) for name in MXFP8_GAPS)]
-    )
+def _mxfp8_cases(function, cases):
+    """``(*values, part)`` parameters of MXFP8 test ``function`` for ``cases`` (``(id, values)``): per case its main
+    item, then the score gradient in an item of its own under that item's marker (:func:`_mok_gaps.parts`)."""
+    known = [(name, gaps.mxfp8_d_scores) for name in MXFP8_GAPS]
+    return [
+        pytest.param(*values, *p.values, marks=p.marks, id=p.id)
+        for case, values in cases
+        for p in gaps.parts(function, known, case)
+    ]
 
 
 def _mxfp8(record_property, part, **kwargs):
@@ -435,25 +438,30 @@ def _mxfp8(record_property, part, **kwargs):
     _check(record_property, part, run, MXFP8_GAPS)
 
 
-LIMITS = pytest.mark.parametrize("swiglu_limit", [None, 0.75], ids=["plain", "clamped"])
+#: ``(id, (geometry, swiglu_limit))`` of the plain and clamped MXFP8 cases of each geometry.
+MXFP8_CASES = [
+    ("h{}-i{}-m{}-{}".format(*geometry, name), (geometry, limit))
+    for geometry in MXFP8_GEOMETRIES
+    for limit, name in ((None, "plain"), (0.75, "clamped"))
+]
 
 
-@_mxfp8_parts("test_mxfp8_training_accuracy")
-@LIMITS
-@pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+@pytest.mark.parametrize("geometry,swiglu_limit,part", _mxfp8_cases("test_mxfp8_training_accuracy", MXFP8_CASES))
 def test_mxfp8_training_accuracy(record_property, swiglu_limit, geometry, part):
     _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry)
 
 
-@_mxfp8_parts("test_mxfp8_training_fp32_wgrad_accuracy")
-@LIMITS
-@pytest.mark.parametrize("geometry", MXFP8_GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+@pytest.mark.parametrize(
+    "geometry,swiglu_limit,part", _mxfp8_cases("test_mxfp8_training_fp32_wgrad_accuracy", MXFP8_CASES)
+)
 def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geometry, part):
     _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True)
 
 
-@_mxfp8_parts("test_mxfp8_training_local_experts_accuracy")
-@pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
+@pytest.mark.parametrize(
+    "experts,part",
+    _mxfp8_cases("test_mxfp8_training_local_experts_accuracy", [("local36", (36,)), ("local9", (9,))]),
+)
 def test_mxfp8_training_local_experts_accuracy(record_property, experts, part):
     """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
     _mxfp8(record_property, part, swiglu_limit=0.75, geometry=(512, 256, 2048), experts=experts, topk=8)

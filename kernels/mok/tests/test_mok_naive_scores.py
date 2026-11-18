@@ -52,6 +52,11 @@ def _problem(seed=5):
         (torch.randn(1, INTERMEDIATE, HIDDEN) / HIDDEN**0.5).bfloat16(),
         (torch.randn(1, HIDDEN, INTERMEDIATE) / INTERMEDIATE**0.5).bfloat16(),
     ]
+    # One large element of Wd.  A power-of-two block scale leaves the E4M3 rounding of a normal value unchanged, so the
+    # forward copy (blocks along I) and the backward copy (blocks along H) of Wd agree except where a block's scale
+    # makes a small element an E4M3 subnormal: the blocks around this element along I and along H, which hold
+    # different elements.
+    weights[2][0, 5, 7] = 1024.0
     q = [mxfp8_quantize(w) for w in weights]
     mx = dict(forward=[(qq[0], qq[1]) for qq in q], backward=(q[0], q[1], (q[2][2], q[2][3])))
     routes = torch.cat((torch.arange(VALID, dtype=torch.int32), torch.full((ROWS - VALID,), -1, dtype=torch.int32)))

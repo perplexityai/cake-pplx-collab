@@ -379,6 +379,7 @@ def test_a_marker_is_active_on_the_architectures_its_caps_list(monkeypatch):
             assert mark.args == (active,) and mark.kwargs["strict"] and mark.kwargs["raises"] is AssertionError
             assert mark.kwargs["reason"].startswith("known gap on sm_100a, sm_107a: ")
             assert "sm_100a max 1.1000; sm_107a l2 1.2000, max 1.3000" in mark.kwargs["reason"]
+            assert mark.kwargs["reason"].endswith("An item that meets the tier fails under this strict marker: remove its caps.")
     finally:
         gaps.arch.cache_clear()
 
