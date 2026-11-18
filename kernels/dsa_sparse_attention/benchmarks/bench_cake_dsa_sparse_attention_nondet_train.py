@@ -113,6 +113,7 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from cake_pplx.cake_dsa_sparse_attention_nondet_train import (  # noqa: E402
+    _dkv_direct_from_environment,
     cake_dsa_sparse_attention_nondet,
     cake_dsa_sparse_attention_nondet_varlen,
 )
@@ -858,13 +859,34 @@ class ArmCake:
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
             )
-        module_name, _record = cake_backend.record_for(self.inp.q_latent.device)
-        return dict(
+        inp = self.inp
+        module_name, _record = cake_backend.record_for(inp.q_latent.device)
+        facts = dict(
             module=module_name,
             stages=list(cake_jit.registered_stages()),
             entry="cake_dsa_sparse_attention_nondet_varlen",
             layout=self.layout.describe(),
         )
+        if self.layout.dkv_acc:
+            # the varlen entry's segment count (``len(cu_seqlens_k) - 1``); the arm passes no ``dkv_direct``, so
+            # the entry resolves ``CAKE_PPLX_DSA_DKV_DIRECT`` (``auto``: the record's rule of this device;
+            # ``1`` / ``0``: forced).  Without ``dkv_acc`` the backward takes the cast path.
+            row = (
+                inp.q_latent.device,
+                inp.total_q,
+                inp.total_k,
+                inp.topk,
+                int(inp.cu_seqlens_k.numel()) - 1,
+            )
+            facts.update(
+                # the route the backward takes (the environment override resolved)
+                dkv_direct=_record_dkv_direct(
+                    *row, dkv_direct=_dkv_direct_from_environment()
+                ),
+                # the record's rule for the row, whatever the environment says
+                dkv_direct_rule=_record_dkv_direct(*row),
+            )
+        return facts
 
     def forward(self):
         if self.runner is not None:
@@ -1168,17 +1190,41 @@ def _chunk_bounds(inp, chunk):
     return bounds
 
 
-def _bridge_dkv_direct(device, num_queries, num_kv):
-    """The shipped record's direct-accumulation decision for a bridge call, passed explicitly
-    so the binding does not depend on the environment."""
-    _, record = cake_backend.record_for(device)
-    stages = cake_jit.registered_stages()
-    policy = cake_backend.DkvDirectPolicy.from_record(record)
+def _record_dkv_direct(
+    device, num_queries, num_kv, topk, num_segments=1, program=None, dkv_direct=None
+):
+    """The planner's direct-accumulation decision (``cake_backend.plan_dkv_direct``) for a
+    ``dkv_acc`` backward of ``num_queries`` query tokens over ``num_kv`` keys with ``topk``
+    index slots per query and ``num_segments`` packed segments on ``device``.
+    ``dkv_direct=None`` applies the shipped record's rule of the device's architecture
+    (``dkv_direct.rules[arch]``, the base without one); ``True`` / ``False`` force the path
+    (the direct path only where the program registers the natural stages).
+    ``program=None`` is the RoPE record (the bridge arm), else the named program's record
+    (the native arm)."""
+    kw = {} if program is None else dict(program=program)
+    _, record = cake_backend.record_for(device, **kw)
+    stages = cake_jit.registered_stages(**kw)
     return bool(
-        policy is not None
-        and cake_backend.record_direct_stages(record, stages)
-        and policy.wants(num_queries, num_kv)
+        cake_backend.plan_dkv_direct(
+            record,
+            stages,
+            num_queries,
+            num_kv,
+            topk,
+            accumulate=True,
+            dkv_direct=dkv_direct,
+            arch=cake_backend.arch_for(device),
+            num_segments=num_segments,
+            **kw,
+        )
     )
+
+
+def _bridge_dkv_direct(device, num_queries, num_kv, topk, num_segments):
+    """The shipped record's direct-accumulation decision for a bridge call
+    (:func:`_record_dkv_direct`), passed explicitly so the binding does not depend on the
+    environment."""
+    return _record_dkv_direct(device, num_queries, num_kv, topk, num_segments)
 
 
 def _planner_key_passes(inp, chunk, program=None):
@@ -1274,8 +1320,20 @@ class ArmCakeNope:
         self.eager = None
 
     def versions(self):
+        inp = self.inp
+        row = (inp.q.device, inp.total_q, inp.total_k, inp.topk, inp.num_segments)
+        # the arm passes no ``dkv_direct``: the entry resolves ``CAKE_PPLX_DSA_DKV_DIRECT``
+        # (``auto``: the record's rule of this device; ``1`` / ``0``: forced)
+        forced = _dkv_direct_from_environment()
         return dict(
-            module=self.program, entry="cake_dsa_sparse_attention_nondet_nope_varlen"
+            module=self.program,
+            entry="cake_dsa_sparse_attention_nondet_nope_varlen",
+            # the route the whole-row backward takes (the environment override resolved)
+            dkv_direct=_record_dkv_direct(
+                *row, program=self.program, dkv_direct=forced
+            ),
+            # the record's rule for the whole row, whatever the environment says
+            dkv_direct_rule=_record_dkv_direct(*row, program=self.program),
         )
 
     def _call(self, q, kv, dkv_acc):
@@ -1380,6 +1438,7 @@ class ArmCakeNope:
         if size is None:
             return None
         inp = self.inp
+        # sized for the route of :meth:`versions` (``dkv_direct``): the environment override resolved
         return int(
             size(
                 inp.total_q,
@@ -1388,6 +1447,7 @@ class ArmCakeNope:
                 inp.q.device,
                 backward=True,
                 num_segments=inp.num_segments,
+                dkv_direct=_dkv_direct_from_environment(),
             )
         )
 
@@ -1401,8 +1461,8 @@ class ArmCakeRopeBridge:
     (once per step); the backward is the autograd gradient of ``q`` (the dead ``dq_rope``
     output is still written) and ``dkv = dkv_acc[:, :512]`` (a view; a consumer that needs
     contiguous rows pays a copy).  ``dkv_direct`` is passed as the record's own
-    size rule evaluates.  ``backward_chunks`` uses the eager entries over the 4096-query
-    chunks.
+    size rule of the device's architecture evaluates.  ``backward_chunks`` uses the eager
+    entries over the 4096-query chunks.
     """
 
     name = "cake_rope_bridge"
@@ -1410,7 +1470,9 @@ class ArmCakeRopeBridge:
     def __init__(self, inp, chunk=NOPE_CHUNK):
         self.inp, self.chunk = inp, chunk
         self.q = inp.q.detach().requires_grad_()
-        self.direct = _bridge_dkv_direct(inp.q.device, inp.total_q, inp.total_k)
+        self.direct = _bridge_dkv_direct(
+            inp.q.device, inp.total_q, inp.total_k, inp.topk, inp.num_segments
+        )
         self.eager = None
 
     def versions(self):
@@ -1498,7 +1560,9 @@ class ArmCakeRopeBridge:
                     cu_q,
                     cu_k,
                     segments,
-                    _bridge_dkv_direct(inp.q.device, q1 - q0, inp.total_k),
+                    _bridge_dkv_direct(
+                        inp.q.device, q1 - q0, inp.total_k, inp.topk, segments
+                    ),
                 )
                 for q0, q1, cu_q, cu_k, segments in _chunk_bounds(inp, self.chunk)
             ]

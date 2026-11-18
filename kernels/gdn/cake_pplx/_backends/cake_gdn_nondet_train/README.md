@@ -5,31 +5,31 @@ DeltaNet) layers in training: head dimension 128, chunk 64, grouped Q/K heads
 (`HV` a multiple of `H`), no context parallelism.  The public entry point is
 `cake_gdn_nondet` in `cake_pplx.cake_gdn_nondet_train`.  Every launch is
 fixed-order, so every output repeats bit for bit (see Outputs).  The
-results match the deterministic package
-`cake_pplx._backends.cake_gdn_det_train` within that package's accuracy
-budgets, not bitwise: where the backward runs the package tail or a cluster
+results are not bitwise equal to those of the deterministic package
+`cake_pplx._backends.cake_gdn_det_train`: where the backward runs the package tail or a cluster
 tail of a value-head group of two or three (see Chain), `dq` and `dk` are
 rounded to BF16 once, after the FP32 sum of the value heads' partials, where the
 deterministic package rounds each partial.  The output and the final state have
 the deterministic package's bits where the forward runs that package's
 kernels (the prep forward, see Chain); where it runs a forward of its own, on
 the WY stage's `A` from `wy_a` (the split forward or the serial A form; a
-`prep` pin turns both off), they match within the same budgets.  `dv`, `dg`,
+`prep` pin turns both off), they can differ from its bits.  `dv`, `dg`,
 `dbeta` and the initial-state gradient have the deterministic package's bits
 too after the prep forward, except where the backward runs the tcgen05 adjoint
 scan, which rounds `dv2` once on `sm_100a`, `sm_103a` and `sm_107a`, or takes
 the adjoint table priced for `dhu_tc2` or the one-wave split of the adjoint
-walk (see Chain); after a forward on `A`, or with such a backward, they match
-within the same budgets.
+walk (see Chain); after a forward on `A`, or with such a backward, they can
+differ from its bits.
 On `sm_107a` a call may also take a deeper split table (see Chain); the
-outputs that depend on that table then match within the same budgets too.
+outputs that depend on that table can then differ from its bits too.
+Accuracy: the tests record each output's error against an FP64 reference beside the BF16 naive implementation's (`kernels/gdn/tests/cake_naive.py`); a miss is recorded and does not fail a test.
 
 The facade `cake_pplx.cake_gdn_nondet_train` is a stable API: its entry points
 are `@cake_api` functions.  This package, under `cake_pplx._backends`, is its
 backend.
 SM100 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200) are the supported
 architectures; another device raises `RuntimeError`.  The SM107 libraries need
-CUDA 13.4 or newer.  The feature does not
+CUDA 13.5 or newer.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when a builder compiled them and
 JIT-built by the package's JIT shim (`_cake_pplx_jit.py`) from the sources and
@@ -203,7 +203,7 @@ facade sits at the top level of `cake_pplx`; its backend package sits under
 | mode | one rank (this API, FLA signature) | context parallel (KCP) |
 |---|---|---|
 | `det` (deterministic) | `cake_pplx.cake_gdn_det_train` (`cake_gdn_det`) | `cake_pplx.cake_gdn_det_train_kcp` (`cake_gdn_det_kcp`) |
-| `nondet` (within the det budgets) | `cake_pplx.cake_gdn_nondet_train` (`cake_gdn_nondet`) | `cake_pplx.cake_gdn_nondet_train_kcp` (`cake_gdn_nondet_kcp`) |
+| `nondet` (not bitwise det) | `cake_pplx.cake_gdn_nondet_train` (`cake_gdn_nondet`) | `cake_pplx.cake_gdn_nondet_train_kcp` (`cake_gdn_nondet_kcp`) |
 
 Each backend package is standalone: it imports no other `cake_pplx` package
 and ships its own copy of every kernel it shares with another.  Nothing
@@ -319,7 +319,7 @@ so no `dv_local` stage runs.  That pre-scan (`dhu_pre_dvl_r64k1`) keeps its
 partial sum of an output.  Its FP32-tile form `dhu_pre_dvl32_r64k1` ships but
 is not routed (`PRE_DVL32_ARCHS` is empty): on B200 it cost up to 1.2 % of the
 backward on the split plans of slow-decay gates.  The two pass-2 forms give the
-same bits on `dhu_tc2` and agree within the budgets on `dhu_tc2_dvl32`.  On a host-built
+same bits on `dhu_tc2` and can give other bits on `dhu_tc2_dvl32`.  On a host-built
 table without plan pins, this package may also replace the planner's adjoint
 table (priced for the register scans) by the table priced for `dhu_tc2`
 itself: the serial table or a `(64, 1)` split table of any segment length,
@@ -389,7 +389,8 @@ tie at 2048 (chunk, value head) CTAs on B200; on GB300 the backward time ratio
 an R200 board with 216 SMs (not the 212-SM R200 of the tables in this file)
 `"tail"` is faster from 1024 CTAs on.
 
-Every tail meets the deterministic package's accuracy budgets.  `dv`, `dg`
+The tests judge every tail like the other forms (FP64 reference, BF16 naive
+implementation beside it).  `dv`, `dg`
 and `dbeta` have one writer each and the same bits in every tail; they are
 the deterministic package's bits where the forward and the adjoint run as that
 package's do (see above).
@@ -592,7 +593,7 @@ is 0.05-0.06 ms larger in this package than in the deterministic package.
 | `segment_chunks` | planner | segment length in chunks of the segment-parallel scans; `0` forces the serial scan; lengths above 128 (the chunks one pre-scan CTA covers) are not supported: a call whose plan then splits a sequence raises `ValueError` |
 | `finalize` | by size | finalize of the `"unfused"` tail: `"finalize"` or `"finalize_mlp"` (the latter needs `HV == 3 * H`) |
 | `warmup_log2` | `-10 / ln 2` | warm-up threshold of the pre-scans |
-| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan; the same bits as `"reg"` on `dhu_tc2`, within the budgets on `dhu_tc2_dvl32`) |
+| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan; the same bits as `"reg"` on `dhu_tc2`, other bits on `dhu_tc2_dvl32`) |
 | `prep` | rule | forward prep: `"plain"` or `"tma"` (`prep_tma`; Q or K not 16-byte aligned still take the plain prep); a pin also keeps the call off the forwards on `wy_a`'s `A` (see Chain) |
 | `save_state` | `True` | keep the forward state of the architecture's tape level for the backward (`T_full`: `w`, `h`, `v_new`; `u`, read only to rebuild `h` / `v_new`, is freed when the forward returns); `False` recomputes them |
 | `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections, the per-stream workspaces and the backward's launch record between calls (a CUDA graph capture takes its own workspaces and no launch record) |
@@ -604,4 +605,4 @@ is 0.05-0.06 ms larger in this package than in the deterministic package.
 
 - Head dimension 128 and chunk 64 only; `q`, `k`, `v` BF16.
 - No context parallelism and no cross-rank state passing.
-- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.4 or newer).
+- `sm_100a`, `sm_103a` and `sm_107a` only (`sm_107a` with CUDA 13.5 or newer).

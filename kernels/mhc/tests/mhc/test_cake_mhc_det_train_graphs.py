@@ -147,7 +147,7 @@ def _leaves(i: dict) -> list:
     ]
 
 
-def _layer(i: dict, wsf, wsb, save_stats: bool):
+def _layer(i: dict, wsf, wsb, save_stats: bool, **mode):
     def layer(X, fn, scale, base):
         U, handle = pkg.cake_mhc_det_train_prepare(
             X,
@@ -157,24 +157,25 @@ def _layer(i: dict, wsf, wsb, save_stats: bool):
             save_stats=save_stats,
             workspace=wsf,
             backward_workspace=wsb,
+            **mode,
         )
         return pkg.cake_mhc_det_train_finish(X, U @ i["W"], handle)
 
     return layer
 
 
-def _direct_step(i: dict, wsf, wsb):
+def _direct_step(i: dict, wsf, wsb, **mode):
     X, fn, scale, base, W, dY = (i[k] for k in ("X", "fn", "scale", "base", "W", "dY"))
 
     def step() -> dict:
         U, stats = pkg.cake_mhc_det_train_forward_prepare(
-            X, fn, scale, base, workspace=wsf
+            X, fn, scale, base, workspace=wsf, **mode
         )
         B = U @ W
         Y = pkg.cake_mhc_det_train_forward_finish(X, B, stats)
         dB, gstats = pkg.cake_mhc_det_train_backward_prepare(dY, B, X, stats)
         dX, dfn, dscale, dbase = pkg.cake_mhc_det_train_backward_finish(
-            X, dY, dB @ W.t(), B, fn, scale, base, stats, gstats, workspace=wsb
+            X, dY, dB @ W.t(), B, fn, scale, base, stats, gstats, workspace=wsb, **mode
         )
         return {
             "U": U,
@@ -191,8 +192,8 @@ def _direct_step(i: dict, wsf, wsb):
     return step, ()
 
 
-def _autograd_step(i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool):
-    layer = _layer(i, wsf, wsb, save_stats)
+def _autograd_step(i: dict, wsf, wsb, *, save_stats: bool, ckpt: bool, **mode):
+    layer = _layer(i, wsf, wsb, save_stats, **mode)
     leaves = _leaves(i)
     dY = i["dY"].float()
 
@@ -329,4 +330,52 @@ def test_make_graphed_callables(
         got = run(graphed, ir)
         _assert_bitwise(
             ref, got, f"make_graphed_callables ckpt={ckpt} T={T} H={hidden} call {r}"
+        )
+
+
+# The opt-in two-word accumulation (``accumulation="fp32x2"``, hidden 4096 only): the same captures, each replay
+# bitwise equal to the eager iteration in that mode.
+TWO_WORD = {"accumulation": "fp32x2"}
+
+
+def _two_word_hidden() -> int:
+    arch = loader.arch_for_capability(torch.cuda.get_device_capability(_device()))
+    sizes = tuple(loader.supported_hidden_sizes(arch)) if arch else ()
+    if loader.ACC_WORDS_HIDDEN not in sizes:
+        pytest.skip(f"hidden {loader.ACC_WORDS_HIDDEN} has no exported route on {arch}")
+    return loader.ACC_WORDS_HIDDEN
+
+
+@pytest.mark.parametrize("T", (1, 129, 2049, 16263))
+@pytest.mark.parametrize("caller_owned", (False, True))
+def test_two_word_direct_entry_points_capture(T: int, caller_owned: bool) -> None:
+    hidden = _two_word_hidden()
+    i = _inputs(T, seed=7346 + T, hidden=hidden)
+    wsf, wsb = _workspaces(T, caller_owned, hidden)
+    ref = _eager(lambda: _direct_step(i, wsf, wsb, **TWO_WORD))
+    for r, got in enumerate(
+        _capture_and_replay(lambda: _direct_step(i, wsf, wsb, **TWO_WORD))
+    ):
+        _assert_bitwise(ref, got, f"two-word direct T={T} replay {r}")
+
+
+@pytest.mark.parametrize("T", (129, 2049))
+@pytest.mark.parametrize("save_stats", (True, False))
+@pytest.mark.parametrize("ckpt", (False, True))
+def test_two_word_autograd_iteration_capture(
+    T: int, save_stats: bool, ckpt: bool
+) -> None:
+    hidden = _two_word_hidden()
+    i = _inputs(T, seed=7446 + T, hidden=hidden)
+    wsf, wsb = _workspaces(T, True, hidden)
+
+    def make():
+        return _autograd_step(i, wsf, wsb, save_stats=save_stats, ckpt=ckpt, **TWO_WORD)
+
+    ref = _eager(make)
+    for r, got in enumerate(_capture_and_replay(make)):
+        _assert_bitwise(
+            ref,
+            got,
+            f"two-word autograd ckpt={ckpt} save_stats={save_stats} T={T} replay {r}",
         )

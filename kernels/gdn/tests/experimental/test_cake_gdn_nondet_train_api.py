@@ -19,8 +19,9 @@ its backend suite ``test_cake_gdn_nondet_train.py``).  On the CPU: importing the
 before first use; the exact facade names, each with the word ``nondet``; the facade is a stable API (``@cake_api``
 entries, not marked experimental, a first call warns of nothing); the old names and the old module path gone; no
 ``deterministic`` keyword (passing one is a ``TypeError``); the support query returns a ``bool``.  On a device: the
-facade runs unchanged under PyTorch's deterministic algorithms, strict and ``warn_only`` (no alert, no warning, no
-fallback to the deterministic package), to the bits of the default mode.
+facade runs under PyTorch's deterministic algorithms, strict and ``warn_only`` (no alert, no warning, no fallback to
+the deterministic package); the calls in both modes and in the default mode are judged by ``tests/cake_naive.py``
+over 32 random draws (the FP64 token recurrence as the oracle beside its PyTorch BF16 form, ``token_recurrence``).
 
 The suite imports the facade and the old module path by name and the packages through the shared alias helper.
 """
@@ -32,6 +33,7 @@ import importlib
 import importlib.util
 import inspect
 import math
+import random
 import re
 import subprocess
 import sys
@@ -41,6 +43,8 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed, seed_all
+from tests.experimental.test_helpers.cake_gdn_naive import token_recurrence
 
 FACADE = "cake_pplx.cake_gdn_nondet_train"
 PACKAGE = "cake_pplx._backends.cake_gdn_nondet_train"
@@ -332,11 +336,12 @@ def _run(entry, inputs, seq_lens) -> dict:
     }
 
 
-def test_the_facade_runs_unchanged_under_torch_deterministic_algorithms(
-    monkeypatch,
+def test_the_facade_runs_under_torch_deterministic_algorithms(
+    monkeypatch, record_property
 ) -> None:
-    # a fixed-order non-deterministic entry under PyTorch's deterministic algorithms, strict and warn_only: the
-    # facade's forward and backward run with no alert, no warning and no fallback, to the bits of the default mode
+    # the facade's forward and backward under PyTorch's deterministic algorithms, strict and warn_only: no alert, no
+    # warning and no fallback; the default mode and both modes are judged against the FP64 token recurrence beside
+    # its PyTorch BF16 form, over DRAWS draws
     device = _device_or_skip()
 
     def refuse(*_args, **_kwargs):
@@ -347,18 +352,43 @@ def test_the_facade_runs_unchanged_under_torch_deterministic_algorithms(
     )
     facade = _facade()
     seq_lens, heads = (300, 77, 640), (2, 6)
-    inputs = _inputs(seq_lens, heads, device, seed=269)
-    # the default mode first: the reference bits
-    want = _run(facade.cake_gdn_nondet, inputs, seq_lens)
-    for warn_only in (False, True):
-        with (
-            _deterministic_algorithms(True, warn_only=warn_only),
-            warnings.catch_warnings(record=True) as caught,
-        ):
-            warnings.simplefilter("always")
-            got = _run(facade.cake_gdn_nondet, inputs, seq_lens)
-        user_warnings = [w for w in caught if issubclass(w.category, UserWarning)]
-        assert not user_warnings, (warn_only, [str(w.message) for w in user_warnings])
-        for name in ("o",) + GRAD_NAMES:
-            assert got[name] is not None, (warn_only, name)
-            assert torch.equal(got[name], want[name]), (warn_only, name)
+    judge, failures = TierJudge(), []
+    cuda = torch.cuda.get_rng_state_all()
+    state = (random.getstate(), torch.get_rng_state())
+    try:
+        for j in range(DRAWS):
+            s = draw_seed(269, j)
+            seed_all(s)
+            inputs = _inputs(seq_lens, heads, device, seed=s)
+            runs = {"default": _run(facade.cake_gdn_nondet, inputs, seq_lens)}
+            for warn_only in (False, True):
+                with (
+                    _deterministic_algorithms(True, warn_only=warn_only),
+                    warnings.catch_warnings(record=True) as caught,
+                ):
+                    warnings.simplefilter("always")
+                    got = _run(facade.cake_gdn_nondet, inputs, seq_lens)
+                user_warnings = [
+                    w for w in caught if issubclass(w.category, UserWarning)
+                ]
+                assert not user_warnings, (
+                    warn_only,
+                    [str(w.message) for w in user_warnings],
+                )
+                runs["warn" if warn_only else "strict"] = got
+            ref = token_recurrence(inputs, seq_lens, dtype=torch.float64)
+            naive = token_recurrence(inputs, seq_lens)
+            for arm, got in runs.items():
+                for name in ("o",) + GRAD_NAMES:
+                    label = f"{arm}.{name}"
+                    if (message := contract(label, got[name], ref[name])) is not None:
+                        failures.append(f"draw {j}: {message}")
+                        continue
+                    judge.add(label, j, got[name], ref[name], {"bf16": naive[name]})
+    finally:
+        random.setstate(state[0])
+        torch.set_rng_state(state[1])
+        torch.cuda.set_rng_state_all(cuda)
+    failures += judge.failures()
+    judge.record(record_property)
+    assert not failures, failures

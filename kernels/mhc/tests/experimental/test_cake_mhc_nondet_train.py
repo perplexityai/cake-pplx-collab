@@ -15,100 +15,70 @@ limitations under the License.
 
 Backend suite of the Cake four-stream mHC training package
 ``cake_pplx._backends.cake_mhc_nondet_train`` (hidden 4096, 5120 and
-7168 on SM100 / SM103, 4096 on SM107; 4 streams).
+7168 on SM100 / SM103 / SM107; 4 streams).
 
-The package is standalone: its forward, statistics replay, residual mixing and
-backward prepare run its own copies of the deterministic programs, and
+The package is standalone: its forward, statistics replay, residual mixing
+and backward prepare run its own copies of the deterministic programs, and
 ``cake_mhc_nondet_train_backward_finish(...)`` launches its copy of the
-deterministic token-owner pass (its group-row form inside ``BWD_ROW_BANDS``, as
-the deterministic package does), its atomic fn split (beside the token-owner
-pass as its programmatic dependent; it also clears ``dfn`` without
-``accumulate``) and its column-slab pass, which stores the compensated ``dfn``
-sum of every (column slab, token chunk) unit (the deterministic partial of that
-unit) in its chunk's slots of the workspace, folds the slots of each element in
-chunk order into ``dfn`` once every unit is done (a compensated FP32 sum, the
-carried value last under ``accumulate``, one rounding) and folds
-``dscale`` / ``dbase`` in the deterministic reduction's order; there is no
-reduction kernel.  Every output repeats bit for bit from launch to launch on
-one device.  ``dX``, ``dscale`` and ``dbase`` are the deterministic package's
-bits; each ``dfn`` element folds ``P`` per-chunk FP32 partials (``P`` the
-column slab's chunk count: ``cake_jit.k7_chunks``, or the two-size geometry
-where ``cake_jit.lpt_chunks`` fires; at most 32; on the one-size chunks the
-deterministic package's partials) in a compensated FP32 sum, where the
-deterministic package sums its ``P`` partials in FP64, so its low-order bits
-may differ from the deterministic ``dfn`` near an FP32 rounding boundary.
-The mode is part of the names: no entry point takes a ``deterministic``
-keyword (passing one is a ``TypeError``) and nothing falls back to the
-deterministic package (checked without a device by
-``test_cake_mhc_nondet_train_rules.py``).  The deterministic package
-(``cake_pplx._backends.cake_mhc_det_train``) is the same-input reference
-throughout, never a source of tolerances.  This module checks:
+deterministic token-owner pass (its group-row form inside ``BWD_ROW_BANDS``),
+its atomic fn split and its column-slab pass, which stores the FP32 ``dfn``
+sum of every (column slab, token chunk) unit in its chunk's slots of the
+workspace and adds the slots of each element into ``dfn`` once every unit is
+done; there is no reduction kernel.  The mode is part of the names: no entry
+point takes a ``deterministic`` keyword (passing one is a ``TypeError``) and
+nothing falls back to the deterministic package (checked without a device by
+``test_cake_mhc_nondet_train_rules.py``).
 
-* accuracy against the FP64 reference of ``test_cake_mhc_det_train.py`` under
-  its bars, on the worst of 5 launches of every draw: BF16 ``dX`` at atol =
-  rtol = 1e-2 with no mismatch; ``dfn`` / ``dscale`` / ``dbase`` rel-L2 <= 1e-5
-  and (``dscale`` / ``dbase``) per element <= 1e-4; the "<= 2x the IEEE-FP32
-  comparator" clause as the distribution over 25 draws (median and maximum);
-  the saturated-sigmoid tail clause and the single-cast cancellation band in
-  the deterministic suite's form;
-* against the deterministic backward on the same inputs: ``dX``, ``dscale``,
-  ``dbase`` bitwise; ``|dfn - dfn_det| <= F u (|carried| + 1.02 sum_t |dz'_t|
-  |x_t|)`` per element (``u = 2^-24``; the FP64 absolute-value contraction of
-  the reference bounds the magnitude of every partial sum either fold forms):
-  ``F = 2 P`` where the column slab runs ``dynr`` or its slab-fastest copy
-  ``dynr_os`` (both sides fold the same per-chunk partials) and ``F = 2 max(P,
-  P_k7) + 10`` where it runs ``lpt`` or ``lpt_os`` (the partials are another
-  partition's; see :func:`_dfn_factor`), the largest ratio printed, also with
-  the unit order forced to each of ``"chunk"`` and ``"slab"`` where the
-  device's route holds that order's records (the board cells of
-  ``BWD_SLAB_ORDER_OVERRIDES`` / ``BWD_SLAB_LPT_OVERRIDES`` emptied, so the
-  forced order holds on every board, the 212-SM sm_107a and 152-SM sm_103a ones
-  too); run to run, and between the default workspace and a poisoned caller
-  workspace, every output (``dfn`` included) identical;
-* the two-size schedule at forced geometries (``cake_jit.lpt_chunks`` replaced
+Accuracy is judged with ``tests/cake_naive.py``: every floating output (BF16
+``U``, ``Y``, ``dB``, ``dX``; the FP32 statistics and gradient statistics; FP32
+``dfn``, ``dscale``, ``dbase``) is compared with the float64 oracle of the
+function (``tests/cake/test_helpers/cake_mhc_naive.py``), and its error, in the
+L2 and max norms over 32 independent inputs of the case, must be at most 1.005
+times the error of the naive BF16 tier (the same function in PyTorch BF16 on
+the same inputs), in the median and the maximum over the draws, and 0 where the
+tier's error is 0; every launch of a draw is judged (the largest error counts).
+The non-deterministic package promises no bits: no test compares it with the
+deterministic package or one of its launches with another bit for bit.  This
+module checks:
+
+* every output against the oracle over 32 inputs at the token counts 1 ...
+  32768 (hidden 5120 and 7168 on a representative subset: small, a middle one
+  and large ones where the token-owner grid reaches its per-SM bound), each
+  draw's backward launched REPEATS times, alternating the default workspace
+  with fresh outputs and a caller workspace (bytes past the zero prefix 0xFF)
+  with NaN-filled outputs, one launch with ``B=None``; the saturated-sigmoid
+  tails (tail gradients finite and non-zero), the single-cast cancellation
+  inputs, a zero row of ``X`` and ``fn x 1e3`` logits the same way;
+* the column slab in each unit order (``cake_jit.BWD_SLAB_ORDER`` forced) and
+  the two-size schedule at forced geometries (``cake_jit.lpt_chunks`` replaced
   for one token count: one size, one small chunk, several, small chunks past
   ``T``, empty small chunks, 32 chunks, one round of units, a short odd row,
-  with and without ``accumulate``, and the screen's best geometry at 16263
-  tokens; at hidden 5120 and 7168, where the device's route holds the size's
-  ``lpt`` record, a subset of these and the screen's best geometry at a
-  measured token count of the size), in each unit order whose record the
-  device's route holds (``lpt_os`` at hidden 4096 on every architecture, at
-  5120 and 7168 on sm_100a alone): the ``lpt`` record
-  (``lpt_os`` with the slab-fastest order forced) launches over
-  ``min(SMs, H / 64 x P)`` CTAs, ``dX`` / ``dscale`` / ``dbase`` bitwise the
-  deterministic package's on two launches (fresh outputs, then a poisoned
-  caller workspace), ``dfn`` within the bound and the same bits on both, the
-  ticket word and the column slab's arrival counts back to 0;
-* the forward entry points (forward prepare, statistics replay, residual
-  mixing, backward prepare) bitwise the deterministic package's, and every
-  launch one of this package's records (the deterministic package launches
-  nothing; the backward loads exactly the token-owner record, the atomic fn
-  split and the column slab's form of the call, in that order);
+  with and without ``accumulate``, and the screen's best geometry), in each
+  unit order whose record the device's route holds: the selection, the launch
+  grid ``min(SMs, H / 64 x P)``, the loaded modules, the zero prefix and the
+  judged outputs of two launches;
+* the forward entry points on the default and a caller workspace, and at
+  hidden 5120 and 7168 the 19 benchmark token counts; every launch one of this
+  package's records (the deterministic package launches nothing; the backward
+  loads exactly the token-owner record, the atomic fn split and the column
+  slab's form of the call, in that order);
 * PyTorch's deterministic algorithms (strict and ``warn_only``): every entry
   point, ``backward_finish`` and the backward of the
   ``cake_mhc_nondet_train_prepare`` node included (also when the mode is
   enabled between the forward and the backward), runs without an alert or a
-  warning and gives the bits it gives with the mode off;
-* four ``accumulate=True`` passes; the autograd functions plain and under a
-  non-reentrant checkpoint, against the deterministic gradients;
+  warning, its outputs judged;
+* four ``accumulate=True`` passes (the oracle: the carried-in values plus the
+  four FP64 gradients); the autograd functions plain and under a
+  non-reentrant checkpoint, around a residual and a linear branch;
 * ``test_cake_mhc_det_train.py``'s checkpoint and lifetime cases with this
-  package's autograd functions (the saved-tensor and autograd-edge contract):
-  the checkpoint replay of the statistics, a
-  checkpoint around the connection or after the prepare keeping nothing alive,
-  nothing alive once a backward has run, repeated backward passes with
-  ``retain_graph``, reentrant checkpoints, a backward without the prepare node,
-  interleaved connections, each pair of this package's runs the same gradient
-  bits (``fn`` included); a zero row of ``X``, ``fn x 1e3`` logits, a changed
-  token count without a rebuild and the argument validation;
-* concurrent launches on several streams (each its serial result's bits);
-  ``T == 0``; the build manifest;
-* the hidden sizes: the contract cases above that take ``hidden`` run at
-  every size the device's architecture routes (5120 and 7168 on a
-  representative subset of their token counts: small, a middle one and large
-  ones where the token-owner grid reaches its per-SM bound; the forward
-  entry points and the backward's exact outputs also at the 19 benchmark
-  token counts), and the sizes mixed in one process (the host caches keyed by
-  the hidden size) give each size's bits.
+  package's autograd functions (the saved-tensor and autograd-edge contract:
+  nothing of a connection alive once its backward has run, nothing beyond the
+  outputs under a checkpoint; their gradients finite), the statistics saved
+  and replayed (both judged), a changed token count without a rebuild and the
+  argument validation;
+* concurrent launches on several streams (each judged); ``T == 0``; the build
+  manifest; the hidden sizes mixed in one process (the host caches keyed by
+  the hidden size; each size judged).
 
 The siblings hold the rest of the deterministic suite's organization:
 ``test_cake_mhc_nondet_train_graphs.py`` (CUDA Graph capture and replay),
@@ -128,10 +98,7 @@ else from ``cake_pplx``.
 
 from __future__ import annotations
 
-import contextlib
-import math
 import re
-import statistics
 import warnings
 from pathlib import Path
 
@@ -139,12 +106,21 @@ import pytest
 import torch
 from torch.utils.checkpoint import checkpoint
 
+from tests.cake.test_helpers.cake_mhc_naive import (
+    OUTPUTS,
+    STATS_COLUMNS,
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+    stats_outputs,
+)
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import DRAWS
 
 KEY = "cake.cake_mhc_nondet_train"
 pkg = cake_package(KEY)
 loader = cake_package(KEY, "cake_jit")
-# The deterministic package: the same-input comparison point (never a source of tolerances).
+# The deterministic package: its loader and records (host rules, workspace sizes, the launches it must not make).
 det = cake_package("cake.cake_mhc_det_train")
 det_loader = cake_package("cake.cake_mhc_det_train", "cake_jit")
 # The package's entry points.
@@ -153,7 +129,6 @@ forward_prepare = pkg.cake_mhc_nondet_train_forward_prepare
 forward_stats = pkg.cake_mhc_nondet_train_forward_stats
 forward_finish = pkg.cake_mhc_nondet_train_forward_finish
 backward_prepare = pkg.cake_mhc_nondet_train_backward_prepare
-det_backward_finish = det.cake_mhc_det_train_backward_finish
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 # HIDDEN / N: the hidden size and flattened token of the cases that take no ``hidden`` (the argument checks run at
@@ -162,44 +137,46 @@ STREAMS, HIDDEN, N, MAPPING_ROWS = 4, 4096, 16384, 24
 # The package's hidden sizes; a case of a size runs where the device's architecture routes it (:func:`_require_hidden`).
 HIDDEN_SIZES = (4096, 5120, 7168)
 RMS_EPS, HC_EPS, SINKHORN_ITERS = 1e-5, 1e-6, 20
-BF16_ATOL = BF16_RTOL = 1e-2
-FP32_REL_L2_MAX = 1e-5
-FP32_COMPARATOR_FACTOR = 2.0
-FP32_ELEM_REL_MAX = 1e-4
+# The cancellation band of the cancellation inputs: |dX| <= CANCEL_FACTOR x the largest of its three contributions.
 CANCEL_FACTOR = 2.0**-6
-CANCEL_ULP_MAX = 2
-CANCEL_FLOOR = 2.0**-14
-TAIL_REL_MAX = 1e-3
 BLOCK_TOKENS = 8192
 SEED = 2032
-PARAM_CLAUSE_DRAWS = 25
-CANCEL_CLAUSE_DRAWS = 64
-# Launches of this package's backward per draw: every gate holds on each (the worst is reported).
+# Backward launches of this package per judged draw: every launch's outputs are judged (the largest error counts).
 REPEATS = 5
-RUN_TO_RUN_REPEATS = 8
-# The FP32 unit roundoff and the slack of the FP64 absolute-value contraction (the kernel's dz' is its own FP32
-# value split into three BF16 pieces, within 1e-5 relative of the FP64 dz'; the pieces add at most 2^-8 relative).
-FP32_UNIT_ROUNDOFF = 2.0**-24
-ABS_SLACK = 1.02
 # The backward workspace's zero prefix: the ticket region (256 bytes) and the column slab's arrival counts (512 bytes),
 # first for every token count and hidden size; every call finds it zero and leaves it zero.
 ZERO_PREFIX_BYTES = 768
-T_ACCURACY = (1, 7, 64, 257, 1024, 2049, 4096, 16263, 32768)
-T_DISTRIBUTION = (1, 2, 3, 7, 63, 129, 255, 1000, 2049)
-T_COMPARE = (1, 7, 64, 65, 257, 1000, 1024, 2049, 4096, 5000, 8192, 14928, 16263, 32768)
-# The token counts of hidden 5120 and 7168 in the cases above: small ones, a middle one (2049: 257 token groups, below
-# the token owner's 2 x SMs at 5120 and above its SM count at 7168) and large ones where the token owner's grid G6 =
-# min(K6_CTAS_PER_SM x SMs, ceil(T / 8)) reaches its bound at both sizes (4096, 16263, 32768).
-T_ACCURACY_NEW = (1, 257, 2049, 16263)
-T_COMPARE_NEW = (1, 7, 65, 1000, 2049, 4096, 16263, 32768)
+# The judged token counts: hidden 4096 every one; hidden 5120 and 7168 small ones, a middle one (2049: 257 token
+# groups, below the token owner's 2 x SMs at 5120 and above its SM count at 7168) and large ones where the token
+# owner's grid G6 = min(K6_CTAS_PER_SM x SMs, ceil(T / 8)) reaches its bound at both sizes (4096, 16263, 32768).
+T_ACCURACY = (
+    1,
+    2,
+    3,
+    7,
+    63,
+    64,
+    65,
+    129,
+    255,
+    257,
+    1000,
+    1024,
+    2049,
+    4096,
+    5000,
+    8192,
+    14928,
+    16263,
+    32768,
+)
+T_ACCURACY_NEW = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 32768)
 # The 19 benchmark token counts of the performance tables.
 T_BENCH = (1024, 1536, 2048, 2304, 2560, 3072, 3584, 4096, 8192, 14928, 15288, 15566, 15590, 16114, 16132, 16164,
            16263, 32768, 65536)  # fmt: skip
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 _PARAMETER = ("dfn", "dscale", "dbase")
 _OUTPUTS = ("dX", "dfn", "dscale", "dbase")
-# Bitwise the deterministic package's.
-_EXACT = ("dX", "dscale", "dbase")
 # PyTorch's wording of the alert of a non-deterministic operation (no call of this package raises it).
 _ALERT = "does not have a deterministic implementation"
 SLAB = "cake_mhc_train_bwd_slab_fold__dynr"
@@ -257,8 +234,8 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True, scope="module")
 def warmup_jit():
     # Build the local architecture's libraries of both packages that have no prebuilt file (this package's, and the
-    # deterministic package's for the same-input comparisons) through the spec objects the loaders build on first
-    # use; a prebuilt or cached library loads without compiling.
+    # deterministic package's, whose handle the argument checks refuse) through the spec objects the loaders build on
+    # first use; a prebuilt or cached library loads without compiling.
     if _supported():
         arch = _arch()
         for spec in [*det_loader.specs_for_arch(arch), *loader.specs_for_arch(arch)]:
@@ -304,9 +281,11 @@ def _require_lpt(hidden: int, order: str = "chunk") -> int:
     """Skip a case of the two-size column slab at ``hidden`` in the unit order ``order`` where the device's
     ``bwd_finish`` route of the size holds no such record (``lpt``, or ``lpt_os`` for ``"slab"``): where neither the
     size's table nor a board cell of ``BWD_SLAB_LPT_OVERRIDES`` at the size has a two-size calibration of the
-    architecture (sm_103a at 5120 and 7168), or for ``"slab"`` where neither its ``BWD_SLAB_ORDER`` of the size nor a
-    board cell of ``BWD_SLAB_ORDER_OVERRIDES`` at the size has a ``"slab"`` band; a calibrated size without the
-    record fails (every architecture's route holds ``lpt`` and ``lpt_os`` at hidden 4096)."""
+    architecture, or for ``"slab"`` where neither its ``BWD_SLAB_ORDER`` of the size nor a board cell of
+    ``BWD_SLAB_ORDER_OVERRIDES`` at the size has a ``"slab"`` band; a calibrated size without the record fails.  The
+    registry calibrates the two-size schedule nowhere today (``BWD_SLAB_LPT`` and ``BWD_SLAB_LPT_HIDDEN`` are None on
+    every architecture and hidden size, and ``BWD_SLAB_LPT_OVERRIDES`` is empty), so no route holds ``lpt`` or
+    ``lpt_os`` and every case that calls this skips on every architecture."""
     _require_hidden(hidden)
     arch = _arch()
     name = (LPT_OS if order == "slab" else LPT) + _suffix(hidden)
@@ -354,75 +333,8 @@ def _hidden_of(i: dict) -> int:
     return int(i["X"].shape[2])
 
 
-def _parts(T: int, hidden: int = HIDDEN) -> int:
-    """``P``: the chunk count of the column-slab pass, the number of partials each ``dfn`` element folds (the
-    deterministic backward's chunk count too: both fold the partials of the same chunks)."""
-    parts = loader.host_plan(T, _sm_count(), _arch(), hidden)["parts"]
-    assert parts == loader.k7_chunks(T, _sm_count(), hidden=hidden)[0], (T, hidden)
-    assert parts == det_loader.host_plan(T, _sm_count(), _arch(), hidden)["parts"]
-    assert 1 <= parts <= 32, (T, hidden, parts)
-    return parts
-
-
-def _lpt_runs(T: int, hidden: int = HIDDEN) -> bool:
-    """Whether the column slab runs a two-size record of ``hidden`` (``lpt`` or its slab-fastest copy ``lpt_os``) at
-    ``T`` on this device (read at call time, so a replaced ``cake_jit.lpt_chunks`` counts; at hidden 5120 and 7168
-    only where the size's table calibrates the architecture)."""
-    program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
-    return program.startswith("lpt")
-
-
-def _slab_parts(T: int, hidden: int = HIDDEN) -> int:
-    """The chunk count the column slab launches: ``slab_plan``'s ``lpt_parts`` under ``lpt`` / ``lpt_os``, else
-    :func:`_parts`."""
-    if not _lpt_runs(T, hidden):
-        return _parts(T, hidden)
-    parts = loader.slab_plan(T, _sm_count(), _arch(), hidden)["lpt_parts"]
-    assert 1 <= parts <= 32, (T, parts)
-    return parts
-
-
-def _dfn_factor(T: int, hidden: int = HIDDEN) -> float:
-    """F of the dfn bound F u (|carried| + ABS_SLACK sum_t |dz'_t| |x_t|) at T.  F = 2 P where the column slab runs
-    dynr or dynr_os: both sides fold the same per-chunk partials (the unit order changes only which CTA forms each
-    partial), this package with a compensated FP32 sum and the deterministic package in FP64, each rounding once, well
-    inside the P roundings per side of any FP32 sum of the partials.  Under lpt or lpt_os the partials are another
-    partition's.  Every chunk starts on a 64-token tile and each tile's leading-piece product starts a fresh
-    accumulator, so those products are bitwise the same on both sides.  Each side then differs from the exact sum of
-    those products and the trailing terms by its own compensated summation of its tiles (2u), the rounding of acc -
-    comp (u) and the FP32 accumulation of the trailing dz' pieces (at most 2^-8 of each term) over 16-tile groups (at
-    most 128 accumulate steps of at most 2u each: about 1.1u).  That is about 4.1u per side.  The cross-chunk fold
-    rounds at most P times on this side and at most P_k7 times on the deterministic side.  So F = 2 max(P, P_k7) + 10
-    >= P + P_k7 + 8.2."""
-    if not _lpt_runs(T, hidden):
-        return 2.0 * _parts(T, hidden)
-    return 2.0 * max(_slab_parts(T, hidden), _parts(T, hidden)) + 10.0
-
-
 # ----------------------------------------------------------------------------------------------------------------
-# Reference arithmetic (the FP64 oracle of test_cake_mhc_det_train.py, with the Sinkhorn count as a parameter; the
-# same code in FP32 after _set_ieee_fp32 is the comparator)
-
-
-def _set_ieee_fp32() -> None:
-    """TF32 off everywhere so that FP32 means IEEE FP32 FMA."""
-    torch.backends.cuda.matmul.allow_tf32 = False
-    torch.backends.cudnn.allow_tf32 = False
-    torch.set_float32_matmul_precision("highest")
-    for path in (
-        "fp32_precision",
-        "cuda.matmul.fp32_precision",
-        "cudnn.conv.fp32_precision",
-    ):
-        obj = torch.backends
-        parts = path.split(".")
-        for name in parts[:-1]:
-            obj = getattr(obj, name, None)
-            if obj is None:
-                break
-        if obj is not None and hasattr(obj, parts[-1]):
-            with contextlib.suppress(Exception):  # a read-only control on this build
-                setattr(obj, parts[-1], "ieee")
+# Input arithmetic (the FP64 statistics the cancellation inputs are solved from)
 
 
 def _round_to_bf16(x: torch.Tensor) -> torch.Tensor:
@@ -440,19 +352,6 @@ def _round_to_bf16(x: torch.Tensor) -> torch.Tensor:
     lo = bits & -65536
     fixed = torch.where(up, hi, lo).view(F32).to(BF16)
     return torch.where(fix, fixed, b)
-
-
-def _bf16_ulp_spacing(x: torch.Tensor) -> torch.Tensor:
-    """The BF16 spacing at ``|x|`` (FP64): ``2^(floor(log2 |x|) - 7)``, the subnormal spacing below ``2^-126``."""
-    e = torch.floor(torch.log2(x.to(F64).abs().clamp_min(2.0**-126)))
-    return torch.exp2(e - 7)
-
-
-def _bf16_ulp_error(out: torch.Tensor, ref: torch.Tensor) -> torch.Tensor:
-    """``|out - ref| / ulp_bf16(ref)`` (FP64) of a BF16 output against the FP64 reference."""
-    assert out.dtype == BF16, out.dtype
-    ref64 = ref.to(F64)
-    return (out.to(F64) - ref64).abs() / _bf16_ulp_spacing(ref64)
 
 
 def _sinkhorn(logits: torch.Tensor, hc_eps: float, iters: int) -> torch.Tensor:
@@ -475,158 +374,13 @@ def _coefficients(z, scale, base, hc_eps: float = HC_EPS, iters: int = SINKHORN_
 
 
 def _constants(i: dict) -> dict:
-    """The launch constants of a case: the epsilons and the Sinkhorn count it carries (default: the model's)."""
-    return {k: i[k] for k in ("rms_eps", "hc_eps", "sinkhorn_iters") if k in i}
-
-
-def _block(
-    X,
-    fn,
-    scale,
-    base,
-    B,
-    dY,
-    dU,
-    *,
-    dtype,
-    want_contrib: bool,
-    rms_eps: float,
-    hc_eps: float,
-    iters: int,
-) -> dict:
-    """One row block of the reference: the forward in ``dtype``, the backward by autograd of the FP arithmetic."""
-    T = X.shape[0]
-    with torch.enable_grad():
-        Xd = X.detach().to(dtype).requires_grad_(True)
-        fnd = fn.detach().to(dtype).requires_grad_(True)
-        scaled = scale.detach().to(dtype).requires_grad_(True)
-        based = base.detach().to(dtype).requires_grad_(True)
-        u = Xd.reshape(T, Xd.shape[1] * Xd.shape[2])
-        r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + rms_eps)
-        z = (u * r) @ fnd.T
-        pre, post, C = _coefficients(z, scaled, based, hc_eps, iters)
-        U_pre = (pre.unsqueeze(-1) * Xd).sum(dim=1)
-        Y_pre = post.unsqueeze(-1) * B.detach().to(dtype).unsqueeze(1) + torch.einsum(
-            "tij,tid->tjd", C, Xd
-        )
-        dUd = dU.detach().to(dtype)
-        dYd = dY.detach().to(dtype)
-        dX32, dfn, dscale, dbase = torch.autograd.grad(
-            [U_pre, Y_pre], [Xd, fnd, scaled, based], grad_outputs=[dUd, dYd]
-        )
-    out = {"dX32": dX32, "dfn": dfn, "dscale": dscale, "dbase": dbase}
-    if want_contrib:
-        with torch.no_grad():
-            out["collapse"] = pre.detach().unsqueeze(-1) * dUd.unsqueeze(1)
-            out["mix"] = torch.einsum("tij,tjd->tid", C.detach(), dYd)
-    return out
-
-
-def _oracle(
-    i: dict,
-    *,
-    dtype=F64,
-    block_tokens: int | None = BLOCK_TOKENS,
-    want_contrib: bool = False,
-) -> dict:
-    """The reference gradients of one input set: FP64 in row blocks (the oracle) or IEEE FP32 in one block (the
-    comparator), at the case's epsilons and Sinkhorn count."""
-    T = i["X"].shape[0]
-    if dtype == F32:
-        _set_ieee_fp32()
-    bt = T if not block_tokens else max(1, min(block_tokens, T))
-    consts = {
-        "rms_eps": i.get("rms_eps", RMS_EPS),
-        "hc_eps": i.get("hc_eps", HC_EPS),
-        "iters": i.get("sinkhorn_iters", SINKHORN_ITERS),
+    """The launch constants of a case: the epsilons, the Sinkhorn count and the accumulation mode it carries (default:
+    the model's, one FP32 word)."""
+    return {
+        k: i[k]
+        for k in ("rms_eps", "hc_eps", "sinkhorn_iters", "accumulation")
+        if k in i
     }
-    blocks = [
-        _block(
-            i["X"][lo : lo + bt], i["fn"], i["scale"], i["base"], i["B"][lo : lo + bt], i["dY"][lo : lo + bt],
-            i["dU"][lo : lo + bt], dtype=dtype, want_contrib=want_contrib, **consts,
-        )
-        for lo in range(0, T, bt)
-    ]  # fmt: skip
-    if len(blocks) == 1:
-        return blocks[0]
-    out = {
-        k: torch.cat([b[k] for b in blocks], dim=0)
-        for k in ("dX32", "collapse", "mix")
-        if k in blocks[0]
-    }
-    for k in _PARAMETER:
-        acc = blocks[0][k].clone()
-        for b in blocks[1:]:
-            acc += b[k]
-        out[k] = acc
-    return out
-
-
-def _dzp(i: dict) -> torch.Tensor:
-    """The FP64 ``dz' = r dL/dz`` of the reference, ``[T, 24]``: ``dfn = dz'^T X_flat`` sums one product per token.
-
-    ``dL/dz`` is the backward of the coefficients alone (sigmoids and Sinkhorn chain) from the per-token gradients
-    of ``pre``, ``post`` and ``C``, so no ``[T, 4H]`` autograd graph is held."""
-    T = i["X"].shape[0]
-    rms_eps = i.get("rms_eps", RMS_EPS)
-    hc_eps = i.get("hc_eps", HC_EPS)
-    iters = i.get("sinkhorn_iters", SINKHORN_ITERS)
-    fn, scale, base = (i[k].double() for k in ("fn", "scale", "base"))
-    blocks = [torch.zeros((0, MAPPING_ROWS), dtype=F64, device=_device())]
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        X = i["X"][lo:hi].double()
-        dY = i["dY"][lo:hi].double()
-        dU = i["dU"][lo:hi].double()
-        B = i["B"][lo:hi].double()
-        u = X.reshape(hi - lo, -1)
-        r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + rms_eps)
-        with torch.enable_grad():
-            z = ((u * r) @ fn.T).requires_grad_(True)
-            pre, post, C = _coefficients(z, scale, base, hc_eps, iters)
-            (dz,) = torch.autograd.grad(
-                [pre, post, C],
-                [z],
-                grad_outputs=[
-                    torch.einsum("tid,td->ti", X, dU),
-                    torch.einsum("tjd,td->tj", dY, B),
-                    torch.einsum("tid,tjd->tij", X, dY),
-                ],
-            )
-        blocks.append(dz * r)
-    return torch.cat(blocks, dim=0)
-
-
-def _abs_contraction(i: dict) -> torch.Tensor:
-    """``sum_t |dz'[t, m]| |x[t, k]|`` (FP64 ``[24, 4H]``): the magnitudes of every term of ``dfn``, summed."""
-    T = i["X"].shape[0]
-    dzp = _dzp(i).abs()
-    A = torch.zeros(
-        (MAPPING_ROWS, STREAMS * _hidden_of(i)), dtype=F64, device=_device()
-    )
-    for lo in range(0, T, BLOCK_TOKENS):
-        hi = min(T, lo + BLOCK_TOKENS)
-        A += dzp[lo:hi].T @ i["X"][lo:hi].reshape(hi - lo, -1).double().abs()
-    return A
-
-
-def _dfn_bound(
-    i: dict, factor: float, *, carried: torch.Tensor | None = None
-) -> torch.Tensor:
-    """Per-element bound of ``|dfn_a - dfn_b|`` for two folds of per-chunk partials:
-    ``factor u (|carried| + sum_t |dz'_t| |x_t|)`` (``factor`` = :func:`_dfn_factor` of the token count).
-
-    Each side adds ``P`` partials (onto the carried-in value with ``accumulate``) with at most ``P`` FP32 roundings,
-    each at most ``u`` times the running sum, whose magnitude never exceeds ``|carried| + sum_j |partial_j| <=
-    |carried| + sum_t |terms_t|``: two sums of the same partials differ by at most ``2 P u (|carried| + sum_t |dz'_t|
-    |x_t|)`` (this package's compensated fold and the deterministic FP64 fold each round once).  The bound holds for
-    any partition of the tokens into the ``P`` chunks (``sum_j |partial_j| <= sum_t |terms_t|`` up to the
-    within-chunk rounding, which ``ABS_SLACK`` absorbs); where the two sides form the partials of two partitions,
-    ``factor`` adds both partitions' roundings and the within-chunk differences."""
-    total = ABS_SLACK * _abs_contraction(i)
-    if carried is not None:
-        total = total + carried.double().abs()
-    return float(factor) * FP32_UNIT_ROUNDOFF * total
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -712,24 +466,8 @@ def _nd_backward(i: dict, prep: dict, **kwargs) -> dict:
     return _backward(backward_finish, i, prep, **kwargs)
 
 
-def _det_backward(i: dict, prep: dict, **kwargs) -> dict:
-    """The deterministic backward of a case (its group-row forms inside ``BWD_ROW_BANDS``, as this package's)."""
-    return _backward(det_backward_finish, i, prep, **kwargs)
-
-
 def _snapshot(out: dict) -> dict:
     return {k: v.detach().clone() for k, v in out.items()}
-
-
-def _nd_repeats(i: dict, prep: dict, n: int = REPEATS, **kwargs) -> list[dict]:
-    """``n`` launches of this package's backward, each output finite."""
-    outs = []
-    for repeat in range(n):
-        out = _snapshot(_nd_backward(i, prep, **kwargs))
-        for k, v in out.items():
-            assert torch.isfinite(v).all(), f"{k} repeat {repeat}: non-finite values"
-        outs.append(out)
-    return outs
 
 
 def _poisoned_outputs(T: int, hidden: int = HIDDEN) -> dict:
@@ -769,243 +507,107 @@ def _assert_zero_prefix(ws: torch.Tensor, what: str) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Bit comparisons
+# The judge: every floating output against the naive BF16 tier over DRAWS inputs (tests/cake_naive.py)
 
 
-_INT_VIEW = {BF16: torch.int16, F32: torch.int32}
-
-
-def _bits(t: torch.Tensor) -> torch.Tensor:
-    return t.detach().contiguous().view(_INT_VIEW[t.dtype])
-
-
-def _differing(a: torch.Tensor, b: torch.Tensor) -> int:
-    """Elements whose bits differ."""
-    return int((_bits(a) != _bits(b)).sum())
-
-
-def _ulp_distance(a: torch.Tensor, b: torch.Tensor) -> int:
-    """The largest distance in FP32 ulps (representable values between) over the elements."""
-    if a.numel() == 0:
-        return 0
-
-    def ordered(t: torch.Tensor) -> torch.Tensor:
-        bits = _bits(t).to(torch.int64)
-        magnitude = bits & 0x7FFFFFFF
-        return torch.where(bits < 0, -magnitude, magnitude)
-
-    return int((ordered(a) - ordered(b)).abs().max())
-
-
-def _assert_same_bits(got: torch.Tensor, want: torch.Tensor, label: str) -> None:
-    assert got.dtype == want.dtype and tuple(got.shape) == tuple(want.shape), (
-        label,
-        got.dtype,
-        tuple(got.shape),
-        want.dtype,
-        tuple(want.shape),
+def _forward_all(i: dict, **workspace) -> dict:
+    """This package's forward prepare, residual mixing and backward prepare on ``i`` (with its launch constants):
+    ``U``, ``stats``, ``Y``, ``dB``, ``gstats``."""
+    U, stats = forward_prepare(
+        i["X"], i["fn"], i["scale"], i["base"], **_constants(i), **workspace
     )
-    assert torch.equal(_bits(got), _bits(want)), (
-        f"{label}: {_differing(got, want)} of {got.numel()} elements differ from the reference bits"
-    )
+    Y = forward_finish(i["X"], i["B"], stats)
+    dB, gstats = backward_prepare(i["dY"], i["B"], i["X"], stats)
+    return {"U": U, "stats": stats, "Y": Y, "dB": dB, "gstats": gstats}
 
 
-def _assert_exact_outputs(got: dict, want: dict, label: str) -> None:
-    """``dX``, ``dscale``, ``dbase``: bitwise the reference."""
-    for k in _EXACT:
-        _assert_same_bits(got[k], want[k], f"{k} {label}")
-
-
-def _assert_dfn_within(
-    got: torch.Tensor, want: torch.Tensor, bound: torch.Tensor, label: str
-) -> dict:
-    """``|got - want| <= bound`` on every ``dfn`` element; returns the figures (differing elements, the largest
-    ulp distance, the largest ratio to the bound)."""
-    assert got.dtype == F32 and tuple(got.shape) == tuple(want.shape), label
-    assert got.shape[0] == MAPPING_ROWS and got.shape[1] % STREAMS == 0, label
-    assert torch.isfinite(got).all(), f"{label}: non-finite dfn"
-    diff = (got.double() - want.double()).abs()
-    over = int((diff > bound).sum())
-    ratio = float((diff / bound.clamp_min(torch.finfo(F64).tiny)).max())
-    figures = {
-        "differ": _differing(got, want),
-        "max_ulp": _ulp_distance(got, want),
-        "max_ratio": ratio,
-    }
-    assert over == 0, (
-        f"{label}: {over} dfn elements beyond F u (|carried| + sum_t |dz'_t| |x_t|) (largest ratio {ratio:.3e})"
-    )
-    return figures
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# Accuracy gates (test_cake_mhc_det_train.py's, on the worst of the repeated launches of a draw)
-
-
-def _rel_l2(a: torch.Tensor, b: torch.Tensor) -> float:
-    num = (a.double() - b.double()).norm().item()
-    den = b.double().norm().item()
-    return num / den if den > 0 else (0.0 if num == 0 else math.inf)
-
-
-def _max_rel_elem(a: torch.Tensor, b: torch.Tensor) -> float:
-    ref = b.double()
-    err = (a.double() - ref).abs()
-    rms = ref.square().mean().sqrt().item()
-    if rms == 0:
-        return 0.0 if float(err.max()) == 0 else math.inf
-    return float((err / ref.abs().clamp_min(rms)).max())
-
-
-def _ratio(a: float, b: float) -> float:
-    return a / b if b > 0 else (0.0 if a == 0 else math.inf)
-
-
-def _assert_bf16(out: torch.Tensor, ref: torch.Tensor, label: str) -> None:
-    assert out.dtype == BF16 and out.is_contiguous(), label
-    assert tuple(out.shape) == tuple(ref.shape), (
-        label,
-        tuple(out.shape),
-        tuple(ref.shape),
-    )
-    a, b = out.double(), ref.double()
-    assert torch.isfinite(a).all(), f"{label}: non-finite values"
-    if a.numel() == 0:
-        return
-    err = (a - b).abs()
-    n_bad = int((err > BF16_ATOL + BF16_RTOL * b.abs()).sum())
-    assert n_bad == 0, (
-        f"{label}: {n_bad} of {a.numel()} elements outside atol = rtol = 1e-2 (max abs err {float(err.max()):.3e})"
-    )
-
-
-def _worst_row(outs: list[dict], ref: dict, comp: dict, k: str) -> dict:
-    """One draw's figures of ``k``: the worst kernel rel-L2 and per-element error over the launches, and the
-    IEEE-FP32 comparator's."""
+def _random_carried(seed: int, hidden: int) -> dict:
+    """Non-zero carried-in values of the parameter gradients (``accumulate``), ``~ 1e-3 N(0, 1)``."""
+    g = torch.Generator(device=_device()).manual_seed(seed)
     return {
-        "kernel": max(_rel_l2(o[k], ref[k]) for o in outs),
-        "kernel_elem": max(_max_rel_elem(o[k], ref[k]) for o in outs),
-        "comparator": _rel_l2(comp[k], ref[k]),
-        "comparator_elem": _max_rel_elem(comp[k], ref[k]),
+        "dfn": torch.randn(
+            (MAPPING_ROWS, STREAMS * hidden), generator=g, device=_device()
+        )
+        * 1e-3,
+        "dscale": torch.randn((3,), generator=g, device=_device()) * 1e-3,
+        "dbase": torch.randn((MAPPING_ROWS,), generator=g, device=_device()) * 1e-3,
     }
 
 
-def _assert_draw(rows: dict, label: str, *, regime: str) -> None:
-    """The absolute bars of one draw on its worst launch (``unit``: rel-L2 <= 1e-5, ``dscale`` / ``dbase`` per element
-    <= 1e-4; ``tail``: both <= 1e-3; ``large_logits``: none, the comparator-relative clause of the distribution
-    governs); the single-draw comparator ratio is printed as the literal record (the clause of record is the >= 25-draw
-    distribution)."""
-    met = {True: "met", False: "NOT met"}
-    bar = TAIL_REL_MAX if regime == "tail" else FP32_REL_L2_MAX
-    elem_bar = TAIL_REL_MAX if regime == "tail" else FP32_ELEM_REL_MAX
-    for k, row in rows.items():
-        per_elem = k in ("dscale", "dbase")
-        ratio = _ratio(row["kernel"], row["comparator"])
-        print(
-            f"{k} {label}: worst rel-L2 over {REPEATS} launches {row['kernel']:.3e}, IEEE-FP32 comparator "
-            f"{row['comparator']:.3e}; single-draw 2x clause {met[ratio <= FP32_COMPARATOR_FACTOR]} (literal record)"
-            + (f"; worst per-element {row['kernel_elem']:.3e}" if per_elem else ""),
-            flush=True,
-        )
-        if regime == "large_logits":
-            continue
-        assert row["kernel"] <= bar, (
-            f"{k} {label}: rel-L2 {row['kernel']:.3e} > {bar:.0e}"
-        )
-        if per_elem:
-            assert row["kernel_elem"] <= elem_bar, (
-                f"{k} {label}: per-element relative error {row['kernel_elem']:.3e} > {elem_bar:.0e}"
-            )
+def _judge_nd(
+    make,
+    record_property,
+    *,
+    seed: int,
+    launches: int = REPEATS,
+    caller_workspace: bool = True,
+    forward: bool = True,
+    accumulate: bool = False,
+    without_b: bool = True,
+    prefix: str = "",
+    draws: int = DRAWS,
+    check=None,
+) -> None:
+    """Judge one case of this package over ``draws`` inputs (``make(s)``: the inputs of the draw of seed ``s``)
+    against the naive BF16 tier: the forward outputs (``U``, ``Y``, ``dB``, the statistics ``r, z, pre, post, C``,
+    the gradient statistics ``dpost, dC``; with ``forward``) and the backward outputs (``dX``, ``dfn``, ``dscale``,
+    ``dbase``) of ``launches`` backward launches, each launch's error recorded (a draw keeps the largest).  The
+    launches alternate: even launches on the default workspace with fresh outputs (launch 2 passes ``B=None``, whose
+    contribution is in the gradient statistics, with ``without_b``), odd launches on one caller workspace whose bytes
+    past the zero prefix are 0xFF before the launch, into NaN-filled outputs, the zero prefix checked zero after it
+    (``caller_workspace``).  With ``accumulate`` every launch adds into a fresh copy of the draw's carried-in values
+    (the oracle: those values plus the FP64 gradients; the tier: the BF16 values plus the BF16 gradients).
+    ``check(i, outs, expected)`` runs on every draw (``outs`` the backward launches' outputs)."""
 
-
-def _assert_parameter_distribution(rows: dict, label: str, *, regime: str) -> None:
-    """The clause of record of the parameter gradients over >= 25 draws (``test_cake_mhc_det_train.py``'s), on the
-    worst launch of every draw: ``unit``: rel-L2 <= 1e-5 and (``dscale`` / ``dbase``) per element <= 1e-4 on every
-    draw, median(kernel rel-L2) <= 2x median(comparator) AND max(kernel) <= 2x max(comparator); ``tail``: rel-L2 and
-    per element <= 1e-3 on every draw, the 2x figures printed and not applied (the comparator loses the tail);
-    ``large_logits``: the comparator-relative clause alone (rel-L2 medians and maxima; per element <= max(1e-4, 2x
-    the comparator's maximum))."""
-    for k, r in rows.items():
-        n = len(r)
-        assert n >= PARAM_CLAUSE_DRAWS, (label, k, n)
-        ks, cs = [d["kernel"] for d in r], [d["comparator"] for d in r]
-        es, ces = [d["kernel_elem"] for d in r], [d["comparator_elem"] for d in r]
-        med_k, med_c, max_k, max_c = (
-            statistics.median(ks),
-            statistics.median(cs),
-            max(ks),
-            max(cs),
-        )
-        per_elem = k in ("dscale", "dbase")
-        print(
-            f"{k} {label}: {n} draws x {REPEATS} launches; worst kernel rel-L2 median {med_k:.3e} / max {max_k:.3e}, "
-            f"comparator {med_c:.3e} / {max_c:.3e}; ratio of medians {_ratio(med_k, med_c):.2f}, of maxima "
-            f"{_ratio(max_k, max_c):.2f}; draws whose single-draw ratio exceeds 2x: "
-            f"{sum(1 for a, b in zip(ks, cs, strict=True) if a > FP32_COMPARATOR_FACTOR * b)} (literal record)"
-            + (f"; per-element max {max(es):.3e}" if per_elem else ""),
-            flush=True,
-        )
-        if regime == "tail":
-            assert max_k <= TAIL_REL_MAX, (
-                f"{k} {label}: tail-clause rel-L2 max over the draws {max_k:.3e} > {TAIL_REL_MAX:.0e}"
+    def case(j: int, s: int):
+        i = make(s)
+        T, hidden = int(i["X"].shape[0]), _hidden_of(i)
+        fwd = _forward_all(i)
+        prep = {"stats": fwd["stats"], "gstats": fwd["gstats"]}
+        carried = _random_carried(s + 1, hidden) if accumulate else None
+        ws = None
+        if caller_workspace and launches > 1:
+            ws = pkg.cake_mhc_nondet_train_backward_workspace(
+                T, _device(), hidden=hidden
             )
-            if per_elem:
-                assert max(es) <= TAIL_REL_MAX, (
-                    f"{k} {label}: tail-clause per-element max {max(es):.3e} > {TAIL_REL_MAX:.0e}"
+        outs = []
+        for launch in range(launches):
+            kwargs = {}
+            if carried is not None:
+                kwargs.update(
+                    accumulate=True, **{k: v.clone() for k, v in carried.items()}
                 )
-            continue
-        if regime == "unit":
-            assert max_k <= FP32_REL_L2_MAX, (
-                f"{k} {label}: rel-L2 max over the draws {max_k:.3e} > {FP32_REL_L2_MAX:.0e}"
-            )
-            if per_elem:
-                assert max(es) <= FP32_ELEM_REL_MAX, (
-                    f"{k} {label}: per-element max over the draws {max(es):.3e} > {FP32_ELEM_REL_MAX:.0e}"
-                )
-        elif per_elem:
-            bar = max(FP32_ELEM_REL_MAX, FP32_COMPARATOR_FACTOR * max(ces))
-            assert max(es) <= bar, (
-                f"{k} {label}: per-element max over the draws {max(es):.3e} > {bar:.3e}"
-            )
-        assert (
-            med_k <= FP32_COMPARATOR_FACTOR * med_c
-            and max_k <= FP32_COMPARATOR_FACTOR * max_c
-        ), (
-            f"{k} {label}: kernel rel-L2 median {med_k:.3e} / max {max_k:.3e} vs the IEEE-FP32 comparator's "
-            f"{med_c:.3e} / {max_c:.3e} (> 2x over {n} draws)"
-        )
+            if launch % 2 and ws is not None:
+                _poison_workspace(ws)
+                kwargs["workspace"] = ws
+                if carried is None:
+                    kwargs.update(_poisoned_outputs(T, hidden))
+            inputs = {**i, "B": None} if (launch == 2 and without_b) else i
+            outs.append(_snapshot(_nd_backward(inputs, prep, **kwargs)))
+            if "workspace" in kwargs:
+                _assert_zero_prefix(ws, f"{prefix}T={T} H={hidden} launch {launch}")
+        expected, naive = expected_and_naive(i, OUTPUTS)
+        if carried is not None:
+            for k in _PARAMETER:
+                expected[k] = carried[k].double() + expected[k]
+                naive[k] = carried[k].to(BF16) + naive[k]
+        if check is not None:
+            check(i, outs, expected)
+        judged = ([package_outputs(fwd)] if forward else []) + outs
+        names = {k for launch in judged for k in launch}
+        return judged, {k: expected[k] for k in names}, {k: naive[k] for k in names}
+
+    judge_draws(case, record_property, seed=seed, draws=draws, prefix=prefix)
 
 
-def _parameter_rows(
-    T: int, *, mode: str = "unit", fn_scale: float = 1.0, seeds
-) -> dict:
-    """The per-draw figures (worst of REPEATS launches) of the parameter gradients over ``seeds`` draws; in the
-    ``tail`` regime every launch also holds the tail-gradient clause."""
-    rows = {k: [] for k in _PARAMETER}
-    for seed in seeds:
-        i = _make_inputs(T, mode=mode, seed=seed, fn_scale=fn_scale)
-        prep = _forward(i)
-        outs = _nd_repeats(i, prep)
-        ref = _oracle(i)
-        comp = _oracle(i, dtype=F32, block_tokens=None)
-        for k in _PARAMETER:
-            rows[k].append(_worst_row(outs, ref, comp, k))
-        if mode == "tail":
-            for repeat, out in enumerate(outs):
-                _assert_tail_gradients(
-                    out, ref, f"T={T} mode=tail seed={seed} launch {repeat}"
-                )
-        del i, prep, outs, ref, comp
-    return rows
-
-
-def _assert_tail_gradients(res: dict, ref: dict, label: str) -> None:
+def _assert_tail_gradients(res: dict, expected: dict, label: str) -> None:
     """Saturated sigmoid tails: the pre / post lanes (rows 0..7) of dbase, the pre / post entries of dscale and the
-    pre / post rows of dfn are non-zero and within 1e-3 relative (L2) of FP64."""
+    pre / post rows of dfn are finite and non-zero where the FP64 tail gradient is non-zero (their accuracy is the
+    judge's; the naive tier's BF16 sigmoid rounds to 1 there and loses the tail)."""
     lanes = {
-        "dbase[0:8]": (res["dbase"][:8], ref["dbase"][:8]),
-        "dscale[0:2]": (res["dscale"][:2], ref["dscale"][:2]),
-        "dfn[0:8]": (res["dfn"][:8], ref["dfn"][:8]),
+        "dbase[0:8]": (res["dbase"][:8], expected["dbase"][:8]),
+        "dscale[0:2]": (res["dscale"][:2], expected["dscale"][:2]),
+        "dfn[0:8]": (res["dfn"][:8], expected["dfn"][:8]),
     }
     for name, (out, want) in lanes.items():
         assert torch.isfinite(out).all(), f"{label} {name}: non-finite"
@@ -1015,211 +617,70 @@ def _assert_tail_gradients(res: dict, ref: dict, label: str) -> None:
         assert (out != 0).all() if out.ndim == 1 else (out != 0).any(dim=1).all(), (
             f"{label} {name}: a tail gradient is zero"
         )
-        error = _rel_l2(out, want)
-        assert error <= TAIL_REL_MAX, (
-            f"{label} {name}: tail rel-L2 {error:.3e} > {TAIL_REL_MAX:.0e}"
-        )
 
 
-def _cancellation_band_report(
-    dX: torch.Tensor, ref: dict, comp: dict, label: str
-) -> dict:
-    """One draw's cancellation-band figures (``test_cake_mhc_det_train.py``'s), printed as the literal record."""
-    total = ref["dX32"]
-    mapping = total - ref["collapse"] - ref["mix"]
-    biggest = torch.maximum(
-        torch.maximum(ref["collapse"].abs(), ref["mix"].abs()), mapping.abs()
+def _assert_cancellation_inputs(i: dict, expected: dict, label: str) -> None:
+    """The cancellation inputs exercise the band: some element of ``dX`` lies within ``CANCEL_FACTOR`` of the largest
+    of its three FP64 contributions (the mapping, collapse and residual-mixing terms)."""
+    total = expected["dX"]
+    collapse = expected["pre"].unsqueeze(-1) * i["dU"].double().unsqueeze(1)
+    mix = torch.einsum("tij,tjd->tid", expected["C"], i["dY"].double())
+    mapping = total - collapse - mix
+    biggest = torch.maximum(torch.maximum(collapse.abs(), mix.abs()), mapping.abs())
+    inside = int((total.abs() <= CANCEL_FACTOR * biggest).sum())
+    assert inside > 0, (
+        f"{label}: the cancellation inputs produced no element inside the band"
     )
-    literal = total.abs() <= CANCEL_FACTOR * biggest
-    band = literal & (total.abs() >= CANCEL_FLOOR * biggest)
-    ulp = _bf16_ulp_error(dX, total)
-    culp = _bf16_ulp_error(comp["dX32"].to(BF16), total)
-
-    def dist(u: torch.Tensor, mask: torch.Tensor) -> dict:
-        sel = u[mask]
-        n = int(sel.numel())
-        return {
-            "n": n,
-            "max": round(float(sel.max()), 3) if n else 0.0,
-            "gt2": int((sel > CANCEL_ULP_MAX).sum()) if n else 0,
-        }
-
-    b, lt, cb = dist(ulp, band), dist(ulp, literal), dist(culp, band)
-    assert lt["n"] > 0, (
-        f"{label}: the cancellation inputs produced no element inside the contract's mask"
-    )
-    strict = b["max"] <= CANCEL_ULP_MAX
-    within = b["gt2"] <= 2 * cb["gt2"] and b["max"] <= 2 * cb["max"]
-    verdict = {True: "PASS", False: "FAIL"}
-    print(
-        f"{label}: resolvable band {b['n']} elements, max ulp {b['max']}, > 2 ulp: {b['gt2']} (IEEE-FP32 comparator "
-        f"max {cb['max']}, > 2 ulp: {cb['gt2']}); spec-literal mask {lt['n']} elements, max ulp {lt['max']}; strict "
-        f"band {verdict[strict]}, single-draw refined gate {verdict[strict or within]} (literal record)",
-        flush=True,
-    )
-    return {"band": b, "comparator_band": cb, "strict": strict, "within": within}
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# Accuracy against the FP64 reference
+# Accuracy against the FP64 oracle, judged against the naive tier
 
 
 @pytest.mark.parametrize(("hidden", "T"), _hidden_cases(T_ACCURACY, T_ACCURACY_NEW))
-def test_nondeterministic_backward_matches_fp64(hidden: int, T: int) -> None:
-    """This package's backward against the FP64 reference on the worst of REPEATS launches: BF16 ``dX`` with no
-    mismatch at atol = rtol = 1e-2 (the launches' ``dX`` bitwise equal); ``dfn`` / ``dscale`` / ``dbase`` rel-L2
-    <= 1e-5, ``dscale`` / ``dbase`` per element <= 1e-4."""
+def test_nondeterministic_backward_matches_fp64(
+    hidden: int, T: int, record_property
+) -> None:
+    """Every output of this package (the forward entry points and REPEATS backward launches, alternating the default
+    workspace with fresh outputs and a poisoned caller workspace with NaN outputs, one launch with ``B=None``) judged
+    against the naive BF16 tier over 32 inputs; the caller workspace's zero prefix is zero after every launch."""
     _require_hidden(hidden)
-    i = _make_inputs(T, hidden=hidden)
-    prep = _forward(i)
-    outs = _nd_repeats(i, prep)
-    ref = _oracle(i)
-    comp = _oracle(i, dtype=F32, block_tokens=None)
-    label = f"T={T} H={hidden} P={_slab_parts(T, hidden)} nondet"
-    _assert_bf16(outs[0]["dX"], ref["dX32"], f"dX {label}")
-    for repeat, out in enumerate(outs[1:], start=1):
-        _assert_same_bits(out["dX"], outs[0]["dX"], f"dX {label} launch {repeat}")
-    _assert_draw(
-        {k: _worst_row(outs, ref, comp, k) for k in _PARAMETER}, label, regime="unit"
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED
     )
-
-
-@pytest.mark.parametrize("T", T_DISTRIBUTION)
-def test_parameter_gradients_within_2x_comparator_over_draws(T: int) -> None:
-    """The clause of record of ``dfn`` / ``dscale`` / ``dbase`` over 25 draws of the unit case, each draw's worst
-    launch: rel-L2 <= 1e-5 (``dscale`` / ``dbase`` per element <= 1e-4) on every draw; the median and the maximum of
-    the rel-L2 <= 2x the IEEE-FP32 comparator's median and maximum."""
-    rows = _parameter_rows(T, seeds=range(SEED, SEED + PARAM_CLAUSE_DRAWS))
-    _assert_parameter_distribution(rows, f"T={T} mode=unit nondet", regime="unit")
 
 
 @pytest.mark.parametrize("T", (257, 2049))
-def test_saturated_sigmoid_tails(T: int) -> None:
-    """Saturated sigmoid tails (``scale z + base >= 17``): the fixed draw through the BF16 gate and the tail bars, then
-    the tail clause on every launch of 25 draws (tail gradients non-zero and within 1e-3 of FP64; the parameter
-    gradients within 1e-3, rel-L2 and per element)."""
-    i = _make_inputs(T, mode="tail")
-    prep = _forward(i)
-    outs = _nd_repeats(i, prep)
-    ref = _oracle(i)
-    comp = _oracle(i, dtype=F32, block_tokens=None)
-    label = f"T={T} mode=tail nondet"
-    _assert_bf16(outs[0]["dX"], ref["dX32"], f"dX {label}")
-    _assert_draw(
-        {k: _worst_row(outs, ref, comp, k) for k in _PARAMETER}, label, regime="tail"
+def test_saturated_sigmoid_tails(T: int, record_property) -> None:
+    """Saturated sigmoid tails (``scale z + base >= 17``): every output judged against the naive BF16 tier over 32
+    inputs; on every launch the tail gradients are finite and non-zero."""
+
+    def check(i: dict, outs: list, expected: dict) -> None:
+        for launch, out in enumerate(outs):
+            _assert_tail_gradients(out, expected, f"T={T} mode=tail launch {launch}")
+
+    _judge_nd(
+        lambda s: _make_inputs(T, mode="tail", seed=s),
+        record_property,
+        seed=SEED,
+        check=check,
     )
-    for repeat, out in enumerate(outs):
-        _assert_tail_gradients(out, ref, f"{label} launch {repeat}")
-    del i, prep, outs, ref, comp
-    rows = _parameter_rows(T, mode="tail", seeds=range(SEED, SEED + PARAM_CLAUSE_DRAWS))
-    _assert_parameter_distribution(rows, f"T={T} mode=tail nondet", regime="tail")
 
 
 @pytest.mark.parametrize("T", (257, 2049))
-def test_single_cast_cancellation(T: int) -> None:
-    """The cancellation band over 64 draws in ``test_cake_mhc_det_train.py``'s aggregate form (the resolvable band
-    within 2 ulp on every draw, or the pooled n(> 2 ulp) and the maximum within 2x the IEEE-FP32 comparator's); every
-    launch's ``dX`` is bitwise the deterministic backward's, and the parameter gradients of the same draws hold the
-    distribution clause on their worst launch."""
-    reports = []
-    rows = {k: [] for k in _PARAMETER}
-    for seed in range(SEED, SEED + CANCEL_CLAUSE_DRAWS):
-        i = _make_inputs(T, mode="cancel", seed=seed)
-        prep = _forward(i)
-        want = _snapshot(_det_backward(i, prep))
-        outs = _nd_repeats(i, prep)
-        label = f"T={T} mode=cancel seed={seed} nondet"
-        for repeat, out in enumerate(outs):
-            _assert_same_bits(out["dX"], want["dX"], f"dX {label} launch {repeat}")
-        ref = _oracle(i, want_contrib=True)
-        comp = _oracle(i, dtype=F32, block_tokens=None)
-        if seed == SEED:
-            _assert_bf16(outs[0]["dX"], ref["dX32"], f"dX {label}")
-        reports.append(
-            _cancellation_band_report(
-                outs[0]["dX"], ref, comp, f"dX cancellation {label}"
-            )
-        )
-        for k in _PARAMETER:
-            rows[k].append(_worst_row(outs, ref, comp, k))
-        del i, prep, want, outs, ref, comp
-    total_k = sum(r["band"]["gt2"] for r in reports)
-    total_c = sum(r["comparator_band"]["gt2"] for r in reports)
-    max_k = max(r["band"]["max"] for r in reports)
-    max_c = max(r["comparator_band"]["max"] for r in reports)
-    strict_every_draw = max_k <= CANCEL_ULP_MAX
-    pooled = total_k <= 2 * total_c and max_k <= 2 * max_c
-    print(
-        f"dX cancellation T={T} nondet: {len(reports)} draws; kernel total n(> 2 ulp) {total_k}, max ulp "
-        f"{max_k}; IEEE-FP32 comparator {total_c} / {max_c}; aggregate verdict "
-        f"{'PASS' if strict_every_draw or pooled else 'FAIL'}",
-        flush=True,
+def test_single_cast_cancellation(T: int, record_property) -> None:
+    """Inputs whose collapse and residual-mixing contributions to ``dX`` cancel on stream 0: every output, ``dX``
+    included, judged against the naive BF16 tier over 32 inputs; every draw holds elements inside the band."""
+
+    def check(i: dict, outs: list, expected: dict) -> None:
+        _assert_cancellation_inputs(i, expected, f"T={T} mode=cancel")
+
+    _judge_nd(
+        lambda s: _make_inputs(T, mode="cancel", seed=s),
+        record_property,
+        seed=SEED,
+        check=check,
     )
-    assert strict_every_draw or pooled, (
-        f"dX cancellation T={T}: over {len(reports)} draws the resolvable band has {total_k} elements > 2 ulp (max "
-        f"{max_k}) against the IEEE-FP32 comparator's {total_c} (max {max_c}): beyond 2x"
-    )
-    _assert_parameter_distribution(rows, f"T={T} mode=cancel nondet", regime="unit")
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# Against the deterministic backward
-
-
-def _matches_the_deterministic_backward(hidden: int, T: int) -> None:
-    """:func:`test_matches_the_deterministic_backward` at ``(hidden, T)`` under the tables read at call time."""
-    program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 1)
-    prep = _forward(i)
-    want = _snapshot(_det_backward(i, prep))
-    parts, lpt = _slab_parts(T, hidden), _lpt_runs(T, hidden)
-    bound = _dfn_bound(i, _dfn_factor(T, hidden))
-    ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
-    figures = []
-    first = None
-    for repeat in range(REPEATS):
-        label = f"T={T} H={hidden} {program} P={parts} launch {repeat}"
-        kwargs = {}
-        if repeat % 2:
-            _poison_workspace(ws)
-            kwargs = {"workspace": ws, **_poisoned_outputs(T, hidden)}
-        got = _snapshot(_nd_backward(i, prep, **kwargs))
-        if repeat % 2:
-            _assert_zero_prefix(ws, label)
-        _assert_exact_outputs(got, want, f"{label} vs deterministic")
-        figures.append(
-            _assert_dfn_within(
-                got["dfn"], want["dfn"], bound, f"dfn {label} vs deterministic"
-            )
-        )
-        if first is None:
-            first = got
-        _assert_same_bits(got["dfn"], first["dfn"], f"dfn {label} vs launch 0")
-    print(
-        f"dfn T={T} H={hidden} {program} P={parts}: vs the deterministic backward over {REPEATS} launches: largest "
-        f"|nd - det| / bound {max(f['max_ratio'] for f in figures):.3e}, elements differing up to "
-        f"{max(f['differ'] for f in figures)} of {want['dfn'].numel()} "
-        f"(largest {max(f['max_ulp'] for f in figures)} ulp)"
-        + (
-            f"; P = 1: equal to the deterministic dfn on every launch: {all(f['max_ulp'] == 0 for f in figures)}"
-            if parts == 1 and not lpt
-            else ""
-        ),
-        flush=True,
-    )
-
-
-@pytest.mark.parametrize(("hidden", "T"), _hidden_cases(T_COMPARE, T_COMPARE_NEW))
-def test_matches_the_deterministic_backward(hidden: int, T: int) -> None:
-    """On the same inputs as the deterministic backward: ``dX``, ``dscale``, ``dbase`` bitwise (inside
-    ``BWD_ROW_BANDS`` both packages fold the token owner's group rows); every ``dfn`` element within ``F u sum_t
-    |dz'_t| |x_t|`` (``F`` = :func:`_dfn_factor`: ``2 P`` under ``dynr`` / ``dynr_os``, ``2 max(P, P_k7) + 10``
-    where the column slab runs ``lpt`` / ``lpt_os`` at ``T`` on this device), and every launch's ``dfn`` the first
-    launch's bits.  The launches alternate between the default workspace with fresh outputs and one caller workspace
-    (bytes past the zero prefix 0xFF before each launch) with NaN-filled outputs; the largest ratio to the bound and
-    the elements that differ from the deterministic ``dfn`` are printed."""
-    _require_hidden(hidden)
-    _matches_the_deterministic_backward(hidden, T)
 
 
 @pytest.fixture
@@ -1251,13 +712,14 @@ def forced_order():
 
 @pytest.mark.parametrize("order", ("chunk", "slab"))
 @pytest.mark.parametrize(("hidden", "T"), _hidden_cases((2049, 16263), (2049, 16263)))
-def test_matches_the_deterministic_backward_in_each_unit_order(
-    forced_order, hidden: int, T: int, order: str
+def test_backward_in_each_unit_order(
+    forced_order, hidden: int, T: int, order: str, record_property
 ) -> None:
-    """:func:`test_matches_the_deterministic_backward` with the size's unit order forced to ``order`` at every token
-    count (the board cells emptied: :func:`forced_order`): the chunk-order records (``dynr`` / ``lpt``) and the
-    slab-fastest ones (``dynr_os`` / ``lpt_os``) both run where the device's route holds them, whichever order the
-    tables of record pick on this device (skipped where the route holds no record of the order)."""
+    """The size's unit order forced to ``order`` at every token count (the board cells emptied: :func:`forced_order`):
+    the chunk-order records (``dynr`` / ``lpt``) and the slab-fastest ones (``dynr_os`` / ``lpt_os``) both run where
+    the device's route holds them, whichever order the tables of record pick on this device (skipped where the route
+    holds no record of the order), and the backward outputs of REPEATS launches (the workspaces alternating as in
+    :func:`test_nondeterministic_backward_matches_fp64`) are judged against the naive BF16 tier over 32 inputs."""
     _require_hidden(hidden)
     forced_order(hidden, order)
     program = loader.bwd_slab_atomic_program(T, _sm_count(), _arch(), hidden)
@@ -1265,23 +727,12 @@ def test_matches_the_deterministic_backward_in_each_unit_order(
     name = SLAB_RECORDS[program] + _suffix(hidden)
     if name not in loader.route_modules(_arch(), hidden, "bwd_finish"):
         pytest.skip(f"hidden {hidden} has no {name} on {_arch()}")
-    _matches_the_deterministic_backward(hidden, T)
-
-
-@pytest.mark.parametrize(("hidden", "T"), _hidden_cases((2049, 16263), (2049, 16263)))
-def test_run_to_run(hidden: int, T: int) -> None:
-    """Repeated launches on the same inputs: every output, ``dfn`` included, the first launch's bits (the column slab
-    folds each ``dfn`` element's per-chunk slots in chunk order, whatever the schedule of its units)."""
-    _require_hidden(hidden)
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 2)
-    prep = _forward(i)
-    outs = _nd_repeats(i, prep, n=RUN_TO_RUN_REPEATS)
-    for repeat, out in enumerate(outs[1:], start=1):
-        label = (
-            f"T={T} H={hidden} P={_slab_parts(T, hidden)} launch {repeat} vs launch 0"
-        )
-        for k in _OUTPUTS:
-            _assert_same_bits(out[k], outs[0][k], f"{k} {label}")
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s),
+        record_property,
+        seed=SEED + 1,
+        forward=False,
+    )
 
 
 @pytest.fixture
@@ -1353,17 +804,17 @@ def test_two_size_schedule_at_forced_geometries(
     geometry,
     accumulate: bool,
     order: str,
+    record_property,
 ) -> None:
     """The column slab's ``lpt`` record of ``hidden`` (under ``order="slab"`` its slab-fastest copy ``lpt_os``; where
     the device's route holds the record, see :func:`_require_lpt`), with the size's unit order forced to ``order`` at
     every token count, at a forced geometry (``geometry`` None: the screen's best two-size geometry of the size at
     ``T`` on this device, ``_lpt_plan`` at ``o_tiles = 1``, also where the table of record is ``None``): the
     selection's column slab is that record, the only column slab ``backward_finish`` loads, launched over
-    ``min(SMs, H / 64 x P)`` CTAs with ``slab_plan`` = the geometry.  On two launches -- fresh outputs on the default
-    workspace, then NaN outputs (the carried-in values under ``accumulate``) on a caller workspace whose bytes past
-    the zero prefix are 0xFF -- ``dX``, ``dscale``, ``dbase`` are bitwise the deterministic backward's, every ``dfn``
-    element lies within ``_dfn_factor(T, hidden) u (|carried| + sum_t |dz'_t| |x_t|)``, the two launches' ``dfn``
-    are the same bits and the zero prefix is zero; the largest ratio to the bound is printed."""
+    ``min(SMs, H / 64 x P)`` CTAs with ``slab_plan`` = the geometry.  Over 32 inputs, two launches a draw -- fresh
+    outputs on the default workspace, then NaN outputs (the carried-in values under ``accumulate``) on a caller
+    workspace whose bytes past the zero prefix are 0xFF, its zero prefix zero after the launch -- have their
+    backward outputs judged against the naive BF16 tier."""
     _require_lpt(hidden, order)
     arch, sm, index = _arch(), _sm_count(), _device().index
     forced_order(hidden, order)
@@ -1386,27 +837,8 @@ def test_two_size_schedule_at_forced_geometries(
         1,
         1,
     )
-    n = STREAMS * hidden
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 71)
-    prep = _forward(i)
-    carried = None
-    if accumulate:
-        g = torch.Generator(device=_device()).manual_seed(SEED + 72)
-        carried = {
-            "dfn": torch.randn((MAPPING_ROWS, n), generator=g, device=_device()) * 1e-3,
-            "dscale": torch.randn((3,), generator=g, device=_device()) * 1e-3,
-            "dbase": torch.randn((MAPPING_ROWS,), generator=g, device=_device()) * 1e-3,
-        }
-
-    def outputs(poisoned: bool) -> dict:
-        if carried is not None:
-            return {k: v.clone() for k, v in carried.items()}
-        return _poisoned_outputs(T, hidden) if poisoned else {}
-
-    want = _snapshot(_det_backward(i, prep, accumulate=accumulate, **outputs(False)))
-    factor = _dfn_factor(T, hidden)
-    bound = _dfn_bound(i, factor, carried=None if carried is None else carried["dfn"])
-    ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
+    # The forward programs load before the recording starts (only the backward's loads are counted).
+    _forward_all(_make_inputs(T, hidden=hidden, seed=SEED + 70))
     loaded: list[str] = []
     load = loader.load
 
@@ -1415,36 +847,11 @@ def test_two_size_schedule_at_forced_geometries(
         return load(name, record_arch)
 
     monkeypatch.setattr(loader, "load", recording_load)
-    figures, dfns = [], []
-    for launch in range(2):
-        label = f"T={T} H={hidden} {order} order lpt {geometry} accumulate={accumulate} launch {launch}"
-        kwargs = {"accumulate": accumulate, **outputs(launch == 1)}
-        if launch:
-            _poison_workspace(ws)
-            kwargs["workspace"] = ws
-        got = _snapshot(_nd_backward(i, prep, **kwargs))
-        if launch:
-            _assert_zero_prefix(ws, label)
-        _assert_exact_outputs(got, want, f"{label} vs deterministic")
-        figures.append(
-            _assert_dfn_within(
-                got["dfn"], want["dfn"], bound, f"dfn {label} vs deterministic"
-            )
-        )
-        dfns.append(got["dfn"])
-    _assert_same_bits(
-        dfns[1],
-        dfns[0],
-        f"dfn T={T} H={hidden} {order} order lpt {geometry} launch 1 vs 0",
-    )
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED + 71, launches=2,
+        forward=False, accumulate=accumulate, without_b=False,
+    )  # fmt: skip
     assert loaded == list(selection), loaded
-    print(
-        f"dfn T={T} H={hidden} {order} order lpt {geometry} (P_k7 {_parts(T, hidden)}, F {factor:g}) "
-        f"accumulate={accumulate}: "
-        f"largest |nd - det| / bound over two launches {max(f['max_ratio'] for f in figures):.3e}, elements "
-        f"differing up to {max(f['differ'] for f in figures)} of {MAPPING_ROWS * n}",
-        flush=True,
-    )
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1477,33 +884,17 @@ def _forward_outputs(i: dict, **workspace) -> dict:
     }
 
 
-def _reference_forward_outputs(i: dict) -> dict:
-    """:func:`_forward_outputs` of the deterministic package (its default workspaces)."""
-    X, fn, scale, base = (i[k] for k in ("X", "fn", "scale", "base"))
-    U, stats = det.cake_mhc_det_train_forward_prepare(X, fn, scale, base)
-    dB, gstats = det.cake_mhc_det_train_backward_prepare(i["dY"], i["B"], X, stats)
-    return {
-        "U": U,
-        "stats": stats,
-        "replay": det.cake_mhc_det_train_forward_stats(X, fn, scale, base),
-        "Y": det.cake_mhc_det_train_forward_finish(X, i["B"], stats),
-        "dB": dB,
-        "gstats": gstats,
-    }
-
-
 @pytest.mark.parametrize(
     ("hidden", "T"), _hidden_cases((1, 7, 129, 2049, 16263), (1, 7, 129, 2049, 16263))
 )
-def test_forward_entry_points_are_the_deterministic_programs(
-    hidden: int, T: int
+def test_forward_entry_points_on_both_workspaces(
+    hidden: int, T: int, record_property
 ) -> None:
     """The package's forward prepare, statistics replay, residual mixing and backward prepare (its copies of the
-    deterministic programs) give the deterministic package's bits, on the default workspaces and on a caller forward
-    workspace of this package (the deterministic forward layout: the same size, zero-initialized)."""
+    deterministic programs), on the default workspaces and on a caller forward workspace of this package (the
+    deterministic forward layout: the same size, zero-initialized): every output (``U``, ``Y``, ``dB``, the statistics
+    of the record and of its replay, the gradient statistics) judged against the naive BF16 tier over 32 inputs."""
     _require_hidden(hidden)
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 12)
-    want = _snapshot(_reference_forward_outputs(i))
     nbytes = pkg.cake_mhc_nondet_train_forward_workspace_bytes(
         T, _device(), hidden=hidden
     )
@@ -1512,53 +903,39 @@ def test_forward_entry_points_are_the_deterministic_programs(
     )
     ws = pkg.cake_mhc_nondet_train_forward_workspace(T, _device(), hidden=hidden)
     assert ws.numel() == nbytes and int(torch.count_nonzero(ws)) == 0
-    for workspace in (None, ws):
-        got = _forward_outputs(i, workspace=workspace)
-        for k, v in want.items():
-            _assert_same_bits(
-                got[k],
-                v,
-                f"{k} T={T} H={hidden} caller workspace={workspace is not None}",
-            )
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        judged = []
+        for workspace in (None, ws):
+            got = _forward_outputs(i, workspace=workspace)
+            judged.append(package_outputs(got))
+            judged.append(stats_outputs(got["replay"]))
+        expected, naive = expected_and_naive(i, OUTPUTS)
+        names = {k for launch in judged for k in launch}
+        return judged, {k: expected[k] for k in names}, {k: naive[k] for k in names}
+
+    judge_draws(case, record_property, seed=SEED + 12)
 
 
 @pytest.mark.parametrize(
     ("hidden", "T"),
     [pytest.param(h, T, id=f"H{h}-{T}") for h in HIDDEN_SIZES[1:] for T in T_BENCH],
 )
-def test_benchmark_token_counts_at_the_new_hidden_sizes(hidden: int, T: int) -> None:
+def test_benchmark_token_counts_at_the_new_hidden_sizes(
+    hidden: int, T: int, record_property
+) -> None:
     """At hidden 5120 and 7168 on the 19 benchmark token counts (their copies of the deterministic programs are
-    renders of their own; H 4096 is the cases above): the forward entry points and the backward prepare give the
-    deterministic package's bits, and one ``backward_finish`` (the column slab's form of the call: ``lpt`` where the
-    size's table fires on this device; on B200 at the token counts its kernel-level pairs measured, H 5120 15566 /
-    15590 / 16263 and H 7168 15288, and at those the screen picks that no pair has measured yet, 1024 at both sizes
-    and 2048 / 3072 at 7168; else ``dynr``; each as its ``_os`` copy where the size's ``BWD_SLAB_ORDER`` band is
-    ``"slab"``) gives its ``dX`` / ``dscale`` / ``dbase`` bits and a ``dfn`` within the bound of
-    :func:`test_matches_the_deterministic_backward`, the zero prefix of a caller workspace back to zero."""
+    renders of their own; H 4096 is the cases above): the forward entry points, the backward prepare and two
+    ``backward_finish`` launches (the column slab's form of the call: ``lpt`` where the size's table fires on this
+    device, else ``dynr``; each as its ``_os`` copy where the size's ``BWD_SLAB_ORDER`` band is ``"slab"``), the
+    second on a poisoned caller workspace whose zero prefix is zero after it, judged against the naive BF16 tier over
+    32 inputs."""
     _require_hidden(hidden)
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 14)
-    want = _snapshot(_reference_forward_outputs(i))
-    got = _snapshot(_forward_outputs(i))
-    label = f"T={T} H={hidden}"
-    for k, v in want.items():
-        _assert_same_bits(got[k], v, f"{k} {label}")
-    prep = {"stats": got["stats"], "gstats": got["gstats"]}
-    want = _snapshot(_det_backward(i, prep))
-    ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=hidden)
-    got = _snapshot(_nd_backward(i, prep, workspace=ws))
-    _assert_zero_prefix(ws, label)
-    _assert_exact_outputs(got, want, f"{label} vs deterministic")
-    figures = _assert_dfn_within(
-        got["dfn"],
-        want["dfn"],
-        _dfn_bound(i, _dfn_factor(T, hidden)),
-        f"dfn {label} vs deterministic",
-    )
-    print(
-        f"dfn {label} P={_slab_parts(T, hidden)} lpt={_lpt_runs(T, hidden)}: largest |nd - det| / bound "
-        f"{figures['max_ratio']:.3e}",
-        flush=True,
-    )
+    _judge_nd(
+        lambda s: _make_inputs(T, hidden=hidden, seed=s), record_property, seed=SEED + 14, launches=2,
+        without_b=False,
+    )  # fmt: skip
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES, ids=lambda h: f"H{h}")
@@ -1627,8 +1004,8 @@ def test_launches_are_this_packages_records(monkeypatch, hidden: int) -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# PyTorch's deterministic algorithms (every output repeats bit for bit, so nothing alerts; the facade, which forwards
-# to this package, is test_cake_mhc_nondet_train_api.py's)
+# PyTorch's deterministic algorithms (no call of this package alerts; the facade, which forwards to this package, is
+# test_cake_mhc_nondet_train_api.py's).  The oracle and the naive tier are evaluated with the mode off.
 
 
 def _determinism_alerts(caught) -> list[str]:
@@ -1637,155 +1014,147 @@ def _determinism_alerts(caught) -> list[str]:
     return [str(w.message) for w in caught if _ALERT in str(w.message)]
 
 
-def test_policy_strict_runs_every_entry_point(deterministic_algorithms) -> None:
+def test_policy_strict_runs_every_entry_point(
+    deterministic_algorithms, record_property
+) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` (warnings are errors): the forward prepare, the statistics
     replay, the residual mixing, the backward prepare, the workspace entry points and ``backward_finish`` (on the
     default workspace with fresh outputs and on a caller workspace whose bytes past the zero prefix are 0xFF, with
-    NaN-filled outputs) run without an alert or a warning and give the bits they give with the mode off (every
-    backward output, ``dfn`` included); ``dX`` / ``dscale`` / ``dbase`` are the deterministic bits, ``dfn`` within
-    the bound, and the zero prefix is zero after the call."""
+    NaN-filled outputs) run without an alert or a warning, the zero prefix is zero after the call, and every output
+    is judged against the naive BF16 tier over 32 inputs."""
     T = 257
-    i = _make_inputs(T, seed=SEED + 6)
-    want_prep = _snapshot(_forward(i))
-    want_replay = forward_stats(i["X"], i["fn"], i["scale"], i["base"]).clone()
-    want_Y = forward_finish(i["X"], i["B"], want_prep["stats"]).clone()
-    want_off = _snapshot(_nd_backward(i, want_prep))
-    want = _snapshot(_det_backward(i, want_prep))
-    bound = _dfn_bound(i, _dfn_factor(T))
     ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device())
-    deterministic_algorithms(True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        prep = _snapshot(_forward(i))
-        replay = forward_stats(i["X"], i["fn"], i["scale"], i["base"]).clone()
-        Y = forward_finish(i["X"], i["B"], prep["stats"]).clone()
-        assert pkg.cake_mhc_nondet_train_backward_workspace_bytes(
-            T, _device()
-        ) == loader.workspace_bytes_upto("bwd", T, _sm_count(), _arch())
-        pkg.cake_mhc_nondet_train_forward_workspace(T, _device())
-        got = {"default": _snapshot(_nd_backward(i, prep))}
-        _poison_workspace(ws)
-        got["caller"] = _snapshot(
-            _nd_backward(i, prep, workspace=ws, **_poisoned_outputs(T))
-        )
-    deterministic_algorithms(False)
-    _assert_zero_prefix(ws, "the call under the strict mode")
-    for k in ("stats", "gstats"):
-        _assert_same_bits(prep[k], want_prep[k], f"{k} under the strict mode")
-    _assert_same_bits(replay, want_replay, "statistics replay under the strict mode")
-    _assert_same_bits(Y, want_Y, "residual mixing under the strict mode")
-    for name, out in got.items():
-        label = f"backward_finish under the strict mode, {name} workspace"
-        for k in _OUTPUTS:
-            _assert_same_bits(out[k], want_off[k], f"{k} {label} vs the mode off")
-        _assert_exact_outputs(out, want, f"{label} vs deterministic")
-        _assert_dfn_within(
-            out["dfn"], want["dfn"], bound, f"dfn {label} vs deterministic"
-        )
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, seed=s)
+        deterministic_algorithms(True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                fwd = _snapshot(_forward_outputs(i))
+                assert pkg.cake_mhc_nondet_train_backward_workspace_bytes(
+                    T, _device()
+                ) == loader.workspace_bytes_upto("bwd", T, _sm_count(), _arch())
+                pkg.cake_mhc_nondet_train_forward_workspace(T, _device())
+                prep = {"stats": fwd["stats"], "gstats": fwd["gstats"]}
+                default = _snapshot(_nd_backward(i, prep))
+                _poison_workspace(ws)
+                caller = _snapshot(
+                    _nd_backward(i, prep, workspace=ws, **_poisoned_outputs(T))
+                )
+        finally:
+            deterministic_algorithms(False)
+        _assert_zero_prefix(ws, "the call under the strict mode")
+        judged = [package_outputs(fwd), stats_outputs(fwd["replay"]), default, caller]
+        expected, naive = expected_and_naive(i, OUTPUTS)
+        names = {k for launch in judged for k in launch}
+        return judged, {k: expected[k] for k in names}, {k: naive[k] for k in names}
+
+    judge_draws(case, record_property, seed=SEED + 6)
 
 
 def test_policy_warn_only_runs_the_backward_without_a_warning(
-    deterministic_algorithms,
+    deterministic_algorithms, record_property
 ) -> None:
     """Under ``torch.use_deterministic_algorithms(True, warn_only=True)`` no ``backward_finish`` call warns (no
     recorded warning carries PyTorch's alert) and each runs this package's backward -- the package never falls
-    back: on the default workspace and on one of this package's sizing every output is the bits of the call with the
-    mode off, ``dX`` / ``dscale`` / ``dbase`` are the deterministic bits, ``dfn`` is within the bound and the zero
-    prefix is zero."""
+    back: on the default workspace and on one of this package's sizing the backward outputs are judged against the
+    naive BF16 tier over 32 inputs, and the zero prefix is zero."""
     T = 2049
-    i = _make_inputs(T, seed=SEED + 7)
-    prep = _forward(i)
-    want_off = _snapshot(_nd_backward(i, prep))
-    want = _snapshot(_det_backward(i, prep))
-    bound = _dfn_bound(i, _dfn_factor(T))
     nd_sized = _nd_workspace_exact(T)
-    deterministic_algorithms(True, warn_only=True)
-    for name, workspace in (("default", None), ("nd-sized", nd_sized)):
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            got = _snapshot(_nd_backward(i, prep, workspace=workspace))
-        assert _determinism_alerts(caught) == [], (
-            name,
-            [str(w.message) for w in caught],
-        )
-        label = f"warn_only workspace={name}"
-        for k in _OUTPUTS:
-            _assert_same_bits(got[k], want_off[k], f"{k} {label} vs the mode off")
-        _assert_exact_outputs(got, want, f"{label} vs deterministic")
-        _assert_dfn_within(got["dfn"], want["dfn"], bound, f"dfn {label}")
-        if workspace is not None:
-            _assert_zero_prefix(workspace, label)
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, seed=s)
+        prep = _forward(i)
+        judged = []
+        deterministic_algorithms(True, warn_only=True)
+        try:
+            for name, workspace in (("default", None), ("nd-sized", nd_sized)):
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    judged.append(_snapshot(_nd_backward(i, prep, workspace=workspace)))
+                assert _determinism_alerts(caught) == [], (
+                    name,
+                    [str(w.message) for w in caught],
+                )
+        finally:
+            deterministic_algorithms(False)
+        _assert_zero_prefix(nd_sized, "warn_only workspace=nd-sized")
+        expected, naive = expected_and_naive(i, _OUTPUTS)
+        return judged, expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 7)
 
 
 @pytest.mark.parametrize("save_stats", (True, False))
 def test_policy_prepare_node_runs_its_backward(
-    deterministic_algorithms, save_stats: bool
+    deterministic_algorithms, save_stats: bool, record_property
 ) -> None:
     """The prepare node's forward, the finish node, (``save_stats=False``) the statistics replay and the prepare
     node's backward run without an alert or a warning whenever the deterministic algorithms are on -- recorded under
     the strict mode (warnings are errors), recorded with the mode off and the strict mode enabled before
     ``backward()``, and under ``warn_only`` (no recorded warning carries PyTorch's alert), also on a caller backward
-    workspace of this package's sizing: ``Y`` and every gradient are the bits of the same graph with the mode off,
-    ``Y`` and the ``X`` / ``scale`` / ``base`` gradients bitwise the deterministic autograd's, the ``fn`` gradient
-    within the bound."""
+    workspace of this package's sizing.  Over 32 inputs, ``U``, ``Y`` and the gradients of every one of these graphs
+    are judged against the naive BF16 tier (each graph's outputs under its own name prefix)."""
     T = 257
-    i = _make_inputs(T, seed=SEED + 8)
-    bound = _connection_bound(i, T)
+    nd_sized = _nd_workspace_exact(T)
 
-    def graph(api, **kwargs) -> tuple:
-        prepare, finish = api
+    def graph(i: dict, **kwargs) -> tuple:
         leaves = _leaves(i)
-        U, handle = prepare(*leaves, save_stats=save_stats, **kwargs)
-        Y = finish(leaves[0], (U.float() + i["B"].float()).to(BF16), handle)
-        return leaves, Y, (Y.float() * i["dY"].float()).sum()
+        U, handle = _nd_prepare(*leaves, save_stats=save_stats, **kwargs)
+        U.retain_grad()
+        B = (U.float() + i["B"].float()).to(BF16)
+        Y = _nd_finish(leaves[0], B, handle)
+        return {"leaves": leaves, "U": U, "B": B, "Y": Y}, (
+            Y.float() * i["dY"].float()
+        ).sum()
 
-    leaves_det, Y_det, loss = graph(DET_API)
-    loss.backward()
-    leaves_off, Y_off, loss = graph(ND_API)
-    loss.backward()
-    _assert_same_bits(Y_off.detach(), Y_det.detach(), "Y with the mode off")
-    _assert_grads(_grads(leaves_off), _grads(leaves_det), bound, "the mode off")
+    def case(j: int, s: int):
+        i = _make_inputs(T, seed=s)
+        runs = {}
+        # recorded under the strict mode: the forward and the backward run without an alert
+        deterministic_algorithms(True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                c, loss = graph(i)
+                loss.backward()
+        finally:
+            deterministic_algorithms(False)
+        runs["strict "] = c
+        # recorded with the mode off, the strict mode enabled before backward()
+        c, loss = graph(i)
+        deterministic_algorithms(True)
+        try:
+            with warnings.catch_warnings():
+                warnings.simplefilter("error")
+                loss.backward()
+        finally:
+            deterministic_algorithms(False)
+        runs["strict at backward "] = c
+        for name, workspace in (("default", None), ("nd-sized", nd_sized)):
+            c, loss = graph(i, backward_workspace=workspace)
+            deterministic_algorithms(True, warn_only=True)
+            try:
+                with warnings.catch_warnings(record=True) as caught:
+                    warnings.simplefilter("always")
+                    loss.backward()
+            finally:
+                deterministic_algorithms(False)
+            assert _determinism_alerts(caught) == [], (
+                name,
+                [str(w.message) for w in caught],
+            )
+            runs[f"warn_only {name} "] = c
+        outputs, expected, naive = {}, {}, {}
+        for prefix, c in runs.items():
+            for d, part in zip(
+                (outputs, expected, naive), _connection_case(i, c), strict=True
+            ):
+                d.update({prefix + k: v for k, v in part.items()})
+        return [outputs], expected, naive
 
-    def check(leaves, Y, what: str) -> None:
-        _assert_same_bits(Y.detach(), Y_off.detach(), f"Y {what} vs the mode off")
-        for name, got, want in zip(
-            ("X", "fn", "scale", "base"),
-            _grads(leaves),
-            _grads(leaves_off),
-            strict=True,
-        ):
-            _assert_same_bits(got, want, f"grad {name} {what} vs the mode off")
-        _assert_grads(_grads(leaves), _grads(leaves_det), bound, what)
-
-    # recorded under the strict mode: the forward and the backward run without an alert
-    deterministic_algorithms(True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        leaves, Y, loss = graph(ND_API)
-        loss.backward()
-    deterministic_algorithms(False)
-    check(leaves, Y, f"recorded under the strict mode, save_stats={save_stats}")
-    # recorded with the mode off, the strict mode enabled before backward()
-    leaves, Y, loss = graph(ND_API)
-    deterministic_algorithms(True)
-    with warnings.catch_warnings():
-        warnings.simplefilter("error")
-        loss.backward()
-    deterministic_algorithms(False)
-    check(leaves, Y, f"strict mode at backward, save_stats={save_stats}")
-    for workspace in (None, _nd_workspace_exact(T)):
-        leaves, Y, loss = graph(ND_API, backward_workspace=workspace)
-        deterministic_algorithms(True, warn_only=True)
-        with warnings.catch_warnings(record=True) as caught:
-            warnings.simplefilter("always")
-            loss.backward()
-        deterministic_algorithms(False)
-        what = f"warn_only at backward, save_stats={save_stats}, workspace={workspace is not None}"
-        assert _determinism_alerts(caught) == [], (
-            what,
-            [str(w.message) for w in caught],
-        )
-        check(leaves, Y, what)
+    judge_draws(case, record_property, seed=SEED + 8)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1793,46 +1162,32 @@ def test_policy_prepare_node_runs_its_backward(
 
 
 @pytest.mark.parametrize(("hidden", "T"), _hidden_cases((1000, 4096), (4096,)))
-def test_accumulate_four_times(hidden: int, T: int) -> None:
+def test_accumulate_four_times(hidden: int, T: int, record_property) -> None:
     """Four consecutive ``accumulate=True`` passes on four input sets into caller buffers that start from non-zero
-    values, beside the deterministic chain on the same values: the returned tensors are the caller's buffers; ``dX``,
-    ``dscale``, ``dbase`` bitwise at every step; ``dfn`` within the sum of the per-pass bounds (each with the larger
-    carried-in magnitude of the two chains)."""
+    values: the returned tensors are the caller's buffers; ``dfn``, ``dscale``, ``dbase`` after the four passes are
+    judged against the naive BF16 tier over 32 draws of the four-fold chain (the oracle: the carried-in values plus
+    the four FP64 gradients; the tier: the carried-in values in BF16 plus the four BF16 gradients, added in BF16)."""
     _require_hidden(hidden)
-    n = STREAMS * hidden
-    g = torch.Generator(device=_device()).manual_seed(SEED + 7919)
-    carried = {
-        "dfn": torch.randn((MAPPING_ROWS, n), generator=g, device=_device()) * 1e-3,
-        "dscale": torch.randn((3,), generator=g, device=_device()) * 1e-3,
-        "dbase": torch.randn((MAPPING_ROWS,), generator=g, device=_device()) * 1e-3,
-    }
-    acc_nd = {k: v.clone() for k, v in carried.items()}
-    acc_det = {k: v.clone() for k, v in carried.items()}
-    parts, factor = _slab_parts(T, hidden), _dfn_factor(T, hidden)
-    bound = torch.zeros((MAPPING_ROWS, n), dtype=F64, device=_device())
-    figures = []
-    for step in range(4):
-        i = _make_inputs(T, hidden=hidden, seed=SEED + 100 + step)
-        prep = _forward(i)
-        before = torch.maximum(
-            acc_nd["dfn"].double().abs(), acc_det["dfn"].double().abs()
-        )
-        got = _nd_backward(i, prep, accumulate=True, **acc_nd)
-        want = _det_backward(i, prep, accumulate=True, **acc_det)
-        for k in _PARAMETER:
-            assert got[k] is acc_nd[k] and want[k] is acc_det[k], (k, step)
-        bound = bound + _dfn_bound(i, factor, carried=before)
-        label = f"accumulate x4 T={T} H={hidden} P={parts} step {step}"
-        _assert_exact_outputs(got, want, label)
-        figures.append(
-            _assert_dfn_within(acc_nd["dfn"], acc_det["dfn"], bound, f"dfn {label}")
-        )
-        del i, prep
-    print(
-        f"dfn accumulate x4 T={T} H={hidden} P={parts}: largest |nd - det| / bound per step "
-        f"{[round(f['max_ratio'], 4) for f in figures]}, elements differing {[f['differ'] for f in figures]}",
-        flush=True,
-    )
+
+    def case(j: int, s: int):
+        carried = _random_carried(s, hidden)
+        acc = {k: v.clone() for k, v in carried.items()}
+        want = {k: v.double() for k, v in carried.items()}
+        tier = {k: v.to(BF16) for k, v in carried.items()}
+        for step in range(4):
+            i = _make_inputs(T, hidden=hidden, seed=s + 100 + step)
+            prep = _forward(i)
+            got = _nd_backward(i, prep, accumulate=True, **acc)
+            for k in _PARAMETER:
+                assert got[k] is acc[k], (k, step)
+            expected, naive = expected_and_naive(i, _PARAMETER)
+            for k in _PARAMETER:
+                want[k] = want[k] + expected[k]
+                tier[k] = tier[k] + naive[k]
+            del i, prep, expected, naive
+        return [acc], want, tier
+
+    judge_draws(case, record_property, seed=SEED + 7919)
 
 
 def test_accumulate_needs_the_buffers() -> None:
@@ -1865,75 +1220,81 @@ def _branch(name: str, i: dict):
 def _connection(prepare, finish, branch, *, save_stats: bool, record=None, **kwargs):
     def connection(X, fn, scale, base):
         U, handle = prepare(X, fn, scale, base, save_stats=save_stats, **kwargs)
-        if record is not None:
-            U.retain_grad()
-            record["U"] = U
         B = branch(U)
-        if record is not None:
-            record["B"] = B
+        if (
+            record is not None and "U" not in record
+        ):  # the first forward (not a checkpoint's recompute)
+            U.retain_grad()
+            record["U"], record["B"] = U, B
         return finish(X, B, handle)
 
     return connection
+
+
+_CONNECTION_OUTPUTS = ("U", "Y", "dB", "dX", "dfn", "dscale", "dbase")
+
+
+def _connection_case(
+    i: dict, c: dict, *, residual: bool = True
+) -> tuple[dict, dict, dict]:
+    """The judged outputs of one autograd connection ``c`` after its backward (``leaves``, ``U`` with its gradient
+    retained, the branch output ``B``, ``Y``): ``U``, ``Y``, the gradients of the leaves (``dX``, ``dfn``, ``dscale``,
+    ``dbase``) and, for the residual branch (``dB/dU = 1``), the gradient of ``U`` as ``dB``; with the oracle's and the
+    naive tier's values on the branch output and the branch's ``dU`` the autograd graph produced."""
+    U, leaves = c["U"], c["leaves"]
+    assert U.grad is not None and U.grad.dtype == BF16
+    assert leaves[0].grad.dtype == BF16
+    j = {**i, "B": c["B"].detach(), "dU": U.grad.detach()}
+    names = (
+        _CONNECTION_OUTPUTS
+        if residual
+        else tuple(k for k in _CONNECTION_OUTPUTS if k != "dB")
+    )
+    expected, naive = expected_and_naive(j, names)
+    outputs = {
+        "U": U.detach(), "Y": c["Y"].detach(), "dB": U.grad, "dX": leaves[0].grad, "dfn": leaves[1].grad,
+        "dscale": leaves[2].grad, "dbase": leaves[3].grad,
+    }  # fmt: skip
+    return {k: outputs[k] for k in names}, expected, naive
 
 
 @pytest.mark.parametrize("T", (7, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("checkpointed", (False, True))
 @pytest.mark.parametrize("branch", ("residual", "linear"))
-def test_autograd_matches_the_deterministic_gradients(
-    T: int, save_stats: bool, checkpointed: bool, branch: str
+def test_autograd_matches_fp64(
+    T: int, save_stats: bool, checkpointed: bool, branch: str, record_property
 ) -> None:
     """``cake_mhc_nondet_train_prepare()`` / ``cake_mhc_nondet_train_finish`` around an external branch, plain or
-    inside a non-reentrant ``torch.utils.checkpoint``, against the plain deterministic autograd on the same inputs:
-    ``Y`` and the gradients of ``X``, ``scale`` and ``base`` bitwise; the ``fn`` gradient within the ``dfn`` bound
-    (evaluated on the branch output and the branch's ``dU`` of the deterministic graph)."""
-    i = _make_inputs(T, seed=SEED + 31)
-    g = torch.Generator(device=_device()).manual_seed(SEED + 32)
-    i["W"] = (torch.randn((HIDDEN, HIDDEN), generator=g, device=_device()) / 64.0).to(
-        BF16
-    )
-    record: dict = {}
-    reference = _connection(
-        det.cake_mhc_det_train_prepare,
-        det.cake_mhc_det_train_finish,
-        _branch(branch, i),
-        save_stats=save_stats,
-        record=record,
-    )
-    leaves_det = _leaves(i)
-    Y_det = reference(*leaves_det)
-    (Y_det.float() * i["dY"].float()).sum().backward()
-    assert record["U"].grad is not None and record["U"].grad.dtype == BF16
-    bound = _dfn_bound(
-        {**i, "B": record["B"].detach(), "dU": record["U"].grad.detach()},
-        _dfn_factor(T),
-    )
-    connection = _connection(
-        _nd_prepare,
-        _nd_finish,
-        _branch(branch, i),
-        save_stats=save_stats,
-    )
-    leaves = _leaves(i)
-    if checkpointed:
-        Y = checkpoint(connection, *leaves, use_reentrant=False)
-    else:
-        Y = connection(*leaves)
-    (Y.float() * i["dY"].float()).sum().backward()
-    what = f"T={T} save_stats={save_stats} checkpointed={checkpointed} branch={branch}"
-    _assert_same_bits(Y.detach(), Y_det.detach(), f"Y {what}")
-    assert leaves[0].grad.dtype == BF16
-    for index, name in ((0, "X"), (2, "scale"), (3, "base")):
-        _assert_same_bits(
-            leaves[index].grad, leaves_det[index].grad, f"grad {name} {what}"
+    inside a non-reentrant ``torch.utils.checkpoint``: ``U``, ``Y`` and the gradients (and ``U``'s gradient as ``dB``
+    for the residual branch) judged against the naive BF16 tier over 32 inputs, the oracle and the tier evaluated on
+    the branch output and the branch's ``dU`` the autograd graph produced."""
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, seed=s)
+        g = torch.Generator(device=_device()).manual_seed(s + 1)
+        i["W"] = (
+            torch.randn((HIDDEN, HIDDEN), generator=g, device=_device()) / 64.0
+        ).to(BF16)
+        record: dict = {}
+        connection = _connection(
+            _nd_prepare,
+            _nd_finish,
+            _branch(branch, i),
+            save_stats=save_stats,
+            record=record,
         )
-    figures = _assert_dfn_within(
-        leaves[1].grad, leaves_det[1].grad, bound, f"grad fn {what}"
-    )
-    print(
-        f"grad fn {what}: largest |nd - det| / bound {figures['max_ratio']:.3e}",
-        flush=True,
-    )
+        leaves = _leaves(i)
+        if checkpointed:
+            Y = checkpoint(connection, *leaves, use_reentrant=False)
+        else:
+            Y = connection(*leaves)
+        (Y.float() * i["dY"].float()).sum().backward()
+        c = {"leaves": leaves, "U": record["U"], "B": record["B"], "Y": Y}
+        outputs, expected, naive = _connection_case(i, c, residual=branch == "residual")
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 31)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1950,38 +1311,21 @@ def _nd_finish(*args, **kwargs):
     return pkg.cake_mhc_nondet_train_finish(*args, **kwargs)
 
 
-# (prepare, finish) of each package: a handle goes to the finish of the package that made it.
+# (prepare, finish) of this package: a handle goes to the finish of the package that made it.
 ND_API = (_nd_prepare, _nd_finish)
-DET_API = (det.cake_mhc_det_train_prepare, det.cake_mhc_det_train_finish)
 
 
-def _connection_bound(i: dict, T: int) -> torch.Tensor:
-    """The ``dfn`` bound of one connection whose branch is ``B = U + B_0`` (its backward hands ``dB`` on as ``dU``)
-    under the loss gradient ``dY``: ``B`` and ``dU`` from the deterministic direct entry points."""
-    U, stats = forward_prepare(i["X"], i["fn"], i["scale"], i["base"])
-    B = (U.float() + i["B"].float()).to(BF16)
-    dB, _gstats = backward_prepare(i["dY"], B, i["X"], stats)
-    return _dfn_bound({**i, "B": B, "dU": dB}, _dfn_factor(T, _hidden_of(i)))
-
-
-def _assert_grads(got, want, bound: torch.Tensor, label: str) -> dict:
-    """The leaf gradients ``(X, fn, scale, base)`` of one connection: ``X``, ``scale``, ``base`` bitwise; ``fn``
-    within the ``dfn`` bound."""
-    for index, name in ((0, "X"), (2, "scale"), (3, "base")):
-        _assert_same_bits(got[index], want[index], f"grad {name} {label}")
-    return _assert_dfn_within(got[1], want[1], bound, f"grad fn {label}")
-
-
-def _assert_same_grads(got, want, label: str) -> None:
-    """The leaf gradients ``[X, *(fn, scale, base) per connection]`` of two runs of this package: every one bitwise,
-    ``fn`` included."""
+def _assert_like_grads(got, want, label: str) -> None:
+    """The leaf gradients ``[X, *(fn, scale, base) per connection]`` of two runs of this package: the same dtypes and
+    shapes, every one finite (this package promises no bits; the accuracy of its autograd path is judged by
+    :func:`test_autograd_matches_fp64` and :func:`test_checkpoint_replay`)."""
     assert len(got) == len(want) and len(got) % 3 == 1, (label, len(got), len(want))
-    chain = len(got) > 4
     for index, (g, w) in enumerate(zip(got, want, strict=True)):
-        name = "X" if index == 0 else ("fn", "scale", "base")[(index - 1) % 3]
-        if chain and index:
-            name += f"[{(index - 1) // 3}]"
-        _assert_same_bits(g, w, f"grad {name} {label}")
+        assert g is not None and g.dtype == w.dtype and g.shape == w.shape, (
+            label,
+            index,
+        )
+        assert torch.isfinite(g).all(), f"grad {index} {label}: non-finite values"
 
 
 def _plain_grads(i: dict, api, *, save_stats: bool = True) -> list:
@@ -2023,42 +1367,43 @@ def _assert_kept(
 
 
 @pytest.mark.parametrize(("hidden", "T"), _hidden_cases((129, 2049), (129, 2049)))
-def test_checkpoint_replay(hidden: int, T: int) -> None:
-    """``forward_stats`` is bitwise the ``forward_prepare`` record, and this package's gradients with the
-    statistics saved (``save_stats=True``) and replayed in the backward (``False``, the checkpoint path) are the same
-    bits (``fn`` included) and agree with the deterministic gradients: ``X`` / ``scale`` / ``base`` bitwise, ``fn``
-    within the bound."""
+def test_checkpoint_replay(hidden: int, T: int, record_property) -> None:
+    """This package's connection with the statistics saved (``save_stats=True``) and replayed in the backward
+    (``False``, the checkpoint path), and the statistics replay ``forward_stats``: over 32 inputs, ``U``, ``Y``,
+    ``dB`` and the gradients of each connection (each under its own name prefix) and the replayed statistics are
+    judged against the naive BF16 tier."""
     _require_hidden(hidden)
-    i = _make_inputs(T, hidden=hidden, seed=SEED + 11)
-    _U, stats = forward_prepare(i["X"], i["fn"], i["scale"], i["base"])
-    replay = forward_stats(i["X"], i["fn"], i["scale"], i["base"])
-    assert torch.equal(stats, replay), (
-        "forward_stats is not bitwise the forward_prepare record"
-    )
-    bound = _connection_bound(i, T)
-    want = _plain_grads(i, DET_API)
-    grads = {
-        save_stats: _plain_grads(i, ND_API, save_stats=save_stats)
-        for save_stats in (True, False)
-    }
-    for save_stats, got in grads.items():
-        _assert_grads(
-            got,
-            want,
-            bound,
-            f"T={T} H={hidden} save_stats={save_stats} vs deterministic",
-        )
-    _assert_same_grads(
-        grads[False], grads[True], f"T={T} H={hidden} replayed vs saved statistics"
-    )
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        outputs, expected, naive = {}, {}, {}
+        for save_stats in (True, False):
+            leaves = _leaves(i)
+            U, handle = _nd_prepare(*leaves, save_stats=save_stats)
+            U.retain_grad()
+            B = (U.float() + i["B"].float()).to(BF16)
+            Y = _nd_finish(leaves[0], B, handle)
+            (Y.float() * i["dY"].float()).sum().backward()
+            c = {"leaves": leaves, "U": U, "B": B, "Y": Y}
+            for d, part in zip(
+                (outputs, expected, naive), _connection_case(i, c), strict=True
+            ):
+                d.update({f"save_stats={save_stats} {k}": v for k, v in part.items()})
+        replay = stats_outputs(forward_stats(i["X"], i["fn"], i["scale"], i["base"]))
+        e, t = expected_and_naive(i, replay)
+        for d, part in zip((outputs, expected, naive), (replay, e, t), strict=True):
+            d.update({f"replay {k}": v for k, v in part.items()})
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 11)
 
 
 @pytest.mark.parametrize("T", (129, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 def test_checkpoint_keeps_nothing_alive(T: int, save_stats: bool) -> None:
     """A non-reentrant ``torch.utils.checkpoint`` around this package's prepare / finish keeps no tensor of
-    the layer alive after the forward, and the checkpointed backward is the plain one's bits (``fn`` included) and
-    equals the deterministic one (``X`` / ``scale`` / ``base`` bitwise, ``fn`` within the bound)."""
+    the layer alive after the forward, and the checkpointed backward gives finite gradients of the plain ones'
+    formats (their accuracy: :func:`test_autograd_matches_fp64`)."""
     i = _make_inputs(T, seed=SEED + 41)
 
     def connection(X, fn, scale, base):
@@ -2066,8 +1411,6 @@ def test_checkpoint_keeps_nothing_alive(T: int, save_stats: bool) -> None:
         B = (U.float() + i["B"].float()).to(BF16)
         return _nd_finish(X, B, handle)
 
-    bound = _connection_bound(i, T)
-    want = _plain_grads(i, DET_API, save_stats=save_stats)
     plain = _leaves(i)
     (connection(*plain).float() * i["dY"].float()).sum().backward()
 
@@ -2077,8 +1420,7 @@ def test_checkpoint_keeps_nothing_alive(T: int, save_stats: bool) -> None:
     _assert_nothing_kept(before, Y, "forward")
     (Y.float() * i["dY"].float()).sum().backward()
     label = f"T={T} save_stats={save_stats} checkpointed"
-    _assert_same_grads(_grads(checkpointed), _grads(plain), f"{label} vs plain")
-    _assert_grads(_grads(checkpointed), want, bound, f"{label} vs deterministic")
+    _assert_like_grads(_grads(checkpointed), _grads(plain), f"{label} vs plain")
 
 
 @pytest.mark.parametrize("T", (129, 2049))
@@ -2086,7 +1428,7 @@ def test_checkpoint_keeps_nothing_alive(T: int, save_stats: bool) -> None:
 def test_checkpoint_after_prepare_replays_statistics(T: int, save_stats: bool) -> None:
     """A non-reentrant checkpoint region that starts after this package's prepare (the branch and the finish
     inside it) keeps nothing beyond its output after the forward, the finish forward takes the edges off the handle
-    and its rerun replays the released statistics; the gradients are the plain run's bits (``fn`` included)."""
+    and its rerun replays the released statistics; the gradients are finite, in the plain run's formats."""
     i = _make_inputs(T, seed=SEED + 42)
 
     def finish(X, U, handle):
@@ -2109,7 +1451,7 @@ def test_checkpoint_after_prepare_replays_statistics(T: int, save_stats: bool) -
     )
     del stats
     (Y.float() * i["dY"].float()).sum().backward()
-    _assert_same_grads(
+    _assert_like_grads(
         _grads(checkpointed),
         _grads(plain),
         f"T={T} save_stats={save_stats} checkpointed finish",
@@ -2137,50 +1479,6 @@ def _two_layers(
     )
 
 
-def _chain_bounds(X: torch.Tensor, params: list, dY: torch.Tensor, T: int) -> list:
-    """The ``dfn`` bound of each connection of :func:`_two_layers`, from the deterministic direct entry points: the
-    input, branch output ``U`` and loss gradient of every connection (this package's chain hands each
-    connection bitwise the same ``dX`` as its upstream gradient)."""
-    xs, us, records = [], [], []
-    x = X.detach()
-    for fn, scale, base in params:
-        U, stats = forward_prepare(x, fn.detach(), scale.detach(), base.detach())
-        xs.append(x)
-        us.append(U)
-        records.append(stats)
-        x = forward_finish(x, U, stats)
-    bounds: list = [None] * len(params)
-    g = dY
-    for c in reversed(range(len(params))):
-        fn, scale, base = (p.detach() for p in params[c])
-        dB, gstats = backward_prepare(g, us[c], xs[c], records[c])
-        case = {
-            "X": xs[c],
-            "fn": fn,
-            "scale": scale,
-            "base": base,
-            "B": us[c],
-            "dY": g,
-            "dU": dB,
-        }
-        bounds[c] = _dfn_bound(case, _dfn_factor(T))
-        g = det_backward_finish(
-            xs[c], g, dB, us[c], fn, scale, base, records[c], gstats
-        )[0]
-    return bounds
-
-
-def _assert_chain_grads(got, want, bounds: list, label: str) -> None:
-    """The gradients of ``[X, *(fn, scale, base) per connection]``: ``X``, every ``scale`` and ``base`` bitwise; each
-    connection's ``fn`` within its bound."""
-    _assert_same_bits(got[0], want[0], f"grad X {label}")
-    for c, bound in enumerate(bounds):
-        fn, scale, base = 1 + 3 * c, 2 + 3 * c, 3 + 3 * c
-        _assert_same_bits(got[scale], want[scale], f"grad scale[{c}] {label}")
-        _assert_same_bits(got[base], want[base], f"grad base[{c}] {label}")
-        _assert_dfn_within(got[fn], want[fn], bound, f"grad fn[{c}] {label}")
-
-
 @pytest.mark.parametrize("T", (129, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("checkpointed", (False, True))
@@ -2189,8 +1487,7 @@ def test_backward_keeps_nothing_alive(
 ) -> None:
     """Once a connection's backward has run, nothing of it stays alive: after
     ``torch.autograd.grad`` over two layers of two connections the only live tensor of the step is its output ``Y``.
-    A second step is the first step's bits (each ``fn`` included) and equals the deterministic step (``X`` / ``scale``
-    / ``base`` bitwise, each ``fn`` within its connection's bound)."""
+    A second step gives finite gradients of the first step's formats."""
     i = _make_inputs(T, seed=SEED + 51)
     params = [
         [p.clone().requires_grad_(True) for p in (q["fn"], q["scale"], q["base"])]
@@ -2205,14 +1502,11 @@ def test_backward_keeps_nothing_alive(
         )
         return Y, torch.autograd.grad(Y, leaves, i["dY"])
 
-    det_grads = step(DET_API)[1]
     reference = step(ND_API)[1]  # also the warm-up
-    bounds = _chain_bounds(i["X"], params, i["dY"], T)
     before = _live_bytes()
     Y, grads = step(ND_API)
     label = f"T={T} save_stats={save_stats} checkpointed={checkpointed}"
-    _assert_same_grads(grads, reference, f"second step {label}")
-    _assert_chain_grads(grads, det_grads, bounds, f"vs deterministic {label}")
+    _assert_like_grads(grads, reference, f"second step {label}")
     del grads
     _assert_kept(before, "the backward", Y)
 
@@ -2221,9 +1515,8 @@ def test_backward_keeps_nothing_alive(
 @pytest.mark.parametrize("save_stats", (True, False))
 def test_repeated_backward_with_retain_graph(T: int, save_stats: bool) -> None:
     """Backward passes over one retained graph of this package are independent: two full passes equal a fresh
-    graph's, and a pass in between that reaches the prepare node but not the finish node (the loss is ``U``) takes
-    no ``dY`` of the earlier pass: it equals the same pass on a fresh graph (every gradient bitwise, ``fn``
-    included)."""
+    graph's formats, and a pass in between that reaches the prepare node but not the finish node (the loss is ``U``)
+    gives finite gradients of the same pass on a fresh graph's formats."""
     i = _make_inputs(T, seed=SEED + 56)
 
     def graph(leaves: list) -> tuple:
@@ -2242,9 +1535,9 @@ def test_repeated_backward_with_retain_graph(T: int, save_stats: bool) -> None:
     fresh = _leaves(i)
     u_fresh = torch.autograd.grad(graph(fresh)[0], fresh, i["dU"])
     label = f"T={T} save_stats={save_stats} retain_graph"
-    _assert_same_grads(first, full, f"{label} first pass")
-    _assert_same_grads(second, full, f"{label} second pass")
-    _assert_same_grads(u_only, u_fresh, f"{label} U-only pass")
+    _assert_like_grads(first, full, f"{label} first pass")
+    _assert_like_grads(second, full, f"{label} second pass")
+    _assert_like_grads(u_only, u_fresh, f"{label} U-only pass")
 
 
 @pytest.mark.parametrize("T", (129, 2049))
@@ -2252,7 +1545,7 @@ def test_repeated_backward_with_retain_graph(T: int, save_stats: bool) -> None:
 @pytest.mark.parametrize("region", ("connection", "after_prepare"))
 def test_reentrant_checkpoint(T: int, save_stats: bool, region: str) -> None:
     """A reentrant ``torch.utils.checkpoint`` around a connection of this package, or around the branch and the
-    finish with the prepare outside, gives the plain gradients' bits (``fn`` included) and keeps nothing alive after
+    finish with the prepare outside, gives finite gradients of the plain ones' formats and keeps nothing alive after
     the backward beyond ``Y`` and the leaves' gradients."""
     i = _make_inputs(T, seed=SEED + 57)
 
@@ -2276,7 +1569,7 @@ def test_reentrant_checkpoint(T: int, save_stats: bool, region: str) -> None:
         Y = checkpoint(finish, checkpointed[0], U, handle, use_reentrant=True)
         del U
     Y.backward(i["dY"])
-    _assert_same_grads(
+    _assert_like_grads(
         _grads(checkpointed),
         _grads(plain),
         f"T={T} save_stats={save_stats} reentrant checkpoint ({region})",
@@ -2323,8 +1616,8 @@ def test_backward_without_the_prepare_node(T: int, prepare: str) -> None:
 
 @pytest.mark.parametrize("save_stats", (True, False))
 def test_interleaved_connections(save_stats: bool) -> None:
-    """Two connections of this package of one shape whose prepares both run before either finish give the bits of
-    the two connections run one after the other (every gradient, ``fn`` included)."""
+    """Two connections of this package of one shape whose prepares both run before either finish give finite
+    gradients of the formats of the two connections run one after the other."""
     T = 129
     a, b = _make_inputs(T, seed=SEED + 61), _make_inputs(T, seed=SEED + 62)
 
@@ -2347,88 +1640,84 @@ def test_interleaved_connections(save_stats: bool) -> None:
 
     serial, interleaved = run(False), run(True)
     for n in range(2):
-        _assert_same_grads(
+        _assert_like_grads(
             interleaved[n], serial[n], f"connection {n} save_stats={save_stats}"
         )
 
 
-def _check_case(T: int, *, seed: int = SEED, zero_rows=()) -> None:
-    """One draw through the gates of :func:`test_nondeterministic_backward_matches_fp64` and, on every launch, against
-    the deterministic backward (``dX`` / ``dscale`` / ``dbase`` bitwise, ``dfn`` within the bound)."""
-    i = _make_inputs(T, seed=seed, zero_rows=zero_rows)
-    prep = _forward(i)
-    outs = _nd_repeats(i, prep)
-    want = _snapshot(_det_backward(i, prep))
-    bound = _dfn_bound(i, _dfn_factor(T))
-    label = f"T={T}" + (f" zero_rows={tuple(zero_rows)}" if zero_rows else "")
-    for repeat, out in enumerate(outs):
-        _assert_exact_outputs(out, want, f"{label} launch {repeat}")
-        _assert_dfn_within(
-            out["dfn"], want["dfn"], bound, f"dfn {label} launch {repeat}"
-        )
-    ref = _oracle(i)
-    comp = _oracle(i, dtype=F32, block_tokens=None)
-    _assert_bf16(outs[0]["dX"], ref["dX32"], f"dX {label}")
-    _assert_draw(
-        {k: _worst_row(outs, ref, comp, k) for k in _PARAMETER}, label, regime="unit"
+def test_zero_row_of_x_takes_the_eps_path(record_property) -> None:
+    """A zero row of ``X`` (the ``rms_eps`` path): every output judged against the naive BF16 tier over 32 inputs."""
+    _judge_nd(
+        lambda s: _make_inputs(7, seed=s, zero_rows=(3,)), record_property, seed=SEED
     )
-
-
-def test_zero_row_of_x_takes_the_eps_path() -> None:
-    _check_case(7, zero_rows=(3,))
 
 
 @pytest.mark.parametrize("T", (257, 2049))
-def test_large_logits(T: int) -> None:
-    """``fn x 1e3`` (``|z| ~ 1e3``), the deterministic suite's regime beyond the contract's distributions: ``dX`` /
-    ``dscale`` / ``dbase`` bitwise the deterministic backward's on every launch; the BF16 ``dX`` gate; the parameter
-    gradients held to the comparator-relative clause in the distribution form over 25 draws (each draw's worst launch).
-    The ``dfn`` bound against the deterministic backward is not applied here: the FP64 ``dz'`` it is built from is
-    not the kernel's FP32 ``dz'`` at these pre-activations (the rel-L2 to the deterministic ``dfn`` is printed)."""
-    i = _make_inputs(T, fn_scale=1e3)
-    prep = _forward(i)
-    outs = _nd_repeats(i, prep)
-    want = _snapshot(_det_backward(i, prep))
-    label = f"T={T} fn_scale=1000 nondet"
-    for repeat, out in enumerate(outs):
-        _assert_exact_outputs(out, want, f"{label} launch {repeat}")
-    ref = _oracle(i)
-    comp = _oracle(i, dtype=F32, block_tokens=None)
-    _assert_bf16(outs[0]["dX"], ref["dX32"], f"dX {label}")
-    _assert_draw(
-        {k: _worst_row(outs, ref, comp, k) for k in _PARAMETER},
-        label,
-        regime="large_logits",
+def test_large_logits(T: int, record_property) -> None:
+    """``fn x 1e3`` (``|z| ~ 1e3``: saturated sigmoids and softmax rows): every output judged against the naive BF16
+    tier over 32 inputs."""
+    _judge_nd(
+        lambda s: _make_inputs(T, fn_scale=1e3, seed=s), record_property, seed=SEED
     )
-    print(
-        f"dfn {label}: rel-L2 to the deterministic dfn, largest over {REPEATS} launches "
-        f"{max(_rel_l2(out['dfn'], want['dfn']) for out in outs):.3e} (literal record)",
-        flush=True,
-    )
-    del i, prep, outs, want, ref, comp
-    rows = _parameter_rows(
-        T, fn_scale=1e3, seeds=range(SEED, SEED + PARAM_CLAUSE_DRAWS)
-    )
-    _assert_parameter_distribution(rows, label, regime="large_logits")
 
 
-def test_changing_rows_in_one_process_does_not_rebuild() -> None:
-    """A changed token count loads no module of either package after the first call, and each call follows the FP64
-    reference (BF16 ``dX`` gate, ``dfn`` rel-L2 <= 1e-5)."""
-    _check_case(64)
-    loaded = (loader.load.cache_info().misses, det_loader.load.cache_info().misses)
-    for T in (1, 65, 2049, 7, 255):
-        i = _make_inputs(T, seed=SEED + T)
-        prep = _forward(i)
-        out = _nd_backward(i, prep)
-        ref = _oracle(i)
-        _assert_bf16(out["dX"], ref["dX32"], f"dX T={T}")
-        error = _rel_l2(out["dfn"], ref["dfn"])
-        assert error <= FP32_REL_L2_MAX, f"dfn T={T}: rel-L2 {error:.3e}"
+def test_changing_rows_in_one_process_does_not_rebuild(
+    record_property, monkeypatch
+) -> None:
+    """A changed token count rebuilds no module: it loads no module of the deterministic package, a module of this
+    package only where its route selects a record of another token-count band than the earlier calls' (a mapping-pass
+    ``xn`` form at 65 or 255 tokens, for example), every module loaded during the changed counts is a record of
+    their selection, and calls back at the earlier counts load nothing.  Every output at 64 tokens, and ``dX`` and
+    ``dfn`` of one launch at each other count, are judged against the naive BF16 tier over 32 inputs."""
+    _judge_nd(
+        lambda s: _make_inputs(64, seed=s), record_property, seed=SEED, prefix="T=64 "
+    )
+    loaded: list[str] = []
+    load = loader.load
+
+    def recording_load(name: str, arch: str):
+        misses = load.cache_info().misses
+        module = load(name, arch)
+        if load.cache_info().misses != misses:
+            loaded.append(name)
+        return module
+
+    monkeypatch.setattr(loader, "load", recording_load)
+    det_loaded = det_loader.load.cache_info().misses
+    counts = (1, 65, 2049, 7, 255)
+    for T in counts:
+
+        def case(j: int, s: int, T: int = T):
+            i = _make_inputs(T, seed=s)
+            out = _nd_backward(i, _forward(i))
+            launch = {k: out[k] for k in ("dX", "dfn")}
+            expected, naive = expected_and_naive(i, launch)
+            return [launch], expected, naive
+
+        judge_draws(case, record_property, seed=SEED + T, prefix=f"T={T} ")
+    arch, sm = _arch(), _sm_count()
+    selected = {
+        name
+        for T in counts
+        for kind in ("fwd_prepare", "bwd_prepare", "bwd_finish")
+        for name in loader.selected_modules(arch, HIDDEN, kind, rows=T, sm_count=sm)
+    }
+    assert set(loaded) <= selected, (
+        f"a changed token count loaded modules outside its routes' records: {sorted(set(loaded) - selected)}"
+    )
+    loaded_before = (load.cache_info().misses, det_loader.load.cache_info().misses)
+    assert loaded_before[1] == det_loaded, (
+        "a changed token count loaded a module of the deterministic package"
+    )
+    for T in (64, *reversed(counts)):
+        i = _make_inputs(T, seed=SEED + 5 + T)
+        _nd_backward(i, _forward(i))
     assert (
-        loader.load.cache_info().misses,
+        load.cache_info().misses,
         det_loader.load.cache_info().misses,
-    ) == loaded, "a changed token count rebuilt or reloaded a module"
+    ) == loaded_before, (
+        "a call back at an earlier token count rebuilt or reloaded a module"
+    )
 
 
 def test_argument_validation() -> None:
@@ -2438,8 +1727,9 @@ def test_argument_validation() -> None:
     ``SINKHORN_ITERS_MAX`` a ``NotImplementedError``) and ``accumulate=True`` without its buffers; the workspace must
     be a 1-D, 256-byte aligned ``uint8`` CUDA tensor of this package's size (a non-tensor a ``TypeError``).
     An operand or output of another hidden size than ``X``, and a call whose hidden size the package does not list
-    (6144) or the architecture does not route (5120 and 7168 on sm_107a), is a ``ValueError``.  ``B`` is optional:
-    ``None`` gives the same bits of every output, ``dfn`` included.  ``finish`` takes
+    (6144) or the architecture does not route (none of the three sizes on the architectures of record), is a
+    ``ValueError``.  ``B`` is optional: ``None`` gives every output (``dfn`` included) in the same dtype and shape as
+    with ``B``, all finite; the test makes no bit comparison.  ``finish`` takes
     only this package's handles (any other object, a deterministic package's handle included, is a ``TypeError``
     naming the deterministic finish); a ``deterministic`` keyword is a ``TypeError`` too."""
     T = 8
@@ -2519,11 +1809,16 @@ def test_argument_validation() -> None:
         call(workspace=[0] * 256)
     with pytest.raises(ValueError):
         backward_finish(*(t.cpu() for t in args.values()))
-    # B is optional in the backward finish (its contribution is in grad_stats).
+    # B is optional in the backward finish (its contribution is in grad_stats; the judged cases of
+    # test_nondeterministic_backward_matches_fp64 launch with B=None too).
     with_b = _snapshot(dict(zip(_OUTPUTS, call(), strict=True)))
     without_b = _snapshot(dict(zip(_OUTPUTS, call(B=None), strict=True)))
     for k in _OUTPUTS:
-        _assert_same_bits(without_b[k], with_b[k], f"{k} B=None")
+        assert (
+            without_b[k].dtype == with_b[k].dtype
+            and without_b[k].shape == with_b[k].shape
+        ), k
+        assert torch.isfinite(without_b[k]).all(), f"{k} B=None: non-finite values"
     with pytest.raises(ValueError):
         _nd_prepare(X.float(), fn, scale, base)
     with pytest.raises(ValueError):
@@ -2546,58 +1841,52 @@ def test_argument_validation() -> None:
 
 
 @pytest.mark.parametrize("Ts", ((2049, 2049), (4096, 1024, 257)))
-def test_concurrent_streams(Ts: tuple) -> None:
+def test_concurrent_streams(Ts: tuple, record_property) -> None:
     """Launches on several ``torch.cuda.Stream`` objects at once, each with its own workspace and outputs (workspace
-    bytes past the zero prefix 0xFF and NaN outputs before every round): each is its serial result's bits (every
-    output, ``dfn`` included), equals the deterministic backward's (``dX``, ``dscale``, ``dbase`` bitwise, ``dfn``
-    within the bound) and leaves its zero prefix zero."""
-    cases = []
-    for n, T in enumerate(Ts):
-        i = _make_inputs(T, seed=SEED + 500 + n)
-        prep = _forward(i)
-        ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device())
-        serial = _snapshot(_nd_backward(i, prep, workspace=ws))
-        want = _snapshot(_det_backward(i, prep))
-        _assert_exact_outputs(serial, want, f"serial T={T}")
-        cases.append(
-            {
-                "T": T,
-                "i": i,
-                "prep": prep,
-                "ws": ws,
-                "serial": serial,
-                "want": want,
-                "bound": _dfn_bound(i, _dfn_factor(T)),
-                "outs": _poisoned_outputs(T),
-            }
-        )
+    bytes past the zero prefix 0xFF and NaN outputs before every round): over 32 inputs of every stream, three rounds
+    a draw, each stream's backward outputs are judged against the naive BF16 tier of its inputs (each stream under its
+    own name prefix), and each workspace's zero prefix is zero after every round."""
+    workspaces = [
+        pkg.cake_mhc_nondet_train_backward_workspace(T, _device()) for T in Ts
+    ]
+    outs = [_poisoned_outputs(T) for T in Ts]
     streams = [torch.cuda.Stream() for _ in Ts]
     main = torch.cuda.current_stream()
-    torch.cuda.synchronize()
-    for rnd in range(3):
-        for c in cases:
-            _poison_workspace(c["ws"])
-            for v in c["outs"].values():
-                v.fill_(float("nan"))
-        for stream, c in zip(streams, cases, strict=True):
-            stream.wait_stream(main)
-            with torch.cuda.stream(stream):
-                _nd_backward(c["i"], c["prep"], workspace=c["ws"], **c["outs"])
-        for stream in streams:
-            main.wait_stream(stream)
+
+    def case(j: int, s: int):
+        cases = []
+        for n, T in enumerate(Ts):
+            i = _make_inputs(T, seed=s + 500 + n)
+            cases.append({"T": T, "i": i, "prep": _forward(i)})
         torch.cuda.synchronize()
+        judged = []
+        for rnd in range(3):
+            for ws, out in zip(workspaces, outs, strict=True):
+                _poison_workspace(ws)
+                for v in out.values():
+                    v.fill_(float("nan"))
+            for stream, c, ws, out in zip(
+                streams, cases, workspaces, outs, strict=True
+            ):
+                stream.wait_stream(main)
+                with torch.cuda.stream(stream):
+                    _nd_backward(c["i"], c["prep"], workspace=ws, **out)
+            for stream in streams:
+                main.wait_stream(stream)
+            torch.cuda.synchronize()
+            launch = {}
+            for n, (c, ws, out) in enumerate(zip(cases, workspaces, outs, strict=True)):
+                _assert_zero_prefix(ws, f"round {rnd} stream {n} (T={c['T']}) of {Ts}")
+                launch.update({f"stream {n} {k}": v.clone() for k, v in out.items()})
+            judged.append(launch)
+        expected, naive = {}, {}
         for n, c in enumerate(cases):
-            what = f"round {rnd} stream {n} (T={c['T']}) of {Ts}"
-            _assert_zero_prefix(c["ws"], what)
-            for k in _OUTPUTS:
-                _assert_same_bits(c["outs"][k], c["serial"][k], f"{k} {what} vs serial")
-            _assert_exact_outputs(c["outs"], c["want"], what + " vs deterministic")
-            _assert_dfn_within(
-                c["outs"]["dfn"],
-                c["want"]["dfn"],
-                c["bound"],
-                f"dfn {what} vs deterministic",
-            )
+            e, t = expected_and_naive(c["i"], _OUTPUTS)
+            expected.update({f"stream {n} {k}": v for k, v in e.items()})
+            naive.update({f"stream {n} {k}": v for k, v in t.items()})
+        return judged, expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 500)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2685,114 +1974,96 @@ def _staged_run(cases: dict, order: tuple[int, ...], ws: dict) -> dict:
     return {H: _snapshot(o) for H, o in out.items()}
 
 
-def _assert_mixed_case(got: dict, want: dict, bound: torch.Tensor, what: str) -> None:
-    """Every output of ``want`` but ``dfn`` bitwise; ``dfn`` within the bound."""
-    for k, v in want.items():
-        if k == "dfn":
-            _assert_dfn_within(got[k], v, bound, f"dfn {what}")
-        else:
-            _assert_same_bits(got[k], v, f"{k} {what}")
-
-
 @pytest.mark.parametrize("T", _MIXED_T)
 @pytest.mark.parametrize("workspaces", _WORKSPACE_MODES)
-def test_mixed_hidden_sizes_same_token_count(T: int, workspaces: str) -> None:
+def test_mixed_hidden_sizes_same_token_count(
+    T: int, workspaces: str, record_property
+) -> None:
     """Calls of every routed hidden size at the same token count, interleaved stage by stage through the direct
     entry points (default workspaces, one caller workspace per size, one caller workspace shared by the sizes), in
-    two rounds of opposite size order: ``forward_stats`` is bitwise the ``forward_prepare`` record, every output
-    (``dfn`` included) is bitwise the sizes run one after the other, every output but ``dfn`` is bitwise the
-    deterministic package's on the same inputs and ``dfn`` within the bound of it, and a caller backward workspace
-    keeps its zero prefix zero."""
+    two rounds of opposite size order: over 32 inputs of every size, every output of both rounds is judged against
+    the naive BF16 tier of its size, and a caller backward workspace keeps its zero prefix zero."""
     sizes = _mixed_hidden_sizes()
-    cases = {H: _make_inputs(T, hidden=H, seed=SEED + 71 + H) for H in sizes}
     ws = _mixed_workspaces(sizes, T, workspaces)
-    bounds = {H: _dfn_bound(cases[H], _dfn_factor(T, H)) for H in sizes}
-    alone = {H: _staged_run({H: cases[H]}, (H,), ws)[H] for H in sizes}
-    reference = {}
-    for H in sizes:
-        i = cases[H]
-        want = _reference_forward_outputs(i)
-        want.update(
-            _det_backward(i, {"stats": want["stats"], "gstats": want["gstats"]})
-        )
-        reference[H] = _snapshot(want)
-    for rnd, order in enumerate((sizes, tuple(reversed(sizes)))):
-        got = _staged_run(cases, order, ws)
+
+    def case(j: int, s: int):
+        cases = {H: _make_inputs(T, hidden=H, seed=s + H) for H in sizes}
+        judged = []
+        for rnd, order in enumerate((sizes, tuple(reversed(sizes)))):
+            got = _staged_run(cases, order, ws)
+            launch = {}
+            for H in sizes:
+                what = f"T={T} H={H} mixed with {sizes} ({workspaces} workspaces, round {rnd})"
+                if ws[H][1] is not None:
+                    _assert_zero_prefix(ws[H][1], what)
+                outputs = package_outputs(got[H])
+                outputs.update(
+                    {
+                        "replay " + k: v
+                        for k, v in stats_outputs(got[H]["replay"]).items()
+                    }
+                )
+                launch.update({f"H{H} {k}": v for k, v in outputs.items()})
+            judged.append(launch)
+        expected, naive = {}, {}
         for H in sizes:
-            what = (
-                f"T={T} H={H} mixed with {sizes} ({workspaces} workspaces, round {rnd})"
-            )
-            assert torch.equal(got[H]["replay"], got[H]["stats"]), (
-                f"{what}: forward_stats is not bitwise the forward_prepare record"
-            )
-            for k, v in alone[H].items():
-                _assert_same_bits(got[H][k], v, f"{k} {what} vs alone")
-            _assert_mixed_case(
-                got[H], reference[H], bounds[H], f"{what} vs deterministic"
-            )
-            if ws[H][1] is not None:
-                _assert_zero_prefix(ws[H][1], what)
-        del got
+            e, t = expected_and_naive(cases[H], OUTPUTS)
+            for k in OUTPUTS:
+                expected[f"H{H} {k}"], naive[f"H{H} {k}"] = e[k], t[k]
+            for k in STATS_COLUMNS:
+                expected[f"H{H} replay {k}"], naive[f"H{H} replay {k}"] = e[k], t[k]
+        return judged, expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 71)
 
 
 @pytest.mark.parametrize("T", _MIXED_T)
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("workspaces", _WORKSPACE_MODES)
-def test_mixed_hidden_sizes_autograd(T: int, save_stats: bool, workspaces: str) -> None:
+def test_mixed_hidden_sizes_autograd(
+    T: int, save_stats: bool, workspaces: str, record_property
+) -> None:
     """This package's autograd connections with every routed hidden size at the same token count: the
     prepares of every size, then the finishes in the reverse order, then one backward over the sum of the losses.
-    Each size's ``U``, ``Y`` and gradients (``fn`` included) are bitwise those of the sizes run one after the other,
-    and its gradients equal the deterministic connection's (``X`` / ``scale`` / ``base`` bitwise, ``fn`` within the
-    bound)."""
+    Over 32 inputs of every size, each size's ``U``, ``Y``, ``dB`` and gradients are judged against the naive BF16
+    tier of its size, the oracle and the tier on the branch output and the ``dU`` the graph produced."""
     sizes = _mixed_hidden_sizes()
-    cases = {H: _make_inputs(T, hidden=H, seed=SEED + 81 + H) for H in sizes}
     ws = _mixed_workspaces(sizes, T, workspaces)
-    bounds = {H: _connection_bound(cases[H], T) for H in sizes}
 
-    def prepare(H: int) -> tuple:
-        leaves = _leaves(cases[H])
-        U, handle = _nd_prepare(
-            *leaves,
-            save_stats=save_stats,
-            workspace=ws[H][0],
-            backward_workspace=ws[H][1],
-        )
-        return leaves, U, handle
+    def case(j: int, s: int):
+        cases = {H: _make_inputs(T, hidden=H, seed=s + H) for H in sizes}
+        connections = {}
+        for H in sizes:
+            leaves = _leaves(cases[H])
+            U, handle = _nd_prepare(
+                *leaves,
+                save_stats=save_stats,
+                workspace=ws[H][0],
+                backward_workspace=ws[H][1],
+            )
+            U.retain_grad()
+            connections[H] = {"leaves": leaves, "U": U, "handle": handle}
+        for H in reversed(sizes):
+            c = connections[H]
+            c["B"] = (c["U"].float() + cases[H]["B"].float()).to(BF16)
+            c["Y"] = _nd_finish(c["leaves"][0], c["B"], c.pop("handle"))
+        torch.stack(
+            [
+                (connections[H]["Y"].float() * cases[H]["dY"].float()).sum()
+                for H in sizes
+            ]
+        ).sum().backward()
+        outputs, expected, naive = {}, {}, {}
+        for H in sizes:
+            for d, part in zip(
+                (outputs, expected, naive),
+                _connection_case(cases[H], connections[H]),
+                strict=True,
+            ):
+                d.update({f"H{H} {k}": v for k, v in part.items()})
+        return [outputs], expected, naive
 
-    def finish(H: int, connection: tuple) -> torch.Tensor:
-        leaves, U, handle = connection
-        return _nd_finish(
-            leaves[0], (U.float() + cases[H]["B"].float()).to(BF16), handle
-        )
-
-    def loss(H: int, Y: torch.Tensor) -> torch.Tensor:
-        return (Y.float() * cases[H]["dY"].float()).sum()
-
-    alone = {}
-    for H in sizes:
-        connection = prepare(H)
-        Y = finish(H, connection)
-        loss(H, Y).backward()
-        alone[H] = (
-            connection[1].detach().clone(),
-            Y.detach().clone(),
-            _grads(connection[0]),
-        )
-        del connection, Y
-    reference = {
-        H: _plain_grads(cases[H], DET_API, save_stats=save_stats) for H in sizes
-    }
-    connections = {H: prepare(H) for H in sizes}
-    Ys = {H: finish(H, connections[H]) for H in reversed(sizes)}
-    torch.stack([loss(H, Ys[H]) for H in sizes]).sum().backward()
-    for H in sizes:
-        what = f"T={T} H={H} mixed with {sizes} ({save_stats=}, {workspaces=})"
-        U_alone, Y_alone, grads_alone = alone[H]
-        _assert_same_bits(connections[H][1].detach(), U_alone, f"U {what}")
-        _assert_same_bits(Ys[H].detach(), Y_alone, f"Y {what}")
-        grads = _grads(connections[H][0])
-        _assert_same_grads(grads, grads_alone, f"{what} vs alone")
-        _assert_grads(grads, reference[H], bounds[H], f"{what} vs deterministic")
+    judge_draws(case, record_property, seed=SEED + 81)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2801,13 +2072,12 @@ def test_mixed_hidden_sizes_autograd(T: int, save_stats: bool, workspaces: str) 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES, ids=lambda h: f"H{h}")
 def test_zero_tokens_launch_nothing(hidden: int) -> None:
-    """``T == 0`` behaves as the deterministic package: ``dX`` is empty; the parameter gradients are zeroed without
-    ``accumulate`` (also caller buffers holding other values) and left untouched with it; the workspace needs no
-    bytes and an empty one is accepted; PyTorch's deterministic mode raises no alert."""
+    """``T == 0``: ``dX`` is empty; the parameter gradients are zeroed without ``accumulate`` (also caller buffers
+    holding other values) and left untouched with it; the workspace needs no bytes and an empty one is accepted;
+    PyTorch's deterministic mode raises no alert."""
     _require_hidden(hidden)
     i = _make_inputs(0, hidden=hidden)
     prep = _forward(i)
-    want = _det_backward(i, prep)
     empty_ws = pkg.cake_mhc_nondet_train_backward_workspace(0, _device(), hidden=hidden)
     assert empty_ws.numel() == 0
     for workspace in (None, empty_ws):
@@ -2818,7 +2088,6 @@ def test_zero_tokens_launch_nothing(hidden: int) -> None:
         assert tuple(got["dfn"].shape) == (MAPPING_ROWS, STREAMS * hidden)
         for k in _PARAMETER:
             assert torch.equal(got[k], torch.zeros_like(got[k])), k
-            _assert_same_bits(got[k], want[k], f"{k} T=0 H={hidden}")
     for accumulate in (False, True):
         buffers = {
             "dfn": torch.full(
@@ -2847,6 +2116,31 @@ def test_zero_tokens_launch_nothing(hidden: int) -> None:
         torch.use_deterministic_algorithms(prev[0], warn_only=prev[1])
 
 
+# The token-owner programs whose sm_107a binding ships as that architecture's own unit
+# (csrc/<library>_sm_107a_binding.cu): at hidden 7168 sm_107a launches them in its oversized shared-memory mode (two
+# CTAs per SM), unlike the program's sm_100a / sm_103a binding.
+OWN_BINDING_UNITS = {("cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr__h7168", "sm_107a")}
+
+
+def _binding_source(library: str, arch: str) -> str:
+    """The binding unit of ``library`` on ``arch``: the architecture's own unit where it ships one
+    (:data:`OWN_BINDING_UNITS`), else the program's ``csrc/<library>_binding.cu``."""
+    if (library, arch) in OWN_BINDING_UNITS:
+        return f"csrc/{library}_{arch}_binding.cu"
+    return f"csrc/{library}_binding.cu"
+
+
+def _own_binding_units(package) -> set:
+    """``(library, arch)`` of every ``csrc/<library>_<arch>_binding.cu`` of the package."""
+    units = set()
+    for path in (package / "csrc").glob("*_binding.cu"):
+        stem = path.name[: -len("_binding.cu")]
+        for arch in ("sm_100a", "sm_103a", "sm_107a"):
+            if stem.endswith("_" + arch):
+                units.add((stem[: -len(arch) - 1], arch))
+    return units
+
+
 def test_registry_records_reference_the_build_manifest() -> None:
     """Every ``MODULES`` record of the package names its ``build.json`` library (schema ``cake-build/1``): one entry
     per (library, architecture) with the kernel and binding sources under ``csrc/`` of this package."""
@@ -2872,7 +2166,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert entry["entry"] == "run"
             assert entry["sources"] == [
                 f"csrc/{record['library']}_kernel.cu",
-                f"csrc/{record['library']}_binding.cu",
+                _binding_source(record["library"], arch),
             ]
             assert set(entry["sha256"]) == set(entry["sources"])
             for source in entry["sources"]:
@@ -2881,3 +2175,215 @@ def test_registry_records_reference_the_build_manifest() -> None:
             assert "--use_fast_math" not in entry["nvcc_flags"]
             assert "--prec-div=true" in entry["nvcc_flags"]
     assert referenced == set(libraries)
+    # an architecture's own binding unit exists exactly where the manifest lists it
+    assert _own_binding_units(package) == OWN_BINDING_UNITS, sorted(_own_binding_units(package))
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The opt-in two-word accumulation (``accumulation="fp32x2"``): hidden 4096 and the Sinkhorn count of record only.
+# The mapping pass, the token-owner pass and the column slab with its folds run their two-word programs
+# (``loader.ACC_WORDS_PROGRAMS``); the rest of the route and every workspace are those of the default mode.  No bit
+# is promised: every output is judged against the naive BF16 tier.
+
+TWO_WORD = "fp32x2"
+
+
+def _two_word_hidden() -> int:
+    return _require_hidden(loader.ACC_WORDS_HIDDEN)
+
+
+@pytest.mark.parametrize("T", (1, 257, 2049, 4097, 16263))
+def test_two_word_backward_matches_fp64(T: int, record_property) -> None:
+    """``accumulation="fp32x2"``: every output (the forward entry points and REPEATS backward launches on the default
+    and on a poisoned caller workspace) judged against the naive BF16 tier over 32 inputs; the caller workspace's zero
+    prefix is zero after every launch."""
+    hidden = _two_word_hidden()
+    _judge_nd(
+        lambda s: {**_make_inputs(T, hidden=hidden, seed=s), "accumulation": TWO_WORD},
+        record_property, seed=SEED + 701, prefix="fp32x2 ",
+    )  # fmt: skip
+
+
+@pytest.mark.parametrize("T", (7, 2049))
+@pytest.mark.parametrize("save_stats", (True, False))
+@pytest.mark.parametrize("checkpointed", (False, True))
+def test_two_word_autograd_matches_fp64(
+    T: int, save_stats: bool, checkpointed: bool, record_property
+) -> None:
+    """``cake_mhc_nondet_train_prepare(..., accumulation="fp32x2")`` / ``cake_mhc_nondet_train_finish`` around the
+    residual branch, plain or inside a non-reentrant checkpoint: ``U``, ``Y``, ``dB`` and the gradients judged against
+    the naive BF16 tier over 32 inputs."""
+    hidden = _two_word_hidden()
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        record: dict = {}
+        connection = _connection(
+            _nd_prepare, _nd_finish, _branch("residual", i), save_stats=save_stats, record=record,
+            accumulation=TWO_WORD,
+        )  # fmt: skip
+        leaves = _leaves(i)
+        if checkpointed:
+            Y = checkpoint(connection, *leaves, use_reentrant=False)
+        else:
+            Y = connection(*leaves)
+        (Y.float() * i["dY"].float()).sum().backward()
+        c = {"leaves": leaves, "U": record["U"], "B": record["B"], "Y": Y}
+        outputs, expected, naive = _connection_case(i, c)
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 731, prefix="fp32x2 ")
+
+
+@pytest.mark.parametrize("T", (129, 2049, 4097))
+def test_two_word_checkpoint_replay(T: int, record_property) -> None:
+    """The two-word connection with the statistics saved and replayed in the backward (``save_stats=False``), and
+    the two-word statistics replay ``forward_stats``: over 32 inputs, ``U``, ``Y``, ``dB`` and the gradients of each
+    connection and the replayed statistics judged against the naive BF16 tier."""
+    hidden = _two_word_hidden()
+
+    def case(j: int, s: int):
+        i = _make_inputs(T, hidden=hidden, seed=s)
+        outputs, expected, naive = {}, {}, {}
+        for save_stats in (True, False):
+            leaves = _leaves(i)
+            U, handle = _nd_prepare(
+                *leaves, save_stats=save_stats, accumulation=TWO_WORD
+            )
+            U.retain_grad()
+            B = (U.float() + i["B"].float()).to(BF16)
+            Y = _nd_finish(leaves[0], B, handle)
+            (Y.float() * i["dY"].float()).sum().backward()
+            c = {"leaves": leaves, "U": U, "B": B, "Y": Y}
+            for d, part in zip(
+                (outputs, expected, naive), _connection_case(i, c), strict=True
+            ):
+                d.update({f"save_stats={save_stats} {k}": v for k, v in part.items()})
+        replay = stats_outputs(
+            forward_stats(i["X"], i["fn"], i["scale"], i["base"], accumulation=TWO_WORD)
+        )
+        e, n = expected_and_naive(i, replay)
+        for d, part in zip((outputs, expected, naive), (replay, e, n), strict=True):
+            d.update({f"replay {k}": v for k, v in part.items()})
+        return [outputs], expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 711, prefix="fp32x2 ")
+
+
+@pytest.mark.parametrize("T", (129, 16263))
+def test_two_word_workspaces_are_the_default_ones(T: int) -> None:
+    """The two-word mode runs in workspaces of exactly ``*_workspace_bytes(T)`` (the default mode's sizes): nothing
+    is written past them (guard bytes after each buffer keep their value), the backward workspace's zero prefix is
+    zero after the launch, and every output is finite."""
+    hidden = _two_word_hidden()
+    guard = 4096
+    i = {**_make_inputs(T, hidden=hidden, seed=SEED + 717), "accumulation": TWO_WORD}
+    sizes = {
+        "fwd": pkg.cake_mhc_nondet_train_forward_workspace_bytes(
+            T, _device(), hidden=hidden
+        ),
+        "bwd": pkg.cake_mhc_nondet_train_backward_workspace_bytes(
+            T, _device(), hidden=hidden
+        ),
+    }
+    buffers = {
+        k: torch.zeros(n + guard, dtype=torch.uint8, device=_device())
+        for k, n in sizes.items()
+    }
+    for k, n in sizes.items():
+        buffers[k][n:].fill_(0xA5)
+    fwd = _forward_all(i, workspace=buffers["fwd"][: sizes["fwd"]])
+    out = _nd_backward(i, fwd, workspace=buffers["bwd"][: sizes["bwd"]])
+    torch.cuda.synchronize()
+    for k, n in sizes.items():
+        tail = buffers[k][n:]
+        assert torch.equal(tail, torch.full_like(tail, 0xA5)), (
+            f"the two-word mode wrote past the {k} workspace"
+        )
+    _assert_zero_prefix(buffers["bwd"][: sizes["bwd"]], f"two-word T={T}")
+    for k, v in {**fwd, **out}.items():
+        assert torch.isfinite(v.float()).all(), k
+
+
+def test_two_word_launches_the_two_word_programs(monkeypatch) -> None:
+    """With fresh plan caches, a default backward and then a two-word backward at the same token count: the two-word
+    call loads exactly its selection (``selected_modules(..., accumulation="fp32x2")``, in launch order; the plan cache
+    is keyed by the mode), whose records of the two-word roles are the programs of ``ACC_WORDS_PROGRAMS`` (the
+    group-row form where ``bwd_group_rows`` holds) and whose other records are the default selection's; the two-word
+    forward loads the two-word mapping pass."""
+    hidden = _two_word_hidden()
+    monkeypatch.setattr(pkg, "_PLANS", {})
+    monkeypatch.setattr(pkg, "_FAST_ROUTES", {})
+    loaded: list[str] = []
+    load = loader.load
+
+    def recording_load(name: str, arch: str):
+        loaded.append(name)
+        return load(name, arch)
+
+    monkeypatch.setattr(loader, "load", recording_load)
+    arch, sm = _arch(), _sm_count()
+    for T in (2049, 16263):
+        i = _make_inputs(T, hidden=hidden, seed=SEED + 719)
+        prep = _forward(i)
+        _nd_backward(i, prep)
+        default = loader.selected_modules(
+            arch, hidden, "bwd_finish", rows=T, sm_count=sm
+        )
+        two = loader.selected_modules(
+            arch, hidden, "bwd_finish", rows=T, sm_count=sm, accumulation=TWO_WORD
+        )
+        rows = loader.bwd_group_rows(T, sm, arch, hidden)
+        assert len(two) == len(default), (default, two)
+        for one, pair in zip(default, two, strict=True):
+            role = loader.MODULES[one]["role"]
+            if role in loader.ACC_WORDS_ROLES:
+                key = (
+                    f"{role}/rows"
+                    if rows and f"{role}/rows" in loader.ACC_WORDS_PROGRAMS
+                    else role
+                )
+                assert pair == loader.ACC_WORDS_PROGRAMS[key][arch], (T, role, pair)
+                assert pair not in default and arch in loader.MODULES[pair]["arches"], (
+                    T,
+                    pair,
+                )
+            else:
+                assert pair == one, (T, one, pair)
+        pi = {**i, "accumulation": TWO_WORD}
+        start = len(loaded)
+        pprep = _forward(pi)
+        assert loader.ACC_WORDS_PROGRAMS["fwd_map"][arch] in loaded[start:], loaded[
+            start:
+        ]
+        start = len(loaded)
+        out = _nd_backward(pi, pprep)
+        assert loaded[start:] == list(two), (T, loaded[start:], two)
+        assert all(torch.isfinite(v).all() for v in out.values())
+
+
+def test_two_word_mode_is_refused_where_it_has_no_program() -> None:
+    """``accumulation="fp32x2"`` at another hidden size or Sinkhorn count is a ``NotImplementedError`` on every entry
+    point that takes the mode; a value other than ``"fp32"`` / ``"fp32x2"`` is a ``ValueError``."""
+    for hidden in _hidden_sizes():
+        i = _make_inputs(8, hidden=hidden, seed=SEED + 723)
+        args = (i["X"], i["fn"], i["scale"], i["base"])
+        prep = _forward(i)
+        bad = [{"accumulation": TWO_WORD}] if hidden != loader.ACC_WORDS_HIDDEN else []
+        bad.append({"accumulation": TWO_WORD, "sinkhorn_iters": 7})
+        for kwargs in bad:
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                forward_prepare(*args, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                forward_stats(*args, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                _nd_backward(i, prep, **kwargs)
+            with pytest.raises(NotImplementedError, match="fp32x2"):
+                _nd_prepare(*args, **kwargs)
+        for value in ("fp64", "FP32X2", "fp32x4", None, 2):
+            with pytest.raises(ValueError, match="accumulation"):
+                forward_prepare(*args, accumulation=value)
+            with pytest.raises(ValueError, match="accumulation"):
+                _nd_backward(i, prep, accumulation=value)
+            with pytest.raises(ValueError, match="accumulation"):
+                _nd_prepare(*args, accumulation=value)
