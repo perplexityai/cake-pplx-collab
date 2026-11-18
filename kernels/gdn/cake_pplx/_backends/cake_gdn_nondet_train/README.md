@@ -108,14 +108,12 @@ and two of the `(2, 6)` packs (2 to 15 pieces per sequence) under the
 log-spaced decays, `logsigmoid(N(0, 1))` and no decay, from a nonzero initial
 state (forward only, one seed per case), the split forward's rel-L2 error is
 1.000 x that of the serial A form on `o` and 0.998-1.003 x on the final state.
-On B200, GB200 and GB300 this version runs some of the 66 cases on other
-routes than the build measured here, with other bits: the backward of the
-`(2, 6)` pair on GB200 and GB300 and of the `(1, 3)` pair on GB300 on the
-longer pieces of `bwd_one_wave_table`, and the serial adjoint scan of the
-small layouts of at most 12 (sequence, value head) pairs on `dhu_tc2_dvl32`
-where `dhu_tc_host_pricing` selects it (see Chain).  The largest-ratio columns
-and the ratio figures below were measured on the earlier routes; the pack
-columns keep their routes.
+On GB200 and GB300 this version runs some of the 66 cases on other routes
+than the build measured here, with other bits: the backward of the `(2, 6)`
+pair on GB200 and GB300 and of the `(1, 3)` pair on GB300 on the longer pieces
+of `bwd_one_wave_table` (see Chain).  The largest-ratio columns and the ratio
+figures below were measured on the earlier routes; the pack columns keep their
+routes.
 
 On B200 every ratio is at most 1.069.  On GB300, GB200 and R200 every ratio is
 at most 1.1 but one: the ratio of the worst `dg` element on the small `(1, 3)`
@@ -314,21 +312,7 @@ head, each the scan and output of one half of the value columns (the same
 bits).  The backward runs the adjoint scan, either `dv_local` plus a register
 scan or, on a serial plan, the tcgen05 scan with `dv_local` fused (`dhu_tc2`),
 which a host-side cost rule selects on the host-table route; a host-built
-table can instead take the one-wave split of the adjoint walk (below).  That
-rule (`dhu_tc_pricing`) takes `dhu_tc2` where its price is at most 0.95 of
-the register path's (`DHU_TC_GAIN`), which it prices at the configuration of
-the bound layout's plan.  On a serial host-built table of at most 12
-(sequence, value head) CTAs (`DHU_TC_HOST_MAX_RESIDENT`), without plan or
-`dhu_scan` pins or a form of `cake_plan.ADJOINT_FORMS`, a device with an entry
-(`dhu_tc_host_costs`) prices the register path at the configuration the
-backward launches instead, with a scale on its step cost and a fixed cost,
-both fitted on the backward of such tables (`dhu_tc_host_pricing`).  The
-fixed cost is mostly the host's gap before the register path's extra
-`dv_local` launch, so it follows the board: the 152-SM Grace-host boards
-GB200 and GB300 have entries of their own (`DHU_TC_HOST_DEVICE_COSTS`), the
-other `sm_100a` boards take that of B200 (`DHU_TC_HOST_COSTS`), and B300 (not
-measured) and `sm_107a` (on R200 the fitted rule moved tables on which
-`dhu_tc2` was not shown faster) have none and keep the first rule.  On
+table can instead take the one-wave split of the adjoint walk (below).  On
 `sm_100a`, `sm_103a` and `sm_107a` (`DVL32_ARCHS`) the tcgen05 scan runs as
 `dhu_tc2_dvl32`: it adds the FP32 `dv_local` values to `dv2`, so `dv2` rounds
 to BF16 once, where `dhu_tc2` rounds `dv_local` first (B200: 0.990-0.995 x

@@ -46,12 +46,8 @@ the other pieces from the stitched start states (``fwd_fused``).  The backward r
 the register scan of the adjoint state (with the pre-scan and the stitch on a
 split plan), or on a serial plan the tcgen05 adjoint scan with ``dv_local``
 fused (``dhu_tc2``) when its selection rule (:func:`dhu_tc_pricing`) prices it
-at most ``DHU_TC_GAIN`` of the register path (a host-built serial table of at
-most ``DHU_TC_HOST_MAX_RESIDENT`` resident CTAs on a device with a host-table
-entry (:func:`dhu_tc_host_costs`) prices the register path at the
-configuration the backward launches, with the device's fixed cost:
-:func:`dhu_tc_host_pricing`);
-a split plan at ``SDT_CONFIG`` on a host-built table runs its pass 2 on ``dhu_tc2`` from the stitched segment
+at most ``DHU_TC_GAIN`` of the register path; a split plan at ``SDT_CONFIG``
+on a host-built table runs its pass 2 on ``dhu_tc2`` from the stitched segment
 states when its rule (:func:`sdt_pricing`) prices that pass 2 below the
 register one, and then launches no ``dv_local``: its pre-scan
 (``dhu_pre_dvl_r64k1``) computes the ``dv_local`` tiles of the chunks it scans.
@@ -213,11 +209,6 @@ __all__ = [
     "chain_plan_pricing",
     "dhu_tc2_stage",
     "dhu_tc_pricing",
-    "DHU_TC_HOST_COSTS",
-    "DHU_TC_HOST_DEVICE_COSTS",
-    "DHU_TC_HOST_MAX_RESIDENT",
-    "dhu_tc_host_costs",
-    "dhu_tc_host_pricing",
     "finalize_stage",
     "fwd_ho_vh2_engaged",
     "fwd_ho_vh2_splits",
@@ -691,10 +682,7 @@ class ChunkMeta:
     sequence ``order[vs]``, its chunks at their original token offsets (``None``: the caller's order);
     ``order_index`` holds it on the device as ``[order, inverse]`` for the state rows.  ``fwd_groups`` /
     ``bwd_groups``: the two-stream sequence groups of the forward / adjoint scan (``None``: one stream);
-    ``bwd_tc``: the adjoint table is priced for ``dhu_tc2`` (:func:`tc_plan_pricing`), which runs it;
-    ``bwd_serial_tc``: the serial adjoint scan of a host-built table runs on ``dhu_tc2`` (``True``) or on the register
-    path (``False``) by :func:`dhu_tc_host_pricing` at the table's configuration (``None``: the rule of
-    :func:`dhu_tc_pricing` at the call, :func:`_dhu_tc_selected`); ``bwd_split``:
+    ``bwd_tc``: the adjoint table is priced for ``dhu_tc2`` (:func:`tc_plan_pricing`), which runs it; ``bwd_split``:
     the entry tables of the one-wave split of the adjoint walk over ``bwd_segments`` (:class:`AdjointSplit`), which
     the backward runs instead of a pre-scan (``None``: the other plans); ``fwd_split``: the tables of the one-wave split
     of the forward scan on the host plan's piece table (:class:`ForwardSplit`), which the forward of
@@ -718,9 +706,6 @@ class ChunkMeta:
     bwd_groups: StreamGroups | None = None
     # the adjoint table was priced for dhu_tc2 (:func:`tc_plan_pricing`): the backward runs it on dhu_tc2
     bwd_tc: bool = False
-    # the serial adjoint scan of a host-built table priced at its launched configuration (:func:`dhu_tc_host_pricing`):
-    # True dhu_tc2, False the register path; None: the rule of :func:`dhu_tc_pricing` at the call
-    bwd_serial_tc: bool | None = None
     # the one-wave split of the adjoint walk over bwd_segments (:func:`adjoint_split_pricing`)
     bwd_split: AdjointSplit | None = None
     # the one-wave split of the forward scan on the host plan's piece table (:func:`forward_split_tables`)
@@ -1632,41 +1617,11 @@ def _scan_stages(kind: str, config: tuple[int, int], arch: str):
 # The rule: T_tc = makespan steps x t(n), t(n) = t_lat + (t_full - t_lat) x clamp((n - 48) / (SMs - 48), 0, 1) with n
 # the resident CTAs (one per (sequence, value head)); T_reg = the planner's serial cost of the register scan at the
 # bound-layout plan's configuration x t_unit + tiles x c_dvl / SMs.  dhu_tc2 is selected iff T_tc <= DHU_TC_GAIN T_reg.
-# A host-built serial table of at most DHU_TC_HOST_MAX_RESIDENT resident CTAs on a device with a host-table entry takes
-# the rule of :func:`dhu_tc_host_pricing` instead (below; the choice is kept in ``ChunkMeta.bwd_serial_tc``).
 DHU_TC_GAIN = 0.95
 DHU_TC_LOW_RESIDENT = 48  # resident CTAs up to which a tcgen05 scan step takes t_lat
 DHU_TC_CONSTANTS = ("t_lat", "t_full", "t_unit", "c_dvl")
 _DHU_AUTO: dict = {}
 _DHU_AUTO_LIMIT = 256
-# The serial adjoint scan of a host-built table at low residency (n = min(sequences x HV, SMs) at most
-# DHU_TC_HOST_MAX_RESIDENT, one round), priced at the configuration the backward launches (the table's
-# ``ScanPlan.config``, not the bound layout's): T_tc = makespan steps x t(n) as above; T_reg = reg_scale x
-# SCAN_STEP_FACTOR[config] x the register makespan x t_unit + tiles x c_dvl / SMs + reg_fixed; dhu_tc2 iff
-# T_tc <= DHU_TC_GAIN T_reg.  reg_fixed (us) is the register path's fixed cost, mostly the host's gap before its extra
-# launch (``dv_local``), so it follows the board's host, not the architecture: a device entry by (architecture, SM
-# count) wins over the architecture's.  Fitted on the backward of serial tables of 1-12 resident (sequence, value
-# head) pairs: sm_100a on B200 (148 SMs), its 152-SM Grace-host board (GB200) a device entry; sm_103a on GB300 (152
-# SMs, Grace host) only, so B300 (148 SMs) keeps the rule above; no sm_107a entry (on R200 the fitted rule moves
-# layouts where dhu_tc2 is not shown faster).  A device without an entry, a larger n, a table priced for dhu_tc2 or
-# split, a plan or ``dhu_scan`` pin and a form of cake_plan.ADJOINT_FORMS keep the rule above.  Immutable (the
-# ``_META_FRONT`` key holds the tables' ids): replace a table whole, never edit it in place.
-DHU_TC_HOST_MAX_RESIDENT = 12
-DHU_TC_HOST_COSTS: Mapping[str, Mapping[str, float]] = MappingProxyType(
-    {"sm_100a": MappingProxyType({"reg_fixed": 28.97, "reg_scale": 0.8878})}
-)
-DHU_TC_HOST_DEVICE_COSTS: Mapping[tuple[str, int], Mapping[str, float]] = (
-    MappingProxyType(
-        {
-            ("sm_100a", 152): MappingProxyType(
-                {"reg_fixed": 39.38, "reg_scale": 0.8925}
-            ),
-            ("sm_103a", 152): MappingProxyType(
-                {"reg_fixed": 39.14, "reg_scale": 0.8799}
-            ),
-        }
-    )
-)
 
 
 @cache
@@ -1717,91 +1672,6 @@ def dhu_tc_pricing(chunks, num_v_heads, device_index, sset: StageSet | None = No
                T_reg=cost_units * const["t_unit"] + tiles * const["c_dvl"] / sm_count)  # fmt: skip
     rec["select"] = rec["T_tc"] <= DHU_TC_GAIN * rec["T_reg"]
     return rec
-
-
-def dhu_tc_host_costs(arch: str, sm_count: int) -> Mapping[str, float] | None:
-    """The host-table entry of ``arch`` on a device of ``sm_count`` SMs: the device's (``DHU_TC_HOST_DEVICE_COSTS``)
-    where one was measured, else the architecture's (``DHU_TC_HOST_COSTS``); ``None`` without either."""
-    found = DHU_TC_HOST_DEVICE_COSTS.get((arch, int(sm_count)))
-    return found if found is not None else DHU_TC_HOST_COSTS.get(arch)
-
-
-def dhu_tc_host_pricing(
-    chunks, num_v_heads: int, device_index: int, reg_config
-) -> dict:
-    """The selection rule's two sides for a host-built serial table of ``chunks`` (chunks per sequence) whose register
-    path launches at ``reg_config`` (costs: the device's host-table entry, :func:`dhu_tc_host_costs`); ``select`` is
-    the answer, ``None`` outside the rule's domain (no entry for the device, no ``dhu_tc2`` constants, more than
-    ``DHU_TC_HOST_MAX_RESIDENT`` resident CTAs, a configuration without a step factor), where :func:`dhu_tc_pricing`
-    decides."""
-    index = int(device_index)
-    arch = cake_backend.device_arch(index)
-    sm_count = _device_props(index)[0]
-    found, host = _dhu_tc_constants(arch), dhu_tc_host_costs(arch, sm_count)
-    chunks = tuple(int(n) for n in chunks)
-    hv, cfg = int(num_v_heads), cast("tuple[int, int]", tuple(reg_config))
-    n = min(len(chunks) * hv, sm_count)
-    rec: dict[str, Any] = {"arch": arch, "resident": n, "reg_config": list(cfg), "select": None}  # fmt: skip
-    if (
-        found is None
-        or host is None
-        or not chunks
-        or n > DHU_TC_HOST_MAX_RESIDENT
-        or cfg not in SCAN_STEP_FACTOR
-    ):
-        return rec
-    const = dict(found)
-    low = DHU_TC_LOW_RESIDENT
-    t_n = const["t_lat"] + (const["t_full"] - const["t_lat"]) * min(
-        max((n - low) / (sm_count - low), 0.0), 1.0
-    )
-    steps_tc = _scan_makespan(chunks, (1,) * len(chunks), hv, sm_count, 1)
-    cost_units = SCAN_STEP_FACTOR[cfg] * _scan_makespan(
-        chunks,
-        (1,) * len(chunks),
-        hv * (HEAD_DIM // cfg[0]),
-        sm_count,
-        _scan_residency("dhu", *cfg, index),
-    )
-    tiles = sum(chunks) * hv
-    t_reg = (host.get("reg_scale", 1.0) * cost_units * const["t_unit"] + tiles * const["c_dvl"] / sm_count
-             + host["reg_fixed"])  # fmt: skip
-    rec.update(steps_tc=steps_tc, t_n=t_n, T_tc=steps_tc * t_n, reg_cost_units=cost_units, T_reg=t_reg)  # fmt: skip
-    rec["select"] = rec["T_tc"] <= DHU_TC_GAIN * t_reg
-    return rec
-
-
-def _serial_scan_choice(
-    meta: ChunkMeta,
-    bwd: ScanPlan,
-    bwd_tc: bool,
-    seq_lens,
-    num_v_heads: int,
-    device_index: int,
-    options: ChainOptions,
-    group: int | None,
-) -> bool | None:
-    """``ChunkMeta.bwd_serial_tc`` of a host-built table whose adjoint table is ``bwd``: :func:`dhu_tc_host_pricing`'s
-    answer at ``bwd``'s configuration; ``None`` where the rule of :func:`dhu_tc_pricing` keeps deciding at the call: a
-    table priced for ``dhu_tc2`` (``bwd_tc``), split or one-wave split, an architecture outside
-    ``ADJOINT_SPLIT_ARCHS`` or without the tcgen05 scan, a plan or ``dhu_scan`` pin, a form of
-    :data:`cake_plan.ADJOINT_FORMS`, or a layout outside the rule's domain."""
-    index = int(device_index)
-    arch = cake_backend.device_arch(index)
-    if (
-        bwd_tc
-        or meta.bwd_split is not None
-        or arch not in ADJOINT_SPLIT_ARCHS
-        or options.pins != (None, None)
-        or options.dhu_scan is not None
-        or _adjoint_form(index, num_v_heads, group, options) is not None
-        or not _available(dhu_tc2_stage(arch), arch)
-    ):
-        return None
-    chunks = cake_plan.chunk_counts(seq_lens)
-    if bwd.segment_len > 0 and max(chunks) > bwd.segment_len:
-        return None  # a split table: the pass-2 rule (:func:`_sdt_selected`)
-    return dhu_tc_host_pricing(chunks, num_v_heads, index, bwd.config)["select"]
 
 
 def _dhu_tc_selected(
@@ -5698,14 +5568,8 @@ def _backward_chain(
     serial = split1 is None and not (
         segs.segment_len > 0 and segs.num_segments > meta.num_seqs
     )
-    # the host table's choice where the plan made one (:func:`dhu_tc_host_pricing`), else the rule at the call
     use_tc = serial and (
-        meta.bwd_tc
-        or (
-            meta.bwd_serial_tc
-            if meta.bwd_serial_tc is not None
-            else _dhu_tc_selected(meta, num_v_heads, index, options)
-        )
+        meta.bwd_tc or _dhu_tc_selected(meta, num_v_heads, index, options)
     )
     # a split plan's pass 2 on dhu_tc2: the fused pre-scan computes the dv_local tiles it reads, no dv_local stage
     split_tc = (
@@ -6269,9 +6133,6 @@ def _chunk_meta(
         cake_plan.M_SHARE_MIN_SAVING,
         M_SHARE_ONE_LAUNCH,
         tuple(sorted(ONE_ROUND_TAIL_DEVICES.items())),
-        id(DHU_TC_HOST_COSTS),
-        id(DHU_TC_HOST_DEVICE_COSTS),
-        DHU_TC_HOST_MAX_RESIDENT,
         ONE_WAVE_TABLE_DEVICES,
     )
     if options.host_cache:
@@ -6318,11 +6179,6 @@ def _chunk_meta(
                 wave_sms,
             ),
         )
-    # a serial adjoint table's scan priced at its launched configuration (:func:`_serial_scan_choice`)
-    serial_tc = _serial_scan_choice(meta, plans[1], bwd_tc, seq_lens, int(num_v_heads), int(index), options,
-                                    group)  # fmt: skip
-    if serial_tc is not None:
-        meta = replace(meta, bwd_serial_tc=serial_tc)
     fwd_split = _host_forward_split(meta, int(num_v_heads), int(index), options)
     if fwd_split is not None:
         meta = replace(meta, fwd_split=fwd_split)
