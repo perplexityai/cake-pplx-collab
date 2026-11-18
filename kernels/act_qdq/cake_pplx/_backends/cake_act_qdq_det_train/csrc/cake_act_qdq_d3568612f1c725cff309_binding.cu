@@ -37,13 +37,23 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
+// The checked `CK.ptr_param_abi(align=N)`: the address the kernel takes is a multiple of N bytes.
+void CheckAligned(const TensorView& t, const char* name, int64_t align) {
+  const uintptr_t address = reinterpret_cast<uintptr_t>(DataPtr(t));
+  TVM_FFI_CHECK(address % static_cast<uintptr_t>(align) == 0, ValueError)
+      << KERNEL_NAME << ": '" << name << "' must be aligned to " << align << " bytes, as the kernel states "
+      << "(CK.ptr_param_abi(align=" << align << ")), but its data is at " << reinterpret_cast<void*>(address);
+}
+
 void Run(TensorView a_x, TensorView a_y, int64_t a_n_vecs, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_x.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_x, "x");
   check_dtype(a_x, DLDataType{kDLBfloat, 16, 1}, "x");
+  CheckAligned(a_x, "x", 16);
   check_cuda_tensor(a_y, "y");
   check_dtype(a_y, DLDataType{kDLBfloat, 16, 1}, "y");
+  CheckAligned(a_y, "y", 16);
   TVM_FFI_CHECK(a_n_vecs >= -2147483648LL && a_n_vecs <= 2147483647LL, ValueError)
       << KERNEL_NAME << ": 'n_vecs' = " << a_n_vecs
       << " is outside the i32 range [-2147483648, 2147483647]";
