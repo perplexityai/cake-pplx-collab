@@ -1148,10 +1148,81 @@ def _judge(record_property, draw, judged: bool) -> None:
     _check_finite(arms)
 
 
-def _check_set(saved, S: int, H: int, gate: str) -> None:
-    """A saved set of an l2n call: this package's type, of the call's gate mode, with ``qk_rstd`` ``[2, S, H]``."""
-    assert type(saved) is cake_backend.CakeKDANondetChunkSaved and saved.gate == gate
-    assert saved.qk_l2norm is True and saved.qk_rstd.shape == (2, S, H)
+def _plan_of(lengths, H: int, device, gate: str, l2n: str = "fused"):
+    """The plan of a call without a workspace on ``device`` (the default entry's): of the problem, the device's
+    SM count and architecture, the gate mode and the l2n mode."""
+    return cake_backend.plan(
+        sum(lengths),
+        len(lengths),
+        H,
+        cake_jit.sm_count(device.index),
+        cake_jit.device_arch(device.index),
+        gate=gate,
+        l2n=l2n,
+    )
+
+
+def _check_set(saved, p, lengths, gate: str, *, tape: bool = False) -> None:
+    """A saved set of an l2n call of plan ``p`` (the call's plan) on documents ``lengths``: this package's type; the
+    version of its save mode (``tape``: the tape set) and the problem's metadata (``S``, ``H``, ``num_docs``, the
+    scale, the call's gate mode and lower bound, the l2n mode); every field present exactly where the save mode and
+    the plan say, of its dtype and shape: ``Aqk`` / ``Akk`` BF16 ``[S, H, 64]``, the tables (int32, the plan's
+    layout), ``qk_rstd`` FP32 ``[2, S, H]``; a light set ``qg`` where the plan saves it, ``w`` / ``u`` where its
+    light backward reads them from the set (BF16 ``[R, H, 128]``), ``hseg`` / ``seg_state`` where it saves the
+    segment states (FP32 ``[NSEG, H, 128, 128]`` / ``[2, NSEG, H, 128, 128]``) and no tape; a tape set the ``h`` tape
+    over the plan's padded chunks (BF16 ``[NC_pad, H, 128, 128]``, the documents' written chunks among them),
+    ``v_new`` (BF16 ``[R, H, 128]``), on the segmented route the transfers ``seg_m`` (FP32 ``[NSEG, H, 128, 128]``)
+    and none of the light fields.  The values are judged through the backward that reads the set."""
+    S, N, H = sum(lengths), len(lengths), p.H
+    assert (p.S, p.N) == (S, N), (p.S, p.N, S, N)
+    assert type(saved) is cake_backend.CakeKDANondetChunkSaved
+    want = {
+        "version": (
+            cake_backend.SAVED_VERSION_TAPE if tape else cake_backend.SAVED_VERSION
+        ),
+        "S": S,
+        "H": H,
+        "num_docs": N,
+        "scale": SCALE,
+        "gate": gate,
+        "lower_bound": LOWER_BOUND if gate == "raw" else None,
+        "qk_l2norm": True,
+    }
+    got = {name: getattr(saved, name) for name in want}
+    assert got == want, (got, want)
+    bf16, fp32 = torch.bfloat16, torch.float32
+    rows, state = (p.R, H, D), (p.NSEG, H, D, D)
+    light = not tape
+    seg_save = light and p.seg_save
+    layout = {
+        "Aqk": (bf16, (S, H, cake_backend.BT)),
+        "Akk": (bf16, (S, H, cake_backend.BT)),
+        "qk_rstd": (fp32, (2, S, H)),
+        "qg": (bf16, rows) if light and p.light_saves_qg else None,
+        "w": (bf16, rows) if light and p.light_saves_wu else None,
+        "u": (bf16, rows) if light and p.light_saves_wu else None,
+        "hseg": (fp32, state) if seg_save else None,
+        "seg_state": (fp32, (2, *state)) if seg_save else None,
+        "h": (bf16, (p.NC_pad, H, D, D)) if tape else None,
+        "v_new": (bf16, rows) if tape else None,
+        "seg_m": (fp32, state) if tape and p.recur == "seg" else None,
+    }
+    for name, spec in layout.items():
+        t = getattr(saved, name)
+        if spec is None:
+            assert t is None, (name, "present", tape, p.recur, p.light_path)
+        else:
+            assert isinstance(t, torch.Tensor), (name, "absent", tape, p.light_path)
+            assert (t.dtype, tuple(t.shape)) == spec, (name, t.dtype, t.shape, spec)
+    words = [words for _name, _offset, words in p.table_layout()]
+    assert isinstance(saved.tables, tuple), type(saved.tables)
+    assert [(t.dtype, tuple(t.shape)) for t in saved.tables] == [
+        (torch.int32, (w,)) for w in words
+    ], ([(t.dtype, tuple(t.shape)) for t in saved.tables], words)
+    if tape:
+        # the documents' chunks, one per 64 tokens, are among the tape's padded chunks
+        written = sum(-(-n // cake_backend.BT) for n in lengths)
+        assert 0 < written <= saved.h.shape[0], (written, saved.h.shape)
 
 
 @pytest.mark.parametrize("gate", GATES)
@@ -1161,18 +1232,19 @@ def test_l2n_is_judged_against_the_exact_reference(
 ) -> None:
     """``out`` and every result of the saved-set path, judged against the exact FP64 recurrence whose q / k are
     normalized in FP64 inside the graph (``dq`` / ``dk`` the raw rows' gradients) beside the naive BF16 tier; on every
-    draw the saved set is this package's, of the call's gate mode, with ``qk_rstd`` ``[2, S, H]``.  The row of 8000
-    tokens at 64 heads keeps these exact checks only (its results finite): the serial route it takes is judged on
-    the row of 4096 tokens at 32 heads."""
+    draw the saved set is this package's light set of the call's plan (:func:`_check_set`: version, metadata, gate
+    and l2n mode, fields, dtypes, shapes and tables).  The row of 8000 tokens at 64 heads keeps these exact checks
+    only (its results finite): the serial route it takes is judged on the row of 4096 tokens at 32 heads."""
     device = _l2n_device()
     lengths, H = shape
     S = sum(lengths)
+    p = _plan_of(lengths, H, device, gate)
 
     def draw(j, s):
         inputs = _inputs(lengths, H, device, gate, s)
         out, grads, saved = _run(inputs, gate)
         torch.cuda.synchronize(device)
-        _check_set(saved, S, H, gate)
+        _check_set(saved, p, lengths, gate)
         return {"": _step(out, grads)}, inputs
 
     _judge(record_property, draw, S <= JUDGE_MAX_TOKENS)
@@ -1188,15 +1260,18 @@ def test_l2n_paths_are_judged(
     workspace of the mode, the forward and backward on that workspace and its replay, the tape set from the default
     entry, the forward and backward on a tape workspace and its replay, a light set on the tape workspace, and the tape
     backward with the plan's WY record and with the tape WY twin forced (``_TAPE_WY``: launched wherever the tape plan
-    has one).  The workspaces' modes and bytes and the tape sets' versions are checked on every draw; on the first,
-    each package's backward refuses the other package's light and tape sets (``ValueError`` naming the mode)."""
+    has one).  The workspaces' modes and bytes and the saved sets (the light set, the tape set from the default entry
+    and from the tape workspace: :func:`_check_set`) are checked on every draw; on the first, each package's backward
+    refuses the other package's light and tape sets (``ValueError`` naming the mode)."""
     device = _l2n_device()
     lengths, H = shape
     S, N = sum(lengths), len(lengths)
+    p = _plan_of(lengths, H, device, gate)
 
     def draw(j, s):
         inputs = _inputs(lengths, H, device, gate, s)
         out, grads, saved = _run(inputs, gate)
+        _check_set(saved, p, lengths, gate)
         arms = {"": _step(out, grads), "repeat": []}
         for _ in range(2):
             o, gr, _ = _run(inputs, gate)
@@ -1222,13 +1297,13 @@ def test_l2n_paths_are_judged(
         arms["workspace"] = _step(out_w, grads_w)
         arms["workspace_replay"] = _grads(_bwd(inputs, None, gate, workspace=ws), gate)
         out_t, grads_t, saved_t = _run(inputs, gate, save_mode="tape")
-        assert saved_t.version == cake_backend.SAVED_VERSION_TAPE and saved_t.qk_l2norm
+        _check_set(saved_t, p, lengths, gate, tape=True)
         arms["tape"] = _step(out_t, grads_t)
         tape_ws = cake_backend.CakeKDANondetWorkspace.for_problem(
             S, N, H, device, save_mode="tape", gate=gate, l2n="fused"
         )
         out_tw, grads_tw, saved_tw = _run(inputs, gate, workspace=tape_ws)
-        assert saved_tw.version == cake_backend.SAVED_VERSION_TAPE
+        _check_set(saved_tw, tape_ws.plan, lengths, gate, tape=True)
         arms["tape_workspace"] = _step(out_tw, grads_tw)
         arms["tape_workspace_replay"] = _grads(
             _bwd(inputs, None, gate, workspace=tape_ws), gate
@@ -1264,9 +1339,9 @@ def test_l2n_saved_states_are_judged(
 ) -> None:
     """The segmented rows that save the segment-boundary states (``light_states``) in an l2n mode: ``out`` and the
     gradients from that set (``""``), the replay's (``replay``) and the tape set's (``tape``), each judged; every
-    draw's set carries the states.  The one-document row (about 14k tokens at one head) is the path's judged
-    production-size row; the two-document row (about 28k tokens at two heads) keeps these exact checks only (its
-    results finite)."""
+    draw's light set carries the states and both sets are checked (:func:`_check_set`).  The one-document row (about
+    14k tokens at one head) is the path's judged production-size row; the two-document row (about 28k tokens at two
+    heads) keeps these exact checks only (its results finite)."""
     device = _l2n_device()
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     nseg = cake_backend.plan(1, num_docs, heads, sm, arch).NSEG
@@ -1282,9 +1357,11 @@ def test_l2n_saved_states_are_judged(
         inputs = _inputs(lengths, heads, device, gate, s)
         out, grads, saved = _run(inputs, gate)
         assert saved.hseg is not None
+        _check_set(saved, p, lengths, gate)
         arms = {"": _step(out, grads)}
         arms["replay"] = _grads(_bwd(inputs, None, gate), gate)
-        out_t, grads_t, _ = _run(inputs, gate, save_mode="tape")
+        out_t, grads_t, saved_t = _run(inputs, gate, save_mode="tape")
+        _check_set(saved_t, p, lengths, gate, tape=True)
         arms["tape"] = _step(out_t, grads_t)
         return arms, inputs
 
@@ -1712,11 +1789,13 @@ def test_l2n_packed_views_are_judged(shape, gate: str, record_property) -> None:
     """q / k as column slices of one packed projection output (NaN outside the views), each arm judged: the forward
     and the backward from its set (``views``) and the replay (``views_replay``) on the views; the set saved from the
     views serving a call on contiguous rows (``contiguous_call``) and a set saved from contiguous rows serving a call
-    on the views (``contiguous_set_views_call``).  On the first draw the call on the views refuses the deterministic
-    package's set (``ValueError`` naming the mode)."""
+    on the views (``contiguous_set_views_call``).  The set saved from the views is checked on every draw
+    (:func:`_check_set`); on the first draw the call on the views refuses the deterministic package's set
+    (``ValueError`` naming the mode)."""
     device = _l2n_device()
     lengths, H = shape
     S = sum(lengths)
+    p = _plan_of(lengths, H, device, gate)
 
     def draw(j, s):
         inputs = _inputs(lengths, H, device, gate, s)
@@ -1729,7 +1808,7 @@ def test_l2n_packed_views_are_judged(shape, gate: str, record_property) -> None:
         kv = packed[:, 8 + H * D : 8 + 2 * H * D].view(S, H, D)
         assert not qv.is_contiguous() and not kv.is_contiguous()
         out_v, saved_v = _fwd(inputs, gate, q=qv, k=kv)
-        _check_set(saved_v, S, H, gate)
+        _check_set(saved_v, p, lengths, gate)
         arms = {
             "views": _step(
                 out_v, _grads(_bwd(inputs, saved_v, gate, q=qv, k=kv), gate)
@@ -1914,8 +1993,9 @@ def test_l2n_fused_and_fallback_routes_are_judged(
 ) -> None:
     """The fused route (the default entry) and the force-fallback knob (an explicit fallback workspace), each judged:
     the forward and the backward from its saved set (``fused`` / ``fallback``) and the replay (``fused_replay`` /
-    ``fallback_replay``); every draw's sets carry ``qk_rstd``.  That the fallback route launches the deterministic
-    package's fallback records is :func:`test_l2n_launch_sequences_are_the_deterministic_l2n`'s (a mode contract)."""
+    ``fallback_replay``); every draw's sets are checked against their plans (:func:`_check_set`).  That the fallback
+    route launches the deterministic package's fallback records is
+    :func:`test_l2n_launch_sequences_are_the_deterministic_l2n`'s (a mode contract)."""
     device = _l2n_device()
     _l2n_device("fallback")
     lengths, H = shape
@@ -1924,13 +2004,14 @@ def test_l2n_fused_and_fallback_routes_are_judged(
         S, N, H, device, gate=gate, l2n="fallback"
     )
     assert ws.l2n == "fallback" and ws.plan.dispatched("qk_pullback", "light")
+    p = _plan_of(lengths, H, device, gate)
 
     def draw(j, s):
         inputs = _inputs(lengths, H, device, gate, s)
         out_a, saved_a = _fwd(inputs, gate)
         out_b, saved_b = _fwd(inputs, gate, workspace=ws)
-        _check_set(saved_a, S, H, gate)
-        _check_set(saved_b, S, H, gate)
+        _check_set(saved_a, p, lengths, gate)
+        _check_set(saved_b, ws.plan, lengths, gate)
         arms = {
             "fused": _step(out_a, _grads(_bwd(inputs, saved_a, gate), gate)),
             "fallback": _step(

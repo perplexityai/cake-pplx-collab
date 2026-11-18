@@ -17,17 +17,27 @@ Checkpoint hand-off suite of the Cake non-deterministic packed KDA chunked train
 (``cake_pplx._backends.cake_kda_nondet_train``: ``cake_kda_nondet(..., checkpoint_handoff="auto" | "on" |
 "off")``).  On a GPU: under both checkpoint modes the hand-off's arm and ``"off"``'s arm (``out`` and the five
 gradients) are each judged against the exact FP64 reference beside the naive BF16 tier (``tests/cake_naive.py``) over
-the judge's draws, on every plan family of the device the packs below reach, with both kinds of record (a tape
-record: the tapes; a row record: the recompute launches the intra twin, ``cake_jit.HANDOFF_TWINS``, and the record
-also keeps the prep's rows), also with the tape WY twin (``cake_jit.TAPE_TWINS``) on the rows whose record keeps no
-``w``; stacked layers are judged layer by layer on the operands each node read.  The plumbing stays exact: the record
-is taken (the counters), its tape fields are the tape forward's, its pointers and bytes are the plan's, the launch
-lists, stale or refused records fall back, the byte budget demotes and refuses, and ``"auto"`` engages exactly where
-``HANDOFF_HEADS``, ``HANDOFF_VERIFIED``, the size bounds (``HANDOFF_MIN_HEAD_TOKENS``, ``HANDOFF_MIN_DOC_TOKENS``) and
-``HANDOFF_ROWS_VERIFIED`` say.  A row above ``JUDGE_MAX_TOKENS`` tokens (P8 and a few others) keeps its exact checks
-only, its results finite; each such test names the rows that judge its route.  The package has no bit contract: no
-result is compared with another result.  Host only: the rules, the admission, the mode parsing and torch's recompute,
-capture, compile and dispatch-mode state as the hand-off reads it.
+the judge's draws, with both kinds of record (a tape record: the tapes; a row record: the recompute launches the intra
+twin, ``cake_jit.HANDOFF_TWINS``, and the record also keeps the prep's rows), also with the tape WY twin
+(``cake_jit.TAPE_TWINS``) on the rows whose record keeps no ``w``: on the short packs, on the one document that saves
+the segment states (the ``light_states`` path, :func:`_states_row`) and on the cheapest row of each plan family of the
+device within the size bounds; stacked layers are judged layer by layer on the operands each node read.  A row of up
+to ``JUDGE_MAX_TOKENS`` tokens is judged at any head count, one production-size row per route up to
+``PRODUCTION_MAX_TOKENS`` tokens at up to ``PRODUCTION_MAX_HEADS`` heads; a larger row (P8 and a few others) keeps its
+exact checks only, its results finite, and its test names the rows that judge its route; the family sweep records
+the families it leaves exact-only (``exact_only_families``).
+
+The package has no bit contract: no result is compared with another result, and no value of one call or program
+with a value of another.  The exact checks are plumbing: the hand-off counters (published, taken, missed, demoted,
+refused), the launch lists and grids, the record's pointers (the light set's own ``w`` and transfers) and bytes (the
+plan's, ``memory_report``'s), the saved sets' metadata, fields, dtypes and shapes with their integer tables bitwise
+(layout tables), and write patterns: with every floating-point per-call tensor NaN-filled at allocation, the record's
+tape fields are written at exactly the elements the tape forward writes, the kept forward ``w`` at exactly the
+elements the tape backward's WY program writes, and a row record's ``gk`` in full.  Stale or refused records fall
+back, the byte budget demotes and refuses, and ``"auto"`` engages exactly where ``HANDOFF_HEADS``,
+``HANDOFF_VERIFIED``, the size bounds (``HANDOFF_MIN_HEAD_TOKENS``, ``HANDOFF_MIN_DOC_TOKENS``) and
+``HANDOFF_ROWS_VERIFIED`` say.  Host only: the rules, the admission, the mode parsing and torch's recompute, capture,
+compile and dispatch-mode state as the hand-off reads it.
 
 Like the backend suite it names its package through the shared alias helper and imports nothing else from
 ``cake_pplx``.
@@ -41,6 +51,7 @@ import random
 import re
 import sys
 import types
+import warnings
 from pathlib import Path
 
 import pytest
@@ -78,11 +89,18 @@ LEAVES = ("q", "k", "v", "g", "beta")
 GRAD_OF_LEAF = ("dq", "dk", "dv", "dg", "dbeta")
 # the order the backward returns its results
 RETURN_ORDER = ("dq", "dk", "dv", "dbeta", "dg")
-# A judged draw runs the FP64 reference and the naive BF16 tier token by token: rows of up to this many tokens are
-# judged at any head count, and the production-size rows below (one per route, up to about 16k tokens at up to four
-# heads); a larger row keeps its exact checks only, its results finite.
+# A judged draw runs the FP64 reference and the naive BF16 tier token by token: rows of up to JUDGE_MAX_TOKENS tokens
+# are judged at any head count, and one production-size row per route of up to PRODUCTION_MAX_TOKENS tokens (about
+# 16k) at up to PRODUCTION_MAX_HEADS heads: the 257 documents at two heads (PRODUCTION_ROWS: the more-than-256-documents
+# form), the one document that saves the segment states (:func:`_states_row`, sized by the device's plan: the
+# light_states path) and, in the family sweep, the cheapest row of a family; a larger row keeps its exact checks only,
+# its results finite.
 JUDGE_MAX_TOKENS = 4096
+PRODUCTION_MAX_TOKENS = 65 * 257
+PRODUCTION_MAX_HEADS = 4
 PRODUCTION_ROWS = frozenset({((65,) * 257, 2)})
+# the head count of the one document that saves the segment states (:func:`_states_row`)
+STATES_HEADS = 1
 # the seed of every judged case and of the inputs of the exact-only rows (each draw's seed derives from it)
 SEED = 7818
 TAIL_STAGES = ("dqkg", "glm_intra", "gate_epilogue")
@@ -378,6 +396,24 @@ def _judged(lengths, heads: int) -> bool:
     )
 
 
+def _production_size(lengths, heads: int) -> bool:
+    """Whether a row is within the production size a route's one production-size row may have: up to
+    :data:`PRODUCTION_MAX_TOKENS` tokens at up to :data:`PRODUCTION_MAX_HEADS` heads."""
+    return sum(lengths) <= PRODUCTION_MAX_TOKENS and heads <= PRODUCTION_MAX_HEADS
+
+
+def _states_row(device) -> tuple[tuple[int, ...], int]:
+    """The one document at :data:`STATES_HEADS` head(s) whose light set saves the segment-boundary states (the
+    ``light_states`` path, where the hand-off's record keeps the set's own transfers): ``SEG_SAVE_MIN_TOKENS_PER_SEG *
+    NSEG`` tokens, ``NSEG`` the segment count of the device's plan of one document at that head count (about 14k
+    tokens).  The production-size row of that path: P8 at up to eight heads reaches it too, and keeps its exact
+    checks only."""
+    sms, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
+    nseg = cake_backend.plan(1, 1, STATES_HEADS, sms, arch).NSEG
+    assert nseg > 0, (arch, sms)
+    return (cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG * nseg,), STATES_HEADS
+
+
 def _finite(t: torch.Tensor) -> bool:
     """Whether every element of ``t`` is finite, in blocks of rows (bounded temporaries on the large rows)."""
     rows = t.reshape(t.shape[0], -1) if t.dim() and t.numel() else t.reshape(-1, 1)
@@ -576,8 +612,11 @@ def test_handoff_takes_its_record_on_the_p8_pack(
     """The P8 pack (261k tokens) with both kinds of record, under non-reentrant and reentrant checkpointing: the off
     arm publishes nothing, the on arm (its record's per-call tensors and the backward's ``dv2`` NaN-filled)
     publishes one record of the kind and its backward takes it, the registry is empty after each backward, and every
-    result is finite.  The exact checks only: a judged draw runs the FP64 and the BF16 token recurrences, so the
-    hand-off of both routes at these head counts is judged on the short packs
+    result is finite.  The exact checks only (a judged draw runs the FP64 and the BF16 token recurrences).  P8 takes
+    the ``light_states`` path at up to eight heads (and at 16 heads on ``sm_103a`` / ``sm_107a``): that hand-off is
+    judged on the one document that saves the states
+    (:func:`test_handoff_is_judged_on_the_document_that_saves_the_states`, one head).  The serial route at 16 and 32
+    heads is judged on the short packs ``(129, 300, 70)`` at 16 heads and ``(65, 200)`` at 32 heads
     (:func:`test_handoff_gradients_are_judged_on_short_packs`)."""
     inputs = _inputs(P8, heads, device)
     for reentrant in (False, True):
@@ -652,14 +691,94 @@ def test_handoff_gradients_are_judged_on_short_packs(
         _run_exact(draw)
 
 
+def test_handoff_is_judged_on_the_document_that_saves_the_states(
+    device, manifest, record_kind, record_property
+) -> None:
+    """The ``light_states`` path on the one document of :func:`_states_row` (about 14k tokens at one head: the path's
+    production-size row; P8 at up to eight heads and the shipped rule's one document reach the path too and keep
+    their exact checks only), with both kinds of record.  On every draw, under non-reentrant and reentrant
+    checkpointing, the off arm (the backward from the light set that carries the states) and the hand-off's on arm
+    (the backward from the record) are judged (``<mode>.off`` / ``<mode>.on``: ``out`` and the five gradients) with
+    the record's exact checks (:func:`_handoff_arms`); and the forward with a hand-off request (the recompute's
+    forward, every floating-point per-call tensor NaN-filled at allocation) saves the states, its record keeps the
+    set's own transfers (``seg_m`` is ``seg_state[1]``) and has the plan's bytes, filling it publishes nothing, and
+    its ``out`` and the light backward from its set (``request``) are judged."""
+    lengths, heads = _states_row(device)
+    assert _production_size(lengths, heads), (lengths, heads)
+    p = _plan(lengths, heads, device)
+    assert p.recur == "seg" and p.seg_save and p.light_path == "light_states", (
+        p.arch,
+        p.sm_count,
+        p.NSEG,
+    )
+    with_rows = _with_rows(p, record_kind)
+    common = dict(
+        scale=SCALE,
+        save_for_backward=True,
+        workspace=None,
+        arena=None,
+        doc_lengths=None,
+    )
+
+    def draw(j, s):
+        inputs = _inputs(lengths, heads, device, s)
+        arms = {}
+        for reentrant in (False, True):
+            arms.update(
+                _handoff_arms(
+                    inputs,
+                    device,
+                    lengths,
+                    heads,
+                    reentrant=reentrant,
+                    record_kind=record_kind,
+                )
+            )
+        ops = [inputs[n] for n in (*LEAVES, "cu_seqlens")]
+        cake_backend._handoff_reset()
+        request = {"task": 0, "index": device.index, "mode": "on"}
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(cake_backend, "_alloc", _nan_alloc)
+            out_h, saved_h = cake_backend._fwd_call(
+                *ops, save_mode=None, handoff=request, **common
+            )
+        assert "tensors" in request, (lengths, heads)
+        assert saved_h.hseg is not None and saved_h.seg_state is not None
+        assert request["tensors"]["seg_m"].data_ptr() == saved_h.seg_state[1].data_ptr()
+        assert request["nbytes"] == p.handoff_bytes(rows=with_rows)
+        assert _stats(device)["published"] == 0  # filling a request publishes nothing
+        del request
+        grads = cake_backend._bwd_call(
+            *ops,
+            inputs["dout"],
+            saved=saved_h,
+            scale=SCALE,
+            workspace=None,
+            arena=None,
+            doc_lengths=None,
+        )
+        arms["request"] = _results(out_h, dict(zip(RETURN_ORDER, grads, strict=True)))
+        return arms, inputs
+
+    _judge(record_property, draw)
+
+
 def test_handoff_is_judged_on_every_plan_family_of_the_device(
     device, manifest, record_kind, record_property
 ) -> None:
     """The plan families (:func:`_family`) the device's plans reach over ``FAMILY_PACKS`` x ``FAMILY_HEADS``: each
     has a row up to P8 at 32 heads, and the cheapest row of each family runs the off arm and the hand-off's on arm
-    under both checkpoint modes with the test's kind of record, with the record's exact checks.  A row of up to
-    ``JUDGE_MAX_TOKENS`` tokens is judged (``<row>.<mode>.off`` / ``<row>.<mode>.on``); a larger one keeps the exact
-    checks only (its results finite; the hand-off of its route is judged on the short packs).  Every family is
+    under both checkpoint modes with the test's kind of record, with the record's exact checks.  A family is a route
+    of its own (its records, head count and light path), so its cheapest row is judged (``<row>.<mode>.off`` /
+    ``<row>.<mode>.on``) up to ``JUDGE_MAX_TOKENS`` tokens at any head count and, as the family's production-size row,
+    up to ``PRODUCTION_MAX_TOKENS`` tokens at up to ``PRODUCTION_MAX_HEADS`` heads.  A family whose cheapest row is
+    larger keeps the exact checks only here (its results finite): this sweep does not judge its records at its head
+    count, and only its route (``recur`` / ``light_path``) is judged on other rows, on the short packs and, for
+    ``light_states``, on the one document that saves the states
+    (:func:`test_handoff_is_judged_on_the_document_that_saves_the_states`).  Those families are recorded by name
+    (``exact_only_families``: the row, the route, the light path and the head count) and named in a warning; they are
+    the families whose cheapest candidate is ``(300,) * 100``, ``tuple(range(1, 257))``, ``(129,) * 300``,
+    ``(4000,) * 16``, ``(2048,) * 64`` or P8, or ``(65,) * 64`` / ``(65,) * 257`` above four heads.  Every family is
     checked and every failure reported together."""
     sms, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     families: dict[tuple, tuple[int, tuple[int, ...], int]] = {}
@@ -678,9 +797,14 @@ def test_handoff_is_judged_on_every_plan_family_of_the_device(
     assert not too_big, ("families without a row up to the cap", too_big)
     failures = []
     judged = 0
-    for _cost, lengths, heads in sorted(families.values()):
+    exact_only = []
+    for key, (_cost, lengths, heads) in sorted(
+        families.items(), key=lambda item: item[1]
+    ):
         sid = _shape_id((lengths, heads))
-        keep = sum(lengths) <= JUDGE_MAX_TOKENS
+        keep = sum(lengths) <= JUDGE_MAX_TOKENS or _production_size(lengths, heads)
+        if not keep:
+            exact_only.append(f"{sid} ({key[0]}, {key[1]}, H={key[2]})")
 
         def draw(j, s, lengths=lengths, heads=heads, sid=sid, keep=keep):
             inputs = _inputs(lengths, heads, device, s)
@@ -709,6 +833,14 @@ def test_handoff_is_judged_on_every_plan_family_of_the_device(
         except AssertionError as exc:
             failures.append((sid, str(exc)[:1000]))
         torch.cuda.empty_cache()
+    # the families left exact-only, by name: in the test's properties and in a warning of the run's summary
+    record_property("exact_only_families", json.dumps(exact_only))
+    if exact_only:
+        warnings.warn(
+            f"{len(exact_only)} of {len(families)} plan families keep the exact checks only (their cheapest row is "
+            "above the size bounds): " + "; ".join(exact_only),
+            stacklevel=1,
+        )
     assert not failures, (
         f"{len(failures)} of {len(families)} family checks failed",
         failures,
@@ -796,6 +928,20 @@ def _check_layout(x, y, tag) -> None:
         assert _bits_equal(x, y), tag
 
 
+def _check_written_alike(x, y, tag) -> None:
+    """``x`` and ``y`` tensors of one dtype and shape, both NaN-filled at allocation, written at exactly the same
+    elements: a write pattern (an element one call writes and the other does not shows), not values (a written
+    element of finite inputs is finite; the package has no bit contract)."""
+    assert isinstance(x, torch.Tensor) and isinstance(y, torch.Tensor), tag
+    assert (x.dtype, x.shape) == (y.dtype, y.shape), tag
+    unwritten_x, unwritten_y = torch.isnan(x), torch.isnan(y)
+    assert torch.equal(unwritten_x, unwritten_y), (
+        tag,
+        int((unwritten_x != unwritten_y).sum()),
+        "elements written by one call only",
+    )
+
+
 def _check_set_layout(a, b, tag) -> None:
     """Two saved sets field for field: the same metadata, the same present tensors of the same dtypes and shapes, and
     the integer tensors (the tables) bitwise.  A floating tensor's values are judged through the backward that reads
@@ -813,18 +959,23 @@ def _check_set_layout(a, b, tag) -> None:
 
 
 @pytest.mark.parametrize("shape", LAUNCH_ROWS, ids=_shape_id)
-def test_the_recompute_writes_are_the_tape_fields_and_out_is_judged(
+def test_the_recompute_writes_the_tape_fields_and_out_is_judged(
     device, manifest, shape, record_kind, record_property
 ) -> None:
     """The forward with a hand-off request (``write_tapes = 1`` on the ``fwd`` records, the extras in per-call
     tensors; for a row record the intra twin), every floating-point per-call tensor NaN-filled at allocation
     (``_alloc``): its saved set has the light forward's metadata, present tensors, dtypes, shapes and tables; its
-    record's ``h`` / ``v_new`` (and transfers) are bitwise the tape forward's (the record's tape fields); it keeps
-    ``w`` exactly where the plan says; a row record keeps ``gk`` / ``kg`` / ``beta_int`` of the plan's shapes (``gk``
-    fully written: no NaN of the fill left) and ``kb`` exactly where it keeps no ``w`` (a tape record none of them);
-    its bytes are ``Plan.handoff_bytes(rows)`` and ``memory_report``'s.  ``out`` of the light forward and of the
-    forward with the request and the gradients of the light backward from each forward's saved set (``light`` /
-    ``request``) are judged.  P8 at 4 heads keeps the exact checks only (its results finite)."""
+    record's tape fields ``h`` / ``v_new`` (and transfers) have the tape set's dtypes and shapes and are written at
+    exactly the elements the tape forward writes (a write pattern: their values reach the gradients of the hand-off's
+    on arms, judged in the tests above); on the ``light_states`` path the record's transfers are the light set's own
+    ``seg_state[1]``; it keeps ``w`` exactly where the plan says (the light set's own ``w`` where the set carries
+    one); a row record keeps ``gk`` / ``kg`` / ``beta_int`` of the plan's shapes (``gk`` fully written: no NaN of the
+    fill left) and ``kb`` exactly where it keeps no ``w`` (a tape record none of them); its bytes are
+    ``Plan.handoff_bytes(rows)`` and ``memory_report``'s.  ``out`` of the light forward and of the forward with the
+    request and the gradients of the light backward from each forward's saved set (``light`` / ``request``) are
+    judged.  P8 at 4 heads keeps the exact checks only (its results finite): on its path (``light_states``) the
+    forward with a request and the light backward from its set are judged on the one document that saves the states
+    (:func:`test_handoff_is_judged_on_the_document_that_saves_the_states`)."""
     lengths, heads = shape
     S, N = sum(lengths), len(lengths)
     p = _plan(lengths, heads, device)
@@ -851,11 +1002,12 @@ def test_the_recompute_writes_are_the_tape_fields_and_out_is_judged(
             _check_set_layout(saved_h, saved, "request set")
             tensors = request["tensors"]
             _, tape = cake_backend._fwd_call(*ops, save_mode="tape", **common)
-        # the record's tape fields: the tape forward's tapes bit for bit, the light set's own transfers and w
-        assert _bits_equal(tensors["h"], tape.h)
-        assert _bits_equal(tensors["v_new"], tape.v_new)
+        # the record's tape fields: the tape set's dtypes and shapes, written where the tape forward writes its tapes
+        # (a write pattern, not values); the light set's own transfers and w by pointer
+        _check_written_alike(tensors["h"], tape.h, "h")
+        _check_written_alike(tensors["v_new"], tape.v_new, "v_new")
         if p.recur == "seg":
-            assert _bits_equal(tensors["seg_m"], tape.seg_m)
+            _check_written_alike(tensors["seg_m"], tape.seg_m, "seg_m")
             if p.seg_save:  # the record keeps the light set's own transfers
                 assert tensors["seg_m"].data_ptr() == saved_h.seg_state[1].data_ptr()
         else:
@@ -919,13 +1071,16 @@ def test_the_recompute_writes_are_the_tape_fields_and_out_is_judged(
 
 
 @pytest.mark.parametrize("shape", WY_ROWS, ids=_shape_id)
-def test_the_kept_forward_w_is_the_tape_wy_w(
+def test_the_kept_forward_w_is_written_where_the_tape_wy_writes_w(
     device, manifest, monkeypatch, shape, tape_wy
 ) -> None:
-    """Where the record keeps the forward's ``w`` (its backward launches no ``wy``), that ``w`` is bit for bit the
-    ``w`` the tape backward's ``wy`` program writes (its WY record, or the record's w-only twin), pad rows included.
-    Both start NaN-filled (the forward's through ``_alloc``, the backward's arena slot right before its ``wy``
-    launch), so a row one program writes and the other does not differs."""
+    """Where the record keeps the forward's ``w`` (its backward launches no ``wy``), that ``w`` has the shape of the
+    ``w`` the tape backward's ``wy`` program writes (its WY record, or the record's w-only twin, the record the plan
+    names) and is written at exactly the same elements, pad rows included: both start NaN-filled (the forward's
+    through ``_alloc``, the backward's arena slot right before its ``wy`` launch), so a row one program writes and
+    the other does not shows.  A write pattern, not values (the package has no bit contract): the kept ``w`` reaches
+    the gradients of the hand-off's on arms, judged on the rows of this list within the size bounds (the short packs,
+    the launch rows) and, for P8's ``light_states`` path, on the one document that saves the states."""
     lengths, heads = shape
     p = _plan(lengths, heads, device)
     if not p.handoff_keeps_w or not p.dispatched("wy", "tape"):
@@ -975,13 +1130,14 @@ def test_the_kept_forward_w_is_the_tape_wy_w(
     w_bwd = captured["w"]
     wy_fwd = p.record("wy_fwd", "fwd") if p.dispatched("wy_fwd", "fwd") else None
     info = (wy_fwd, captured["record"], tuple(w_fwd.shape), tuple(w_bwd.shape))
-    assert w_bwd.numel() == w_fwd.numel(), info
-    a = w_fwd.reshape(p.R, heads, D).contiguous().view(torch.int16)
-    b = w_bwd.reshape(p.R, heads, D).contiguous().view(torch.int16)
+    assert w_bwd.numel() == w_fwd.numel() and w_bwd.dtype == w_fwd.dtype, info
+    # the elements each program left unwritten (NaN of the fill): the same, row for row
+    a = torch.isnan(w_fwd.reshape(p.R, heads, D))
+    b = torch.isnan(w_bwd.reshape(p.R, heads, D))
     rows = (a != b).any(dim=2).any(dim=1).nonzero().flatten()
     assert rows.numel() == 0, (
         *info,
-        f"{rows.numel()} of {p.R} rows differ",
+        f"{rows.numel()} of {p.R} rows written by one program only",
         rows[:8].tolist(),
     )
 
@@ -1050,7 +1206,10 @@ def test_the_handoff_backward_launches_the_tape_path_with_the_light_prep(
     record carries the forward's ``w`` (elsewhere its WY record, or with ``tape_wy`` the record's w-only twin, one
     launch either way); ``"off"`` launches the light path.  The launches are checked on every draw and both arms
     (``off`` / ``on``: ``out`` and the five gradients) judged; P8 at 4 heads keeps the exact checks only (its results
-    finite)."""
+    finite): the hand-off of its path (``light_states``: the off arm the backward from the set that carries the
+    states, the on arm the backward from the record that keeps the set's transfers) is judged on the one document
+    that saves the states (:func:`test_handoff_is_judged_on_the_document_that_saves_the_states`, the call's own
+    workspace), the caller workspace's hand-off on the other rows of this list."""
     lengths, heads = shape
     p = _plan(lengths, heads, device)
     with_rows = _with_rows(p, record_kind)
@@ -1751,7 +1910,9 @@ def test_the_shipped_rule_on_this_device(device, manifest) -> None:
     on any device: nothing is published or counted.  The problem (about 98k tokens at two heads with the shipped
     bounds) keeps the exact checks only (the results of the off and default steps finite): the hand-off at this head
     count is judged on ``(100, 640, 77, 1000, 129)``
-    (:func:`test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it`)."""
+    (:func:`test_a_row_record_falls_back_to_a_tape_record_where_the_rule_refuses_it`: the light path), and on the
+    path this one document takes (``light_states``) on the one document that saves the states
+    (:func:`test_handoff_is_judged_on_the_document_that_saves_the_states`, one head)."""
     heads = min(cake_backend.HANDOFF_HEADS)
     min_doc = cake_backend.HANDOFF_MIN_DOC_TOKENS
     S = _smallest_admitted(heads)
