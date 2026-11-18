@@ -25,7 +25,9 @@ its own name; repeated launches of an arm are judged each and the worst is kept.
 result is held to a bit pattern, from run to run or against the deterministic package.  The bit checks that remain
 compare operands, integer tables, NaN write patterns and records.  The judged rows are those up to about 4096 tokens at
 any head count and one production-size row per route (up to about 16k tokens at up to four heads); a larger row keeps
-its exact checks and finite results, and its test names the judged row of the same route.
+its exact checks and finite results, and its test names the judged row of the same route.  The states-saving route
+of the 16-head rows and of the batched groups is judged on short packs under the size rule lowered for the test
+(``seg_save_rule``: the rule chooses where the states are kept, not what they are).
 
 The package's backward runs the S1 schedule on the S1 cells: the ``q * dq`` term of ``dg`` moves from the fused
 gradient (``dqkg``) into the GLM intra program.  The suite adds the S1 contract: the dispatch of the S1 pairs (the
@@ -5207,79 +5209,101 @@ def test_the_light_saved_set_carries_qg_and_w_u_where_the_plan_says(
 
 
 def test_the_states_saving_set_of_a_segmented_16_head_row_feeds_the_plain_passes(
-    device, manifest
+    device, manifest, seg_save_rule, record_property
 ) -> None:
     """On the segmented 16-head rows whose light set carries ``w`` / ``u`` (above 32 (document, head) chains on
     sm_103a / sm_107a) a pack at the size rule's threshold saves the segment-boundary states too: the backward
     from that set launches the kb-free prep, no WY program, the plain pass 3 and the plain adjoint recurrence
-    (the saved representation feeds both), the set stripped of its states launches the light path, and every
-    result (the set's, the stripped set's, the set on a tape-mode workspace and the replay) is finite.  The pack
-    (three documents at 16 heads, the threshold of about 384 tokens per segment) is too large to judge: the
-    16-head row whose light set carries ``w`` / ``u`` is judged at three documents in
-    :func:`test_the_light_saved_set_carries_qg_and_w_u_where_the_plan_says`, the states-saving route in
-    :func:`test_light_saved_set_carries_the_segment_states_above_the_size_rule` (``n1-h1``)."""
+    (the saved representation feeds both; three documents at 16 heads are 48 chains, above the fused pass 3's
+    bound) and the set stripped of its states launches the light path.  At the production rule's threshold
+    (384 tokens per segment: 10k to 15k tokens at three documents, by the SM count) the launches are checked and
+    every result (the set's, the replay, the stripped set's and the set on a tape-mode workspace) is finite.  The
+    same route is judged on the threshold pack of the rule lowered to whole chunks per segment within
+    :data:`JUDGED_TOKENS` (:func:`seg_save_rule`): the same launches on the first draw, and the set's forward and
+    backward (arm ``""``), the replay, the stripped set and the set on a tape-mode workspace (``replay``,
+    ``stripped``, ``tape_workspace``)."""
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     num_docs, heads = 3, 16
     route, _, nseg = cake_jit.segment_plan(num_docs, heads, sm, arch)
     if route != "seg" or not _wu_saved(num_docs, heads, sm, arch):
         pytest.skip(f"{arch}: three documents at 16 heads are a {route} row")
-    S = (
-        cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG * nseg
-    )  # the shortest pack that saves the states
-    lengths = _split(S, num_docs)
-    inputs = make_inputs(lengths, heads, device)
-    q, k, v, g, beta, cu, dout = _ops(inputs)
     launched: list[str] = []
 
     def recording(name, values, *, grid, device_index):
         launched.append(name)
         cake_jit.run_module(name, values, grid=grid, device_index=device_index)
 
-    ws = CakeKDANondetWorkspace.for_problem(
-        S, num_docs, heads, device, launcher=recording
-    )
-    p = ws.plan
-    assert p.recur == "seg" and nseg == p.NSEG and p.seg_save is True
-    assert p.light_path == "light_states"
-    assert p.light_saves_qg is True and p.light_saves_wu is True
-    records = p.records["light_states"]
-    assert records["bwd_prep"] == "bwd_prep_g8_noqg_nokb" and records["wy"] is None
-    assert records["fwdh_p3"] == "fwdh_p3" and not records["dhu"].endswith("_wt")
-    out, saved = cake_kda_nondet_train_forward(q, k, v, g, beta, cu, workspace=ws)
-    assert saved.hseg is not None and saved.seg_state is not None
-    assert saved.qg is not None and saved.w is not None and saved.u is not None
-    launched.clear()
-    grads = cake_kda_nondet_train_backward(
-        q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
-    )
-    assert launched == _expected_launches(p, "light_states")
-    assert launched[0] == "bwd_prep_g8_noqg_nokb" and "wy_bwd" not in launched
-    assert "fwdh_p3" in launched and records["dhu"] in launched
-    replay = cake_kda_nondet_train_backward(
-        q, k, v, g, beta, cu, dout, saved=None, workspace=ws
-    )
-    stripped = dataclasses.replace(saved, hseg=None, seg_state=None)
-    launched.clear()
-    from_stripped = cake_kda_nondet_train_backward(
-        q, k, v, g, beta, cu, dout, saved=stripped, workspace=ws
-    )
-    assert launched == _expected_launches(p, "light")
-    assert launched[0] == "bwd_prep_g8_noqg_nokb" and "wy_bwd" not in launched
-    tape_ws = CakeKDANondetWorkspace.for_problem(
-        S, num_docs, heads, device, save_mode="tape"
-    )
-    from_tape_ws = cake_kda_nondet_train_backward(
-        q, k, v, g, beta, cu, dout, saved=saved, workspace=tape_ws
-    )
-    _finite_arms(
-        {
+    def workspaces(S: int) -> tuple:
+        """The light workspace of the threshold pack (its plan saves the states and reads the plain passes) and
+        a tape-mode workspace of the same problem."""
+        ws = CakeKDANondetWorkspace.for_problem(
+            S, num_docs, heads, device, launcher=recording
+        )
+        p = ws.plan
+        assert p.recur == "seg" and nseg == p.NSEG and p.seg_save is True
+        assert p.light_path == "light_states"
+        assert p.light_saves_qg is True and p.light_saves_wu is True
+        records = p.records["light_states"]
+        assert records["bwd_prep"] == "bwd_prep_g8_noqg_nokb" and records["wy"] is None
+        assert records["fwdh_p3"] == "fwdh_p3" and not records["dhu"].endswith("_wt")
+        tape_ws = CakeKDANondetWorkspace.for_problem(
+            S, num_docs, heads, device, save_mode="tape"
+        )
+        return ws, tape_ws
+
+    def run(inputs, ws, tape_ws, first: bool) -> dict:
+        p = ws.plan
+        q, k, v, g, beta, cu, dout = _ops(inputs)
+        out, saved = cake_kda_nondet_train_forward(q, k, v, g, beta, cu, workspace=ws)
+        assert saved.hseg is not None and saved.seg_state is not None
+        assert saved.qg is not None and saved.w is not None and saved.u is not None
+        launched.clear()
+        grads = cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
+        )
+        if first:
+            assert launched == _expected_launches(p, "light_states")
+            assert launched[0] == "bwd_prep_g8_noqg_nokb" and "wy_bwd" not in launched
+            assert "fwdh_p3" in launched
+            assert p.records["light_states"]["dhu"] in launched
+        replay = cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=None, workspace=ws
+        )
+        stripped = dataclasses.replace(saved, hseg=None, seg_state=None)
+        launched.clear()
+        from_stripped = cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=stripped, workspace=ws
+        )
+        if first:
+            assert launched == _expected_launches(p, "light")
+            assert launched[0] == "bwd_prep_g8_noqg_nokb" and "wy_bwd" not in launched
+        from_tape_ws = cake_kda_nondet_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved, workspace=tape_ws
+        )
+        return {
             "": {"out": out, **_named(grads)},
             "replay": _named(replay),
             "stripped": _named(from_stripped),
             "tape_workspace": _named(from_tape_ws),
-        },
-        (lengths, heads),
-    )
+        }
+
+    # the production rule: the shortest pack that saves the states (too large to judge)
+    S = cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG * nseg
+    lengths = _split(S, num_docs)
+    ws, tape_ws = workspaces(S)
+    inputs = make_inputs(lengths, heads, device)
+    _finite_arms(run(inputs, ws, tape_ws, True), (lengths, heads))
+    del ws, tape_ws, inputs
+    # the lowered rule: its shortest pack that saves the states, judged
+    S = nseg * seg_save_rule(_judged_seg_save_tokens(nseg))
+    lengths = _split(S, num_docs)
+    ws, tape_ws = workspaces(S)
+
+    def draw(j, s):
+        inputs = _draw(lengths, heads, s, device)
+        return run(inputs, ws, tape_ws, j == 0), inputs
+
+    _judge(record_property, ("states_saving_16_heads", lengths, heads), draw)
 
 
 def test_the_two_level_carry_binds_its_group_operands(
@@ -5374,6 +5398,46 @@ STATE_SHAPES = [(1, 1), (2, 2)]
 def _split(S: int, num_docs: int) -> tuple[int, ...]:
     base = S // num_docs
     return tuple(base + (1 if i < S % num_docs else 0) for i in range(num_docs))
+
+
+# The judged size of a pack: the tokens of one draw (the FP64 reference walks every token).
+JUDGED_TOKENS = 4096
+
+
+@pytest.fixture
+def seg_save_rule():
+    """``seg_save_rule(tokens)`` lowers the size rule to ``tokens`` per segment for one test and returns it, so a
+    pack within the judged size takes the states-saving route (``light_states``): ``seg_states_saved`` reads
+    ``SEG_SAVE_MIN_TOKENS_PER_SEG`` at each call.  The rule is a size choice only (below it the backward recomputes
+    the same states).  The cached plans (a plan holds its rule) and the default entry's pooled workspaces (each
+    holds a plan) are dropped when the rule changes and again when the test ends, with the rule restored."""
+    original = cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG
+
+    def drop_cached() -> None:
+        cake_backend._plan.cache_clear()
+        cake_backend._entry_pool.clear()
+
+    def lower(tokens: int) -> int:
+        assert 1 <= int(tokens) <= original, tokens
+        cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG = int(tokens)
+        drop_cached()
+        return int(tokens)
+
+    try:
+        yield lower
+    finally:
+        cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG = original
+        drop_cached()
+
+
+def _judged_seg_save_tokens(nseg: int) -> int:
+    """The lowered size rule of a judged pack of ``nseg`` segments: the most whole chunks per segment, at most the
+    production rule's, whose threshold pack (``nseg`` segments at that many tokens) stays within
+    :data:`JUDGED_TOKENS`; one chunk at least.  Read it before lowering the rule."""
+    chunks = min(
+        cake_backend.SEG_SAVE_MIN_TOKENS_PER_SEG // BT, JUDGED_TOKENS // (BT * nseg)
+    )
+    return BT * max(1, chunks)
 
 
 def _retained_after_checkpointed_forward(fn, *leaves) -> int:
@@ -5581,7 +5645,8 @@ def test_the_arena_options_never_synchronize_the_host(device, manifest) -> None:
     indices ride with the ``doc_lengths`` copy), with the same guarantees.  These packs (above 80k tokens) are too
     large to judge: the lean arena on a states-saving row is judged in
     :func:`test_lean_arena_serves_the_saved_states_and_the_tape_paths` (``n1-h1``), the batched groups in
-    :func:`test_batched_arena_results_are_judged`."""
+    :func:`test_batched_arena_results_are_judged` and the batched groups of a states-saving row (one run and by
+    index) in :func:`test_batched_arena_on_a_row_that_saves_the_states`."""
     split = _saving_pack(SPLIT_LENGTHS, 4, device)
     for lengths, heads, budget, runs in (
         (ISSUE_LENGTHS, ISSUE_HEADS, 200000, (True, True)),
@@ -7605,16 +7670,24 @@ def test_batched_arena_launches_per_group(device, manifest, record_property) -> 
     assert min(seen.values()) > 0, seen
 
 
-def test_batched_arena_on_a_row_that_saves_the_states(device, manifest) -> None:
+def test_batched_arena_on_a_row_that_saves_the_states(
+    device, manifest, monkeypatch, seg_save_rule, record_property
+) -> None:
     """A pack above the size rule (its light set carries the states) whose last document alone would be below it:
     the groups follow the whole problem's rule, the forward writes their blocks into the saved states by chain
     rank (the whole problem's tables; every state finite), the backward reads them there (``light_states`` as pass
     2 alone; the documents rank in pack order, so every group's blocks are one run of the saved ones: the carry
     writes the saved ``hseg``, the backward reads views), every result finite: the batched backward from the
     default's and the batched set, the default backward from the batched set and the checkpointed autograd node.
-    The pack (above 80k tokens at 4 heads) is too large to judge: the batched groups are judged in
-    :func:`test_batched_arena_results_are_judged`, the states-saving route in
-    :func:`test_lean_arena_serves_the_saved_states_and_the_tape_paths` (``n1-h1``)."""
+    That pack (above 80k tokens at 4 heads) is too large to judge.  The same route is judged on a small pack under
+    the size rule lowered to its tokens per segment (:func:`seg_save_rule`), ``(640, 64, 320)`` at 2 heads: under
+    ``batch_tokens = 704`` its group (0, 2) holds chain ranks 0 and 2 (the group's blocks gathered and scattered by
+    index) and the group (2, 3) rank 1 (one run); both kinds are checked against the packing on the first draw.
+    The saved state blocks of every call on its groupings start as NaN (each must be written: finite after the
+    batched forward).  Judged: the default call (arm ``""``) and per grouping and tail-pass count
+    (``<grouping>.t<t>``) the batched forward (``.forward``), the batched backward from the default's set and from
+    its own (``.default_set``, ``.own_set``), the default backward from the batched set (``.default_backward``) and
+    the checkpointed autograd step (``.checkpoint``)."""
     lengths, heads = (40000, 20000, 20000, 1000), 4
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     # The size rule is S >= SEG_SAVE_MIN_TOKENS_PER_SEG * NSEG with NSEG = the SM count here, so on a device
@@ -7678,6 +7751,95 @@ def test_batched_arena_on_a_row_that_saves_the_states(device, manifest) -> None:
         o.backward(dout)
         _finite({"out": o.detach(), **_leaf_grads(leaves)}, (*tag, "checkpoint"))
         del ws, o, leaves
+    del inputs, q, k, v, g, beta, dout, saved
+
+    # the judged pack: the rule lowered to the tokens per segment of the whole pack (most segments hold no chunk,
+    # as on the short documents of the pack above)
+    lengths, heads = (640, 64, 320), 2
+    S, N = sum(lengths), len(lengths)
+    nseg = cake_backend.plan(S, N, heads, sm, arch).NSEG
+    seg_save_rule(max(1, S // nseg))
+    p = cake_backend.plan(S, N, heads, sm, arch)
+    assert p.recur == "seg" and p.seg_save and p.light_path == "light_states"
+    ranks = _kernel_ranks(lengths)
+    groupings = list(RANK_GROUPINGS[lengths])
+    groupings += [kw for _label, kw in _partitions(lengths) if kw not in groupings]
+    hits = {"run": 0, "index": 0}
+    original_alloc = cake_backend._alloc
+
+    def poisoned_alloc(shape, dtype, device_):
+        t = original_alloc(shape, dtype, device_)
+        # the saved state blocks (hseg, seg_state): NaN until a kernel or a copy writes them
+        if dtype == torch.float32 and tuple(shape[-2:]) == (D, D):
+            t.view(torch.uint8).fill_(0xFF)
+        return t
+
+    def grouped(inputs, saved, kw, t: int, first: bool) -> dict:
+        """The arms of one grouping and tail-pass count."""
+        q, k, v, g, beta, cu, dout = _ops(inputs)
+        prefix = f"{_kw_label(kw)}.t{t}"
+        arena = cake_backend.CakeKDANondetArena(lean=t > 1, tail_passes=t, **kw)
+        ws = CakeKDANondetWorkspace.for_problem(
+            S, N, heads, device, arena=arena, doc_lengths=lengths
+        )
+        if first:
+            packing = ws._packing(lengths)
+            for i, b in enumerate(packing.batches):
+                one_run = _one_run(_expected_group_blocks(ranks, lengths, b, p.P))
+                assert (packing.blocks[i] is not None) == one_run, (prefix, b)
+                hits["run" if one_run else "index"] += 1
+        o, saved_b = cake_kda_nondet_train_forward(
+            q, k, v, g, beta, cu, workspace=ws, doc_lengths=lengths
+        )
+        _finite({"hseg": saved_b.hseg, "seg_state": saved_b.seg_state}, prefix)
+        assert all(
+            torch.equal(a, b) for a, b in zip(saved_b.tables, saved.tables, strict=True)
+        ), prefix
+        arms = {f"{prefix}.forward": {"out": o}}
+        for name, source, space in (
+            ("default_set", saved, ws),
+            ("own_set", saved_b, ws),
+            ("default_backward", saved_b, None),
+        ):
+            got = cake_kda_nondet_train_backward(
+                q,
+                k,
+                v,
+                g,
+                beta,
+                cu,
+                dout,
+                saved=source,
+                workspace=space,
+                doc_lengths=lengths if space is not None else None,
+            )
+            arms[f"{prefix}.{name}"] = _named(got)
+        leaves = _leaves(inputs)
+        o = checkpoint(
+            lambda *a: cake_kda_nondet(*a, cu, arena=arena, doc_lengths=lengths),
+            *leaves,
+            use_reentrant=False,
+        )
+        o.backward(dout)
+        arms[f"{prefix}.checkpoint"] = {"out": o.detach(), **_leaf_grads(leaves)}
+        return arms
+
+    def draw(j, s):
+        inputs = _draw(lengths, heads, s, device)
+        out, grads, saved = _run_fwd_bwd(inputs)
+        assert saved.hseg is not None and saved.seg_state is not None
+        arms = {"": {"out": out, **grads}}
+        monkeypatch.setattr(cake_backend, "_alloc", poisoned_alloc)
+        try:
+            for kw in groupings:
+                for t in (1, 4):
+                    arms.update(grouped(inputs, saved, kw, t, j == 0))
+        finally:
+            monkeypatch.setattr(cake_backend, "_alloc", original_alloc)
+        return arms, inputs
+
+    _judge(record_property, ("batched_saved_states", lengths, heads), draw)
+    assert hits["run"] > 0 and hits["index"] > 0, hits
 
 
 def test_batched_arena_with_exact_zero_values(
@@ -8490,7 +8652,9 @@ def test_batched_block_runs_results_are_judged(
     default call (``<pack>``) and per grouping, tail-pass count and save mode
     (``<pack>.<grouping>.t<t>.<mode>``) the batched forward (``.forward``) and the batched backward from its own
     set and from the default's (``.own_set``, ``.default_set``).  The issue's pack and the pack above the size rule
-    (above 80k tokens at 4 heads) are too large to judge: every result of them is finite."""
+    (above 80k tokens at 4 heads) are too large to judge: every result of them is finite.  The judged packs here
+    save no states: the states-saving groups of both kinds (one run and by index) are judged on a small pack under a
+    lowered size rule in :func:`test_batched_arena_on_a_row_that_saves_the_states`."""
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     split = _saving_pack(SPLIT_LENGTHS, 4, device)
     cases = [(ISSUE_LENGTHS, ISSUE_HEADS, (1, 4), False), (split, 4, (1, 4), False)] + [
@@ -10310,9 +10474,10 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
     same grids and scalars (a mode contract), and the lists this suite spells from the plan: the raw records on the
     gate stages, no gate epilogue, no S1 record and the parameter finalize once, last, on every backward path.  No
     call of the raw mode allocates an FP32 token-row tensor: neither the activated gate nor its gradient exists.
-    Judged per row: the forward and the backward from its light set on a caller workspace (arm ``""``), the set
-    without its tables (``bare``), the replay (``replay``), the tape set with the plan's WY record (``tape``) and
-    with the tape WY twin's rule (``tape_wy_rule``, the twin where it admits it)."""
+    Judged per row (``<row>``, :func:`_shape_id`): the forward and the backward from its light set on a caller
+    workspace (arm ``<row>``), the set without its tables (``<row>.bare``), the replay (``<row>.replay``), the tape
+    set with the plan's WY record (``<row>.tape``) and with the tape WY twin's rule (``<row>.tape_wy_rule``, the twin
+    where it admits it)."""
     allocs: list = []
     original_alloc = cake_backend._alloc
 
@@ -10324,6 +10489,7 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
 
     def check_row(lengths, heads):
         S, N = sum(lengths), len(lengths)
+        row = _shape_id((lengths, heads))
         nd_log: list = []
         det_log: list = []
         workspaces = {}
@@ -10399,7 +10565,9 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
                     inputs, workspace=det_ws, save_for_backward=False
                 )
                 assert taken() == _expected_launches(p, "fwd_nosave")
-            arms = {"": {"out": out, **_rg_named(_rg_bwd(inputs, saved, workspace=ws))}}
+            arms = {
+                row: {"out": out, **_rg_named(_rg_bwd(inputs, saved, workspace=ws))}
+            }
             if first:
                 _rg_det_bwd(inputs, det_saved, workspace=det_ws)  # mode contract
                 seq = taken()
@@ -10407,14 +10575,14 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
                 assert len(seq) == p.launch_count("light")
                 no_fp32_token_rows("light")
             bare = dataclasses.replace(saved, tables=None)
-            arms["bare"] = _rg_named(_rg_bwd(inputs, bare, workspace=ws))
+            arms[f"{row}.bare"] = _rg_named(_rg_bwd(inputs, bare, workspace=ws))
             if first:
                 det_bare = dataclasses.replace(det_saved, tables=None)
                 _rg_det_bwd(inputs, det_bare, workspace=det_ws)  # mode contract
                 seq = taken()
                 check_backward(seq, "light", saved_tables=False)
                 assert len(seq) == p.launch_count("light", tables=False)
-            arms["replay"] = _rg_named(_rg_bwd(inputs, None, workspace=ws))
+            arms[f"{row}.replay"] = _rg_named(_rg_bwd(inputs, None, workspace=ws))
             if first:
                 _rg_det_bwd(inputs, None, workspace=det_ws)  # mode contract
                 seq = taken()
@@ -10428,7 +10596,7 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
                     inputs, workspace=det_tape_ws
                 )
                 assert taken() == _expected_launches(p, "fwd")
-            arms["tape"] = _rg_named(_rg_bwd(inputs, saved_t, workspace=tape_ws))
+            arms[f"{row}.tape"] = _rg_named(_rg_bwd(inputs, saved_t, workspace=tape_ws))
             if first:
                 _rg_det_bwd(inputs, det_saved_t, workspace=det_tape_ws)  # mode contract
                 seq = taken()
@@ -10438,7 +10606,7 @@ def test_raw_gate_launch_sequences_are_the_deterministic_raw_mode(
             monkeypatch.setattr(cake_backend, "_TAPE_WY", None)  # the twin's rule
             nd_log.clear()
             got = _rg_bwd(inputs, saved_t, workspace=tape_ws)
-            arms["tape_wy_rule"] = _rg_named(got)
+            arms[f"{row}.tape_wy_rule"] = _rg_named(got)
             if first:
                 twin = cake_backend._tape_wy_record(tape_ws.plan, device.index)
                 check_backward([n for n, *_ in nd_log], "tape", tape_wy=twin)
@@ -10674,8 +10842,9 @@ def test_raw_gate_workspace_content_never_reaches_a_result(
 ) -> None:
     """Write-before-read in raw mode: an arena filled with NaN bytes and per-call backward buffers (the outputs and
     the per-chunk partials, only the real chunks of which are written and read) filled with NaN bytes, on the
-    light, replay, tape and lean paths.  Judged per case: the forward on the poisoned workspace and the backward
-    from its set under the poisoned buffers (arm ``""``) and, without a lean arena, the replay (``replay``)."""
+    light, replay, tape and lean paths.  Judged per case (``<row>-<save mode>``, ``-t<passes>`` on a lean arena):
+    the forward on the poisoned workspace and the backward from its set under the poisoned buffers (arm ``<case>``)
+    and, without a lean arena, the replay (``<case>.replay``)."""
     cases = (
         ((129,), 2, "light", None),
         ((100, 640, 77, 1000, 129), 2, "light", None),
@@ -10693,6 +10862,9 @@ def test_raw_gate_workspace_content_never_reaches_a_result(
 
     def check_row(lengths, heads, save_mode, passes):
         S, N = sum(lengths), len(lengths)
+        case = f"{_shape_id((lengths, heads))}-{save_mode}" + (
+            "" if passes is None else f"-t{passes}"
+        )
         arena = (
             None
             if passes is None
@@ -10725,7 +10897,7 @@ def test_raw_gate_workspace_content_never_reaches_a_result(
                 got = _rg_bwd(inputs, saved_p, workspace=poisoned)
             finally:
                 monkeypatch.setattr(cake_backend, "_alloc", original_alloc)
-            arms = {"": {"out": o, **_rg_named(got)}}
+            arms = {case: {"out": o, **_rg_named(got)}}
             if arena is None:
                 poisoned.arena.fill_(0xFF)
                 monkeypatch.setattr(cake_backend, "_alloc", nan_alloc)
@@ -10733,7 +10905,7 @@ def test_raw_gate_workspace_content_never_reaches_a_result(
                     got = _rg_bwd(inputs, None, workspace=poisoned)
                 finally:
                     monkeypatch.setattr(cake_backend, "_alloc", original_alloc)
-                arms["replay"] = _rg_named(got)
+                arms[f"{case}.replay"] = _rg_named(got)
             return arms, inputs
 
         key = ("raw_workspace_content", lengths, heads, save_mode, passes)
@@ -10741,6 +10913,45 @@ def test_raw_gate_workspace_content_never_reaches_a_result(
 
     for lengths, heads, save_mode, passes in cases:
         check_row(lengths, heads, save_mode, passes)
+
+
+# The raw backward repeated on a device: heads 1..64 cover the serial and segmented routes on every architecture (the
+# raw rows of 16, 32 and 64 heads among them), on a pack of four documents (3206 tokens).  Each repeat's seven results
+# are held for the judge, so a draw runs a few.
+RAW_REPEAT_HEADS = (1, 2, 4, 16, 32, 64)
+RAW_REPEAT_LENGTHS = (2000, 77, 1000, 129)
+RAW_REPEATS = 4
+
+
+@pytest.mark.parametrize("heads", RAW_REPEAT_HEADS, ids=lambda h: f"h{h}")
+def test_raw_gate_repeats_are_judged(device, manifest, heads, record_property) -> None:
+    """``RAW_REPEATS`` raw backwards from one saved set on one caller workspace and as many without one (a
+    per-call workspace each): every repeat's seven results, ``dA_log`` / ``ddt_bias`` included, judged, the worst
+    kept (``workspace``, ``per_call``; the package promises no bits from run to run), with the forward that saved
+    the set (arm ``""``).  The caller workspace holds the arena alone: its bytes are ``workspace_bytes`` of the
+    problem, the deterministic package's (a byte query of the other package: a mode contract)."""
+    lengths = RAW_REPEAT_LENGTHS
+    S, N = sum(lengths), len(lengths)
+    ws = CakeKDANondetWorkspace.for_problem(S, N, heads, device, gate="raw")
+    sm = ws.plan.sm_count
+    # mode contract: the byte query of the deterministic package
+    assert (
+        ws.bytes
+        == cake_backend.workspace_bytes(S, N, heads, sm_count=sm, gate="raw")
+        == det_backend.workspace_bytes(S, N, heads, sm_count=sm, gate="raw")
+    )
+
+    def draw(j, s):
+        inputs = _draw(lengths, heads, s, device, gate="raw")
+        out, saved = _rg_fwd(inputs, workspace=ws)
+        arms = {"": {"out": out}}
+        for name, kw in (("workspace", {"workspace": ws}), ("per_call", {})):
+            arms[name] = [
+                _rg_named(_rg_bwd(inputs, saved, **kw)) for _ in range(RAW_REPEATS)
+            ]
+        return arms, inputs
+
+    _judge(record_property, ("raw_gate_repeats", lengths, heads), draw)
 
 
 @pytest.mark.parametrize("l2n", ("off", "fused"))
@@ -10754,8 +10965,8 @@ def test_raw_gate_raises_no_alert_under_torch_deterministic_mode(
     kernels normalize).  The caller workspace's backward finishes the parameter gradients with the one
     deterministic finalize (``param_finalize``; ``param_finalize_l2n`` in the l2n mode).  The g mode raises no
     alert either.  (The saving forwards run with torch's deterministic algorithms off; the backward and the
-    replay's recompute run under them.)  Judged per head count: the forward (arm ``""``) and every backward,
-    ``<strict|warn_only>.<workspace|per_call>.<saved|replay>``."""
+    replay's recompute run under them.)  Judged per head count (``h<heads>``): the forward (arm ``h<heads>``) and
+    every backward, ``h<heads>.<strict|warn_only>.<workspace|per_call>.<saved|replay>``."""
     alert = "deterministic implementation"
     lengths = (63, 1, 65)
     S, N = sum(lengths), len(lengths)
@@ -10787,7 +10998,7 @@ def test_raw_gate_raises_no_alert_under_torch_deterministic_mode(
                 launched.clear()
                 out, saved = _rg_fwd(inputs, workspace=ws, **L2)
                 assert launched
-                arms[""] = {"out": out}
+                arms[f"h{heads}"] = {"out": out}
                 if j == 0:
                     g_inputs = make_inputs(lengths, heads, device)
                     gq = [
@@ -10802,7 +11013,8 @@ def test_raw_gate_raises_no_alert_under_torch_deterministic_mode(
                         ("per_call", {}),
                     ):
                         for s_name, s_in in (("saved", saved), ("replay", None)):
-                            arm = f"{'warn_only' if warn_only else 'strict'}.{ws_name}.{s_name}"
+                            mode = "warn_only" if warn_only else "strict"
+                            arm = f"h{heads}.{mode}.{ws_name}.{s_name}"
                             launched.clear()
                             with warnings.catch_warnings(record=True) as caught:
                                 warnings.simplefilter("always")
