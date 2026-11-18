@@ -731,6 +731,42 @@ Other public names:
 - `cake_mhc_nondet_train_reset_workspace(workspace)`: required before reusing a buffer that a det backward used.
 - `cake_mhc_nondet_train_route_key`, `CakeMHCNondetPrepareFunction`, `CakeMHCNondetFinishFunction`, `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
 
+### Pre handoff and standalone collapse (det and nondet)
+
+A sublayer of [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) collapses its streams with the `pre` of the previous sublayer and hands its own `pre` on. Both packages have entry points for this, under their own prefix (`<mode>` is `det` or `nondet`):
+
+- Forward: `(pre_next, post, C)` are the coefficients of `X`, as above. `U = BF16(sum_i pre_in_i X_i)` uses the incoming FP32 `pre_in [T, 4]`, not `pre_next`. `pre_next` is the FP32 `pre` of the coefficient pass, bit for bit the `pre` columns of `stats`. `Y` is computed by `forward_finish` as before.
+- Backward: `dpre_next [T, 4]` FP32 is the gradient of `pre_next` from its consumer. The coefficient VJP takes `dpre_next`, not a gradient derived from `dU`. `dpre_in_i = sum_d dU_d X_id` (one FP32 sum per token and stream). `dX = BF16(dX_mix + pre_in_i dU + dX_coef)` is rounded once.
+- The first sublayer passes a one-hot `pre_in = [1, 0, 0, 0]`; its `U` is stream 0 bit for bit. The final collapse before the model head is the standalone collapse `(X, pre_in) -> U` with the VJP `(X, pre_in, dU) -> (dX, dpre_in)`.
+- Coverage: hidden 5120 on `sm_100a` and `sm_103a` (`is_cake_mhc_<mode>_train_handoff_supported(device, hidden=None)`). Other sizes and architectures raise `ValueError`. The standard entry points are unchanged.
+
+| Name | Signature | Returns / notes |
+|---|---|---|
+| `cake_mhc_<mode>_train_handoff_forward_prepare` | `(X, pre_in, fn, scale, base, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", out=None, pre_next_out=None, stats_out=None, workspace=None)` | Returns `(U, pre_next, stats)`. Not autograd. The workspace is the forward workspace of the package. `Y` comes from `forward_finish(X, B, stats)`. |
+| `cake_mhc_<mode>_train_handoff_backward_finish` | `(X, dY, dU, pre_in, dpre_next, B, fn, scale, base, stats, grad_stats, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", accumulate=False, workspace=None, dX=None, dpre_in=None, dfn=None, dscale=None, dbase=None)` | Returns `(dX, dpre_in, dfn, dscale, dbase)`. `grad_stats` comes from `backward_prepare` as before. `accumulate` and the workspace work as in `backward_finish`. |
+| `cake_mhc_<mode>_train_collapse_forward` | `(X, pre_in, *, out=None)` | Returns BF16 `U [T, H]`. No workspace and no parameters. |
+| `cake_mhc_<mode>_train_collapse_backward` | `(X, pre_in, dU, *, dX=None, dpre_in=None)` | Returns BF16 `dX = BF16(pre_in_i dU)` and FP32 `dpre_in`. |
+| `cake_mhc_<mode>_train_handoff_prepare` | `(X, pre_in, fn, scale, base, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", save_stats=True, workspace=None, backward_workspace=None)` | Autograd. Returns `(U, pre_next, handle)`; pass the handle to the package's `finish`. The backward takes `dU` and `dpre_next` (zeros when `pre_next` reaches no loss) and returns `dX`, `dpre_in` (when `pre_in` requires grad) and the parameter gradients. It saves `pre_in` (the previous `pre_next`, no copy). |
+| `cake_mhc_<mode>_train_collapse` | `(X, pre_in)` | Autograd standalone collapse. Returns `U`. It saves `X` and `pre_in`. |
+
+- Use `rms_eps=1e-20` for DeepSeek-V4.1-Flash. `rms_eps` and `hc_eps` are launch arguments.
+- Under `torch.utils.checkpoint(..., use_reentrant=False)`, a `pre_next` may cross region boundaries: a region returns `(Y, pre_next)`, and the next region takes `pre_next` as `pre_in`.
+- Retained state: the handoff connection keeps what the standard connection keeps (`stats`, 256 B per token, under `save_stats=True`). `pre_next` (16 B per token) stays alive until its consumer's backward has run. The standalone collapse saves only its inputs.
+- det: the bits of every output repeat for a given token count on a given device, as in the standard det entry points. nondet makes no run-to-run bit promise.
+- The autograd classes are `CakeMHC<Mode>HandoffPrepareFunction` and `CakeMHC<Mode>CollapseFunction`.
+
+```python
+from cake_pplx.cake_mhc_nondet_train import (
+    cake_mhc_nondet_train_collapse, cake_mhc_nondet_train_finish, cake_mhc_nondet_train_handoff_prepare,
+)
+
+pre = torch.zeros(T, 4, device=dev); pre[:, 0] = 1.0           # one-hot start
+for fn, scale, base, branch in sublayers:                       # attention, then MoE, per layer
+    U, pre, handle = cake_mhc_nondet_train_handoff_prepare(X, pre, fn, scale, base, rms_eps=1e-20)
+    X = cake_mhc_nondet_train_finish(X, branch(U), handle)
+head_input = cake_mhc_nondet_train_collapse(X, pre)            # the final collapse
+```
+
 **Options and environment.**
 
 - `rms_eps` and `hc_eps` are launch arguments, so any finite positive value uses the same compiled programs.

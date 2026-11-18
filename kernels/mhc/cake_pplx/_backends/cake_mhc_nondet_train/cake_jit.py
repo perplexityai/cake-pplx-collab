@@ -250,6 +250,17 @@ on sm_107a the column-slab pass keeps the attribute on at every token count
 and SM count (hidden 4096: a cell without a band in place of the
 deterministic column slab's checkpointed-backward band); every other board
 keeps ``PDL_OFF_BANDS``.
+
+Pre handoff (``HANDOFF_KINDS``, :func:`handoff_hidden_sizes`: hidden 5120 on
+sm_100a / sm_103a): ``fwd_prepare_handoff_h5120`` is ``fwd_prepare_h5120``
+with ``fwd_collapse__h5120`` replaced by ``fwd_collapse__pi_pn__h5120`` (it
+reads ``pre_in`` in place of the coefficient pass's ``pre`` and writes
+``pre_next``); ``bwd_finish_handoff_h5120`` is ``bwd_finish_h5120`` with each
+``bwd_token__<form>__h5120`` replaced by ``bwd_token__<form>_ho__h5120`` (the
+base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
+record; same grid, launch facts and selection); ``collapse_forward_h5120`` /
+``collapse_backward_h5120`` are one record each (``collapse_fwd__h5120``,
+``collapse_bwd__h5120``: own library stems, no PDL attribute, no workspace).
 """
 
 from __future__ import annotations

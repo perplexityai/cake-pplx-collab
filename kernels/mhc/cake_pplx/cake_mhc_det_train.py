@@ -110,6 +110,22 @@ Usage::
 
 The model's head, the stream mean ``Y = mean_i X[:, i, :]`` of the last
 layer's four streams, is the module :mod:`cake_pplx.cake_mhc_head_det_train`.
+
+Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103,
+``is_cake_mhc_det_train_handoff_supported``): a sublayer collapses its streams
+with the incoming FP32 ``pre_in [T, 4]`` and hands its own ``pre`` on as
+``pre_next``; its backward takes ``dpre_next`` (the gradient of ``pre_next``)
+for the coefficient VJP and returns ``dpre_in``.  The final collapse runs
+alone.  Every output repeats bit for bit for a given token count on a given
+device::
+
+    U, pre_next, handle = cake_mhc_det_train_handoff_prepare(X, pre_in, fn, scale, base, rms_eps=1e-20)
+    Y = cake_mhc_det_train_finish(X, branch(U), handle)
+    head_input = cake_mhc_det_train_collapse(Y_last, pre_last)          # the final collapse
+
+    # direct calls: handoff_forward_prepare -> (U, pre_next, stats); forward_finish; backward_prepare;
+    # handoff_backward_finish(X, dY, dU, pre_in, dpre_next, B, fn, scale, base, stats, grad_stats)
+    #   -> (dX, dpre_in, dfn, dscale, dbase); collapse_forward / collapse_backward
 """
 
 from __future__ import annotations
