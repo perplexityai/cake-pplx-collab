@@ -37,7 +37,6 @@ import copy
 import math
 
 import pytest
-
 from tests.cake.test_helpers.cake_package import cake_package
 
 DET = cake_package("cake.cake_mhc_det_train", "cake_jit")
@@ -45,12 +44,42 @@ ND = cake_package("cake.cake_mhc_nondet_train", "cake_jit")
 REGISTRIES = {"det": DET, "nondet": ND}
 PREFIX = {"det": "cake_mhc_det_train_", "nondet": "cake_mhc_train_"}
 HIDDEN = 5120
-HANDOFF_KINDS = ("fwd_prepare_handoff", "bwd_finish_handoff", "collapse_forward", "collapse_backward")
+HANDOFF_KINDS = (
+    "fwd_prepare_handoff",
+    "bwd_finish_handoff",
+    "collapse_forward",
+    "collapse_backward",
+)
 HANDOFF_ARCHES = ("sm_100a", "sm_103a")
 BOARDS = (("sm_100a", 148), ("sm_103a", 152))
 TOKEN_FORMS = ("ao22_rae7_pd1_ntr", "dot_ao8", "dot_ao8_trows_dyn", "rt64")
-HANDOFF_OPERANDS = (["buffer", "pre_in"], ["buffer", "dpre_next"], ["buffer", "dpre_in"])
-ROWS = (1, 2, 3, 7, 64, 65, 255, 256, 1000, 1024, 2049, 4096, 4097, 8192, 12000, 16384, 20001, 32768, 65536, 131072)
+HANDOFF_OPERANDS = (
+    ["buffer", "pre_in"],
+    ["buffer", "dpre_next"],
+    ["buffer", "dpre_in"],
+)
+ROWS = (
+    1,
+    2,
+    3,
+    7,
+    64,
+    65,
+    255,
+    256,
+    1000,
+    1024,
+    2049,
+    4096,
+    4097,
+    8192,
+    12000,
+    16384,
+    20001,
+    32768,
+    65536,
+    131072,
+)
 NAME_KEYS = ("kernel", "kernel_symbol", "library")
 
 
@@ -65,12 +94,21 @@ def _strip(record: dict, *keys: str) -> dict:
 def _swaps(mode: str) -> dict[str, str]:
     p = PREFIX[mode]
     out = {f"{p}fwd_collapse__h{HIDDEN}": f"{p}fwd_collapse__pi_pn__h{HIDDEN}"}
-    out.update({f"{p}bwd_token__{f}__h{HIDDEN}": f"{p}bwd_token__{f}_ho__h{HIDDEN}" for f in TOKEN_FORMS})
+    out.update(
+        {
+            f"{p}bwd_token__{f}__h{HIDDEN}": f"{p}bwd_token__{f}_ho__h{HIDDEN}"
+            for f in TOKEN_FORMS
+        }
+    )
     return out
 
 
-def _selected(mode: str, arch: str, kind: str, rows: int, sm: int, iters: int) -> tuple[str, ...]:
-    return REGISTRIES[mode].selected_modules(arch, HIDDEN, kind, rows=rows, sm_count=sm, sinkhorn_iters=iters)
+def _selected(
+    mode: str, arch: str, kind: str, rows: int, sm: int, iters: int
+) -> tuple[str, ...]:
+    return REGISTRIES[mode].selected_modules(
+        arch, HIDDEN, kind, rows=rows, sm_count=sm, sinkhorn_iters=iters
+    )
 
 
 @pytest.mark.cpu_only
@@ -81,7 +119,9 @@ def test_handoff_kinds_keys_and_sizes(mode: str) -> None:
     assert not set(reg.HANDOFF_KINDS) & set(reg.KINDS)
     for kind in HANDOFF_KINDS:
         assert reg.route_key(HIDDEN, kind) == f"{kind}_h{HIDDEN}"
-    assert reg.workspace_kind("fwd_prepare_handoff") == reg.workspace_kind("fwd_prepare")
+    assert reg.workspace_kind("fwd_prepare_handoff") == reg.workspace_kind(
+        "fwd_prepare"
+    )
     assert reg.workspace_kind("bwd_finish_handoff") == reg.workspace_kind("bwd_finish")
     assert reg.workspace_kind("collapse_forward") is None
     assert reg.workspace_kind("collapse_backward") is None
@@ -101,19 +141,32 @@ def test_handoff_kinds_keys_and_sizes(mode: str) -> None:
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("mode", tuple(REGISTRIES))
 @pytest.mark.parametrize("form", TOKEN_FORMS)
-def test_token_owner_twins_are_the_base_records_with_the_handoff_operands(mode: str, form: str) -> None:
+def test_token_owner_twins_are_the_base_records_with_the_handoff_operands(
+    mode: str, form: str
+) -> None:
     base = _rec(mode, f"bwd_token__{form}__h{HIDDEN}")
     twin = _rec(mode, f"bwd_token__{form}_ho__h{HIDDEN}")
     name = f"{PREFIX[mode]}bwd_token__{form}_ho__h{HIDDEN}"
-    assert (twin["kernel"], twin["library"], twin["kernel_symbol"]) == (name, name, f"kernel_{name}")
-    assert _strip(twin, "arches", "arg_plan", "logical") == _strip(base, "arches", "arg_plan", "logical")
+    assert (twin["kernel"], twin["library"], twin["kernel_symbol"]) == (
+        name,
+        name,
+        f"kernel_{name}",
+    )
+    assert _strip(twin, "arches", "arg_plan", "logical") == _strip(
+        base, "arches", "arg_plan", "logical"
+    )
     assert twin["arches"] == [a for a in base["arches"] if a in HANDOFF_ARCHES]
     plan = copy.deepcopy(base["arg_plan"])
     at = plan.index(["buffer", "param_partial"]) + 1
     assert plan[at] == ["parameter", "T"]
     plan[at:at] = [list(op) for op in HANDOFF_OPERANDS]
     assert twin["arg_plan"] == plan
-    assert twin["logical"] == {**base["logical"], "pre_in": "pre_in", "dpre_next": "dpre_next", "dpre_in": "dpre_in"}
+    assert twin["logical"] == {
+        **base["logical"],
+        "pre_in": "pre_in",
+        "dpre_next": "dpre_next",
+        "dpre_in": "dpre_in",
+    }
 
 
 @pytest.mark.cpu_only
@@ -125,7 +178,9 @@ def test_collapse_records(mode: str) -> None:
     bwd = _rec(mode, f"collapse_bwd__h{HIDDEN}")
     grid = [["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]]
     # the sublayer collapse: the base record (same grid, launch facts, PDL edge) with pre_in in and pre_next out
-    assert _strip(pi_pn, "arches", "arg_plan", "logical") == _strip(base, "arches", "arg_plan", "logical")
+    assert _strip(pi_pn, "arches", "arg_plan", "logical") == _strip(
+        base, "arches", "arg_plan", "logical"
+    )
     assert pi_pn["arg_plan"] == [
         ["buffer", "x"],
         ["buffer", "pre_in"],
@@ -136,7 +191,11 @@ def test_collapse_records(mode: str) -> None:
         ["launch", "enable_pdl"],
         *grid,
     ]
-    assert REGISTRIES[mode].pdl_edge(pi_pn["library"]) == REGISTRIES[mode].pdl_edge(base["library"]) is not None
+    assert (
+        REGISTRIES[mode].pdl_edge(pi_pn["library"])
+        == REGISTRIES[mode].pdl_edge(base["library"])
+        is not None
+    )
     # the standalone collapse: own library stems, no workspace; the forward takes the per-call PDL attribute on its own
     # edge K4->C (after the last sublayer's residual mixing, no band: on), the VJP none
     assert fwd["arg_plan"] == [
@@ -162,20 +221,32 @@ def test_collapse_records(mode: str) -> None:
     assert REGISTRIES[mode].pdl_edge(bwd["library"]) is None
     for rec in (fwd, bwd):
         assert rec["workspace_rule"] is None and rec["select_rule"] is None
-        assert rec["launch"]["dynamic_smem_bytes"] == 0 and tuple(rec["launch"]["block"]) == (256, 1, 1)
+        assert rec["launch"]["dynamic_smem_bytes"] == 0 and tuple(
+            rec["launch"]["block"]
+        ) == (256, 1, 1)
     assert fwd["grid_rule"] == base["grid_rule"]
-    one_token_per_cta = {"col_split": 1, "grid_limit": 0, "grid_per_sm": 0, "kind": "rows_per_cta", "rows_per_cta": 1}
+    one_token_per_cta = {
+        "col_split": 1,
+        "grid_limit": 0,
+        "grid_per_sm": 0,
+        "kind": "rows_per_cta",
+        "rows_per_cta": 1,
+    }
     assert bwd["grid_rule"] == one_token_per_cta
     for rec in (pi_pn, fwd, bwd):
         assert rec["arches"] == list(HANDOFF_ARCHES)
         assert rec["hidden"] == HIDDEN
-        assert set(rec["logical"]) == {k for kind, k in rec["arg_plan"] if kind in ("buffer", "parameter")}
+        assert set(rec["logical"]) == {
+            k for kind, k in rec["arg_plan"] if kind in ("buffer", "parameter")
+        }
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("mode", tuple(REGISTRIES))
 @pytest.mark.parametrize("arch", HANDOFF_ARCHES)
-def test_handoff_routes_are_the_standard_routes_with_the_swaps(mode: str, arch: str) -> None:
+def test_handoff_routes_are_the_standard_routes_with_the_swaps(
+    mode: str, arch: str
+) -> None:
     reg, p, swaps = REGISTRIES[mode], PREFIX[mode], _swaps(mode)
     routes = reg.ROUTES[arch]
     fwd = routes[f"fwd_prepare_h{HIDDEN}"]
@@ -183,7 +254,9 @@ def test_handoff_routes_are_the_standard_routes_with_the_swaps(mode: str, arch: 
     assert routes[f"fwd_prepare_handoff_h{HIDDEN}"] == [swaps.get(n, n) for n in fwd]
     assert routes[f"bwd_finish_handoff_h{HIDDEN}"] == [swaps.get(n, n) for n in bwd]
     # every collapse / token-owner record of the standard routes has its twin (no base form left in a handoff route)
-    assert [n for n in fwd if REGISTRIES[mode].MODULES[n]["role"] == "fwd_collapse"] == [f"{p}fwd_collapse__h{HIDDEN}"]
+    assert [
+        n for n in fwd if REGISTRIES[mode].MODULES[n]["role"] == "fwd_collapse"
+    ] == [f"{p}fwd_collapse__h{HIDDEN}"]
     assert {n for n in bwd if REGISTRIES[mode].MODULES[n]["role"] == "bwd_token"} == {
         f"{p}bwd_token__{f}__h{HIDDEN}" for f in TOKEN_FORMS
     }
@@ -198,20 +271,35 @@ def test_handoff_routes_are_the_standard_routes_with_the_swaps(mode: str, arch: 
 @pytest.mark.parametrize("mode", tuple(REGISTRIES))
 @pytest.mark.parametrize(("arch", "sm"), BOARDS)
 @pytest.mark.parametrize("iters", (20, 7))
-def test_a_handoff_call_selects_the_standard_programs_with_the_swaps(mode: str, arch: str, sm: int, iters: int) -> None:
+def test_a_handoff_call_selects_the_standard_programs_with_the_swaps(
+    mode: str, arch: str, sm: int, iters: int
+) -> None:
     swaps = _swaps(mode)
     for rows in ROWS:
-        for kind, standard in (("fwd_prepare_handoff", "fwd_prepare"), ("bwd_finish_handoff", "bwd_finish")):
-            want = tuple(swaps.get(n, n) for n in _selected(mode, arch, standard, rows, sm, iters))
+        for kind, standard in (
+            ("fwd_prepare_handoff", "fwd_prepare"),
+            ("bwd_finish_handoff", "bwd_finish"),
+        ):
+            want = tuple(
+                swaps.get(n, n)
+                for n in _selected(mode, arch, standard, rows, sm, iters)
+            )
             assert _selected(mode, arch, kind, rows, sm, iters) == want, (kind, rows)
-        for kind, name in (("collapse_forward", "collapse_fwd"), ("collapse_backward", "collapse_bwd")):
-            assert _selected(mode, arch, kind, rows, sm, iters) == (f"{PREFIX[mode]}{name}__h{HIDDEN}",)
+        for kind, name in (
+            ("collapse_forward", "collapse_fwd"),
+            ("collapse_backward", "collapse_bwd"),
+        ):
+            assert _selected(mode, arch, kind, rows, sm, iters) == (
+                f"{PREFIX[mode]}{name}__h{HIDDEN}",
+            )
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("mode", tuple(REGISTRIES))
 @pytest.mark.parametrize(("arch", "sm"), BOARDS)
-def test_handoff_launch_grids_and_pdl_arguments(monkeypatch: pytest.MonkeyPatch, mode: str, arch: str, sm: int) -> None:
+def test_handoff_launch_grids_and_pdl_arguments(
+    monkeypatch: pytest.MonkeyPatch, mode: str, arch: str, sm: int
+) -> None:
     reg, swaps = REGISTRIES[mode], _swaps(mode)
     monkeypatch.setattr(reg, "sm_count", lambda device_index: sm)
     monkeypatch.setattr(reg, "device_arch", lambda device_index: arch)
@@ -219,13 +307,21 @@ def test_handoff_launch_grids_and_pdl_arguments(monkeypatch: pytest.MonkeyPatch,
     bwd = reg.MODULES[f"{PREFIX[mode]}collapse_bwd__h{HIDDEN}"]
     for rows in ROWS:
         for base, twin in swaps.items():
-            assert reg.launch_grid(reg.MODULES[twin], rows, device_index=0) == reg.launch_grid(
-                reg.MODULES[base], rows, device_index=0
-            ), (twin, rows)
+            assert reg.launch_grid(
+                reg.MODULES[twin], rows, device_index=0
+            ) == reg.launch_grid(reg.MODULES[base], rows, device_index=0), (twin, rows)
             for path in reg.PDL_PATHS:
                 args = (rows, arch, path) if mode == "det" else (rows, arch, path, sm)
-                assert reg.enable_pdl(twin, *args) == reg.enable_pdl(base, *args), (twin, rows, path)
-        assert reg.launch_grid(fwd, rows, device_index=0) == (math.ceil(5 * rows / 2), 1, 1)
+                assert reg.enable_pdl(twin, *args) == reg.enable_pdl(base, *args), (
+                    twin,
+                    rows,
+                    path,
+                )
+        assert reg.launch_grid(fwd, rows, device_index=0) == (
+            math.ceil(5 * rows / 2),
+            1,
+            1,
+        )
         assert reg.launch_grid(bwd, rows, device_index=0) == (rows, 1, 1)
         for path in reg.PDL_PATHS:
             for rec in (fwd, bwd):
@@ -251,7 +347,13 @@ def test_the_nondet_handoff_records_are_the_det_records_renamed() -> None:
         if key.rsplit("_h", 1)[0] in HANDOFF_KINDS
         for name in names
     }
-    new = {n for n in det_names if any(s in n for s in ("__pi_pn__", "collapse_fwd__", "collapse_bwd__", "_ho__"))}
+    new = {
+        n
+        for n in det_names
+        if any(
+            s in n for s in ("__pi_pn__", "collapse_fwd__", "collapse_bwd__", "_ho__")
+        )
+    }
     assert len(new) == 7, sorted(new)
     for name in new:
         assert ND.MODULES[renamed(name)] == renamed(DET.MODULES[name]), name

@@ -157,7 +157,9 @@ def one_hot(T: int, device: torch.device) -> torch.Tensor:
 # Oracles
 
 
-def collapse_oracle(X: torch.Tensor, pre_in: torch.Tensor, dU: torch.Tensor, *, dtype: torch.dtype) -> dict:
+def collapse_oracle(
+    X: torch.Tensor, pre_in: torch.Tensor, dU: torch.Tensor, *, dtype: torch.dtype
+) -> dict:
     """The standalone collapse and its VJP in ``dtype``: ``U = sum_i pre_in_i X_i``, ``dX_i = pre_in_i dU``,
     ``dpre_in_i = sum_d dU_d X_id`` (values before any cast)."""
     out = {k: [] for k in COLLAPSE_OUTPUTS}
@@ -189,7 +191,9 @@ def _coefficients(X, fn, scale, base, *, rms_eps, hc_eps, iters):
     return pre, post, C
 
 
-def chain_inputs(T: int, *, device: torch.device, seed: int, sublayers: int = 2, hidden: int = HIDDEN) -> dict:
+def chain_inputs(
+    T: int, *, device: torch.device, seed: int, sublayers: int = 2, hidden: int = HIDDEN
+) -> dict:
     """The inputs of a chain of ``sublayers`` sublayers: ``X0 ~ N(0, 1)`` BF16 ``[T, 4, H]``; per sublayer distinct
     ``fn ~ 1e-2 N``, ``scale ~ 1 + 0.1 N``, ``base ~ 0.1 N`` (FP32) and a branch weight ``W ~ N(0, 1 / H)`` BF16
     ``[H, H]``; the upstream gradient ``G ~ N(0, 1)`` BF16 ``[T, H]`` of the final collapse."""
@@ -220,7 +224,9 @@ def chain_names(sublayers: int) -> tuple[str, ...]:
     """The judged outputs of a chain: the final ``U``, each sublayer's ``pre_next``, ``dX0`` and each sublayer's
     parameter gradients."""
     pres = tuple(f"pre{k + 1}" for k in range(sublayers))
-    grads = tuple(f"{n}{k + 1}" for k in range(sublayers) for n in ("dfn", "dscale", "dbase"))
+    grads = tuple(
+        f"{n}{k + 1}" for k in range(sublayers) for n in ("dfn", "dscale", "dbase")
+    )
     return ("U_final", *pres, "dX0", *grads)
 
 
@@ -232,11 +238,16 @@ def chain_oracle(i: Mapping, *, dtype: torch.dtype) -> dict:
     T = int(i["X"].shape[0])
     with torch.enable_grad():
         X0 = i["X"].detach().to(dtype).requires_grad_(True)
-        params = [[p.detach().to(dtype).requires_grad_(True) for p in ps] for ps in i["params"]]
+        params = [
+            [p.detach().to(dtype).requires_grad_(True) for p in ps]
+            for ps in i["params"]
+        ]
         X, pre_in = X0, one_hot(T, X0.device).to(dtype)
         pres = []
         for ps, W in zip(params, i["W"], strict=True):
-            pre_next, post, C = _coefficients(X, *ps, rms_eps=RMS_EPS, hc_eps=HC_EPS, iters=SINKHORN_ITERS)
+            pre_next, post, C = _coefficients(
+                X, *ps, rms_eps=RMS_EPS, hc_eps=HC_EPS, iters=SINKHORN_ITERS
+            )
             U = (pre_in.unsqueeze(-1) * X).sum(dim=1)
             B = torch.tanh(U @ W.to(dtype))
             X = post.unsqueeze(-1) * B.unsqueeze(1) + torch.einsum("tij,tid->tjd", C, X)
@@ -292,7 +303,14 @@ class Fp32Gate:
         self.ours: dict[int, float] = {}
         self.fp32: dict[int, float] = {}
 
-    def add(self, draw: int, actual: torch.Tensor, X: torch.Tensor, dU: torch.Tensor, expected: torch.Tensor) -> None:
+    def add(
+        self,
+        draw: int,
+        actual: torch.Tensor,
+        X: torch.Tensor,
+        dU: torch.Tensor,
+        expected: torch.Tensor,
+    ) -> None:
         ours = relative_l2(actual, expected)
         self.ours[draw] = max(self.ours.get(draw, 0.0), ours)
         if draw not in self.fp32:
@@ -308,11 +326,15 @@ class Fp32Gate:
             "factor": DPRE_IN_FACTOR,
         }
 
-    def check(self, record_property: Callable[[str, object], None] | None, draws: int) -> None:
+    def check(
+        self, record_property: Callable[[str, object], None] | None, draws: int
+    ) -> None:
         v = self.verdict()
         if record_property is not None:
             record_property("dpre_in_fp32_gate", v)
-        assert v["draws"] == draws, f"{self.name}: gated on {v['draws']} of {draws} draws"
+        assert v["draws"] == draws, (
+            f"{self.name}: gated on {v['draws']} of {draws} draws"
+        )
         (om, ox), (fm, fx) = v["ours"], v["fp32"]
         assert om <= DPRE_IN_FACTOR * fm and ox <= DPRE_IN_FACTOR * fx, (
             f"{self.name}: relative L2 error median / largest {om:.3e} / {ox:.3e} exceeds {DPRE_IN_FACTOR} x "
@@ -332,14 +354,22 @@ def sublayer_forward_backward(
     (``dX``, ``dpre_in``, ``dfn``, ``dscale``, ``dbase``); ``outputs`` (caller buffers of those names) are passed as
     the ``out`` / ``pre_next_out`` / ``stats_out`` and gradient buffers."""
     o = dict(outputs or {})
-    fwd = {"out": o.get("U"), "pre_next_out": o.get("pre_next"), "stats_out": o.get("stats")}
+    fwd = {
+        "out": o.get("U"),
+        "pre_next_out": o.get("pre_next"),
+        "stats_out": o.get("stats"),
+    }
     U, pre_next, stats = api.handoff_forward_prepare(
         i["X"], i["pre_in"], i["fn"], i["scale"], i["base"], **CONSTANTS, workspace=fwd_ws,
         **{k: v for k, v in fwd.items() if v is not None},
     )  # fmt: skip
     Y = api.forward_finish(i["X"], i["B"], stats)
     dB, gstats = api.backward_prepare(i["dY"], i["B"], i["X"], stats)
-    bwd = {k: o[k] for k in ("dX", "dpre_in", "dfn", "dscale", "dbase") if o.get(k) is not None}
+    bwd = {
+        k: o[k]
+        for k in ("dX", "dpre_in", "dfn", "dscale", "dbase")
+        if o.get(k) is not None
+    }
     dX, dpre_in, dfn, dscale, dbase = api.handoff_backward_finish(
         i["X"], i["dY"], i["dU"], i["pre_in"], i["dpre_next"], i["B"], i["fn"], i["scale"], i["base"], stats, gstats,
         **CONSTANTS, workspace=bwd_ws, **bwd,
@@ -365,15 +395,21 @@ def nan_outputs(T: int, device: torch.device, hidden: int = HIDDEN) -> dict:
     }  # fmt: skip
 
 
-def autograd_sublayer(api: Api, i: Mapping, *, save_stats: bool = True, leaves: bool = True) -> dict:
+def autograd_sublayer(
+    api: Api, i: Mapping, *, save_stats: bool = True, leaves: bool = True
+) -> dict:
     """One handoff sublayer through the autograd entry points, ``U`` and ``B`` taken as given (the branch outside):
     ``handoff_prepare`` and ``finish``, then ``autograd.backward([U, Y, pre_next], [dU, dY, dpre_next])``: the
     forward outputs and the gradients of ``X``, ``pre_in``, ``fn``, ``scale``, ``base`` and ``B``."""
     X = i["X"].detach().clone().requires_grad_(True)
     pre_in = i["pre_in"].detach().clone().requires_grad_(True)
-    params = [i[k].detach().clone().requires_grad_(True) for k in ("fn", "scale", "base")]
+    params = [
+        i[k].detach().clone().requires_grad_(True) for k in ("fn", "scale", "base")
+    ]
     B = i["B"].detach().clone().requires_grad_(True)
-    U, pre_next, handle = api.handoff_prepare(X, pre_in, *params, save_stats=save_stats, **CONSTANTS)
+    U, pre_next, handle = api.handoff_prepare(
+        X, pre_in, *params, save_stats=save_stats, **CONSTANTS
+    )
     Y = api.finish(X, B, handle)
     torch.autograd.backward([U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]])
     return {
@@ -427,14 +463,20 @@ def chain_package(
 
     T = int(i["X"].shape[0])
     X0 = i["X"].detach().clone().requires_grad_(True)
-    params = [[p.detach().clone().requires_grad_(True) for p in ps] for ps in i["params"]]
+    params = [
+        [p.detach().clone().requires_grad_(True) for p in ps] for ps in i["params"]
+    ]
 
     def sublayer(X, pre_in, fn, scale, base, W):
         if mutation == "own_pre":
-            U, handle = api.prepare(X, fn, scale, base, save_stats=save_stats, **CONSTANTS)
+            U, handle = api.prepare(
+                X, fn, scale, base, save_stats=save_stats, **CONSTANTS
+            )
             pre_next = _torch_pre(X, fn, scale, base)
         else:
-            U, pre_next, handle = api.handoff_prepare(X, pre_in, fn, scale, base, save_stats=save_stats, **CONSTANTS)
+            U, pre_next, handle = api.handoff_prepare(
+                X, pre_in, fn, scale, base, save_stats=save_stats, **CONSTANTS
+            )
         Y = api.finish(X, torch.tanh(U @ W), handle)
         if mutation == "detached":
             pre_next = pre_next.detach()
@@ -450,7 +492,11 @@ def chain_package(
     X, pre_in = X0, one_hot(T, X0.device)
     pres = []
     for lo in range(0, len(params), region):
-        flat = [t for k in range(lo, min(lo + region, len(params))) for t in (*params[k], i["W"][k])]
+        flat = [
+            t
+            for k in range(lo, min(lo + region, len(params)))
+            for t in (*params[k], i["W"][k])
+        ]
         if checkpointed:
             X, pre_in = checkpoint(run, X, pre_in, *flat, use_reentrant=False)
         else:
@@ -475,6 +521,7 @@ def assert_equal(got: Mapping, want: Mapping, names: Sequence[str], label: str) 
     for k in names:
         a, b = got[k], want[k]
         assert a.dtype == b.dtype and a.shape == b.shape, (label, k)
-        assert torch.equal(a.view(torch.uint8) if a.numel() else a, b.view(torch.uint8) if b.numel() else b), (
-            f"{label}: {k} differs bitwise"
-        )
+        assert torch.equal(
+            a.view(torch.uint8) if a.numel() else a,
+            b.view(torch.uint8) if b.numel() else b,
+        ), f"{label}: {k} differs bitwise"

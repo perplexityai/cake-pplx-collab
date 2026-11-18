@@ -30,7 +30,6 @@ from __future__ import annotations
 
 import pytest
 import torch
-
 from tests.cake.test_helpers import cake_mhc_naive as naive
 
 F64, BF16 = torch.float64, torch.bfloat16
@@ -38,7 +37,9 @@ STREAMS, MAPPING_ROWS = 4, 24
 RMS_EPS, HC_EPS, ITERS = 1e-20, 1e-6, 20
 
 
-def _standard_block(X, fn, scale, base, B, dY, dU, *, dtype, rms_eps, hc_eps, iters) -> dict:
+def _standard_block(
+    X, fn, scale, base, B, dY, dU, *, dtype, rms_eps, hc_eps, iters
+) -> dict:
     """The standard block of the oracle as it stood before the pre handoff (verbatim op sequence)."""
     T, S, H = X.shape
     with torch.enable_grad():
@@ -57,7 +58,9 @@ def _standard_block(X, fn, scale, base, B, dY, dU, *, dtype, rms_eps, hc_eps, it
         post = 2 * torch.sigmoid(a_post)
         C = naive._sinkhorn(a_logit, hc_eps, iters)
         U_pre = (pre.unsqueeze(-1) * Xd).sum(dim=1)
-        Y_pre = post.unsqueeze(-1) * Bd.unsqueeze(1) + torch.einsum("tij,tid->tjd", C, Xd)
+        Y_pre = post.unsqueeze(-1) * Bd.unsqueeze(1) + torch.einsum(
+            "tij,tid->tjd", C, Xd
+        )
         dUd = dU.detach().to(dtype)
         dYd = dY.detach().to(dtype)
         dX, dfn, dscale, dbase, dB = torch.autograd.grad(
@@ -101,7 +104,10 @@ def _issue_reference(i: dict) -> dict:
     """The requester's FP64 reference of one pre-handoff sublayer (its reference script's ``coefficients``,
     ``collapse`` and ``combine`` at ``rms_eps`` 1e-20, ``hc_eps`` 1e-6, 20 iterations), with autograd of
     ``(U, Y, pre_next)`` for ``(dU, dY, dpre_next)`` with respect to ``X``, ``pre_in``, the parameters and ``B``."""
-    leaves = [i[k].double().requires_grad_(True) for k in ("X", "pre_in", "fn", "scale", "base", "B")]
+    leaves = [
+        i[k].double().requires_grad_(True)
+        for k in ("X", "pre_in", "fn", "scale", "base", "B")
+    ]
     X, pre_in, fn, scale, base, B = leaves
     u = X.flatten(1)
     r = torch.rsqrt(u.square().mean(-1, keepdim=True) + RMS_EPS)
@@ -115,16 +121,32 @@ def _issue_reference(i: dict) -> dict:
         C = C / (C.sum(-2, keepdim=True) + HC_EPS)
     U = (pre_in.unsqueeze(-1) * X).sum(1)
     Y = post.unsqueeze(-1) * B.unsqueeze(1) + torch.einsum("tij,tid->tjd", C, X)
-    grads = torch.autograd.grad((U, Y, pre), leaves, (i["dU"].double(), i["dY"].double(), i["dpre_next"].double()))
-    out = dict(zip(("dX", "dpre_in", "dfn", "dscale", "dbase", "dB"), grads, strict=True))
-    out.update(U=U.detach(), Y=Y.detach(), pre_next=pre.detach(), post=post.detach(), C=C.detach())
+    grads = torch.autograd.grad(
+        (U, Y, pre),
+        leaves,
+        (i["dU"].double(), i["dY"].double(), i["dpre_next"].double()),
+    )
+    out = dict(
+        zip(("dX", "dpre_in", "dfn", "dscale", "dbase", "dB"), grads, strict=True)
+    )
+    out.update(
+        U=U.detach(),
+        Y=Y.detach(),
+        pre_next=pre.detach(),
+        post=post.detach(),
+        C=C.detach(),
+    )
     return out
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("dtype", (F64, BF16), ids=("fp64", "bf16"))
-@pytest.mark.parametrize(("T", "H", "block_tokens"), ((3, 8, None), (7, 16, 3), (1, 64, None)))
-def test_default_oracle_is_the_standard_op_sequence(dtype, T: int, H: int, block_tokens) -> None:
+@pytest.mark.parametrize(
+    ("T", "H", "block_tokens"), ((3, 8, None), (7, 16, 3), (1, 64, None))
+)
+def test_default_oracle_is_the_standard_op_sequence(
+    dtype, T: int, H: int, block_tokens
+) -> None:
     """Without ``pre_in`` every output of the oracle equals the standard block's bit for bit (also over blocks)."""
     i = _inputs(T, H, seed=7 + T, handoff=False)
     got = naive.oracle(
@@ -186,10 +208,13 @@ def test_handoff_oracle_exact_cases(dtype) -> None:
     T, H = 4, 16
     i = _inputs(T, H, seed=31)
     zeros = {k: torch.zeros_like(i[k]) for k in ("dpre_next", "dU", "dY")}
+
     def run(**kw):
         return naive.case_oracle({**i, **kw}, dtype=dtype)
 
-    omitted = naive.case_oracle({k: v for k, v in i.items() if k != "dpre_next"}, dtype=dtype)
+    omitted = naive.case_oracle(
+        {k: v for k, v in i.items() if k != "dpre_next"}, dtype=dtype
+    )
     zero_next = run(dpre_next=zeros["dpre_next"])
     for name in naive.HANDOFF_OUTPUTS:
         assert torch.equal(omitted[name], zero_next[name]), name
@@ -197,9 +222,14 @@ def test_handoff_oracle_exact_cases(dtype) -> None:
     assert torch.count_nonzero(no_dU["dpre_in"]) == 0
     assert torch.count_nonzero(no_dU["dX"]) > 0
     only_next = run(dU=zeros["dU"], dY=zeros["dY"])
-    assert all(torch.count_nonzero(only_next[k]) > 0 for k in ("dfn", "dscale", "dbase", "dX"))
+    assert all(
+        torch.count_nonzero(only_next[k]) > 0 for k in ("dfn", "dscale", "dbase", "dX")
+    )
     # dpre_next reaches the pre lanes only: rows 0..3 of dfn and dbase, entry 0 of dscale
-    assert torch.count_nonzero(only_next["dfn"][4:]) == 0 and torch.count_nonzero(only_next["dbase"][4:]) == 0
+    assert (
+        torch.count_nonzero(only_next["dfn"][4:]) == 0
+        and torch.count_nonzero(only_next["dbase"][4:]) == 0
+    )
     assert torch.count_nonzero(only_next["dscale"][1:]) == 0
     nothing = run(dU=zeros["dU"], dY=zeros["dY"], dpre_next=zeros["dpre_next"])
     for name in ("dX", "dpre_in", "dfn", "dscale", "dbase"):
@@ -207,4 +237,6 @@ def test_handoff_oracle_exact_cases(dtype) -> None:
     one_hot = torch.zeros(T, STREAMS)
     one_hot[:, 0] = 1.0
     hot = run(pre_in=one_hot)
-    assert torch.equal(hot["U"].to(BF16), i["X"][:, 0]), "a one-hot pre_in collapses to stream 0"
+    assert torch.equal(hot["U"].to(BF16), i["X"][:, 0]), (
+        "a one-hot pre_in collapses to stream 0"
+    )

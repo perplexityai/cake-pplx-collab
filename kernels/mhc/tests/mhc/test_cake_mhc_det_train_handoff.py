@@ -35,8 +35,6 @@ import warnings
 
 import pytest
 import torch
-from torch.utils.checkpoint import checkpoint
-
 from tests.cake.test_helpers.cake_mhc_handoff import (
     CONSTANTS,
     HIDDEN,
@@ -56,9 +54,14 @@ from tests.cake.test_helpers.cake_mhc_handoff import (
     nan_outputs,
     sublayer_forward_backward,
 )
-from tests.cake.test_helpers.cake_mhc_naive import expected_and_naive, judge_draws, package_outputs
+from tests.cake.test_helpers.cake_mhc_naive import (
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import DRAWS
+from torch.utils.checkpoint import checkpoint
 
 KEY = "cake.cake_mhc_det_train"
 pkg = cake_package(KEY)
@@ -80,11 +83,14 @@ def _device() -> torch.device:
 
 
 def _supported() -> bool:
-    return torch.cuda.is_available() and pkg.is_cake_mhc_det_train_handoff_supported(_device(), HIDDEN)
+    return torch.cuda.is_available() and pkg.is_cake_mhc_det_train_handoff_supported(
+        _device(), HIDDEN
+    )
 
 
 pytestmark = pytest.mark.skipif(
-    not _supported(), reason="the pre handoff of cake_mhc_det_train needs an SM100 / SM103 device (hidden 5120)"
+    not _supported(),
+    reason="the pre handoff of cake_mhc_det_train needs an SM100 / SM103 device (hidden 5120)",
 )
 
 
@@ -97,7 +103,9 @@ def warmup_jit():
 
 
 def _arch() -> str:
-    return loader.arch_for_capability(tuple(torch.cuda.get_device_capability(_device())))
+    return loader.arch_for_capability(
+        tuple(torch.cuda.get_device_capability(_device()))
+    )
 
 
 def _sm_count() -> int:
@@ -107,7 +115,9 @@ def _sm_count() -> int:
 def _poison(fwd_ws: torch.Tensor, bwd_ws: torch.Tensor, T: int) -> None:
     """Every region of both workspaces but the ticket words set to 0xFF."""
     for kind, ws in (("fwd", fwd_ws), ("bwd", bwd_ws)):
-        layout = loader.workspace_layout(kind, T, device_index=_device().index, hidden=HIDDEN)
+        layout = loader.workspace_layout(
+            kind, T, device_index=_device().index, hidden=HIDDEN
+        )
         for name, region in layout["regions"].items():
             if name != "ticket":
                 ws[region["offset"] : region["offset"] + region["bytes"]].fill_(0xFF)
@@ -141,17 +151,26 @@ class _Strict:
 
 
 def _snapshot(out: dict) -> dict:
-    return {k: v.detach().clone() for k, v in out.items() if isinstance(v, torch.Tensor)}
+    return {
+        k: v.detach().clone() for k, v in out.items() if isinstance(v, torch.Tensor)
+    }
 
 
 def _assert_pre_next(res: dict, label: str) -> None:
     """``pre_next`` is the statistics record's ``pre`` (the coefficient pass's FP32 value), bit for bit."""
     lo, hi = PRE_COLUMNS
-    assert res["pre_next"].dtype == F32 and tuple(res["pre_next"].shape) == (res["stats"].shape[0], STREAMS), label
-    assert torch.equal(res["pre_next"], res["stats"][:, lo:hi]), f"{label}: pre_next is not the statistics' pre"
+    assert res["pre_next"].dtype == F32 and tuple(res["pre_next"].shape) == (
+        res["stats"].shape[0],
+        STREAMS,
+    ), label
+    assert torch.equal(res["pre_next"], res["stats"][:, lo:hi]), (
+        f"{label}: pre_next is not the statistics' pre"
+    )
 
 
-def _judge_sublayer(make, record_property, *, seed: int, launches: int = 2, check=None, prefix: str = "") -> None:
+def _judge_sublayer(
+    make, record_property, *, seed: int, launches: int = 2, check=None, prefix: str = ""
+) -> None:
     """One sublayer per draw through the low-level entry points (``make(s)``: the draw's inputs), ``launches``
     launches: even ones on the default workspaces with fresh outputs, odd ones on poisoned caller workspaces with
     NaN-filled caller outputs, every launch bit for bit the first.  Every output of :data:`SUBLAYER_OUTPUTS` is judged
@@ -168,11 +187,20 @@ def _judge_sublayer(make, record_property, *, seed: int, launches: int = 2, chec
             kwargs = {}
             if launch % 2:
                 _poison(fwd_ws, bwd_ws, T)
-                kwargs = {"fwd_ws": fwd_ws, "bwd_ws": bwd_ws, "outputs": nan_outputs(T, _device())}
+                kwargs = {
+                    "fwd_ws": fwd_ws,
+                    "bwd_ws": bwd_ws,
+                    "outputs": nan_outputs(T, _device()),
+                }
             res = sublayer_forward_backward(api, i, **kwargs)
             _assert_pre_next(res, f"{prefix}T={T} launch {launch}")
             outs.append(_snapshot(package_outputs(res)))
-            assert_equal(outs[-1], outs[0], tuple(outs[0]), f"{prefix}T={T} launch {launch} vs launch 0")
+            assert_equal(
+                outs[-1],
+                outs[0],
+                tuple(outs[0]),
+                f"{prefix}T={T} launch {launch} vs launch 0",
+            )
         expected, naive = expected_and_naive(i, SUBLAYER_OUTPUTS)
         for out in outs:
             gate.add(j, out["dpre_in"], i["X"], i["dU"], expected["dpre_in"])
@@ -193,7 +221,11 @@ def test_handoff_matches_fp64(T: int, record_property) -> None:
     """One handoff sublayer at ``T`` tokens: ``U``, ``Y``, ``dB``, ``dX``, the statistics, the gradient statistics,
     the parameter gradients, ``pre_next`` and ``dpre_in`` judged against the naive BF16 tier over 32 inputs (default
     and poisoned caller workspaces); ``dpre_in`` within 2 x the IEEE-FP32 evaluation's error."""
-    _judge_sublayer(lambda s: make_inputs(T, device=_device(), seed=s), record_property, seed=SEED + T)
+    _judge_sublayer(
+        lambda s: make_inputs(T, device=_device(), seed=s),
+        record_property,
+        seed=SEED + T,
+    )
 
 
 @pytest.mark.parametrize("T", T_COLLAPSE)
@@ -206,7 +238,9 @@ def test_collapse_matches_fp64(T: int, record_property) -> None:
     def case(j: int, s: int):
         i = make_inputs(T, device=_device(), seed=s)
         U = pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"])
-        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
+        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(
+            i["X"], i["pre_in"], i["dU"]
+        )
         low = {"U": U, "dX": dX, "dpre_in": dpre_in}
         X = i["X"].clone().requires_grad_(True)
         pre_in = i["pre_in"].clone().requires_grad_(True)
@@ -214,7 +248,11 @@ def test_collapse_matches_fp64(T: int, record_property) -> None:
         Ua.backward(i["dU"])
         auto = {"U": Ua.detach(), "dX": X.grad, "dpre_in": pre_in.grad}
         for out in (low, auto):
-            assert out["U"].dtype == BF16 and out["dX"].dtype == BF16 and out["dpre_in"].dtype == F32
+            assert (
+                out["U"].dtype == BF16
+                and out["dX"].dtype == BF16
+                and out["dpre_in"].dtype == F32
+            )
         expected, naive = collapse_expected_and_naive(i)
         for out in (low, auto):
             gate.add(j, out["dpre_in"], i["X"], i["dU"], expected["dpre_in"])
@@ -231,7 +269,9 @@ def test_collapse_matches_fp64(T: int, record_property) -> None:
 @pytest.mark.parametrize("T", (7, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("checkpointed", (False, True))
-def test_two_sublayer_handoff_chain_matches_fp64(T: int, save_stats: bool, checkpointed: bool, record_property) -> None:
+def test_two_sublayer_handoff_chain_matches_fp64(
+    T: int, save_stats: bool, checkpointed: bool, record_property
+) -> None:
     """Two sublayers with distinct parameters and branches ``tanh(U W)``, from the one-hot start through the
     standalone final collapse, an asymmetric upstream gradient ``G`` on the final ``U``: the final ``U``, both
     ``pre_next`` and the gradients of ``X0`` and of both sublayers' parameters judged against the FP64 chain (the BF16
@@ -266,7 +306,9 @@ def test_two_sublayer_chain_rejects_mutations(mutation: str) -> None:
     with pytest.raises(AssertionError) as caught:
         judge_draws(case, None, seed=SEED + 400)
     moved = "U_final" if mutation == "own_pre" else "dfn1"
-    assert f"{moved}: misses the naive tier" in str(caught.value), str(caught.value)[:2000]
+    assert f"{moved}: misses the naive tier" in str(caught.value), str(caught.value)[
+        :2000
+    ]
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -285,7 +327,11 @@ def _assert_pre_lanes_zero(out: dict, label: str) -> None:
 def test_handoff_zero_dY_with_dpre_next(T: int, record_property) -> None:
     """``dY = 0`` with a non-zero ``dpre_next``: every output judged against the naive tier over 32 inputs (``dB``,
     ``dpost`` and ``dC`` are zero in the oracle: the tier's zero rule holds them to exact zeros)."""
-    _judge_sublayer(lambda s: make_inputs(T, device=_device(), seed=s, dY="zero"), record_property, seed=SEED + 500)
+    _judge_sublayer(
+        lambda s: make_inputs(T, device=_device(), seed=s, dY="zero"),
+        record_property,
+        seed=SEED + 500,
+    )
 
 
 @pytest.mark.parametrize("T", (257, 2049))
@@ -299,10 +345,14 @@ def test_handoff_zero_dpre_next_with_dY(T: int, record_property) -> None:
             _assert_pre_lanes_zero(out, f"launch {n}")
         X = i["X"].clone().requires_grad_(True)
         params = [i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")]
-        U, _pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(X, i["pre_in"], *params, **CONSTANTS)
+        U, _pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(
+            X, i["pre_in"], *params, **CONSTANTS
+        )
         Y = pkg.cake_mhc_det_train_finish(X, i["B"], handle)
         torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
-        _assert_pre_lanes_zero(dict(zip(_PARAMETER, (p.grad for p in params), strict=True)), "autograd")
+        _assert_pre_lanes_zero(
+            dict(zip(_PARAMETER, (p.grad for p in params), strict=True)), "autograd"
+        )
 
     _judge_sublayer(
         lambda s: make_inputs(T, device=_device(), seed=s, dpre_next="zero"),
@@ -320,9 +370,14 @@ def test_one_hot_pre_in_collapses_to_stream_0(T: int, record_property) -> None:
     def check(i, outs, expected):
         for out in outs:
             assert torch.equal(out["U"], i["X"][:, 0, :]), "sublayer U is not stream 0"
-        assert torch.equal(pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"]), i["X"][:, 0, :])
+        assert torch.equal(
+            pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"]),
+            i["X"][:, 0, :],
+        )
         X = i["X"].clone().requires_grad_(True)
-        U, _pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(X, i["pre_in"], i["fn"], i["scale"], i["base"])
+        U, _pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(
+            X, i["pre_in"], i["fn"], i["scale"], i["base"]
+        )
         assert torch.equal(U, i["X"][:, 0, :]), "autograd U is not stream 0"
         del handle
 
@@ -341,13 +396,22 @@ def test_zero_dU_gives_zero_dpre_in(T: int, record_property) -> None:
 
     def check(i, outs, expected):
         for out in outs:
-            assert torch.count_nonzero(out["dpre_in"]) == 0, "dpre_in is not exactly zero"
+            assert torch.count_nonzero(out["dpre_in"]) == 0, (
+                "dpre_in is not exactly zero"
+            )
             assert torch.count_nonzero(out["dX"]) > 0, "dX is zero"
-        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
-        assert torch.count_nonzero(dX) == 0 and torch.count_nonzero(dpre_in) == 0, "standalone VJP at dU = 0"
+        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(
+            i["X"], i["pre_in"], i["dU"]
+        )
+        assert torch.count_nonzero(dX) == 0 and torch.count_nonzero(dpre_in) == 0, (
+            "standalone VJP at dU = 0"
+        )
 
     _judge_sublayer(
-        lambda s: make_inputs(T, device=_device(), seed=s, dU="zero"), record_property, seed=SEED + 800, check=check
+        lambda s: make_inputs(T, device=_device(), seed=s, dU="zero"),
+        record_property,
+        seed=SEED + 800,
+        check=check,
     )
 
 
@@ -357,7 +421,9 @@ CANCEL_FACTOR = 2.0**-6
 
 @pytest.mark.parametrize("T", (257, 2049))
 @pytest.mark.parametrize("dY", ("zero", "random"))
-def test_single_cast_cancellation_driven_by_dpre_next(T: int, dY: str, record_property) -> None:
+def test_single_cast_cancellation_driven_by_dpre_next(
+    T: int, dY: str, record_property
+) -> None:
     """``dU := BF16(-dX_0 / pre_in_0)`` (``dX_0``: the FP64 ``dX`` of stream 0 at ``dU = 0``, its coefficient term
     driven by ``dpre_next``): the collapse term of stream 0 cancels the others, the inputs put elements of ``dX`` inside
     the cancellation band, and every output is judged against the naive tier over 32 inputs (one rounding of ``dX``)."""
@@ -369,7 +435,9 @@ def test_single_cast_cancellation_driven_by_dpre_next(T: int, dY: str, record_pr
         mapping = total - collapse - mix
         assert bool(mapping.abs().max() > 0), "the coefficient term is zero"
         biggest = torch.maximum(torch.maximum(collapse.abs(), mix.abs()), mapping.abs())
-        assert int((total.abs() <= CANCEL_FACTOR * biggest).sum()) > 0, "no element inside the cancellation band"
+        assert int((total.abs() <= CANCEL_FACTOR * biggest).sum()) > 0, (
+            "no element inside the cancellation band"
+        )
 
     _judge_sublayer(
         lambda s: make_inputs(T, device=_device(), seed=s, mode="cancel", dY=dY),
@@ -382,7 +450,11 @@ def test_single_cast_cancellation_driven_by_dpre_next(T: int, dY: str, record_pr
 def _assert_tail_lanes(out: dict, expected: dict, lanes: int, label: str) -> None:
     """The saturated lanes ``0 .. lanes - 1`` of ``dbase``, the matching entries of ``dscale`` and rows of ``dfn`` are
     finite and non-zero where the FP64 tail gradient is non-zero."""
-    groups = {"dbase": out["dbase"][:lanes], "dscale": out["dscale"][: lanes // 4], "dfn": out["dfn"][:lanes]}
+    groups = {
+        "dbase": out["dbase"][:lanes],
+        "dscale": out["dscale"][: lanes // 4],
+        "dfn": out["dfn"][:lanes],
+    }
     want = {
         "dbase": expected["dbase"][:lanes],
         "dscale": expected["dscale"][: lanes // 4],
@@ -393,13 +465,17 @@ def _assert_tail_lanes(out: dict, expected: dict, lanes: int, label: str) -> Non
         assert (want[name] != 0).all(), (
             f"{label} {name}: the FP64 tail gradient is zero; the case does not test the tail"
         )
-        nonzero = (value != 0).all() if value.ndim == 1 else (value != 0).any(dim=1).all()
+        nonzero = (
+            (value != 0).all() if value.ndim == 1 else (value != 0).any(dim=1).all()
+        )
         assert nonzero, f"{label} {name}: a tail gradient is zero"
 
 
 @pytest.mark.parametrize("T", (257, 2049))
 @pytest.mark.parametrize("dY", ("random", "zero"))
-def test_saturated_pre_tails_through_dpre_next(T: int, dY: str, record_property) -> None:
+def test_saturated_pre_tails_through_dpre_next(
+    T: int, dY: str, record_property
+) -> None:
     """``base[:8] = 20`` (saturated ``pre`` / ``post`` sigmoids) with ``dpre_next ~ N``: the tail gradients of the
     ``pre`` lanes (and, with ``dY``, the ``post`` lanes) are finite and non-zero through the low-level and the autograd
     entry points, and every output is judged against the naive tier over 32 inputs."""
@@ -423,7 +499,9 @@ def test_zero_row_of_x_takes_the_eps_path(record_property) -> None:
     """A zero row of ``X`` at ``rms_eps`` 1e-20 (``r = 1e10``): every output judged against the naive tier over 32
     inputs."""
     _judge_sublayer(
-        lambda s: make_inputs(7, device=_device(), seed=s, zero_rows=(3,)), record_property, seed=SEED + 1100
+        lambda s: make_inputs(7, device=_device(), seed=s, zero_rows=(3,)),
+        record_property,
+        seed=SEED + 1100,
     )
 
 
@@ -439,7 +517,9 @@ def test_handoff_zero_tokens_launch_nothing() -> None:
     with _Strict():
         res = sublayer_forward_backward(api, i)
         U = pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"])
-        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
+        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(
+            i["X"], i["pre_in"], i["dU"]
+        )
         auto = autograd_sublayer(api, i)
     shapes = {
         "U": (0, HIDDEN),
@@ -453,7 +533,11 @@ def test_handoff_zero_tokens_launch_nothing() -> None:
     for k in _PARAMETER:
         assert torch.equal(res[k], torch.zeros_like(res[k])), k
         assert torch.equal(auto[k], torch.zeros_like(auto[k])), k
-    assert tuple(U.shape) == (0, HIDDEN) and tuple(dX.shape) == (0, STREAMS, HIDDEN) and tuple(dpre_in.shape) == (0, 4)
+    assert (
+        tuple(U.shape) == (0, HIDDEN)
+        and tuple(dX.shape) == (0, STREAMS, HIDDEN)
+        and tuple(dpre_in.shape) == (0, 4)
+    )
     buffers = {
         "dfn": torch.full((MAPPING_ROWS, STREAMS * HIDDEN), 3.0, device=_device()),
         "dscale": torch.full((3,), 5.0, device=_device()),
@@ -464,7 +548,9 @@ def test_handoff_zero_tokens_launch_nothing() -> None:
         res["stats"], res["gstats"], **CONSTANTS, accumulate=True, **buffers,
     )  # fmt: skip
     for k, got in zip(_PARAMETER, out[2:], strict=True):
-        assert got is buffers[k] and bool((got == {"dfn": 3.0, "dscale": 5.0, "dbase": 7.0}[k]).all()), k
+        assert got is buffers[k] and bool(
+            (got == {"dfn": 3.0, "dscale": 5.0, "dbase": 7.0}[k]).all()
+        ), k
 
 
 def test_handoff_changing_rows_does_not_rebuild(record_property, monkeypatch) -> None:
@@ -502,12 +588,20 @@ def test_handoff_changing_rows_does_not_rebuild(record_property, monkeypatch) ->
         for kind in kinds
         for name in loader.selected_modules(arch, HIDDEN, kind, rows=T, sm_count=sm)
     }
-    assert set(loaded) <= selected, f"modules outside the routes' records: {sorted(set(loaded) - selected)}"
+    assert set(loaded) <= selected, (
+        f"modules outside the routes' records: {sorted(set(loaded) - selected)}"
+    )
     before = (load.cache_info().misses, nd_loader.load.cache_info().misses)
-    assert before[1] == nd_loaded, "a handoff call loaded a module of the nondeterministic package"
+    assert before[1] == nd_loaded, (
+        "a handoff call loaded a module of the nondeterministic package"
+    )
     for T in reversed(counts):
-        sublayer_forward_backward(api, make_inputs(T, device=_device(), seed=SEED + 5 + T))
-    assert (load.cache_info().misses, nd_loader.load.cache_info().misses) == before, "a call rebuilt a module"
+        sublayer_forward_backward(
+            api, make_inputs(T, device=_device(), seed=SEED + 5 + T)
+        )
+    assert (load.cache_info().misses, nd_loader.load.cache_info().misses) == before, (
+        "a call rebuilt a module"
+    )
 
 
 def test_handoff_policy_strict_runs_every_entry_point(record_property) -> None:
@@ -520,7 +614,9 @@ def test_handoff_policy_strict_runs_every_entry_point(record_property) -> None:
             res = _snapshot(package_outputs(sublayer_forward_backward(api, i)))
             auto = {k: v for k, v in autograd_sublayer(api, i).items() if k != "dB"}
             U = pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"])
-            dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
+            dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(
+                i["X"], i["pre_in"], i["dU"]
+            )
         assert U.dtype == BF16 and dX.dtype == BF16 and dpre_in.dtype == F32
         expected, naive = expected_and_naive(i, SUBLAYER_OUTPUTS)
         return [res, auto], expected, naive
@@ -535,7 +631,9 @@ def test_handoff_policy_strict_runs_every_entry_point(record_property) -> None:
 @pytest.mark.parametrize("T", (7, 2049))
 @pytest.mark.parametrize("save_stats", (True, False))
 @pytest.mark.parametrize("checkpointed", (False, True))
-def test_handoff_autograd_matches_fp64(T: int, save_stats: bool, checkpointed: bool, record_property) -> None:
+def test_handoff_autograd_matches_fp64(
+    T: int, save_stats: bool, checkpointed: bool, record_property
+) -> None:
     """``handoff_prepare`` / ``finish`` with the branch outside (``U`` and ``B`` taken as given), plain or in a
     non-reentrant checkpoint returning ``(U, Y, pre_next)``: ``U``, ``Y``, ``pre_next`` and the gradients of ``X``,
     ``pre_in``, the parameters and ``B`` (as ``dB``) judged against the naive tier over 32 inputs."""
@@ -545,7 +643,9 @@ def test_handoff_autograd_matches_fp64(T: int, save_stats: bool, checkpointed: b
         if checkpointed:
             X = i["X"].clone().requires_grad_(True)
             pre_in = i["pre_in"].clone().requires_grad_(True)
-            params = [i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")]
+            params = [
+                i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")
+            ]
             B = i["B"].clone().requires_grad_(True)
 
             def region(X, pre_in, fn, scale, base, B):
@@ -554,8 +654,12 @@ def test_handoff_autograd_matches_fp64(T: int, save_stats: bool, checkpointed: b
                 )
                 return U, pkg.cake_mhc_det_train_finish(X, B, handle), pre_next
 
-            U, Y, pre_next = checkpoint(region, X, pre_in, *params, B, use_reentrant=False)
-            torch.autograd.backward([U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]])
+            U, Y, pre_next = checkpoint(
+                region, X, pre_in, *params, B, use_reentrant=False
+            )
+            torch.autograd.backward(
+                [U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]]
+            )
             out = {
                 "U": U.detach(), "Y": Y.detach(), "pre_next": pre_next.detach(), "dX": X.grad, "dpre_in": pre_in.grad,
                 "dfn": params[0].grad, "dscale": params[1].grad, "dbase": params[2].grad, "dB": B.grad,
@@ -580,7 +684,9 @@ def test_autograd_normalizes_the_incoming_gradients(record_property) -> None:
         X = i["X"].clone().requires_grad_(True)
         pre_in = i["pre_in"].clone().requires_grad_(True)
         params = [i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")]
-        U, pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(X, pre_in, *params, **CONSTANTS)
+        U, pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(
+            X, pre_in, *params, **CONSTANTS
+        )
         Y = pkg.cake_mhc_det_train_finish(X, i["B"], handle)
         loss = U.float().sum() + pre_next.sum() + (Y.float() * i["dY"].float()).sum()
         loss.backward()
@@ -609,8 +715,13 @@ def _assert_same_bits(got: list, want: list, label: str) -> None:
     """Two runs of this package: the same bits."""
     assert len(got) == len(want), label
     for index, (g, w) in enumerate(zip(got, want, strict=True)):
-        assert g is not None and g.dtype == w.dtype and g.shape == w.shape, (label, index)
-        assert torch.equal(g.view(torch.uint8), w.view(torch.uint8)), f"{label} grad {index}: bits differ"
+        assert g is not None and g.dtype == w.dtype and g.shape == w.shape, (
+            label,
+            index,
+        )
+        assert torch.equal(g.view(torch.uint8), w.view(torch.uint8)), (
+            f"{label} grad {index}: bits differ"
+        )
 
 
 @pytest.mark.parametrize("T", (129, 2049))
@@ -627,12 +738,20 @@ def test_checkpoint_across_pre_next(T: int, save_stats: bool, record_property) -
         i = chain_inputs(T, device=_device(), seed=s, sublayers=4)
         plain = chain_package(api, i, save_stats=save_stats, region=2)
         ckpt = chain_package(api, i, save_stats=save_stats, checkpointed=True, region=2)
-        assert torch.equal(ckpt["U_final"], plain["U_final"]), "the final U differs from the plain run"
+        assert torch.equal(ckpt["U_final"], plain["U_final"]), (
+            "the final U differs from the plain run"
+        )
         for a, b in zip(ckpt["pres"], plain["pres"], strict=True):
             assert torch.equal(a, b), "a crossing pre_next differs from the plain run"
-        _assert_same_bits([ckpt[k] for k in names[1:]], [plain[k] for k in names[1:]], f"T={T}")
+        _assert_same_bits(
+            [ckpt[k] for k in names[1:]], [plain[k] for k in names[1:]], f"T={T}"
+        )
         expected, naive = chain_expected_and_naive(i)
-        return [{k: plain[k] for k in names}, {k: ckpt[k] for k in names}], expected, naive
+        return (
+            [{k: plain[k] for k in names}, {k: ckpt[k] for k in names}],
+            expected,
+            naive,
+        )
 
     judge_draws(case, record_property, seed=SEED + 1600 + T)
 
@@ -650,7 +769,9 @@ def test_checkpointed_layer_keeps_only_its_outputs(T: int) -> None:
     def layer(X, pre_in, *flat):
         for k in range(0, len(flat), 4):
             fn, scale, base, W = flat[k : k + 4]
-            U, pre_in, handle = pkg.cake_mhc_det_train_handoff_prepare(X, pre_in, fn, scale, base, **CONSTANTS)
+            U, pre_in, handle = pkg.cake_mhc_det_train_handoff_prepare(
+                X, pre_in, fn, scale, base, **CONSTANTS
+            )
             X = pkg.cake_mhc_det_train_finish(X, torch.tanh(U @ W), handle)
         return X, pre_in
 
@@ -658,14 +779,21 @@ def test_checkpointed_layer_keeps_only_its_outputs(T: int) -> None:
     before = _live_bytes()
     Y, pre_next = checkpoint(layer, X0, pre0, *flat, use_reentrant=False)
     if before is not None:
-        kept = _live_bytes() - before - Y.untyped_storage().nbytes() - pre_next.untyped_storage().nbytes()
+        kept = (
+            _live_bytes()
+            - before
+            - Y.untyped_storage().nbytes()
+            - pre_next.untyped_storage().nbytes()
+        )
         assert kept == 0, f"{kept} bytes kept alive after a checkpointed layer"
     pkg.cake_mhc_det_train_collapse(Y, pre_next).backward(i["G"])
     assert torch.isfinite(X0.grad).all()
 
 
 @pytest.mark.parametrize("T", (16384, 65536))
-def test_handoff_workspace_and_retained_bytes_per_token(T: int, record_property) -> None:
+def test_handoff_workspace_and_retained_bytes_per_token(
+    T: int, record_property
+) -> None:
     """Per token (``record_property("handoff_bytes_per_token", ...)``): the forward / backward workspace bytes of the
     handoff routes (equal to the standard routes'), and the bytes a sublayer keeps alive after its forward beyond its
     outputs under ``save_stats`` True / False (equal to the standard connection's: ``pre_in`` is saved as an alias of
@@ -676,8 +804,12 @@ def test_handoff_workspace_and_retained_bytes_per_token(T: int, record_property)
     i = make_inputs(T, device=_device(), seed=SEED + 77)
     report: dict[str, float] = {}
     for kind, name in (("fwd", "forward"), ("bwd", "backward")):
-        nbytes = getattr(pkg, f"cake_mhc_det_train_{name}_workspace_bytes")(T, _device(), hidden=HIDDEN)
-        handoff = loader.workspace_kind(f"{'fwd_prepare' if kind == 'fwd' else 'bwd_finish'}_handoff")
+        nbytes = getattr(pkg, f"cake_mhc_det_train_{name}_workspace_bytes")(
+            T, _device(), hidden=HIDDEN
+        )
+        handoff = loader.workspace_kind(
+            f"{'fwd_prepare' if kind == 'fwd' else 'bwd_finish'}_handoff"
+        )
         assert handoff == kind, (kind, handoff)
         report[f"{kind}_workspace"] = nbytes / T
     for save_stats in (True, False):
@@ -685,11 +817,15 @@ def test_handoff_workspace_and_retained_bytes_per_token(T: int, record_property)
         for route in ("standard", "handoff"):
             X = i["X"].clone().requires_grad_(True)
             pre_in = i["pre_in"].clone().requires_grad_(True)
-            params = [i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")]
+            params = [
+                i[k].clone().requires_grad_(True) for k in ("fn", "scale", "base")
+            ]
             B = i["B"].clone().requires_grad_(True)
             before = _live_bytes()
             if route == "standard":
-                U, handle = pkg.cake_mhc_det_train_prepare(X, *params, save_stats=save_stats, **CONSTANTS)
+                U, handle = pkg.cake_mhc_det_train_prepare(
+                    X, *params, save_stats=save_stats, **CONSTANTS
+                )
                 outputs = [U]
             else:
                 U, pre_next, handle = pkg.cake_mhc_det_train_handoff_prepare(
@@ -697,7 +833,11 @@ def test_handoff_workspace_and_retained_bytes_per_token(T: int, record_property)
                 )
                 outputs = [U, pre_next]
             Y = pkg.cake_mhc_det_train_finish(X, B, handle)
-            kept[route] = _live_bytes() - before - sum(t.untyped_storage().nbytes() for t in (*outputs, Y))
+            kept[route] = (
+                _live_bytes()
+                - before
+                - sum(t.untyped_storage().nbytes() for t in (*outputs, Y))
+            )
             del U, Y, handle, outputs
         assert kept["handoff"] == kept["standard"], (save_stats, kept)
         report[f"retained_save_stats_{save_stats}"] = kept["handoff"] / T
@@ -708,10 +848,14 @@ def test_handoff_workspace_and_retained_bytes_per_token(T: int, record_property)
     base_bytes = _live_bytes() - before
     U = pkg.cake_mhc_det_train_collapse(X, pre_in)
     collapse_kept = _live_bytes() - before - base_bytes - U.untyped_storage().nbytes()
-    assert collapse_kept == 0, f"the standalone collapse keeps {collapse_kept} bytes beyond U"
+    assert collapse_kept == 0, (
+        f"the standalone collapse keeps {collapse_kept} bytes beyond U"
+    )
     report["collapse_retained_beyond_inputs"] = 0.0
     report["collapse_saved_aliases_X_pre_in"] = STREAMS * HIDDEN * 2 + STREAMS * 4
-    record_property("handoff_bytes_per_token", {k: round(float(v), 3) for k, v in report.items()})
+    record_property(
+        "handoff_bytes_per_token", {k: round(float(v), 3) for k, v in report.items()}
+    )
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -730,17 +874,27 @@ def test_handoff_outputs_are_deterministic(T: int) -> None:
         _poison(fwd_ws, bwd_ws, T)
         direct.append(
             _snapshot(
-                sublayer_forward_backward(api, i, fwd_ws=fwd_ws, bwd_ws=bwd_ws, outputs=nan_outputs(T, _device()))
+                sublayer_forward_backward(
+                    api,
+                    i,
+                    fwd_ws=fwd_ws,
+                    bwd_ws=bwd_ws,
+                    outputs=nan_outputs(T, _device()),
+                )
             )
         )
         for save_stats in (True, False):
             auto.append(_snapshot(autograd_sublayer(api, i, save_stats=save_stats)))
         U = pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"])
-        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
+        dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(
+            i["X"], i["pre_in"], i["dU"]
+        )
         collapse.append({"U": U, "dX": dX, "dpre_in": dpre_in})
     for n in range(1, 3):
         assert_equal(direct[n], direct[0], tuple(direct[0]), f"direct run {n}")
-        assert_equal(collapse[n], collapse[0], ("U", "dX", "dpre_in"), f"collapse run {n}")
+        assert_equal(
+            collapse[n], collapse[0], ("U", "dX", "dpre_in"), f"collapse run {n}"
+        )
     for n in range(1, len(auto)):
         assert_equal(auto[n], auto[0], tuple(auto[0]), f"autograd run {n}")
     shared = ("U", "Y", "pre_next", "dX", "dpre_in", "dfn", "dscale", "dbase")
@@ -765,9 +919,21 @@ def test_captured_handoff_replays_the_eager_bits() -> None:
     for seed in (SEED + 5, SEED + 6):
         new = make_inputs(T, device=_device(), seed=seed)
         with torch.no_grad():
-            for k in ("X", "fn", "scale", "base", "B", "dY", "dU", "pre_in", "dpre_next"):
+            for k in (
+                "X",
+                "fn",
+                "scale",
+                "base",
+                "B",
+                "dY",
+                "dU",
+                "pre_in",
+                "dpre_next",
+            ):
                 statics[k].copy_(new[k])
         graph.replay()
         torch.cuda.synchronize()
         eager = sublayer_forward_backward(api, new)
-        assert_equal(_snapshot(out), _snapshot(eager), tuple(eager), f"replay seed {seed}")
+        assert_equal(
+            _snapshot(out), _snapshot(eager), tuple(eager), f"replay seed {seed}"
+        )

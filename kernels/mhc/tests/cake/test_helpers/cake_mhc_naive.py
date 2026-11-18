@@ -96,7 +96,20 @@ def _sinkhorn(logits: torch.Tensor, hc_eps: float, iters: int) -> torch.Tensor:
 
 
 def _block(
-    X, fn, scale, base, B, dY, dU, *, dtype, rms_eps, hc_eps, iters, pre_in=None, dpre_next=None
+    X,
+    fn,
+    scale,
+    base,
+    B,
+    dY,
+    dU,
+    *,
+    dtype,
+    rms_eps,
+    hc_eps,
+    iters,
+    pre_in=None,
+    dpre_next=None,
 ) -> dict:
     """One row block of the function in ``dtype``: the forward, then the backward by autograd (the pre handoff with
     ``pre_in``; its gradient ``dpre_next``, ``None`` for zeros)."""
@@ -131,9 +144,15 @@ def _block(
                 [U_pre, Y_pre], [Xd, fnd, scaled, based, Bd], grad_outputs=[dUd, dYd]
             )
         else:
-            dpn = torch.zeros_like(pre) if dpre_next is None else dpre_next.detach().to(dtype)
+            dpn = (
+                torch.zeros_like(pre)
+                if dpre_next is None
+                else dpre_next.detach().to(dtype)
+            )
             dX, dfn, dscale, dbase, dB, dpin = torch.autograd.grad(
-                [U_pre, Y_pre, pre], [Xd, fnd, scaled, based, Bd, pind], grad_outputs=[dUd, dYd, dpn]
+                [U_pre, Y_pre, pre],
+                [Xd, fnd, scaled, based, Bd, pind],
+                grad_outputs=[dUd, dYd, dpn],
             )
     with torch.no_grad():
         Xd, Bd = Xd.detach(), Bd.detach()
@@ -350,7 +369,9 @@ def judge_package(
         launches = [package_outputs(res) for res in results]
         wanted = tuple(names) if names is not None else tuple(launches[0])
         launches = [{k: launch[k] for k in wanted} for launch in launches]
-        expected, naive = expected_and_naive(i, HANDOFF_OUTPUTS if "pre_in" in i else OUTPUTS, iters=iters)
+        expected, naive = expected_and_naive(
+            i, HANDOFF_OUTPUTS if "pre_in" in i else OUTPUTS, iters=iters
+        )
         if check is not None:
             check(i, results, expected)
         return launches, {k: expected[k] for k in wanted}, {k: naive[k] for k in wanted}

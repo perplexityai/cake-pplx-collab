@@ -2077,7 +2077,9 @@ def _backward_finish(
 # alone (the final collapse before the model's head).
 
 
-def _require_pre(tensor: Any, name: str, rows: int, device: torch.device) -> torch.Tensor:
+def _require_pre(
+    tensor: Any, name: str, rows: int, device: torch.device
+) -> torch.Tensor:
     return _validate_tensor(
         tensor, name, shape=(rows, STREAMS), device=device, dtype=_F32
     )
@@ -2161,7 +2163,9 @@ def cake_mhc_nondet_train_handoff_forward_prepare(
             )
         ):
             U = _empty((rows, hidden), _BF16, X) if out is None else out
-            pre_next = _empty(pre_shape, _F32, X) if pre_next_out is None else pre_next_out
+            pre_next = (
+                _empty(pre_shape, _F32, X) if pre_next_out is None else pre_next_out
+            )
             stats = (
                 _empty((rows, STATS_COLS), _F32, X) if stats_out is None else stats_out
             )
@@ -2557,7 +2561,9 @@ def cake_mhc_nondet_train_collapse_forward(
         ):
             U = _empty((rows, hidden), _BF16, X) if out is None else out
             _launch_route(
-                _fast_route(arch, "collapse_forward", rows, hidden, index, _PATH_FORWARD),
+                _fast_route(
+                    arch, "collapse_forward", rows, hidden, index, _PATH_FORWARD
+                ),
                 (X, pre_in, U),
                 index,
             )
@@ -2628,7 +2634,9 @@ def cake_mhc_nondet_train_collapse_backward(
             if dpre_in is None:
                 dpre_in = _empty(pre_shape, _F32, X)
             _launch_route(
-                _fast_route(arch, "collapse_backward", rows, hidden, index, _PATH_BACKWARD),
+                _fast_route(
+                    arch, "collapse_backward", rows, hidden, index, _PATH_BACKWARD
+                ),
                 (X, pre_in, dU, dX, dpre_in),
                 index,
             )
@@ -2650,7 +2658,14 @@ def cake_mhc_nondet_train_collapse_backward(
     _run_route(
         arch,
         "collapse_backward",
-        {"x": X, "pre_in": pre_in, "du": dU, "dx": dX, "dpre_in": dpre_in, "rows": rows},
+        {
+            "x": X,
+            "pre_in": pre_in,
+            "du": dU,
+            "dx": dX,
+            "dpre_in": dpre_in,
+            "rows": rows,
+        },
         rows=rows,
         hidden=hidden,
         device=device,
@@ -3081,7 +3096,9 @@ class CakeMHCNondetCollapseFunction(torch.autograd.Function):
         dX, dpre_in = cake_mhc_nondet_train_collapse_backward(
             X,
             pre_in,
-            _as_operand(dU, shape=(X.shape[0], X.shape[2]), dtype=_BF16, device=X.device),
+            _as_operand(
+                dU, shape=(X.shape[0], X.shape[2]), dtype=_BF16, device=X.device
+            ),
         )
         return (
             dX if ctx.needs_input_grad[0] else None,
@@ -3233,7 +3250,9 @@ def cake_mhc_nondet_train_handoff_prepare(
     return U, pre_next, _MHCTrainHandle(state, out[2:] if state.recorded else ())
 
 
-def cake_mhc_nondet_train_collapse(X: torch.Tensor, pre_in: torch.Tensor) -> torch.Tensor:
+def cake_mhc_nondet_train_collapse(
+    X: torch.Tensor, pre_in: torch.Tensor
+) -> torch.Tensor:
     """Autograd-enabled standalone collapse: ``U = BF16(sum_i pre_in_i X_i)`` (:class:`CakeMHCNondetCollapseFunction`);
     its backward is :func:`cake_mhc_nondet_train_collapse_backward`."""
 

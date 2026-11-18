@@ -50,7 +50,11 @@ from tests.cake.test_helpers.cake_mhc_handoff import (
     make_inputs,
     sublayer_forward_backward,
 )
-from tests.cake.test_helpers.cake_mhc_naive import expected_and_naive, judge_draws, package_outputs
+from tests.cake.test_helpers.cake_mhc_naive import (
+    expected_and_naive,
+    judge_draws,
+    package_outputs,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 
 KEY = "cake.cake_mhc_nondet_train"
@@ -66,11 +70,14 @@ def _device() -> torch.device:
 
 
 def _supported() -> bool:
-    return torch.cuda.is_available() and pkg.is_cake_mhc_nondet_train_handoff_supported(_device(), HIDDEN)
+    return torch.cuda.is_available() and pkg.is_cake_mhc_nondet_train_handoff_supported(
+        _device(), HIDDEN
+    )
 
 
 pytestmark = pytest.mark.skipif(
-    not _supported(), reason="the pre handoff of cake_mhc_nondet_train needs an SM100 / SM103 device (hidden 5120)"
+    not _supported(),
+    reason="the pre handoff of cake_mhc_nondet_train needs an SM100 / SM103 device (hidden 5120)",
 )
 
 
@@ -109,7 +116,18 @@ def _copier(statics: dict):
     return load
 
 
-def _replay_judged(graph, out: dict, load, make, expect, record_property, *, seed: int, before=None, after=None):
+def _replay_judged(
+    graph,
+    out: dict,
+    load,
+    make,
+    expect,
+    record_property,
+    *,
+    seed: int,
+    before=None,
+    after=None,
+):
     """Replays of ``graph`` on 32 inputs (``make(s)``, copied into the static inputs by ``load``), each judged by
     ``expect(i, got)`` -> ``(expected, naive)``; ``before()`` / ``after(j)`` run around each replay."""
 
@@ -144,14 +162,23 @@ def test_captured_handoff_sublayer(T: int, workspace: str, record_property) -> N
     statics = make_inputs(T, device=_device(), seed=SEED)
     fwd_ws = bwd_ws = None
     if workspace == "caller":
-        fwd_ws = pkg.cake_mhc_nondet_train_forward_workspace(T, _device(), hidden=HIDDEN)
-        bwd_ws = pkg.cake_mhc_nondet_train_backward_workspace(T, _device(), hidden=HIDDEN)
+        fwd_ws = pkg.cake_mhc_nondet_train_forward_workspace(
+            T, _device(), hidden=HIDDEN
+        )
+        bwd_ws = pkg.cake_mhc_nondet_train_backward_workspace(
+            T, _device(), hidden=HIDDEN
+        )
 
     def step():
-        return package_outputs(sublayer_forward_backward(api, statics, fwd_ws=fwd_ws, bwd_ws=bwd_ws))
+        return package_outputs(
+            sublayer_forward_backward(api, statics, fwd_ws=fwd_ws, bwd_ws=bwd_ws)
+        )
 
     graph, out = _capture(step)
-    tensors = {k: statics[k] for k in ("X", "fn", "scale", "base", "B", "dY", "dU", "pre_in", "dpre_next")}
+    tensors = {
+        k: statics[k]
+        for k in ("X", "fn", "scale", "base", "B", "dY", "dU", "pre_in", "dpre_next")
+    }
 
     def before():
         if bwd_ws is not None:
@@ -159,7 +186,9 @@ def test_captured_handoff_sublayer(T: int, workspace: str, record_property) -> N
 
     def after(j: int):
         if bwd_ws is not None:
-            assert int(torch.count_nonzero(bwd_ws[:ZERO_PREFIX_BYTES])) == 0, f"replay {j}: zero prefix not zero"
+            assert int(torch.count_nonzero(bwd_ws[:ZERO_PREFIX_BYTES])) == 0, (
+                f"replay {j}: zero prefix not zero"
+            )
 
     _replay_judged(
         graph,
@@ -195,7 +224,9 @@ def test_captured_autograd_handoff_sublayer(save_stats: bool, record_property) -
             save_stats=save_stats, **CONSTANTS,
         )  # fmt: skip
         Y = pkg.cake_mhc_nondet_train_finish(leaves["X"], leaves["B"], handle)
-        torch.autograd.backward([U, Y, pre_next], [statics["dU"], statics["dY"], statics["dpre_next"]])
+        torch.autograd.backward(
+            [U, Y, pre_next], [statics["dU"], statics["dY"], statics["dpre_next"]]
+        )
         return {
             "U": U.detach(), "Y": Y.detach(), "pre_next": pre_next.detach(), "dX": leaves["X"].grad,
             "dpre_in": leaves["pre_in"].grad, "dfn": leaves["fn"].grad, "dscale": leaves["scale"].grad,
@@ -203,7 +234,11 @@ def test_captured_autograd_handoff_sublayer(save_stats: bool, record_property) -
         }  # fmt: skip
 
     graph, out = _capture(step, tuple(leaves.values()))
-    tensors = {k: (v.detach() if k in leaves else v) for k, v in statics.items() if isinstance(v, torch.Tensor)}
+    tensors = {
+        k: (v.detach() if k in leaves else v)
+        for k, v in statics.items()
+        if isinstance(v, torch.Tensor)
+    }
     _replay_judged(
         graph,
         out,
@@ -257,7 +292,9 @@ def test_captured_standalone_collapse(record_property) -> None:
 
     def step():
         U = pkg.cake_mhc_nondet_train_collapse_forward(statics["X"], statics["pre_in"])
-        dX, dpre_in = pkg.cake_mhc_nondet_train_collapse_backward(statics["X"], statics["pre_in"], statics["dU"])
+        dX, dpre_in = pkg.cake_mhc_nondet_train_collapse_backward(
+            statics["X"], statics["pre_in"], statics["dU"]
+        )
         return {"U": U, "dX": dX, "dpre_in": dpre_in}
 
     graph, out = _capture(step)
