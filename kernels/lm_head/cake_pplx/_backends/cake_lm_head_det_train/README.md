@@ -93,8 +93,9 @@ keyword.
   BF16 `dz` and its bits.  The fold is the change of version 0.3.0: on the
   shapes checked for it (the production head, H 6144, V 154880, at `T` from 1
   to 8193, the loss and log-probability entries) `loss`, `logp`, `lse` and
-  `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The call
-  holds `rlab` beside `lse` (4 bytes a row of the chunk loop).
+  `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The
+  candidate-support entries fold nothing.  The call holds `rlab` beside `lse`
+  (4 bytes a row of the chunk loop).
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every
@@ -880,7 +881,7 @@ previous mode; `zero_weight_loss_mode()` reads it):
 | `logp`, `lse` of every row (`Z` rows from the logp-only pass) | identical (the same per-row logits and row-statistics arithmetic) |
 | `loss`, mode `"exact"` | identical, non-finite values in `Z` rows included (their term is `+-0` either way) |
 | `loss`, mode `"regroup"` | the same FP32 sum over other chunk boundaries: may differ in the last FP32 bits |
-| `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X`, logits or `infer_logp` is not finite) |
+| `dX` row of a `Z` row | exact `+0` (the plain path: `+-0`, or NaN through `0 * inf` when the row's `X` or logits are not finite) |
 | `dX` row of a `G` row | identical when its chunk runs the same dX form and K-slice count in both calls; otherwise both are judged against the naive tier |
 | `dW` | the same products, summed over the split's chunk rows (the K reduction groups differ): both are judged against the naive tier; a `Z` row with a non-finite `X` row or logit no longer makes it NaN |
 

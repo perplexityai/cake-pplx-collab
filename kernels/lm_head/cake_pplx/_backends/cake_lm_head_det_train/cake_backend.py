@@ -153,10 +153,11 @@ Contract
   its K reduction over the split's chunk rows (both are judged against the naive tier, see the package README, Tests;
   run to run bitwise).  A zero-weight row is
   treated like an ignored row for the gradients: a non-finite value in its ``X`` row, its logits or its
-  ``infer_logp`` does not reach ``dX`` / ``dW`` (the plain path gives NaN there through ``0 * inf``; its loss term is
-  ``+-0`` either way).  Not applied (the plain path runs): ``compact_rows=False``, ``objective="ce"``, the
-  log-probability entry, the prepared runner (:func:`prepare_lm_head_det_loss`) and a caller-given
-  ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits the rows as here).
+  ``infer_logp`` does not reach ``dX`` / ``dW`` (the plain path gives NaN there through ``0 * inf`` when the row's
+  ``X`` or logits are not finite; its loss term is ``+-0`` either way).  Not applied (the plain path runs):
+  ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
+  (:func:`prepare_lm_head_det_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form
+  splits the rows as here).
 * Temperature (log-probability entry, ``temperature`` / ``check_temperature``;
   :func:`_resolve_temperature`): a positive scalar or a per-token FP32 ``[T]``
   ``tau``, not differentiable.  ``logp_t = z_y / tau_t - logsumexp_v(z_v /

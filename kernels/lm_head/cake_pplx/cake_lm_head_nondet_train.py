@@ -25,13 +25,16 @@ may differ from the deterministic module's by the rounding of that sum
 (``loss``, ``logp`` and ``dW`` keep their fixed order).  The module makes no
 run-to-run bit-equality promise for any output; the deterministic module makes
 it.  Both modules leave zero-weight policy rows out of the gradient path and
-skip the GEMM work of log-probability rows with a zero ``dlogp``.  This module
-adds no loss term for a zero-weight row (the deterministic module's default
-``"exact"`` loss mode keeps the loss bits of the call without the split), and
-its zero-``dlogp`` skip starts at 1946 valid rows on ``sm_107a`` (the
-deterministic module's at 4097), so ``loss`` and ``dW`` bits may differ from
-the deterministic module's (both are judged against the naive tier; see the
-backend README, Tests).  By default a
+skip the GEMM work of log-probability rows with a zero ``dlogp``.  The
+deterministic module splits off those rows only when its memory rule allows
+it, and it does not skip in its opt-in forms or in a default call whose
+automatic form is a budget form (this module has no automatic form).  This
+module adds no loss term for a zero-weight row (the deterministic module's
+default ``"exact"`` loss mode keeps the loss bits of the call without the
+split), and its zero-``dlogp`` skip starts at 1946 valid rows on ``sm_107a``
+(the deterministic module's at 4097).  So ``loss`` and ``dW`` bits may differ
+from the deterministic module's (both are judged against the naive tier; see
+the backend README, Tests).  By default a
 one-row cross-entropy loss call at ``H = 6144`` (BF16 contiguous ``W``, one
 chunk, compacted rows, no explicit ``gemm_tuning``, a registered program; the
 conditions of ``cake_backend.set_one_pass_rows``) runs the backend's one-pass
@@ -165,8 +168,7 @@ def cake_lm_head_nondet_train_loss(
     for the computation, the arguments, the switches and their
     ``CAKE_PPLX_LM_HEAD_LOSS_*`` fallbacks, ``memory_mode``,
     ``num_valid_rows`` and the outputs, except as the module docstring notes
-    (the dX reduction, the loss of a call with zero-weight rows and the
-    one-pass call).
+    (the dX reduction, a call with zero-weight rows and the one-pass call).
 
     Notes
     -----
@@ -289,8 +291,7 @@ def cake_lm_head_nondet_train_logprob(
     See :func:`cake_pplx.cake_lm_head_det_train.cake_lm_head_det_train_logprob`
     for the computation and the arguments (``memory_mode="keep_logits"``,
     ``temperature`` and ``check_temperature`` included), except as the module
-    docstring notes (the dX reduction and the zero-gradient row skip's
-    ``sm_107a`` floor).
+    docstring notes (the dX reduction and the zero-gradient row skip).
     The backward sums the K slices of a sliced dX GEMM in slice order and
     stores the sum into the FP32 ``dX`` accumulator (``logp`` keeps its fixed
     order); torch's deterministic mode raises PyTorch's alert before that
