@@ -951,7 +951,7 @@ out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.
 
 **Caveats.**
 
-- State kept for the backward: the inputs only. Workspace of a backward call: FP32 `[4, 5120]` rows of 80 KiB each, for the weight product, FP32 copies of BF16 weights, and the weight-gradient partial rows (det: one per cluster of the backward grid; nondet: one accumulator). A forward allocates the weight product and, for a BF16 `q_weight`, its FP32 copy.
+- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each (det: one per cluster of the backward grid; nondet: one accumulator). The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward allocates the weight product and, for a BF16 `q_weight`, its FP32 copy.
 - The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - `X`, `dOut` and `dX` must be contiguous. Output rows must not overlap.
 - No double backward.

@@ -119,9 +119,9 @@ nearly cancel: 17802 of the 8.19 million output elements of the near-cancelling 
 - Retained for the backward (autograd): the inputs only. The backward recomputes the norms and the dot product; no
   statistics are saved.
 - Forward workspace: the FP32 weight product (80 KiB), plus an FP32 copy of a BF16 `q_weight` (80 KiB).
-- Backward workspace: the weight product, FP32 copies of BF16 weights (80 KiB each) and one FP32 `[4, 5120]`
-  weight-gradient accumulator (80 KiB, zeroed per call);
-  `cake_engram_gate_nondet_train_workspace_bytes(T, device)`.
+- Backward workspace: one FP32 `[4, 5120]` weight-gradient accumulator (80 KiB, zeroed per call);
+  `cake_engram_gate_nondet_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32 weights as
+  stored and write the autograd weight gradients in each parameter's dtype.
 
 ## Determinism
 

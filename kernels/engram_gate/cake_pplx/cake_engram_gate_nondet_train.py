@@ -81,8 +81,8 @@ synchronization; the calls are CUDA-graph capturable after one eager call
 
 Memory: the state kept for the backward is the inputs alone (the backward
 recomputes the norms and the dot product).  A backward call allocates FP32
-``[4, 5120]`` rows beside its outputs (the weight product, FP32 copies of BF16
-weights and the weight-gradient partial sums):
+``[4, 5120]`` rows of weight-gradient partial sums beside its outputs and
+reads the weights as stored:
 :func:`cake_engram_gate_nondet_train_workspace_bytes`.
 
 Usage::
@@ -384,10 +384,10 @@ def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.de
 
     Returns
     -------
-    With BF16 weights: 80 KiB (``4 * 5120`` FP32) for each of the weight product, the two FP32 weight copies and
-    the ``[4, 5120]`` FP32 weight-gradient accumulator;
-    contiguous FP32 weights need no copies (160 KiB less).  0 for ``T == 0``.  A forward call allocates the weight
-    product (and an FP32 copy of a BF16 ``q_weight``) only, and the state kept for the backward is the inputs alone.
+    80 KiB (``4 * 5120`` FP32), the ``[4, 5120]`` FP32 weight-gradient accumulator; 0 for ``T == 0``.  The backward
+    reads BF16 and FP32 weights as stored (a weight that is not contiguous or not 16-byte aligned is copied first).  A
+    forward call allocates the weight product (and an FP32 copy of a BF16 ``q_weight``) only, and the state kept for
+    the backward is the inputs alone.
 
     Notes
     -----

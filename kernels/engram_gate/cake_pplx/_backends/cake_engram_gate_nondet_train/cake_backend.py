@@ -34,12 +34,17 @@ and each BF16 output rounded once, at its store::
     gate = sigmoid(copysign(sqrt(max(|dot|, clamp_value)), dot))   (0 on a masked token)
     out[t, s] = bf16(h + gate v)
 
-The host forms ``w`` (FP32 ``[4, 5120]``, one rounding of the FP32 product).
-One forward call launches ``fwd``.  One backward call launches ``bwd``, which
-recomputes ``r_h``, ``r_k`` and ``P`` from the inputs (the forward keeps
-nothing beyond its inputs), writes ``dx``, ``dkey`` and ``dvalue`` and the FP32
-weight-gradient partial sums ``dw = sum_t c h k``, then ``dw_reduce``, which
-writes ``dq_weight = dw * k_weight`` and ``dk_weight = dw * q_weight`` in FP32.
+One forward call forms ``w`` on the host (FP32 ``[4, 5120]``, one rounding of
+the FP32 product) and launches ``fwd``.  One backward call clears its
+accumulator, then launches ``bwd`` and ``dw_reduce``, back to back.  Both read
+``q_weight`` and ``k_weight`` as stored, BF16 or FP32, as the 32-bit words of
+each (:func:`_words`) with a mode word (:func:`_wmode`).  ``bwd`` forms the
+same FP32 product ``w`` once per CTA, recomputes ``r_h``, ``r_k`` and ``P``
+from the inputs (the forward keeps nothing beyond its inputs) and writes
+``dx``, ``dkey`` and ``dvalue`` and the FP32 weight-gradient partial sums
+``dw = sum_t c h k``.  ``dw_reduce`` writes ``dq_weight = dw * k_weight`` and
+``dk_weight = dw * q_weight``: in FP32 for the explicit backward, in each
+parameter's dtype (rounded once, as ``.to(dtype)`` rounds) for autograd.
 ``key`` and ``value`` (and ``dkey`` and ``dvalue``) may be views into one packed
 ``[T, 25600]`` buffer: the kernels read their token strides.  A masked token
 (``token_mask[t]`` False) gives ``out[t] = x[t]`` and ``dx[t] = dout[t]``
@@ -79,7 +84,6 @@ import functools
 import inspect
 import math
 import warnings
-from collections.abc import Mapping
 from typing import Any, Optional, Union
 
 import torch
@@ -136,7 +140,7 @@ _STRIDE_ELEMENTS = 8
 _ALIGNMENT = 16
 # The kernels take the token count as a 32-bit integer (token offsets are 64-bit).
 _MAX_TOKENS = 2**31 - 1
-# Bytes of one FP32 [4, 5120] row (the weight product, a weight copy, a partial row).
+# Bytes of one FP32 [4, 5120] row (the forward's weight product, a partial row of the backward).
 _ROW_BYTES = STREAMS * HIDDEN * 4
 
 # This package's module prefix (the vendored name of a vendored copy).
@@ -264,30 +268,48 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
-def _launch(name: str, stage: str, values: Mapping[str, Any], grid: tuple[int, int, int], device: torch.device) -> None:
-    """Launch record ``name`` of ``stage`` with its kernel parameters named in ``values`` on ``grid``.  tvm-ffi runs
-    the call on the current torch stream of the device of its first CUDA tensor argument (every buffer is on
-    ``device``), and the binding makes that device current for the launch."""
+# The kernel parameters each stage's launcher passes, in order (then the grid): every record of a stage takes these.
+_STAGE_PARAMETERS: dict[str, tuple[str, ...]] = {
+    "fwd": ("x", "key", "value", "w", "mask", "out", "T", "eps", "clamp"),
+    "bwd": (
+        "dout",
+        "x",
+        "key",
+        "value",
+        "q_weight",
+        "k_weight",
+        "mask",
+        "dx",
+        "dkey",
+        "dvalue",
+        "dw_acc",
+        "T",
+        "eps",
+        "clamp",
+        "wmode",
+    ),
+    "dw_reduce": ("dw_part", "q_weight", "k_weight", "dq", "dk", "NP", "wmode"),
+}
+
+
+@functools.cache
+def _plan(name: str, stage: str) -> None:
+    """Check, once per record, that record ``name`` serves ``stage`` and that its argument plan takes the parameters
+    :data:`_STAGE_PARAMETERS` lists for the stage, in that order: the launchers pass their arguments by position."""
     found = record(name)
     if found["stage"] != stage:
         raise ValueError(f"record {name} serves stage {found['stage']}, not {stage}")
-    args = []
-    for key in parameters(name):
-        try:
-            args.append(values[key])
-        except KeyError:
-            raise ValueError(f"record {name} needs argument {key!r}") from None
-    _entry(name, device_arch(device.index))(*args, int(grid[0]), int(grid[1]), int(grid[2]))
+    if parameters(name) != _STAGE_PARAMETERS[stage]:
+        passed = list(_STAGE_PARAMETERS[stage])
+        raise ValueError(f"record {name} takes {list(parameters(name))}; the {stage} launcher passes {passed}")
 
 
-def _mask_values(name: str, mask: Optional[torch.Tensor], device: torch.device) -> dict[str, Any]:
-    """The mask arguments of record ``name``: the mask (``None`` when absent: a nullable pointer) and, for a kernel
-    that takes ``has_mask``, the flag and a one-byte stand-in for an absent mask (never read)."""
-    if "has_mask" not in parameters(name):
-        return {"mask": mask}
-    if mask is None:
-        return {"mask": torch.empty(1, dtype=torch.bool, device=device), "has_mask": 0}
-    return {"mask": mask, "has_mask": 1}
+def _run(name: str, stage: str, device: torch.device, args: tuple[Any, ...]) -> None:
+    """Launch record ``name`` of ``stage`` with its kernel parameters ``args`` in plan order, then the grid.  tvm-ffi
+    runs the call on the current torch stream of the device of its first CUDA tensor argument (every buffer is on
+    ``device``), and the binding makes that device current for the launch."""
+    _plan(name, stage)
+    _entry(name, device_arch(device.index))(*args)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -312,19 +334,9 @@ def launch_fwd(
     ``out = bf16(x + gate * value)`` from ``x`` (BF16 ``[T, 4, 5120]``, contiguous), ``key`` (BF16 ``[T, 4, 5120]``,
     token stride a multiple of 8), ``value`` (BF16 ``[T, 5120]``, same), ``w`` (FP32 ``[4, 5120]``, the weight
     product) and ``mask`` (bool ``[T]`` or None)."""
-    T = int(x.shape[0])
-    values = {
-        "x": x,
-        "key": key,
-        "value": value,
-        "w": w,
-        "out": out,
-        "T": T,
-        "eps": float(eps),
-        "clamp": float(clamp_value),
-        **_mask_values(name, mask, x.device),
-    }
-    _launch(name, "fwd", values, (cake_jit.CLUSTER_CTAS * int(clusters), 1, 1), x.device)
+    grid = cake_jit.CLUSTER_CTAS * int(clusters)
+    args = (x, key, value, w, mask, out, int(x.shape[0]), float(eps), float(clamp_value), grid, 1, 1)
+    _run(name, "fwd", x.device, args)
 
 
 def launch_bwd(
@@ -334,7 +346,9 @@ def launch_bwd(
     x: torch.Tensor,
     key: torch.Tensor,
     value: torch.Tensor,
-    w: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    wmode: int,
     mask: Optional[torch.Tensor],
     dx: torch.Tensor,
     dkey: torch.Tensor,
@@ -347,40 +361,29 @@ def launch_bwd(
     """Launch the backward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters:
     ``dx`` (BF16 ``[T, 4, 5120]``, contiguous), ``dkey`` and ``dvalue`` (BF16, laid out as ``key`` and ``value``)
     and the FP32 ``[1, 4, 5120]`` accumulator ``dw`` (zeroed by the caller), into which each cluster adds its sum of
-    ``c h k`` over its tokens."""
-    T = int(x.shape[0])
-    values = {
-        "dout": dout,
-        "x": x,
-        "key": key,
-        "value": value,
-        "w": w,
-        "dx": dx,
-        "dkey": dkey,
-        "dvalue": dvalue,
-        "dw_acc": dw,
-        "T": T,
-        "eps": float(eps),
-        "clamp": float(clamp_value),
-        **_mask_values(name, mask, x.device),
-    }
-    _launch(name, "bwd", values, (cake_jit.CLUSTER_CTAS * int(clusters), 1, 1), x.device)
+    ``c h k`` over its tokens.  ``q_weight`` and ``k_weight`` are the weights' 32-bit words (:func:`_words`) and
+    ``wmode`` their mode (:func:`_wmode`)."""
+    grid = cake_jit.CLUSTER_CTAS * int(clusters)
+    args = (dout, x, key, value, q_weight, k_weight, mask, dx, dkey, dvalue, dw)
+    _run(name, "bwd", x.device, (*args, int(x.shape[0]), float(eps), float(clamp_value), int(wmode), grid, 1, 1))
 
 
 def launch_dw_reduce(
     name: str,
     *,
     dw: torch.Tensor,
-    qw: torch.Tensor,
-    kw: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
     dq: torch.Tensor,
     dk: torch.Tensor,
+    wmode: int,
 ) -> None:
-    """Launch the finalize record ``name``: ``dq = (sum_p dw[p]) * kw`` and ``dk = (sum_p dw[p]) * qw``, FP32
-    ``[4, 5120]``, from the ``NP`` partial rows ``dw`` (FP32 ``[NP, 4, 5120]``) summed in one fixed order; ``qw`` and
-    ``kw`` are the FP32 weights (contiguous)."""
-    values = {"dw_part": dw, "qw": qw, "kw": kw, "dq": dq, "dk": dk, "NP": int(dw.shape[0])}
-    _launch(name, "dw_reduce", values, cake_jit.dw_reduce_grid(), dw.device)
+    """Launch the finalize record ``name``: ``dq = (sum_p dw[p]) * k_weight`` and ``dk = (sum_p dw[p]) * q_weight``,
+    ``[4, 5120]``, from the ``NP`` partial rows ``dw`` (FP32 ``[NP, 4, 5120]``) summed in one fixed order.
+    ``q_weight``, ``k_weight``, ``dq`` and ``dk`` are 32-bit words (:func:`_words`): ``wmode`` bits 0 and 1 say which
+    weight is BF16 (:func:`_wmode`), bits 2 and 3 whether ``dq`` and ``dk`` are BF16 (each rounded once) or FP32."""
+    args = (dw, q_weight, k_weight, dq, dk, int(dw.shape[0]), int(wmode), *cake_jit.dw_reduce_grid())
+    _run(name, "dw_reduce", dw.device, args)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -593,26 +596,36 @@ def _mask(token_mask: Optional[torch.Tensor]) -> Optional[torch.Tensor]:
     return None if token_mask is None else token_mask.contiguous()
 
 
-def _param_grad(grad: torch.Tensor, param: torch.Tensor) -> torch.Tensor:
-    """An FP32 weight gradient in its parameter's dtype."""
-    return grad if param.dtype == torch.float32 else grad.to(param.dtype)
+def _words(t: torch.Tensor) -> torch.Tensor:
+    """The 32-bit words the backward kernels read of ``t``, a BF16 or FP32 ``[4, 5120]`` weight or weight gradient: an
+    ``int32`` view (``[4, 2560]`` for BF16, two columns a word; ``[4, 5120]`` for FP32) of ``t`` itself when it is
+    contiguous and 16-byte aligned, of a copy otherwise."""
+    t = t.detach().contiguous()
+    if t.data_ptr() % _ALIGNMENT:
+        t = t.clone()
+    return t.view(torch.int32)
+
+
+def _wmode(q: torch.dtype, k: torch.dtype, dq: torch.dtype = torch.float32, dk: torch.dtype = torch.float32) -> int:
+    """The kernels' mode word: bit 0 ``q_weight`` is BF16, bit 1 ``k_weight``, bit 2 ``dq_weight``, bit 3
+    ``dk_weight`` (each FP32 otherwise)."""
+    bf16 = torch.bfloat16
+    return int(q == bf16) | int(k == bf16) << 1 | int(dq == bf16) << 2 | int(dk == bf16) << 3
 
 
 def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.device, int, str, None] = None) -> int:
     """Bytes of device memory one backward call over ``T`` tokens on ``device`` (None: the current CUDA device)
-    allocates beside its operands and outputs, with BF16 weights: the FP32 weight product, the two FP32 weight copies
-    (none for contiguous FP32 weights) and the
-    ``[4, 5120]`` FP32 weight-gradient accumulator,
-    80 KiB each row (0 for ``T == 0``).  A forward call allocates the weight product (and an FP32 copy of a BF16
-    ``q_weight``) only; the state kept for the backward is the inputs alone.  The backward, and so its workspace, is
-    the same for either ``dot_sum`` of the forward."""
+    allocates beside its operands and outputs: the ``[4, 5120]`` FP32 weight-gradient accumulator, 80 KiB (0 for
+    ``T == 0``), and a copy of a weight that is not contiguous or not 16-byte aligned (none otherwise: the kernels
+    read the weights in place, in their dtypes).  A forward call allocates the weight product (and an FP32 copy of a
+    BF16 ``q_weight``) only; the state kept for the backward is the inputs alone.  The backward, and so its
+    workspace, is the same for either ``dot_sum`` of the forward."""
     T = int(T)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
     if T == 0:
         return 0
-    parts = 1
-    return _ROW_BYTES * (3 + parts)
+    return _ROW_BYTES
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -675,6 +688,7 @@ def _backward(
     dvalue: Optional[torch.Tensor],
     api: str,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The explicit backward: every operand checked, FP32 weight gradients."""
     T, eps_f, clamp_f = _check_operands(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value)
     device = x.device
     dout = _tensor("dout", dout)
@@ -683,16 +697,43 @@ def _backward(
     for name, t, kind in (("dx", dx, "contiguous"), ("dkey", dkey, "strided"), ("dvalue", dvalue, "value")):
         if t is not None:
             _check_output(name, t, T, device, kind)
+    fp32 = torch.float32
+    return _launch_backward(
+        dout, x, key, value, q_weight, k_weight, token_mask, T, eps_f, clamp_f, dx, dkey, dvalue, api, fp32, fp32
+    )
+
+
+def _launch_backward(
+    dout: torch.Tensor,
+    x: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    token_mask: Optional[torch.Tensor],
+    T: int,
+    eps: float,
+    clamp_value: float,
+    dx: Optional[torch.Tensor],
+    dkey: Optional[torch.Tensor],
+    dvalue: Optional[torch.Tensor],
+    api: str,
+    dq_dtype: torch.dtype,
+    dk_dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward of checked operands over ``T`` tokens: ``(dx, dkey, dvalue, dq_weight, dk_weight)``, the weight
+    gradients in ``dq_dtype`` and ``dk_dtype`` (FP32 or BF16).  Every buffer is allocated and both argument tuples are
+    built before the first launch, so the launches go out back to back."""
+    device = x.device
     if T == 0:
         # No token: nothing to launch and nothing to alert; zero weight gradients.
         empty = functools.partial(torch.empty, dtype=torch.bfloat16, device=device)
-        dq = torch.zeros((STREAMS, HIDDEN), dtype=torch.float32, device=device)
         return (
             empty((0, STREAMS, HIDDEN)) if dx is None else dx,
             empty((0, STREAMS, HIDDEN)) if dkey is None else dkey,
             empty((0, HIDDEN)) if dvalue is None else dvalue,
-            dq,
-            torch.zeros_like(dq),
+            torch.zeros((STREAMS, HIDDEN), dtype=dq_dtype, device=device),
+            torch.zeros((STREAMS, HIDDEN), dtype=dk_dtype, device=device),
         )
     index = device.index
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES, before the alert
@@ -703,32 +744,22 @@ def _backward(
         dkey = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
     if dvalue is None:
         dvalue = torch.empty((T, HIDDEN), dtype=torch.bfloat16, device=device)
-    qw32, kw32 = _fp32(q_weight), _fp32(k_weight)
-    w = qw32 * kw32
     # One backward for either forward sum: it recomputes P as a compensated dot product.
     name = cake_jit.record("bwd", "dot2")
     clusters = cake_jit.clusters(name, T, arch, sm_count(index))
-    # The accumulator the clusters add into.
-    dw = torch.zeros((1, STREAMS, HIDDEN), dtype=torch.float32, device=device)
-    launch_bwd(
-        name,
-        dout=dout,
-        x=x,
-        key=key,
-        value=value,
-        w=w,
-        mask=_mask(token_mask),
-        dx=dx,
-        dkey=dkey,
-        dvalue=dvalue,
-        dw=dw,
-        eps=eps_f,
-        clamp_value=clamp_f,
-        clusters=clusters,
-    )
-    dq = torch.empty((STREAMS, HIDDEN), dtype=torch.float32, device=device)
-    dk = torch.empty((STREAMS, HIDDEN), dtype=torch.float32, device=device)
-    launch_dw_reduce(cake_jit.record("dw_reduce"), dw=dw, qw=qw32, kw=kw32, dq=dq, dk=dk)
+    # The accumulator the clusters add into, cleared right before the backward.
+    dw = torch.empty((1, STREAMS, HIDDEN), dtype=torch.float32, device=device)
+    dq = torch.empty((STREAMS, HIDDEN), dtype=dq_dtype, device=device)
+    dk = torch.empty((STREAMS, HIDDEN), dtype=dk_dtype, device=device)
+    # The weights as stored (their 32-bit words), the product formed in the kernels.
+    qw, kw = _words(q_weight), _words(k_weight)
+    wmode = _wmode(q_weight.dtype, k_weight.dtype, dq_dtype, dk_dtype)
+    grid = cake_jit.CLUSTER_CTAS * clusters
+    bwd = (dout, x, key, value, qw, kw, _mask(token_mask), dx, dkey, dvalue, dw, T, eps, clamp_value, wmode & 3)
+    finish = (dw, qw, kw, dq.view(torch.int32), dk.view(torch.int32), int(dw.shape[0]), wmode)
+    dw.zero_()
+    _run(name, "bwd", device, (*bwd, grid, 1, 1))
+    _run(cake_jit.record("dw_reduce"), "dw_reduce", device, (*finish, *cake_jit.dw_reduce_grid()))
     return dx, dkey, dvalue, dq, dk
 
 
@@ -805,13 +836,54 @@ def cake_engram_gate_nondet_train_backward(
 
 
 def _grad_out(dout: Optional[torch.Tensor], x: torch.Tensor) -> torch.Tensor:
+    """The gradient of ``out`` as the backward reads it: BF16, contiguous, 16-byte aligned, on ``x``'s device and of
+    its shape."""
     if dout is None:
         return torch.zeros_like(x)
     if dout.dtype != torch.bfloat16:
         dout = dout.to(torch.bfloat16)
     if not dout.is_contiguous():
-        return dout.contiguous()
-    return dout if dout.data_ptr() % _ALIGNMENT == 0 else dout.clone()
+        dout = dout.contiguous()
+    elif dout.data_ptr() % _ALIGNMENT:
+        dout = dout.clone()
+    _on_device("dout", dout, x.device)
+    _streams_layout("dout", dout, int(x.shape[0]), contiguous=True, output=False)
+    return dout
+
+
+def _autograd_backward(
+    dout: Optional[torch.Tensor],
+    x: torch.Tensor,
+    key: torch.Tensor,
+    value: torch.Tensor,
+    q_weight: torch.Tensor,
+    k_weight: torch.Tensor,
+    token_mask: Optional[torch.Tensor],
+    ctx: Any,
+    dkey: Optional[torch.Tensor],
+    dvalue: Optional[torch.Tensor],
+    api: str,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The backward of an autograd entry: the saved operands were checked by its forward (autograd refuses a saved
+    tensor changed in place since), so only ``dout`` is; the weight gradients come in each parameter's dtype."""
+    return _launch_backward(
+        _grad_out(dout, x),
+        x,
+        key,
+        value,
+        q_weight,
+        k_weight,
+        token_mask,
+        int(x.shape[0]),
+        ctx.eps,
+        ctx.clamp_value,
+        None,
+        dkey,
+        dvalue,
+        api,
+        q_weight.dtype,
+        k_weight.dtype,
+    )
 
 
 class CakeEngramGateNondetFunction(torch.autograd.Function):
@@ -838,36 +910,23 @@ class CakeEngramGateNondetFunction(torch.autograd.Function):
     ) -> torch.Tensor:
         out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)
         ctx.save_for_backward(x, key, value, q_weight, k_weight, token_mask)
-        ctx.eps = eps
-        ctx.clamp_value = clamp_value
+        ctx.eps, ctx.clamp_value = _check_scalars(eps, clamp_value)
         return out
 
     @staticmethod
     @torch.autograd.function.once_differentiable
     def backward(ctx: Any, dout: Optional[torch.Tensor]) -> tuple[Optional[torch.Tensor], ...]:
         x, key, value, q_weight, k_weight, token_mask = ctx.saved_tensors
-        dx, dkey, dvalue, dq, dk = _backward(
-            _grad_out(dout, x),
-            x,
-            key,
-            value,
-            q_weight,
-            k_weight,
-            token_mask,
-            ctx.eps,
-            ctx.clamp_value,
-            None,
-            None,
-            None,
-            "cake_engram_gate_nondet",
+        dx, dkey, dvalue, dq, dk = _autograd_backward(
+            dout, x, key, value, q_weight, k_weight, token_mask, ctx, None, None, "cake_engram_gate_nondet"
         )
         need = ctx.needs_input_grad
         return (
             dx if need[0] else None,
             dkey if need[1] else None,
             dvalue if need[2] else None,
-            _param_grad(dq, q_weight) if need[3] else None,
-            _param_grad(dk, k_weight) if need[4] else None,
+            dq if need[3] else None,
+            dk if need[4] else None,
             None,
             None,
             None,
@@ -896,8 +955,7 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
         key, value = _split_kv(kv)
         out = _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum)
         ctx.save_for_backward(x, kv, q_weight, k_weight, token_mask)
-        ctx.eps = eps
-        ctx.clamp_value = clamp_value
+        ctx.eps, ctx.clamp_value = _check_scalars(eps, clamp_value)
         return out
 
     @staticmethod
@@ -907,27 +965,15 @@ class CakeEngramGateNondetKvFunction(torch.autograd.Function):
         key, value = _split_kv(kv)
         dkv = torch.empty((kv.shape[0], KV_WIDTH), dtype=torch.bfloat16, device=kv.device)
         dkey, dvalue = _split_kv(dkv, "dkv")
-        dx, _, _, dq, dk = _backward(
-            _grad_out(dout, x),
-            x,
-            key,
-            value,
-            q_weight,
-            k_weight,
-            token_mask,
-            ctx.eps,
-            ctx.clamp_value,
-            None,
-            dkey,
-            dvalue,
-            "cake_engram_gate_nondet_kv",
+        dx, _, _, dq, dk = _autograd_backward(
+            dout, x, key, value, q_weight, k_weight, token_mask, ctx, dkey, dvalue, "cake_engram_gate_nondet_kv"
         )
         need = ctx.needs_input_grad
         return (
             dx if need[0] else None,
             dkv if need[1] else None,
-            _param_grad(dq, q_weight) if need[2] else None,
-            _param_grad(dk, k_weight) if need[3] else None,
+            dq if need[2] else None,
+            dk if need[3] else None,
             None,
             None,
             None,

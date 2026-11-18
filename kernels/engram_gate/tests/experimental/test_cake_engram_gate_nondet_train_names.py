@@ -204,14 +204,16 @@ def test_no_entry_takes_a_mode_keyword():
 
 def test_only_the_backward_reads_torch_mode():
     """The facade never reads torch's deterministic mode; the backend reads it in one place, the alert, which the
-    backward calls and the forward does not."""
+    backward calls (both backward entries through ``_launch_backward``) and the forward does not."""
     assert not READS_TORCH_MODE.search(inspect.getsource(public))
     backend = _backend("cake_backend")
     assert READS_TORCH_MODE.search(inspect.getsource(backend._alert_nondeterministic))
     for fn in (backend._forward, backend.cake_engram_gate_nondet_train_forward, backend.launch_fwd):
         source = inspect.getsource(fn)
         assert not READS_TORCH_MODE.search(source) and "_alert_nondeterministic" not in source, fn.__name__
-    assert "_alert_nondeterministic(" in inspect.getsource(backend._backward)
+    assert "_alert_nondeterministic(" in inspect.getsource(backend._launch_backward)
+    for fn in (backend._backward, backend._autograd_backward):
+        assert "_launch_backward(" in inspect.getsource(fn), fn.__name__
     assert not READS_TORCH_MODE.search(inspect.getsource(_backend("cake_jit")))
 
 

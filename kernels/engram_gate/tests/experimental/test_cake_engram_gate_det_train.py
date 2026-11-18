@@ -19,14 +19,15 @@ context gate (four streams of width 5120).
 Without a device: the registry's records, stages, architectures and launch facts; the record of each stage and dot
 product summation (two forwards, one backward), and the forward record of each ``dot_sum`` choice; the persistent grid
 sizes and the resident cluster table they come from; every stage launcher passes every kernel parameter of its records
-by name (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its source
-digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment variable but
-the JIT shim's.
+in plan order (the FFI entry replaced by a recorder); ``build.json`` covers every record on every architecture and its
+source digests; the loader imports standalone; a prebuilt library is preferred; the package reads no environment
+variable but the JIT shim's.
 
 On SM100 / SM103 / SM107: every record loads; each forward record writes every element of a NaN-filled ``out`` and
 meets the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 draws); the backward meets the tier for
 ``dx``, ``dkey``, ``dvalue``, ``dq_weight`` and ``dk_weight``; ``dw_reduce`` alone meets the tier on random partial
-rows.
+rows, with FP32 and BF16 weights; its BF16 weight gradients hold the bits of torch's ``.to(torch.bfloat16)`` of its
+FP32 ones over 2^24 FP32 patterns.
 """
 
 from __future__ import annotations
@@ -235,6 +236,8 @@ def _cpu_operands(T: int) -> dict:
         "key": torch.zeros(T, STREAMS, HIDDEN, **bf16),
         "value": torch.zeros(T, HIDDEN, **bf16),
         "w": torch.zeros(STREAMS, HIDDEN),
+        "q_words": torch.zeros(STREAMS, HIDDEN // 2, dtype=torch.int32),
+        "k_words": torch.zeros(STREAMS, HIDDEN, dtype=torch.int32),
         "dout": torch.zeros(T, STREAMS, HIDDEN, **bf16),
     }
 
@@ -244,7 +247,7 @@ def _cpu_operands(T: int) -> dict:
 def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -> None:
     """Each stage launcher passes every parameter of its records' argument plans, in order, then the grid
     (``_entry`` replaced by a recorder; nothing is launched): the forward record of ``acc``, the backward, then
-    ``dw_reduce``."""
+    ``dw_reduce``; the weights as their words (a BF16 ``q_weight``, an FP32 ``k_weight``) with their mode word."""
     recorder = _Recorder()
     monkeypatch.setattr(cake_backend, "_entry", recorder.entry)
     monkeypatch.setattr(cake_backend, "device_arch", lambda index: "sm_100a")
@@ -272,7 +275,9 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         x=ops["x"],
         key=ops["key"],
         value=ops["value"],
-        w=ops["w"],
+        q_weight=ops["q_words"],
+        k_weight=ops["k_words"],
+        wmode=1,
         mask=mask,
         dx=torch.empty_like(ops["x"]),
         dkey=torch.empty_like(ops["x"]),
@@ -282,8 +287,11 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         clamp_value=1e-6,
         clusters=clusters,
     )
-    vec = torch.zeros(STREAMS, HIDDEN)
-    cake_backend.launch_dw_reduce("dw_reduce", dw=dw, qw=vec, kw=vec, dq=vec.clone(), dk=vec.clone())
+    dq = torch.zeros(STREAMS, HIDDEN // 2, dtype=torch.int32)
+    dk = torch.zeros(STREAMS, HIDDEN, dtype=torch.int32)
+    cake_backend.launch_dw_reduce(
+        "dw_reduce", dw=dw, q_weight=ops["q_words"], k_weight=ops["k_words"], dq=dq, dk=dk, wmode=0b0101
+    )
     assert [name for name, _ in recorder.calls] == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
     for name, args in recorder.calls:
         params = cake_backend.parameters(name)
@@ -296,10 +304,14 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         named = dict(zip(params, args, strict=False))
         if "T" in named:
             assert named["T"] == T
-        if "mask" in named and masked:
+        if "mask" in named:
             assert named["mask"] is mask
-        if "has_mask" in named:
-            assert named["has_mask"] == int(masked)
+        if name == "bwd_dot2":
+            assert named["q_weight"] is ops["q_words"] and named["k_weight"] is ops["k_words"]
+            assert named["wmode"] == 1
+        if name == "dw_reduce":
+            assert named["dq"] is dq and named["dk"] is dk
+            assert (named["wmode"], named["NP"]) == (0b0101, rows)
 
 
 def test_the_package_exports_the_backend_entries() -> None:
@@ -525,22 +537,28 @@ def test_the_backward_matches_the_reference(T, weights, mask, layout, device, re
     _record_failures(*judge_draws(run, make, seed=23 + T), record_property)
 
 
+@pytest.mark.parametrize("weights", ("fp32", "bf16"))
 @pytest.mark.parametrize("parts", (1, 7, 296))
-def test_dw_reduce_matches_the_reference(parts, device, record_property) -> None:
-    """``dw_reduce`` alone: ``dq = (sum_p dw[p]) * kw32`` and ``dk = (sum_p dw[p]) * qw32`` (FP32) from random partial
-    rows meet the tier (BF16 tier: the rows, weights and sum in BF16)."""
+def test_dw_reduce_matches_the_reference(parts, weights, device, record_property) -> None:
+    """``dw_reduce`` alone: ``dq = (sum_p dw[p]) * k_weight`` and ``dk = (sum_p dw[p]) * q_weight`` (FP32) from random
+    partial rows and the weights stored as ``weights`` meet the tier (BF16 tier: the rows, weights and sum in BF16)."""
     from tests.cake_naive import judge_case
 
     cache = {}
+    dtype = torch.bfloat16 if weights == "bf16" else torch.float32
 
     def run(j, s):
         gen = torch.Generator(device=device).manual_seed(s)
         dw = torch.randn(parts, STREAMS, HIDDEN, device=device, generator=gen)
-        qw = 1.0 + 0.1 * torch.randn(STREAMS, HIDDEN, device=device, generator=gen)
-        kw = 1.0 + 0.1 * torch.randn(STREAMS, HIDDEN, device=device, generator=gen)
+        qw = (1.0 + 0.1 * torch.randn(STREAMS, HIDDEN, device=device, generator=gen)).to(dtype)
+        kw = (1.0 + 0.1 * torch.randn(STREAMS, HIDDEN, device=device, generator=gen)).to(dtype)
         dq = torch.full((STREAMS, HIDDEN), math.nan, device=device)
         dk = torch.full_like(dq, math.nan)
-        cake_backend.launch_dw_reduce("dw_reduce", dw=dw, qw=qw, kw=kw, dq=dq, dk=dk)
+        words = [t.view(torch.int32) for t in (qw, kw, dq, dk)]
+        mode = cake_backend._wmode(qw.dtype, kw.dtype)
+        cake_backend.launch_dw_reduce(
+            "dw_reduce", dw=dw, q_weight=words[0], k_weight=words[1], dq=words[2], dk=words[3], wmode=mode
+        )
         torch.cuda.synchronize(device)
         cache[j] = (dw, qw, kw)
         total = dw.double().sum(0)
@@ -553,3 +571,67 @@ def test_dw_reduce_matches_the_reference(parts, device, record_property) -> None
 
     judge, failures = judge_case(run, naive, seed=31 + parts)
     _record_failures(judge, failures, record_property)
+
+
+# The FP32 patterns of the rounding test: every upper half (each sign, exponent and leading mantissa: zeros,
+# subnormals, the largest finite values, infinities and NaNs), each with these lower halves (zero, the smallest, the
+# largest below the tie, the tie, past it, the largest, two more) and random ones up to 256.
+_LOWER_FIXED = (0x0000, 0x0001, 0x7FFF, 0x8000, 0x8001, 0xFFFF, 0x4000, 0xC000)
+_LOWER_HALVES = 256
+
+
+def _fp32_patterns(device: torch.device, row: int) -> torch.Tensor:
+    """The 2^24 FP32 patterns as int32 words, then the first ones again up to a whole number of ``row`` words."""
+    generator = torch.Generator().manual_seed(5)
+    random = torch.randint(0, 1 << 16, (_LOWER_HALVES - len(_LOWER_FIXED),), generator=generator)
+    lower = torch.cat((torch.tensor(_LOWER_FIXED), random)).to(device=device, dtype=torch.int64)
+    upper = torch.arange(1 << 16, device=device, dtype=torch.int64)
+    bits = ((upper.view(-1, 1) << 16) | lower.view(1, -1)).flatten()
+    bits = torch.cat((bits, bits[: -bits.numel() % row]))
+    return torch.where(bits >= 1 << 31, bits - (1 << 32), bits).to(torch.int32)
+
+
+@pytest.mark.parametrize("weights", ("fp32", "bf16", "mixed"))
+def test_bf16_weight_gradients_round_as_torch(weights, device) -> None:
+    """``dw_reduce`` with unit weights (stored as ``weights`` says) and one partial row of FP32 patterns: its BF16
+    ``dq_weight`` and ``dk_weight`` (mode bits 2 and 3, together and alone) hold the bits of its FP32 ones (both bits
+    clear) rounded by torch's ``.to(torch.bfloat16)``, the cast the autograd entries applied before, on every
+    pattern of 2^24 (ties, NaN, infinities, subnormals, overflow)."""
+    q_dtype = torch.float32 if weights == "fp32" else torch.bfloat16
+    k_dtype = torch.bfloat16 if weights == "bf16" else torch.float32
+    qw = torch.ones(STREAMS, HIDDEN, dtype=q_dtype, device=device).view(torch.int32)
+    kw = torch.ones(STREAMS, HIDDEN, dtype=k_dtype, device=device).view(torch.int32)
+    mode = cake_backend._wmode(q_dtype, k_dtype)
+    dw = torch.empty(1, STREAMS, HIDDEN, device=device)
+    row = dw.view(torch.int32).flatten()
+    patterns = _fp32_patterns(device, row.numel())
+    f32 = torch.empty(2, STREAMS, HIDDEN, device=device)
+    bf = torch.empty(2, STREAMS, HIDDEN, dtype=torch.bfloat16, device=device)
+    words = {False: f32.view(torch.int32), True: bf.view(torch.int32)}
+    mismatches = {grads: torch.zeros((), dtype=torch.int64, device=device) for grads in (0b0100, 0b1000, 0b1100)}
+    for at in range(0, patterns.numel(), row.numel()):
+        row.copy_(patterns[at : at + row.numel()])
+        cake_backend.launch_dw_reduce(
+            "dw_reduce", dw=dw, q_weight=qw, k_weight=kw, dq=words[False][0], dk=words[False][1], wmode=mode
+        )
+        expected = f32.to(torch.bfloat16).view(torch.int16)
+        for grads, count in mismatches.items():
+            bf.fill_(math.nan)
+            dq_bf16, dk_bf16 = bool(grads & 0b0100), bool(grads & 0b1000)
+            cake_backend.launch_dw_reduce(
+                "dw_reduce",
+                dw=dw,
+                q_weight=qw,
+                k_weight=kw,
+                dq=words[dq_bf16][0],
+                dk=words[dk_bf16][1],
+                wmode=mode | grads,
+            )
+            got = bf.view(torch.int16)
+            if dq_bf16:
+                count += (got[0] != expected[0]).sum()
+            if dk_bf16:
+                count += (got[1] != expected[1]).sum()
+    torch.cuda.synchronize(device)
+    assert patterns.numel() >= 1 << 24
+    assert {grads: int(count) for grads, count in mismatches.items()} == {0b0100: 0, 0b1000: 0, 0b1100: 0}
