@@ -2565,8 +2565,8 @@ def _launch_wgrad_sk(
 #: against the deterministic plan in the same process: faster in eager launches and in CUDA graph replays in 5 of 5
 #: paired groups of a screen (1.1 to 3.2 %), within the deterministic package's error budgets against FP64, and the same
 #: bits on 20 repeats.  These rows run the named program as measured, never its promoted twin
-#: (:func:`k1_program_knobs` names ``promote=False``), although its whole tiles hold more than 128 K blocks; every
-#: other row this package keeps on the deterministic program runs that package's plan, its promoted chunks included.
+#: (:func:`k1_program_knobs` names ``promote=False``), whatever that package's promotion threshold; every other row
+#: this package keeps on the deterministic program runs that package's plan, its promoted chunks included.
 # fmt: off
 K1_WGRAD_DET_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {

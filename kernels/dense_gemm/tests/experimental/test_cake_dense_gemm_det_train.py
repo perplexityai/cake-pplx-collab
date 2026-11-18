@@ -622,7 +622,9 @@ def _key_knobs(knobs: dict) -> dict:
     and the planner's ``promote`` as the instance-key field ``promote_blocks``."""
     key_knobs = {k: v for k, v in knobs.items() if v is not None}
     key_knobs["sk_exact"] = bool(knobs["sk_exact"])
-    key_knobs["promote_blocks"] = cake_backend.K1_PROMOTE_BLOCKS if key_knobs.pop("promote", False) else 0
+    key_knobs["promote_blocks"] = (
+        cake_backend.K1_PROMOTE_BLOCKS if key_knobs.pop("promote", False) else 0
+    )
     return key_knobs
 
 
@@ -9602,7 +9604,8 @@ def test_promote_instance_key_symbol_and_refusals():
 def test_segment_blocks_reads_the_longest_segment():
     """``segment_blocks``: a whole tile's K blocks where a plan stores whole tiles, else the longest part of a tile a
     stream-K unit, an exact split part or a synchronised main or collector part sums; the 32 x 4096 weight gradient
-    on a 152-SM sm_100a part (32 tiles, two K halves each) holds 128 K blocks at 16384 tokens and 129 at 16385."""
+    on a 152-SM sm_100a part (32 tiles, two K halves each) holds 128 K blocks at 16384 tokens, 129 at 16385, 256 at
+    32768 and 257 at 32769."""
     seg = cake_backend.segment_blocks
 
     def plan(**fields):
@@ -9627,7 +9630,13 @@ def test_segment_blocks_reads_the_longest_segment():
         seg(plan(k_blocks=254, sk_units=106, iters_per_unit=100, sk_sync=True)) == 154
     )
     assert seg(plan(k_blocks=10, sk_units=3, iters_per_unit=40)) == 10
-    for T, blocks in ((16384, 128), (16385, 129), (65536, 512)):
+    for T, blocks in (
+        (16384, 128),
+        (16385, 129),
+        (32768, 256),
+        (32769, 257),
+        (65536, 512),
+    ):
         G = torch.empty(T, 32, dtype=torch.bfloat16)
         X = torch.empty(T, 4096, dtype=torch.bfloat16)
         A, B, transposed = wgrad_views(G, X, arch="sm_100a")
@@ -9647,12 +9656,13 @@ def test_segment_blocks_reads_the_longest_segment():
 def test_long_segments_plan_the_promoted_twin(monkeypatch):
     """The 32 x 4096 BF16 weight gradient on a 152-SM sm_100a part plans the 64-row ``hen`` program of its rule
     (two K halves of each of its 32 tiles): with the program's twin registered, a plan whose longest segment holds more
-    than 128 K blocks (16385 tokens and more) runs the twin, the same plan but for the template and
-    ``promote_blocks``; at 16384 tokens (128 blocks) it keeps the program.  ``promote=False`` keeps the program at any
-    length, ``promote=True`` runs the twin at any length; without the twin registered the plan keeps the program and
-    ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall tile (the kernel's
-    refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold, and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at
-    one token count, ragged at all) keeps the program unless ``promote=True``."""
+    than 256 K blocks (32769 tokens and more) runs the twin, the same plan but for the template and
+    ``promote_blocks``; at 16384 and 32768 tokens (128 and 256 blocks) it keeps the program.  ``promote=False`` keeps
+    the program at any length, ``promote=True`` runs the twin at any length; without the twin registered the plan
+    keeps the program and ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall
+    tile (the kernel's refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 128 blocks the twin runs from
+    16385 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all) keeps the
+    program unless ``promote=True``."""
     arch, sm_count = "sm_100a", 152
     program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
     twin = _twin_of(program)
@@ -9683,12 +9693,14 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         with pytest.raises(ValueError, match="not registered"):
             plan_at(65536, promote=True)
     _register_twins(monkeypatch, arch, program)
-    short = plan_at(16384)
-    assert (short.template, short.promote_blocks) == (program, 0)
-    forced = plan_at(16384, promote=True)
-    assert (forced.template, forced.promote_blocks) == (twin, 128)
-    assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
-    for T in (16385, 32768, 65536):
+    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 256
+    for T in (16384, 16385, 32768):
+        short = plan_at(T)
+        assert (short.template, short.promote_blocks) == (program, 0), T
+        forced = plan_at(T, promote=True)
+        assert (forced.template, forced.promote_blocks) == (twin, 128), T
+        assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
+    for T in (32769, 65536):
         plan, plain = plan_at(T), plan_at(T, promote=False)
         assert (plan.template, plan.promote_blocks) == (twin, 128), T
         assert (plain.template, plain.promote_blocks) == (program, 0), T
@@ -9726,12 +9738,12 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
             transposed_out=v.get("transposed", False),
             promote=True,
         )
-    # the threshold: at 256 blocks the twin runs from 32769 tokens (257 blocks a half) on
+    # the threshold: at 128 blocks the twin runs from 16385 tokens (129 blocks a half) on
     with monkeypatch.context() as m:
-        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 256)
-        assert plan_at(32768).template == program
-        assert plan_at(32769).template == twin
-        assert plan_at(16385, promote=True).template == twin
+        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
+        assert plan_at(16384).template == program
+        assert plan_at(16385).template == plan_at(32768).template == twin
+        assert plan_at(16384, promote=True).template == twin
     # the exempt rows: an exact key at 65536 tokens, a ragged key at every token count; promote=True runs the twin
     row = (arch, True, True, False, True, False, 32)
     with monkeypatch.context() as m:
@@ -9745,15 +9757,15 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         m.setattr(
             cake_backend, "K1_PROMOTE_EXEMPT_ROWS", frozenset({row + (None, 4096)})
         )
-        assert plan_at(32768).template == plan_at(65536).template == program
+        assert plan_at(32769).template == plan_at(65536).template == program
         assert plan_at(65536, promote=True).template == twin
 
 
 def test_promoted_twins_are_no_registry_variants(monkeypatch):
     """The registry fallback never names a twin as a variant (``_registry_variants`` skips it and leaves ``promote`` to
     the caller): a row whose program is not registered lands on the registered program nearest it and, where that
-    program's twin is registered and a segment holds more than 128 K blocks, runs the twin; ``promote=False`` keeps the
-    program."""
+    program's twin is registered and a segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` K blocks (set to 128 here),
+    runs the twin; ``promote=False`` keeps the program."""
     module = cake_jit.KERNELS["sm_100a"]["dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"]
     program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
     twin = _twin_of(program)
@@ -9761,6 +9773,7 @@ def test_promoted_twins_are_no_registry_variants(monkeypatch):
         cake_backend, "KERNELS", {"sm_100a": {program: module, twin: module}}
     )
     monkeypatch.setattr(cake_backend, "ROW_RULES", {})
+    monkeypatch.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
     variants = cake_backend._registry_variants(
         "dense_proj_det_gemm_nn_n128_hen_t_pro7", "sm_100a", False
     )
@@ -9778,6 +9791,7 @@ def test_promoted_twins_are_no_registry_variants(monkeypatch):
         v["A"], v["B"], v["out"], promote=False, **kw
     )
     assert (plain.template, plain.promote_blocks) == (program, 0)
+    assert cake_backend.segment_blocks(plain) > cake_backend.K1_PROMOTE_MIN_SEGMENT
     assert dataclasses.replace(plan, template=program, promote_blocks=0) == plain
 
 
@@ -9799,14 +9813,15 @@ def test_promoted_twins_registered_are_twins_of_registered_programs():
                 assert record["build"]["kwargs"]["promote_blocks"] == 128, template
 
 
-# The promoted twins on the device: (d_out, d_in, T of a plan whose segments hold more than 128 K blocks, T of the
-# same row's plan at one chunk a segment, the architectures).  512 x 4096 plans the 64-row 256-wide ``hen`` program of
-# its rule, 32 x 4096 the 64-row 128-wide one; at T 32768 a segment holds at least a third of the 512 K blocks, at
-# T 8192 at most the 128 K blocks.  Both programs are rendered from the kernel source the twins are, on these
+# The promoted twins on the device: (d_out, d_in, T of a plan whose longest segment holds more than
+# ``K1_PROMOTE_MIN_SEGMENT`` (256) K blocks, T of the same row's plan at one chunk a segment, the architectures).
+# 512 x 4096 plans the 64-row 256-wide ``hen`` program of its rule, 32 x 4096 the 64-row 128-wide one; at T 65536 a
+# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 256), at T 8192 128, so no
+# segment holds more than one chunk.  Both programs are rendered from the kernel source the twins are, on these
 # architectures (the sm_107a 32 x 4096 rule names a carried ``skx`` program).
 PROMOTED_GPU_CASES = (
-    (512, 4096, 32768, 8192, ("sm_100a", "sm_103a", "sm_107a")),
-    (32, 4096, 32768, 8192, ("sm_100a", "sm_103a")),
+    (512, 4096, 65536, 8192, ("sm_100a", "sm_103a", "sm_107a")),
+    (32, 4096, 65536, 8192, ("sm_100a", "sm_103a")),
 )
 
 

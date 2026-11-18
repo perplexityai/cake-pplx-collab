@@ -2144,14 +2144,16 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 #: split) into ``ceil(n / K1_PROMOTE_BLOCKS)`` balanced contiguous chunks, sums each in an accumulator of its own and
 #: adds the chunk sums in chunk order, one FP32 round-to-nearest addition per element: the same bits on every run.  The
 #: loads, the plan, the workspace and the launch arguments are the program's without promotion; at one chunk
-#: (``n <= 128``) its bits are that program's.  The planner runs the twin where :func:`k1_promote_blocks` names it,
-#: except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`.
+#: (``n <= 128``) its bits are that program's.  The planner runs the twin where :func:`k1_promote_blocks` names it (a
+#: segment of more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`.
 K1_PROMOTE_BLOCKS = 128
 #: The longest segment (:func:`segment_blocks`) above which :func:`k1_promote_blocks` names the promoted twin, in K
-#: blocks of 64 tokens: the twin runs where a segment holds more than this many.  At :data:`K1_PROMOTE_BLOCKS` (8192
-#: tokens in one segment) a plan promotes wherever the twin's bits differ from the program's; a larger value keeps the
-#: program without promotion up to that segment length.
-K1_PROMOTE_MIN_SEGMENT = K1_PROMOTE_BLOCKS
+#: blocks of 64 tokens: the twin runs where a segment holds more than this many, 256 (16384 tokens in one
+#: accumulator).  Plans whose segments hold up to 256 K blocks already meet the naive BF16 tier at the measured token
+#: counts, and the promoted twin costs up to 1.7 % kernel time on some forms there; the accuracy misses are at longer
+#: segments.  So no plan changes where no segment holds more than 16384 tokens.  At :data:`K1_PROMOTE_BLOCKS` (8192
+#: tokens) a plan would promote wherever the twin's bits differ from the program's.
+K1_PROMOTE_MIN_SEGMENT = 256
 #: Rows whose plans keep the program without promotion where :func:`k1_promote_blocks` names the twin, keyed as
 #: ``ROW_RULES`` (the planned orientation): an exact ``(N, K, M)`` key holds at that token count ``K`` only, a ragged
 #: ``(N, None, M)`` key at every token count.  ``promote=True`` runs the twin on these rows too.
@@ -3127,8 +3129,8 @@ def cake_dense_gemm_det_train_projection_plan(
     columns go to the 64-row tile of the transposed store instead of one padded 224- / 256-column tile).
 
     A fifth package-only deviation, the promoted chunks (``promote``, ``plan.promote_blocks``): once the program and the
-    plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks
-    (:func:`segment_blocks`) runs the promoted twin of its program (``_kc128``, :data:`K1_PROMOTE_BLOCKS`) where the
+    plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks (256:
+    16384 tokens; :func:`segment_blocks`) runs the promoted twin of its program (``_kc128``, :data:`K1_PROMOTE_BLOCKS`) where the
     architecture registers it (:func:`k1_promote_blocks`), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`: the
     same plan, each segment summed in chunks of at most 128 K blocks added in a fixed order, so the bits stay the same
     on every run.  No plan changes where no segment holds more than that.  ``promote=False`` never runs the twin,
@@ -4019,7 +4021,7 @@ def _promote_twin_refusal(arch: str, key: tuple) -> str:
 def k1_promote_blocks(arch: str, key: tuple, segment: int) -> int:
     """The promoted chunk of a plan of instance key ``key`` (without promotion) on ``arch`` whose longest segment
     holds ``segment`` K blocks (:func:`segment_blocks`): :data:`K1_PROMOTE_BLOCKS` where the segment holds more than
-    :data:`K1_PROMOTE_MIN_SEGMENT` blocks and the architecture registers the program's promoted twin; else ``0`` (the
+    :data:`K1_PROMOTE_MIN_SEGMENT` blocks (256) and the architecture registers the program's promoted twin; else ``0`` (the
     program without promotion).  The rule reads the segment's length and the registry only; the planner keeps the rows
     of :data:`K1_PROMOTE_EXEMPT_ROWS` without it."""
     if int(segment) <= K1_PROMOTE_MIN_SEGMENT or _promote_twin_refusal(arch, key):

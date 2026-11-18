@@ -16125,10 +16125,11 @@ def test_k1_wgrad_det_rules_by_sm():
 def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
     """The rows of :data:`K1_WGRAD_DET_RULES_BY_SM` run the named program as measured, never its promoted twin: their
     knobs (:func:`k1_program_knobs`) carry ``promote=False``, so with the twin of the BF16 program registered the
-    deterministic planner plans exactly the named program at its token counts, where the same knobs without
-    ``promote`` (the deterministic planner's automatic rule: whole tiles of 253 to 256 K blocks) plan the twin.  The
-    rows stay on the deterministic program (:func:`plan_atomic_gemm`), and the convenience call binds the table's
-    knobs (:func:`_wgrad_det_args`)."""
+    deterministic planner plans exactly the named program at its token counts.  The same knobs without ``promote``
+    (the deterministic planner's automatic rule) plan the program too, their segments holding no more than the
+    default threshold's 256 K blocks, and plan the twin at a threshold of 128 K blocks, where the named knobs still
+    plan the program.  The rows stay on the deterministic program (:func:`plan_atomic_gemm`), and the convenience call
+    binds the table's knobs (:func:`_wgrad_det_args`)."""
     rows = cake_backend.K1_WGRAD_DET_RULES_BY_SM[("sm_100a", 148)]
     program = det_backend._TEMPLATE_PREFIX + "nn_n192_bz64_hne_sks_sb2_pro15"
     twin = program.replace("_pro15", "_kc128_pro15")
@@ -16141,6 +16142,8 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         "device_facts",
         lambda device=None: SimpleNamespace(arch="sm_100a", sm_count=148),
     )
+    default = det_backend.K1_PROMOTE_MIN_SEGMENT
+    assert default == 256
     bf16 = torch.bfloat16
     seen = 0
     for (d_in, d_out, T, dt), name in rows.items():
@@ -16151,17 +16154,19 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         G, X = torch.empty(T, d_out, dtype=bf16), torch.empty(T, d_in, dtype=bf16)
         out = torch.empty(d_out, d_in, dtype=bf16)
         A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_100a")
-        plan = _plan_of_knobs(
-            A, B, out, "sm_100a", 148, knobs, transposed_out=transposed
-        )
-        assert (plan.template, plan.promote_blocks) == (program, 0), (T, plan.template)
         automatic = dict(knobs)
         del automatic["promote"]
-        auto = _plan_of_knobs(
-            A, B, out, "sm_100a", 148, automatic, transposed_out=transposed
-        )
-        assert (auto.template, auto.promote_blocks) == (twin, 128), (T, auto.template)
-        assert det_backend.segment_blocks(auto) > 128, T
+        for threshold, promoted in ((default, (program, 0)), (128, (twin, 128))):
+            monkeypatch.setattr(det_backend, "K1_PROMOTE_MIN_SEGMENT", threshold)
+            plan = _plan_of_knobs(
+                A, B, out, "sm_100a", 148, knobs, transposed_out=transposed
+            )
+            assert (plan.template, plan.promote_blocks) == (program, 0), T
+            auto = _plan_of_knobs(
+                A, B, out, "sm_100a", 148, automatic, transposed_out=transposed
+            )
+            assert (auto.template, auto.promote_blocks) == promoted, (T, auto.template)
+            assert 128 < det_backend.segment_blocks(auto) <= default, T
         assert (
             cake_backend.plan_atomic_gemm(
                 X.t(), G, out, transposed_out=True, arch="sm_100a", sm_count=148
