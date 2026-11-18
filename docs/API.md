@@ -18,7 +18,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 ## det and nondet
 
 - **det:** reductions run in a fixed order, so the same inputs, hardware and plan give bitwise identical outputs and gradients. Some families add conditions, such as the same token count, the same SM count or the same topology.
-- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other. fmha has no det module; its accuracy reference is an FP64 oracle beside the same math in BF16.
+- **nondet:** these modules may use orders that det does not allow, for example atomics or arrival-order partial sums. Results stay within det's accuracy budgets but can differ from det in the last bits. gdn promises neither: see its row below (its tests record each output's error against an FP64 reference beside the BF16 naive implementation's). Several nondet modules still run in a fixed order today. Neither mode ever falls back to the other. fmha has no det module; its accuracy reference is an FP64 oracle beside the same math in BF16.
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
@@ -26,7 +26,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
-| gdn | Fixed order today, with no run-to-run promise. Within det budgets but not bitwise det. | Runs unchanged |
+| gdn | Fixed order today, with no run-to-run promise. Not bitwise det. As with det, the tests record each output's error against an FP64 reference beside the BF16 naive implementation's. | Runs unchanged |
 | mhc | `dfn` differs from det only near an FP32 rounding boundary; everything else is bitwise det. Repeats run to run. | Not stated |
 | mhc_head | Same kernels as det | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
@@ -518,7 +518,7 @@ Other public names:
 
 ### `cake_pplx.cake_gdn_nondet_train`
 
-Every launch has a fixed order today, so two runs on one device give the same bits, but the contract does not promise run-to-run bits. Results match det within its accuracy budgets, not bitwise. Deterministic algorithms run unchanged. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train.py).
+Every launch has a fixed order today, so two runs on one device give the same bits, but the contract does not promise run-to-run bits. Results are not bitwise det. The tests measure each output's error against an FP64 reference over 32 random inputs, beside the error of PyTorch on the same BF16 inputs, and record whether it is within 1.005 times PyTorch's (L2 norm: the median and the largest over the inputs; max norm: input by input, on at least half of them) as a `TIER` line. A miss is recorded and does not fail a test ([`kernels/gdn/tests/cake_naive.py`](../kernels/gdn/tests/cake_naive.py)). Deterministic algorithms run unchanged. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -561,7 +561,7 @@ Other public names:
 
 ### `cake_pplx.cake_gdn_nondet_train_kcp`
 
-Every launch has a fixed order today, but run-to-run bits are not promised. This module keeps det's contract and accuracy budgets, not det's bits. An options instance from another package raises `TypeError`, and a det saved set raises `ValueError`. Use this package's own context. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py).
+Every launch has a fixed order today, but run-to-run bits are not promised. This module keeps det's contract, not det's bits. The tests record each output's error against an FP64 reference beside the BF16 naive implementation's, as for `cake_gdn_nondet_train`. An options instance from another package raises `TypeError`, and a det saved set raises `ValueError`. Use this package's own context. Source: [`kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py`](../kernels/gdn/cake_pplx/cake_gdn_nondet_train_kcp.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
@@ -569,7 +569,7 @@ Every launch has a fixed order today, but run-to-run bits are not promised. This
 | `cake_gdn_nondet_train_kcp_partition` | `(cu_seqlens_global_cpu, world_size, layout="contiguous", fragments=None, *, cut_points=None)` | As det | Returns `CakeGDNNondetKcpPartition`. Same algorithm as det. |
 | `cake_gdn_nondet_train_kcp_build_context` | `(part, group, rank, device, conv_kernel_size=4, *, sm_count=None, graph_replay=False)` | `graph_replay=True` builds the context for `graph='replay'` calls; a non-bool value raises `TypeError` | This rank's context, with this package's own head plan. |
 | `cake_gdn_nondet_train_kcp_forward` | `(q, k, v, g, beta, ctx, *, scale=None, save_for_backward=True, workspace=None, options=None, **knobs)` | As det KCP | Returns `(out, saved)`. Only this package's backward can read the saved set. `save_mode` adds `'light_akk'`. |
-| `cake_gdn_nondet_train_kcp_backward` | `(q, k, v, g, beta, ctx, dout, *, saved=None, scale=None, workspace=None, options=None, **knobs)` | `dout` BF16 | Returns `(dq, dk, dv, dbeta, dg)`, within det's budgets but not bitwise det. |
+| `cake_gdn_nondet_train_kcp_backward` | `(q, k, v, g, beta, ctx, dout, *, saved=None, scale=None, workspace=None, options=None, **knobs)` | `dout` BF16 | Returns `(dq, dk, dv, dbeta, dg)`, not bitwise det. |
 
 Other public names:
 

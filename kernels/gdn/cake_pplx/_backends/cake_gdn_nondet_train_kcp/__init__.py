@@ -21,7 +21,7 @@ limitations under the License.
 # SM100 / SM103 / SM107.  The mode is in the name: this package is the
 # non-deterministic route and takes no ``deterministic`` keyword.  Its
 # deterministic counterpart is ``cake_pplx.cake_gdn_det_train_kcp``; this
-# package keeps that route's contracts and accuracy budgets, not its bitwise
+# package keeps that route's contracts, not its bitwise
 # results.  The public entry module is ``cake_pplx.cake_gdn_nondet_train_kcp``;
 # the names below are the package's public names (every one names the mode).
 # The partition / context plan, the host orchestration, the options, the

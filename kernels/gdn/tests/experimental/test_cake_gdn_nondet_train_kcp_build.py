@@ -78,8 +78,8 @@ KCP_SUFFIX = "_kcp"  # the context-parallel-only programs (``kcp_*``)
 _W = "sm100_sm103_sm107"
 
 # The nine programs of a step, the two output walks and the cut table of the adjoint offset walk (the shipped records
-# by program name: twenty-one libraries), the three programs of the in-kernel Q / K L2 norm and the light replay of
-# #1_l2n (one library each: 25 shipped records)
+# by program name: twenty-one libraries), the three programs of the in-kernel Q / K L2 norm (``fwd_prep_l2n`` in its
+# full and its forward form) and the light replay of #1_l2n (one library each: 26 shipped records)
 # and the two test-only records.
 SHIPPED_PROGRAMS = (
     "fwd_prep",
@@ -140,8 +140,8 @@ IDENTITIES = {
         {"vh": 64},
     ),
     "kcp_transfer_walk": (
-        f"tart.gdn_chunk_kcp_transfer_walk.{_W}.gdn_chunk_det_transfer_walk_v1_kcp",
-        {"precision_mode": 0, "compute_warps": 8},
+        f"tart.gdn_chunk_kcp_transfer_walk.{_W}.gdn_chunk_det_transfer_walk_ez_v1_kcp",
+        {},
     ),
     "kcp_transfer_walk_three_mma": (
         f"tart.gdn_chunk_kcp_transfer_walk.{_W}.gdn_chunk_det_transfer_walk_v1_kcp",
@@ -196,6 +196,10 @@ IDENTITIES = {
         f"tart.gdn_chunk_train_fwd_prep.{_W}.gdn_chunk_det_train_fwd_prep_l2n_v1",
         {},
     ),
+    "fwd_prep_l2n_fwd": (
+        f"tart.gdn_chunk_train_fwd_prep.{_W}.gdn_chunk_det_train_fwd_prep_l2n_v2",
+        {},
+    ),
     "fwd_prep_replay_l2n": (
         f"tart.gdn_chunk_train_fwd_prep.{_W}.gdn_chunk_train_fwd_prep_replay_l2n_v1",
         {},
@@ -225,7 +229,7 @@ GRID_RULES = (
     "chunks_qk_heads_persistent",
     "chunk_head_items",
 )
-SELECT_RULES = ("always", "columns", "ctas_per_head")
+SELECT_RULES = ("always", "columns", "ctas_per_head", "prep_form")
 
 
 def _registry():

@@ -23,7 +23,8 @@ Numeric policy: FTZ off (subnormal inputs and results are kept), round to neares
 rounding per output.  Every step is a plain IEEE FP32 operation of torch except the ``fma.rn`` of the sum of
 squares, which is emulated exactly: ``x^2`` of a BF16 ``x`` is exact in FP64, the FP64 sum is rounded once to FP64
 and once to FP32, and that double rounding equals the single FP32 rounding of the exact ``x^2 + s`` (53 >= 2 * 24 + 2;
-the tests check it against an exact rational oracle, subnormals and overflow included).  The reference assumes
+the tests check it bit for bit against an exact rational oracle on normal-range values; subnormal and
+overflowing values are not tested).  The reference assumes
 torch's flush-denormal mode is off (the torch default); it does not change that global mode.
 
 Forward, per token ``t`` and head ``h`` (``x = fp32(q[t, h, :])``)::
