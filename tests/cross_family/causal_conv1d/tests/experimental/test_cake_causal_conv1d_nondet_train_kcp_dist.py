@@ -37,6 +37,10 @@ are never compared bit for bit with another launch and never with the determinis
   are judged;
 - the rank-agreement check runs once per phase and refuses a mismatched call on every rank.
 
+The CUDA Graph replay cache (``graph="replay"``, W = 2): more keys than ``GRAPH_CACHE_MAX`` captured and replayed in
+turn; the cache keeps at most ``GRAPH_CACHE_MAX`` graphs, the package's pre-zeroed buffers those graphs hold stay
+bounded by the live graphs (an evicted graph's buffers return to the package), and the replays of a key are judged.
+
 Launch forms as the deterministic suite: ``torch.multiprocessing`` (skipped with fewer than ``W`` visible devices)
 or one process per Slurm task (``SLURM_NTASKS == W``).  Skipped until the exporter renders the package.
 """
@@ -462,6 +466,140 @@ def _run_rank(
     return report
 
 
+# The row of the replay-cache test, and the keys it captures beyond the cache's capacity.
+GRAPH_CACHE_ROW = ((3000,), 2, "zigzag", 256)
+GRAPH_CACHE_EXTRA = 24
+
+
+def _run_rank_graph_cache(rank: int, W: int, port: int, result_dir: str | None, local_id: int) -> dict:
+    """One rank of :func:`test_kcp_graph_replay_cache_eviction_bounded`: ``GRAPH_CACHE_MAX + GRAPH_CACHE_EXTRA`` keys
+    (pointer-distinct inputs, the same on every rank), each run four times with ``graph="replay"`` (forward and
+    backward: eager, capture, replay); after every key the cache holds at most ``GRAPH_CACHE_MAX`` entries and the
+    package holds at most a few pre-zeroed buffers beyond one per cached graph; then a fixed key's calls (eager,
+    capture, replays) are judged over the draws."""
+
+    import cake_pplx._backends.cake_causal_conv1d_nondet_train as backend
+    from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
+        kcp as conv_kcp,
+    )
+    from cake_pplx._backends.cake_kda_det_train_kcp import (
+        cake_kcp_plan as plan,
+    )
+    from tests.cake.test_helpers.cake_causal_conv1d_oracle import judge_draws, problem
+
+    lengths, _w, layout, C = GRAPH_CACHE_ROW
+    device = torch.device("cuda", local_id % max(torch.cuda.device_count(), 1))
+    torch.cuda.set_device(device)
+    if not dist.is_initialized():
+        os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
+        os.environ.setdefault("MASTER_PORT", str(port))
+        dist.init_process_group("nccl", rank=rank, world_size=W, device_id=device)
+    part, cu = _partition(plan.cake_kda_det_train_kcp_partition, lengths, W, layout)
+    ctx = plan.cake_kda_det_train_kcp_build_context(
+        part, dist.group.WORLD, rank, device, conv_kernel_size=WIDTH
+    )
+    T = cu[-1]
+    cu_dev = torch.tensor(cu, dtype=torch.int32, device=device)
+    rows = _local(part, rank, cu, torch.arange(T)).to(device)
+
+    def pack(seed: int) -> types.SimpleNamespace:
+        g = torch.Generator(device="cpu").manual_seed(seed)
+        x_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
+        w_all = (torch.randn(C, WIDTH, generator=g) * 0.5).contiguous()
+        dy_all = torch.randn(T, C, generator=g).to(torch.bfloat16)
+        return types.SimpleNamespace(
+            x=_local(part, rank, cu, x_all).to(device),
+            w=w_all.to(device),
+            dy=_local(part, rank, cu, dy_all).to(device),
+            x_all=x_all.to(device),
+            dy_all=dy_all.to(device),
+        )
+
+    def step(x, w, dy):
+        y, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(x, w, ctx, graph="replay")
+        dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(x, w, ctx, dy, hist, graph="replay")
+        return y, dx, dw
+
+    flags: dict[str, bool] = {}
+    info: dict[str, object] = {"T_r": None}
+    first = pack(SEED)
+    info["T_r"] = int(first.x.shape[0])
+    stats = dict(conv_kcp.GRAPH_STATS)
+    keys = []  # the keyed inputs stay alive, so no later key reuses their addresses
+    held_ok, cached_ok, worst = True, True, 0
+    for _ in range(conv_kcp.GRAPH_CACHE_MAX + GRAPH_CACHE_EXTRA):
+        keys.append(first.x.clone())
+        for _ in range(4):
+            step(keys[-1], first.w, first.dy)
+        torch.cuda.synchronize(device)
+        live = sum(e.graph is not None for e in conv_kcp._GRAPHS.values())
+        held = len(backend._GRAPH_HELD)
+        worst = max(worst, held - live)
+        cached_ok = cached_ok and len(conv_kcp._GRAPHS) <= conv_kcp.GRAPH_CACHE_MAX
+        held_ok = held_ok and held <= live + 4
+    captures = conv_kcp.GRAPH_STATS["capture"] - stats["capture"]
+    replays = conv_kcp.GRAPH_STATS["replay"] - stats["replay"]
+    info["graph_stats"] = {"captures": captures, "replays": replays, "held_beyond_live_max": worst}
+    n_keys = conv_kcp.GRAPH_CACHE_MAX + GRAPH_CACHE_EXTRA
+    flags["captured_every_key"] = captures >= 2 * n_keys and replays >= n_keys
+    flags["cache_bounded"] = cached_ok
+    flags["held_buffers_bounded"] = held_ok
+    flags["idle_pool_bounded"] = all(len(p) <= backend._POOL_DEPTH for p in backend._ZEROED_POOL.values())
+    del keys
+
+    x_key, w_key, dy_key = first.x.clone(), first.w.clone(), first.dy.clone()
+
+    def launch(_draw: int, seed: int):
+        p = pack(seed)
+        x_key.copy_(p.x)
+        w_key.copy_(p.w)
+        dy_key.copy_(p.dy)
+        y, dx, dw = step(x_key, w_key, dy_key)
+        outputs = {"y": y.clone(), "dx": dx.clone(), "dweight": dw.clone()}
+        partials = [torch.empty_like(outputs["dweight"]) for _ in range(W)]
+        dist.all_gather(partials, outputs["dweight"].contiguous())
+        total = partials[0].clone()
+        for partial in partials[1:]:
+            total += partial
+        outputs["dweight"] = total
+        if not rows.numel():
+            outputs = {"dweight": total}
+        return outputs, problem(p.x_all, p.w, cu_dev, None, p.dy_all, rows=rows)
+
+    failures = judge_draws(launch, seed=SEED, label="graph replay cache")
+    info["judge_failures"] = failures[:8]
+    flags["judged:graph replay cache"] = not failures
+    conv_kcp.cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()
+    torch.cuda.synchronize(device)
+    flag_list = [None] * W
+    info_list = [None] * W
+    dist.all_gather_object(flag_list, flags)
+    dist.all_gather_object(info_list, info)
+    report = {
+        "world": W,
+        "flags": {k: all(f[k] for f in flag_list) for k in flags},
+        "failing_ranks": {k: [r for r, f in enumerate(flag_list) if not f[k]] for k in flags},
+        "info_by_rank": info_list,
+    }
+    report["pass"] = all(report["flags"].values())
+    dist.barrier()
+    if rank == 0 and result_dir:
+        os.makedirs(result_dir, exist_ok=True)
+        with open(os.path.join(result_dir, "nondet-graph-cache.json"), "w") as fh:
+            json.dump(report, fh, indent=1, default=str)
+    return report
+
+
+def _spawn_graph_cache_entry(rank: int, W: int, port: int, result_dir: str) -> None:
+    try:
+        report = _run_rank_graph_cache(rank, W, port, result_dir, rank)
+        if not report["pass"]:
+            raise AssertionError(f"rank {rank}: {report}")
+    finally:
+        if dist.is_initialized():
+            dist.destroy_process_group()
+
+
 def _spawn_entry(rank: int, W: int, row, port: int, result_dir: str) -> None:
     try:
         report = _run_rank(rank, W, row, port, result_dir, rank)
@@ -519,5 +657,44 @@ def test_nondeterministic_kcp_rows(row) -> None:
             start_method="spawn",
         )
         with open(os.path.join(result_dir, "nondet-" + _row_id(row) + ".json")) as fh:
+            report = json.load(fh)
+    assert report["pass"], report
+
+
+def test_kcp_graph_replay_cache_eviction_bounded() -> None:
+    W = GRAPH_CACHE_ROW[1]
+    ntasks = int(os.environ.get("SLURM_NTASKS", "1"))
+    if os.environ.get("SLURM_PROCID") is not None and ntasks > 1:
+        if ntasks != W:
+            pytest.skip(f"a {ntasks}-task Slurm step runs the W={ntasks} rows only")
+        if not _supported():
+            pytest.skip(
+                "the non-deterministic conv package is not rendered or does not support this device"
+            )
+        report = _run_rank_graph_cache(
+            int(os.environ["SLURM_PROCID"]),
+            W,
+            int(os.environ.get("MASTER_PORT", "29500")),
+            os.environ.get("KCP_TEST_RESULT_DIR"),
+            int(os.environ.get("SLURM_LOCALID", "0")),
+        )
+        assert report["pass"], report
+        return
+    if not _supported():
+        pytest.skip(
+            "the non-deterministic conv package is not rendered or does not support this device"
+        )
+    if torch.cuda.device_count() < W:
+        pytest.skip(f"{W} CUDA devices required, {torch.cuda.device_count()} visible")
+    with tempfile.TemporaryDirectory(prefix="cake_conv_kcp_nondet_graph_cache_") as tmp:
+        result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
+        mp.start_processes(
+            _spawn_graph_cache_entry,
+            args=(W, _free_port(), result_dir),
+            nprocs=W,
+            join=True,
+            start_method="spawn",
+        )
+        with open(os.path.join(result_dir, "nondet-graph-cache.json")) as fh:
             report = json.load(fh)
     assert report["pass"], report

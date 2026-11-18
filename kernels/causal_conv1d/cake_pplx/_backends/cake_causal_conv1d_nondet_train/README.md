@@ -110,7 +110,8 @@ The forward runs two programs:
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and token count. It takes each of the rank's fragments as a
    document of its own, launches its record's full co-resident grid and takes its token chunks from zeroed counters,
-   as the single-rank forward does.
+   as the single-rank forward does. It launches without programmatic dependent launch (its `enable_pdl` launch scalar
+   is 0), in every mode.
 2. The history-row program (`kcp_fwd_halo`) runs after the exchange's wait. It writes `y` of the first
    `min(3, len)` rows of every fragment with a history row again, from the received pool, with the `kcp_fwd`
    program's instructions, the instructions of the one-launch forward (the `kcp_fwd` program with the context's
@@ -201,8 +202,15 @@ barrier.
 
 Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
-package keeps one zeroed buffer per capture and stream. When CUDA's capture
-id is not available, each captured call gets its own buffer.
+package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
+is destroyed; when the package has none ready, the capture zeroes one, a fill node). When CUDA's capture
+id is not available, each captured call gets its own buffer. The package allocates these pre-zeroed buffers and its
+per-stream workspaces from a memory pool of its own (`torch.cuda.MemPool`, one per device), so a CUDA Graph tree's
+warm-up does not take them into the tree's private pool. That memory is not returned to the caching allocator's other
+pools (a replaced per-stream buffer's memory stays cached in the package's pool): per device and kind (forward
+counters, backward accumulators) at most `_POOL_DEPTH` idle buffers of the largest eager need, plus the buffers live
+graphs hold, besides the per-stream buffers. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
+every captured call zeroes its own.
 
 ### Rank agreement
 

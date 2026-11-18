@@ -1566,6 +1566,8 @@ def _kcp_forward(
         counters = _forward_work(None, words, device=device, device_index=device_index)
         if counters is not None:
             values["work"] = counters
+        # the single-rank record's programmatic dependent launch scalar (records with ``use_pdl`` "runtime"): off
+        values["enable_pdl"] = 0
     else:
         (name,) = route_modules(arch, KCP_FWD)
         record = _loader.MODULES[name]
@@ -1776,6 +1778,8 @@ def _fwd_main(
     if e["sr"]:
         if counters is not None:
             values["work"] = counters
+        # the single-rank record's programmatic dependent launch scalar (records with ``use_pdl`` "runtime"): off
+        values["enable_pdl"] = 0
     elif deferred:
         values["hist"] = x_flat
         values["hist_row_off"] = _no_hist(e, device)

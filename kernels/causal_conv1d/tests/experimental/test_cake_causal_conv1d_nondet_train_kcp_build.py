@@ -21,7 +21,7 @@ programs keep the deterministic route positions, selection rule, build geometry 
 the ``partial`` rows replaced by zeroed FP32 accumulators (kernel parameter ``dw_acc``, logical ``acc``) and uint32
 ``work`` ticket counters, an ordinary occupancy-sized
 launch (no cooperative attribute, no grid barrier) and the workspace size of the legacy channel-tile rule the KCP
-path plans with.  No device is needed; nothing is built or launched.
+path plans with.  No device is needed; nothing is built or launched (a host launch is recorded, not run).
 """
 
 from __future__ import annotations
@@ -29,6 +29,7 @@ from __future__ import annotations
 import re
 
 import pytest
+import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -161,9 +162,10 @@ def test_two_launch_forward_programs() -> None:
     route's one record and takes the arguments the host passes (``kcp._fwd_repair``); the single-rank main program is
     a record of this package's zero-history registry's ``fwd`` route (``kcp.FWD_MAIN_ROUTE``) on every architecture,
     the det package's zero-history record of the same route position, each record of that route takes only ``x``,
-    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``) and the plan scalars (``kcp._fwd_main``), and
-    launches the co-resident grid (no reserved SM), so the host can launch whichever record
-    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count."""
+    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``), the plan scalars and, exactly when its
+    ``launch.use_pdl`` is ``"runtime"``, the ``enable_pdl`` launch scalar (``kcp._fwd_main`` passes 0), and launches
+    the co-resident grid (no reserved SM), so the host can launch whichever record ``cake_jit.selected_modules``
+    picks for the call's ``C`` and token count."""
 
     kcp = cake_package(KEY, "kcp")
     det_cake_jit = cake_package("cake_causal_conv1d_det_train", "cake_jit")
@@ -179,7 +181,10 @@ def test_two_launch_forward_programs() -> None:
         for name in names:
             record = cake_jit.MODULES[name]
             assert record["role"] == "fwd" and arch in record["arches"], (arch, name)
-            assert set(record["logical"].values()) <= main_values, (arch, name)
+            runtime_pdl = record["launch"]["use_pdl"] == "runtime"
+            logical = set(record["logical"].values())
+            assert logical <= main_values | ({"enable_pdl"} if runtime_pdl else set()), (arch, name)
+            assert ("enable_pdl" in logical) == runtime_pdl, (arch, name)
             assert record["workspace_rule"]["kind"] == "tile_counters", (arch, name)
             assert record["grid_rule"]["kind"] == "co_resident", (arch, name)
             assert "reserve_sms" not in record["grid_rule"], (arch, name)
@@ -198,6 +203,41 @@ def test_two_launch_forward_programs() -> None:
                 name,
                 det_name,
             )
+
+
+@pytest.mark.cpu_only
+def test_single_rank_forward_main_launches_without_pdl(monkeypatch) -> None:
+    """The single-rank main program's launch (``kcp._fwd_main`` of an entry with ``sr``) passes every logical argument
+    of each record of the ``fwd`` route on every architecture, and the ``enable_pdl`` launch scalar 0 (no
+    programmatic dependent launch, in every mode) with and without token-chunk counters."""
+
+    kcp = cake_package(KEY, "kcp")
+    seen: list[dict] = []
+    monkeypatch.setattr(
+        kcp, "_launch_trim", lambda info, values, device_index: seen.append(dict(values))
+    )
+    S, C = 16, 64
+    entry = {
+        "sr": True,
+        "cu": torch.tensor([0, S], dtype=torch.int32),
+        "scalars": dict.fromkeys(cake_jit.PLAN_SCALARS, 1),
+        "launch": None,
+        "device_index": 0,
+    }
+    x = torch.zeros(S * C, dtype=torch.bfloat16)
+    w = torch.zeros(C, 4, dtype=torch.float32)
+    y = torch.zeros(S, C, dtype=torch.bfloat16)
+    for counters in (torch.zeros(8, dtype=torch.int32), None):
+        seen.clear()
+        kcp._fwd_main(entry, x, w, y, None, counters, S=S, C=C, device=torch.device("cpu"))
+        (values,) = seen
+        assert values["enable_pdl"] == 0, counters
+        if counters is None:
+            continue
+        for arch in ARCHES:
+            for name in cake_jit.route_modules(arch, kcp.FWD_MAIN_ROUTE):
+                missing = set(cake_jit.MODULES[name]["logical"].values()) - set(values)
+                assert not missing, (arch, name, missing)
 
 
 @pytest.mark.cpu_only
