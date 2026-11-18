@@ -20,21 +20,21 @@ import itertools
 import json
 import re
 import types
+import zlib
 from pathlib import Path
 
 import pytest
 import torch
 
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
-    GRAD_NAMES,
     LOWER_BOUND,
-    RAW_GRAD_NAMES,
-    elementwise_gate,
-    error_metrics,
-    kda_exact_raw_with_grads,
-    kda_exact_with_grads,
     make_inputs,
     make_raw_inputs,
+)
+from tests.experimental.test_helpers.cake_kda_naive import (
+    assert_bitwise,
+    draw_case,
+    judge_arms,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -53,11 +53,11 @@ BT, D, SCALE = cake_backend.BT, cake_backend.D, cake_backend.SCALE
 CakeKDADetChunkSaved = cake_backend.CakeKDADetChunkSaved
 CakeKDADetWorkspace = cake_backend.CakeKDADetWorkspace
 
-# Accuracy gate, declared before the first run: every output elementwise within
-# ``|cand - ref| <= ATOL + RTOL * |ref|`` of the exact FP64 per-document recurrence of the same BF16 / FP32 inputs
-# (the BF16 outputs and the FP32 ``dg`` alike, compared in FP32).
-ATOL = RTOL = 1e-2
-OUTPUT_NAMES = ("out",) + GRAD_NAMES
+# Accuracy: every floating output (``out`` and each gradient) is judged by ``judge_arms``
+# (``test_helpers/cake_kda_naive.py``): its error against the exact FP64 per-document recurrence of the same BF16 /
+# FP32 inputs beside the error of the naive BF16 tier (``tests/cake_naive.py``) over the judge's draws, each draw's
+# inputs drawn from its seed.  A miss fails unless the owner listed it as a known gap
+# (``test_helpers/cake_kda_known_gaps.py``).
 
 # Dispatch constants the registry rules must reproduce (the kernels' validated regimes).
 TABLE_V2_MAX_DOCS = 256  # the chunk-parallel layout table serves up to 256 documents
@@ -282,6 +282,12 @@ SHAPES = [
 def _shape_id(shape) -> str:
     lengths, heads = shape
     return "s" + "_".join(str(n) for n in lengths) + f"-h{heads}"
+
+
+def _case_seed(test: str, shape) -> int:
+    """The base seed of a judged case (``judge_arms`` draws every input of draw ``j`` from ``draw_seed(base, j)``):
+    a CRC of the test's name and the case, so each case draws its own inputs and a rerun draws the same ones."""
+    return zlib.crc32(f"{test}:{_shape_id(shape)}".encode())
 
 
 def _device_or_skip() -> torch.device:
@@ -3894,33 +3900,31 @@ def _spy_call_workspaces(monkeypatch) -> list:
 
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
 def test_forward_and_backward_match_the_exact_reference(
-    device, manifest, shape
+    device, manifest, shape, record_property
 ) -> None:
+    """``out`` and the five gradients of the explicit forward / backward pair on the activated FP32 gate, judged by
+    ``judge_arms``: each against the exact FP64 recurrence beside the naive BF16 tier over the judge's draws (the
+    shape and the contract of every output on every draw).  On the first draw the pair runs twice and every result
+    repeats bit for bit (the package's run-to-run contract).  ``s1-h1``, a batch of one one-token document, is the only
+    case in the scope of the owner's one-token gaps."""
     lengths, heads = shape
-    inputs = make_inputs(lengths, heads, device)
-    out, grads, _ = _run_fwd_bwd(inputs)
-    torch.cuda.synchronize(device)
-    ref_out, ref_grads = kda_exact_with_grads(
-        inputs["q"],
-        inputs["k"],
-        inputs["v"],
-        inputs["g"],
-        inputs["beta"],
-        inputs["dout"],
-        inputs["cu_seqlens"],
-        SCALE,
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device)
+        out, grads, _ = _run_fwd_bwd(inputs)
+        got = {"out": out, **grads}
+        if j == 0:
+            got = {name: t.clone() for name, t in got.items()}
+            again, again_grads, _ = _run_fwd_bwd(inputs)
+            assert_bitwise(got, {"out": again, **again_grads}, tag="run to run")
+        return {"": got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("forward_and_backward", shape),
+        scale=SCALE,
     )
-    candidates = {"out": out, **grads}
-    references = {"out": ref_out, **ref_grads}
-    failures = []
-    for name in OUTPUT_NAMES:
-        assert candidates[name].shape == references[name].shape, name
-        gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append(
-                (name, gate, error_metrics(candidates[name], references[name]))
-            )
-    assert not failures, failures
 
 
 @pytest.mark.parametrize("shape", SHAPES[6:10], ids=_shape_id)
@@ -3986,31 +3990,44 @@ def test_replay_and_repeats_are_bitwise_identical(device, manifest, shape) -> No
         assert torch.equal(t, first_grads[name]), name
 
 
-def test_documents_do_not_leak_into_one_another(device, manifest) -> None:
-    lengths, heads = (100, 640, 77), 2
-    packed = make_inputs(lengths, heads, device)
-    out, grads, _ = _run_fwd_bwd(packed)
-    out, grads = _clone_all(out, grads)
-    start = 0
-    for length in lengths:
-        stop = start + length
-        single = {
-            name: packed[name][start:stop].contiguous()
-            for name in ("q", "k", "v", "g", "beta", "dout")
-        }
-        single["cu_seqlens"] = torch.tensor(
-            [0, length], dtype=torch.int32, device=device
-        )
-        s_out, s_grads, _ = _run_fwd_bwd(single)
-        assert elementwise_gate(out[start:stop], s_out, ATOL, RTOL)["pass"], (
-            "out",
-            start,
-        )
-        for name in s_grads:
-            assert elementwise_gate(grads[name][start:stop], s_grads[name], ATOL, RTOL)[
-                "pass"
-            ], (name, start)
-        start = stop
+def test_documents_do_not_leak_into_one_another(
+    device, manifest, record_property
+) -> None:
+    """A pack of three documents and each document run alone (``cu_seqlens`` ``[0, n]``; arm ``alone``: the
+    per-document results concatenated in pack order) are both judged by ``judge_arms`` against the pack's exact FP64
+    recurrence beside the naive BF16 tier: the reference keeps the documents apart, so a pack whose documents read
+    one another's state misses it.  The two sides are not compared with each other."""
+    shape = ((100, 640, 77), 2)
+    lengths, heads = shape
+
+    def draw(j, s):
+        packed = draw_case(lengths, heads, "g", False, s, device)
+        out, grads, _ = _run_fwd_bwd(packed)
+        whole = {"out": out, **grads}
+        parts: dict[str, list[torch.Tensor]] = {name: [] for name in whole}
+        start = 0
+        for length in lengths:
+            stop = start + length
+            single = {
+                name: packed[name][start:stop].contiguous()
+                for name in ("q", "k", "v", "g", "beta", "dout")
+            }
+            single["cu_seqlens"] = torch.tensor(
+                [0, length], dtype=torch.int32, device=device
+            )
+            s_out, s_grads, _ = _run_fwd_bwd(single)
+            for name, t in {"out": s_out, **s_grads}.items():
+                parts[name].append(t)
+            start = stop
+        alone = {name: torch.cat(ts) for name, ts in parts.items()}
+        return {"": whole, "alone": alone}, packed
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("documents_do_not_leak", shape),
+        scale=SCALE,
+    )
 
 
 def test_autograd_and_checkpoint_give_the_explicit_gradients(device, manifest) -> None:
@@ -4494,11 +4511,78 @@ def test_the_states_saving_set_of_a_segmented_16_head_row_feeds_the_plain_passes
             assert torch.equal(mine, theirs)
 
 
-def test_the_two_level_carry_binds_its_group_operands(device, manifest) -> None:
+def _judge_the_two_level_carry_row(
+    record_property, device, lengths, heads, p, choice
+) -> None:
+    """One two-level carry row of :func:`test_the_two_level_carry_binds_its_group_operands`: on the first draw, the
+    carry launches of a forward and a backward on a fresh workspace and their operands, grids and epochs exactly; on
+    every draw, ``out`` and the five gradients (arm: the row's id) judged by ``judge_arms`` against the exact FP64
+    recurrence beside the naive BF16 tier."""
+    S, N = sum(lengths), len(lengths)
+    captured: list = []
+
+    def recording(name, values, *, grid, device_index):
+        if name == "seg_carry_v8":
+            captured.append((dict(values), tuple(grid)))
+        elif name.startswith("seg_carry"):
+            assert not {"gsize", "carry_out_tiles"} & set(values), name
+        cake_jit.run_module(name, values, grid=grid, device_index=device_index)
+
+    ws = CakeKDADetWorkspace.for_problem(S, N, heads, device, launcher=recording)
+    fwd_carry = p.record("seg_carry", "fwd")
+    expected = int(fwd_carry == "seg_carry_v8") + 2 * int(
+        p.record("seg_carry", p.light_path) == "seg_carry_v8"
+    )
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "g", False, s, device)
+        q, k, v, g, beta, cu, dout = (
+            inputs[n] for n in ("q", "k", "v", "g", "beta", "cu_seqlens", "dout")
+        )
+        captured.clear()
+        epoch0 = ws._epoch[0]
+        out, saved = cake_backend.cake_kda_det_train_forward(
+            q, k, v, g, beta, cu, workspace=ws
+        )
+        grads = cake_backend.cake_kda_det_train_backward(
+            q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
+        )
+        if j == 0:
+            assert len(captured) == expected >= 2, (lengths, heads)
+            # one fresh epoch per stamped carry launch (the overlap pair's forward carry stamps one too)
+            epochs = [values["epoch"] for values, _grid in captured]
+            assert epochs == sorted(epochs) and len(set(epochs)) == len(epochs)
+            assert ws._epoch[0] - epoch0 == len(captured) + int(
+                fwd_carry == "seg_carry_ov"
+            )
+            for values, grid in captured:
+                assert grid == (choice[1], 1, 1) == p.grid("seg_carry", p.light_path)
+                assert values["gsize"] == p.gsize
+                assert values["flags"].data_ptr() == ws.flags.data_ptr()
+                assert values["flags"].numel() >= cake_jit.flag_words(grid[0])
+                tiles = values["carry_out_tiles"]
+                assert tiles.shape == (p.NSEG * heads, D, D)
+                assert tiles.data_ptr() == values["carry_out"].data_ptr()
+        names = ("dq", "dk", "dv", "dbeta", "dg")
+        got = {"out": out, **dict(zip(names, grads, strict=True))}
+        return {_shape_id((lengths, heads)): got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("two_level_carry", (lengths, heads)),
+        scale=SCALE,
+    )
+
+
+def test_the_two_level_carry_binds_its_group_operands(
+    device, manifest, record_property
+) -> None:
     """Where a path dispatches the two-level carry (every architecture, at most two heads, the rule's rows) its
     launch binds the carried states viewed as [NSEG * H, 128, 128] tiles, the plan's group size, the flag buffer
     (enough words for its grid) and a fresh epoch per launch, at the rule's grid; the chain carry binds none of
-    them."""
+    them.  The results of each two-level row (arm: the row's id, ``s<lengths>-h<heads>``) are judged by
+    ``judge_arms`` against the exact FP64 recurrence beside the naive BF16 tier over the judge's draws."""
     sm, arch = cake_jit.sm_count(device.index), cake_jit.device_arch(device.index)
     seen = 0
     for lengths, heads in (
@@ -4518,52 +4602,9 @@ def test_the_two_level_carry_binds_its_group_operands(device, manifest) -> None:
             continue
         seen += 1
         assert p.gsize == choice[0]
-        inputs = make_inputs(lengths, heads, device)
-        q, k, v, g, beta, cu, dout = (
-            inputs[n] for n in ("q", "k", "v", "g", "beta", "cu_seqlens", "dout")
+        _judge_the_two_level_carry_row(
+            record_property, device, lengths, heads, p, choice
         )
-        captured: list = []
-
-        def recording(name, values, *, grid, device_index):
-            if name == "seg_carry_v8":
-                captured.append((dict(values), tuple(grid)))
-            elif name.startswith("seg_carry"):
-                assert not {"gsize", "carry_out_tiles"} & set(values), name
-            cake_jit.run_module(name, values, grid=grid, device_index=device_index)
-
-        ws = CakeKDADetWorkspace.for_problem(S, N, heads, device, launcher=recording)
-        epoch0 = ws._epoch[0]
-        out, saved = cake_backend.cake_kda_det_train_forward(
-            q, k, v, g, beta, cu, workspace=ws
-        )
-        grads = cake_backend.cake_kda_det_train_backward(
-            q, k, v, g, beta, cu, dout, saved=saved, workspace=ws
-        )
-        fwd_carry = p.record("seg_carry", "fwd")
-        expected = int(fwd_carry == "seg_carry_v8") + 2 * int(
-            p.record("seg_carry", p.light_path) == "seg_carry_v8"
-        )
-        assert len(captured) == expected >= 2, (lengths, heads)
-        # one fresh epoch per stamped carry launch (the overlap pair's forward carry stamps one too)
-        epochs = [values["epoch"] for values, _grid in captured]
-        assert epochs == sorted(epochs) and len(set(epochs)) == len(epochs)
-        assert ws._epoch[0] - epoch0 == len(captured) + int(fwd_carry == "seg_carry_ov")
-        for values, grid in captured:
-            assert grid == (choice[1], 1, 1) == p.grid("seg_carry", p.light_path)
-            assert values["gsize"] == p.gsize
-            assert values["flags"].data_ptr() == ws.flags.data_ptr()
-            assert values["flags"].numel() >= cake_jit.flag_words(grid[0])
-            tiles = values["carry_out_tiles"]
-            assert tiles.shape == (p.NSEG * heads, D, D)
-            assert tiles.data_ptr() == values["carry_out"].data_ptr()
-        # the results are the exact reference's
-        ref_out, ref_grads = kda_exact_with_grads(q, k, v, g, beta, dout, cu, SCALE)
-        names = ("dq", "dk", "dv", "dbeta", "dg")
-        candidates = {"out": out, **dict(zip(names, grads, strict=True))}
-        references = {"out": ref_out, **ref_grads}
-        for name in OUTPUT_NAMES:
-            gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-            assert gate["pass"], (lengths, heads, name)
     assert (seen > 0) is (arch in CARRY_V8_ARCHES)
 
 
@@ -7880,49 +7921,44 @@ def _raw_recorder(launched: list):
 
 @pytest.mark.parametrize("shape", SHAPES, ids=_shape_id)
 def test_raw_gate_forward_and_backward_match_the_exact_reference(
-    device, manifest, shape
+    device, manifest, shape, record_property
 ) -> None:
-    """The raw mode against the exact FP64 recurrence whose gate is activated from the same BF16 raw gate and FP32
-    parameters in FP64 (the declared elementwise gate of every output, the parameter gradients included); the
-    result dtypes and shapes: ``dg`` the BF16 contiguous gradient of the raw gate, ``dA_log`` FP32 ``[H]``, ``ddt_bias``
-    FP32 in ``dt_bias``'s shape; the saved set records the gate mode and the lower bound."""
+    """The raw mode's ``out`` and seven gradients (the parameter gradients ``dA_log`` / ``ddt_bias`` included), judged
+    by ``judge_arms`` (``gate="raw"``) against the exact FP64 recurrence whose gate is activated from the same BF16
+    raw gate and FP32 parameters in FP64, beside the naive BF16 tier over the judge's draws.  On the first draw: the
+    result dtypes and shapes (``dg`` the BF16 contiguous gradient of the raw gate, ``dA_log`` FP32 ``[H]``,
+    ``ddt_bias`` FP32 in ``dt_bias``'s shape), the saved set's gate mode and lower bound, and a second run that
+    repeats every result bit for bit (the package's run-to-run contract).  ``s1-h1`` is the only case in the scope
+    of the owner's one-token gaps."""
     lengths, heads = shape
     S = sum(lengths)
-    inputs = make_raw_inputs(lengths, heads, device)
-    out, grads, saved = _run_raw(inputs)
-    torch.cuda.synchronize(device)
-    assert saved.gate == "raw" and saved.lower_bound == LOWER_BOUND
-    assert out.shape == (S, heads, D) and out.dtype == torch.bfloat16
-    assert grads["dg"].shape == (S, heads, D) and grads["dg"].dtype == torch.bfloat16
-    assert grads["dg"].is_contiguous()
-    assert grads["dA_log"].shape == (heads,) and grads["dA_log"].dtype == torch.float32
-    assert grads["ddt_bias"].shape == (heads * D,)
-    assert grads["ddt_bias"].dtype == torch.float32
-    q, k, v, raw, beta, cu, dout = _raw_ops(inputs)
-    ref_out, ref_grads = kda_exact_raw_with_grads(
-        q,
-        k,
-        v,
-        raw,
-        beta,
-        inputs["A_log"],
-        inputs["dt_bias"],
-        dout,
-        cu,
-        SCALE,
-        LOWER_BOUND,
+
+    def draw(j, s):
+        inputs = draw_case(lengths, heads, "raw", False, s, device)
+        out, grads, saved = _run_raw(inputs)
+        got = {"out": out, **grads}
+        if j == 0:
+            assert saved.gate == "raw" and saved.lower_bound == LOWER_BOUND
+            assert out.shape == (S, heads, D) and out.dtype == torch.bfloat16
+            assert grads["dg"].shape == (S, heads, D)
+            assert grads["dg"].dtype == torch.bfloat16
+            assert grads["dg"].is_contiguous()
+            assert grads["dA_log"].shape == (heads,)
+            assert grads["dA_log"].dtype == torch.float32
+            assert grads["ddt_bias"].shape == (heads * D,)
+            assert grads["ddt_bias"].dtype == torch.float32
+            got = {name: t.clone() for name, t in got.items()}
+            again, again_grads, _ = _run_raw(inputs)
+            assert_bitwise(got, {"out": again, **again_grads}, tag="run to run")
+        return {"": got}, inputs
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=_case_seed("raw_gate_forward_and_backward", shape),
+        scale=SCALE,
+        lower_bound=LOWER_BOUND,
     )
-    candidates = {"out": out, **grads}
-    references = {"out": ref_out, **ref_grads}
-    failures = []
-    for name in ("out",) + RAW_GRAD_NAMES:
-        assert candidates[name].shape == references[name].shape, name
-        gate = elementwise_gate(candidates[name], references[name], ATOL, RTOL)
-        if not gate["pass"]:
-            failures.append(
-                (name, gate, error_metrics(candidates[name], references[name]))
-            )
-    assert not failures, failures
 
 
 @pytest.mark.parametrize("shape", SHAPES[6:10] + SHAPES[11:13], ids=_shape_id)
