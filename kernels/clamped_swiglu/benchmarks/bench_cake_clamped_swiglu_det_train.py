@@ -329,6 +329,7 @@ def te_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         raise Unavailable("TE's scaled clamped SwiGLU needs a route weight (its unweighted form is another op)")
     try:
         import transformer_engine
+        import transformer_engine.pytorch  # noqa: F401  (loads the transformer_engine_torch extension)
         import transformer_engine_torch as tex
     except Exception as exc:  # noqa: BLE001
         raise Unavailable(f"transformer_engine_torch does not import: {type(exc).__name__}: {exc}") from None
