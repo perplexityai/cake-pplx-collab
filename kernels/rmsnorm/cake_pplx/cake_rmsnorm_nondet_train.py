@@ -262,7 +262,8 @@ def cake_rmsnorm_nondet_train_forward(
     -------
     ``(y, rstd)`` or ``(y, rstd, h_new)`` when ``residual`` is given.
     ``rstd`` is the FP32 per-row ``1 / sqrt(mean(h_new^2) + eps)`` the backward
-    needs; no other ``[T, H]`` temporary is produced.
+    needs.  No other ``[T, H]`` temporary is produced unless a preallocated
+    output takes the copy described above.
 
     Notes
     -----
