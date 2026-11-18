@@ -997,7 +997,7 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - The last token of an odd-length document belongs to no pair. It changes no output, and its `dC` and `dZ` rows are exactly zero.
 - Three kernels run on the current stream: a pair table (the int32 `[S + 1]` exclusive prefix of the pair counts), the forward (one row per pair) and the backward (every token row written once). The kernels compute in FP32 only, with IEEE round to nearest and no FP64. Gate gaps of 100 and more and exact ties give finite outputs.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`. Not yet validated on GB200, GB300 or VR200; results pending.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` (12.9 for the backward library, which uses 256-bit loads and stores), 12.9 for `sm_103a` and 13.5 for `sm_107a`. Not yet validated on GB200, GB300 or VR200; results pending.
 
 **Inputs.**
 
