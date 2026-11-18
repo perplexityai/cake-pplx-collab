@@ -32,6 +32,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.norm import test_cake_rmsnorm_det_train as bitwise
 
 pkg = cake_package("cake_rmsnorm_det_train")
 loader = cake_package("cake_rmsnorm_det_train", "cake_jit")
@@ -657,6 +658,32 @@ def test_fp32_weight_routes_mirror_their_bf16_routes(arch: str) -> None:
         _route_parts(loader.route_key(h, "fwd", False))[3] == "bf16"
         for h in loader.supported_hidden_sizes(arch)
     )
+
+
+def test_swapped_fp32_backward_windows_are_the_registry_windows() -> None:
+    """``SWAPPED_FP32_BACKWARD_TWINS`` of the bitwise test names the backward routes of ``SWAPPED_FP32_ROUTES``, and
+    each of its windows is, at both ends, the select window of the FP32-weight record the route runs there, with the
+    BF16 record of the listed program over that window under the FP32-weight record's host plan: a later swap or
+    re-cut of these routes fails here, with no device, before the bitwise test meets it on one."""
+    assert set(bitwise.SWAPPED_FP32_BACKWARD_TWINS) == {
+        (arch, hidden, residual)
+        for arch, hidden, kind, residual in SWAPPED_FP32_ROUTES
+        if kind == "bwd"
+    }
+    for (arch, hidden, residual), twins in bitwise.SWAPPED_FP32_BACKWARD_TWINS.items():
+        for above, at_most in twins:
+            top = max(OPEN_WINDOW_ROWS, above + 1) if at_most is None else at_most
+            for rows in (above + 1, top):
+                selected = loader.selected_modules(
+                    arch, hidden, "bwd", residual, rows=rows, w_dtype="f32"
+                )
+                (main,) = [
+                    n for n in selected if loader.MODULES[n]["role"] != REDUCE_ROLE
+                ]
+                label = (arch, hidden, residual, rows)
+                assert _window(loader.MODULES[main]) == (above, at_most), label
+                twin = bitwise._swapped_backward_twin(arch, hidden, residual, rows)
+                assert twin, label
 
 
 # --------------------------------------------------------------------------- the accuracy guard (no device)
