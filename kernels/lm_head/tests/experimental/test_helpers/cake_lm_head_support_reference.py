@@ -30,7 +30,8 @@ Contract reproduced here (independently of the package):
 :func:`reference_support_fp64` evaluates it in float64 from the BF16 input values (no rounding of ``z``)
 with PyTorch autograd, chunked over rows; :func:`reference_support_b0` is the eager PyTorch path at the
 contract's rounding boundaries (BF16 ``z`` promoted to FP32, a dense ``[T, V]`` logits tensor with the
-support as a mask, autograd), the "dense logits + support mask" baseline.
+support as a mask, autograd), the "dense logits + support mask" baseline; :func:`naive_support_bf16` is the
+same path with every tensor in BF16, the naive tier of the shared judge ``tests/cake_naive.py``.
 """
 
 from __future__ import annotations
@@ -45,22 +46,11 @@ from tests.experimental.test_helpers.cake_lm_head_loss_reference import (
     IGNORE_INDEX,
     _randn_rows,
     make_weight,
-    rel_l2,
 )
 
 OUTPUTS = ("packed", "selected", "kl")
 TAU_FORMS = ("none", "scalar", "constant", "hetero")
 SUPPORT_KINDS = ("ind", "shr", "heavy", "full")
-# Accuracy gates against the FP64 oracle: at most 1.05x the error of B0 on the same inputs plus a floor
-# per metric (the values of tests/experimental/test_cake_lm_head_det_train.py, logp-scale floors for KL).
-GATE_MARGIN = 1.05
-GATE_TINY = dict(
-    packed_max_abs=1e-5,
-    selected_max_abs=1e-5,
-    kl_max_abs=1e-5,
-    dX_rel_l2=1e-3,
-    dW_rel_l2=1e-3,
-)
 _TAU_SEED_OFFSET = (
     2000003  # the temperature's own generator (the #7637 rule): other draws do not move
 )
@@ -560,40 +550,88 @@ def reference_support_b0(
     return res
 
 
-def support_error_report(result: dict, oracle: dict, inp: SupportInputs) -> dict:
-    """Errors of ``result`` against the FP64 ``oracle``: ``packed_max_abs``, ``selected_max_abs`` (labelled rows),
-    ``kl_max_abs``, ``dX_rel_l2`` / ``dW_rel_l2`` where both sides carry them, plus ``selected_ignored_zero`` and
-    ``nan`` (any non-finite value)."""
-    report: dict = {}
-    nan = False
-    for name in ("packed", "selected", "kl"):
-        got, ref = result.get(name), oracle.get(name)
-        if got is None or ref is None:
-            continue
-        got = got.detach().double()
-        nan |= not bool(torch.isfinite(got).all())
-        diff = (got - ref).abs()
-        if name == "selected" and inp.labels is not None:
-            lab = inp.labels.to(diff.device) != IGNORE_INDEX
-            report["selected_ignored_zero"] = bool((got[~lab] == 0).all())
-            diff = diff[lab]
-        report[f"{name}_max_abs"] = float(diff.max()) if diff.numel() else 0.0
-    for name in ("dX", "dW"):
-        got, ref = result.get(name), oracle.get(name)
-        if got is not None and ref is not None:
-            report[f"{name}_rel_l2"] = rel_l2(got, ref)
-            nan |= not bool(torch.isfinite(got.detach().float()).all())
-    report["nan"] = bool(nan)
-    return report
-
-
-def gate_failures(errors: dict, b0_errors: dict) -> list[str]:
-    """Metrics whose error exceeds ``GATE_MARGIN * B0 + GATE_TINY`` (empty: every gate holds)."""
-    bad = []
-    for key, tiny in GATE_TINY.items():
-        if key in errors and key in b0_errors:
-            if not errors[key] <= GATE_MARGIN * b0_errors[key] + tiny:
-                bad.append(
-                    f"{key}={errors[key]:.3e} > {GATE_MARGIN} x {b0_errors[key]:.3e} + {tiny:.0e}"
-                )
-    return bad
+def naive_support_bf16(
+    inp: SupportInputs,
+    *,
+    outputs: Sequence[str],
+    upstream: Optional[dict] = None,
+    need_dx: bool = True,
+    need_dw: bool = True,
+) -> dict:
+    """The naive tier of the shared judge (``tests/cake_naive.py``): :func:`reference_support_b0` with every tensor
+    in BF16.  ``z = X @ W^T`` (torch's default BF16 GEMM), ``q = z / tau`` with the BF16 temperature rows, the
+    support as a mask of the dense ``[T, V]`` logits, the masked ``logsumexp``, the gathers, the teacher's BF16
+    ``lq``, ``Q = exp(lq)`` and the KL terms all run on BF16 tensors through autograd; the upstreams are cast to
+    BF16.  Returns BF16 ``packed [M]`` / ``selected [T]`` / ``kl [T]`` for the requested ``outputs`` (``None``
+    otherwise), ``lse [T]`` (0 on empty rows) and the BF16 gradients ``dX`` / ``dW`` (``None`` when not
+    requested)."""
+    for name in outputs:
+        if name not in OUTPUTS:
+            raise ValueError(f"unknown output {name!r}")
+    bf = torch.bfloat16
+    up = {
+        k: (None if v is None else v.to(bf)) for k, v in _upstreams(inp, outputs, upstream).items()
+    }
+    T, V, M = inp.T, inp.V, inp.M
+    device = inp.X.device
+    X = inp.X.detach().requires_grad_(bool(need_dx))
+    W = inp.W.detach().requires_grad_(bool(need_dw))
+    ids = inp.support_ids.to(torch.int64)
+    counts = inp.counts.to(device)
+    rows = torch.repeat_interleave(torch.arange(T, device=device), counts)
+    lpos = label_positions(inp.support_ids, inp.support_offsets, inp.labels).to(device)
+    offsets = inp.support_offsets.to(torch.int64).to(device)
+    multi = counts >= 2
+    zero_t = torch.zeros(T, dtype=bf, device=device)
+    res: dict = dict(packed=None, selected=None, kl=None)
+    with torch.enable_grad():
+        z = X @ W.t()  # BF16 [T, V]
+        q = z / inp.tau_rows().to(bf)[:, None]
+        mask = torch.zeros(T, V, dtype=torch.bool, device=device)
+        mask[rows, ids] = True
+        qm = q.masked_fill(~mask, -math.inf)
+        qm = torch.where((counts > 0)[:, None], qm, torch.zeros_like(qm))
+        lse = torch.logsumexp(qm, dim=1)
+        logp_full = q - lse[:, None]
+        packed = torch.where(
+            multi[rows], logp_full[rows, ids], torch.zeros(M, dtype=bf, device=device)
+        )
+        loss = torch.zeros((), dtype=bf, device=device)
+        if "packed" in outputs:
+            res["packed"] = packed
+            if up["packed"] is not None:
+                loss = loss + (packed * up["packed"]).sum()
+        if "selected" in outputs:
+            j = (offsets[:-1] + lpos.clamp_min(0)).clamp_max(max(M - 1, 0))
+            sel = torch.where(lpos >= 0, packed[j], zero_t) if M else zero_t
+            res["selected"] = sel
+            if up["selected"] is not None:
+                loss = loss + (sel * torch.where(lpos >= 0, up["selected"], zero_t)).sum()
+        if "kl" in outputs:
+            lq_full = torch.full((T, V), -math.inf, dtype=bf, device=device)
+            lq_full[rows, ids] = inp.teacher.to(bf)
+            Q = torch.exp(lq_full)
+            lpk = torch.zeros(T, V, dtype=bf, device=device)
+            lpk = lpk.index_put((rows, ids), packed)
+            term = torch.where(Q > 0, Q * (lq_full - lpk), torch.zeros_like(Q))
+            kl = torch.where(multi, term.sum(1), zero_t)
+            res["kl"] = kl
+            if up["kl"] is not None:
+                loss = loss + (kl * torch.where(multi, up["kl"], zero_t)).sum()
+        if (need_dx or need_dw) and loss.requires_grad:
+            loss.backward()
+    for name in OUTPUTS:
+        if res[name] is not None:
+            res[name] = res[name].detach()
+    res["lse"] = torch.where(counts > 0, lse, torch.zeros_like(lse)).detach()
+    res["dX"] = (
+        X.grad.detach()
+        if (need_dx and X.grad is not None)
+        else (torch.zeros_like(inp.X) if need_dx else None)
+    )
+    res["dW"] = (
+        W.grad.detach()
+        if (need_dw and W.grad is not None)
+        else (torch.zeros_like(inp.W) if need_dw else None)
+    )
+    return res
