@@ -45,11 +45,12 @@ and up to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2
 ran it up to 256 rows per SM there).  Version 0.2.4 changes no bits: a call
 with ``compute_grad_weight=False`` runs a program built without the weight
 gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  Version 0.2.5
-changes no bits: the strided programs without the weight gradient read
-packed rows at their linear offsets, a CTA of one block takes no integer
-division before its loads, and in the repeatable band (sm_107a) packed rows
-run a 128-thread build of the strided program (8-row blocks: twice the CTAs
-of 16-row blocks at a small row count), other layouts the 256-thread one.
+changes no bits: in the repeatable band (sm_107a) packed rows run a
+128-thread build of the strided program without the weight gradient (8-row
+blocks: twice the CTAs of 16-row blocks at a small row count), other
+layouts the 0.2.4 256-thread one; this build and the fused band's strided
+program read packed rows at their linear offsets, and a CTA of theirs with
+one block takes no integer division before its loads.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

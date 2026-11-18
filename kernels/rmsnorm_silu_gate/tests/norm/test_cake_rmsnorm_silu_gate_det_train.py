@@ -2930,3 +2930,96 @@ def test_strided_programs_follow_the_layout(sm_count):
                 )
                 got = loader.nodw_module(arch, name, rows, sm_count, packed=packed)
                 assert got == routes[NODW_CLAIMED], (arch, rows, strides, got)
+
+
+def test_backward_module_tells_the_layout_as_backward_packed(monkeypatch):
+    """``backward_module`` (host only) tells ``module_for_rows`` the rows are
+    packed, by its own copy of the kernel's test, exactly when
+    ``backward_packed`` does: on packed strides, on each of
+    ``OTHER_STRIDES``, on packed strides with any one of the six set to 0,
+    moved by a row or set to 256, and on one head."""
+    told = []
+
+    def record(arch, role, rows, sm_count, packed=False):
+        told.append(packed)
+        return loader.ROUTES[arch][role]
+
+    monkeypatch.setattr(loader, "module_for_rows", record)
+    row = ROUTE_H * D
+    cases = [(ROUTE_H, PACKED_STRIDES)]
+    cases += [(ROUTE_H, strides) for strides in OTHER_STRIDES.values()]
+    for i, stride in enumerate(PACKED_STRIDES):
+        for value in (0, stride + row, 2 * D):
+            strides = list(PACKED_STRIDES)
+            strides[i] = value
+            cases.append((ROUTE_H, tuple(strides)))
+    cases += [(1, (D, D, D, D, D, D)), (1, (0, D, 0, D, 0, D))]
+    seen = set()
+    for heads, strides in cases:
+        want = loader.backward_packed(heads, *strides)
+        seen.add(want)
+        told.clear()
+        loader.backward_module("sm_100a", "bwd_bf16", 4096, heads, 148, *strides)
+        assert told == [want], (heads, strides, told)
+    assert seen == {True, False}
+
+
+# The layouts of a backward without the weight gradient on 65 tokens of 48
+# heads (one token for ``single_token``; ``dy_projection``: ``dy`` alone
+# sliced from a projection; ``broadcast``: token-stride-0 ``x`` and ``z``),
+# and whether the kernel reads them as packed rows (misaligned ones once
+# copied by the host).
+NODW_ENTRY_PACKED = {
+    "contiguous": True,
+    "flat": True,
+    "misaligned": True,
+    "single_token": False,
+    "projection": False,
+    "head_major": False,
+    "dy_projection": False,
+    "broadcast": False,
+}
+
+
+@pytest.mark.parametrize("layout", NODW_ENTRY_PACKED)
+def test_nodw_backward_tells_nodw_module_the_layout(layout, launches):
+    """A backward with ``compute_grad_weight=False`` tells ``nodw_module`` the
+    rows are packed, by its own copy of the kernel's test, exactly for the
+    layouts the kernel reads as packed rows, and launches the program
+    ``nodw_module`` names; ``dx`` and ``dz`` are the bits of the call that
+    computes a BF16 weight gradient."""
+    arch, sms = _device()
+    H, T = ROUTE_H, 65
+    if layout == "single_token":
+        x, z, w, dy = make(1, H, seed=46)
+    elif layout == "broadcast":
+        x, z, w, _ = make(1, H, seed=46)
+        x, z = x.expand(T, H, D), z.expand(T, H, D)
+        dy = make(T, H, seed=47)[3]
+    elif layout == "dy_projection":
+        x, z, w, _ = make(T, H, seed=46)
+        dy = make(T, H, layout="projection", seed=47)[3]
+    else:
+        x, z, w, dy = make(T, H, layout=layout, seed=46)
+    rows = x.numel() // D
+    assert rows < LONG_MIN_ROWS_PER_SM[arch] * sms
+    told = []
+    nodw_module = pkg.nodw_module
+
+    def record(arch, name, rows, sm_count, packed=False):
+        told.append(packed)
+        return nodw_module(arch, name, rows, sm_count, packed)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pkg, "nodw_module", record)
+        launches.clear()
+        dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+    packed = NODW_ENTRY_PACKED[layout]
+    assert dw is None
+    assert told == [packed], (layout, told)
+    name = loader.ROUTES[arch]["bwd_bf16"]
+    want = loader.nodw_module(arch, name, rows, sms, packed)
+    assert launches == [want], (layout, launches)
+    want_dx, want_dz, _ = backward(dy, x, z, w, EPS)
+    assert_same_bits(dx, want_dx, f"{layout}: dx")
+    assert_same_bits(dz, want_dz, f"{layout}: dz")

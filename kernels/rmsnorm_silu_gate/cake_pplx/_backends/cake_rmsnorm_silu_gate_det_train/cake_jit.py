@@ -639,9 +639,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # The backward without the weight gradient, strided: the BF16 backward
     # built without the weight gradient (all of its work removed at build
     # time), CTA b running the 16-row blocks b, b + grid, ... with no claim,
-    # no ticket and no workspace word (a CTA of one block takes its block
-    # count and prefetch test without an integer division), so dx and dz are
-    # the BF16 backward's bits at any grid; the BF16 backward's kernel
+    # no ticket and no workspace word, so dx and dz are the BF16 backward's
+    # bits at any grid; the BF16 backward's kernel
     # parameters (the weight-gradient and workspace ones unread) and CTA
     # count; a call with compute_grad_weight=False runs it on rows that are
     # not packed (packed rows run bwd_bf16_nodw_strided_packed) up to
