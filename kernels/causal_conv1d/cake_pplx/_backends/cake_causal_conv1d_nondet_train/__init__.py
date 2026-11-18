@@ -257,12 +257,12 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # The pre-zeroed capture buffers.  An eager call that omits ``workspace=`` keeps, per
 # (device index, kind) -- kind ``"fwd"`` (int32 counter words) or ``"bwd"`` (uint8
 # accumulator and counter bytes) -- up to ``_POOL_DEPTH`` idle zeroed buffers of
-# ``_POOL_SIZE`` elements, the largest need of such a call on the device
-# (``_ZEROED_POOL``).  Each idle buffer carries (``_PoolBuffer``) a slot of a pinned
-# host flag array that a device-to-host copy, queued on the eager call's stream
-# behind the buffer's zero fill, sets to 1, and a CUDA user object, made on the
-# eager call (outside any capture), whose destructor posts the buffer's POSIX
-# semaphore.  A capture call takes an idle buffer whose flag reads 1 (a host load:
+# ``_POOL_SIZE`` elements, the largest need of such a call on the device whose
+# refill succeeded (``_ZEROED_POOL``).  Each idle buffer carries (``_PoolBuffer``) a
+# slot of a pinned host flag array that a device-to-host copy, queued on the eager
+# call's stream behind the buffer's zero fill, sets to 1, and a CUDA user object,
+# made on the eager call (outside any capture), whose destructor posts the buffer's
+# POSIX semaphore.  A capture call takes an idle buffer whose flag reads 1 (a host load:
 # its zero fill has completed) and moves the user object's reference into the graph
 # being captured (``cudaGraphRetainUserObject``, the only CUDA call besides
 # ``cudaStreamGetCaptureInfo`` a capture makes here): the graph and each of its
@@ -288,9 +288,11 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # memory pool) they stay.  A dropped buffer's memory stays cached in the package's
 # memory pool.  ``_POOL_READY[kind][device index]`` is the need up to which an eager
 # call does not refill: the pool's size after a refill that succeeded, 0 (or absent:
-# the next eager call refills) once a capture took a buffer or found none, and the
-# call's need after a refill that ran out of memory (the pool and its size stay as
-# they were): the one lookup of an eager call while the pool needs nothing.
+# the next eager call refills) once a capture took a buffer or found none, the
+# call's need after a refill that ran out of memory (that refill adds no buffer and
+# keeps the pool's size, but its drain has already run) and ``sys.maxsize`` once
+# ``_pool_off`` turned the kind off: the one lookup of an eager call while the pool
+# needs nothing.
 # ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards the take
 # (``_pool_take``), the refill and its drain (``_pool_refill``), every entry into the
 # package's memory pool (the refill's and ``_package_zeros``': two threads never
@@ -299,7 +301,8 @@ _CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {
 # that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
 # ``_capture_buffer``): the thread would wait for itself.
 _POOL_DEPTH = 4
-# torch's out-of-memory error: a refill that meets it leaves the pool as it was.
+# torch's out-of-memory error: a refill that meets it adds no buffer and keeps the
+# pool's size.
 _OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
 _POOL_DTYPES: dict[str, torch.dtype] = {"fwd": torch.int32, "bwd": torch.uint8}
 _ZEROED_POOL: dict[tuple[int, str], list] = {}
@@ -1201,10 +1204,10 @@ def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) 
     ``_POOL_READY[kind][device_index]``: return the buffers released by their graphs (to the pool, with a new user
     object, or freed), raise the device's pool size to ``need``, free idle buffers below it and zero new buffers on
     the current stream until the pool holds ``_POOL_DEPTH``; each new buffer's flag is set by a device-to-host copy,
-    queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error leaves the pool
-    and its size as they were and sets ``_POOL_READY[kind][device_index]`` to ``need`` (the next refill comes at a
-    larger need or after the next take); any other failure leaves the device without pre-zeroed buffers of
-    ``kind``."""
+    queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error adds no buffer
+    and keeps the pool's size (the drain before it has kept or dropped the released buffers against the raised size)
+    and sets ``_POOL_READY[kind][device_index]`` to ``need`` (the next refill comes at a larger need or after the
+    next take); any other failure leaves the device without pre-zeroed buffers of ``kind``."""
 
     uo = _user_objects()
     if not uo:
