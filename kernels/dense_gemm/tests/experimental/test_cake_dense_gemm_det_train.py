@@ -9905,11 +9905,13 @@ def test_gpu_promoted_programs(case):
 
 
 # Every promoted twin on the device, by its own knobs: (twin, d_out, d_in, T, the architectures).  Each row is a weight
-# gradient the planner runs on that twin on the listed architectures (a plan enumeration over the benchmark rows and
-# part sizes), at a token count where its longest segment holds more than 256 K blocks there; the test forces the
-# twin's program (``_template_knobs``), so it runs on any SM count of those architectures.  A twin's other registered
-# architectures plan another program for these rows (the row's rule adds its own split or orientation there).  The
-# synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
+# gradient of the benchmark rows that the planner runs on that twin on some part (a plan enumeration over the rows and
+# part sizes), at a token count where its longest segment holds more than one chunk.  The test forces the twin's
+# program (``_template_knobs``); the architectures are those of the twin's registered ones on which the forced knobs
+# plan exactly the twin for this row (``test_forced_twin_cases_plan_their_twin``).  On the others the row's rule
+# still decides a knob the symbol leaves open: ``sk_exact`` (``None`` reads the rule: the ``sm_107a`` 32 -> 5120 rule
+# splits it exactly) or the orientation ``wgrad_views`` picks (the ``sm_107a`` 512 -> 5120 rule plans ``_hne_t``).
+# The synchronised, exact-split, TMA-store and stt twins write their chunk sums inside their own drains, which
 # ``PROMOTED_GPU_CASES`` does not reach.
 PROMOTED_TWIN_GPU_CASES = (
     ("dense_proj_det_gemm_nn_n128_hen_t_kc128_pro15", 32, 5120, 65535, ("sm_100a",)),
@@ -9925,7 +9927,7 @@ PROMOTED_TWIN_GPU_CASES = (
         32,
         5120,
         32768,
-        ("sm_103a", "sm_107a"),
+        ("sm_100a", "sm_103a", "sm_107a"),
     ),
     (
         "dense_proj_det_gemm_nn_n192_bz64_hne_sks_sb2_kc128_pro15",
@@ -9975,6 +9977,48 @@ def test_promoted_twin_gpu_cases_cover_every_twin():
         assert knobs is not None and knobs["promote"] is True, twin
 
 
+#: The SM count of a part of each architecture the CPU plan check plans for.
+_FORCED_TWIN_SM_COUNT = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
+
+
+def _forced_twin_knobs(twin):
+    """The knobs of ``twin``'s symbol the prepare call takes (``promote=True`` among them); the rest (``kser``,
+    ``sk_first``, ``lw``, ``mg``, ``sw``) are off in every twin."""
+    knobs = cake_backend._template_knobs(twin)
+    assert knobs is not None and knobs["promote"] is True, twin
+    takes = inspect.signature(cake_dense_gemm_det_train_projection_prepare).parameters
+    assert not any(v for k, v in knobs.items() if k not in takes), (twin, knobs)
+    return {k: v for k, v in knobs.items() if k in takes}
+
+
+def test_forced_twin_cases_plan_their_twin():
+    """On every architecture of a ``PROMOTED_TWIN_GPU_CASES`` row, the twin's knobs plan exactly the twin for the
+    row's weight gradient, with a longest segment of more than one chunk: the GPU test's premise, checked without a
+    device."""
+    for twin, d_out, d_in, T, arches in PROMOTED_TWIN_GPU_CASES:
+        knobs = _forced_twin_knobs(twin)
+        for arch in arches:
+            G = torch.empty(T, d_out, dtype=torch.bfloat16)
+            X = torch.empty(T, d_in, dtype=torch.bfloat16)
+            A, B, transposed = wgrad_views(G, X, arch=arch)
+            plan = cake_dense_gemm_det_train_projection_plan(
+                A,
+                B,
+                torch.empty(d_out, d_in, dtype=torch.bfloat16),
+                sm_count=_FORCED_TWIN_SM_COUNT[arch],
+                l2_bytes=L2_BYTES,
+                transposed_out=transposed,
+                arch=arch,
+                **knobs,
+            )[0]
+            assert plan.template == twin, (arch, twin, plan.template)
+            assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, (arch, twin)
+            assert cake_backend.segment_blocks(plan) > cake_backend.K1_PROMOTE_BLOCKS, (
+                arch,
+                twin,
+            )
+
+
 @pytest.mark.parametrize(
     "case",
     PROMOTED_TWIN_GPU_CASES,
@@ -9995,12 +10039,7 @@ def test_gpu_promoted_twin_forms(case):
     twin, d_out, d_in, T, arches = case
     if arch not in arches:
         pytest.skip(f"a case of {list(arches)}; the device is {arch}")
-    knobs = cake_backend._template_knobs(twin)
-    assert knobs.pop("kser", 0) == 0 and knobs["promote"] is True, twin
-    # the symbol's knobs the prepare call takes; the rest (``sk_first``, ``lw``, ``mg``, ``sw``) are off in every twin
-    takes = inspect.signature(cake_dense_gemm_det_train_projection_prepare).parameters
-    assert not any(v for k, v in knobs.items() if k not in takes), (twin, knobs)
-    knobs = {k: v for k, v in knobs.items() if k in takes}
+    knobs = _forced_twin_knobs(twin)
     G, X = _d1_wgrad_operands(T, d_out, d_in, SEED, device)
     A, B, transposed = wgrad_views(G, X, arch=arch)
     out = torch.full((d_out, d_in), float("nan"), dtype=torch.bfloat16, device=device)
@@ -10047,7 +10086,7 @@ def test_gpu_promoted_twin_forms(case):
     assert all(torch.equal(run, runs[0]) for run in runs[1:])
 
 
-# The GB T-exact serpentine-K rules:(arch, B MN-major, N, K) -> (the T of the exact keys, the program on the 76-pair parts, the
+# The GB T-exact serpentine-K rules: (arch, B MN-major, N, K) -> (the T of the exact keys, the program on the 76-pair parts, the
 # program without ``kser``).  Each key names the T 16231 key's program of the row with ``kser`` 76 (at T 16172; at the T of
 # the row's round-9 / round-10 keys the key's own rule gains ``kser`` 76); the wave guard keeps it on
 # the 152-SM parts only (76 CTA pairs), every other part plans the program without it.
