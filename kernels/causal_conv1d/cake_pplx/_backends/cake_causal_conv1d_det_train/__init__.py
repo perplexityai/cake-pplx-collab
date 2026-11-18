@@ -29,9 +29,18 @@ Host design (the knobs are keywords; no environment variable):
   (FLA's order).  ``dweight`` / ``dbias`` default to the parameter's dtype and
   may be preallocated as FP32 or BF16.
 - ``silu_grad_preactivation``: ``"bf16"`` (default, the shipped policy: SiLU'
-  at the BF16-rounded preactivation, the boundary FLA's backward uses) or
-  ``"fp32"`` (SiLU' at the unrounded FP32 preactivation and an FP64 final
-  reduction of ``dweight``: a weight gradient within ~2e-7 rel-L2 of exact).
+  at the BF16-rounded preactivation with FP32 taps, the boundary FLA's
+  backward uses, and at the unrounded FP32 preactivation with BF16 taps) or
+  ``"fp32"`` (SiLU' at the unrounded FP32 preactivation; a slower program).
+  Every ``dweight`` / ``dbias`` sum is one plain FP32 word under both by
+  default (``dweight_sum``).
+- ``dweight_sum``: ``"fp32"`` (default: one plain FP32 word per ``dweight`` /
+  ``dbias`` sum) or ``"fp32_pair"`` (opt-in, with ``silu_grad_preactivation=
+  "fp32"`` only: the pair routes ``cake_jit.PAIR_ROUTES``, every sum an FP32
+  (hi, lo) pair -- the main program's two-level fold Kahan-compensated, the
+  reduce program's row sums in hi/lo pairs, one final rounding; FP32 operations
+  only).  The default never selects a pair route; ``"fp32_pair"`` without the
+  FP32 SiLU' policy is a ``ValueError``.
 - A call's arguments select its route (``cake_jit.forward_route`` /
   ``backward_route``): the default routes run the shipped programs unchanged;
   the other routes' programs read the ``flags`` bit mask (``cake_jit.FLAG_*``,
@@ -108,6 +117,9 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
 PARAMETER_DTYPES = (torch.float32, torch.bfloat16)
 # The two SiLU'-evaluation policies of the weight gradient (``silu_grad_preactivation``).
 SILU_GRAD_PREACTIVATIONS = ("bf16", "fp32")
+# The sum forms of ``dweight`` / ``dbias`` (``dweight_sum``): one FP32 word per sum (the default) or an FP32 (hi, lo)
+# pair (the opt-in pair routes).
+DWEIGHT_SUMS: tuple[str, ...] = tuple(_loader.DWEIGHT_SUMS)
 # The backward main grid multiples a call may choose (``bwd_grid_mult``): 1 is the
 # default grid; 2, 3 and 4 launch that many times its untrimmed CTA count.  The
 # registry's ``GRID_MULT_CHOICES``.
@@ -188,6 +200,15 @@ def _check_placement(
         raise ValueError(f"{name} must be contiguous")
 
 
+# The largest token count ``S`` a call takes.  The kernels split a channel
+# tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
+# streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
+# few thousand on any supported device and far below MAX_TOKEN_STREAMS, so
+# ``S <= INT32_MAX - MAX_TOKEN_STREAMS + 1`` keeps that sum in range.
+MAX_TOKEN_STREAMS = 1 << 16
+MAX_TOKENS = INT32_MAX - MAX_TOKEN_STREAMS + 1
+
+
 def _tokens(
     tensor: object,
     name: str,
@@ -201,7 +222,7 @@ def _tokens(
     against ``x``).  Both kernels read the packed rows as 16-byte vectors of eight
     channels, so ``C`` is a multiple of eight; ``S`` and ``C`` are 32-bit kernel
     scalars (``S x C`` itself may exceed 2^31: the kernels address with 64-bit
-    offsets).
+    offsets), and ``S`` is at most :data:`MAX_TOKENS`.
     """
 
     t = _require_tensor(tensor, name)
@@ -221,9 +242,11 @@ def _tokens(
             f"{name} must have a channel count C that is a positive multiple of "
             f"{CHANNEL_MULTIPLE}, got C={C}"
         )
-    if S > INT32_MAX or C > INT32_MAX:
+    if S > MAX_TOKENS or C > INT32_MAX:
         raise ValueError(
-            f"{name}: S={S} and C={C} must each fit a 32-bit kernel scalar"
+            f"{name}: S={S} must be at most {MAX_TOKENS} and C={C} must fit a "
+            "32-bit kernel scalar (the kernels split S over at most "
+            f"{MAX_TOKEN_STREAMS} token streams with the 32-bit S + streams - 1)"
         )
     return S, C, t.view(S, C)
 
@@ -316,6 +339,23 @@ def _silu_grad_preactivation(value: object) -> str:
     if value not in SILU_GRAD_PREACTIVATIONS:
         raise ValueError(
             f"silu_grad_preactivation must be one of {SILU_GRAD_PREACTIVATIONS}, got {value!r}"
+        )
+    return str(value)
+
+
+def _dweight_sum(value: object, policy: str) -> str:
+    """Validate ``dweight_sum``: a ``str`` (``TypeError`` otherwise), one of ``DWEIGHT_SUMS`` (``ValueError``
+    otherwise); ``"fp32_pair"`` needs the ``"fp32"`` SiLU' policy (``ValueError`` otherwise: only the FP32-SiLU'
+    routes have a pair form)."""
+
+    if not isinstance(value, str):
+        raise TypeError(f"dweight_sum must be a str, one of {DWEIGHT_SUMS}, got {type(value).__name__}")
+    if value not in DWEIGHT_SUMS:
+        raise ValueError(f"dweight_sum must be one of {DWEIGHT_SUMS}, got {value!r}")
+    if value == "fp32_pair" and policy != "fp32":
+        raise ValueError(
+            'dweight_sum="fp32_pair" needs silu_grad_preactivation="fp32": only the FP32-SiLU\' '
+            f"routes have an FP32 (hi, lo) pair form, got silu_grad_preactivation={policy!r}"
         )
     return str(value)
 
@@ -729,6 +769,7 @@ def cake_causal_conv1d_det_train_backward(
     dweight: Optional[torch.Tensor] = None,
     dbias: Optional[torch.Tensor] = None,
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> tuple[torch.Tensor, ...]:
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward.
 
@@ -741,10 +782,13 @@ def cake_causal_conv1d_det_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
-        ``"bf16"`` at the BF16-rounded recomputed preactivation (the shipped
-        policy and FLA's boundary; ``dweight`` within ~3e-5 rel-L2 of exact),
-        ``"fp32"`` at the unrounded FP32 preactivation with an FP64 final
-        reduction (~2e-7).  ``dx`` is within one BF16 ulp of exact either way.
+        ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` (the shipped policy and FLA's boundary; ``dweight`` within
+        ~3e-5 rel-L2 of exact) and at the unrounded FP32 preactivation with a
+        BF16 ``weight``,
+        ``"fp32"`` at the unrounded FP32 preactivation (a slower program);
+        both sum in plain FP32 words.  ``dx`` is within one BF16 ulp of exact
+        either way.
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_causal_conv1d_det_train_backward_workspace`; allocated when
@@ -762,6 +806,16 @@ def cake_causal_conv1d_det_train_backward(
         default).  A ``workspace`` must be sized with the same or a larger
         ``bwd_grid_mult``.  ``TypeError`` for a non-int, ``ValueError`` for
         another value.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias``: ``"fp32"`` (default) one
+        plain FP32 word per sum; ``"fp32_pair"`` (opt-in, with
+        ``silu_grad_preactivation="fp32"`` only, ``ValueError`` otherwise; a
+        non-``str`` is a ``TypeError``, another ``str`` a ``ValueError``) an
+        FP32 (hi, lo) pair per sum -- the pair route of the call's ``_fp32g``
+        route: the same ``dx``, the fold Kahan-compensated and the rows summed
+        as hi/lo pairs in the same fixed order, rounded once (bitwise
+        reproducible run to run; its bits differ from the default's).  The
+        default workspace serves it.
 
     Returns
     -------
@@ -772,7 +826,7 @@ def cake_causal_conv1d_det_train_backward(
     the empty ``dx`` and zero gradients without launching.
 
     The call's arguments select the route (``cake_jit.backward_route``:
-    ``bias``, the policy, BF16 among ``weight`` / ``dweight``), and within a
+    ``bias``, the policy, the ``weight`` and ``dweight`` dtypes), and within a
     route the channel count selects the program through the registry's
     host-side rule (``cake_jit.selected_modules``; the data is never read), so a
     given ``(S, C, device)`` and route always run the same program.  The
@@ -795,6 +849,7 @@ def cake_causal_conv1d_det_train_backward(
     """
 
     policy = _silu_grad_preactivation(silu_grad_preactivation)
+    sum_form = _dweight_sum(dweight_sum, policy)
     bwd_grid_mult = _bwd_grid_mult(bwd_grid_mult)
     x = _require_tensor(x, "x")
     device = x.device
@@ -839,7 +894,9 @@ def cake_causal_conv1d_det_train_backward(
     kind = backward_route(
         bias=b is not None,
         fp32_grad=policy == "fp32",
-        bf16_taps_or_dweight=torch.bfloat16 in (w.dtype, dw_out.dtype),
+        bf16_taps=w.dtype == torch.bfloat16,
+        bf16_dweight=dw_out.dtype == torch.bfloat16,
+        pair=sum_form == "fp32_pair",
     )
     # Within the route the program is a pure function of the architecture and C
     # (S never enters): its own grid sizes the partial rows this call writes
@@ -847,7 +904,10 @@ def cake_causal_conv1d_det_train_backward(
     names = _route(
         arch,
         kind,
-        needs=f"this backward (bias / BF16 taps or dweight / silu_grad_preactivation={policy!r})",
+        needs=(
+            f"this backward (bias / BF16 taps or dweight / silu_grad_preactivation={policy!r} / "
+            f"dweight_sum={sum_form!r})"
+        ),
         C=C,
         S=S,
     )
@@ -910,7 +970,7 @@ class CakeCausalConv1dDetFunction(torch.autograd.Function):
     """Autograd wrapper saving only ``(x, weight, cu_seqlens, bias)`` for the backward.
 
     ``forward(x, weight, cu_seqlens, bias=None, silu_grad_preactivation="bf16",
-    bwd_grid_mult=1)`` returns ``y``; the backward runs the fused ``dx`` + deterministic
+    bwd_grid_mult=1, dweight_sum="fp32")`` returns ``y``; the backward runs the fused ``dx`` + deterministic
     ``dweight`` (+ ``dbias``) pair of launches of :func:`cake_causal_conv1d_det_train_backward`
     on the incoming gradient (materialized as a contiguous BF16 tensor when
     autograd hands over another layout or dtype) and returns the gradients of
@@ -926,13 +986,16 @@ class CakeCausalConv1dDetFunction(torch.autograd.Function):
         bias=None,
         silu_grad_preactivation="bf16",
         bwd_grid_mult=1,
+        dweight_sum="fp32",
     ):
         policy = _silu_grad_preactivation(silu_grad_preactivation)
+        sum_form = _dweight_sum(dweight_sum, policy)
         bwd_grid_mult = _bwd_grid_mult(bwd_grid_mult)
         y = cake_causal_conv1d_det_train_forward(x, weight, cu_seqlens, bias=bias)
         ctx.save_for_backward(x, weight, cu_seqlens, bias)
         ctx.silu_grad_preactivation = policy
         ctx.bwd_grid_mult = bwd_grid_mult
+        ctx.dweight_sum = sum_form
         return y
 
     @staticmethod
@@ -949,9 +1012,10 @@ class CakeCausalConv1dDetFunction(torch.autograd.Function):
             bias=bias,
             silu_grad_preactivation=ctx.silu_grad_preactivation,
             bwd_grid_mult=ctx.bwd_grid_mult,
+            dweight_sum=ctx.dweight_sum,
         )
         dbias = grads[2] if bias is not None else None
-        return grads[0], grads[1], None, dbias, None, None
+        return grads[0], grads[1], None, dbias, None, None, None
 
 
 def cake_causal_conv1d_det(
@@ -962,6 +1026,7 @@ def cake_causal_conv1d_det(
     *,
     silu_grad_preactivation: str = "bf16",
     bwd_grid_mult: int = 1,
+    dweight_sum: str = "fp32",
 ) -> torch.Tensor:
     """Autograd-enabled packed width-4 depthwise causal convolution + SiLU.
 
@@ -983,6 +1048,11 @@ def cake_causal_conv1d_det(
         The backward's opt-in finer partition (default 1; see
         :func:`cake_causal_conv1d_det_train_backward`); checked here, used by the
         backward.
+    dweight_sum : {"fp32", "fp32_pair"}
+        The sum form of ``dweight`` / ``dbias`` (default ``"fp32"``; the opt-in
+        ``"fp32_pair"`` needs ``silu_grad_preactivation="fp32"``, see
+        :func:`cake_causal_conv1d_det_train_backward`); checked here, used by the
+        backward.
 
     Returns
     -------
@@ -993,13 +1063,14 @@ def cake_causal_conv1d_det(
     """
 
     return CakeCausalConv1dDetFunction.apply(
-        x, weight, cu_seqlens, bias, silu_grad_preactivation, bwd_grid_mult
+        x, weight, cu_seqlens, bias, silu_grad_preactivation, bwd_grid_mult, dweight_sum
     )
 
 
 __all__ = [
     "ARCHES",
     "BWD_GRID_MULTS",
+    "DWEIGHT_SUMS",
     "PARAMETER_DTYPES",
     "SILU_GRAD_PREACTIVATIONS",
     "SUPPORTED_COMPUTE_CAPABILITIES",

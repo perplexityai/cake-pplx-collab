@@ -39,7 +39,7 @@ logical tensor names are ``cake_jit.LOGICAL_TENSORS`` plus ``hist``,
 ``hist_row_off``, ``dpre_tail``, ``tail_row_off``, ``dpre_head``,
 ``head_row_off`` (``x_map`` / ``dy_map`` map to ``x`` / ``dy``); the scalars are
 ``cake_jit.PLAN_SCALARS`` (the KCP programs take no ``flags``).  The KCP path
-keeps the package's pre-round-6 contract: FP32 taps only (``_weight``'s default
+keeps the package's earlier contract: FP32 taps only (``_weight``'s default
 dtype set), no bias, and the legacy channel tile rule ``cake_jit.plan(...,
 legacy=True)`` (``ct_vec = min(C / 8, 128)``; its kernels pick the grouped path
 from ``ct_vec`` on the device and were validated and measured under that rule),
@@ -52,14 +52,12 @@ equal to the no-CP ``y`` of the same documents.  The backward takes the SiLU
 derivative on the FP32 preactivation (the issue's requirement), whereas the
 shipped zero-history backward differentiates the BF16-rounded preactivation,
 so ``dx`` is not the no-CP ``dx`` bit for bit: the two differ by that
-rounding's effect on ``dpre`` plus one BF16 output rounding.  Measured on
-GB300 (sm_103a) over the single-GPU test rows (``S x C`` up to 12000 x 8192,
-random BF16 inputs, FP32 taps of scale 0.5): max ``|dx - dx_noCP|`` 0.03125
-(one BF16 ulp at magnitude 4-8), 0 elements beyond ``1e-2 + 1e-2 |dx_noCP|``,
-and the same maximum between the two policies' FP32 oracles with no kernel
-involved; each kernel stays within one BF16 ulp of its own oracle.  ``dweight``
-is the rank's fixed-order FP32 partial; it is reproducible across launches and
-within ``5e-2 + 1e-4 |dw|`` of an FP64 oracle, not bitwise the no-CP partial.
+rounding's effect on ``dpre`` plus one BF16 output rounding.  ``dweight``
+is the rank's fixed-order FP32 partial, summed in plain FP32 words; it is
+reproducible across launches, not bitwise the no-CP partial.  The package
+tests judge the L2 and max error of ``y``, ``dx`` and ``dweight`` against an
+FP64 oracle of the unpartitioned documents, relative to a PyTorch BF16
+implementation of the same operation, over 32 random draws.
 
 Shipped host path (this revision;
 ``HOST_TRIM_DEFAULT = 1``): the context-derived host work of the eager halo
@@ -94,7 +92,7 @@ fixed-order ``dweight`` reduction; a cooperative grid starts only when all its
 CTAs fit at once, so it waits for every kernel of another stream that occupies
 an SM.  ``y`` and ``dx`` are bitwise equal in both forms.  ``dweight`` is
 reproducible in each form (a pure function of the device type and the call's
-shapes) and within the same FP64-oracle bound, but the two forms sum different
+shapes) and summed in plain FP32 words, but the two forms sum different
 partial rows, so their ``dweight`` bits differ.  The form is fixed per call and
 changes no collective; every rank of a group passes the same ``cooperative``
 value (one launch form per layer of the group, so that the ranks' ``dweight``
@@ -2155,7 +2153,7 @@ def cake_causal_conv1d_det_kcp(
         fixed-order reduce program on the same stream; it starts beside a small kernel of another stream.
         ``True``: one cooperative launch; it starts only when every CTA fits at once, so it waits for any kernel of
         another stream that occupies an SM.  ``dx`` is bitwise the same in both forms.  ``dweight`` is reproducible
-        and within the same FP64-oracle bound in each form, but its bits differ between the forms (each form sums
+        and summed in plain FP32 words in each form, but its bits differ between the forms (each form sums
         its own partial rows), so keep one form for runs whose ``dweight`` bits must match.  Every rank of
         ``ctx.group`` passes the same value (one launch form per layer of the group; the form changes no
         collective, so a mismatch does not hang, but the ranks' ``dweight`` partials then mix two reduction

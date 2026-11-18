@@ -20,9 +20,10 @@ the rank's receive pool with a wait the test records:
 
 - the backward launches the head program (when the rank has head rows), the main program, waits, then launches the
   tail-row program (when the rank receives tail rows), and never the single backward program;
-- ``dx`` is bitwise the deterministic KCP backward's and the single program's (the ``bwd_route`` test knob
-  ``"single"``) on each of ``REPEATS`` launches, ``dweight`` within the package budget of the FP64 oracle every time,
-  and the accumulator workspace reads back zero after each.
+- ``dx`` and ``dweight`` of each of ``REPEATS`` launches and of the single program (the ``bwd_route`` test knob
+  ``"single"``) are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``: over 32 random draws
+  against the float64 oracle of the unpartitioned problem and PyTorch's BF16 naive convolution; no bit rule, no
+  comparison with the deterministic package), and the accumulator workspace reads back zero after each launch.
 
 Every test skips until the exporter has rendered the package.
 """
@@ -36,18 +37,7 @@ import cake_pplx._backends.cake_causal_conv1d_nondet_train as pkg
 from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
     kcp as conv_kcp,
 )
-from tests.cake.test_helpers.cake_package import cake_package
-from tests.test_cake_causal_conv1d_det_train_kcp import (
-    DW_ATOL,
-    DW_RTOL,
-    ROWS,
-    _assert_within,
-    _bits,
-    _problem,
-    _reference,
-)
-
-det_kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
+from tests.test_cake_causal_conv1d_det_train_kcp import ROWS, judge_kcp
 
 REPEATS = 5
 WIDE_ROWS = [("wide-qkv", (2000, 1003), (1, 2, 1997, 1003), 10240)]
@@ -148,49 +138,42 @@ def _recorder(monkeypatch) -> list[str]:
 def test_overlapped_backward_order_and_outputs(
     monkeypatch, name, lens, cuts, C, host_trim
 ) -> None:
-    device = torch.device("cuda")
-    p = _problem(lens, cuts, C, device)
-    _, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    _, hist_det = det_kcp.cake_causal_conv1d_det_train_kcp_forward(
-        p.x_local, p.w, p.ctx
-    )
-    dx_det, _ = det_kcp.cake_causal_conv1d_det_train_kcp_backward(
-        p.x_local, p.w, p.ctx, p.dy_local, hist_det
-    )
-    _, _, dw_ref = _reference(p.x, p.w, p.cu, p.dy)
-    dw_ref = dw_ref.float()
-    try:
-        conv_kcp._set_test_knobs({"host_trim": host_trim, "bwd_route": "single"})
-        dx_single, _ = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
-            p.x_local, p.w, p.ctx, p.dy_local, hist
-        )
-        conv_kcp._set_test_knobs({"host_trim": host_trim})
-        conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
-        order = _recorder(monkeypatch)
-        want = []
-        if p.S and int(p.ctx.halo.n_head_rows):
-            want.append(conv_kcp.KCP_BWD_HEAD)
-        want += [conv_kcp.KCP_BWD_DYN, "wait"]
-        if int(p.ctx.halo.n_tail_rows):
-            want.append(conv_kcp.KCP_BWD_HALO)
-        for repeat in range(REPEATS):
-            order.clear()
-            dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
+    def run(p):
+        try:
+            conv_kcp._set_test_knobs(None)
+            _, hist = conv_kcp.cake_causal_conv1d_nondet_train_kcp_forward(
+                p.x_local, p.w, p.ctx
+            )
+            conv_kcp._set_test_knobs({"host_trim": host_trim, "bwd_route": "single"})
+            dx_single, dw_single = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
                 p.x_local, p.w, p.ctx, p.dy_local, hist
             )
-            torch.cuda.synchronize()
-            label = f"{name} host_trim={host_trim} launch {repeat}"
-            assert order == want, (label, order)
-            assert torch.equal(_bits(dx), _bits(dx_det)), label
-            assert torch.equal(_bits(dx), _bits(dx_single)), label
-            _assert_within(
-                dw, dw_ref, atol=DW_ATOL, rtol=DW_RTOL, label=f"dweight, {label}"
-            )
-            held = _stream_workspace()
-            assert held is not None and int(torch.count_nonzero(held)) == 0, label
-    finally:
-        monkeypatch.undo()
-        conv_kcp._set_test_knobs(None)
-        conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+            found = {"dx": [dx_single], "dweight": [dw_single]}
+            conv_kcp._set_test_knobs({"host_trim": host_trim})
+            conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+            order = _recorder(monkeypatch)
+            want = []
+            if p.S and int(p.ctx.halo.n_head_rows):
+                want.append(conv_kcp.KCP_BWD_HEAD)
+            want += [conv_kcp.KCP_BWD_DYN, "wait"]
+            if int(p.ctx.halo.n_tail_rows):
+                want.append(conv_kcp.KCP_BWD_HALO)
+            for repeat in range(REPEATS):
+                order.clear()
+                dx, dw = conv_kcp.cake_causal_conv1d_nondet_train_kcp_backward(
+                    p.x_local, p.w, p.ctx, p.dy_local, hist
+                )
+                torch.cuda.synchronize()
+                label = f"{name} host_trim={host_trim} launch {repeat}"
+                assert order == want, (label, order)
+                held = _stream_workspace()
+                assert held is not None and int(torch.count_nonzero(held)) == 0, label
+                found["dx"].append(dx)
+                found["dweight"].append(dw)
+        finally:
+            monkeypatch.undo()
+            conv_kcp._set_test_knobs(None)
+            conv_kcp.cake_causal_conv1d_nondet_train_kcp_host_cache_clear()
+        return found
+
+    judge_kcp(lens, cuts, C, run, label=f"{name} host_trim={host_trim}")

@@ -27,11 +27,11 @@ stable APIs (none is marked experimental, and a call emits no ``ExperimentalWarn
 package's parameters (the KCP ones plus ``bwd_reserve_sms``);
 ``import cake_pplx`` imports neither module, and the KCP module imports the package on first use only.  The opt-in
 ``bwd_grid_mult`` is refused with the deterministic package's errors, and ``cooperative=True`` with an error that names
-the deterministic KCP package.  On a device (once the package is rendered): the entry points return the package's
-bits (``y`` and ``dx`` bitwise the deterministic package's, the parameter gradients within budget), at every
-``bwd_grid_mult``; under torch's deterministic mode the forward runs and the backward raises (strict) or warns and runs
-(``warn_only``), also when the mode changes between a forward and its backward and through ``torch.utils.checkpoint``
-(reentrant and not).  The public names are ``test_cake_causal_conv1d_nondet_train_names.py``'s; the numerical contract
+the deterministic KCP package.  On a device (once the package is rendered): the entry points' outputs, at every
+``bwd_grid_mult``, are judged against the naive BF16 tier over 32 draws (``tests.cake.test_helpers.cake_naive``);
+under torch's deterministic mode the forward runs and the backward raises (strict) or warns and runs (``warn_only``),
+also when the mode changes between a forward and its backward and through ``torch.utils.checkpoint`` (reentrant and
+not).  The public names are ``test_cake_causal_conv1d_nondet_train_names.py``'s; the numerical contract
 itself is ``test_cake_causal_conv1d_nondet_train.py``'s.
 """
 
@@ -53,12 +53,12 @@ import cake_pplx.cake_causal_conv1d_det_train_kcp as det_kcp_facade
 import cake_pplx.cake_causal_conv1d_nondet_train as facade
 import cake_pplx.cake_causal_conv1d_nondet_train_kcp as kcp_facade
 import cake_pplx._backends.cake_causal_conv1d_nondet_train as backend
+from tests.cake.test_helpers.cake_causal_conv1d_oracle import assert_judged, problem
 from tests.cake.test_helpers.cake_package import cake_package
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 SEED = 8066
 WIDTH = 4
-DW_ATOL, DW_RTOL = 5e-2, 1e-4
 
 # entry point -> deterministic package name
 ENTRIES = {
@@ -183,9 +183,11 @@ def test_entry_points_pass_the_call_to_the_package(recorded) -> None:
         "cake_causal_conv1d_nondet_train_backward": (
             (x, w, cu, dy),
             {"bias": b, "silu_grad_preactivation": "fp32", "workspace": ws, "dx": None, "dweight": None, "dbias": None,
-             "bwd_grid_mult": 3},
+             "bwd_grid_mult": 3, "dweight_sum": "fp32_pair"},
         ),
-        "cake_causal_conv1d_nondet": ((x, w, cu, b), {"silu_grad_preactivation": "fp32", "bwd_grid_mult": 3}),
+        "cake_causal_conv1d_nondet": (
+            (x, w, cu, b), {"silu_grad_preactivation": "fp32", "bwd_grid_mult": 3, "dweight_sum": "fp32_pair"}
+        ),
     }  # fmt: skip
     for entry in ENTRIES:
         args, kwargs = calls[entry]
@@ -361,7 +363,7 @@ def _parameters(fn) -> list[tuple]:
 def test_entry_points_mirror_the_package() -> None:
     """The single-rank module's entry points, helpers and support query take exactly the package's parameters, which
     are the deterministic package's; the KCP module's take the deterministic KCP package's plus keyword-only
-    ``bwd_reserve_sms`` last, each as the package takes it."""
+    ``bwd_reserve_sms`` and ``dweight_sum`` last, each as the package takes it."""
 
     for entry, det_name in {**ENTRIES, **HELPERS, SUPPORTED[0]: SUPPORTED[1]}.items():
         mine = _parameters(getattr(facade, entry))
@@ -397,10 +399,11 @@ def test_entry_points_mirror_the_package() -> None:
 
     for entry, det_name in KCP_ENTRIES.items():
         mine = _parameters(getattr(kcp_facade, entry))
-        assert mine[-1] == ("bwd_reserve_sms", inspect.Parameter.KEYWORD_ONLY, None), (
-            entry
-        )
-        assert mine[:-1] == _parameters(getattr(det_kcp_facade, det_name)), entry
+        assert mine[-2:] == [
+            ("bwd_reserve_sms", inspect.Parameter.KEYWORD_ONLY, None),
+            ("dweight_sum", inspect.Parameter.KEYWORD_ONLY, None),
+        ], entry
+        assert mine[:-2] == _parameters(getattr(det_kcp_facade, det_name)), entry
         theirs = {p[0]: p for p in _parameters(getattr(kcp_backend, entry))}
         assert all(theirs.get(p[0]) == p for p in mine), entry
 
@@ -570,7 +573,7 @@ def test_core_does_not_import_the_experimental_package() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# On a device: the entry points return the package's bits; torch's deterministic mode.
+# On a device: the entry points' outputs judged against the naive tier; torch's deterministic mode.
 
 
 def _device() -> torch.device:
@@ -588,13 +591,13 @@ def _gpu_supported() -> bool:
 
 gpu = pytest.mark.skipif(
     not _gpu_supported(),
-    reason="needs an SM100 / SM103 / SM107 device and the rendered non-deterministic package (TODO-EXPORT)",
+    reason="needs an SM100 / SM103 / SM107 device and the rendered non-deterministic package",
 )
 ALERT = "cake_causal_conv1d_nondet_train_backward does not have a deterministic implementation"
 
 
-def _problem(S: int = 1000, C: int = 512):
-    generator = torch.Generator(device=_device()).manual_seed(SEED)
+def _problem(S: int = 1000, C: int = 512, seed: int = SEED):
+    generator = torch.Generator(device=_device()).manual_seed(seed)
     x = torch.randn(S, C, device=_device(), generator=generator).to(torch.bfloat16)
     dy = torch.randn(S, C, device=_device(), generator=generator).to(torch.bfloat16)
     w = 0.5 * torch.randn(C, WIDTH, device=_device(), generator=generator)
@@ -603,18 +606,31 @@ def _problem(S: int = 1000, C: int = 512):
     return x, w, cu, dy, b
 
 
-def _close(got, want) -> None:
-    torch.testing.assert_close(got, want, atol=DW_ATOL, rtol=DW_RTOL)
+def _judged(call, *, bias: bool = True, label: str) -> None:
+    """``call(x, w, cu, dy, b)`` on each draw's :func:`_problem` (``b`` None without ``bias``), its outputs by name
+    (a value, or a list of the values of several calls on the draw) judged against the naive tier."""
+
+    def launch(_draw: int, seed: int):
+        x, w, cu, dy, b = _problem(seed=seed)
+        if not bias:
+            b = None
+        return call(x, w, cu, dy, b), problem(x, w, cu, b, dy)
+
+    assert_judged(launch, seed=SEED, label=label)
 
 
 @gpu
-def test_entry_points_return_the_packages_bits() -> None:
-    x, w, cu, dy, b = _problem()
-    S, C = x.shape
-    y_det = det_facade.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
-    y = facade.cake_causal_conv1d_nondet_train_forward(x, w, cu, bias=b)
-    assert torch.equal(y, y_det)
-    det_grads = det_facade.cake_causal_conv1d_det_train_backward(x, w, cu, dy, bias=b)
+def test_entry_points_return_the_packages_outputs() -> None:
+    """The forward and the backward with a caller-owned workspace (left zero): ``y``, ``dx``, ``dweight`` and
+    ``dbias`` judged against the naive tier."""
+
+    S, C = 1000, 512
+    assert facade.cake_causal_conv1d_nondet_train_forward_workspace_bytes(
+        S, C, _device()
+    ) == det_facade.cake_causal_conv1d_det_train_forward_workspace_bytes(
+        S, C, _device()
+    )
+    assert facade.is_cake_causal_conv1d_nondet_train_supported(_device()) is True
     ws = facade.cake_causal_conv1d_nondet_train_backward_workspace(S, C, _device())
     assert ws.dtype == torch.uint8 and int(torch.count_nonzero(ws)) == 0
     assert (
@@ -623,53 +639,53 @@ def test_entry_points_return_the_packages_bits() -> None:
             S, C, _device()
         )
     )
-    dx, dw, db = facade.cake_causal_conv1d_nondet_train_backward(
-        x, w, cu, dy, bias=b, workspace=ws
-    )
-    assert int(torch.count_nonzero(ws)) == 0
-    assert torch.equal(dx, det_grads[0])
-    _close(dw, det_grads[1])
-    _close(db, det_grads[2])
-    assert facade.cake_causal_conv1d_nondet_train_forward_workspace_bytes(
-        S, C, _device()
-    ) == det_facade.cake_causal_conv1d_det_train_forward_workspace_bytes(
-        S, C, _device()
-    )
-    assert facade.is_cake_causal_conv1d_nondet_train_supported(_device()) is True
+
+    def call(x, w, cu, dy, b):
+        y = facade.cake_causal_conv1d_nondet_train_forward(x, w, cu, bias=b)
+        dx, dw, db = facade.cake_causal_conv1d_nondet_train_backward(
+            x, w, cu, dy, bias=b, workspace=ws
+        )
+        assert int(torch.count_nonzero(ws)) == 0
+        return {"y": y, "dx": dx, "dweight": dw, "dbias": db}
+
+    _judged(call, label="entry points")
 
 
 @gpu
 def test_bwd_grid_mult() -> None:
-    """Every ``bwd_grid_mult``: ``dx`` bitwise the deterministic default's and the gradients within its budget,
-    with a workspace of the same size at every multiple, left zero (explicit and autograd entries)."""
+    """Every ``bwd_grid_mult``, explicit and autograd entries: the gradients judged against the naive tier, with a
+    workspace of the same size at every multiple, left zero."""
 
-    x, w, cu, dy, b = _problem()
-    S, C = x.shape
-    default = det_facade.cake_causal_conv1d_det_train_backward(x, w, cu, dy, bias=b)
+    S, C = 1000, 512
     nbytes = facade.cake_causal_conv1d_nondet_train_backward_workspace_bytes(
         S, C, _device()
     )
+    workspaces = {}
     for mult in backend.BWD_GRID_MULTS:
         ws = facade.cake_causal_conv1d_nondet_train_backward_workspace(
             S, C, _device(), bwd_grid_mult=mult
         )
         assert ws.numel() == nbytes and int(torch.count_nonzero(ws)) == 0
-        dx, dw, db = facade.cake_causal_conv1d_nondet_train_backward(
-            x, w, cu, dy, bias=b, workspace=ws, bwd_grid_mult=mult
-        )
-        assert int(torch.count_nonzero(ws)) == 0
-        assert torch.equal(dx, default[0]), mult
-        _close(dw, default[1])
-        _close(db, default[2])
-        xg = x.clone().requires_grad_(True)
-        wg = w.clone().requires_grad_(True)
-        bg = b.clone().requires_grad_(True)
-        facade.cake_causal_conv1d_nondet(xg, wg, cu, bg, bwd_grid_mult=mult).backward(
-            dy
-        )
-        assert torch.equal(xg.grad, default[0]), mult
-        _close(wg.grad, default[1])
-        _close(bg.grad, default[2])
+        workspaces[mult] = ws
+
+    def call(x, w, cu, dy, b):
+        found = {"dx": [], "dweight": [], "dbias": []}
+        for mult, ws in workspaces.items():
+            dx, dw, db = facade.cake_causal_conv1d_nondet_train_backward(
+                x, w, cu, dy, bias=b, workspace=ws, bwd_grid_mult=mult
+            )
+            assert int(torch.count_nonzero(ws)) == 0, mult
+            xg = x.clone().requires_grad_(True)
+            wg = w.clone().requires_grad_(True)
+            bg = b.clone().requires_grad_(True)
+            facade.cake_causal_conv1d_nondet(xg, wg, cu, bg, bwd_grid_mult=mult).backward(
+                dy
+            )
+            for name, values in (("dx", (dx, xg.grad)), ("dweight", (dw, wg.grad)), ("dbias", (db, bg.grad))):
+                found[name] += values
+        return found
+
+    _judged(call, label="bwd_grid_mult")
 
 
 def _autograd(x0, w0, cu, dy, b0=None, *, before_backward=None, checkpointed=None):
@@ -696,30 +712,26 @@ def _autograd(x0, w0, cu, dy, b0=None, *, before_backward=None, checkpointed=Non
 
 
 @gpu
-def test_autograd_returns_the_packages_bits() -> None:
-    x, w, cu, dy, b = _problem()
-    expected = det_facade.cake_causal_conv1d_det_train_backward(x, w, cu, dy, bias=b)
-    y_det = det_facade.cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
-    y, dx, dw, db = _autograd(x, w, cu, dy, b)
-    assert torch.equal(y, y_det) and torch.equal(dx, expected[0])
-    _close(dw, expected[1])
-    _close(db, expected[2])
+def test_autograd_returns_the_packages_outputs() -> None:
+    """The autograd entry's ``y`` and gradients judged against the naive tier."""
+
+    def call(x, w, cu, dy, b):
+        y, dx, dw, db = _autograd(x, w, cu, dy, b)
+        return {"y": y, "dx": dx, "dweight": dw, "dbias": db}
+
+    _judged(call, label="autograd")
 
 
 @gpu
 def test_torch_deterministic_mode_alerts_on_the_backward(torch_mode) -> None:
-    """Under torch's deterministic mode the forward runs (the deterministic forward's bits); the backward raises
-    PyTorch's ``RuntimeError`` (strict) or warns and runs (``warn_only=True``) -- explicit and autograd entries,
-    also when the mode is turned on between a forward and its backward.  It never runs the deterministic package
-    instead.  A forward under the mode whose backward runs without it runs the package."""
+    """Under torch's deterministic mode the forward runs; the backward raises PyTorch's ``RuntimeError`` (strict)
+    or warns and runs (``warn_only=True``) -- explicit and autograd entries, also when the mode is turned on between
+    a forward and its backward.  It never runs the deterministic package instead.  A forward under the mode whose
+    backward runs without it runs the package.  The outputs of every call that runs are judged against the naive
+    tier."""
 
     x, w, cu, dy, _ = _problem()
-    expected = det_facade.cake_causal_conv1d_det_train_backward(x, w, cu, dy)
-    y_det = det_facade.cake_causal_conv1d_det_train_forward(x, w, cu)
-
     torch_mode(False)
-    y = facade.cake_causal_conv1d_nondet_train_forward(x, w, cu)
-    assert torch.equal(y, y_det)
     with pytest.raises(RuntimeError, match=ALERT):
         facade.cake_causal_conv1d_nondet_train_backward(x, w, cu, dy)
     with pytest.raises(RuntimeError, match=ALERT):
@@ -728,37 +740,53 @@ def test_torch_deterministic_mode_alerts_on_the_backward(torch_mode) -> None:
     with pytest.raises(RuntimeError, match=ALERT):
         _autograd(x, w, cu, dy, before_backward=lambda: torch_mode(False))
 
-    torch_mode(True)
-    with pytest.warns(UserWarning, match=ALERT):
-        dx, dw = facade.cake_causal_conv1d_nondet_train_backward(x, w, cu, dy)
-    assert torch.equal(dx, expected[0])
-    _close(dw, expected[1])
-    torch_mode(None)
-    with pytest.warns(UserWarning, match=ALERT):
-        y, dx, dw = _autograd(x, w, cu, dy, before_backward=lambda: torch_mode(True))
-    assert torch.equal(y, y_det) and torch.equal(dx, expected[0])
-    _close(dw, expected[1])
+    def call(x, w, cu, dy, b):
+        torch_mode(False)
+        y_strict = facade.cake_causal_conv1d_nondet_train_forward(x, w, cu)
+        torch_mode(True)
+        with pytest.warns(UserWarning, match=ALERT):
+            dx, dw = facade.cake_causal_conv1d_nondet_train_backward(x, w, cu, dy)
+        torch_mode(None)
+        with pytest.warns(UserWarning, match=ALERT):
+            y_warn, dx_warn, dw_warn = _autograd(
+                x, w, cu, dy, before_backward=lambda: torch_mode(True)
+            )
+        torch_mode(False)
+        y_off, dx_off, dw_off = _autograd(
+            x, w, cu, dy, before_backward=lambda: torch_mode(None)
+        )
+        torch_mode(None)
+        return {
+            "y": [y_strict, y_warn, y_off],
+            "dx": [dx, dx_warn, dx_off],
+            "dweight": [dw, dw_warn, dw_off],
+        }
 
-    torch_mode(False)
-    y, dx, dw = _autograd(x, w, cu, dy, before_backward=lambda: torch_mode(None))
-    assert torch.equal(y, y_det) and torch.equal(dx, expected[0])
-    _close(dw, expected[1])
+    _judged(call, bias=False, label="deterministic mode")
 
 
 @gpu
 @pytest.mark.parametrize("reentrant", [False, True], ids=["nonreentrant", "reentrant"])
 def test_checkpoint(torch_mode, reentrant) -> None:
-    """``torch.utils.checkpoint`` (2 x forward + backward): ``y`` / ``dx`` bitwise the uncheckpointed pass's, the
-    gradients within budget; with torch's deterministic mode turned on before the backward, the backward raises:
-    the recompute runs the same package."""
+    """``torch.utils.checkpoint`` (2 x forward + backward) and the uncheckpointed pass: ``y`` and the gradients of
+    both judged against the naive tier; with torch's deterministic mode turned on before the backward, the backward
+    raises: the recompute runs the same package."""
 
-    x, w, cu, dy, b = _problem()
     torch_mode(None)
-    direct = _autograd(x, w, cu, dy, b)
-    got = _autograd(x, w, cu, dy, b, checkpointed=reentrant)
-    assert torch.equal(got[0], direct[0]) and torch.equal(got[1], direct[1])
-    _close(got[2], direct[2])
-    _close(got[3], direct[3])
+
+    def call(x, w, cu, dy, b):
+        found = {"y": [], "dx": [], "dweight": [], "dbias": []}
+        for checkpointed in (None, reentrant):
+            for name, value in zip(
+                ("y", "dx", "dweight", "dbias"),
+                _autograd(x, w, cu, dy, b, checkpointed=checkpointed),
+                strict=True,
+            ):
+                found[name].append(value)
+        return found
+
+    _judged(call, label=f"checkpoint reentrant={reentrant}")
+    x, w, cu, dy, b = _problem()
     with pytest.raises(RuntimeError, match=ALERT):
         _autograd(
             x,
