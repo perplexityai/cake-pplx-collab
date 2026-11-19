@@ -80,7 +80,7 @@ per channel tile), zero before the first launch; the last CTA of each tile
 resets them, so the buffer is zero after every launch and every CUDA Graph
 replay and serves every later launch of one stream.  Two launches that may run
 at once (two streams, two graphs replayed concurrently) need two buffers.  The
-static and direct programs take no ``work``; a passed buffer is accepted and
+static and direct programs take no ``work``; a passed buffer is checked and
 not read.
 
 A backward call is two ordinary launches on one stream.  The selected program

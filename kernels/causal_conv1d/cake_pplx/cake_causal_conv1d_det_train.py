@@ -73,7 +73,7 @@ architecture and route (the backend's ``cake_jit.FALLBACK_ROWS`` and
 ``DIRECT_ROWS``), the forward runs a static program on the route's tile plan or
 a direct program on channel tiles of its own with at most one CTA per token
 block; neither takes counters, so such a call zeroes and uses no buffer, eager
-or captured, and a passed ``workspace`` is accepted and not read.  Every
+or captured, and a passed ``workspace`` is checked and not read.  Every
 forward program writes the same ``y`` bits.
 
 Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
@@ -257,7 +257,7 @@ def cake_causal_conv1d_det_train_forward(
         package uses a zeroed buffer it keeps per (device, current stream), or
         a zeroed buffer of the call's own inside a CUDA Graph capture.  At a
         small-S row the program takes no counters: a passed buffer is
-        accepted and not read, and none is zeroed.
+        checked and not read, and none is zeroed.
 
     Returns
     -------

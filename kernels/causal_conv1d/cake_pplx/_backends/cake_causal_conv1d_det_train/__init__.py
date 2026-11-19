@@ -77,7 +77,7 @@ Host design (the knobs are keywords; no environment variable):
   plan, or its direct program on the channel tiles of
   ``cake_jit.DIRECT_PLANS`` with at most one CTA per token block; neither
   takes counters, so the call zeroes and uses no buffer there (eager or
-  captured), and a passed ``workspace`` is accepted and not read.  Every
+  captured), and a passed ``workspace`` is checked and not read.  Every
   forward program writes the same ``y`` bits.
 """
 
