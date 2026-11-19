@@ -82,7 +82,7 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 |---|---|---|
 | `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total | `(1, 1, 1)` |
 | `fwd` | per output row `r < G`: the document by a binary search of `cu_pairs`, the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  With `S <= fuse_docs` (256) the launch builds the pair table itself and does not search: row `r`'s first token is `cu_seqlens[0] + 2 r` plus the number of odd-length documents before its document, counted from `cu_seqlens`, and CTA 0 writes `cu_pairs` | rows `G` |
-| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
+| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  With `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
 
 Each role has one registry record per architecture.  The forward has two, one kernel in two
 schedules, each the faster on its architectures: record `fwd` on SM100 / SM103 reads `C` and

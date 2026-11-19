@@ -64,8 +64,12 @@ The roles, in launch order:
   the same FP32 operations per element.
 * ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
   the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
-  ``v >= cu_pairs[S]``).  Row ``v >= G`` is document ``s = v - G``: when its
-  length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last
+  ``v >= cu_pairs[S]``), its document ``s`` by a binary search of
+  ``cu_pairs``.  A launch of ``S <= 16384`` documents searches in two levels:
+  each CTA with pair rows copies every 16th entry of ``cu_pairs`` to shared
+  memory, and a row picks its window of 16 entries there and searches only
+  that window of ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``: when
+  its length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last
   token.  Every token row below ``cu_seqlens[S]`` is written exactly once.
 
 Every output element depends on its own pair (or token) only: no reduction
@@ -239,15 +243,15 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_857e5499b5edd675ffd3",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 4096,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
+        "library": "cake_gated_kv_compression_det_train_857e5499b5edd675ffd3",
         "role": "bwd",
     },
 }
