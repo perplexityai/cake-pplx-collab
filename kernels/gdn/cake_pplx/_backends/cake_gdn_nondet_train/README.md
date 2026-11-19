@@ -135,6 +135,25 @@ the aarch64-drawn inputs, and B200, GB300 and R200 give 1.060 on the
 x86_64-drawn ones.  Over 100 seeds on GB300 it is 1.011 (bootstrap 95 %
 interval 0.93-1.10).
 
+On the `(8, 24)` pair under FLA's initialization (FP32
+`beta = sigmoid(N(0, 1))`, an initial state of `0.1 N(0, 1)` and a final-state
+gradient, the split forward on 63-chunk pieces), `dg` can miss the BF16 naive
+tier, the bar of the tests (`kernels/gdn/tests/cake_naive.py`: over 32 random
+draws, the median and the largest of an output's L2 error against an FP64
+reference at most 1.005 times those of PyTorch on the same BF16 inputs with
+the same operations in BF16, and its max-norm error at most 1.005 times
+PyTorch's on at least half of the draws).  It misses by the median: on the 32
+draws from seed 23031 the median of its L2 errors is 1.0175 times the tier's
+on GB300 and on GB200, which give the same bits there.  GB200 has run this
+route since 0.2.2, so 0.2.2 has the same miss on GB200.  Over 160 draws (five
+seeds), the split forward on `fwd_ho_a` and the `wy_tc2` form (0.2.2's route
+on GB300) give the same `dg` error per draw (geometric mean of the per-draw
+ratio 1.0007, 95 % interval 0.9966-1.0047), and each misses the tier on about
+half of the sets of 32 draws (48.9 % and 47.9 % of 20,000 random sets of the
+160 draws; at the five seeds `fwd_ho_a` misses on one, the `wy_tc2` form on
+two).  Its largest L2 error and its max-norm error meet the tier at each of
+the five seeds, and so does every other output.  B200 was not measured.
+
 ## Mode rules
 
 The mode is in the name.  No entry takes a `deterministic` keyword: passing
@@ -639,6 +658,16 @@ backward measure 1.101 and 1.150.  The checkpointed rows below 1 on R200
 forward (1.002-1.005) and its backward alone is below 1 on two of them; there
 the checkpointed step's extra cost over the forward and the forward + backward
 is 0.05-0.06 ms larger in this package than in the deterministic package.
+
+On GB300 this version runs the split forward's pieces of 63 to 95 chunks on
+`fwd_ho_a`, where 0.2.2 ran the `wy_tc2` form, as did the build of the table
+(see Chain).  On the 63-chunk pieces of the `(8, 24)` pair, the `fwd_ho_a`
+form takes 0.84-0.85 of the `wy_tc2` form's time per forward, 0.95 per
+forward + backward and 0.91 per checkpointed step in a CUDA graph (CUPTI,
+cold L2, six fresh processes per form in ABBA order, the three gate regimes),
+but 1.009-1.044 per eager checkpointed step under FLA's initialization and
+`logsigmoid(N(0, 1))` (12 readings of six runs), because each of its forwards
+launches once more (19 launches per checkpointed step instead of 17).
 
 ## Plan pins (keyword-only)
 
