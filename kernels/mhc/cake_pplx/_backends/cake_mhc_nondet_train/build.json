@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "5da983a34f21cda223301af69fbc6b26b51879e9",
+    "cake_revision": "27d90d6c0dbecd8255a52b02890e501d87ed4d3d",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-18T23:48:02Z"
+    "rendered_at": "2026-11-19T05:50:21Z"
   },
   "libraries": [
     {
@@ -2151,25 +2151,25 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "8cf3cb310a89ac350d47b7a4dd815c64d7099c6be8d4d9423de2ab39659487fd",
+      "closure_sha256": "296d87ab176fa300a068b326ea4b474100feb43134287556f33532b8b8bec4ca",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
-      "name": "cake_mhc_train_collapse_bwd__h5120_sm_107a",
+      "name": "cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_sm_107a",
       "nvcc_flags": [
         "--prec-div=true",
         "--prec-sqrt=true",
         "--ftz=false"
       ],
       "nvcc_flags_if": [],
-      "path": "aot/cake_mhc_train_collapse_bwd__h5120_sm_107a.so",
+      "path": "aot/cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_sm_107a.so",
       "sha256": {
-        "csrc/cake_mhc_train_collapse_bwd__h5120_binding.cu": "6d7044ba7384698cbfea8682ceaa629933a516f5315e856b042117455e5177ce",
-        "csrc/cake_mhc_train_collapse_bwd__h5120_kernel.cu": "cc55c7cf714a530f00a28c815bc58c556be91a1d3a33943fbbc30357315cd3c0"
+        "csrc/cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_binding.cu": "ca55d5e229cf64a6c457986d00ba3d483a0fd57342279257777e94270ff0b268",
+        "csrc/cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_kernel.cu": "e0ba8dd7b3081b425f103e912f3da9f63eb7bafdcfd7a45450c8ea4968a9d380"
       },
       "sources": [
-        "csrc/cake_mhc_train_collapse_bwd__h5120_kernel.cu",
-        "csrc/cake_mhc_train_collapse_bwd__h5120_binding.cu"
+        "csrc/cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_kernel.cu",
+        "csrc/cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120_binding.cu"
       ]
     },
     {
@@ -2220,25 +2220,25 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "5563834618bb211a43a4dcb5e240aa116fc18333cf3516abc93534826d7c189b",
+      "closure_sha256": "3d7904674ac6668cb02f44c5ce7a1c479f4c7ef5af30fe8c57f9dd8f2df15483",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
-      "name": "cake_mhc_train_collapse_fwd__h5120_sm_107a",
+      "name": "cake_mhc_train_collapse_fwd__m2__h5120_sm_107a",
       "nvcc_flags": [
         "--prec-div=true",
         "--prec-sqrt=true",
         "--ftz=false"
       ],
       "nvcc_flags_if": [],
-      "path": "aot/cake_mhc_train_collapse_fwd__h5120_sm_107a.so",
+      "path": "aot/cake_mhc_train_collapse_fwd__m2__h5120_sm_107a.so",
       "sha256": {
-        "csrc/cake_mhc_train_collapse_fwd__h5120_binding.cu": "7cebce63866aa78ce2e6abd1ea1d55f864c730f12d5bd7fbac8d1bb6fd8fc0fc",
-        "csrc/cake_mhc_train_collapse_fwd__h5120_kernel.cu": "09d623b44c3170633677878170a9a4a594eb72859a8708a48b47ca7273896fbf"
+        "csrc/cake_mhc_train_collapse_fwd__m2__h5120_binding.cu": "2819a8107644600c07c4a7466857f760fbbe345efd029d7c0f61e6c84a0dd50c",
+        "csrc/cake_mhc_train_collapse_fwd__m2__h5120_kernel.cu": "47a7cb69216db34091c024cb021dd58fced380ac408979abcfb3919cdf94ecb4"
       },
       "sources": [
-        "csrc/cake_mhc_train_collapse_fwd__h5120_kernel.cu",
-        "csrc/cake_mhc_train_collapse_fwd__h5120_binding.cu"
+        "csrc/cake_mhc_train_collapse_fwd__m2__h5120_kernel.cu",
+        "csrc/cake_mhc_train_collapse_fwd__m2__h5120_binding.cu"
       ]
     },
     {
@@ -4496,6 +4496,29 @@
       ]
     },
     {
+      "arch": "sm_107a",
+      "closure_sha256": "a2afb18d3f05755ca4f1aecab10d49e4bc2df96ba36f96847cc3821fd5b28cdc",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_binding.cu": "c9caa7a5b5848ee11668885912dad4587bde8964334b0bfe6f246e65e068aadf",
+        "csrc/cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_kernel.cu": "b3a5a7c034cc432c8b0a1523639664f82c8d44ef2a3c1424c643e8cc6c73e66d"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_kernel.cu",
+        "csrc/cake_mhc_train_fwd_collapse__m2_pi_pn__h5120_binding.cu"
+      ]
+    },
+    {
       "arch": "sm_100a",
       "closure_sha256": "aae2a6c04eb0044d3b5c3e8b9beb6edcd0dbb8d6557724ab8b9b4846fe317c0b",
       "entry": "run",
@@ -4532,29 +4555,6 @@
       ],
       "nvcc_flags_if": [],
       "path": "aot/cake_mhc_train_fwd_collapse__pi_pn__h5120_sm_103a.so",
-      "sha256": {
-        "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_binding.cu": "f9ffd90e0cc02e17bc0e7452d281bd9a0538031e95df36bc19b5cf1dcf13709e",
-        "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_kernel.cu": "47cc34b31c06c9376c70c5f619006b6926079bce6f70fb96d38d033130e09baf"
-      },
-      "sources": [
-        "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_kernel.cu",
-        "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_binding.cu"
-      ]
-    },
-    {
-      "arch": "sm_107a",
-      "closure_sha256": "8e899107ed55022cb90a85f2aa49855b4b154714f9f0a14a5a6247dde350ccd0",
-      "entry": "run",
-      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
-      "min_cuda": "13.5",
-      "name": "cake_mhc_train_fwd_collapse__pi_pn__h5120_sm_107a",
-      "nvcc_flags": [
-        "--prec-div=true",
-        "--prec-sqrt=true",
-        "--ftz=false"
-      ],
-      "nvcc_flags_if": [],
-      "path": "aot/cake_mhc_train_fwd_collapse__pi_pn__h5120_sm_107a.so",
       "sha256": {
         "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_binding.cu": "f9ffd90e0cc02e17bc0e7452d281bd9a0538031e95df36bc19b5cf1dcf13709e",
         "csrc/cake_mhc_train_fwd_collapse__pi_pn__h5120_kernel.cu": "47cc34b31c06c9376c70c5f619006b6926079bce6f70fb96d38d033130e09baf"
