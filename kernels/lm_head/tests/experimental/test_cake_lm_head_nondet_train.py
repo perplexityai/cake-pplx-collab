@@ -2029,6 +2029,109 @@ def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
         assert bool((rlab[live] != 0).any()), compact
 
 
+def _graph_rlab_node(lp: torch.Tensor):
+    """The log-probability autograd node behind ``lp`` that holds the graph's label residuals (``rlab``): the entry's
+    Function node, found through the slice of a staged small call."""
+    pending, seen = [lp.grad_fn], set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if hasattr(node, "rlab"):
+            return node
+        pending.extend(n for n, _ in node.next_functions)
+    raise AssertionError("no log-probability node holds rlab")
+
+
+def test_device_logprob_graph_rlab(glm_weight):
+    """The log-probability autograd graph's label residuals (``_GraphRlab``): the forward allocates them behind its
+    launches -- zero-filled for the ``dz`` arm's recompute, uninitialized for the kept logits' ``row_grad`` -- and
+    every backward of a retained graph binds that tensor (no allocation, no zero fill, no ``rlab_zero`` host step in
+    the remembered sequences) with +0 on every row without a label column in the head.  dX / dW of four backwards (two
+    ``dlogp`` draws) equal those of the same backwards whose bindings allocate their own ``rlab`` (``node.rlab =
+    None``) bit for bit -- the default form (one chunk and two, compacted and not), the kept form and the small call
+    that stages its rows; a held tensor with NaN on its rows with a label column is bound and every such row is stored
+    again; one that is not clean is not bound."""
+    _require_program(entry="logprob")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
+    default = cake_backend.cake_lm_head_nondet_train_logprob
+    keep = cake_backend.cake_lm_head_nondet_train_logprob_keep
+    # (entry, T, chunk_size, compact): T = 1500 runs the default Function (above the small call's rows, below the
+    # zero-gradient row skip's floor; 768-row chunks: two chunks outside the vocabulary-major rule); T = 256 the kept
+    # Function, directly or through the small call's staged rows
+    cases = (
+        (default, 1500, 4096, True),
+        (default, 1500, 4096, False),
+        (default, 1500, 768, True),
+        (default, 1500, 768, False),
+        (keep, 256, 4096, True),
+        (keep, 256, 4096, False),
+        (default, 256, 4096, True),
+    )
+    for entry, T, chunk, compact in cases:
+        case = (entry.__name__, T, chunk, compact)
+        inp = make_inputs(T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
+        labels = inp.labels.clone()
+        labels[: edge.numel()] = edge
+        dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
+        out = {}
+        for own in (True, False):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+            lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
+            node = _graph_rlab_node(lp)
+            holder = node.rlab
+            if own:
+                node.rlab = None  # each backward's binding allocates its own rlab
+            else:
+                assert isinstance(holder, cake_backend._GraphRlab), case
+                held = holder.tensor
+                assert held is not None and held.dtype == torch.float32, case
+                saved = node.saved_tensors
+                rows_labels = saved[2] if saved[4] is None else saved[2][saved[4]]
+                assert held.numel() == rows_labels.numel(), case
+                live = (rows_labels >= 0) & (rows_labels < V)
+                assert bool((~live).any()) and bool(live.any()), case
+            grads = []
+            for i, dlogp in enumerate(dlogps):
+                X.grad = W.grad = None
+                lp.backward(dlogp, retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                if not own:
+                    # bound, not reallocated; clean after every backward
+                    assert holder.tensor is held and holder.clean, (case, i)
+                    assert bool((_bits(held)[~live] == 0).all()), (case, i)
+            if not own:
+                # NaN on the rows with a label column of a clean tensor: the producers store every such row again
+                held[live] = float("nan")
+                X.grad = W.grad = None
+                lp.backward(dlogps[0], retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                assert holder.tensor is held and bool(torch.isfinite(held).all()), case
+                # a held tensor that is not clean is not bound: the call allocates a zero-filled one for the graph
+                held[~live] = float("nan")
+                holder.clean = False
+                X.grad = W.grad = None
+                lp.backward(dlogps[0], retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                assert holder.tensor is not held and holder.clean, case
+                assert bool((_bits(holder.tensor)[~live] == 0).all()), case
+            out[own] = grads
+            del lp, node, holder
+        bindings = list(cake_backend.BINDING_CACHE._bindings.values())
+        assert bindings, case
+        for b in bindings:
+            assert not any(k[0] == cake_backend.RLAB_ZERO_STAGE for k in b.forward_order + b.backward_order), case
+        ref = out[True] + [out[True][0], out[True][0]]
+        assert len(out[False]) == len(ref), case
+        for i, (got, want) in enumerate(zip(out[False], ref)):
+            assert _same_bits(got[0], want[0]) and _same_bits(got[1], want[1]), (case, i)
+
 def _det_sliced(stage: str) -> bool:
     """A deterministic K-sliced dX stage name (``gemm_dx_s`` and its forms; ``gemm_dx_st3`` is the plain store)."""
     return stage == "gemm_dx_s" or stage.startswith("gemm_dx_s_")

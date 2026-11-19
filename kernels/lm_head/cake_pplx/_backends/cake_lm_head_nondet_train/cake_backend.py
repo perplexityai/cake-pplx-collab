@@ -6695,6 +6695,42 @@ def _with_rlab_zero(plan: Plan, keys: list) -> list:
     return keys
 
 
+def _without_rlab_zero(keys: tuple) -> tuple[tuple, bool]:
+    """``(keys without the host step ("rlab_zero", None), whether it was there)``: a remembered binding fills each
+    call's ``rlab`` with zeros where it allocates it (:meth:`_Binding._call_rlab`), ahead of every launch of the call,
+    instead of running the step (:func:`_with_rlab_zero`) inside its launch sequence."""
+    rest = tuple(key for key in keys if key[0] != RLAB_ZERO_STAGE)
+    return rest, len(rest) != len(keys)
+
+
+def _rlab_filled(plan: Plan, keys: tuple) -> bool:
+    """Whether the launch keys ``keys`` store every row of ``rlab``: they have row-gradient producers, all of them
+    ``row_grad`` (+0 on a row with no label column), over chunks that tile the rows (:func:`_rlab_zero_needed`)."""
+    producers = [stage for stage, _ in keys if stage in DZ_PRODUCER_STAGES]
+    return (
+        bool(producers)
+        and all(stage == "row_grad" for stage in producers)
+        and _chunks_tile_rows(plan)
+    )
+
+
+class _GraphRlab:
+    """The FP32 label residuals ``rlab`` of one log-probability autograd graph (its rows of the chunk loop), held from
+    its forward through its backwards (a retained graph runs several): a backward binds the held tensor and allocates
+    and fills none of its own (:meth:`_Binding._call_rlab`).  ``clean``: every row without a label column in the head
+    (an ignored row, a label at or past ``V``) holds +0 -- after a zero fill, or after ``row_grad`` over chunks that
+    tile the rows (it stores +0 there); the ``dz`` arms keep it (they store only the rows whose label lies in the head,
+    and every backward of the graph has the same labels in the same row order).  A counted plan (the zero-gradient row
+    skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows past its count unwritten: it never binds the
+    held tensor.  A call takes the tensor until it returns, so a concurrent backward of the same graph allocates its
+    own; a call that fails leaves none."""
+
+    __slots__ = ("tensor", "clean")
+
+    def __init__(self, tensor: Optional[torch.Tensor] = None, clean: bool = False):
+        self.tensor, self.clean = tensor, clean
+
+
 def _dx_values(
     stage: str,
     t: dict[str, Any],
@@ -8892,6 +8928,12 @@ class _Binding:
     # the log-probability backward makes its gradient accumulators and outputs right before its first dX GEMM key
     # (behind the row gathers and the recompute launch) instead of up front (:func:`_gradients_at_first_dx`)
     backward_gradients_at_dx: bool = False
+    # the ``rlab_zero`` host step the plan's forward / backward sequence had (:func:`_with_rlab_zero`): the binding's
+    # sequences leave it out and each call allocates ``rlab`` zero-filled instead (:meth:`_call_rlab`)
+    forward_rlab_zero: bool = False
+    backward_rlab_zero: bool = False
+    # the backward sequence stores every row of ``rlab`` (:func:`_rlab_filled`)
+    backward_rlab_filled: bool = False
 
     @classmethod
     def from_runner(
@@ -8899,7 +8941,8 @@ class _Binding:
     ) -> "_Binding":
         """``hidden`` (the eager entry points' hidden valid-row count): the runner was prepared on the counted rows
         after chunk 0's gather and logits GEMM ran in device-count form; the remembered plan records that and its
-        launch sequences start at chunk 0's row kernels (the runner's chunk-0 gather / GEMM launches are dropped)."""
+        launch sequences start at chunk 0's row kernels (the runner's chunk-0 gather / GEMM launches are dropped).
+        The sequences leave out the ``rlab_zero`` host step (:func:`_without_rlab_zero`, :meth:`_call_rlab`)."""
         if runner.backend != "cake":
             raise ValueError("only cake-backend runners are remembered")
         t = runner.tensors
@@ -8926,6 +8969,8 @@ class _Binding:
                 chunk=p.chunk,
                 stats_tile=plan.geometry.stats_tile,
             )
+        forward_order, forward_zero = _without_rlab_zero(forward_order)
+        backward_order, backward_zero = _without_rlab_zero(backward_order)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -8976,6 +9021,9 @@ class _Binding:
             backward_gradients_at_dx=_gradients_at_first_dx(
                 _slot_values, backward_order, t, plan
             ),
+            forward_rlab_zero=forward_zero,
+            backward_rlab_zero=backward_zero,
+            backward_rlab_filled=_rlab_filled(plan, backward_order),
         )
 
     def holds_no_tensor(self) -> bool:
@@ -9084,6 +9132,39 @@ class _Binding:
         if plan.compact:
             t["row_index"] = row_index
 
+    def _call_rlab(
+        self,
+        zero: bool,
+        graph: Optional[_GraphRlab] = None,
+        filled: bool = False,
+    ) -> tuple[torch.Tensor, Optional[bool]]:
+        """``(rlab, clean)``: the call's FP32 label residuals (``[plan.rows]``) and the state to hand back to ``graph``
+        when the call returns (``None``: nothing to hand back).  ``zero`` (the plan had the ``rlab_zero`` step,
+        :func:`_without_rlab_zero`): allocated zero-filled, on the call's stream ahead of all its launches (the step
+        ran right before the first row-gradient producer; nothing ahead of it reads or writes ``rlab``), so the same
+        rows hold +0.  ``graph`` (the log-probability autograd graph's, :class:`_GraphRlab`): a plan that is not
+        counted, over chunks that tile its rows, takes the graph's tensor when it is clean or the call stores every row
+        (``filled``, :func:`_rlab_filled`) -- no allocation and no fill: the producers store the same rows they store in
+        a fresh zero-filled tensor, and every other row already holds +0 -- else it allocates one (zero-filled as
+        above) for the graph; a counted plan allocates its own and leaves the graph's."""
+        plan = self.plan
+        if graph is not None and not plan.dcnt and _chunks_tile_rows(plan):
+            held, graph.tensor = graph.tensor, None  # taken until the call returns
+            if (
+                held is not None
+                and held.numel() == plan.rows
+                and held.device == self.device
+                and (graph.clean or filled)
+            ):
+                return held, True
+            clean: Optional[bool] = zero or filled
+        else:
+            clean = None
+        rlab = (torch.zeros if zero else torch.empty)(
+            (plan.rows,), dtype=torch.float32, device=self.device
+        )
+        return rlab, clean
+
     def _launch(
         self,
         keys: tuple,
@@ -9177,7 +9258,7 @@ class _Binding:
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
             if plan.need_dx or plan.need_dw:
-                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+                t["rlab"] = self._call_rlab(self.forward_rlab_zero)[0]
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -9208,7 +9289,10 @@ class _Binding:
         hidden=None,
         dw_stream: str = "auto",
         dcnt: Optional[torch.Tensor] = None,
+        rlab: Optional[_GraphRlab] = None,
     ):
+        """One log-probability backward through the remembered launches; ``rlab``: the autograd graph's label
+        residuals (:class:`_GraphRlab`, :meth:`_call_rlab`)."""
         p, plan = self.plan.problem, self.plan
         T, H, V = plan.rows, p.hidden, p.vocab
         self._check_hidden(hidden)
@@ -9231,9 +9315,12 @@ class _Binding:
                 )
             t["dcnt"] = dcnt
         self._scratch(t, hidden, backward=True)
+        clean = None
         if plan.need_dx or plan.need_dw:
             # the producers' label residuals: written by the recompute, ahead of the gradient buffers
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"], clean = self._call_rlab(
+                self.backward_rlab_zero, rlab, self.backward_rlab_filled
+            )
 
         def gradient_buffers() -> None:
             if plan.need_dx:
@@ -9264,6 +9351,8 @@ class _Binding:
         else:
             gradient_buffers()
             self._launch(self.backward_order, t, dw_stream)
+        if clean is not None:
+            rlab.tensor, rlab.clean = t["rlab"], clean
         dx = (
             t.get("dx_out") if plan.dx_cast else t.get("dx_acc")
         )  # dx_cast=False: the caller finalizes the accumulator
@@ -9311,6 +9400,8 @@ class _TemperatureBinding(_Binding):
                 stats_tile=plan.geometry.stats_tile,
                 temperature=p.temperature,
             )
+        forward_order, forward_zero = _without_rlab_zero(forward_order)
+        backward_order, backward_zero = _without_rlab_zero(backward_order)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9378,6 +9469,9 @@ class _TemperatureBinding(_Binding):
             backward_gradients_at_dx=_gradients_at_first_dx(
                 slot_values, backward_order, t, plan
             ),
+            forward_rlab_zero=forward_zero,
+            backward_rlab_zero=backward_zero,
+            backward_rlab_filled=_rlab_filled(plan, backward_order),
         )
 
     # the rows of the call in progress, per thread (set and cleared around the inherited sequence)
@@ -9421,6 +9515,7 @@ class _TemperatureBinding(_Binding):
         dw_stream: str = "auto",
         dcnt: Optional[torch.Tensor] = None,
         temperature: Optional[torch.Tensor] = None,
+        rlab: Optional[_GraphRlab] = None,
     ):
         """:meth:`_Binding.backward_logprob` with the call's compact temperature rows -- in the order of the call's
         ``row_index``, which the zero-gradient row skip reorders -- and, for a plan under the skip
@@ -9437,6 +9532,7 @@ class _TemperatureBinding(_Binding):
             hidden,
             dw_stream,
             dcnt,
+            rlab,
         )
 
     def _with_rows(self, temperature, call, *args):
@@ -9650,11 +9746,13 @@ class _KeptBinding(_Binding):
         dz_ready: bool = False,
         dx_side: bool = False,
         after_dz: Optional[Callable[[], None]] = None,
+        rlab: Optional[_GraphRlab] = None,
     ):
         """:meth:`_Binding.backward_logprob` over the forward's kept views ``logits`` (:func:`check_kept_logits`):
         ``row_grad`` overwrites each with the chunk's ``dz``; no chunk logits buffer is allocated.  ``dz_ready``: the
         views already hold ``dz`` (an earlier backward's ``row_grad`` formed it): no ``row_grad``.  ``dx_side``: the dX
-        keys run on the side stream and ``after_dz`` behind the last ``row_grad`` (:meth:`_launch_dx_side`)."""
+        keys run on the side stream and ``after_dz`` behind the last ``row_grad`` (:meth:`_launch_dx_side`).  ``rlab``:
+        the autograd graph's label residuals (:meth:`_call_rlab`; not taken with ``dz_ready``: no producer runs)."""
         p, plan = self.plan.problem, self.plan
         T, H, V = plan.rows, p.hidden, p.vocab
         self._check_hidden(None)
@@ -9681,8 +9779,13 @@ class _KeptBinding(_Binding):
             t["x_c"] = torch.empty((rows, H), dtype=torch.bfloat16, device=self.device)
         self._scratch(t, chunk_buffers=False, backward=True)
         t["logits_keep"] = logits
+        clean = None
         if plan.need_dx or plan.need_dw:
-            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
+            t["rlab"], clean = self._call_rlab(
+                self.backward_rlab_zero,
+                None if dz_ready else rlab,
+                self.backward_rlab_filled,
+            )
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -9710,6 +9813,8 @@ class _KeptBinding(_Binding):
                     "after_dz runs with dx_side only (a dX-only kept backward)"
                 )
             self._launch(keys, t, dw_stream)
+        if clean is not None:
+            rlab.tensor, rlab.clean = t["rlab"], clean
         dx = t.get("dx_out") if plan.dx_cast else t.get("dx_acc")
         return dx, t.get("dw_out")
 
@@ -11197,6 +11302,7 @@ def backward_logprob(
     logprob_dz: Optional[bool] = None,
     row_index: Any = _RECOUNT,
     _problem: Optional[Problem] = None,
+    _rlab: Optional[_GraphRlab] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Backward of the log-probability entry: recompute each chunk's logits, ``dz = dlogp_t *
     (1[v = y_t] - softmax)`` (ignored rows zero), then ``dX`` (BF16) and ``dW`` (BF16) through
@@ -11229,7 +11335,8 @@ def backward_logprob(
 
     ``_problem`` (internal, the autograd Function's): the forward's validated :class:`Problem` of these same ``X``,
     ``W`` and ``labels`` (:attr:`ForwardResult.problem`, passed only when no saved-tensor hooks could have unpacked
-    another ``X``), taken instead of validating them again."""
+    another ``X``), taken instead of validating them again.  ``_rlab`` (internal, the autograd Function's): the graph's
+    label residuals (:class:`_GraphRlab`), bound by a remembered binding instead of its own (:meth:`_Binding._call_rlab`)."""
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
     problem = (
@@ -11381,7 +11488,7 @@ def backward_logprob(
             # the key of an eligible call remembers the plan it took (counted, or the shipped one)
             order_rows(binding.plan)
             dx, dw = binding.backward_logprob(
-                X, W, labels, lse, dlogp, row_index, hc, stream_mode, counts
+                X, W, labels, lse, dlogp, row_index, hc, stream_mode, counts, _rlab
             )
             return finish_dx(dx), dw
     runner = prepare_lm_head_loss(
@@ -11425,7 +11532,7 @@ def backward_logprob(
         if key is not None:
             cache.remember(key, binding)
         dx, dw = binding.backward_logprob(
-            X, W, labels, lse, dlogp, row_index, hc, stream_mode, counts
+            X, W, labels, lse, dlogp, row_index, hc, stream_mode, counts, _rlab
         )
         return finish_dx(dx), dw
     dx, dw = runner._backward()
@@ -11610,6 +11717,60 @@ def _logprob_vm_eligible(
         "gemm_dw_cast_bf16_dcnt",
     }
     return need <= set(stages)
+
+
+def _logprob_graph_rlab(
+    X: torch.Tensor,
+    row_index: Optional[torch.Tensor],
+    *,
+    backend: str,
+    need_dx: bool,
+    need_dw: bool,
+    dz_arm: bool,
+    fused_dx: bool,
+    problem: Optional[Problem],
+    tuning: dict,
+    temperature: bool,
+    kept: bool = False,
+) -> Optional[_GraphRlab]:
+    """The label residuals a log-probability autograd forward allocates for its graph's backwards
+    (:class:`_GraphRlab`): ``None`` when no backward can bind them (no gradient, another backend, no rows).  Allocated
+    right behind the forward's launches, where a call of few rows is GPU-bound -- its backward is host-bound up to the
+    first GEMM -- for the backward's ``[rows]`` loop rows (the forward's valid-row index): uninitialized for a first
+    backward whose ``row_grad`` stores every row (``kept``: the kept logits; or no ``dz`` arm), zero-filled (clean)
+    for the ``dz`` arm's recompute.  A backward that takes another form -- the zero-gradient row skip's counted plan
+    (:func:`_zero_dlogp_skip`) or the vocabulary-major form (:func:`_logprob_vm_eligible`) -- binds its own, so the
+    holder starts empty there.  The forward's pick is a placement only: each backward checks the held tensor
+    (:meth:`_Binding._call_rlab`)."""
+    if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
+        return None
+    rows = (int(X.shape[0]) if X.ndim else 0) if row_index is None else int(row_index.numel())
+    if rows <= 0:
+        return None
+    if not kept and (
+        _zero_dlogp_skip(X.device, row_index, backend, dz_arm, need_dx, fused_dx)
+        or (
+            problem is not None
+            and _logprob_vm_eligible(
+                problem,
+                X,
+                rows,
+                backend=backend,
+                need_dw=need_dw,
+                dz_arm=dz_arm,
+                tuning=tuning,
+                temperature=temperature,
+            )
+        )
+    ):
+        return _GraphRlab()
+    zero = dz_arm and not kept
+    return _GraphRlab(
+        (torch.zeros if zero else torch.empty)(
+            (rows,), dtype=torch.float32, device=X.device
+        ),
+        zero,
+    )
 
 
 def _backward_logprob_vm(
@@ -12128,6 +12289,7 @@ def backward_logprob_temperature(
     temperature_rows: Optional[torch.Tensor] = None,
     _problem: Optional[Problem] = None,
     _vm_any_chunks: bool = False,
+    _rlab: Optional[_GraphRlab] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """:func:`backward_logprob` with a temperature (:func:`_backward_logprob` is the path without one).  Backward
     of the log-probability entry: recompute each chunk's logits, ``dz = dlogp_t *
@@ -12170,7 +12332,7 @@ def backward_logprob_temperature(
     without the skip.  ``_problem`` (internal) as in :func:`backward_logprob`: the forward's validated problem without
     the temperature form.  ``_vm_any_chunks`` (internal; the opt-in budget form's pick of the vocabulary-major
     backward): the form at any chunk count (:func:`_logprob_vm_eligible`'s ``any_chunks``); a call that is not
-    eligible raises (the budget form's peak needs it)."""
+    eligible raises (the budget form's peak needs it).  ``_rlab`` (internal) as in :func:`backward_logprob`."""
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
     problem = (
@@ -12414,6 +12576,7 @@ def backward_logprob_temperature(
                 stream_mode,
                 temperature=tau_rows,
                 dcnt=counts,
+                rlab=_rlab,
             )
             return finish_dx(dx), dw
     # the runner binds the forward's row order; an eligible call plans with the counted forms, the counts and the
@@ -12469,6 +12632,7 @@ def backward_logprob_temperature(
             stream_mode,
             temperature=tau_rows,
             dcnt=counts,
+            rlab=_rlab,
         )
         return finish_dx(dx), dw
     dx, dw = runner._backward()
@@ -12637,6 +12801,7 @@ def backward_logprob_keep(
     dz_ready: bool = False,
     dx_side: bool = False,
     after_dz: Optional[Callable[[], None]] = None,
+    _rlab: Optional[_GraphRlab] = None,
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
     """:func:`backward_logprob` over the kept logits ``logits`` of :func:`forward_logprob_keep`
     (:attr:`KeptForwardResult.logits`, ``cake`` backend): each chunk's ``dz`` is formed by ``row_grad`` over its kept
@@ -12653,7 +12818,8 @@ def backward_logprob_keep(
     GEMM over ``M = T_v`` and the fused weight-gradient cast over ``K = T_v`` (no FP32 ``dW`` accumulator); its
     ``dW`` sums the rows in one GEMM, so its bits differ from the chunked backward's (each in its own fixed order).
     ``dz_ready`` / ``dx_side`` / ``after_dz``: the parts of the ordered one-pass backward
-    (:func:`backward_logprob_keep_ordered`, :meth:`_KeptBinding.backward_logprob_keep`)."""
+    (:func:`backward_logprob_keep_ordered`, :meth:`_KeptBinding.backward_logprob_keep`).  ``_rlab`` (internal) as in
+    :func:`backward_logprob`."""
     if backend != "cake":
         raise ValueError("the kept logits (logprob_keep) run on the cake backend")
     problem = validate_lm_head_inputs(
@@ -12774,6 +12940,7 @@ def backward_logprob_keep(
         dz_ready=dz_ready,
         dx_side=dx_side,
         after_dz=after_dz,
+        rlab=_rlab,
     )
     if dx is not None:
         dx = (
@@ -14146,6 +14313,24 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = dz_arm
+        # the graph's label residuals, behind the forward's launches (_logprob_graph_rlab); a checkpoint's
+        # recomputation hands its row results to the checkpointed call, whose backward binds that call's
+        ctx.rlab = (
+            None
+            if ckpt is not None and kept is not None
+            else _logprob_graph_rlab(
+                X,
+                row_index,
+                backend=backend,
+                need_dx=bool(ctx.needs_input_grad[0]),
+                need_dw=bool(ctx.needs_input_grad[1]),
+                dz_arm=dz_arm,
+                fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
+                problem=problem,
+                tuning=tuning,
+                temperature=False,
+            )
+        )
         return logp
 
     @staticmethod
@@ -14173,6 +14358,7 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
             logprob_dz=ctx.logprob_dz,
             row_index=row_index,
             _problem=ctx.problem,
+            _rlab=ctx.rlab,
         )
         return (dx, dw) + (None,) * 11
 
@@ -14308,6 +14494,23 @@ class CakeLMHeadNondetLogprobTemperatureFunction(torch.autograd.Function):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = dz_arm
+        # the graph's label residuals (as in CakeLMHeadNondetLogprobFunction.forward)
+        ctx.rlab = (
+            None
+            if ckpt is not None and kept is not None
+            else _logprob_graph_rlab(
+                X,
+                saved[1],
+                backend=backend,
+                need_dx=bool(ctx.needs_input_grad[0]),
+                need_dw=bool(ctx.needs_input_grad[1]),
+                dz_arm=dz_arm,
+                fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
+                problem=problem,
+                tuning=tuning,
+                temperature=saved[2] is not None,
+            )
+        )
         return logp
 
     @staticmethod
@@ -14345,6 +14548,7 @@ class CakeLMHeadNondetLogprobTemperatureFunction(torch.autograd.Function):
             temperature=tau if tau_rows is not None else None,
             temperature_rows=tau_rows,
             _problem=ctx.problem,
+            _rlab=ctx.rlab,
         )
         return (dx, dw) + (None,) * 13
 
@@ -14433,6 +14637,21 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = _resolve_logprob_dz(logprob_dz)
+        # the graph's label residuals (_logprob_graph_rlab): the first backward's row_grad over the kept logits stores
+        # every row, a later one (a retained graph) recomputes with the dz arm over the same rows
+        ctx.rlab = _logprob_graph_rlab(
+            X,
+            result.row_index,
+            backend="cake",
+            need_dx=bool(ctx.needs_input_grad[0]),
+            need_dw=bool(ctx.needs_input_grad[1]),
+            dz_arm=ctx.logprob_dz,
+            fused_dx=bool(ctx.needs_input_grad[0]) and ctx.dx_finalize,
+            problem=None,
+            tuning=tuning,
+            temperature=False,
+            kept=ctx.kept,
+        )
         return result.logp
 
     @staticmethod
@@ -14451,6 +14670,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
             dw_stream=ctx.dw_stream,
             gemm_tuning=ctx.gemm_tuning,
             row_index=row_index,
+            _rlab=ctx.rlab,
         )
         if ctx.kept and (need_dx or need_dw):
             ctx.kept = False  # spent: row_grad overwrites them with dz
