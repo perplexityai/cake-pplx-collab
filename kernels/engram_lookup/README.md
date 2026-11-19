@@ -21,7 +21,7 @@ The family has a deterministic module only and a forward step only (no backward,
 | Retained state | None |
 | Empty inputs | `T = 0` or `M = 0` returns an empty `out` and launches nothing |
 | Shapes | `R`, `T` and `M` are run-time values: no recompilation. Two programs per architecture: a call of at most `SMALL_MAX_POSITIONS` looked-up rows (the backend's `cake_jit.py`) launches the small one, a larger call the main one; both write the same bytes. |
-| First call | The first call on each device loads both programs and launches both on its operands (the one its row count does not pick first; both write the same bytes). Make it outside a CUDA graph capture: after it, a captured call of any size loads nothing. |
+| First call | The first call on each device loads both programs and launches both on its operands (the one its row count does not pick first; both write the same bytes). Make it outside a CUDA graph capture: after it, a captured call of any size loads nothing. A call captured before it launches its own program only; the next call outside a capture loads both. |
 | Host | No synchronization, no device-to-host read; runs on the current stream of the operands' device |
 | Architectures | `sm_100a` (CUDA 12.8 or newer), `sm_103a` (12.9), `sm_107a` (13.5) |
 | Determinism | Bitwise reproducible run to run: every output element is one product rounded once, and nothing is summed. No alert under `torch.use_deterministic_algorithms(True)`. |

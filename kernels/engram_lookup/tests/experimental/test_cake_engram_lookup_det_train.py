@@ -31,7 +31,8 @@ launch facts, their argument plans in the launch order of the host code, the thr
 picks (the small one up to the threshold, the main one above), the launch grid, the launch's arguments (byte views
 of the table operands with their strides, then the ids, the output, the row count and the grid), the first launch on
 a device (both records' entries looked up, the other program launched first with the same arguments; later launches
-there launch one program, the first launch on another device both again), the build manifest
+there launch one program, the first launch on another device both again; a launch inside a capture before it
+launches its own program only and readies nothing), the build manifest
 (each record's library per architecture, the recorded source digests), the standalone loader, the prebuilt
 libraries served first, no environment read outside the JIT shim, and a one-row table launched with its compact row
 strides.
@@ -278,10 +279,11 @@ def test_the_grid_covers_every_row() -> None:
 
 def _recorders(monkeypatch) -> list:
     """The FFI entries replaced by recorders (no device): the entry of a record appends ``(record, arch, args)`` to the
-    returned list at each launch, and no launch has run on any device yet."""
+    returned list at each launch, no launch has run on any device yet, and no stream is capturing."""
     calls = []
     monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
     monkeypatch.setattr(cake_backend, "_ENTRIES", {})
+    monkeypatch.setattr(cake_backend, "_capturing", lambda index: False)
     return calls
 
 
@@ -354,6 +356,28 @@ def test_the_first_launch_on_a_device_launches_both_programs(monkeypatch) -> Non
     cake_backend._launch("sm_107a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 1)
     assert [record for record, _, _ in calls] == [RECORD, SMALL_RECORD]
     assert sorted(cake_backend._ENTRIES) == sorted((record, index) for record in RECORDS for index in (0, 1))
+
+
+def test_a_first_launch_inside_a_capture_launches_its_own_program_only(monkeypatch) -> None:
+    """A launch on a device with no entries yet, on a stream that is capturing a CUDA graph, launches the call's own
+    program only (the graph gets one kernel) and readies nothing; so does the next one in the capture.  The first
+    launch on that device outside a capture then launches both programs (no device: the FFI entries are recorders and
+    the capture flag is set by the test)."""
+    calls = _recorders(monkeypatch)
+    capturing = {0: True}
+    monkeypatch.setattr(cake_backend, "_capturing", lambda index: capturing[index])
+    buf = torch.zeros(5, PACKED_ROW_BYTES, dtype=torch.uint8)
+    weight, scale = buf[:, :ROW_DIM].view(torch.float8_e4m3fn), buf[:, ROW_DIM:].view(torch.float8_e8m0fnu)
+    ids, out = torch.zeros(4, dtype=torch.int64), torch.empty(4, ROW_DIM, dtype=torch.bfloat16)
+    for name in (SMALL_RECORD, RECORD):
+        cake_backend._launch("sm_103a", name, weight, scale, ids, out, 4, 1, 0)
+    assert [(record, arch) for record, arch, _ in calls] == [(SMALL_RECORD, "sm_103a"), (RECORD, "sm_103a")]
+    assert cake_backend._ENTRIES == {}
+    calls.clear()
+    capturing[0] = False
+    cake_backend._launch("sm_103a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 0)
+    assert [record for record, _, _ in calls] == [RECORD, SMALL_RECORD]
+    assert sorted(cake_backend._ENTRIES) == sorted((record, 0) for record in RECORDS)
 
 
 def test_the_package_exports_the_backend_entries() -> None:

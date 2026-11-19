@@ -39,8 +39,10 @@ kernel on a device loads the kernel's module there (CUDA's lazy module
 loading, the default, loads it then), so after that call no call on the device
 loads a library or a module, whichever program it launches: a later call
 captured in a CUDA graph launches a kernel that is already loaded.  Make the
-first call on each device outside a CUDA graph capture.  For each looked-up
-row ``p`` with ``r = row_ids[p]`` and each column
+first call on each device outside a CUDA graph capture: a call captured before
+it launches its own program only and readies nothing, which leaves the
+readying to the next call outside a capture.  For each looked-up row ``p``
+with ``r = row_ids[p]`` and each column
 ``c``: ``out[p, c] = bf16(float(weight[r, c]) * float(scale[r, c // 32]))``.
 The kernel decodes the E4M3 values and the E8M0 scale to FP32, multiplies in
 FP32 without flushing subnormals and rounds the product once to BF16.  That is
@@ -243,13 +245,26 @@ def _entry(name: str, arch: str) -> Any:
 _ENTRIES: dict[tuple[str, int], Any] = {}
 
 
+def _capturing(index: int) -> bool:
+    """Whether the current torch stream of device ``index``, the stream the launch runs on, is capturing a CUDA
+    graph."""
+    with torch.cuda.device(index):
+        return torch.cuda.is_current_stream_capturing()
+
+
 def _first_launch(arch: str, name: str, index: int, *args: Any) -> Any:
     """The FFI entry of record ``name`` for the first launch on device ``index``, after launching every other record
     with the same arguments ``args`` (the programs write the same bytes, so the output does not change): the entries
     of every record are looked up (:func:`_entry` loads each library once per process and architecture) and stored
     for ``index``.  With the launch of ``name`` that follows, the first call on a device launches each program once
     there, and so loads each kernel's module on the device under CUDA's lazy module loading: no later call on the
-    device, a call captured in a CUDA graph included, loads a library or a module."""
+    device, a call captured in a CUDA graph included, loads a library or a module.
+
+    A launch on a stream that is capturing a CUDA graph is not a first launch: it takes the entry of ``name`` only
+    and stores nothing, so the graph gets the call's own kernel only, and the next launch outside a capture readies
+    both programs."""
+    if _capturing(index):
+        return _entry(name, arch)
     entries = {record: _entry(record, arch) for record in RECORDS}
     for record, entry in entries.items():
         if record != name:
