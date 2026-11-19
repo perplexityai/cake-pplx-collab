@@ -53,6 +53,9 @@ the flat rope form, the flat NoPE form and the packed NoPE form::
 The packed forward also returns the global rows and row lengths that its
 backward reads.
 
+The NoPE entries take the ``sink`` keyword of the non-deterministic package's
+entries with ``None`` only: a sink raises ``NotImplementedError`` here.
+
 Their autograd Functions, ``CakeDSASparseAttentionDetFunction`` (both rope
 entries), ``CakeDSASparseAttentionDetNopeFunction`` and
 ``CakeDSASparseAttentionDetNopeVarlenFunction``, resolve from the backend
@@ -168,6 +171,16 @@ def _backend(backend: str):
             "DSA sparse-attention training currently supports backend='cake'"
         )
     return _cake_backend()
+
+
+def _refuse_sink(sink: Optional[torch.Tensor]) -> None:
+    """The NoPE entries take the ``sink`` keyword of the non-deterministic package's entries, ``None`` only: this
+    package has no sink build."""
+    if sink is not None:
+        raise NotImplementedError(
+            "a sink is not supported by the deterministic package: it has no sink build of the NoPE kernels; "
+            "the non-deterministic package's flat NoPE entries take one"
+        )
 
 
 @cake_api
@@ -426,6 +439,7 @@ def cake_dsa_sparse_attention_det_nope(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     return_lse: bool = False,
     key_passes: Optional[int] = None,
     backend: str = "cake",
@@ -526,6 +540,7 @@ def cake_dsa_sparse_attention_det_nope(
     Host side as in :func:`cake_dsa_sparse_attention_det` (the same
     ``BINDING_CACHE``, under keys disjoint from the rope entries).
     """
+    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).cake_dsa_sparse_attention_det_nope(
@@ -556,6 +571,7 @@ def cake_dsa_sparse_attention_det_nope_varlen(
     causal: bool = False,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     return_lse: bool = False,
     key_passes: Optional[int] = None,
     backend: str = "cake",
@@ -613,6 +629,7 @@ def cake_dsa_sparse_attention_det_nope_varlen(
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`.
     """
+    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).cake_dsa_sparse_attention_det_nope_varlen(
@@ -747,6 +764,7 @@ def cake_dsa_sparse_attention_det_train_nope_forward(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     backend: str = "cake",
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
     """Training forward of the NoPE form without autograd: ``(out, lse,
@@ -763,6 +781,7 @@ def cake_dsa_sparse_attention_det_train_nope_forward(
     (at or above that limit, without ``topk_length``, the autograd entry
     compacts the rows first).
     """
+    _refuse_sink(sink)
     return _backend(backend).forward_nope(
         q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
     )
@@ -780,6 +799,7 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
     *,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     key_passes: Optional[int] = None,
     backend: str = "cake",
     dkv_acc: Optional[torch.Tensor] = None,
@@ -803,6 +823,7 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
     :func:`cake_dsa_sparse_attention_det_train_nope_forward`. Nothing raises or
     warns under ``torch.use_deterministic_algorithms(True)``.
     """
+    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).backward_nope(
@@ -834,6 +855,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_forward(
     causal: bool = False,
     topk_length: Optional[torch.Tensor] = None,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     backend: str = "cake",
     check_cu_seqlens: bool = False,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -850,6 +872,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_forward(
     output repeats bit for bit and is that of the autograd entry's forward on
     the same inputs.
     """
+    _refuse_sink(sink)
     return _backend(backend).forward_nope_varlen(
         q,
         kv,
@@ -876,6 +899,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_backward(
     *,
     topk_length: torch.Tensor,
     softmax_scale: Optional[float] = None,
+    sink: Optional[torch.Tensor] = None,
     key_passes: Optional[int] = None,
     backend: str = "cake",
     dkv_acc: Optional[torch.Tensor] = None,
@@ -894,6 +918,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_backward(
     on the same inputs and ``key_passes``. Nothing raises or warns under
     ``torch.use_deterministic_algorithms(True)``.
     """
+    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).backward_nope(

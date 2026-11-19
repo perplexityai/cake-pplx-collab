@@ -4838,11 +4838,16 @@ def test_logprob_arm_plan_keys():
     assert [k for k in bwd if k[0] == "gemm_logits_dz"] == [
         ("gemm_logits_dz", i) for i in range(3)
     ]
-    assert [k for k in bwd if k[0] != "gemm_logits_dz"] == [
+    assert [k for k in bwd if k[0] not in ("gemm_logits_dz", "rlab_zero")] == [
         k
         for k in cake_backend.recompute_keys(plain)
         if k[0] not in ("row_grad", "gemm_logits_nostats")
     ]
+    # the dz arm stores no label residual on a row with no label column: its recompute keeps the zero step, right
+    # before chunk 0's arm; ``row_grad`` writes every row of its chunk, so the plain recompute has none
+    assert bwd.count(("rlab_zero", None)) == 1
+    assert bwd[bwd.index(("rlab_zero", None)) + 1] == ("gemm_logits_dz", 0)
+    assert ("rlab_zero", None) not in cake_backend.recompute_keys(plain)
     assert {"gemm_logits_dz", "gemm_logits_lbl"} <= set(arms.stages)
     assert not {"row_grad", "gemm_logits", "gemm_logits_nostats"} & set(arms.stages)
     assert list(arms.stages) == [s for s in cake_jit.STAGES if s in arms.stages]
@@ -5537,9 +5542,10 @@ def test_dx_finalize_plan_keys():
     """Every chunk's dX rows end with the ``slab_sum`` kernel, which folds the rows' FP32 label residuals: right behind
     the dX GEMM, adding a sliced GEMM's slabs, under ``dx_finalize``; behind the host ``dx_reduce`` step of a sliced
     GEMM without it, as the fold alone (``n_slabs`` 0, as after a one-slice GEMM).  It is registered in the plan's
-    stages in launch order whenever the plan computes dX, and the call zeroes its label residuals once, right before
-    chunk 0's row gradient.  ``dx_cast=False`` leaves the flat dX cast out of the cast keys; the reference path never
-    slices K, so its slab sums are the fold alone."""
+    stages in launch order whenever the plan computes dX.  The loss plan has no zero step for its label residuals: its
+    producers are ``row_grad`` alone, which writes every row of its chunk (:func:`cake_backend._rlab_zero_needed`).
+    ``dx_cast=False`` leaves the flat dX cast out of the cast keys; the reference path never slices K, so its slab sums
+    are the fold alone."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
     for finalize in (False, True):
         plan = cake_backend.make_plan(
@@ -5570,8 +5576,10 @@ def test_dx_finalize_plan_keys():
             else:
                 assert ("dx_reduce", i) not in keys
                 assert keys.index(slab) == keys.index(dx) + 1
-        assert keys.count(("rlab_zero", None)) == 1
-        assert keys.index(("rlab_zero", None)) + 1 == keys.index(("row_grad", 0))
+        assert ("rlab_zero", None) not in keys
+        assert [k for k in keys if k[0] in cake_backend.DZ_PRODUCER_STAGES] == [
+            ("row_grad", i) for i in range(plan.num_chunks)
+        ]
         assert "slab_sum" in plan.stages
         assert list(plan.stages) == [s for s in cake_jit.STAGES if s in plan.stages]
         assert ("scale_cast_bf16", "dx") in cake_backend.cast_keys(plan)
@@ -6891,6 +6899,160 @@ def test_template_only_runner_never_launches():
             launch()
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeypatch):
+    """A binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot against the host
+    values the runner was prepared with (``runner.values``: :func:`stage_values` of its tensors, which its launches
+    bind) and forms none of them again; a runner value that is not the slot's view still fails the check.  The
+    template is a reference runner of a compacted plan marked ``cake``: it binds no launch, so a stand-in launch of
+    chunk 0's row gradient joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37)
+    runner = mod.prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        objective="ce",
+        loss_div=inp.loss_div,
+        chunk_size=16,
+        backend="reference",
+        compact_rows=True,
+    )
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    grad = ("row_grad", 0)
+    assert gathers and grad in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        grad: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "d", "rlab"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+    real = mod.stage_values
+
+    def counted(stage, t, plan, index, **kw):
+        formed.append((stage, index))
+        return real(stage, t, plan, index, **kw)
+
+    monkeypatch.setattr(mod, "stage_values", counted)
+    mod._Binding.from_runner(runner)
+    assert not [key for key in formed if key == grad or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (grad, "rlab")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._Binding.from_runner(runner)
+        runner.values[key] = kept
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_temperature_from_runner_checks_slots_against_the_runner_host_values(
+    module, monkeypatch
+):
+    """A temperature binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot
+    against the host values the runner was prepared with (``runner.values``: :func:`stage_values_temperature` of its
+    tensors) and forms none of them again, through neither :func:`stage_values_temperature` nor
+    :func:`stage_values`; a runner value that is not the slot's view, the compact ``temperature`` rows included,
+    still fails the check.  The template is a reference runner of a compacted log-probability plan with a
+    temperature, marked ``cake``: a stand-in launch of chunk 0's row kernel joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37, ignore_frac=0.2, temperature="hetero")
+    row_index = inp.valid.nonzero().reshape(-1)
+    runner = mod.prepare_lm_head_det_loss_temperature(
+        inp.X,
+        inp.W,
+        inp.labels,
+        chunk_size=16,
+        entry="logprob",
+        backend="reference",
+        compact_rows=row_index,
+        temperature=inp.temperature.index_select(0, row_index).contiguous(),
+    )
+    assert runner.plan.problem.temperature and runner.plan.compact
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    row = (runner.plan.row_finalize_stage, 0)
+    assert gathers and row in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        row: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "logp", "d", "temperature"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+
+    def counting(real):
+        def counted(stage, t, plan, index, **kw):
+            formed.append((stage, index))
+            return real(stage, t, plan, index, **kw)
+
+        return counted
+
+    for name in ("stage_values", "stage_values_temperature"):
+        monkeypatch.setattr(mod, name, counting(getattr(mod, name)))
+    binding = mod._TemperatureBinding.from_runner(runner)
+    assert isinstance(binding, mod._TemperatureBinding)
+    assert not [key for key in formed if key == row or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (row, "temperature")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._TemperatureBinding.from_runner(runner)
+        runner.values[key] = kept
+
+
+def test_default_module_template_only_runner_takes_the_cake_backend():
+    """The default module's ``_template_only`` runners (the eager entry points' binding build, which binds the device's
+    constant cells) take the ``cake`` backend only, with and without a temperature."""
+    inp = _host_inputs(37)
+    for prepare in (prepare_lm_head_det_loss, prepare_lm_head_det_loss_temperature):
+        with pytest.raises(ValueError, match="template-only"):
+            prepare(
+                inp.X,
+                inp.W,
+                inp.labels,
+                chunk_size=16,
+                backend="reference",
+                _template_only=True,
+            )
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_slab_sum_slots_of_a_whole_tensor_chunk_form_no_view(module):
+    """The per-call slots of a slab sum (``_slot_values``, and the opt-in module's temperature form) bind what
+    ``stage_values`` binds -- the same address, shape, strides, dtype and device -- and, where the chunk's rows are all
+    of ``dX_acc`` / ``labels`` / ``rlab`` (a one-chunk plan), those tensors themselves rather than a view of them."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    slot_forms = [mod._slot_values]
+    if mod is opt_in:
+        slot_forms.append(mod._slot_values_temperature)
+    rows_of = (("dx", "dx_acc"), ("labels", "labels"), ("rlab", "rlab"))
+    same = cake_backend._same_view
+    inp = _host_inputs(37)
+    for chunk in (64, 16):
+        runner = mod.prepare_lm_head_det_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            objective="ce",
+            loss_div=inp.loss_div,
+            chunk_size=chunk,
+            backend="reference",
+        )
+        plan, t = runner.plan, runner.tensors
+        assert plan.num_chunks == (1 if chunk == 64 else 3)
+        whole = plan.num_chunks == 1
+        for i in range(plan.num_chunks):
+            full = mod.stage_values("slab_sum", t, plan, i)
+            for slots in slot_forms:
+                v = slots("slab_sum", t, plan, i)
+                for name in STAGE_TENSORS["slab_sum"]:
+                    assert same(v[name], full[name]), (chunk, i, name)
+                for name, rows in rows_of:
+                    assert (v[name] is t[rows]) is whole, (chunk, i, name)
+
+
 _ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),
@@ -7950,6 +8112,69 @@ def test_device_binding_scratch_binds_constant_cells(glm_weight):
     )
 
 
+def test_device_template_runner_binds_constant_cells(glm_weight, monkeypatch):
+    """The runner an eager call prepares only to template its remembered binding (``_template_only``) binds the
+    device's constant cells (``unit_scale`` / ``f32_dummy``), as the binding's scratch does, and never launches; a
+    runner prepared without the switch fills cells of its own."""
+    _require_program(entry="loss")
+    inp = _device_inputs(4097, W=glm_weight)
+    kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=4096, backend="cake")
+    real = cake_backend.prepare_lm_head_det_loss
+    runners = []
+
+    def recording(*args, **kwargs):
+        runners.append((real(*args, **kwargs), kwargs.get("_template_only", False)))
+        return runners[-1][0]
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", recording)
+    with _cache(True) as cache:
+        cache.clear()
+        cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
+    assert [flag for _, flag in runners] == [True]
+    runner = runners[0][0]
+    constants = cake_backend._device_constants(runner.device_index)
+    assert runner._template_only
+    cells = ("unit_scale", "f32_dummy")
+    assert all(runner.tensors[name] is constants[name] for name in cells)
+    with pytest.raises(RuntimeError, match="never launches"):
+        runner.forward()
+    own = real(inp.X, inp.W, inp.labels, **kw)
+    assert not own._template_only
+    assert not any(own.tensors[name] is constants[name] for name in cells)
+    torch.cuda.synchronize()
+    assert own.tensors["unit_scale"].tolist() == [1.0]
+    assert not bool(own.tensors["f32_dummy"].any())
+
+
+@pytest.mark.parametrize("form", ["loss", "temperature"])
+def test_device_opt_in_template_runner_binds_constant_cells(glm_weight, form):
+    """The opt-in module's template runner (``_template_only``, its eager entry points' binding build), with and
+    without a temperature, binds the device's constant cells (``unit_scale`` / ``f32_dummy``), as the binding's
+    scratch does, rather than filling cells of its own; a runner prepared without the switch fills its own."""
+    _require_program(entry="loss")
+    inp = _device_inputs(4097, W=glm_weight)
+    if form == "temperature":
+        _require_tau_program()
+        prepare = opt_in.prepare_lm_head_det_loss_temperature
+        tau = torch.full((4097,), 0.7, dtype=torch.float32, device=CUDA)
+        kw = dict(entry="logprob", temperature=tau)
+    else:
+        prepare = opt_in.prepare_lm_head_det_loss
+        kw = dict(objective="ce", loss_div=inp.loss_div)
+    kw.update(chunk_size=4096, backend="cake")
+    runner = prepare(inp.X, inp.W, inp.labels, _template_only=True, **kw)
+    assert runner._template_only
+    constants = cake_backend._device_constants(runner.device_index)
+    cells = ("unit_scale", "f32_dummy")
+    assert all(runner.tensors[name] is constants[name] for name in cells)
+    own = prepare(inp.X, inp.W, inp.labels, **kw)
+    assert not own._template_only
+    assert not any(own.tensors[name] is constants[name] for name in cells)
+    torch.cuda.synchronize()
+    assert own.tensors["unit_scale"].tolist() == [1.0]
+    assert not bool(own.tensors["f32_dummy"].any())
+
+
 def test_device_binding_cache_hits_are_bitwise_and_pin_nothing(glm_weight):
     _require_program(entry="loss")
     inp = _device_inputs(4097, W=glm_weight)
@@ -8909,6 +9134,143 @@ def test_device_logprob_arms_store_the_same_label_residual(glm_weight):
         dz, rlab, rows_labels = out[True]
         _check_label_residual(dz, rlab, rows_labels, V, case)
         assert bool((rlab != 0).any()), case
+
+
+def test_rlab_zero_step_follows_the_producers():
+    """``_rlab_zero_needed`` / ``_with_rlab_zero``: a plan computing dX whose row-gradient producers are ``row_grad``
+    alone, over chunks that tile its loop rows (the rows of ``rlab``), has no ``rlab_zero`` step: ``row_grad`` writes
+    every row of its chunk (+0 on a row with no label column).  A ``dz`` arm among the producers keeps exactly one
+    step, right before the first producer; so do chunks that leave a loop row out or start past row 0.  A plan without
+    dX has none.  The opt-in module's loss forward keys follow the same rule."""
+    g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+    common = dict(
+        need_dx=True,
+        need_dw=True,
+        geometry=g,
+        dx_max_slices=4,
+        num_sms=148,
+        dx_resident=74,
+        fuse_dw_cast=True,
+        dx_finalize=True,
+        arch="sm_100a",
+    )
+    zero = (cake_backend.RLAB_ZERO_STAGE, None)
+    for valid_rows in (None, 8265):
+        loss = cake_backend.make_plan(
+            _problem(8700, 6144, 154880, 4096), valid_rows=valid_rows, **common
+        )
+        keys = cake_backend.forward_keys(loss)
+        assert zero not in keys and not cake_backend._rlab_zero_needed(
+            loss, list(keys)
+        ), valid_rows
+        assert cake_backend._chunks_tile_rows(loss), loss.chunks
+    lp = _problem(8700, 6144, 154880, 4096, entry="logprob")
+    plain = cake_backend.make_plan(lp, valid_rows=8265, **common)
+    assert zero not in cake_backend.recompute_keys(plain)
+    arms = cake_backend.make_plan(
+        lp, valid_rows=8265, logprob_dz=True, logprob_lbl=True, **common
+    )
+    rk = cake_backend.recompute_keys(arms)
+    assert rk.count(zero) == 1 and rk[rk.index(zero) + 1] == ("gemm_logits_dz", 0), rk
+    hk = cake_backend.recompute_keys(
+        replace(arms, hidden_count=True, hidden_stats=False)
+    )
+    assert hk.count(zero) == 1 and hk[hk.index(zero) + 1] == ("row_grad", 0), hk
+    no_dx = cake_backend.make_plan(
+        _problem(8700, 6144, 154880, 4096), **dict(common, need_dx=False)
+    )
+    assert zero not in cake_backend.forward_keys(no_dx)
+    # the opt-in module's loss forward (with and without the saved per-row scale) takes the same rule: row_grad alone
+    for keep in (False, True):
+        opt = opt_in.make_plan(
+            _problem(8700, 6144, 154880, 4096),
+            valid_rows=8265,
+            keep_row_grad=keep,
+            **common,
+        )
+        ok = opt_in.forward_keys(opt)
+        producers = {
+            stage for stage, _ in ok if stage in cake_backend.DZ_PRODUCER_STAGES
+        }
+        assert producers == {"row_grad"} and zero not in ok, (keep, ok)
+    # the predicate over stand-in plans: the chunks must cover [0, rows) in order, each row once
+    rg = [
+        ("gemm_logits", 0),
+        ("row_finalize", 0),
+        ("loss_reduce", 0),
+        ("row_grad", 0),
+        ("gemm_dx", 0),
+        ("slab_sum", 0),
+    ]
+
+    def stub(chunks, rows=64, need_dx=True):
+        return SimpleNamespace(need_dx=need_dx, chunks=chunks, rows=rows)
+
+    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(rg)) == rg
+    assert cake_backend._with_rlab_zero(stub(((0, 40), (40, 24))), list(rg)) == rg
+    for chunks in (
+        ((0, 32),),
+        ((8, 56),),
+        ((0, 32), (40, 24)),
+        ((0, 40), (32, 32)),
+        (),
+    ):
+        assert (
+            cake_backend._with_rlab_zero(stub(chunks), list(rg))
+            == rg[:3] + [zero] + rg[3:]
+        ), chunks
+    assert cake_backend._with_rlab_zero(stub(((0, 32),), need_dx=False), list(rg)) == rg
+    dz = [("gemm_logits_dz", 0), ("gemm_dx", 0), ("slab_sum", 0)]
+    assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(dz)) == [zero] + dz
+
+
+def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
+    """A loss runner whose row-gradient producers are ``row_grad`` alone has no ``rlab_zero`` step: ``row_grad`` writes
+    every row of its chunk.  With the label residuals ``rlab`` prefilled with NaN before the step (compacted and not,
+    so ignored rows run too), every loop row of ``rlab`` holds a finite value afterwards: the residual on a row whose
+    label lies in ``[0, V)``, +0 (the bit pattern 0) on every other row; the loss, ``logp``, dX and dW equal those of
+    a step whose ``rlab`` was prefilled with zeros (the state the zero step left), bit for bit."""
+    _require_program(entry="loss")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
+    inp = make_inputs(4097, seed=SEED + 61, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    labels = inp.labels.clone()
+    labels[: edge.numel()] = edge
+    for compact in (True, False):
+        out = {}
+        for fill in (float("nan"), 0.0):
+            runner = prepare_lm_head_det_loss(
+                inp.X,
+                inp.W,
+                labels,
+                objective="ce",
+                loss_div=inp.loss_div,
+                chunk_size=4096,
+                backend="cake",
+                compact_rows=compact,
+            )
+            keys = runner.forward_order + runner.backward_order
+            assert ("rlab_zero", None) not in keys and ("row_grad", 0) in keys, compact
+            runner.tensors["rlab"].fill_(fill)
+            loss, logp = runner.forward()
+            dx, dw = runner.backward()
+            torch.cuda.synchronize()
+            rows = runner.plan.rows
+            out[fill == 0.0] = [x.clone() for x in (loss, logp, dx, dw)] + [
+                runner.tensors["rlab"][:rows].clone(),
+                runner.tensors["labels"][:rows].clone(),
+            ]
+            del runner
+        for name, a, b in zip(
+            ("loss", "logp", "dX", "dW", "rlab"), out[False], out[True]
+        ):
+            assert torch.equal(_bits(a), _bits(b)), (compact, name)
+        rlab, y = out[False][4], out[False][5].long()
+        live = (y >= 0) & (y < V)
+        assert bool((~live).any()) and bool(live.any()), compact
+        assert bool(torch.isfinite(rlab).all()), compact
+        assert bool((_bits(rlab)[~live] == 0).all()), compact
+        assert bool((rlab[live] != 0).any()), compact
 
 
 def test_reference_slab_sum_folds_the_label_residual():
@@ -15805,13 +16167,22 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     torch.cuda.empty_cache()
     _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)  # binds
     fast, _, _ = _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)
+    # both remembered-binding plain steps start from one allocator state: no earlier pass's result alive (``fast``
+    # aside) and every free cached block released.  A result left alive pins the segment it lies in, and the free blocks
+    # the steps before leave cached depend on the tests run before this one, so either can let one step's request take
+    # a free block less than 1 MiB larger than the other step's identical request
+    gc.collect()
+    torch.cuda.empty_cache()
     # the explicit fast form's plain step through the same step as the default passes (the log-probability entry's
     # upstream product included)
     _, fast_peak = _default_pass(inp, C, entry, "plain", tau, memory_mode="fast")
+    del _
     expected = "opt_in" if entry == "loss" else "cake_backend"
     begun = _record_every_hidden_count(monkeypatch)
     host_counts = _record_host_counts(monkeypatch)
     _default_pass(inp, C, entry, "plain", tau)  # binds
+    gc.collect()
+    torch.cuda.empty_cache()
     for kind in ("plain", "nograd", "nonreentrant", "reentrant"):
         begun.clear()
         host_counts.clear()
@@ -15832,7 +16203,6 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     # 1 MiB larger serves takes the whole block (the caching allocator splits no smaller remainder off), so a result
     # left alive (pinning a partly free segment) or blocks cached before one miss only can add such a remainder to one
     # peak at the same requested bytes
-    del _
     _clear_binding_caches()
     gc.collect()
     torch.cuda.empty_cache()

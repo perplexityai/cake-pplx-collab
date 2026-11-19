@@ -43,6 +43,8 @@ CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # the backend objects the module forwards to carry the module's names
 FORWARDED = (
     "cake_dsa_indexer_det_train_topk",
+    "cake_dsa_indexer_det_train_topk_in_candidates",
+    "cake_dsa_indexer_det_train_topk_in_candidates_workspace_size",
     "cake_dsa_indexer_det_train_topk_with_candidates",
     "cake_dsa_indexer_det_train_topk_with_candidates_workspace_size",
     "cake_dsa_indexer_det_train_topk_workspace_size",

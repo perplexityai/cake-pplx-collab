@@ -59,7 +59,7 @@ __device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
 extern "C" {
 
 __global__ __launch_bounds__(256) void
-kernel_cake_engram_gate_train_eec3759c50f56c38622b(float* __restrict__ dw_part, float* __restrict__ qw, float* __restrict__ kw, float* __restrict__ dq, float* __restrict__ dk, int NP)
+kernel_cake_engram_gate_train_eec3759c50f56c38622b(float* __restrict__ dw_part, int* __restrict__ q_weight, int* __restrict__ k_weight, int* __restrict__ dq, int* __restrict__ dk, int NP, int wmode, long long q_weight_size_p0, long long q_weight_size_p1, long long k_weight_size_p0, long long k_weight_size_p1, long long dq_size_p0, long long dq_size_p1, long long dk_size_p0, long long dk_size_p1)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -115,19 +115,51 @@ kernel_cake_engram_gate_train_eec3759c50f56c38622b(float* __restrict__ dw_part, 
     if (warp == 0) {
         float qv[4];
         float kv[4];
-        {
-            float4 _v4 = *reinterpret_cast<const float4*>(qw + column + 0);
-            qv[0 + 0] = _v4.x;
-            qv[0 + 1] = _v4.y;
-            qv[0 + 2] = _v4.z;
-            qv[0 + 3] = _v4.w;
+        if ((wmode & 1) != 0) {
+            unsigned int cw_raw[2];
+            {
+                const uint2* _ivptr_2 = reinterpret_cast<const uint2*>(reinterpret_cast<unsigned int*>(q_weight + (column >> 1)) + 0);
+                uint2 _ivld_2;
+                _ivld_2 = *_ivptr_2;
+                cw_raw[0 + 0] = _ivld_2.x;
+                cw_raw[0 + 1] = _ivld_2.y;
+            }
+            #pragma unroll
+            for (int m = 0; m < 2; m++) {
+                qv[2 * m] = __uint_as_float(cw_raw[m] << 16);
+                qv[2 * m + 1] = __uint_as_float(cw_raw[m] & 4294901760u);
+            }
+        } else {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(reinterpret_cast<float*>(q_weight + column) + 0);
+                qv[0 + 0] = _v4.x;
+                qv[0 + 1] = _v4.y;
+                qv[0 + 2] = _v4.z;
+                qv[0 + 3] = _v4.w;
+            }
         }
-        {
-            float4 _v4 = *reinterpret_cast<const float4*>(kw + column + 0);
-            kv[0 + 0] = _v4.x;
-            kv[0 + 1] = _v4.y;
-            kv[0 + 2] = _v4.z;
-            kv[0 + 3] = _v4.w;
+        if ((wmode & 2) != 0) {
+            unsigned int cw_raw_1[2];
+            {
+                const uint2* _ivptr_4 = reinterpret_cast<const uint2*>(reinterpret_cast<unsigned int*>(k_weight + (column >> 1)) + 0);
+                uint2 _ivld_4;
+                _ivld_4 = *_ivptr_4;
+                cw_raw_1[0 + 0] = _ivld_4.x;
+                cw_raw_1[0 + 1] = _ivld_4.y;
+            }
+            #pragma unroll
+            for (int m_1 = 0; m_1 < 2; m_1++) {
+                kv[2 * m_1] = __uint_as_float(cw_raw_1[m_1] << 16);
+                kv[2 * m_1 + 1] = __uint_as_float(cw_raw_1[m_1] & 4294901760u);
+            }
+        } else {
+            {
+                float4 _v4 = *reinterpret_cast<const float4*>(reinterpret_cast<float*>(k_weight + column) + 0);
+                kv[0 + 0] = _v4.x;
+                kv[0 + 1] = _v4.y;
+                kv[0 + 2] = _v4.z;
+                kv[0 + 3] = _v4.w;
+            }
         }
         float dqv[4];
         float dkv[4];
@@ -140,32 +172,52 @@ kernel_cake_engram_gate_train_eec3759c50f56c38622b(float* __restrict__ dw_part, 
             }
             #pragma unroll
             for (int g_0 = 0; g_0 < 8; g_0 += 2) {
-                float _add_4;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_4) : "f"(tree[g_0]), "f"(tree[g_0 + 1]));
-                tree[g_0] = _add_4;
+                float _add_6;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_6) : "f"(tree[g_0]), "f"(tree[g_0 + 1]));
+                tree[g_0] = _add_6;
             }
             #pragma unroll
             for (int g_1 = 0; g_1 < 8; g_1 += 4) {
-                float _add_5;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_5) : "f"(tree[g_1]), "f"(tree[g_1 + 2]));
-                tree[g_1] = _add_5;
+                float _add_7;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_7) : "f"(tree[g_1]), "f"(tree[g_1 + 2]));
+                tree[g_1] = _add_7;
             }
             #pragma unroll
             for (int g_2 = 0; g_2 < 8; g_2 += 8) {
-                float _add_6;
-                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_6) : "f"(tree[g_2]), "f"(tree[g_2 + 4]));
-                tree[g_2] = _add_6;
+                float _add_8;
+                asm("add.rn.f32 %0, %1, %2;" : "=f"(_add_8) : "f"(tree[g_2]), "f"(tree[g_2 + 4]));
+                tree[g_2] = _add_8;
             }
             dqv[c_3] = mul_f32_rn_noftz(tree[0], kv[c_3]);
             dkv[c_3] = mul_f32_rn_noftz(tree[0], qv[c_3]);
         }
-        {
-            float4 _v4 = make_float4(dqv[0 + 0], dqv[0 + 1], dqv[0 + 2], dqv[0 + 3]);
-            *reinterpret_cast<float4*>((dq + column) + 0) = _v4;
+        if ((wmode & 4) != 0) {
+            unsigned int cg_bf[2];
+            #pragma unroll
+            for (int _lp = 0; _lp < 2; _lp++) {
+                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(dqv[_lp*2 + 0], dqv[_lp*2+1 + 0]));
+                cg_bf[_lp] = *(uint32_t*)&_bf2;
+            }
+            reinterpret_cast<int2*>(reinterpret_cast<unsigned int*>(dq + (column >> 1)))[0] = reinterpret_cast<int2*>(cg_bf)[0];
+        } else {
+            {
+                float4 _v4 = make_float4(dqv[0 + 0], dqv[0 + 1], dqv[0 + 2], dqv[0 + 3]);
+                *reinterpret_cast<float4*>(reinterpret_cast<float*>(dq + column) + 0) = _v4;
+            }
         }
-        {
-            float4 _v4 = make_float4(dkv[0 + 0], dkv[0 + 1], dkv[0 + 2], dkv[0 + 3]);
-            *reinterpret_cast<float4*>((dk + column) + 0) = _v4;
+        if ((wmode & 8) != 0) {
+            unsigned int cg_bf_1[2];
+            #pragma unroll
+            for (int _lp = 0; _lp < 2; _lp++) {
+                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(dkv[_lp*2 + 0], dkv[_lp*2+1 + 0]));
+                cg_bf_1[_lp] = *(uint32_t*)&_bf2;
+            }
+            reinterpret_cast<int2*>(reinterpret_cast<unsigned int*>(dk + (column >> 1)))[0] = reinterpret_cast<int2*>(cg_bf_1)[0];
+        } else {
+            {
+                float4 _v4 = make_float4(dkv[0 + 0], dkv[0 + 1], dkv[0 + 2], dkv[0 + 3]);
+                *reinterpret_cast<float4*>(reinterpret_cast<float*>(dk + column) + 0) = _v4;
+            }
         }
     }
 }

@@ -15782,33 +15782,56 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
 
 def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     """The FP32 rows of the deterministic package's 212-SM ``sm_107a`` token ranges (its ``ROW_RULE_RANGES_BY_SM``,
-    version 0.3.5), as this package runs them on a 212-SM ``sm_107a`` part: no row of this package's tables
-    (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K, deterministic-program,
-    input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's program at the ends of
-    each range."""
+    version 0.3.5, with the ranges of version 0.3.8), as this package runs them on a 212-SM ``sm_107a`` part: no row of
+    this package's tables (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K,
+    deterministic-program, input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's
+    program at the ends of each range (by range: the T 12288 ranges of version 0.3.8 run the 256-row programs).  The
+    BF16 ranges of that table (the K-major rows of version 0.3.7):
+    test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7; the sm_100a and sm_103a parts of that table (version
+    0.3.8): test_k1_rows_follow_the_deterministic_ranges_of_0_3_8 (their raster ranges of versions 0.3.9 and 0.3.10:
+    the raster tests)."""
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
     prefix = "dense_proj_det_gemm_"
-    # (d_in, d_out) -> the deterministic program inside the range
+    # (d_in, d_out) -> {the low end of a range: the deterministic program inside that range}
+    sks = "nn_n256_f32_v8_ef_sks_sb2_pro7"
+    v8 = "nn_n256_f32_v8_pro15"
     wgrad_rows = {
-        (12288, 4096): "nn_n256_f32_v8_ef_sks_sb2_pro7",
-        (4096, 12288): "nn_n256_f32_v8_ef_sks_sb2_pro7",
-        (17408, 5120): "nn_n256_f32_v8_pro15",
-        (5120, 17408): "nn_n256_f32_v8_pro15",
-        (16384, 6144): "nn_n256_f32_v8_pro15",
-        (6144, 12288): "nn_n256_f32_v8_pro15",
-        (12288, 6144): "nn_n256_f32_v8_pro15",
+        (12288, 4096): {4096: sks},
+        (4096, 12288): {4096: sks},
+        (17408, 5120): {4096: v8, 12288: "nn_n256_m256_f32_ht_tma1_pro7"},
+        (5120, 17408): {4096: v8, 12288: "nn_n256_m256_f32_ht_tma1_pro7"},
+        (16384, 6144): {4096: v8, 12288: "nn_n256_m256_f32_tma1_pro7"},
+        (6144, 12288): {4096: v8},
+        (12288, 6144): {4096: v8},
     }
-    dgrad_rows = {(16384, 6144): "kn_n256_f32_v8_ht_pro7"}
-    table = det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)]
-    assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {(arch, sms)}
+    dgrad_rows = {(16384, 6144): {8192: "kn_n256_f32_v8_ht_pro7"}}
+    assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {
+        (arch, sms),
+        ("sm_103a", 148),
+        ("sm_103a", 152),
+        ("sm_100a", 152),
+        ("sm_100a", 148),
+    }
+    table = {
+        key: ranges
+        for key, ranges in det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)].items()
+        if key[3]
+    }
     assert {(key[6], key[8]) for key in table if key[7] is None} == set(wgrad_rows)
     assert {(key[6], key[7]) for key in table if key[8] is None} == set(dgrad_rows)
     for key, ranges in table.items():
         d_in = key[6]
         d_out = key[8] if key[7] is None else key[7]
-        for T in sorted({t for lo, hi, _ in ranges for t in (lo, hi)}):
+        programs = (wgrad_rows if key[7] is None else dgrad_rows)[(d_in, d_out)]
+        assert sorted(programs) == [lo for lo, _hi, _ in ranges], key
+        # the ends of each range, and on 4096 -> 12288 also the ends of its version 0.3.5 range (8192 - 16231)
+        inner = (8192, 16231) if key[7] is None and (d_in, d_out) == (4096, 12288) else ()
+        assert all(any(lo <= t <= hi for lo, hi, _ in ranges) for t in inner), key
+        ends = {(lo, t) for lo, hi, _ in ranges for t in (lo, hi)}
+        ends |= {(lo, t) for lo, hi, _ in ranges for t in inner if lo <= t <= hi}
+        for lo_of, T in sorted(ends):
             what = (key, T)
             if key[7] is None:
                 G = torch.empty(T, d_out, dtype=bf16)
@@ -15846,7 +15869,7 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
                     transposed_out=False,
                     arch=arch,
                 )[0]
-                assert det_plan.template == prefix + wgrad_rows[(d_in, d_out)], (
+                assert det_plan.template == prefix + programs[lo_of], (
                     what,
                     det_plan.template,
                 )
@@ -15872,10 +15895,490 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
                     == ()
                 ), what
                 det_plan = _plan_of_knobs(G, W, out, arch, sms, ())
-                assert det_plan.template == prefix + dgrad_rows[(d_in, d_out)], (
+                assert det_plan.template == prefix + programs[lo_of], (
                     what,
                     det_plan.template,
                 )
+
+
+#: The FP32 weight-gradient rows of the 212-SM ``sm_107a`` ranges version 0.3.8 of the deterministic package added or
+#: extended, at the token counts that version measured in them, ``(d_in, d_out, T)`` -> the deterministic program there.
+DET_212_F32_WGRAD_038 = {
+    (4096, 12288, 4096): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+    (4096, 12288, 16384): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+    (17408, 5120, 12288): "nn_n256_m256_f32_ht_tma1_pro7",
+    (5120, 17408, 4096): "nn_n256_f32_v8_pro15",
+    (5120, 17408, 12288): "nn_n256_m256_f32_ht_tma1_pro7",
+    (16384, 6144, 6208): "nn_n256_f32_v8_pro15",
+    (16384, 6144, 8128): "nn_n256_f32_v8_pro15",
+    (16384, 6144, 12288): "nn_n256_m256_f32_tma1_pro7",
+    (12288, 6144, 4096): "nn_n256_f32_v8_pro15",
+}
+#: The row of ``DET_212_F32_WGRAD_038`` whose program is the program of the deterministic plan before version 0.3.8:
+#: the o_proj weight gradient at T 12288 splits the K of each of its 26 tail tiles three ways, 78 units of 64 K blocks,
+#: ``(d_in, d_out, T)`` -> ``(tail_tiles, sk_units, iters_per_unit)`` of the plan.
+DET_212_F32_WGRAD_038_SPLIT = {(16384, 6144, 12288): (26, 78, 64)}
+#: The deterministic package's single-CTA program of its sm_100a and sm_103a input-gradient ranges (version 0.3.8).
+DET_DGRAD_RANGE_PROGRAM = "kn_n128_f32_tma2_s4_c1"
+#: The rows of the deterministic package's 148-SM ``sm_100a`` part rules without a range of version 0.3.8 on a part
+#: that has such ranges, ``(arch, SM count) -> ((K, N), ...)``: they keep the deterministic plan of version 0.3.7 there.
+DET_DGRAD_ROWS_WITHOUT_RANGE = {
+    ("sm_103a", 148): ((5120, 128), (8192, 128)),
+    ("sm_100a", 152): ((8192, 128),),
+}
+#: The FP32 entries of :data:`K1_DGRAD_RULES_BY_SM` of the rows of the deterministic package's input-gradient ranges
+#: (version 0.3.8) at a token count outside the row's ranges, ``(arch, SM count, K, N, T)``: there the entry's program
+#: runs and the deterministic plan runs its plan of version 0.3.7.
+K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES = {
+    ("sm_100a", 152, 6144, 128, 16231),
+    ("sm_100a", 152, 6144, 128, 16384),
+    ("sm_100a", 152, 8192, 128, 16172),
+    ("sm_100a", 152, 8192, 128, 16384),
+}
+
+
+def _det_dgrad_before(K, N):
+    """The program of the deterministic plan of the sm_100a / sm_103a FP32 input gradient
+    ``out[T, K] = G[T, N] @ W[N, K]`` outside the ranges of version 0.3.8 (its plan of version 0.3.7)."""
+    return "kn_n128_f32_tma1_pro7" if (K, N) == (6144, 128) else "kn_n256_f32_tma2_pd2_pro15"
+
+
+#: The raster ranges version 0.3.9 of the deterministic package added on 152-SM ``sm_103a`` parts, ``(K, N) -> (first,
+#: last token count)`` of the FP32 input gradient ``out[T, K] = G[T, N] @ W[N, K]``: there its plan runs
+#: :data:`DET_DGRAD_RANGE_PROGRAM` in raster groups of 2 row tiles (the indexer_hw ``6144 -> 32`` and ``8192 -> 128``).
+DET_DGRAD_RASTER_039 = {(6144, 32): (16172, 32768), (8192, 128): (16231, 16384)}
+
+
+#: The raster ranges version 0.3.10 of the deterministic package added on 148-SM parts, ``(arch, K, N) -> ((first, last
+#: token count, raster group), ...)`` of the FP32 input gradient ``out[T, K] = G[T, N] @ W[N, K]``: there its plan runs
+#: :data:`DET_DGRAD_RANGE_PROGRAM` in raster groups of that many row tiles.
+DET_DGRAD_RASTER_0310 = {
+    ("sm_103a", 8192, 128): ((8192, 32768, 2),),
+    ("sm_103a", 6144, 32): ((8192, 8192, 4),),
+    ("sm_100a", 8192, 128): ((8192, 32768, 2),),
+    ("sm_100a", 5120, 128): ((16384, 32768, 2),),
+    ("sm_100a", 6144, 128): ((16384, 32768, 2),),
+    ("sm_100a", 6144, 32): ((16231, 16231, 4), (32768, 32768, 2)),
+}
+
+
+def _det_tables_039(m):
+    """Put the deterministic package's 148-SM tables of version 0.3.9 back (``m``: a monkeypatch context): no 148-SM
+    ``sm_100a`` ranges, no ``8192 -> 128`` or ``6144 -> 32`` range on the 148-SM ``sm_103a`` part, and the 148-SM
+    ``sm_100a`` part rules of ``8192 -> 128`` at T 16231 and 16384 (:data:`DET_DGRAD_RANGE_PROGRAM` in the default
+    raster group)."""
+    m.delitem(det_backend.ROW_RULE_RANGES_BY_SM, ("sm_100a", 148))
+    key = ("sm_103a", False, True, True, False, False)
+    for K, N in ((8192, 128), (6144, 32)):
+        m.delitem(det_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 148)], key + (K, N, None))
+    for T in (16231, 16384):
+        m.setitem(
+            det_backend.ROW_RULES_BY_SM[("sm_100a", 148)],
+            ("sm_100a", False, True, True, False, False, 8192, 128, T),
+            dict(det_backend._SM100A_148_DGRAD_F32),
+        )
+
+
+def _det_tables_038(m):
+    """Put the deterministic package's ranges of version 0.3.8 back (``m``: a monkeypatch context): its 148-SM tables of
+    version 0.3.9 (:func:`_det_tables_039`), and on the 152-SM ``sm_103a`` part ``8192 -> 128`` in one range of
+    :data:`DET_DGRAD_RANGE_PROGRAM` at T 16172 - 16384 in the default raster group, no range of ``6144 -> 32``."""
+    _det_tables_039(m)
+    part = det_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 152)]
+    key = ("sm_103a", False, True, True, False, False)
+    m.setitem(part, key + (8192, 128, None), ((16172, 16384, dict(det_backend._SM100A_148_DGRAD_F32)),))
+    m.delitem(part, key + (6144, 32, None))
+
+
+def test_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch):
+    """The ranges version 0.3.8 of the deterministic package added (its ``ROW_RULE_RANGES_BY_SM``), as this package runs
+    them.  The FP32 input gradients of its 148-SM ``sm_103a`` ranges: this package has no input-gradient row on that
+    part (no row of :data:`K1_DGRAD_RULES_BY_SM`, :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` or
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM`, no knobs), so the call binds the deterministic plan: the single-CTA program
+    ``kn_n128_f32_tma2_s4_c1`` at the ends and the middle of each range, the plan of version 0.3.7 one token count
+    outside.  Its 152-SM ``sm_103a`` ranges (16172 to 16384 tokens) and 152-SM ``sm_100a`` ranges (16172 to 16384
+    tokens, ``5120 -> 128`` at 16172 and 16384 alone, ``6144 -> 128`` at 16172 alone): where the row of
+    :data:`K1_DGRAD_RULES_BY_SM` names that program inside a range its plan is the deterministic plan, field for field;
+    at the token counts without such a row (no knobs) the call binds the deterministic plan, that program inside a range
+    and the plan of version 0.3.7 outside.  At the entries outside the ranges
+    (``K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES``) the call runs the entry's program and the deterministic plan the plan of
+    version 0.3.7, as before version 0.3.8; so do the rows without a range on the part
+    (``DET_DGRAD_ROWS_WITHOUT_RANGE``) at 16172, 16231 and 16384 tokens.  The FP32 weight gradients of its 212-SM
+    ``sm_107a`` ranges at the token counts version 0.3.8 measured in the ranges it added or extended
+    (``DET_212_F32_WGRAD_038``): no row of this package's tables (``plan_atomic_gemm`` keeps each on the deterministic
+    program; no stream-K or deterministic-program row), so each runs the deterministic plan, the range's program, and
+    the o_proj weight gradient at T 12288 its three-way K split (``DET_212_F32_WGRAD_038_SPLIT``).  The checks read
+    the ranges of version 0.3.8 (``_det_tables_038``; the raster groups of versions 0.3.9 and 0.3.10:
+    ``test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_9`` and ``..._of_0_3_10``)."""
+    bf16, f32 = torch.bfloat16, torch.float32
+    prefix = det_backend._TEMPLATE_PREFIX
+    _det_tables_038(monkeypatch)
+    parts = {
+        part: table
+        for part, table in det_backend.ROW_RULE_RANGES_BY_SM.items()
+        if part[0] in ("sm_100a", "sm_103a")
+    }
+    assert {part: len(table) for part, table in parts.items()} == {
+        ("sm_103a", 148): 8,
+        ("sm_103a", 152): 10,
+        ("sm_100a", 152): 9,
+    }
+    assert set(DET_DGRAD_ROWS_WITHOUT_RANGE) <= set(parts)
+    assert ("sm_103a", 148) not in cake_backend.K1_DGRAD_RULES_BY_SM
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+
+    def bound_plan(G, W, out):
+        cake_backend._K1_DET_CACHE.clear()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+        )
+        ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert key[2][0] == ("dgrad",) and entry.k1 is not None
+        return entry.plan
+
+    checked = 0
+    outside_entries = set()
+    for (arch, sms), table in sorted(parts.items()):
+        rows = cake_backend.K1_DGRAD_RULES_BY_SM.get((arch, sms), {})
+        keyed = []
+        for key, ranges in sorted(table.items()):
+            assert key[:6] == (arch, False, True, True, False, False) and key[8] is None, key
+            keyed.append((key[6], key[7], ranges))  # out[T, K] = G[T, N] @ W[N, K]
+        for K, N in DET_DGRAD_ROWS_WITHOUT_RANGE.get((arch, sms), ()):
+            assert (arch, False, True, True, False, False, K, N, None) not in table, (arch, sms, K, N)
+            keyed.append((K, N, ()))
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            for K, N, ranges in keyed:
+                W = torch.empty(N, K, dtype=bf16)
+                # the ends and the middle of each range, one token count outside each end, the token counts of the
+                # row's entries in K1_DGRAD_RULES_BY_SM, and 16172, 16231 and 16384 on 152 SMs and on a row without a
+                # range
+                tokens = {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)}
+                tokens |= {T for k, n, T, dt in rows if (k, n, dt) == (K, N, "f32")}
+                if sms == 152 or not ranges:
+                    tokens |= set(K1_SCREEN_TOKENS)
+                for T in sorted(tokens):
+                    what = (arch, sms, K, N, T)
+                    inside = any(lo <= T <= hi for lo, hi, _ in ranges)
+                    G = torch.empty(T, N, dtype=bf16)
+                    out = torch.empty(T, K, dtype=f32)
+                    plan, *_, reason = cake_backend.plan_atomic_gemm(
+                        G, W, out, transposed_out=False, arch=arch, sm_count=sms
+                    )
+                    assert plan is None, (what, reason)
+                    row = (K, N, T, "f32")
+                    for rules in (
+                        cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+                        cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+                    ):
+                        assert row not in rules.get((arch, sms), {}), what
+                    knobs = cake_backend.k1_dgrad_knobs(
+                        arch=arch, sm_count=sms, K=K, N=N, T=T, out_f32=True
+                    )
+                    program = rows.get(row)
+                    if program is None:
+                        assert knobs == (), what
+                    else:
+                        assert sms == 152 and program == DET_DGRAD_RANGE_PROGRAM, what
+                        assert knobs == cake_backend.k1_program_knobs(program), what
+                    routed = _plan_of_knobs(G, W, out, arch, sms, knobs)
+                    default = _plan_of_knobs(G, W, out, arch, sms, ())
+                    det_want = DET_DGRAD_RANGE_PROGRAM if inside else _det_dgrad_before(K, N)
+                    assert default.template == prefix + det_want, (what, default.template)
+                    if program is None or inside:
+                        assert routed == default, (what, routed.template, default.template)
+                        want = det_want
+                    else:
+                        # the entry's program outside the deterministic ranges, as before version 0.3.8
+                        assert what in K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES, what
+                        assert routed.template == prefix + program, (what, routed.template)
+                        outside_entries.add(what)
+                        want = program
+                    # the call binds the deterministic package's plan of the row with the row's knobs
+                    bound = bound_plan(G, W, out)
+                    assert bound == det_backend._k1_plan(
+                        G, W, out, transposed_out=False, knobs=dict(knobs)
+                    )[0], what
+                    assert bound.template == prefix + want, (what, bound.template)
+                    checked += 1
+    assert outside_entries == K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES
+    # five token counts around each range of the 8 + 10 sm_103a rows and the seven sm_100a rows of 16172 to 16384
+    # tokens, and 16231 inside each of those 17 ranges on 152 SMs; on 152-SM sm_100a parts 5120 -> 128 at 16171 to
+    # 16173, 16231 and 16383 to 16385 (7) and 6144 -> 128 at 16171 to 16173, 16231 and 16384 (5); the three rows
+    # without a range at 16172, 16231 and 16384
+    assert checked == 5 * (8 + 10 + 7) + (10 + 7) + 7 + 5 + 3 * 3
+    # the FP32 weight gradients of the 212-SM sm_107a ranges at the token counts version 0.3.8 measured in them
+    arch, sms = "sm_107a", 212
+    l2 = K1_DGRAD_PARTS[(arch, sms)]
+    for (d_in, d_out, T), program in sorted(DET_212_F32_WGRAD_038.items()):
+        what = (d_in, d_out, T)
+        key = (arch, True, True, True, False, False, d_in, None, d_out)
+        assert any(
+            lo <= T <= hi for lo, hi, _ in det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)][key]
+        ), what
+        G = torch.empty(T, d_out, dtype=bf16)
+        X = torch.empty(T, d_in, dtype=bf16)
+        out = torch.empty(d_out, d_in, dtype=f32)
+        plan, *_, reason = cake_backend.plan_atomic_gemm(
+            X.t(), G, out, transposed_out=True, arch=arch, sm_count=sms
+        )
+        assert plan is None, (what, reason)
+        assert not any(
+            (d_in, d_out, T, "f32") in rows
+            for rows in cake_backend.K1_WGRAD_SK_RULES_BY_SM.values()
+        ), what
+        assert (
+            cake_backend.k1_wgrad_det_knobs(
+                arch=arch, sm_count=sms, d_in=d_in, d_out=d_out, T=T, out_f32=True
+            )
+            == ()
+        ), what
+        A, B, transposed = det_backend.wgrad_views(G, X, arch=arch, out_f32=True)
+        assert not transposed, what
+        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=sms, l2_bytes=l2, transposed_out=False, arch=arch
+        )[0]
+        assert det_plan.template == prefix + program, (what, det_plan.template)
+        if what in DET_212_F32_WGRAD_038_SPLIT:
+            split = (det_plan.tail_tiles, det_plan.sk_units, det_plan.iters_per_unit)
+            assert split == DET_212_F32_WGRAD_038_SPLIT[what], (what, split)
+
+
+def test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_9(monkeypatch):
+    """The raster ranges version 0.3.9 of the deterministic package added on 152-SM ``sm_103a`` parts
+    (``DET_DGRAD_RASTER_039``), as this package runs them.  This package has no plan of these FP32 input gradients
+    (``plan_atomic_gemm``) and no row of :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` or :data:`K1_DGRAD_NVJET_RULES_BY_SM`;
+    ``8192 -> 128`` names :data:`DET_DGRAD_RANGE_PROGRAM` in :data:`K1_DGRAD_RULES_BY_SM`, whose knobs leave the raster
+    group to the deterministic plan, and ``6144 -> 32`` has no FP32 row there (no knobs).  At the ends and the middle of
+    each range, one token count outside each end and 16172, 16231 and 16384 tokens the call binds the deterministic
+    plan of the row with the row's knobs, that program: inside a range in raster groups of 2, where the ranges of
+    version 0.3.8 (``_det_tables_038``) bind it in another group; outside, the plan the ranges of version 0.3.8 bind."""
+    bf16, f32 = torch.bfloat16, torch.float32
+    prefix = det_backend._TEMPLATE_PREFIX
+    arch, sms = "sm_103a", 152
+    _cpu_k1_launches(monkeypatch, arch)
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    rows = cake_backend.K1_DGRAD_RULES_BY_SM[(arch, sms)]
+
+    def bound_plan(G, W, out):
+        cake_backend._K1_DET_CACHE.clear()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+        )
+        ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert key[2][0] == ("dgrad",) and entry.k1 is not None
+        return entry.plan
+
+    checked = inside_checked = 0
+    for (K, N), (lo, hi) in sorted(DET_DGRAD_RASTER_039.items()):
+        assert det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)][
+            (arch, False, True, True, False, False, K, N, None)
+        ][-1][:2] == (lo, hi), (K, N)
+        W = torch.empty(N, K, dtype=bf16)
+        tokens = {lo - 1, lo, (lo + hi) // 2, hi, hi + 1, *K1_SCREEN_TOKENS}
+        for T in sorted(tokens):
+            what = (K, N, T)
+            G = torch.empty(T, N, dtype=bf16)
+            out = torch.empty(T, K, dtype=f32)
+            plan, *_, reason = cake_backend.plan_atomic_gemm(
+                G, W, out, transposed_out=False, arch=arch, sm_count=sms
+            )
+            assert plan is None, (what, reason)
+            row = (K, N, T, "f32")
+            for table in (
+                cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+                cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+            ):
+                assert row not in table.get((arch, sms), {}), what
+            program = rows.get(row)
+            assert program in (None, DET_DGRAD_RANGE_PROGRAM), (what, program)
+            assert (program is None) == (N == 32 or T not in K1_SCREEN_TOKENS), what
+            knobs = cake_backend.k1_dgrad_knobs(
+                arch=arch, sm_count=sms, K=K, N=N, T=T, out_f32=True
+            )
+            assert knobs == (() if program is None else cake_backend.k1_program_knobs(program)), what
+            bound = bound_plan(G, W, out)
+            assert bound == det_backend._k1_plan(
+                G, W, out, transposed_out=False, knobs=dict(knobs)
+            )[0], what
+            with monkeypatch.context() as m:
+                _det_tables_038(m)
+                before = bound_plan(G, W, out)
+            if lo <= T <= hi:
+                assert bound.template == prefix + DET_DGRAD_RANGE_PROGRAM, (what, bound.template)
+                assert before.template == bound.template, (what, before.template)
+                assert bound.group_m == 2 and before.group_m != 2, (what, before.group_m)
+                inside_checked += 1
+            else:
+                assert bound == before, (what, bound.template, before.template)
+            checked += 1
+    # 6144 -> 32 at 16171, 16172, 16231, 16384, 24470, 32768 and 32769 (five inside); 8192 -> 128 at 16172, 16230,
+    # 16231, 16307, 16384 and 16385 (three inside)
+    assert (checked, inside_checked) == (7 + 6, 5 + 3)
+
+
+def test_k1_rows_follow_the_deterministic_raster_ranges_of_0_3_10(monkeypatch):
+    """The raster ranges version 0.3.10 of the deterministic package added on 148-SM ``sm_103a`` and ``sm_100a`` parts
+    (``DET_DGRAD_RASTER_0310``), as this package runs them.  This package has no plan of these FP32 input gradients
+    (``plan_atomic_gemm``) and no row of :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` or :data:`K1_DGRAD_NVJET_RULES_BY_SM`;
+    on the ``sm_103a`` part no row of :data:`K1_DGRAD_RULES_BY_SM` (no knobs), on the ``sm_100a`` part the FP32 rows
+    there name :data:`DET_DGRAD_RANGE_PROGRAM`, whose knobs leave the raster group to the deterministic plan.  Each
+    range is that program in its raster group in the deterministic tables.  At the ends and the middle of each range,
+    one token count outside each end and 16172, 16231 and 16384 tokens the call binds the deterministic plan of the row
+    with the row's knobs: inside a range that program in the range's raster group; outside, the plan the tables of
+    version 0.3.9 (``_det_tables_039``) bind."""
+    bf16, f32 = torch.bfloat16, torch.float32
+    prefix = det_backend._TEMPLATE_PREFIX
+    sms = 148
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    assert ("sm_103a", sms) not in cake_backend.K1_DGRAD_RULES_BY_SM
+
+    def bound_plan(G, W, out):
+        cake_backend._K1_DET_CACHE.clear()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+        )
+        ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert key[2][0] == ("dgrad",) and entry.k1 is not None
+        return entry.plan
+
+    checked = inside_checked = 0
+    for (arch, K, N), ranges in sorted(DET_DGRAD_RASTER_0310.items()):
+        det_ranges = det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)][
+            (arch, False, True, True, False, False, K, N, None)
+        ]
+        assert [(lo, hi, rule) for lo, hi, rule in det_ranges] == [
+            (lo, hi, {**det_backend._SM100A_148_DGRAD_F32, "group_m": group})
+            for lo, hi, group in ranges
+        ], (arch, K, N)
+        rows = cake_backend.K1_DGRAD_RULES_BY_SM.get((arch, sms), {})
+        W = torch.empty(N, K, dtype=bf16)
+        tokens = {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)}
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            for T in sorted(tokens | set(K1_SCREEN_TOKENS)):
+                what = (arch, K, N, T)
+                G = torch.empty(T, N, dtype=bf16)
+                out = torch.empty(T, K, dtype=f32)
+                plan, *_, reason = cake_backend.plan_atomic_gemm(
+                    G, W, out, transposed_out=False, arch=arch, sm_count=sms
+                )
+                assert plan is None, (what, reason)
+                row = (K, N, T, "f32")
+                for table in (
+                    cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+                    cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+                ):
+                    assert row not in table.get((arch, sms), {}), what
+                program = rows.get(row)
+                assert program in (None, DET_DGRAD_RANGE_PROGRAM), (what, program)
+                knobs = cake_backend.k1_dgrad_knobs(
+                    arch=arch, sm_count=sms, K=K, N=N, T=T, out_f32=True
+                )
+                assert knobs == (() if program is None else cake_backend.k1_program_knobs(program)), what
+                bound = bound_plan(G, W, out)
+                assert bound == det_backend._k1_plan(
+                    G, W, out, transposed_out=False, knobs=dict(knobs)
+                )[0], what
+                with monkeypatch.context() as before_tables:
+                    _det_tables_039(before_tables)
+                    before = bound_plan(G, W, out)
+                group = next((g for lo, hi, g in ranges if lo <= T <= hi), None)
+                if group is not None:
+                    assert bound.template == prefix + DET_DGRAD_RANGE_PROGRAM, (what, bound.template)
+                    assert bound.group_m == group, (what, bound.group_m)
+                    inside_checked += 1
+                else:
+                    assert bound == before, (what, bound.template, before.template)
+                checked += 1
+    # sm_100a: 5120 -> 128 and 6144 -> 128 at 16172, 16231, 16383, 16384, 24576, 32768 and 32769 (three inside each);
+    # 6144 -> 32 at 16172, 16230 - 16232, 16384 and 32767 - 32769 (two inside); 8192 -> 128 at 8191, 8192, 16172, 16231,
+    # 16384, 20480, 32768 and 32769 (six inside).  sm_103a: 6144 -> 32 at 8191 - 8193, 16172, 16231 and 16384 (one
+    # inside); 8192 -> 128 as on sm_100a (six inside)
+    assert (checked, inside_checked) == (7 + 7 + 8 + 8 + 6 + 8, 3 + 3 + 2 + 6 + 1 + 6)
+
+
+def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
+    """On a 148- or 152-SM ``sm_103a`` or ``sm_100a`` part or a 212-SM ``sm_107a`` part: the rows of the ranges version
+    0.3.8 of the deterministic package added, through this package's entry points.  On ``sm_103a`` and ``sm_100a`` the
+    FP32 input gradient of each range row at both ends of each of the part's ranges of the row binds the deterministic
+    package's single-CTA program ``kn_n128_f32_tma2_s4_c1``; on the 212-SM ``sm_107a`` part each FP32
+    weight gradient of ``DET_212_F32_WGRAD_038`` binds the deterministic plan (no plan of this package's split tables),
+    the range's program.  Each meets the naive BF16 tier against FP64 over the draws, the first draw launched
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  The ranges are the deterministic package's current ones: on 152-SM
+    ``sm_103a`` parts also the raster ranges of version 0.3.9 (``DET_DGRAD_RASTER_039``), on 148-SM parts those of
+    version 0.3.10 (``DET_DGRAD_RASTER_0310``; the 148-SM ``sm_100a`` part has no other range).  Another part skips."""
+    device, arch, sms = _part_or_skip()
+    ranges = (
+        det_backend.ROW_RULE_RANGES_BY_SM.get((arch, sms), {})
+        if arch in ("sm_100a", "sm_103a")
+        else {}
+    )
+    if not ranges and (arch, sms) != ("sm_107a", 212):
+        pytest.skip(f"no range of version 0.3.8 of the deterministic package on {arch} with {sms} SMs")
+    prefix = det_backend._TEMPLATE_PREFIX
+    ran = 0
+    for key, bands in sorted(ranges.items()):
+        K, N = key[6], key[7]
+        for T in sorted({t for lo, hi, _rule in bands for t in (lo, hi)}):
+            what = f"dgrad {K} {N} {T} f32"
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            _n5_judge_call(
+                record_property,
+                f"dgrad_{K}_{N}_{T}_f32",
+                SEED + 183,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+                lambda G, W: G @ W,
+                ((T, N), (N, K)),
+                (T, K),
+                torch.float32,
+            )
+            ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+            assert entry.k1 is not None, what
+            assert entry.plan.template == prefix + DET_DGRAD_RANGE_PROGRAM, (
+                what,
+                entry.plan.template,
+            )
+            ran += 1
+    if (arch, sms) == ("sm_107a", 212):
+        for (d_in, d_out, T), program in sorted(DET_212_F32_WGRAD_038.items()):
+            what = f"wgrad {d_in} {d_out} {T} f32"
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            _n5_judge_call(
+                record_property,
+                f"wgrad_{d_in}_{d_out}_f32_{T}",
+                SEED + 183,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                lambda G, X: G.t() @ X,
+                ((T, d_out), (T, d_in)),
+                (d_out, d_in),
+                torch.float32,
+            )
+            ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
+            assert entry.plan is None and entry.det_plan is not None, what
+            assert entry.det_plan.template == prefix + program, (
+                what,
+                entry.det_plan.template,
+            )
+            # the three-way split runs the program of the plan before: check the split itself
+            split = DET_212_F32_WGRAD_038_SPLIT.get((d_in, d_out, T))
+            if split is not None:
+                plan = entry.det_plan
+                got = (plan.tail_tiles, plan.sk_units, plan.iters_per_unit)
+                assert got == split, (what, got)
+            ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"DET_RANGES_038 {arch} sm_count={sms}: {ran} rows ran the deterministic plan")
+    assert ran
 
 
 def test_k1_program_knobs_are_planner_keywords(monkeypatch):
@@ -16336,10 +16839,10 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
     """The rows of :data:`K1_WGRAD_DET_RULES_BY_SM` run the named program as measured, never its promoted twin: their
     knobs (:func:`k1_program_knobs`) carry ``promote=False``, so with the twin of the BF16 program registered the
     deterministic planner plans exactly the named program at its token counts.  The same knobs without ``promote``
-    (the deterministic planner's automatic rule) plan the program too, their segments holding no more than the
-    default threshold's 256 K blocks, and plan the twin at a threshold of 128 K blocks, where the named knobs still
-    plan the program.  The rows stay on the deterministic program (:func:`plan_atomic_gemm`), and the convenience call
-    binds the table's knobs (:func:`_wgrad_det_args`)."""
+    (the deterministic planner's automatic rule) plan the twin, their segments holding more than the default
+    threshold's 128 K blocks, and plan the program at a threshold of 256 K blocks (that of versions up to 0.3.5), which
+    no segment exceeds; the named knobs plan the program at both.  The rows stay on the deterministic program
+    (:func:`plan_atomic_gemm`), and the convenience call binds the table's knobs (:func:`_wgrad_det_args`)."""
     rows = cake_backend.K1_WGRAD_DET_RULES_BY_SM[("sm_100a", 148)]
     program = det_backend._TEMPLATE_PREFIX + "nn_n192_bz64_hne_sks_sb2_pro15"
     twin = program.replace("_pro15", "_kc128_pro15")
@@ -16353,7 +16856,7 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         lambda device=None: SimpleNamespace(arch="sm_100a", sm_count=148),
     )
     default = det_backend.K1_PROMOTE_MIN_SEGMENT
-    assert default == 256
+    assert default == 128
     bf16 = torch.bfloat16
     seen = 0
     for (d_in, d_out, T, dt), name in rows.items():
@@ -16366,7 +16869,7 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_100a")
         automatic = dict(knobs)
         del automatic["promote"]
-        for threshold, promoted in ((default, (program, 0)), (128, (twin, 128))):
+        for threshold, promoted in ((default, (twin, 128)), (256, (program, 0))):
             monkeypatch.setattr(det_backend, "K1_PROMOTE_MIN_SEGMENT", threshold)
             plan = _plan_of_knobs(
                 A, B, out, "sm_100a", 148, knobs, transposed_out=transposed
@@ -16376,7 +16879,7 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
                 A, B, out, "sm_100a", 148, automatic, transposed_out=transposed
             )
             assert (auto.template, auto.promote_blocks) == promoted, (T, auto.template)
-            assert 128 < det_backend.segment_blocks(auto) <= default, T
+            assert default < det_backend.segment_blocks(auto) <= 256, T
         assert (
             cake_backend.plan_atomic_gemm(
                 X.t(), G, out, transposed_out=True, arch="sm_100a", sm_count=148
@@ -17354,6 +17857,582 @@ def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
             block_n,
             splits,
         ), what
+
+
+#: The cells of ``LONG_SEGMENT_MISSED_CELLS`` of the deterministic package's tests, restated: the BF16 weight-gradient
+#: cells that missed the naive BF16 tier on deterministic plans whose longest segment held 129 to 256 K blocks without
+#: promoted chunks (that package's threshold up to version 0.3.5), per device class: (arch, SM count) ->
+#: ``((d_in, d_out, T, seeds), ...)``: a row at one token count with the seeds it missed on, one cell per seed
+#: (``LONG_SEGMENT_SEED``: the seed of that package's tests).  This package's weight gradient missed the tier with the
+#: deterministic plan's errors on 28 of the 77 B200 cells, 28 of the 58 GB200 cells, 28 of the 61 B300 cells, 28 of the
+#: 51 GB300 cells and 58 of the 61 VR200 cells (all but 8192 -> 128).
+LONG_SEGMENT_SEED = 20260930
+# fmt: off
+LONG_SEGMENT_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)),
+        (4096, 32, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (LONG_SEGMENT_SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)),
+        (4096, 48, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 48, 32768, (LONG_SEGMENT_SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (LONG_SEGMENT_SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (LONG_SEGMENT_SEED,)), (4096, 96, 32768, (LONG_SEGMENT_SEED,)),
+        (4096, 128, 31744, (LONG_SEGMENT_SEED, 1, 2, 758)), (4096, 128, 32768, (LONG_SEGMENT_SEED, 2, 3, 758)),
+        (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3)), (5120, 32, 31745, (1, 2)),
+        (5120, 32, 32768, (LONG_SEGMENT_SEED, 1)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (1, 2, 3, 758)), (5120, 48, 31745, (1,)),
+        (5120, 48, 32768, (LONG_SEGMENT_SEED, 1, 2, 3, 758)),
+        (5120, 64, 16231, (LONG_SEGMENT_SEED,)), (5120, 64, 16384, (3,)),
+        (5120, 128, 13312, (LONG_SEGMENT_SEED,)), (5120, 128, 15361, (758,)), (5120, 128, 16172, (1,)),
+        (5120, 128, 16231, (758,)), (5120, 128, 16383, (758,)), (5120, 128, 16384, (LONG_SEGMENT_SEED,)),
+        (6144, 32, 13312, (LONG_SEGMENT_SEED,)), (6144, 32, 15360, (LONG_SEGMENT_SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (LONG_SEGMENT_SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (LONG_SEGMENT_SEED, 3)),
+    ),
+    ("sm_100a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (LONG_SEGMENT_SEED, 758)),
+        (4096, 32, 31744, (LONG_SEGMENT_SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (LONG_SEGMENT_SEED, 3)),
+        (4096, 64, 31744, (LONG_SEGMENT_SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)),
+        (4096, 64, 32768, (LONG_SEGMENT_SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (LONG_SEGMENT_SEED, 3, 758)), (4096, 128, 31745, (LONG_SEGMENT_SEED, 2)),
+        (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3, 758)), (5120, 32, 32768, (3, 758)),
+        (5120, 48, 32768, (3,)),
+        (5120, 64, 14336, (758,)), (5120, 64, 15360, (2,)), (5120, 64, 15361, (1, 3)), (5120, 64, 16172, (3,)),
+        (5120, 64, 16231, (1,)),
+        (5120, 128, 12288, (3,)), (5120, 128, 16172, (758,)), (5120, 128, 16231, (758,)), (5120, 128, 16383, (1, 2, 3)),
+        (5120, 128, 16384, (2,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (LONG_SEGMENT_SEED,)), (6144, 128, 16231, (LONG_SEGMENT_SEED,)),
+        (6144, 128, 16384, (LONG_SEGMENT_SEED,)),
+    ),
+    ("sm_103a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)),
+        (4096, 32, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (LONG_SEGMENT_SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)),
+        (4096, 48, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 48, 32768, (LONG_SEGMENT_SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (LONG_SEGMENT_SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (LONG_SEGMENT_SEED,)), (4096, 96, 32768, (LONG_SEGMENT_SEED,)),
+        (4096, 128, 31744, (LONG_SEGMENT_SEED, 1, 2, 758)), (4096, 128, 32768, (LONG_SEGMENT_SEED, 2, 3, 758)),
+        (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3, 758)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (3,)),
+        (5120, 64, 31744, (LONG_SEGMENT_SEED, 2, 3, 758)),
+        (6144, 32, 13312, (LONG_SEGMENT_SEED,)), (6144, 32, 15360, (LONG_SEGMENT_SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (LONG_SEGMENT_SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (LONG_SEGMENT_SEED, 3)),
+    ),
+    ("sm_103a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (LONG_SEGMENT_SEED, 758)),
+        (4096, 32, 31744, (LONG_SEGMENT_SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (LONG_SEGMENT_SEED, 3)),
+        (4096, 64, 31744, (LONG_SEGMENT_SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)),
+        (4096, 64, 32768, (LONG_SEGMENT_SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (LONG_SEGMENT_SEED, 3, 758)), (4096, 128, 31745, (LONG_SEGMENT_SEED, 2)),
+        (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 23553, (3,)), (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 758)),
+        (5120, 48, 15361, (LONG_SEGMENT_SEED,)), (5120, 48, 28672, (1,)),
+        (5120, 48, 31744, (LONG_SEGMENT_SEED, 1, 2, 3, 758)),
+        (5120, 64, 31744, (1,)),
+        (5120, 128, 12288, (3,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (LONG_SEGMENT_SEED,)), (6144, 128, 16231, (LONG_SEGMENT_SEED,)),
+        (6144, 128, 16384, (LONG_SEGMENT_SEED,)),
+    ),
+    ("sm_107a", 212): (
+        (4096, 16, 31744, (3,)), (4096, 16, 31745, (2, 3)), (4096, 16, 32768, (758,)),
+        (4096, 32, 40960, (2,)),
+        (4096, 96, 31744, (2,)), (4096, 96, 31745, (1, 2)), (4096, 96, 32768, (2, 758)),
+        (4096, 512, 16172, (1,)), (4096, 512, 16231, (3,)),
+        (5120, 32, 31744, (LONG_SEGMENT_SEED, 3)), (5120, 32, 31745, (LONG_SEGMENT_SEED, 3)),
+        (5120, 32, 32768, (LONG_SEGMENT_SEED, 2)),
+        (5120, 48, 31744, (2, 3)), (5120, 48, 31745, (LONG_SEGMENT_SEED, 758)), (5120, 48, 32768, (1, 2, 758)),
+        (5120, 64, 31744, (2,)), (5120, 64, 31745, (2, 3)), (5120, 64, 32768, (3, 758)),
+        (5120, 128, 31744, (LONG_SEGMENT_SEED, 2, 758)), (5120, 128, 31745, (1,)),
+        (5120, 128, 32768, (LONG_SEGMENT_SEED, 1, 2, 3, 758)),
+        (6144, 32, 40960, (2,)), (6144, 32, 49152, (758,)),
+        (6144, 48, 31744, (2, 3, 758)), (6144, 48, 32768, (2, 3, 758)),
+        (6144, 64, 28672, (LONG_SEGMENT_SEED,)), (6144, 64, 31744, (2, 758)), (6144, 64, 31745, (1, 3)),
+        (6144, 64, 32768, (1, 3)),
+        (6144, 128, 31745, (1, 2)), (6144, 128, 32768, (LONG_SEGMENT_SEED, 758)),
+        (8192, 128, 31744, (3, 758)), (8192, 128, 31745, (1,)),
+    ),
+}
+# fmt: on
+#: The rows of the cells above without a rule of the deterministic package: (d_in, d_out).
+LONG_SEGMENT_RULELESS_ROWS = ((4096, 16), (4096, 96), (6144, 48), (6144, 64))
+
+
+def _long_segment_rows():
+    """``(d_in, d_out)`` of the BF16 weight gradients of the deterministic package's promotion checks: every unbatched
+    BF16 weight-gradient key of its ``ROW_RULES`` (either orientation, every architecture) and the rows of
+    ``LONG_SEGMENT_RULELESS_ROWS``."""
+    rows = set(LONG_SEGMENT_RULELESS_ROWS)
+    for _arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M in det_backend.ROW_RULES:
+        if a_mn and b_mn and not out_f32 and not batched and K is None:
+            # a swapped key names (d_out, None, d_in), a direct one (d_in, None, d_out)
+            rows.add((M, N) if out_t else (N, M))
+    return tuple(sorted(rows))
+
+
+def _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes, t_max=65536):
+    """``plan_at(T, **knobs)``: the deterministic planner's plan (with the registry fallback) of the ``d_in -> d_out``
+    BF16 weight gradient at ``T <= t_max`` tokens on a part of ``arch`` with ``sm_count`` SMs, in the orientation of
+    that package's ``wgrad_views`` (CPU views of one buffer per operand, nothing launched)."""
+    G = torch.empty(t_max, d_out, dtype=torch.bfloat16)
+    X = torch.empty(t_max, d_in, dtype=torch.bfloat16)
+    out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+
+    def plan_at(T, **knobs):
+        A, B, transposed = det_backend.wgrad_views(G[:T], X[:T], arch=arch)
+        return det_backend.cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            out,
+            sm_count=sm_count,
+            l2_bytes=l2_bytes,
+            transposed_out=transposed,
+            arch=arch,
+            **knobs,
+        )[0]
+
+    return plan_at
+
+
+def _segment_edge(plan_at, threshold, lo=1024, hi=65536):
+    """The token count ``T`` in ``[lo, hi)`` whose deterministic plan without promotion (``promote=False``) holds a
+    longest segment of at most ``threshold`` K blocks while the plan at ``T + 1`` holds more (bisection), else ``None``
+    (no plan up to ``hi`` tokens holds more)."""
+
+    def long(T):
+        return det_backend.segment_blocks(plan_at(T, promote=False)) > threshold
+
+    if not long(hi):
+        return None
+    assert not long(lo), lo
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if long(mid):
+            hi = mid
+        else:
+            lo = mid
+    return lo
+
+
+def _long_segment_gpu_cases(arch, sm_count, l2_bytes):
+    """The cases of the deterministic package's ``test_gpu_long_segment_wgrad_rows_meet_the_naive_tier`` on a part of
+    ``arch`` with ``sm_count`` SMs, ``(d_in, d_out, T, seeds)``: the cells of ``LONG_SEGMENT_MISSED_CELLS`` of the
+    class, and for each promoted twin the deterministic planner runs at its threshold's edge (``_segment_edge``), on
+    the first row of ``_long_segment_rows`` that does, three token counts on ``LONG_SEGMENT_SEED``: the edge (a
+    longest segment of at most 128 K blocks), the next token count (more than 128) and the last token count whose
+    plan's longest segment holds at most 256 K blocks."""
+    cases = list(LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ()))
+    forms = set()
+    for d_in, d_out in _long_segment_rows():
+        plan_at = _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes)
+        T = _segment_edge(plan_at, det_backend.K1_PROMOTE_MIN_SEGMENT)
+        if T is None:
+            continue
+        edge = plan_at(T + 1)
+        if not edge.promote_blocks or edge.template in forms:
+            continue
+        forms.add(edge.template)
+        top = _segment_edge(plan_at, 256)
+        cases += [
+            (d_in, d_out, t, (LONG_SEGMENT_SEED,))
+            for t in (T, T + 1, top)
+            if t is not None
+        ]
+    return cases
+
+
+def _long_segment_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` weight gradient at ``T`` tokens
+    from ``seed``, as the deterministic package's tests draw them: ``X``, the weight ``[d_out, d_in]`` scaled by
+    ``d_in ** -0.5`` (drawn for the order of the generator alone), then ``G``, each standard normal."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, G
+
+
+def _judge_long_segment_wgrad(record_property, name, launch, X, G, out, seed):
+    """Judge the weight gradient ``out [d_out, d_in]`` that ``launch()`` writes from the operands ``X [T, d_in]`` and
+    ``G [T, d_out]`` against the naive BF16 tier over the draws of ``seed`` (:func:`judge_gemm`): each draw's operands
+    (:func:`_long_segment_operands`) written into ``X`` and ``G`` and ``out`` filled with NaN; the oracle and the tier
+    in the orientation of the deterministic package's tests (its ``wgrad_views`` without an architecture: ``X.T @ G``
+    against ``out.T`` where it swaps)."""
+    (T, d_in), d_out = X.shape, G.shape[1]
+    A, B, transposed = det_backend.wgrad_views(G, X)
+
+    def draw(s):
+        operands = _long_segment_operands(T, d_in, d_out, s, X.device)
+        for dst, src in zip((X, G), operands, strict=True):
+            dst.copy_(src)
+        nan_fill([out])
+        return SimpleNamespace(A=A, B=B)
+
+    def run(_inputs):
+        launch()
+        torch.cuda.synchronize()
+        return {name: out.t() if transposed else out}
+
+    def product(v, dtype):
+        return {name: torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+
+
+def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
+    """The cases of the deterministic package's test of the same name (``_long_segment_gpu_cases``: the cells of
+    ``LONG_SEGMENT_MISSED_CELLS`` and three token counts around that package's promotion threshold per promoted twin)
+    through this package's weight-gradient entry, whatever program its tables choose: the output is judged against the
+    FP64 oracle beside the naive BF16 tier over the draws of each listed seed (:func:`_judge_long_segment_wgrad`), and
+    every failing cell is reported.  Where the call binds the deterministic plan (its ``_K1_ATOMIC_CACHE`` entry has no
+    plan of this package) and no row of :data:`K1_WGRAD_DET_RULES_BY_SM` names the program, that plan runs the promoted
+    twin exactly where its longest segment holds more than that package's ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the
+    architecture registers the twin (every missed cell bound there does).  A class without cases skips."""
+    device, arch, sms = _part_or_skip()
+    l2_bytes = det_backend.device_facts(device).l2_bytes
+    cases = _long_segment_gpu_cases(arch, sms, l2_bytes)
+    if not cases:
+        pytest.skip(
+            f"no promoted weight-gradient twin at the threshold on {arch} with {sms} SMs"
+        )
+    missed = {case[:3] for case in LONG_SEGMENT_MISSED_CELLS.get((arch, sms), ())}
+    registered = det_jit.KERNELS.get(arch, {})
+    kc = det_backend.K1_PROMOTE_BLOCKS
+    failures = []
+    for d_in, d_out, T, seeds in cases:
+        where = (arch, sms, d_in, d_out, T)
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        launch = functools.partial(
+            cake_backend.cake_dense_gemm_nondet_train_projection_wgrad, G, X, out
+        )
+        for seed in seeds:
+            try:
+                _judge_long_segment_wgrad(
+                    record_property,
+                    f"wgrad_{d_in}x{d_out}_t{T}_s{seed}",
+                    launch,
+                    X,
+                    G,
+                    out,
+                    seed,
+                )
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+        entries = list(cake_backend._K1_ATOMIC_CACHE.values())
+        if len(entries) != 1 or entries[0].plan is not None:
+            continue  # this package's own program (stream-K or split-K): judged above
+        assert entries[0].k1 is not None, where
+        det_plan = entries[0].det_plan
+        named = cake_backend.k1_wgrad_det_knobs(
+            arch=arch, sm_count=sms, d_in=d_in, d_out=d_out, T=T, out_f32=False
+        )
+        plain = det_plan.template.replace(f"_kc{kc}", "")
+        twin = re.sub(r"(_pro\d+)$", rf"_kc{kc}\1", plain)
+        segment = det_backend.segment_blocks(det_plan)
+        promoted = (
+            not named
+            and twin != plain
+            and twin in registered
+            and segment > det_backend.K1_PROMOTE_MIN_SEGMENT
+            and not det_backend._promote_exempt(arch, det_plan)
+        )
+        assert det_plan.template == (twin if promoted else plain), (
+            where,
+            det_plan.template,
+        )
+        assert (d_in, d_out, T) not in missed or promoted, (where, det_plan.template)
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"LONG_SEGMENT_WGRAD {arch} sm_count={sms}: {len(cases)} cases")
+    assert not failures, "\n".join(failures)
+
+
+#: The cells of ``K_MAJOR_MISSED_CELLS`` of the deterministic package's tests, restated: the BF16 forward and input
+#: gradient cells with K > 8192 that missed the naive BF16 tier on that package's plans of version 0.3.6 (a tile's 192
+#: to 272 K blocks in one FP32 accumulator), per device class: (arch, SM count) -> ``((op, d_in, d_out, T, seeds),
+#: ...)``: a row at one token count with the seeds it missed on, one cell per seed (``K_MAJOR_SEED``: the seed of that
+#: package's tests).  This package runs the deterministic plan on these rows: since that package's version 0.3.7 a plan
+#: whose longest segment holds at most 128 K blocks.
+K_MAJOR_SEED = 20260930
+# fmt: off
+K_MAJOR_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (K_MAJOR_SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (K_MAJOR_SEED, 758)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (K_MAJOR_SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (1, 2, 758)), ("dgrad", 2048, 16384, 384, (1, 2)),
+        ("dgrad", 2048, 16384, 513, (2,)), ("dgrad", 5120, 17408, 1, (2,)),
+        ("dgrad", 5120, 17408, 16, (K_MAJOR_SEED, 1, 2)), ("dgrad", 5120, 17408, 64, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 97, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 128, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 129, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 192, (K_MAJOR_SEED,)),
+        ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_100a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (K_MAJOR_SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (K_MAJOR_SEED, 758)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (K_MAJOR_SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (2,)), ("dgrad", 2048, 16384, 384, (1, 2)), ("dgrad", 2048, 16384, 513, (2,)),
+        ("dgrad", 5120, 17408, 1, (2,)), ("dgrad", 5120, 17408, 16, (K_MAJOR_SEED, 1, 2)),
+        ("dgrad", 5120, 17408, 64, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 97, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 128, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 129, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 192, (K_MAJOR_SEED,)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 2)), ("fwd", 17408, 5120, 128, (758,)),
+        ("fwd", 17408, 5120, 129, (758,)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED,)),
+        ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_107a", 212): (
+        ("fwd", 16384, 6144, 16, (K_MAJOR_SEED,)), ("fwd", 16384, 6144, 33, (1,)), ("dgrad", 4096, 12288, 1, (1,)),
+        ("dgrad", 4096, 12288, 64, (758,)),
+    ),
+}
+# fmt: on
+#: The K-major rows of the deterministic package's tables of version 0.3.7: (op, d_in, d_out).
+K_MAJOR_ROWS = (
+    ("fwd", 12288, 4096),
+    ("fwd", 12288, 6144),
+    ("fwd", 16384, 6144),
+    ("fwd", 17408, 5120),
+    ("dgrad", 2048, 16384),
+    ("dgrad", 4096, 12288),
+    ("dgrad", 5120, 17408),
+    ("dgrad", 6144, 12288),
+)
+
+
+def _k_major_views(op, X, W, G):
+    """``(A, B)`` of the forward (``X @ W.T``) or the input gradient (``G @ W``)."""
+    return (X, W.t()) if op == "fwd" else (G, W)
+
+
+def _k_major_no_table_row(arch, sms, op, d_in, d_out, T):
+    """The row at ``T`` tokens has no row of this package's forward or input-gradient tables on the part: the call
+    binds the deterministic plan."""
+    if op == "fwd":
+        assert (
+            cake_backend.k1_forward_knobs(arch=arch, sm_count=sms, K=d_in, N=d_out, T=T)
+            == ()
+        )
+        assert not any(
+            (d_in, d_out, T) in rows
+            for rows in cake_backend.K1_FORWARD_PROGRAM_RULES_BY_SM.values()
+        )
+        return
+    assert (
+        cake_backend.k1_dgrad_knobs(
+            arch=arch, sm_count=sms, K=d_in, N=d_out, T=T, out_f32=False
+        )
+        == ()
+    )
+    for rules in (
+        cake_backend.K1_DGRAD_RULES_BY_SM,
+        cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+        cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+    ):
+        assert not any((d_in, d_out, T, "bf16") in rows for rows in rules.values())
+
+
+def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7(monkeypatch):
+    """The K-major rows of the deterministic package's version 0.3.7 (its ``ROW_RULE_MIN_T`` tiers on sm_100a and
+    sm_103a and the BF16 ranges of its 212-SM ``sm_107a`` ``ROW_RULE_RANGES_BY_SM``), as this package runs them: the
+    BF16 keys of that range table are the four K-major rows of the 212-SM part, and at each cell of
+    ``K_MAJOR_MISSED_CELLS`` on its class (CPU views, the class's device facts, nothing launched:
+    :func:`_cpu_k1_launches`) the call's layout routes to the deterministic programs, the row has no row of this
+    package's tables and the entry point resolves no knobs, so the forward or input-gradient entry point binds the
+    deterministic package's plan of the row on the class, field for field, whose longest segment holds at most 128 K
+    blocks."""
+    bf16 = torch.bfloat16
+    ranged = {
+        key for key in det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)] if not key[3]
+    }
+    assert {
+        ("dgrad", key[6], key[7]) if key[2] else ("fwd", key[7], key[6]) for key in ranged
+    } == {
+        ("fwd", 16384, 6144),
+        ("fwd", 17408, 5120),
+        ("dgrad", 4096, 12288),
+        ("dgrad", 5120, 17408),
+    }
+    assert {
+        part: len([s for *_, seeds in cells for s in seeds])
+        for part, cells in K_MAJOR_MISSED_CELLS.items()
+    } == {
+        ("sm_100a", 148): 49,
+        ("sm_100a", 152): 35,
+        ("sm_103a", 148): 47,
+        ("sm_103a", 152): 35,
+        ("sm_107a", 212): 4,
+    }
+    for (arch, sms), cells in K_MAJOR_MISSED_CELLS.items():
+        l2 = K1_DGRAD_PARTS.get((arch, sms), GB_L2_BYTES)
+        with monkeypatch.context() as m:
+            _cpu_k1_launches(m, arch)
+            m.setattr(cake_backend, "_k1_index", lambda *views: 0)
+            facts = det_backend.DeviceFacts(index=0, arch=arch, sm_count=sms, l2_bytes=l2)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            for op, d_in, d_out, T, _seeds in cells:
+                what = (arch, sms, op, d_in, d_out, T)
+                assert (op, d_in, d_out) in K_MAJOR_ROWS, what
+                _k_major_no_table_row(arch, sms, op, d_in, d_out, T)
+                X = torch.empty(T, d_in, dtype=bf16)
+                W = torch.empty(d_out, d_in, dtype=bf16)
+                G = torch.empty(T, d_out, dtype=bf16)
+                A, B = _k_major_views(op, X, W, G)
+                out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=bf16)
+                assert cake_backend._route(cake_backend._k1_layout(A, B)) == "det", what
+                if op == "fwd":
+                    assert cake_backend._k1_forward_knobs_of(X, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_forward, X, W, out
+                    )
+                else:
+                    assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_dgrad, G, W, out
+                    )
+                cake_backend._K1_DET_CACHE.clear()
+                assert call() is out, what
+                ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+                assert key[2][0] == (op,) and entry.k1 is not None, what
+                det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+                    A, B, out, sm_count=sms, l2_bytes=l2, arch=arch
+                )[0]
+                assert entry.plan == det_plan, (what, entry.plan.template, det_plan.template)
+                assert det_backend.segment_blocks(entry.plan) <= 128, (what, entry.plan.template)
+
+
+def _k_major_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]``, ``W [d_out, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` row at
+    ``T`` tokens from ``seed``, as the deterministic package's tests draw them: ``X``, the weight scaled by
+    ``d_in ** -0.5``, then ``G``, each standard normal, from one generator."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    W = normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, W, G
+
+
+def test_gpu_k_major_rows_meet_the_naive_tier(record_property):
+    """The cells of ``K_MAJOR_MISSED_CELLS`` of the device's class through this package's forward and input-gradient
+    entries: the call binds the deterministic plan (its ``_K1_DET_CACHE`` entry), a plan whose longest segment holds at
+    most 128 K blocks; the output is judged against the FP64 oracle beside the naive BF16 tier over the draws of each
+    listed seed (each draw's operands drawn as the deterministic package's tests draw them, written in place, ``out``
+    filled with NaN) and gives the same bits on three more launches into NaN.  Every failing cell is reported.  A class
+    without such cells skips."""
+    device, arch, sms = _part_or_skip()
+    cells = K_MAJOR_MISSED_CELLS.get((arch, sms), ())
+    if not cells:
+        pytest.skip(f"no K-major cell of the deterministic package's version 0.3.7 on {arch} with {sms} SMs")
+    failures = []
+    for op, d_in, d_out, T, seeds in cells:
+        where = (arch, sms, op, d_in, d_out, T)
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        W = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=torch.bfloat16, device=device)
+        A, B = _k_major_views(op, X, W, G)
+        if op == "fwd":
+            launch = functools.partial(
+                cake_backend.cake_dense_gemm_nondet_train_projection_forward, X, W, out
+            )
+        else:
+            launch = functools.partial(
+                cake_backend.cake_dense_gemm_nondet_train_projection_dgrad, G, W, out
+            )
+
+        def draw(s):
+            for dst, src in zip(
+                (X, W, G), _k_major_operands(T, d_in, d_out, s, device), strict=True
+            ):
+                dst.copy_(src)
+            nan_fill([out])
+            return SimpleNamespace(A=A, B=B)
+
+        def run(_inputs):
+            launch()
+            torch.cuda.synchronize()
+            return {"out": out}
+
+        def product(v, dtype):
+            return {"out": torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+        for seed in seeds:
+            try:
+                judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None, where
+        facts = det_backend.device_facts(device)
+        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=facts.sm_count, l2_bytes=facts.l2_bytes, arch=arch
+        )[0]
+        assert entry.plan == det_plan, (where, entry.plan.template, det_plan.template)
+        assert det_backend.segment_blocks(entry.plan) <= 128, (where, entry.plan.template)
+        out.fill_(float("nan"))
+        launch()
+        torch.cuda.synchronize()
+        first = out.clone()
+        for _ in range(3):
+            out.fill_(float("nan"))
+            launch()
+            torch.cuda.synchronize()
+            if not torch.equal(out.view(torch.int16), first.view(torch.int16)):
+                failures.append(f"{where}: another bit pattern on a repeated launch")
+                break
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"K_MAJOR_ROWS {arch} sm_count={sms}: {len(cells)} cells")
+    assert not failures, "\n".join(failures)
 
 
 def test_gpu_k1_parity_ranges_run_at_their_edges(record_property):

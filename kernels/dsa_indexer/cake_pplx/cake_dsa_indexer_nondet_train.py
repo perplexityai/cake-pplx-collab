@@ -426,8 +426,156 @@ def cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size(
     )
 
 
+@cake_api
+def cake_dsa_indexer_nondet_train_topk_in_candidates(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    candidate_blocks: torch.Tensor,
+    *,
+    top_k: int = 512,
+    softmax_scale: Optional[float] = None,
+    q_causal_offsets: Optional[torch.Tensor] = None,
+    ratio: int = 1,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    workspace_buffer: Optional[torch.Tensor] = None,
+    indices: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
+    return_scores: bool = True,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
+    r""":func:`cake_dsa_indexer_nondet_train_topk` restricted to given candidate
+    blocks; SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+
+    Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For query
+    row ``t`` with ``n`` visible keys (the family's visibility rule) the pool
+    ``P_t`` is the keys ``j < n`` whose block ``j // 8`` is named in
+    ``candidate_blocks[t]``; the row selects the top ``min(top_k, |P_t|)``
+    keys of ``P_t`` by score descending, then key id descending (``+0.0 ==
+    -0.0``), with the family's scores.  The work of a row is bounded by its
+    candidate keys (at most ``8 W``), not by its visible prefix: no key
+    outside ``P_t`` is scored.
+
+    Parameters
+    ----------
+    q, k, w, cu_seqlens_q, cu_seqlens_k, softmax_scale, q_causal_offsets, max_seqlen_q, max_seqlen_k
+        As :func:`cake_dsa_indexer_nondet_train_topk` (BF16 ``q`` and ``k``;
+        a row-strided ``k`` is read in place, as there).
+    candidate_blocks : torch.Tensor
+        int32 ``[T, W]`` contiguous segment-local block ids on the device of
+        ``q``, ``W <= 2048`` (the ``candidate_blocks`` output of
+        :func:`cake_dsa_indexer_nondet_train_topk_with_candidates` fits as is).
+        Any order; ``-1`` and ids at or past the row's visible blocks name no
+        key.  The non-negative ids of a row must be distinct: a row that
+        repeats one gets an unspecified result for that row, without
+        out-of-bounds access.  Never read on the host.
+    top_k : int
+        Output slots per query, ``1 <= top_k <= 2048`` (default 512).
+    ratio : int
+        Must be 1 (blocks of 8 keys).
+    workspace_buffer : Optional[torch.Tensor]
+        Scratch of at least
+        :func:`cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size`
+        bytes (uint8, 8-byte aligned); allocated through the caching allocator
+        when omitted.
+    indices, scores : Optional[torch.Tensor]
+        Caller-owned ``[T, top_k]`` int32 / float32 outputs; allocated when
+        omitted.
+    return_scores : bool
+        ``False``: ``scores`` must be omitted and ``None`` is returned in its
+        place (the scores are still computed internally).
+
+    Returns
+    -------
+    indices, scores : torch.Tensor, Optional[torch.Tensor]
+        As :func:`cake_dsa_indexer_nondet_train_topk`: the row's set in no
+        specified slot order, ``-1`` / ``-inf`` padding anywhere.  Under
+        ``torch.use_deterministic_algorithms(True)`` a call with queries, keys
+        and candidate slots raises PyTorch's ``RuntimeError``
+        (``warn_only=True``: a ``UserWarning``).
+    The call never materializes a ``[T, Tkv]`` matrix and never synchronizes
+    with the host.  Raises ``NotImplementedError`` on an architecture without
+    a registered candidate-restricted program (SM107).
+    """
+    if cu_seqlens_q is None or cu_seqlens_k is None:
+        raise ValueError(
+            "cake_dsa_indexer_nondet_train_topk_in_candidates needs cu_seqlens_q and cu_seqlens_k"
+        )
+    if not return_scores and scores is not None:
+        raise ValueError("scores given with return_scores=False")
+    indices, cake_scores = _backend().cake_dsa_indexer_nondet_train_topk_in_candidates(
+        q,
+        k,
+        w,
+        cu_seqlens_q,
+        cu_seqlens_k,
+        candidate_blocks,
+        top_k=top_k,
+        softmax_scale=softmax_scale,
+        q_causal_offsets=q_causal_offsets,
+        ratio=ratio,
+        max_seqlen_q=max_seqlen_q,
+        max_seqlen_k=max_seqlen_k,
+        workspace_buffer=workspace_buffer,
+        indices=indices,
+        scores=scores,
+    )
+    return indices, cake_scores if return_scores else None
+
+
+@cake_api
+def cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size(
+    num_queries: int,
+    num_keys: int,
+    num_segments: int,
+    *,
+    top_k: int = 512,
+    ratio: int = 1,
+    device: Optional[torch.device] = None,
+) -> int:
+    r"""Explicit workspace bound of
+    :func:`cake_dsa_indexer_nondet_train_topk_in_candidates` in bytes.
+
+    ``grid x 4 x cand_cap x 8`` bytes of candidate buffers (``cand_cap =
+    max(4096, 4 top_k)``), ``grid x 64 KiB`` of block lists and a 16-byte work
+    ticket, ``grid`` being the SM count of ``device``.  It depends on the
+    device and ``top_k`` only, not on ``T``, ``Tkv``, the segments or the
+    candidate content.  Raises ``NotImplementedError`` on an architecture
+    without a registered candidate-restricted program.
+
+    Parameters
+    ----------
+    num_queries, num_keys, num_segments : int
+        ``T``, ``Tkv`` and ``S`` of the call.
+    top_k : int
+        Output slots per query, ``1 <= top_k <= 2048`` (default 512).
+    ratio : int
+        Must be 1.
+    device : Optional[torch.device]
+        The device whose SM count and architecture select the program; the
+        current CUDA device when omitted.
+
+    Returns
+    -------
+    int
+        The workspace bound in bytes.
+    """
+    return _backend().cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size(
+        num_queries,
+        num_keys,
+        num_segments,
+        top_k=top_k,
+        ratio=ratio,
+        device=device,
+    )
+
+
 __all__ = [
     "cake_dsa_indexer_nondet_train_topk",
+    "cake_dsa_indexer_nondet_train_topk_in_candidates",
+    "cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size",
     "cake_dsa_indexer_nondet_train_topk_with_candidates",
     "cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size",
     "cake_dsa_indexer_nondet_train_topk_workspace_size",

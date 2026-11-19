@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 20 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 21 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,7 +11,7 @@ This page covers the public modules of all 20 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). mok has no autograd entry: its entries are `prepare_mok_bf16` (an adapter with forward, recompute and backward methods), `create_mok_bf16_workspace` and `quantize_mok_mxfp8_weights`; its backend package is `cake_mok_bf16`. Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). mok has no autograd entry: its entries are `prepare_mok_bf16` (an adapter with forward, recompute and backward methods), `create_mok_bf16_workspace` and `quantize_mok_mxfp8_weights`; its backend package is `cake_mok_bf16`. gated_kv_compression has a second autograd entry, `cake_gated_kv_compression_det_cz`, for one `[T, 1024]` input. Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -42,6 +42,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | engram_lookup | Has no nondet module | — |
 | mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
+| gated_kv_compression | Has no nondet module | — |
 
 ---
 
@@ -291,7 +292,7 @@ Other public names: `CakeCausalConv1dNondetKcpRecomputeHandle`. Any object with 
 - `bwd_grid_mult` (1 by default, up to 4): an opt-in finer static token partition of the backward, which helps overlap with kernels on other streams. In det, the `dweight` bits change with each value and the workspace grows. In nondet, the workspace size does not change.
 - `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only, so no `bwd_reserve_sms` and at most 65536 channels). det KCP has no `dweight_sum` keyword and no pair opt-in. Other combinations and other strings raise `ValueError`, and a non-string raises `TypeError` (`None` is the nondet KCP default); no call falls back to another program. The default never selects a pair program.
 - `workspace=`: when omitted, the forward of either package keeps one zeroed counter buffer per (device, current stream), and the nondet backward keeps one zeroed accumulator buffer per (device, current stream). The det backward allocates a new partial-row buffer on every call, eager or captured; that buffer needs no zeroing. Inside a CUDA Graph capture, each det forward call zeroes a counter buffer of its own. nondet takes one pre-zeroed buffer per capture and stream for the forward and one for the backward, so the graph has no fill node for them. The package zeroes these buffers in refills on earlier eager calls that omit `workspace=`, separately for the forward and the backward, at the size of the largest call whose refill succeeded, and keeps at most 4 idle ones of each kind. A graph holds its buffer until the graph is destroyed and its launches have completed. The package takes a released buffer back only at its next refill on that device; until then the released buffer stays allocated. An eager call that omits `workspace=` refills its kind (forward or backward) when it needs a larger buffer than the kind's ready size on that device, which the latest of these events sets: a capture that asks for a buffer of that kind sets it to zero, a refill that succeeds sets it to the size of its buffers, and a refill that runs out of memory sets it to that call's need. A refill that runs out of memory keeps no new buffer and keeps the buffer size, but it has already taken back the device's released buffers, dropping each one that is smaller than its kind's buffer size (for the refill's own kind, that call's need if it is larger) or that would exceed 4 idle buffers of its kind. A refill that fails for any other reason turns that kind's pre-zeroed buffers off on that device for the rest of the process: its captured calls then zero buffers of their own. Replays of one graph must not overlap. Without a ready buffer of the needed kind and size, each captured nondet call zeroes a buffer of its own, one fill node per call, forward and backward alike. A buffer is ready once the zero fill that an earlier eager call queued has completed: a capture that begins right after that call without a device synchronize can find none ready (`torch.cuda.graph` synchronizes before it captures). Without `cuda.bindings` (no capture id), each captured nondet call zeroes a buffer of its own. nondet allocates its per-stream and pre-zeroed buffers from its own `torch.cuda.MemPool` per device; that memory stays cached in that pool and is not returned to the caching allocator's other pools.
-- Programmatic dependent launch (PDL): nondet's single-rank forward and backward programs, except the `"fp32_pair"` programs, take it per call by architecture and by mode (eager or inside a CUDA Graph capture; backend `cake_jit.PDL_EAGER` / `PDL_GRAPH`). A launch may then begin while the stream's preceding kernel finishes; each program waits for that kernel before it reads or writes global memory. The nondet KCP programs launch without it.
+- Programmatic dependent launch (PDL): nondet's single-rank forward and backward programs, except the `"fp32_pair"` programs, take it per call by architecture and by mode (eager or inside a CUDA Graph capture; backend `cake_jit.PDL_EAGER` / `PDL_GRAPH`). A launch may then begin while the stream's preceding kernel finishes; each program waits for that kernel before it reads or writes global memory. The single-rank backward launches without it, in both modes, at the rows of backend `cake_jit.PDL_OFF_ROWS` (by route, `C` and `S`): the default `bwd` route at C = 1000 to 1008 from S = 187755 and at C = 1016 from S = 155648 on sm_100a, and at C = 1000 to 1008 from S = 131073 and at C = 1016 from S = 125171 on sm_103a. From these token counts on, the measured training step and checkpointed step were not slower with that launch made without PDL. The forward keeps it at those rows. The nondet KCP programs launch without it.
 - KCP: `recompute_handle` must be one per call and micro-step, created outside the outermost checkpoint region, and every rank passes one or none.
 - CUDA Graph: build every library of the architecture first (backend `cake_jit.specs_for_arch`) so that no JIT build runs inside capture.
 - `CAKE_CONV1D_FULL_PLAN_SWEEP=1` is a test-only variable. The KCP backend reads no environment variable, and its `_set_test_knobs` are private test hooks.
@@ -918,7 +919,7 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
 - `dot_sum="compensated"` (the default): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end.
-- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 13% less time (GB300, `T = 16384`: 0.326 ms against 0.375 ms). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
+- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 5-10% less time, depending on the GPU (`T = 16384`, FP32 weights: 0.313 ms against 0.329 ms on GB300, 0.197 ms against 0.218 ms on VR200). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
@@ -989,7 +990,7 @@ out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.
 
 **Caveats.**
 
-- State kept for the backward: the inputs only. Workspace of a backward call: FP32 `[4, 5120]` rows of 80 KiB each, for the weight product, FP32 copies of BF16 weights, and the weight-gradient partial rows (det: one per cluster of the backward grid; nondet: one accumulator). A forward allocates the weight product and, for a BF16 `q_weight`, its FP32 copy.
+- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each (det: one per cluster of the backward grid; nondet: one accumulator). The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
 - The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - `X`, `dOut` and `dX` must be contiguous. Output rows must not overlap.
 - No double backward.
@@ -1141,6 +1142,84 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 
 ---
 
+## gated_kv_compression
+
+**Computes.** Ratio-2 gated KV compression for training: each pair of adjacent tokens of a packed document becomes one row, mixed per channel by a softmax over the two gate logits. The width is 512.
+
+- Document `s` has bounds `b_s = cu_seqlens[s]`, length `L_s` and `g_s` pairs before it. Its pair `k < floor(L_s / 2)` reads the tokens `t0 = b_s + 2k` and `t1 = t0 + 1` and writes row `r = g_s + k`. Pairs never cross a document boundary.
+- **Forward:** `(p0, p1) = softmax(Z[t0, d], Z[t1, d])` and `out[r, d] = BF16(p0 * C[t0, d] + p1 * C[t1, d])`, in FP32 with one rounding.
+- **Backward:** with `g = float32(dout[r, d])`, `dC[t0, d] = p0 * g`, `dC[t1, d] = p1 * g`, `dZ[t0, d] = p0 * p1 * (C[t0, d] - C[t1, d]) * g` and `dZ[t1, d] = -dZ[t0, d]`. The BF16 cast counts as the identity. The pairwise form of `dZ` stays accurate when the two values of a pair are close.
+- The last token of an odd-length document belongs to no pair. It changes no output, and its `dC` and `dZ` rows are exactly zero.
+- Three kernels run on the current stream: a pair table (the int32 `[S + 1]` exclusive prefix of the pair counts), the forward (one row per pair) and the backward (every token row written once). The kernels compute in FP32 only, with IEEE round to nearest and no FP64. Gate gaps of 100 and more and exact ties give finite outputs.
+- The forward ships one schedule per architecture, the faster one on each: 128-bit loads of `C` and `Z` on `sm_100a` and `sm_103a`, 256-bit loads on `sm_107a`. The call picks the build of the operands' device. The backward uses 256-bit loads on all three.
+
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a` (12.9 for the backward library, which uses 256-bit loads and stores), 12.9 for `sm_103a` and 13.5 for `sm_107a`. The GPU suites and the benchmark ran on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76: each `out` element is within 1 BF16 ulp of the FP64 result rounded once to BF16, or its absolute error is at most 1 BF16 ulp of `max(|C[t0, d]|, |C[t1, d]|)` (near-cancelling pairs), and `dC` and `dZ` have a relative L2 error of at most 1e-6 against FP64.
+
+**Inputs.**
+
+- `c`, `z`: FP32 `[T, 512]` values and gate logits. Each needs a unit feature stride, a row stride that is a multiple of 8 elements (at least 512) and a 32-byte aligned base. The column halves of one `[T, 1024]` tensor qualify and are read in place.
+- `cz`: FP32 `[T, 1024]`, `C` in columns `[0, 512)` and `Z` in `[512, 1024)`, with the same layout rules (row stride at least 1024).
+- `cu_seqlens`: int32 `[S + 1]` on the same device, `0 = b_0 <= ... <= b_S = T`. The host never reads it, so the caller keeps this contract.
+- `dout`, `out`: BF16 `[G, 512]`, contiguous, 16-byte aligned. `dc`, `dz`: FP32 `[T, 512]` with the layout rules of `c`; the two halves of one `[T, 1024]` buffer qualify.
+- `G`, the sum over documents of `floor(L_s / 2)`, comes from the caller: `num_pairs`, or the rows of a caller `out` or `dout`. `G` is at most 2^26 (67108864) and `S` at most 2^24 (16777216).
+- `T`, `S` and `G` are run-time values. There is no recompilation, no device-to-host read and no synchronization.
+
+### `cake_pplx.cake_gated_kv_compression_det_train`
+
+The only module of the family. Every output element is one fixed chain of FP32 operations on its own pair or token, with no reduction across threads, CTAs or calls and no atomic. So `out`, `dC` and `dZ` repeat bit for bit for identical inputs, also in the recompute of an activation checkpoint. There is no nondet module, because no non-deterministic step exists that could be traded for speed. There is no KCP module, because the kernel is single-rank: under context parallelism, the caller moves a boundary token so that every rank holds whole pairs. Nothing alerts under `torch.use_deterministic_algorithms(True)`. Source: [`kernels/gated_kv_compression/cake_pplx/cake_gated_kv_compression_det_train.py`](../kernels/gated_kv_compression/cake_pplx/cake_gated_kv_compression_det_train.py).
+
+| Name | Signature | Inputs | Returns / notes |
+|---|---|---|---|
+| `cake_gated_kv_compression_det` | `(c, z, cu_seqlens, num_pairs)` | `c`, `z` may require grad; `num_pairs` a Python int, at least the pair count | Autograd. Returns BF16 `out [G, 512]`. The node saves `c`, `z`, `cu_seqlens` and the int32 `[S + 1]` pair table only. Works under `torch.utils.checkpoint(..., use_reentrant=False)`. |
+| `cake_gated_kv_compression_det_cz` | `(cz, cu_seqlens, num_pairs)` | `cz` FP32 `[T, 1024]` (`C` \| `Z`), may require grad; `num_pairs` a Python int, at least the pair count | Autograd. Returns BF16 `out [G, 512]`. The gradient of `cz` is one FP32 `[T, 1024]` buffer that one launch writes, with no slice-backward copy. The node saves `cz`, `cu_seqlens` and the pair table only. |
+| `cake_gated_kv_compression_det_train_forward` | `(c, z, cu_seqlens, num_pairs=None, *, out=None)` | `num_pairs` or a preallocated `out` (both given must agree) | Returns `out`. Rows past the pair count are zero. `G == 0` launches nothing, and `T == 0` or `S == 0` zero-fills `out` without a kernel. Not autograd. |
+| `cake_gated_kv_compression_det_train_backward` | `(dout, c, z, cu_seqlens, *, dc=None, dz=None, pair_offsets=None)` | `dout` rows `G` at least the pair count; `pair_offsets` the int32 `[S + 1]` pair table, which skips the pair-table launch | Returns FP32 `(dc, dz)`, every row written; these are the caller's tensors when given. `T == 0` launches nothing, and `G == 0` or `S == 0` zero-fills both without a kernel. |
+| `cake_gated_kv_compression_det_train_memory_bytes` | `(num_tokens, num_docs)` | `T`, `S` | Returns a dict. `forward_workspace` and `backward_workspace` are `4 (S + 1)`: the pair table one explicit call allocates and frees. The autograd backward allocates no workspace, except a `1024 G`-byte copy of an incoming gradient that is not contiguous and 16-byte aligned (for example from `out.sum().backward()`), which the report leaves out. `retained_for_backward` is `4 (S + 1)`: the pair table the autograd node keeps. `retained_inputs` is `4096 T + 4 (S + 1)`: the caller's tensors the node references, with no copy. |
+
+Other public names:
+
+- `is_cake_gated_kv_compression_det_train_supported(device)`.
+- `CakeGatedKvCompressionDetFunction`, `CakeGatedKvCompressionDetCzFunction`.
+- `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
+
+**Options and environment.** The keyword options are `out`, `dc`, `dz` and `pair_offsets`. This family has no environment variables of its own.
+
+**Cross-family.** Its BF16 `out` feeds the [rmsnorm](#rmsnorm) family at width 512. This is a data dependency only, with no shared context object or workspace.
+
+**Example.**
+
+```python
+import torch
+from cake_pplx.cake_gated_kv_compression_det_train import (
+    cake_gated_kv_compression_det_cz,
+    cake_gated_kv_compression_det_train_backward,
+    cake_gated_kv_compression_det_train_forward,
+)
+
+lengths = [5, 0, 8, 3]                                    # T = 16 tokens in S = 4 documents
+cu_seqlens = torch.tensor([0, 5, 5, 13, 16], dtype=torch.int32, device="cuda")
+G = sum(n // 2 for n in lengths)                          # 7 pairs, known on the host
+cz = torch.randn(16, 1024, device="cuda", requires_grad=True)   # C | Z from one projection GEMM
+
+out = cake_gated_kv_compression_det_cz(cz, cu_seqlens, G)      # BF16 [7, 512], autograd
+out.backward(torch.randn_like(out))                             # cz.grad: FP32 [16, 1024], dC | dZ
+
+c, z = cz.detach()[:, :512], cz.detach()[:, 512:]
+out = cake_gated_kv_compression_det_train_forward(c, z, cu_seqlens, G)
+grad = torch.empty(16, 1024, device="cuda")
+cake_gated_kv_compression_det_train_backward(torch.randn_like(out), c, z, cu_seqlens,
+                                             dc=grad[:, :512], dz=grad[:, 512:])
+```
+
+**Caveats.**
+
+- The host never reads `cu_seqlens`. The caller keeps its contract (non-decreasing, last bound `T`) and passes `G`. A `G` below the pair count gives the first `G` rows in the forward and leaves the gradient rows of the later pairs unwritten in the backward. The autograd entries need `num_pairs` at least the pair count: their gradient buffers are not zero-filled, so with a smaller `num_pairs` the gradient rows of the tokens of the later pairs are uninitialized.
+- A layout the kernels cannot read or write in place raises `ValueError`, and no call copies an operand silently. The autograd backward copies a non-contiguous or misaligned incoming gradient once.
+- Capture a call in a CUDA graph only after one eager call has loaded the programs.
+- Only ratio 2 and width 512 are supported.
+
+---
+
 ## dsa_indexer
 
 **Computes.** Fused DeepSeek Sparse Attention indexer scoring plus exact top-k key selection for training.
@@ -1149,8 +1228,9 @@ dq, dk, dv = cake_fmha_nondet_train_backward(q, k, v, out, lse, dout, softmax_sc
 - Selection: the exact global top `min(top_k, visible)` keys per query row, ranked by score descending, then key id descending. det returns them in ascending id order, and nondet leaves the slot order unspecified.
 - Forward only. It returns int32 indices and FP32 scores. No autograd or backward is documented.
 - Candidate blocks (`*_topk_with_candidates`): the same call also returns, per query, up to 2048 blocks of 8 keys chosen from the same scores (below).
+- Candidate-restricted top-k (`*_topk_in_candidates`): the top-k over only the keys of the blocks a caller names per query, for example the candidate blocks of another layer (below).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The candidate-block call: `sm_100a` and `sm_103a` (`NotImplementedError` on `sm_107a`).
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The candidate-block and candidate-restricted calls: `sm_100a` and `sm_103a` (`NotImplementedError` on `sm_107a`).
 
 **Inputs.**
 
@@ -1174,8 +1254,10 @@ Identical inputs give identical ids and score bits, independent of the internal 
 | `cake_dsa_indexer_det_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | Python ints. `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Workspace bound in bytes for one call geometry. It follows the scan program chosen from T, Tkv, S, `ratio`, `top_k` and the SM count; for example, 74 MiB at `top_k=2048` with 4 queries per unit on a 148-SM `sm_100a`. Raises `NotImplementedError` when no program is registered for the architecture. |
 | `cake_dsa_indexer_det_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As `cake_dsa_indexer_det_train_topk`, BF16 only, `ratio=1`, `1 <= top_k <= 2047`. `candidate_blocks`: caller-owned int32 `[T, 2048]`, contiguous. `max_seqlen_k` must bound every key segment (it sizes the block entries). | Returns `(indices, scores, candidate_blocks)`. `indices` / `scores` as `cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit. `candidate_blocks` holds ascending segment-local block ids with tail `-1`. Identical inputs give identical bits. |
 | `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | Python ints; the call's `max_seqlen_k`. | Workspace bound in bytes: the scan's candidate buffers and tickets plus `grid x queries_per_unit x blk_cap x 8` bytes of block entries (`blk_cap = ceil(W/8) - 1` when `ceil(W/8) > 2048`, else 0; `W` = `max_seqlen_k`, else `Tkv`). The `[T, 2048]` output is not part of it. |
+| `cake_dsa_indexer_det_train_topk_in_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, candidate_blocks, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True)` | As `cake_dsa_indexer_det_train_topk`, BF16 only, `ratio=1`, `1 <= top_k <= 2048`; a row-strided `k` is read in place, as there. `candidate_blocks`: int32 `[T, W]`, `W <= 2048`, contiguous, on the device of `q` (the `candidate_blocks` output of `*_topk_with_candidates` fits as is). | Returns `(indices, scores)`: per row the top `min(top_k, \|P_t\|)` keys of its pool (below), ascending ids with tail `-1`, scores aligned with tail `-inf`, or `None`. Identical inputs give identical bits. |
+| `cake_dsa_indexer_det_train_topk_in_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, device=None)` | Python ints. | Workspace bound in bytes: `grid x 4 x cand_cap x 8` bytes of candidate buffers (`cand_cap = max(4096, 4 top_k)`), `grid x 64 KiB` of block lists and a 16-byte work ticket; `grid` is the SM count. It does not depend on T, Tkv, S or the candidates. |
 
-The module exports only these four functions.
+The module exports only these six functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
@@ -1187,6 +1269,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 | `cake_dsa_indexer_nondet_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Same bound as det for the same call and form. Never consults the deterministic-algorithms setting. |
 | `cake_dsa_indexer_nondet_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As det. | Returns `(indices, scores, candidate_blocks)`. Each row of `candidate_blocks` holds its block set with `-1` in the other slots, in no specified order. Raises under deterministic algorithms, as `cake_dsa_indexer_nondet_train_topk`. |
 | `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | As det. | Same bound as det for the same call. Never consults the deterministic-algorithms setting. |
+| `cake_dsa_indexer_nondet_train_topk_in_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, candidate_blocks, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True)` | As det. | Returns `(indices, scores)`. Each row holds its set with `-1` / `-inf` in the other slots, in no specified order. A call that launches (T > 0, Tkv > 0 and W > 0) raises under deterministic algorithms, as `cake_dsa_indexer_nondet_train_topk`. |
+| `cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, device=None)` | As det. | Same bound as det for the same call. Never consults the deterministic-algorithms setting. |
 
 **Options and environment.**
 
@@ -1196,6 +1280,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 - The facades read no environment variable of their own. Backend partition knobs are private.
 
 **Candidate blocks.** Block `b` holds the segment-local keys `8b .. 8b+7`. A row with `n` visible keys sees `nb = ceil(n/8)` blocks; the newest block, `nb-1`, may be partial and its future keys do not count. A block's score is the largest score of its visible keys. With `nb <= 2048` the row holds blocks `0 .. nb-1`. Otherwise it holds block `nb-1` and the 2047 blocks of `0 .. nb-2` with the largest scores, ties broken by the larger block id (`+0.0 == -0.0`), the tie rule of `indices`. A row with `n == 0` is all `-1`. With `top_k <= 2047` every id of `indices` lies in a block of its row. The call runs the unsplit narrow or six-query scan unit, so its timing can differ from the plain top-k call of the same shape.
+
+**Candidate-restricted top-k.** For query row `t` with `n` visible keys the pool `P_t` is the keys `j < n` whose block `j // 8` appears in `candidate_blocks[t]`. Ids may come in any order; `-1` and ids at or past the row's visible blocks name no key, and the non-negative ids of a row must be distinct: a row that repeats one gets an unspecified result for that row, without out-of-bounds access. The row selects the top `min(top_k, |P_t|)` keys of `P_t` by score descending, then key id descending (`+0.0 == -0.0`), scored by the formula of `cake_dsa_indexer_*_train_topk`. Its work is bounded by its candidate keys (at most `8 W`), not by its visible prefix: no key outside `P_t` is scored. On inputs whose FP32 scores are exact in any summation order (for example `q` and `k` on the MXFP4 grid with scales 1 or 1/2, `w` in eighths and `softmax_scale` 1/16), the `candidate_blocks` of a layer's own `*_topk_with_candidates` call and the same `top_k` give that call's top-k set; on other inputs each call meets the family's accuracy rule against FP64 on its own. A call with `W == 0` launches nothing and returns all `-1` / `-inf`.
 
 **Cross-family.** There is no runtime contract with other families. The `k` docstring mentions the `packed[:, :128]` view of a `[Tkv, 704]` tensor, the same row layout that dsa_sparse_attention describes. Neither family consumes the other's objects.
 
@@ -1237,6 +1323,7 @@ indices, scores = cake_dsa_indexer_det_train_topk(
 
 - **Rope form:** `O = softmax(softmax_scale * (q_rope . k_rope^T + q_latent . kv_latent^T)) . kv_latent`, over the keys that each row's indices select (K = V = latent).
 - **NoPE form:** `O = softmax(softmax_scale * q . kv^T) . kv`.
+- **NoPE form with a sink** (nondet, flat entries, `sm_100a`/`sm_103a`): `lse = log(sum_j exp(s_j) + exp(sink[h]))` and `O = sum_j exp(s_j - lse) . kv_j`, with `s_j = softmax_scale * q . kv_j`. The sink is not scaled and has no value term.
 
 The autograd entries run the forward eagerly and the backward through autograd; the `*_train*_forward` / `*_train*_backward` step entries run them as two explicit calls without autograd. The backward recomputes scores from the BF16 inputs and returns `dq` plus `dkv`, or adds `dkv` into a caller's `dkv_acc`.
 
@@ -1264,6 +1351,7 @@ The autograd entries run the forward eagerly and the backward through autograd; 
 - `softmax_scale`: defaults to `1/16`.
 - `dkv_acc`: FP32 `[S_dst, >= 512]`, with a row stride that is a multiple of 4 and >= 512.
 - `dout` may be head-major (strides `[512, T*512, 1]`).
+- `sink`: FP32 `[64]` (one value per head), contiguous, on `q`'s device, or `None` (the default: no sink). Only the metadata is checked, so there is no device sync. `-inf` disables the sink of its head. `+inf` and NaN are not supported. Only the nondet flat NoPE entries take a tensor. The varlen entries and the det package raise `NotImplementedError` for any tensor. On `sm_107a`, the nondet flat NoPE entries raise `NotImplementedError` when the call has query rows. A call with no query rows (T = 0) launches nothing on any architecture, `sm_107a` included: it checks the sink's metadata and device, returns empty outputs, and gives a zero FP32 `dsink`.
 
 **Varlen forms.** Indices are document-relative and are offset by `cu_seqlens_k` on the device. The rope varlen form compacts each row. The NoPE varlen form compacts rows only with a caller `topk_length` or at or above `cake_backend.NOPE_CONVERT_SLOT_LIMIT` slots; below that it converts rows in place, keeping slot positions. The query segment is the tail of its key prefix. `causal=True` also invalidates keys after the query's own position. A row with every slot invalid gives `out=0`, `lse=-inf` and zero gradients. `max_seqlen_q` / `max_seqlen_k` are accepted for parity but not read on the host. `topk_length` is a position cut that is applied before compaction.
 
@@ -1275,14 +1363,14 @@ Every output (`out`, `lse`, `dq`, `dkv` / `dkv_acc` rows) repeats bit for bit fo
 |---|---|---|---|
 | `cake_dsa_sparse_attention_det` | `(q_latent, q_rope, kv_latent, k_rope, indices, *, topk_length=None, softmax_scale=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | Rope form. `key_passes` is `None` or 1..S. `dkv` keeps the bits of one pass, and `dq` is summed through an FP32 partial between passes. `dkv_direct` is accepted and validated but has no effect. | Autograd. Returns BF16 `out [T, 64, 512]` (zero for fully masked rows), plus FP32 `lse [T, 64]` with `return_lse=True`. Gradients go to all four inputs. With `dkv_acc`, the `kv_latent`/`k_rope` gradients are `None` and are added into the buffer instead. |
 | `cake_dsa_sparse_attention_det_varlen` | `(q_latent, q_rope, kv_latent, k_rope, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, *, causal=False, topk_length=None, softmax_scale=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | `T = cu_seqlens_q[-1]` and `S = cu_seqlens_k[-1]`. `gather_kv_indices`: int32 `[T, topk]`; `-1` or `>= seqlen_k[d]` is invalid. The two prefix sums are independent. | Packed multi-document rope form. |
-| `cake_dsa_sparse_attention_det_nope` | `(q, kv, indices, *, topk_length=None, softmax_scale=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | NoPE form. `key_passes` is `None` (one pass) or 1..S. `dkv` keeps the bits of one pass, and `dq` is summed through an FP32 partial between passes. `dkv_direct` is accepted and validated but has no effect. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dkv = dK + dV` is FP32. Without `dkv_acc`, autograd casts it to the `kv` leaf dtype. |
-| `cake_dsa_sparse_attention_det_nope_varlen` | `(q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, *, causal=False, topk_length=None, softmax_scale=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None, check_cu_seqlens=False)` | `cu_seqlens_q/k`: int32 `[num_docs+1]` of one length on `q`'s device, starting at 0 and non-decreasing, with `cu_seqlens_q[-1]==T`, `cu_seqlens_k[-1]==S` and `seqlen_q <= seqlen_k` per document | Packed NoPE form. The structure of `cu_seqlens` is checked on every call. The values are checked only with `check_cu_seqlens=True`, which costs one blocking D2H copy and is skipped during graph capture. |
+| `cake_dsa_sparse_attention_det_nope` | `(q, kv, indices, *, topk_length=None, softmax_scale=None, sink=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | NoPE form. `key_passes` is `None` (one pass) or 1..S. `dkv` keeps the bits of one pass, and `dq` is summed through an FP32 partial between passes. `dkv_direct` is accepted and validated but has no effect. `sink` must be `None` (`NotImplementedError` otherwise), as on every det NoPE entry. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dkv = dK + dV` is FP32. Without `dkv_acc`, autograd casts it to the `kv` leaf dtype. |
+| `cake_dsa_sparse_attention_det_nope_varlen` | `(q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None, *, causal=False, topk_length=None, softmax_scale=None, sink=None, return_lse=False, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None, check_cu_seqlens=False)` | `cu_seqlens_q/k`: int32 `[num_docs+1]` of one length on `q`'s device, starting at 0 and non-decreasing, with `cu_seqlens_q[-1]==T`, `cu_seqlens_k[-1]==S` and `seqlen_q <= seqlen_k` per document | Packed NoPE form. The structure of `cu_seqlens` is checked on every call. The values are checked only with `check_cu_seqlens=True`, which costs one blocking D2H copy and is skipped during graph capture. |
 | `cake_dsa_sparse_attention_det_train_forward` | `(q_latent, q_rope, kv_latent, k_rope, indices, *, topk_length=None, softmax_scale=None, backend="cake")` | As the det rope entry | Returns `(out, lse, o_lo)`: BF16 `out`, FP32 `lse`, BF16 `o_lo` (the rounding residual of `out`). Not autograd. Bitwise the autograd entry's `out` and `lse`. |
 | `cake_dsa_sparse_attention_det_train_backward` | `(q_latent, q_rope, kv_latent, k_rope, indices, out, o_lo, lse, dout, *, topk_length=None, softmax_scale=None, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None, dkv_fp32=False)` | `out`, `o_lo`, `lse` from the step forward on the same inputs; `dout` BF16 `[T, 64, 512]`; `dkv_acc` a tensor only | Returns `(dq_latent, dq_rope, dkv_latent, dk_rope)`; the last two are `None` with `dkv_acc`, and FP32 with `dkv_fp32=True`. `o_lo` is unchanged. Bitwise the autograd entry's gradients. |
-| `cake_dsa_sparse_attention_det_train_nope_forward` | `(q, kv, indices, *, topk_length=None, softmax_scale=None, backend="cake")` | As the det NoPE entry | Returns `(out, lse, o_lo)`. Not autograd. |
-| `cake_dsa_sparse_attention_det_train_nope_backward` | `(q, kv, indices, out, o_lo, lse, dout, *, topk_length=None, softmax_scale=None, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | `out`, `o_lo`, `lse` from the NoPE step forward | Returns `(dq, dkv)` with FP32 `dkv [S, 512]`, or `(dq, None)` with `dkv_acc`. |
-| `cake_dsa_sparse_attention_det_train_nope_varlen_forward` | `(q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, *, causal=False, topk_length=None, softmax_scale=None, backend="cake", check_cu_seqlens=False)` | As the det NoPE varlen entry | Returns `(out, lse, o_lo, indices, topk_length)`: the forward outputs, plus the global rows and row lengths that the forward read. |
-| `cake_dsa_sparse_attention_det_train_nope_varlen_backward` | `(q, kv, indices, out, o_lo, lse, dout, cu_seqlens_k, *, topk_length, softmax_scale=None, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | `out`, `o_lo`, `lse`, `indices`, `topk_length` from the varlen step forward | As the NoPE step backward. |
+| `cake_dsa_sparse_attention_det_train_nope_forward` | `(q, kv, indices, *, topk_length=None, softmax_scale=None, sink=None, backend="cake")` | As the det NoPE entry | Returns `(out, lse, o_lo)`. Not autograd. |
+| `cake_dsa_sparse_attention_det_train_nope_backward` | `(q, kv, indices, out, o_lo, lse, dout, *, topk_length=None, softmax_scale=None, sink=None, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | `out`, `o_lo`, `lse` from the NoPE step forward | Returns `(dq, dkv)` with FP32 `dkv [S, 512]`, or `(dq, None)` with `dkv_acc`. |
+| `cake_dsa_sparse_attention_det_train_nope_varlen_forward` | `(q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, *, causal=False, topk_length=None, softmax_scale=None, sink=None, backend="cake", check_cu_seqlens=False)` | As the det NoPE varlen entry | Returns `(out, lse, o_lo, indices, topk_length)`: the forward outputs, plus the global rows and row lengths that the forward read. |
+| `cake_dsa_sparse_attention_det_train_nope_varlen_backward` | `(q, kv, indices, out, o_lo, lse, dout, cu_seqlens_k, *, topk_length, softmax_scale=None, sink=None, key_passes=None, backend="cake", dkv_acc=None, dkv_dst_map=None, dkv_direct=None, check_dst_map=None)` | `out`, `o_lo`, `lse`, `indices`, `topk_length` from the varlen step forward | As the NoPE step backward. |
 
 Other public names:
 
@@ -1298,14 +1386,14 @@ The backward adds `dK`/`dV` into FP32 accumulators with unordered atomics, and n
 |---|---|---|---|
 | `cake_dsa_sparse_attention_nondet` | Same as the det rope entry | `key_passes=None` applies the per-architecture policy of the registry record (see [Key-range passes for the DRAM regime](../kernels/dsa_sparse_attention/cake_pplx/_backends/cake_dsa_sparse_attention_nondet_train/README.md#key-range-passes-for-the-dram-regime)): on one-segment rows, `ceil(S*2304 B / 100 MiB)` passes when that exceeds 1 and the row is one chunk (T <= 4224 at top-k 2048) or, on `sm_103a`/`sm_107a`, a tail row (`2T <= S`, at least 131,072 keys; at most 3 passes on `sm_103a`); `sm_107a` runs a fixed 2 passes with a 131,072-key floor; a count above 4 runs one pass. `1` forces one pass, and a larger value (<= S) forces that many. `dkv_direct=None` reads `CAKE_PPLX_DSA_DKV_DIRECT`; `True`/`False` select direct vs accumulate-and-cast for `dkv_acc`. The `dkv_direct` rule is 4 keys per query token; on `sm_107a` the row also needs `T * K_eff < 112 S + 2^20`, with `K_eff = min(K_slots, ceil(S / num_segments))`. | Autograd. Returns `out`, plus `lse` with `return_lse=True`. `dkv` is accumulated in FP32 with atomics, then cast to BF16 or added into `dkv_acc`. |
 | `cake_dsa_sparse_attention_nondet_varlen` | Same as det varlen | As det varlen | Packed rope form. |
-| `cake_dsa_sparse_attention_nondet_nope` | Same as det nope | `key_passes=None` uses one pass, and a value > 1 forces passes. For this program, the `dkv_direct` rule is 1 key per query token; on `sm_107a` the row also needs `T * K_eff < 112 S + 2^20` or more than 131,072 keys (`cast_max_keys`), with `K_eff = min(K_slots, ceil(S / num_segments))`. | `dq` is BF16. `dkv` is FP32 via atomics, handed over through `dkv_acc` or cast by autograd. |
-| `cake_dsa_sparse_attention_nondet_nope_varlen` | Same as det nope_varlen | As det | Packed NoPE form. Without `check_cu_seqlens`, only structural checks run (dtype, rank, length, contiguity, device). |
+| `cake_dsa_sparse_attention_nondet_nope` | Same as det nope | `key_passes=None` uses one pass, and a value > 1 forces passes. For this program, the `dkv_direct` rule is 1 key per query token; on `sm_107a` the row also needs `T * K_eff < 112 S + 2^20` or more than 131,072 keys (`cast_max_keys`), with `K_eff = min(K_slots, ceil(S / num_segments))`. `sink`: FP32 `[64]` trainable per-head sink or `None`. A call with a sink and query rows needs `sm_100a`/`sm_103a`. | `dq` is BF16. `dkv` is FP32 via atomics, handed over through `dkv_acc` or cast by autograd. With `sink`, `lse` includes the sink, and a row with no valid slot gives `out = 0` and `lse = sink[h]`. Autograd returns `dsink = -sum_t exp(sink - lse[t]) * delta[t]` (FP32 `[64]`, summed over all rows in a fixed order that does not depend on the SM count) as the `sink` gradient. A `-inf` head gets exactly 0. |
+| `cake_dsa_sparse_attention_nondet_nope_varlen` | Same as det nope_varlen | As det. `sink` must be `None` (`NotImplementedError` otherwise). | Packed NoPE form. Without `check_cu_seqlens`, only structural checks run (dtype, rank, length, contiguity, device). |
 | `cake_dsa_sparse_attention_nondet_train_forward` | Same as the det step forward | As det | Returns `(out, lse, o_lo)`. Not autograd. |
 | `cake_dsa_sparse_attention_nondet_train_backward` | Same as the det step backward | As det. `dkv_direct=None` reads `CAKE_PPLX_DSA_DKV_DIRECT`. | Returns `(dq_latent, dq_rope, dkv_latent, dk_rope)`. Under deterministic algorithms it raises like the autograd backward. |
-| `cake_dsa_sparse_attention_nondet_train_nope_forward` | Same as det | As det | Returns `(out, lse, o_lo)`. |
-| `cake_dsa_sparse_attention_nondet_train_nope_backward` | Same as det | As det | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. |
-| `cake_dsa_sparse_attention_nondet_train_nope_varlen_forward` | Same as det | As det | Returns `(out, lse, o_lo, indices, topk_length)`. |
-| `cake_dsa_sparse_attention_nondet_train_nope_varlen_backward` | Same as det | As det | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. |
+| `cake_dsa_sparse_attention_nondet_train_nope_forward` | Same as det | As det. `sink` as the nondet NoPE entry. | Returns `(out, lse, o_lo)`. With `sink`, `lse` includes the sink. Pass the same `sink` to the step backward. |
+| `cake_dsa_sparse_attention_nondet_train_nope_backward` | Same as det | As det. `sink`: the sink that the step forward ran with. | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. With `sink`, returns `(dq, dkv, dsink)`, or `(dq, None, dsink)` with `dkv_acc`. `dsink` is FP32 `[64]`, summed over all rows. |
+| `cake_dsa_sparse_attention_nondet_train_nope_varlen_forward` | Same as det | As det. `sink` must be `None`. | Returns `(out, lse, o_lo, indices, topk_length)`. |
+| `cake_dsa_sparse_attention_nondet_train_nope_varlen_backward` | Same as det | As det. `sink` must be `None`. | Returns `(dq, dkv)`, or `(dq, None)` with `dkv_acc`. |
 
 Other public names:
 
@@ -1350,6 +1438,7 @@ out.float().square().sum().backward()  # every gradient repeats bit for bit
 - The flat forms apply no positional mask; the index rows alone define the key set. The varlen forms mask only with `causal=True`.
 - Out-of-range `dkv_dst_map` values are caught only with `check_dst_map` or the environment variable.
 - In NoPE without `dkv_acc`, the FP32 `dkv` is cast to BF16. To keep FP32, use `dkv_acc` or `cake_backend.backward_nope`.
+- The NoPE sink (nondet flat entries, `sm_100a`/`sm_103a`) adds one saved tensor for the backward: the reference to the caller's `sink`. The backward workspace grows by `ceil(T/64) * 256 + 4` bytes of `dsink` scratch. In a head whose sink is far above every score, the true `out` and `dq` are below the smallest BF16 subnormal and come out as 0.
 - In nondet, deterministic preparation (the `dout` copy, the binding plan and the JIT load) may run before the alert is raised.
 - The binding cache keys differ. Det binds by geometry (shape, stride, dtype, alignment, scale). Nondet binds by `data_ptr`, shape, stride, dtype and scale.
 - The det backward reuses the saved `o_lo` storage as its integer accumulator when `S_dst` is up to about `27.7*T` rows, and allocates otherwise. A second backward with `retain_graph=True` recomputes the forward first.
@@ -1649,7 +1738,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 
 - **Forward:** `g' = min(g, L)`, `u' = clamp(u, -L, L)`, `a = silu(g') * u'` in FP32, and `h = BF16(w * a)`, the only rounding.
 - **Backward:** with `s = sigmoid(g')`, `d_gate = BF16(dh * w * u' * s * (1 + g' (1 - s)) * [g <= L])`, `d_up = BF16(dh * w * silu(g') * [-L <= u <= L])` and the FP32 `d_weight = sum_c dh * a`. The masks are inclusive: the gradient passes at `g = L` and `u = ±L`. `d_weight` uses the unweighted `a` (no division by `w`), so a zero-weight row gets exactly 0 in `h`, `d_gate` and `d_up` and keeps its `d_weight`.
-- One kernel per call. The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
+- One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
 - The sigmoid uses the approximate FP32 base-2 exponential and the approximate reciprocal with one round-to-nearest Newton step (exact below the flushed reciprocal's range, subnormal results kept). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`, also for `R = 0`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
@@ -1659,8 +1748,9 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 - `gate`, `up`: BF16 `[R, 2304]` each, or one `[R, 4608]` tensor with the gate in columns `[0, 2304)` and the up in `[2304, 4608)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
 - `weight`: FP32 `[R]`, `>= 0` (not checked), zeros allowed; `None` for an unweighted (shared) expert, `w = 1`.
 - `dh`: BF16 `[R, 2304]`.
-- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per stage and architecture serves every call, with no recompilation.
+- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has a small-`R` and a large-`R` program, chosen by the rows per SM of the device; both give the same bits.
 - `R` is any count from 0 to `2**31 - 257`. Every operand is on one CUDA device.
+- Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
 
 ### `cake_pplx.cake_clamped_swiglu_det_train`
 
@@ -1703,9 +1793,11 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 **Caveats.**
 
 - The intermediate width is 2304 only.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them.
-- No double backward (`create_graph`). No MXFP8 or FP4 output.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output (also the weight gradient an unweighted backward drops) and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
+- A program's library builds at its first launch, and the row count picks the program. Before capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
 
 ---
 

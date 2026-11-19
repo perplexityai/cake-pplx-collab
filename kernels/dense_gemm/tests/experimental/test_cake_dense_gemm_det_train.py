@@ -594,6 +594,15 @@ def _expected(table, key, T, sm_count):
 
 
 ARCH_OF_SM = {148: "sm_100a", 212: "sm_107a"}
+# The cells of test_projection_rows_plan_like_the_cake_launcher whose plan this package's token tables moved off the
+# Cake launcher's plan of the generated tables above (version 0.3.7, test_k_major_bands_plan_the_measured_rule): the q_b
+# input gradient at T 1001 on sm_100a (the ``ROW_RULE_MIN_T`` tier of the K-major rows: the 128-row program without
+# the row's rule) and the o_proj forward at T 1001 on 212-SM sm_107a parts (the ``ROW_RULE_RANGES_BY_SM`` range: the
+# 128-row program with the row's column-grouped raster).  (row, op, out dtype, T, SM count) -> template.
+PACKAGE_TABLE_TEMPLATES = {
+    ("q_b", "dgrad", "bf16", 1001, 148): "dense_proj_det_gemm_kn_n256_pro7",
+    ("o_proj", "fwd", "bf16", 1001, 212): "dense_proj_det_gemm_kk_n256_cg_pro15",
+}
 # the SM count of a device of each architecture the planner can target (the two export architectures and
 # compute capability 10.3, whose programs register when the export ships them)
 SM_COUNT_OF_ARCH = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
@@ -3165,11 +3174,26 @@ def test_round27_rules_plan_like_the_cake_launcher(T):
     akey = ("sm_100a", False, True, True, False, False, 6144, 128, None)
     assert ROW_RULES[akey] == {"block_n": 128, "group_m": 2}
     a = _views("proj", "indexer_k", "dgrad", "f32", T)
-    # the 152-SM part plans the round-27 program; on the 148-SM part the exact keys of ROW_RULES_BY_SM at T 16172 /
-    # 16231 run the single-CTA program in the same raster groups (test_sm100a_148_fp32_dgrad_part_rules)
-    pa, *_ = cake_dense_gemm_det_train_projection_plan(
+    # the 152-SM part plans the round-27 program (since version 0.3.8 at T 16172 the single-CTA program in the same
+    # raster groups, a token range of ROW_RULE_RANGES_BY_SM: test_dgrad_f32_part_ranges_plan_the_measured_rule); on the
+    # 148-SM part the exact keys of ROW_RULES_BY_SM at T 16172 / 16231 run the single-CTA program in the same raster
+    # groups (test_sm100a_148_fp32_dgrad_part_rules)
+    pa152, *_ = cake_dense_gemm_det_train_projection_plan(
         a["A"], a["B"], a["out"], **dict(kw, sm_count=152)
     )
+    with pytest.MonkeyPatch.context() as m:
+        _without_dgrad_parts(m)
+        pa, *_ = cake_dense_gemm_det_train_projection_plan(
+            a["A"], a["B"], a["out"], **dict(kw, sm_count=152)
+        )
+    if _dgrad_part_band("sm_100a", 152, 6144, 128, T) is None:
+        assert pa152 == pa, T
+    else:
+        assert (
+            pa152.template == SM100A_148_DGRAD_F32_PROGRAM
+            and pa152.group_m == 2
+            and pa152.cta1
+        ), (T, pa152.template)
     assert (
         _nopro(pa.template) == "dense_proj_det_gemm_kn_n128_f32_tma1"
         and pa.group_m == 2
@@ -4829,9 +4853,13 @@ def test_projection_rows_plan_like_the_cake_launcher(sm_count, T):
                     arch=ARCH_OF_SM[sm_count],
                 )
                 rule = _rule_of(plan, sm_count)
+                expected = PACKAGE_TABLE_TEMPLATES.get(
+                    (row, op, out_dtype, T, sm_count),
+                    _expected(EXPECTED_TEMPLATES, (row, op, out_dtype), T, sm_count),
+                )
                 _assert_mirrors_cake(
                     plan,
-                    _expected(EXPECTED_TEMPLATES, (row, op, out_dtype), T, sm_count),
+                    expected,
                     (row, op, out_dtype, T, sm_count),
                     ARCH_OF_SM[sm_count],
                     rule,
@@ -7583,14 +7611,33 @@ def _key_views(key, T):
 
 
 @pytest.mark.parametrize("arch", sorted({row[0][0] for row in MEASURED_SHAPE_ROWS}))
-def test_measured_shape_rules_plan_their_programs(arch):
+def test_measured_shape_rules_plan_their_programs(arch, monkeypatch):
     """Every measured row of the shapes tranche plans the program its measurement selected (its rule reproduces the
     measured knobs through the planner, at the measuring device's SM count); where this tree registers the
     architecture, that program is registered or pending (``PENDING_PROGRAMS``), a registered one runs as is (no
-    fallback) and a pending one still runs a registered neighbour (the registry fallback)."""
+    fallback) and a pending one still runs a registered neighbour (the registry fallback).  The rows a part range of
+    ``ROW_RULE_RANGES_BY_SM`` holds at their token count and SM count (version 0.3.8, on 152 SMs: the 18 FP32
+    input-gradient rows of sm_103a at T 16231 / 16384, and the 15 of sm_100a, all but 8192 -> 128 at both T and
+    5120 -> 128 at T 16231: test_dgrad_f32_part_ranges_plan_the_measured_rule) plan the range's program; the check of
+    the shapes tranche runs without the sm_100a and sm_103a part ranges."""
+    _tables_039(monkeypatch)  # the part tables of version 0.3.9 (version 0.3.10: test_raster_0310_tables)
     rows = [row for row in MEASURED_SHAPE_ROWS if row[0][0] == arch]
     assert rows
     registered = _registered(arch)
+    ranged = [
+        (key, T, sm_count)
+        for key, T, sm_count, _template in rows
+        if (key[1:6], key[8]) == ((False, True, True, False, False), None)
+        and _dgrad_part_band(key[0], sm_count, key[6], key[7], T) is not None
+    ]
+    assert len(ranged) == {"sm_100a": 15, "sm_103a": 18}.get(arch, 0), ranged
+    for key, T, sm_count in ranged:
+        v = _key_views(key, T)
+        plan, *_ = cake_dense_gemm_det_train_projection_plan(
+            v["A"], v["B"], v["out"], sm_count=sm_count, l2_bytes=L2_BYTES, arch=arch, _fallback=False
+        )
+        assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, (key, T, plan.template)
+    _without_dgrad_parts(monkeypatch)
     for key, T, sm_count, template in rows:
         v = _key_views(key, T)
         kw = dict(
@@ -7688,7 +7735,11 @@ def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
     """sm_103a registers every sm_100a program, but its lanes measured only the shapes tranche: a row without an
     sm_103a rule plans with the sm_100a rule (the same instance-key knobs, the same program, the same weight-gradient
     orientation) and runs that program where the sm_103a registry has it - the registry decides, no template is
-    named here; a row the GB300 lanes measured keeps its own rule."""
+    named here; a row the GB300 lanes measured keeps its own rule.  An owner row a 152-SM sm_103a part range holds at
+    its token count (version 0.3.8: the indexer_k FP32 input gradient at T 16172 and 16231; version 0.3.9: the
+    indexer_hw FP32 input gradient at T 16172 and 16231, in raster groups of 2) plans the range's rule, not the
+    parent's (test_dgrad_f32_part_ranges_plan_the_measured_rule, test_raster_039_ranges_plan_the_group_of_2); the
+    parent's own 152-SM ranges hold no row compared with it here."""
     assert cake_backend.RULE_PARENT == {"sm_103a": "sm_100a"}
     keys = lambda arch: {k[1:] for k in ROW_RULES if k[0] == arch}  # noqa: E731
     own, inherited = keys("sm_103a"), keys("sm_100a") - keys("sm_103a")
@@ -7751,7 +7802,7 @@ def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
             ), key
     sm = SM_COUNT_OF_ARCH["sm_103a"]
     registered = _registered("sm_103a")
-    direct = fallen = own_rows = 0
+    direct = fallen = own_rows = part_rows = raster_rows = 0
     for label, v, extra in _owner_rows():
         kw = dict(sm_count=sm, l2_bytes=L2_BYTES, **extra)
         mirror, *_ = cake_dense_gemm_det_train_projection_plan(
@@ -7759,6 +7810,29 @@ def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
         )
         if _own_measured_rule("sm_103a", mirror) is not None:
             own_rows += 1  # a GB300-measured row: its own rule, checked by the measured-rows test
+            continue
+        if (
+            not mirror.a_mn
+            and mirror.b_mn
+            and mirror.out_f32
+            and not mirror.transposed_out
+            and mirror.L == 1
+            and _dgrad_part_band("sm_103a", sm, mirror.N, mirror.K, mirror.M) is not None
+        ):
+            part_rows += 1  # a row a 152-SM part range holds: the range's rule, checked by the range tests
+            assert mirror.template == SM100A_148_DGRAD_F32_PROGRAM, (label, mirror.template)
+            continue
+        if (
+            not mirror.a_mn
+            and mirror.b_mn
+            and mirror.out_f32
+            and not mirror.transposed_out
+            and mirror.L == 1
+            and _raster_039_band(sm, mirror.N, mirror.K, mirror.M) is not None
+        ):
+            raster_rows += 1  # a row a raster range of version 0.3.9 holds, checked by the raster tests
+            assert mirror.template == SM100A_148_DGRAD_F32_PROGRAM, (label, mirror.template)
+            assert mirror.group_m == 2, (label, mirror.group_m)
             continue
         parent, *_ = cake_dense_gemm_det_train_projection_plan(
             v["A"], v["B"], v["out"], arch="sm_100a", _fallback=False, **kw
@@ -7777,6 +7851,8 @@ def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
             assert plan.template in registered, (label, plan.template)
             fallen += 1
     assert own_rows and direct, (own_rows, direct, fallen)
+    assert part_rows == 2, part_rows
+    assert raster_rows == 2, raster_rows
 
 
 def test_rule_inheritance_leaves_the_other_architectures_unchanged(monkeypatch):
@@ -9679,13 +9755,13 @@ def test_segment_blocks_reads_the_longest_segment():
 def test_long_segments_plan_the_promoted_twin(monkeypatch):
     """The 32 x 4096 BF16 weight gradient on a 152-SM sm_100a part plans the 64-row ``hen`` program of its rule
     (two K halves of each of its 32 tiles): with the program's twin registered, a plan whose longest segment holds more
-    than 256 K blocks (32769 tokens and more) runs the twin, the same plan but for the template and
-    ``promote_blocks``; at 16384 and 32768 tokens (128 and 256 blocks) it keeps the program.  ``promote=False`` keeps
-    the program at any length, ``promote=True`` runs the twin at any length; without the twin registered the plan
-    keeps the program and ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall
-    tile (the kernel's refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 128 blocks the twin runs from
-    16385 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all) keeps the
-    program unless ``promote=True``."""
+    than 128 K blocks (16385 tokens and more) runs the twin, the same plan but for the template and ``promote_blocks``;
+    at 16384 tokens (128 blocks) it keeps the program.  ``promote=False`` keeps the program at any length,
+    ``promote=True`` runs the twin at any length; without the twin registered the plan keeps the program and
+    ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall tile (the kernel's
+    refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 256 blocks, the threshold up to version 0.3.5, the
+    twin runs from 32769 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all)
+    keeps the program unless ``promote=True``."""
     arch, sm_count = "sm_100a", 152
     program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
     twin = _twin_of(program)
@@ -9716,14 +9792,13 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         with pytest.raises(ValueError, match="not registered"):
             plan_at(65536, promote=True)
     _register_twins(monkeypatch, arch, program)
-    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 256
-    for T in (16384, 16385, 32768):
-        short = plan_at(T)
-        assert (short.template, short.promote_blocks) == (program, 0), T
-        forced = plan_at(T, promote=True)
-        assert (forced.template, forced.promote_blocks) == (twin, 128), T
-        assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
-    for T in (32769, 65536):
+    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 128
+    short = plan_at(16384)
+    assert (short.template, short.promote_blocks) == (program, 0)
+    forced = plan_at(16384, promote=True)
+    assert (forced.template, forced.promote_blocks) == (twin, 128)
+    assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
+    for T in (16385, 32768, 32769, 65536):
         plan, plain = plan_at(T), plan_at(T, promote=False)
         assert (plan.template, plan.promote_blocks) == (twin, 128), T
         assert (plain.template, plain.promote_blocks) == (program, 0), T
@@ -9761,12 +9836,12 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
             transposed_out=v.get("transposed", False),
             promote=True,
         )
-    # the threshold: at 128 blocks the twin runs from 16385 tokens (129 blocks a half) on
+    # the threshold: at 256 blocks (up to version 0.3.5) the twin runs from 32769 tokens (257 blocks a half) on
     with monkeypatch.context() as m:
-        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
-        assert plan_at(16384).template == program
-        assert plan_at(16385).template == plan_at(32768).template == twin
-        assert plan_at(16384, promote=True).template == twin
+        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 256)
+        assert plan_at(16385).template == plan_at(32768).template == program
+        assert plan_at(32769).template == plan_at(65536).template == twin
+        assert plan_at(32768, promote=True).template == twin
     # the exempt rows: an exact key at 65536 tokens, a ragged key at every token count; promote=True runs the twin
     row = (arch, True, True, False, True, False, 32)
     with monkeypatch.context() as m:
@@ -9780,7 +9855,7 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         m.setattr(
             cake_backend, "K1_PROMOTE_EXEMPT_ROWS", frozenset({row + (None, 4096)})
         )
-        assert plan_at(32769).template == plan_at(65536).template == program
+        assert plan_at(16385).template == plan_at(65536).template == program
         assert plan_at(65536, promote=True).template == twin
 
 
@@ -9837,9 +9912,9 @@ def test_promoted_twins_registered_are_twins_of_registered_programs():
 
 
 # The promoted twins on the device: (d_out, d_in, T of a plan whose longest segment holds more than
-# ``K1_PROMOTE_MIN_SEGMENT`` (256) K blocks, T of the same row's plan at one chunk a segment, the architectures).
+# ``K1_PROMOTE_MIN_SEGMENT`` (128) K blocks, T of the same row's plan at one chunk a segment, the architectures).
 # 512 x 4096 plans the 64-row 256-wide ``hen`` program of its rule, 32 x 4096 the 64-row 128-wide one; at T 65536 a
-# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 256), at T 8192 128, so no
+# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 128), at T 8192 128, so no
 # segment holds more than one chunk.  Both programs are rendered from the kernel source the twins are, on these
 # architectures (the sm_107a 32 x 4096 rule names a carried ``skx`` program).
 PROMOTED_GPU_CASES = (
@@ -12974,8 +13049,9 @@ SM107A_212_TRANCHE_TIERS = {
 
 def test_sm107a_212_tranche_floor_table():
     # the sm_107a tiers are the tranche's; the others are the long-token 5120 -> 64 / 128 weight gradients of sm_100a
-    # (test_sm100a_5120_wgrad_long_token_rule) and the 4096 x 4096 weight gradients of sm_100a and sm_103a
-    # (test_wave_yield_plans_the_synchronised_tail_on_148_sms)
+    # (test_sm100a_5120_wgrad_long_token_rule), the 4096 x 4096 weight gradients of sm_100a and sm_103a
+    # (test_wave_yield_plans_the_synchronised_tail_on_148_sms) and the K-major forward / input-gradient rows of
+    # sm_100a and sm_103a of version 0.3.7 (test_k_major_tier_and_range_tables)
     assert {
         key: tiers
         for key, tiers in cake_backend.ROW_RULE_MIN_T.items()
@@ -12985,7 +13061,7 @@ def test_sm107a_212_tranche_floor_table():
         key: tiers
         for key, tiers in cake_backend.ROW_RULE_MIN_T.items()
         if key[0] != "sm_107a"
-    } == {**SM100A_5120_WGRAD_TIERS, **WAVE_YIELD_TIERS}
+    } == {**SM100A_5120_WGRAD_TIERS, **WAVE_YIELD_TIERS, **K_MAJOR_TIERS}
     for key, tiers in SM107A_212_TRANCHE_TIERS.items():
         # ragged tranche keys only: one token dimension left out, the training T at or above the floor
         assert key in SM107A_212_TRANCHE and (key[7] is None) != (key[8] is None), key
@@ -13083,27 +13159,59 @@ SM100A_148_DGRAD_F32_PROGRAM = "dense_proj_det_gemm_kn_n128_f32_tma2_s4_c1"
 EXACT_FIT_PROGRAM = "dense_proj_det_gemm_nn_n256_m256_skx_skf_pro7"
 WAVE_YIELD_PROGRAM = "dense_proj_det_gemm_nn_n256_m256_sks_sb2_pro7"
 LONG_5120_WGRAD_PROGRAM = "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7"
-#: The 212-SM sm_107a token ranges (cake_backend.ROW_RULE_RANGES_BY_SM): ragged key -> (op, d_in, d_out, ((lo, hi,
-#: rule), ...), the program the rule plans, its form, the program of the row's plan without the range).  The forms:
-#: ``sync`` the synchronised split of the tail, ``whole`` whole tiles, ``parts2`` a two-way K split of the tail tiles,
-#: ``htail`` the half-height tail wave.  The rules are the measured ones, each injected as an exact key of the row.
+#: The 212-SM sm_107a FP32 token ranges (cake_backend.ROW_RULE_RANGES_BY_SM): ragged key -> (op, d_in, d_out, ((lo, hi,
+#: rule, program, form), ...), the program of the row's plan without the ranges): each range with the program its rule
+#: plans and the form of that plan.  The forms: ``sync`` the synchronised split of the tail, ``whole`` whole tiles,
+#: ``parts2`` a two-way K split of the tail tiles (at an odd number of K blocks a unit runs on into the next tail tile),
+#: ``htail`` the half-height tail wave of the 128-row tiles, ``htail256`` the half-height tail wave of the 256-row
+#: tiles, ``parts3`` a three-way K split of the tail tiles of the 256-row tiles.  The rules are the measured ones, each
+#: injected as an exact key of the row.  Version 0.3.8 extends the ranges of four keys (``SM107A_212_F32_BOUNDS_037``:
+#: the bounds up to version 0.3.7) and adds the T 12288 ranges.
 # fmt: off
 _VR212_SKS = {"epi": "reg", "f32_v8": True, "store_ef": True, "sk_sync": True, "sk_sync_m": 38, "sk_slab": 2}
 _VR212_V8 = {"epi": "reg", "f32_v8": True, "pro": 15}
 _VR212_V8_SK2 = {"epi": "reg", "f32_v8": True, "sk_parts": 2, "pro": 15}
 _VR212_V8_HT = {"epi": "reg", "f32_v8": True, "htail": True, "pro": 7}
+_VR212_M256_HT = {"cta_rows": 256, "htail": True}
+_VR212_M256_SK3 = {"cta_rows": 256, "sk_parts": 3}
 _VR212_SKS_PROGRAM = "dense_proj_det_gemm_nn_n256_f32_v8_ef_sks_sb2_pro7"
 _VR212_V8_PROGRAM = "dense_proj_det_gemm_nn_n256_f32_v8_pro15"
 _VR212_M256 = "dense_proj_det_gemm_nn_n256_m256_f32_tma1_pro7"
+_VR212_M256_HT_PROGRAM = "dense_proj_det_gemm_nn_n256_m256_f32_ht_tma1_pro7"
+_VR212_SYNC = (_VR212_SKS, _VR212_SKS_PROGRAM, "sync")
+_VR212_WHOLE = (_VR212_V8, _VR212_V8_PROGRAM, "whole")
+_VR212_HT256 = (_VR212_M256_HT, _VR212_M256_HT_PROGRAM, "htail256")
 SM107A_212_F32_RANGES = {
-    ("sm_107a", True, True, True, False, False, 12288, None, 4096): ("wgrad", 12288, 4096, ((4096, 16384, _VR212_SKS),), _VR212_SKS_PROGRAM, "sync", _VR212_M256),
-    ("sm_107a", True, True, True, False, False, 4096, None, 12288): ("wgrad", 4096, 12288, ((8192, 16231, _VR212_SKS),), _VR212_SKS_PROGRAM, "sync", _VR212_M256),
-    ("sm_107a", True, True, True, False, False, 17408, None, 5120): ("wgrad", 17408, 5120, ((4096, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", _VR212_M256),
-    ("sm_107a", True, True, True, False, False, 5120, None, 17408): ("wgrad", 5120, 17408, ((8192, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", _VR212_M256),
-    ("sm_107a", True, True, True, False, False, 16384, None, 6144): ("wgrad", 16384, 6144, ((4096, 4096, _VR212_V8_SK2), (8192, 8192, _VR212_V8_SK2)), _VR212_V8_PROGRAM, "parts2", _VR212_M256),
-    ("sm_107a", True, True, True, False, False, 6144, None, 12288): ("wgrad", 6144, 12288, ((4096, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", "dense_proj_det_gemm_nn_n256_m256_f32_ht_tma1_pro7"),
-    ("sm_107a", True, True, True, False, False, 12288, None, 6144): ("wgrad", 12288, 6144, ((8192, 8192, _VR212_V8),), _VR212_V8_PROGRAM, "whole", "dense_proj_det_gemm_nn_n256_m256_f32_v8_ef_ht_pro7"),
-    ("sm_107a", False, True, True, False, False, 16384, 6144, None): ("dgrad", 16384, 6144, ((8192, 8192, _VR212_V8_HT),), "dense_proj_det_gemm_kn_n256_f32_v8_ht_pro7", "htail", "dense_proj_det_gemm_kn_n256_m256_f32_tma1_pro7"),
+    ("sm_107a", True, True, True, False, False, 12288, None, 4096): ("wgrad", 12288, 4096, ((4096, 16384, *_VR212_SYNC),), _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 4096, None, 12288): ("wgrad", 4096, 12288, ((4096, 16384, *_VR212_SYNC),), _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 17408, None, 5120): ("wgrad", 17408, 5120, ((4096, 8192, *_VR212_WHOLE), (12288, 12288, *_VR212_HT256)), _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 5120, None, 17408): ("wgrad", 5120, 17408, ((4096, 8192, *_VR212_WHOLE), (12288, 12288, *_VR212_HT256)), _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 16384, None, 6144): ("wgrad", 16384, 6144, ((4096, 8192, _VR212_V8_SK2, _VR212_V8_PROGRAM, "parts2"), (12288, 12288, _VR212_M256_SK3, _VR212_M256, "parts3")), _VR212_M256),
+    ("sm_107a", True, True, True, False, False, 6144, None, 12288): ("wgrad", 6144, 12288, ((4096, 8192, *_VR212_WHOLE),), "dense_proj_det_gemm_nn_n256_m256_f32_ht_tma1_pro7"),
+    ("sm_107a", True, True, True, False, False, 12288, None, 6144): ("wgrad", 12288, 6144, ((4096, 8192, *_VR212_WHOLE),), "dense_proj_det_gemm_nn_n256_m256_f32_v8_ef_ht_pro7"),
+    ("sm_107a", False, True, True, False, False, 16384, 6144, None): ("dgrad", 16384, 6144, ((8192, 8192, _VR212_V8_HT, "dense_proj_det_gemm_kn_n256_f32_v8_ht_pro7", "htail"),), "dense_proj_det_gemm_kn_n256_m256_f32_tma1_pro7"),
+}
+#: The bounds of the 212-SM sm_107a FP32 ranges of versions 0.3.5 - 0.3.7: ragged key -> ((lo, hi), ...).  Each lies in
+#: a range of ``SM107A_212_F32_RANGES`` with the same rule.
+SM107A_212_F32_BOUNDS_037 = {
+    ("sm_107a", True, True, True, False, False, 12288, None, 4096): ((4096, 16384),),
+    ("sm_107a", True, True, True, False, False, 4096, None, 12288): ((8192, 16231),),
+    ("sm_107a", True, True, True, False, False, 17408, None, 5120): ((4096, 8192),),
+    ("sm_107a", True, True, True, False, False, 5120, None, 17408): ((8192, 8192),),
+    ("sm_107a", True, True, True, False, False, 16384, None, 6144): ((4096, 4096), (8192, 8192)),
+    ("sm_107a", True, True, True, False, False, 6144, None, 12288): ((4096, 8192),),
+    ("sm_107a", True, True, True, False, False, 12288, None, 6144): ((8192, 8192),),
+    ("sm_107a", False, True, True, False, False, 16384, 6144, None): ((8192, 8192),),
+}
+#: The token counts version 0.3.8 measured inside the ranges it added or extended: ragged key -> token counts (the
+#: o_proj weight gradient at T 6208 and 8128: an odd number of K blocks, 97 and 127, the two unit counts of its
+#: two-way split at an odd number of K blocks).
+SM107A_212_F32_MEASURED_038 = {
+    ("sm_107a", True, True, True, False, False, 4096, None, 12288): (4096, 16384),
+    ("sm_107a", True, True, True, False, False, 17408, None, 5120): (12288,),
+    ("sm_107a", True, True, True, False, False, 5120, None, 17408): (4096, 12288),
+    ("sm_107a", True, True, True, False, False, 16384, None, 6144): (6208, 8128, 12288),
+    ("sm_107a", True, True, True, False, False, 12288, None, 6144): (4096,),
 }
 # fmt: on
 #: The device classes the CPU checks plan for: (arch, SM count).
@@ -13126,14 +13234,17 @@ def _vr212_exact_key(key, T):
     return key[:slot] + (T,) + key[slot + 1 :]
 
 
-def _vr212_rule_at(op, d_in, d_out, T):
-    """``(program, form)`` of the 212-SM sm_107a FP32 range that holds the row at ``T`` tokens, else ``None``."""
-    for value in SM107A_212_F32_RANGES.values():
-        row_op, row_in, row_out, ranges, program, form, _before = value
-        if (row_op, row_in, row_out) == (op, d_in, d_out) and any(
-            lo <= T <= hi for lo, hi, _ in ranges
-        ):
-            return program, form
+def _vr212_rule_at(op, d_in, d_out, T, version_037=False):
+    """``(program, form)`` of the 212-SM sm_107a FP32 range that holds the row at ``T`` tokens, else ``None``; with
+    ``version_037`` a range of versions 0.3.5 - 0.3.7 (``SM107A_212_F32_BOUNDS_037``)."""
+    for key, (row_op, row_in, row_out, ranges, _before) in SM107A_212_F32_RANGES.items():
+        if (row_op, row_in, row_out) != (op, d_in, d_out):
+            continue
+        if version_037 and not any(lo <= T <= hi for lo, hi in SM107A_212_F32_BOUNDS_037[key]):
+            return None
+        for lo, hi, _rule, program, form in ranges:
+            if lo <= T <= hi:
+                return program, form
     return None
 
 
@@ -13183,6 +13294,30 @@ def _pre_034_tables(m):
         m.delitem(cake_backend.ROW_RULE_MIN_T, key)
 
 
+def _without_dgrad_parts(m):
+    """Drop the sm_100a and sm_103a parts of ``ROW_RULE_RANGES_BY_SM`` (version 0.3.8, the FP32 input-gradient ranges of
+    ``DGRAD_F32_PART_RANGES``; ``m``: a monkeypatch context)."""
+    for part in [part for part in cake_backend.ROW_RULE_RANGES_BY_SM if part[0] in ("sm_100a", "sm_103a")]:
+        m.delitem(cake_backend.ROW_RULE_RANGES_BY_SM, part)
+
+
+def _pre_038_tables(m):
+    """Put the part tables of version 0.3.7 in place (``m``: a monkeypatch context): no sm_100a or sm_103a part ranges,
+    and the 212-SM sm_107a FP32 ranges at their bounds of versions 0.3.5 - 0.3.7 (``SM107A_212_F32_BOUNDS_037``), each
+    with the rule of the current range that holds it (the BF16 ranges of version 0.3.7 as they are), and the 148-SM
+    sm_100a part rules of version 0.3.9 (``_tables_039``)."""
+    _tables_039(m)
+    _without_dgrad_parts(m)
+    current = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
+    table = dict(current)
+    for key, bounds in SM107A_212_F32_BOUNDS_037.items():
+        table[key] = tuple(
+            (lo, hi, next(rule for a, b, rule in current[key] if a <= lo and hi <= b))
+            for lo, hi in bounds
+        )
+    m.setitem(cake_backend.ROW_RULE_RANGES_BY_SM, ("sm_107a", 212), table)
+
+
 # The rows and token counts of the sweep below: (op, d_in, d_out, out dtype, token counts).
 # fmt: off
 ROUTING_034_SWEEP = (
@@ -13193,10 +13328,12 @@ ROUTING_034_SWEEP = (
     ("wgrad", 5120, 64, "f32", (32767, 32768, 65535)),
     *(("dgrad", d_in, d_out, "f32", (16171, 16172, 16231, 16232, 16384, 16385))
       for d_in, d_out in (*SM100A_148_DGRAD_F32_ROWS, (6144, 32))),
-    # the rows of the 212-SM sm_107a ranges at the measured token counts and around each range end, and their BF16 forms
+    # the rows of the 212-SM sm_107a ranges at the measured token counts and around each range end of versions 0.3.5 -
+    # 0.3.7, and their BF16 forms
     *((op, d_in, d_out, "f32", tuple(sorted({4096, 8192, 16172, 16231, 16384}
-                                            | {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)})))
-      for op, d_in, d_out, ranges, *_ in SM107A_212_F32_RANGES.values()),
+                                            | {T for lo, hi in SM107A_212_F32_BOUNDS_037[key]
+                                               for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)})))
+      for key, (op, d_in, d_out, *_) in SM107A_212_F32_RANGES.items()),
     *(("wgrad", d_in, d_out, "bf16", (4096, 8192))
       for d_in, d_out in ((16384, 6144), (17408, 5120), (6144, 12288), (5120, 17408), (12288, 6144))),
     ("dgrad", 16384, 6144, "bf16", (8192,)),
@@ -13205,13 +13342,13 @@ ROUTING_034_SWEEP = (
 
 
 def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
-    """The program a plan of version 0.3.4 or 0.3.5 runs where it differs from the plan of version 0.3.3, else
-    ``None``."""
+    """The program a plan of version 0.3.4 or 0.3.5 (the tables of version 0.3.7, ``_pre_038_tables``) runs where it
+    differs from the plan of version 0.3.3, else ``None``."""
     k_blocks = -(-T // 64)
     gb = arch in ("sm_100a", "sm_103a")
     if (arch, sm_count) == ("sm_107a", 212) and out_dtype == "f32":
         # the 212-SM sm_107a FP32 token ranges
-        ranged = _vr212_rule_at(op, d_in, d_out, T)
+        ranged = _vr212_rule_at(op, d_in, d_out, T, version_037=True)
         return ranged[0] if ranged else None
     if op == "dgrad":
         part = (arch, sm_count) == ("sm_100a", 148) and out_dtype == "f32"
@@ -13232,21 +13369,25 @@ def _changed_034(op, d_in, d_out, out_dtype, T, arch, sm_count):
 
 
 def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
-    """Byte for byte against the tables of version 0.3.3 (``_pre_034_tables``), over the changed rows, their
-    neighbours and the token counts around each bound, on sm_100a and sm_103a at 148 and 152 SMs, sm_103a at 160 SMs and
-    sm_107a at 208, 212 and 216 SMs: a plan changes exactly where ``_changed_034`` names a program, and runs that
-    program - the exact-split fit and the exact-wave yield on the 148-SM parts of both architectures where the rule's
-    split is admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a part at their token counts, the
-    5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on, the FP32 rows of the 212-SM sm_107a token ranges
-    inside their ranges on that part.  Every other plan (the 152- and 160-SM parts but for the 5120 -> 64 / 128 rows,
-    the 208- and 216-SM sm_107a parts, the other FP32 outputs, the BF16 forms of the ranged rows, one token count
-    outside each range, the other rows and token counts) is the plan of version 0.3.3."""
+    """Byte for byte, the part tables of version 0.3.7 (``_pre_038_tables``; version 0.3.8 is checked by
+    test_routing_038_changes_exactly_the_measured_plans) against the tables of version 0.3.3 (``_pre_034_tables``),
+    over the changed rows, their neighbours and the token counts around each bound, on sm_100a and sm_103a at 148 and
+    152 SMs, sm_103a at 160 SMs and sm_107a at 208, 212 and 216 SMs: a plan changes exactly where ``_changed_034``
+    names a program, and runs that program - the exact-split fit and the exact-wave yield on the 148-SM parts of both
+    architectures where the rule's split is admitted (the latter from T 8192 on), the part rules on the 148-SM sm_100a
+    part at their token counts, the 5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on, the FP32 rows
+    of the 212-SM sm_107a token ranges inside their ranges of version 0.3.5 on that part.  Every other plan (the 152-
+    and 160-SM parts but for the 5120 -> 64 / 128 rows, the 208- and 216-SM sm_107a parts, the other FP32 outputs, the
+    BF16 forms of the ranged rows, one token count outside each range, the other rows and token counts) is the plan of
+    the tables of version 0.3.3 (at the current promotion threshold)."""
     changed = changed_212 = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_034_SWEEP:
         for T in token_counts:
             for arch, sm_count in ROUTING_034_CLASSES:
                 where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
-                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _pre_038_tables(m)
+                    plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
                 with monkeypatch.context() as m:
                     _pre_034_tables(m)
                     before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
@@ -13408,7 +13549,11 @@ def test_sm100a_148_fp32_dgrad_part_rules(monkeypatch):
     48 / 64 / 128 and 8192 -> 128 at their measured token counts, and 6144 -> 128 at T 16172 / 16231, run the single-CTA
     program with 128-column tiles, two TMA-store slots and four stages over the raster group of the row's rule: exactly
     the plan of that program's knobs (its symbol's) laid over the row's rule.  The table holds these 19 exact keys
-    alone; ``_measured_row_rule`` reads it only with the part's SM count and never through ``RULE_PARENT``."""
+    alone; ``_measured_row_rule`` reads it only with the part's SM count and never through ``RULE_PARENT`` (checked
+    without the sm_100a and sm_103a part ranges of version 0.3.8, which give the 148-SM sm_103a part (all but
+    5120 -> 128 and 8192 -> 128) and the 152-SM sm_100a part (all but 8192 -> 128) the same program on these rows over
+    token ranges: test_dgrad_f32_part_range_tables)."""
+    _tables_039(monkeypatch)  # the part tables of version 0.3.9 (version 0.3.10: test_raster_0310_tables)
     table = cake_backend.ROW_RULES_BY_SM
     assert set(table) == {("sm_100a", 148)}
     expected = {
@@ -13432,13 +13577,15 @@ def test_sm100a_148_fp32_dgrad_part_rules(monkeypatch):
         assert cake_backend._measured_row_rule("sm_100a", *ident, sm_count=148) == rule
         ragged = ROW_RULES[key[:8] + (None,)]
         assert cake_backend._measured_row_rule("sm_100a", *ident) == ragged, key
-        assert (
-            cake_backend._measured_row_rule("sm_100a", *ident, sm_count=152) == ragged
-        )
         # sm_103a reads the sm_100a rules through RULE_PARENT, never the sm_100a part's table
-        assert cake_backend._measured_row_rule(
-            "sm_103a", *ident, sm_count=148
-        ) == cake_backend._measured_row_rule("sm_103a", *ident), key
+        with monkeypatch.context() as m:
+            _without_dgrad_parts(m)
+            assert (
+                cake_backend._measured_row_rule("sm_100a", *ident, sm_count=152) == ragged
+            ), key
+            assert cake_backend._measured_row_rule(
+                "sm_103a", *ident, sm_count=148
+            ) == cake_backend._measured_row_rule("sm_103a", *ident), key
         plan = _rows_plan("dgrad", "sm_100a", 148, d_in, d_out, T, "f32")
         where = (key, plan.template)
         assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
@@ -13460,8 +13607,8 @@ def test_sm100a_5120_wgrad_long_token_rule():
     """The sm_100a 5120 -> 64 / 128 BF16 weight-gradient rules (the swapped orientation, ragged in T) are the sm_103a
     rules of the rows: the synchronised split of the 20-tile tail (20 collectors, margin 16: s = ceil((k_blocks + 16)
     / 2)), whose segments promote (the ``_kc128`` twin), from T 32768 on, where the main parts hold 264 K blocks (more
-    than ``K1_PROMOTE_MIN_SEGMENT``); below T 32768 their token tier keeps the 64-row program of version 0.3.3.  Both
-    on the 148- and the 152-SM part."""
+    than ``K1_PROMOTE_MIN_SEGMENT``); below T 32768 their token tier keeps the 64-row program of version 0.3.3 (its
+    promoted twin above ``K1_PROMOTE_MIN_SEGMENT``).  Both on the 148- and the 152-SM part."""
     for key, tiers in SM100A_5120_WGRAD_TIERS.items():
         assert cake_backend.ROW_RULE_MIN_T[key] == tiers, key
         own = ("sm_103a",) + key[1:]
@@ -13500,20 +13647,38 @@ def test_sm100a_5120_wgrad_long_token_rule():
 
 
 def test_sm107a_212_f32_range_table():
-    """``ROW_RULE_RANGES_BY_SM`` holds the 212-SM sm_107a FP32 ranges alone (``SM107A_212_F32_RANGES``): ragged keys in
-    the orientation the rows plan (the weight gradients direct: no ``ROW_RULES`` key swaps them), sorted disjoint
-    inclusive ranges, rules whose program the sm_107a registry ships, no token tiers on the keys and no exact
-    ``ROW_RULES`` key of a row inside its ranges (such a key would lose to the range).  ``_measured_row_rule`` reads a
-    range with the part's SM count alone: the range's rule at its ends and middle, the row's ``ROW_RULES`` entry one
-    token count outside, on the 208- and 216-SM parts and without an SM count."""
+    """``ROW_RULE_RANGES_BY_SM`` holds the 212-SM sm_107a part and, since version 0.3.8, the 148- and 152-SM sm_103a
+    parts and the 152-SM sm_100a part (``DGRAD_F32_PART_RANGES``, test_dgrad_f32_part_range_tables), and since
+    version 0.3.10 the 148-SM sm_100a part (``RASTER_0310_RANGES``, test_raster_0310_tables).  The 212-SM
+    part's FP32 ranges are ``SM107A_212_F32_RANGES``, its BF16 ranges the K-major rows of version 0.3.7
+    (``K_MAJOR_RANGES_212``, test_k_major_tier_and_range_tables).  The FP32 ranges: ragged keys in the orientation the
+    rows plan (the weight gradients direct: no ``ROW_RULES`` key swaps them), sorted disjoint inclusive ranges, rules
+    whose program the sm_107a registry ships, no token tiers on the keys and no exact ``ROW_RULES`` key of a row inside
+    its ranges (such a key would lose to the range); each range of versions 0.3.5 - 0.3.7 lies inside a range (whose rule
+    ``_pre_038_tables`` gives it), and each token count version 0.3.8 measured lies inside a range and outside those of
+    version 0.3.7.
+    ``_measured_row_rule`` reads a range with the part's SM count alone: the range's rule at its ends and middle, the
+    row's ``ROW_RULES`` entry one token count outside, on the 208- and 216-SM parts and without an SM count."""
     table = cake_backend.ROW_RULE_RANGES_BY_SM
-    assert set(table) == {("sm_107a", 212)}
-    assert table[("sm_107a", 212)] == {
-        key: value[3] for key, value in SM107A_212_F32_RANGES.items()
+    assert set(table) == {
+        ("sm_107a", 212),
+        ("sm_103a", 148),
+        ("sm_103a", 152),
+        ("sm_100a", 152),
+        ("sm_100a", 148),
     }
+    assert {key: ranges for key, ranges in table[("sm_107a", 212)].items() if key[3]} == {
+        key: tuple((lo, hi, rule) for lo, hi, rule, _program, _form in value[3])
+        for key, value in SM107A_212_F32_RANGES.items()
+    }
+    assert {
+        key: ranges for key, ranges in table[("sm_107a", 212)].items() if not key[3]
+    } == K_MAJOR_RANGES_212
+    assert set(SM107A_212_F32_BOUNDS_037) == set(SM107A_212_F32_RANGES)
+    assert set(SM107A_212_F32_MEASURED_038) <= set(SM107A_212_F32_RANGES)
     registered = _registered("sm_107a")
     for key, value in SM107A_212_F32_RANGES.items():
-        op, d_in, d_out, ranges, program, form, before = value
+        op, d_in, d_out, ranges, before = value
         arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M = key
         assert (arch, b_mn, out_f32, out_t, batched) == (
             "sm_107a",
@@ -13528,11 +13693,18 @@ def test_sm107a_212_f32_range_table():
         else:
             assert (a_mn, N, K, M) == (False, d_in, d_out, None), key
         assert key not in cake_backend.ROW_RULE_MIN_T, key
-        assert program in registered and before in registered, key
-        assert form in ("sync", "whole", "parts2", "htail"), key
-        bounds = [(lo, hi) for lo, hi, _ in ranges]
+        assert before in registered, key
+        for _lo, _hi, _rule, program, form in ranges:
+            assert program in registered, (key, program)
+            assert form in ("sync", "whole", "parts2", "htail", "htail256", "parts3"), key
+        bounds = [(lo, hi) for lo, hi, *_ in ranges]
         assert all(1 <= lo <= hi for lo, hi in bounds), key
         assert all(a[1] < b[0] for a, b in zip(bounds, bounds[1:])), key
+        for lo, hi in SM107A_212_F32_BOUNDS_037[key]:
+            assert [rule for a, b, rule, *_ in ranges if a <= lo and hi <= b], (key, lo, hi)
+        for T in SM107A_212_F32_MEASURED_038.get(key, ()):
+            assert any(a <= T <= b for a, b in bounds), (key, T)
+            assert not any(a <= T <= b for a, b in SM107A_212_F32_BOUNDS_037[key]), (key, T)
         slot = 7 if K is None else 8
         assert not [
             exact
@@ -13543,7 +13715,7 @@ def test_sm107a_212_f32_range_table():
             and any(lo <= exact[slot] <= hi for lo, hi in bounds)
         ], key
         plain = ROW_RULES.get(key, {})
-        for lo, hi, rule in ranges:
+        for lo, hi, rule, *_ in ranges:
             for T in {lo, (lo + hi) // 2, hi}:
                 ident = _vr212_exact_key(key, T)[1:]
                 assert (
@@ -13565,15 +13737,19 @@ def test_sm107a_212_f32_range_table():
 
 @pytest.mark.parametrize("key", list(SM107A_212_F32_RANGES))
 def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
-    """At the ends and the middle of each 212-SM sm_107a range the plan on a 212-SM part equals the plan of the range's
-    rule as an exact ``ROW_RULES`` key at that token count without the range (the form the rule was measured in): the
-    rule's program with no fallback flag, in the direct orientation, and the form of the range - the synchronised split
-    of the 26-tile tail (26 collectors, s = ceil((k_blocks + 38) / 2)), whole 128-row tiles, a two-way K split of the 52
-    tail tiles (104 units of half the K blocks each) or the half-height tail wave (68 half items of the 34-tile tail of
-    the input gradient).  Without the range the row plans the program of versions 0.3.3 and 0.3.4.  One token count outside each
-    range on the 212-SM part, and at every checked token count on the 208- and 216-SM parts, the plan is the plan
-    without the range."""
-    op, d_in, d_out, ranges, program, form, before_program = SM107A_212_F32_RANGES[key]
+    """At the ends and the middle of each 212-SM sm_107a range, and at the token counts version 0.3.8 measured inside
+    the ranges (``SM107A_212_F32_MEASURED_038``), the plan on a 212-SM part equals the plan of the range's rule as an
+    exact ``ROW_RULES`` key at that token count without the range (the form the rule was measured in): the range's
+    program with no fallback flag, in the direct orientation, and the form of the range - the synchronised split of
+    the 26-tile tail (26 collectors, s = ceil((k_blocks + 38) / 2)), whole 128-row tiles, a two-way K split of the 52
+    tail tiles of the 128-row tiles (units of ceil(k_blocks / 2) K blocks: 104 units at an even number of K blocks; at
+    an odd number a unit runs on into the next tail tile, 103 units at T 6208 (97 K blocks) and 104 at T 8128 (127)),
+    the half-height tail wave of the 128-row tiles (68 half items of the 34-tile tail of the input gradient) or of the
+    256-row tiles (88 half items of the 44-tile tail), or a three-way K split of the 26 tail tiles of the 256-row tiles
+    (78 units of ceil(k_blocks / 3) K blocks).  Without the range the row plans the program of versions 0.3.3 and
+    0.3.4, and another plan.  One token count outside each range on the 212-SM part, and at every checked token count
+    on the 208- and 216-SM parts, the plan is the plan without the range."""
+    op, d_in, d_out, ranges, before_program = SM107A_212_F32_RANGES[key]
     part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
 
     def plan_at(T, sm_count):
@@ -13591,23 +13767,27 @@ def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
                 m.setitem(ROW_RULES, _vr212_exact_key(key, T), dict(rule))
             return plan_at(T, sm_count)
 
+    measured = set(SM107A_212_F32_MEASURED_038.get(key, ()))
     checked = set()
-    for lo, hi, rule in ranges:
-        for T in sorted({lo, (lo + hi) // 2, hi}):
+    for lo, hi, rule, program, form in ranges:
+        for T in sorted({lo, (lo + hi) // 2, hi} | {T for T in measured if lo <= T <= hi}):
             checked.add(T)
             plan = plan_at(T, 212)
             before = plan_without(T, 212)
             where = (T, plan.template, before.template)
             assert plan == plan_without(T, 212, rule), where
             assert plan.template == program and before.template == before_program, where
+            assert _plan_signature(plan) != _plan_signature(before), where
             assert not (
                 plan.rule_fallback
                 or plan.knob_fallback
                 or plan.swap_fallback
                 or plan.wave_fallback
             ), where
-            assert not plan.transposed_out and plan.cta_rows == 128, where
+            assert not plan.transposed_out, where
+            assert plan.cta_rows == (256 if form in ("htail256", "parts3") else 128), where
             k_blocks = plan.k_blocks
+            assert k_blocks == -(-(T if op == "wgrad" else d_out) // 64), where
             fields = (
                 plan.num_full,
                 plan.tail_tiles,
@@ -13621,13 +13801,42 @@ def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
                 assert not plan.sk_sync and not plan.htail_plan, where
                 assert fields == (d_in * d_out // 65536, 0, 0, k_blocks), where
             elif form == "parts2":
-                assert not plan.sk_sync and k_blocks % 2 == 0, where
-                assert fields == (1484, 52, 104, k_blocks // 2), where
+                assert not plan.sk_sync and not plan.htail_plan, where
+                half = -(-k_blocks // 2)
+                assert fields == (1484, 52, -(-52 * k_blocks // half), half), where
+            elif form == "parts3":
+                assert not plan.sk_sync and not plan.htail_plan, where
+                third = -(-k_blocks // 3)
+                assert fields == (742, 26, -(-26 * k_blocks // third), third), where
+            elif form == "htail256":
+                assert plan.htail_plan and not plan.sk_sync, where
+                assert fields == (636, 44, 88, k_blocks), where
             else:
+                assert form == "htail", where
                 assert plan.htail_plan and not plan.sk_sync, where
                 assert fields == (2014, 34, 68, k_blocks), where
-    outside = {T for lo, hi, _ in ranges for T in (lo - 1, hi + 1)}
-    outside -= {T for T in outside for lo, hi, _ in ranges if lo <= T <= hi}
+    # the measured form of version 0.3.8 at its token counts (the plan records of the measurement)
+    measured_fields = {
+        ("wgrad", 4096, 12288, 4096): (742, 26, 52, 51),
+        ("wgrad", 4096, 12288, 16384): (742, 26, 52, 147),
+        ("wgrad", 17408, 5120, 12288): (636, 44, 88, 192),
+        ("wgrad", 5120, 17408, 4096): (1360, 0, 0, 64),
+        ("wgrad", 5120, 17408, 12288): (636, 44, 88, 192),
+        ("wgrad", 16384, 6144, 6208): (1484, 52, 103, 49),
+        ("wgrad", 16384, 6144, 8128): (1484, 52, 104, 64),
+        ("wgrad", 16384, 6144, 12288): (742, 26, 78, 64),
+        ("wgrad", 12288, 6144, 4096): (1152, 0, 0, 64),
+    }
+    for T in sorted(measured):
+        plan = plan_at(T, 212)
+        assert (
+            plan.num_full,
+            plan.tail_tiles,
+            plan.sk_units,
+            plan.iters_per_unit,
+        ) == measured_fields[(op, d_in, d_out, T)], (T, plan.template)
+    outside = {T for lo, hi, *_ in ranges for T in (lo - 1, hi + 1)}
+    outside -= {T for T in outside for lo, hi, *_ in ranges if lo <= T <= hi}
     for T in sorted(outside):
         assert plan_at(T, 212) == plan_without(T, 212), T
     for sm_count in (208, 216):
@@ -13636,7 +13845,8 @@ def test_sm107a_212_f32_ranges_plan_the_measured_rule(monkeypatch, key):
 
 
 class _Routing034Case(NamedTuple):
-    """A GPU case of a plan version 0.3.4 or 0.3.5 changed (``ROUTING_034_GPU_CASES``)."""
+    """A GPU case of a plan version 0.3.4 or 0.3.5 changed (``ROUTING_034_GPU_CASES``), or version 0.3.8
+    (``ROUTING_038_GPU_CASES``)."""
 
     op: str
     d_in: int
@@ -13647,9 +13857,42 @@ class _Routing034Case(NamedTuple):
     programs: dict
     #: only the listed device classes run the case (the plan changed there alone); else every supported device does
     scoped: bool = False
-    #: on a listed device class the output also equals, bit for bit, the output of the plan before
-    #: (``ROW_RULES_BY_SM`` and ``ROW_RULE_RANGES_BY_SM`` empty)
+    #: on a listed device class the output also equals, bit for bit, the output of the plan before (a case of version
+    #: 0.3.4 or 0.3.5: ``ROW_RULES_BY_SM`` and ``ROW_RULE_RANGES_BY_SM`` empty; of version 0.3.8: the part tables of
+    #: version 0.3.7, ``_pre_038_tables``)
     same_bits: bool = False
+
+
+def _vr212_gpu_case(op, d_in, d_out, T, version_037=False):
+    """The GPU case of a 212-SM sm_107a FP32 range at ``T`` tokens (with ``version_037`` a range of versions 0.3.5 -
+    0.3.7), else ``None``: run on that device class alone (every other class plans the row as before); the whole-tile
+    and half-height tail forms keep the bits of the plan before."""
+    ranged = _vr212_rule_at(op, d_in, d_out, T, version_037=version_037)
+    if ranged is None:
+        return None
+    program, form = ranged
+    return _Routing034Case(
+        op,
+        d_in,
+        d_out,
+        T,
+        "f32",
+        {("sm_107a", 212): program},
+        scoped=True,
+        same_bits=form in ("whole", "htail", "htail256"),
+    )
+
+
+def _vr212_gpu_cases(token_counts, version_037=False):
+    """The GPU cases of the 212-SM sm_107a FP32 ranges at ``token_counts``: each row at the token counts a range holds
+    (``_vr212_gpu_case``)."""
+    return tuple(
+        case
+        for op, d_in, d_out, *_ in SM107A_212_F32_RANGES.values()
+        for T in token_counts
+        for case in [_vr212_gpu_case(op, d_in, d_out, T, version_037)]
+        if case is not None
+    )
 
 
 # GPU cases of the plans versions 0.3.4 and 0.3.5 changed.  Every supported device runs the default plan of each case (judged
@@ -13674,12 +13917,10 @@ ROUTING_034_GPU_CASES = (
     # the floor of these rules at T 32768: run on the sm_100a parts alone (every other device class plans the rows
     # with its own, unchanged rules)
     *(_Routing034Case("wgrad", 5120, d_out, 32768, "bf16", _LONG_5120_GPU, scoped=True) for d_out in (64, 128)),
-    # the 212-SM sm_107a FP32 ranges at their measured token counts: run on that device class alone (every other class
-    # plans these rows as versions 0.3.3 and 0.3.4 did); the whole-tile and half-height tail forms keep the bits of the plan before
-    *(_Routing034Case(op, d_in, d_out, T, "f32", {("sm_107a", 212): program}, scoped=True,
-                      same_bits=form in ("whole", "htail"))
-      for op, d_in, d_out, ranges, program, form, _before in SM107A_212_F32_RANGES.values()
-      for T in (4096, 8192, 16172, 16231, 16384) if any(lo <= T <= hi for lo, hi, _ in ranges)),
+    # the 212-SM sm_107a FP32 ranges of version 0.3.5 at their measured token counts: run on that device class alone
+    # (every other class plans these rows as versions 0.3.3 and 0.3.4 did); the whole-tile and half-height tail forms
+    # keep the bits of the plan before
+    *_vr212_gpu_cases((4096, 8192, 16172, 16231, 16384), version_037=True),
 )
 # fmt: on
 
@@ -13698,6 +13939,25 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
     three more launches into NaN.  On a listed class a ``same_bits`` case also equals, bit for bit, the plan it had
     before (``ROW_RULES_BY_SM`` and ``ROW_RULE_RANGES_BY_SM`` empty): the FP32 input gradients of the 148-SM sm_100a
     part rules, and the whole-tile and half-height tail forms of the 212-SM sm_107a ranges."""
+
+    def before_tables(m):
+        m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+        m.setattr(cake_backend, "ROW_RULE_RANGES_BY_SM", {})
+
+    _run_routing_gpu_case(
+        case, monkeypatch, record_property, before_tables, "version 0.3.4 or 0.3.5"
+    )
+
+
+def _run_routing_gpu_case(
+    case, monkeypatch, record_property, before_tables, version, plan_changes=False, raster=False
+):
+    """The body of the routing GPU tests: ``case`` (a ``_Routing034Case``) on the device; ``before_tables(m)`` puts
+    the tables of the plan before in place (``m``: a monkeypatch context); ``version`` names the change in a skip.
+    With ``plan_changes``, or for a ``same_bits`` case, the device's plan on a listed device class also differs from
+    the plan of ``before_tables`` in a planned field (``_plan_signature``): the program, or the split of the same
+    program.  A ``same_bits`` case compares the output with that of another program, or with ``raster`` with that of
+    the same program in another raster group."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -13708,7 +13968,7 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
     arch, sm_count = arch_for(device), _sm_count()
     if scoped and (arch, sm_count) not in programs:
         pytest.skip(
-            f"a case of the device classes {sorted(programs)} alone, where version 0.3.4 or 0.3.5 changed the plan; this "
+            f"a case of the device classes {sorted(programs)} alone, where {version} changed the plan; this "
             f"device is {arch} with {sm_count} SMs"
         )
     odt = torch.float32 if out_dtype == "f32" else torch.bfloat16
@@ -13763,18 +14023,1100 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
         prepared.launch()
         torch.cuda.synchronize()
         assert torch.equal(out.view(bits), first.view(bits)), case
-    if same_bits and (arch, sm_count) in programs:
+    if (same_bits or plan_changes) and (arch, sm_count) in programs:
         before_out = torch.full_like(out, float("nan"))
         with monkeypatch.context() as m:
-            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
-            m.setattr(cake_backend, "ROW_RULE_RANGES_BY_SM", {})
+            before_tables(m)
             cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
             before = prepare(before_out)
-        assert before.template != prepared.template, before.template
-        before.launch()
-        torch.cuda.synchronize()
-        assert torch.equal(before_out.view(bits), first.view(bits)), case
+        # the plan of the device, not only its program: the three-way K split of the o_proj weight gradient at
+        # T 12288 runs the program of the plan before
+        assert _plan_signature(before.plan) != _plan_signature(prepared.plan), (
+            before.template,
+            prepared.template,
+        )
+        if same_bits:
+            if raster:
+                assert before.template == prepared.template, before.template
+                assert before.plan.group_m != prepared.plan.group_m, before.plan.group_m
+            else:
+                assert before.template != prepared.template, before.template
+            before.launch()
+            torch.cuda.synchronize()
+            assert torch.equal(before_out.view(bits), first.view(bits)), case
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# The promotion threshold of version 0.3.6: a BF16 weight-gradient plan whose longest segment holds more than
+# K1_PROMOTE_MIN_SEGMENT (128) K blocks runs the promoted twin of its program where the architecture registers it
+# ---------------------------------------------------------------------------
+
+#: The device classes of the CPU checks of the promotion threshold: (arch, SM count).
+LONG_SEGMENT_CLASSES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 208),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+    ("sm_107a", 224),
+)
+#: The rows of ``LONG_SEGMENT_MISSED_CELLS`` without a BF16 weight-gradient key in ``ROW_RULES``: (d_in, d_out).
+LONG_SEGMENT_RULELESS_ROWS = ((4096, 16), (4096, 96), (6144, 48), (6144, 64))
+#: The token counts of the promotion sweep: the measured token counts and, for each plan form, those whose longest
+#: segment holds 128 / 129, 192 / 193 and 256 / 257 K blocks (whole tiles: ``T / 64`` K blocks; two or three parts of
+#: a tile's K blocks; the synchronised split with a margin of 16 or 38 K steps: ``(T / 64 + margin) / 2``).
+# fmt: off
+LONG_SEGMENT_TOKENS = tuple(sorted(
+    {1001, 4096, 8192, 12288, 16172, 16231, 16384, 24576, 28672, 31744, 31745, 32768, 40960, 49152, 65536}
+    | {t for s in (128, 192, 256)
+       for edge in (64 * s, 128 * s, 192 * s, 128 * s - 64 * 16, 128 * s - 64 * 38)
+       for t in (edge, edge + 1)}
+))
+# fmt: on
+#: The BF16 weight-gradient cells that missed the naive BF16 tier on plans whose longest segment held 129 to 256 K
+#: blocks without promoted chunks (the threshold of versions up to 0.3.5), per device class: (arch, SM count) ->
+#: ``((d_in, d_out, T, seeds), ...)``: a row at one token count with the seeds it missed on, one cell per seed.  B200
+#: (a 148-SM sm_100a part), GB200 (a 152-SM sm_100a part), B300 (a 148-SM sm_103a part), GB300 (a 152-SM sm_103a part)
+#: and VR200 (a 212-SM sm_107a part): judged on ``SEED``, 758, 1, 2 and 3.  At the threshold of 128 K blocks every plan
+#: of these cells runs its promoted twin.
+# fmt: off
+LONG_SEGMENT_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)), (4096, 32, 31745, (SEED, 1)),
+        (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)), (4096, 48, 31745, (SEED, 1)),
+        (4096, 48, 32768, (SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (SEED,)), (4096, 96, 32768, (SEED,)),
+        (4096, 128, 31744, (SEED, 1, 2, 758)), (4096, 128, 32768, (SEED, 2, 3, 758)),
+        (5120, 32, 31744, (SEED, 1, 3)), (5120, 32, 31745, (1, 2)), (5120, 32, 32768, (SEED, 1)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (1, 2, 3, 758)), (5120, 48, 31745, (1,)),
+        (5120, 48, 32768, (SEED, 1, 2, 3, 758)),
+        (5120, 64, 16231, (SEED,)), (5120, 64, 16384, (3,)),
+        (5120, 128, 13312, (SEED,)), (5120, 128, 15361, (758,)), (5120, 128, 16172, (1,)), (5120, 128, 16231, (758,)),
+        (5120, 128, 16383, (758,)), (5120, 128, 16384, (SEED,)),
+        (6144, 32, 13312, (SEED,)), (6144, 32, 15360, (SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (SEED, 3)),
+    ),
+    ("sm_100a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (SEED, 758)),
+        (4096, 32, 31744, (SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (SEED, 3)),
+        (4096, 64, 31744, (SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)), (4096, 64, 32768, (SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (SEED, 3, 758)), (4096, 128, 31745, (SEED, 2)), (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 31744, (SEED, 1, 3, 758)), (5120, 32, 32768, (3, 758)),
+        (5120, 48, 32768, (3,)),
+        (5120, 64, 14336, (758,)), (5120, 64, 15360, (2,)), (5120, 64, 15361, (1, 3)), (5120, 64, 16172, (3,)),
+        (5120, 64, 16231, (1,)),
+        (5120, 128, 12288, (3,)), (5120, 128, 16172, (758,)), (5120, 128, 16231, (758,)), (5120, 128, 16383, (1, 2, 3)),
+        (5120, 128, 16384, (2,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (SEED,)), (6144, 128, 16231, (SEED,)), (6144, 128, 16384, (SEED,)),
+    ),
+    ("sm_103a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)), (4096, 32, 31745, (SEED, 1)),
+        (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)), (4096, 48, 31745, (SEED, 1)),
+        (4096, 48, 32768, (SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (SEED,)), (4096, 96, 32768, (SEED,)),
+        (4096, 128, 31744, (SEED, 1, 2, 758)), (4096, 128, 32768, (SEED, 2, 3, 758)),
+        (5120, 32, 31744, (SEED, 1, 3, 758)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (3,)),
+        (5120, 64, 31744, (SEED, 2, 3, 758)),
+        (6144, 32, 13312, (SEED,)), (6144, 32, 15360, (SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (SEED, 3)),
+    ),
+    ("sm_103a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (SEED, 758)),
+        (4096, 32, 31744, (SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (SEED, 3)),
+        (4096, 64, 31744, (SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)), (4096, 64, 32768, (SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (SEED, 3, 758)), (4096, 128, 31745, (SEED, 2)), (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 23553, (3,)), (5120, 32, 31744, (SEED, 1, 758)),
+        (5120, 48, 15361, (SEED,)), (5120, 48, 28672, (1,)), (5120, 48, 31744, (SEED, 1, 2, 3, 758)),
+        (5120, 64, 31744, (1,)),
+        (5120, 128, 12288, (3,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (SEED,)), (6144, 128, 16231, (SEED,)), (6144, 128, 16384, (SEED,)),
+    ),
+    ("sm_107a", 212): (
+        (4096, 16, 31744, (3,)), (4096, 16, 31745, (2, 3)), (4096, 16, 32768, (758,)),
+        (4096, 32, 40960, (2,)),
+        (4096, 96, 31744, (2,)), (4096, 96, 31745, (1, 2)), (4096, 96, 32768, (2, 758)),
+        (4096, 512, 16172, (1,)), (4096, 512, 16231, (3,)),
+        (5120, 32, 31744, (SEED, 3)), (5120, 32, 31745, (SEED, 3)), (5120, 32, 32768, (SEED, 2)),
+        (5120, 48, 31744, (2, 3)), (5120, 48, 31745, (SEED, 758)), (5120, 48, 32768, (1, 2, 758)),
+        (5120, 64, 31744, (2,)), (5120, 64, 31745, (2, 3)), (5120, 64, 32768, (3, 758)),
+        (5120, 128, 31744, (SEED, 2, 758)), (5120, 128, 31745, (1,)), (5120, 128, 32768, (SEED, 1, 2, 3, 758)),
+        (6144, 32, 40960, (2,)), (6144, 32, 49152, (758,)),
+        (6144, 48, 31744, (2, 3, 758)), (6144, 48, 32768, (2, 3, 758)),
+        (6144, 64, 28672, (SEED,)), (6144, 64, 31744, (2, 758)), (6144, 64, 31745, (1, 3)), (6144, 64, 32768, (1, 3)),
+        (6144, 128, 31745, (1, 2)), (6144, 128, 32768, (SEED, 758)),
+        (8192, 128, 31744, (3, 758)), (8192, 128, 31745, (1,)),
+    ),
+}
+# fmt: on
+#: The L2 size of the part each class of ``LONG_SEGMENT_MISSED_CELLS`` was measured on (the hint gate of a plan reads
+#: it): (arch, SM count) -> bytes.
+LONG_SEGMENT_L2_BYTES = {
+    ("sm_100a", 148): 132644864,
+    ("sm_100a", 152): 135528448,
+    ("sm_103a", 148): 132644864,
+    ("sm_103a", 152): 135528448,
+    ("sm_107a", 212): 132120576,
+}
+
+
+def _long_segment_rows():
+    """``(d_in, d_out)`` of the BF16 weight gradients the promotion checks plan: every unbatched BF16 weight-gradient
+    key of ``ROW_RULES`` (either orientation, every architecture; the projection rows among them) and the rows of
+    ``LONG_SEGMENT_RULELESS_ROWS``."""
+    rows = set(LONG_SEGMENT_RULELESS_ROWS)
+    for _arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M in ROW_RULES:
+        if a_mn and b_mn and not out_f32 and not batched and K is None:
+            # a swapped key names (d_out, None, d_in), a direct one (d_in, None, d_out)
+            rows.add((M, N) if out_t else (N, M))
+    return tuple(sorted(rows))
+
+
+def _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes=L2_BYTES, t_max=65536):
+    """``plan_at(T, **knobs)``: the planner's plan (with the registry fallback) of the ``d_in -> d_out`` BF16 weight
+    gradient at ``T <= t_max`` tokens on a part of ``arch`` with ``sm_count`` SMs, in the orientation of
+    ``wgrad_views`` (CPU views of one buffer per operand, nothing launched)."""
+    G = torch.empty(t_max, d_out, dtype=torch.bfloat16)
+    X = torch.empty(t_max, d_in, dtype=torch.bfloat16)
+    out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+
+    def plan_at(T, **knobs):
+        A, B, transposed = wgrad_views(G[:T], X[:T], arch=arch)
+        return cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            out,
+            sm_count=sm_count,
+            l2_bytes=l2_bytes,
+            transposed_out=transposed,
+            arch=arch,
+            **knobs,
+        )[0]
+
+    return plan_at
+
+
+def _segment_edge(plan_at, threshold, lo=1024, hi=65536):
+    """The token count ``T`` in ``[lo, hi)`` whose plan without promotion (``promote=False``) holds a longest segment of
+    at most ``threshold`` K blocks while the plan at ``T + 1`` holds more (bisection), else ``None`` (no plan up to
+    ``hi`` tokens holds more)."""
+
+    def long(T):
+        return cake_backend.segment_blocks(plan_at(T, promote=False)) > threshold
+
+    if not long(hi):
+        return None
+    assert not long(lo), lo
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if long(mid):
+            hi = mid
+        else:
+            lo = mid
+    return lo
+
+
+def _registered_twin(arch, plan, registered):
+    """The promoted twin of the program of ``plan`` (a plan without promotion) where ``arch`` registers it (a template
+    of ``registered``) and the row is no row of ``K1_PROMOTE_EXEMPT_ROWS``, else ``None``."""
+    twin = _twin_of(plan.template)
+    if (
+        twin == plan.template
+        or twin not in registered
+        or cake_backend._promote_exempt(arch, plan)
+    ):
+        return None
+    return twin
+
+
+def _twin_refusal(arch, plan, twin):
+    """Why the plan ``plan`` (without promotion) cannot run on its promoted twin ``twin`` (the stream-K contract,
+    ``check_stream_k_plan``), ``""`` where it can."""
+    try:
+        check_stream_k_plan(
+            dataclasses.replace(
+                plan, template=twin, promote_blocks=cake_backend.K1_PROMOTE_BLOCKS
+            ),
+            arch,
+        )
+    except ValueError as error:
+        return str(error)
+    return ""
+
+
+def test_promotion_threshold_edges_plan_the_twin():
+    """At ``K1_PROMOTE_MIN_SEGMENT`` (128 K blocks), for each BF16 weight gradient of ``_long_segment_rows`` on each
+    class of ``LONG_SEGMENT_CLASSES``: at the token count ``T`` whose plan's longest segment holds at most 128 K blocks
+    while the plan at ``T + 1`` holds more (``_segment_edge``), the plan at ``T`` is the plan without promotion, and at
+    ``T + 1`` a program whose promoted twin the architecture registers (outside ``K1_PROMOTE_EXEMPT_ROWS``) runs the
+    twin, every other plan field the plan's without promotion; a program without a registered twin keeps its plan.
+    Every class has such edges of registered twins."""
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    assert threshold == cake_backend.K1_PROMOTE_BLOCKS == 128
+    rows = _long_segment_rows()
+    assert set(PROJECTION_ROWS.values()) <= set(rows)
+    for arch, sm_count in LONG_SEGMENT_CLASSES:
+        registered = _registered(arch)
+        twins = set()
+        for d_in, d_out in rows:
+            plan_at = _long_segment_planner(arch, sm_count, d_in, d_out)
+            T = _segment_edge(plan_at, threshold)
+            if T is None:
+                continue
+            where = (arch, sm_count, d_in, d_out, T)
+            short = plan_at(T)
+            assert short == plan_at(T, promote=False), (where, short.template)
+            assert cake_backend.segment_blocks(short) <= threshold, where
+            plan, plain = plan_at(T + 1), plan_at(T + 1, promote=False)
+            assert cake_backend.segment_blocks(plain) > threshold, where
+            twin = _registered_twin(arch, plain, registered)
+            if twin is None:
+                assert plan == plain, (where, plan.template)
+                continue
+            assert (plan.template, plan.promote_blocks) == (
+                twin,
+                cake_backend.K1_PROMOTE_BLOCKS,
+            ), (where, plan.template, _twin_refusal(arch, plain, twin))
+            assert (
+                dataclasses.replace(plan, template=plain.template, promote_blocks=0)
+                == plain
+            ), where
+            twins.add(twin)
+        assert twins, (arch, sm_count)
+        print(f"PROMOTION_EDGES {arch} sm_count={sm_count}: {sorted(twins)}")
+
+
+def test_promotion_threshold_sweep_promotes_exactly_the_long_segments():
+    """Over the BF16 weight gradients of ``_long_segment_rows`` at ``LONG_SEGMENT_TOKENS`` on each class of
+    ``LONG_SEGMENT_CLASSES``: a plan whose program has a promoted twin the architecture registers (outside
+    ``K1_PROMOTE_EXEMPT_ROWS``) runs the twin exactly where its longest segment holds more than
+    ``K1_PROMOTE_MIN_SEGMENT`` K blocks, every other plan field the plan's without promotion; a plan whose program has
+    no registered twin keeps its program at any length.  Every class sweeps plans of each kind: promoted, a program
+    with a registered twin at a segment of at most 128 K blocks, and a program without one."""
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    for arch, sm_count in LONG_SEGMENT_CLASSES:
+        registered = _registered(arch)
+        seen = {"promoted": 0, "short": 0, "no_twin": 0}
+        for d_in, d_out in _long_segment_rows():
+            plan_at = _long_segment_planner(arch, sm_count, d_in, d_out)
+            for T in LONG_SEGMENT_TOKENS:
+                plan = plan_at(T)
+                segment = cake_backend.segment_blocks(plan)
+                where = (arch, sm_count, d_in, d_out, T, plan.template, segment)
+                if plan.promote_blocks:
+                    plain = plan_at(T, promote=False)
+                    assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, where
+                    twin = _registered_twin(arch, plain, registered)
+                    assert plan.template == twin, where
+                    assert (
+                        dataclasses.replace(
+                            plan, template=plain.template, promote_blocks=0
+                        )
+                        == plain
+                    ), where
+                    assert segment > threshold, where
+                    seen["promoted"] += 1
+                    continue
+                twin = _registered_twin(arch, plan, registered)
+                if twin is None:
+                    seen["no_twin"] += 1
+                    continue
+                assert segment <= threshold, (*where, _twin_refusal(arch, plan, twin))
+                seen["short"] += 1
+        assert all(seen.values()), (arch, sm_count, seen)
+        print(f"PROMOTION_SWEEP {arch} sm_count={sm_count}: {seen}")
+
+
+def test_long_segment_missed_cells_plan_the_promoted_twin():
+    """Each cell of ``LONG_SEGMENT_MISSED_CELLS``, planned for its class with the L2 of the part it was measured on
+    (``LONG_SEGMENT_L2_BYTES``): the plan without promotion holds a longest segment of more than
+    ``K1_PROMOTE_MIN_SEGMENT`` K blocks, and the plan runs the promoted twin of its program, a twin the architecture
+    registers, every other plan field the plan's without promotion."""
+    assert set(LONG_SEGMENT_MISSED_CELLS) == set(LONG_SEGMENT_L2_BYTES)
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    for (arch, sm_count), cells in LONG_SEGMENT_MISSED_CELLS.items():
+        registered = _registered(arch)
+        l2_bytes = LONG_SEGMENT_L2_BYTES[(arch, sm_count)]
+        for d_in, d_out, T, _seeds in cells:
+            plan_at = _long_segment_planner(
+                arch, sm_count, d_in, d_out, l2_bytes=l2_bytes, t_max=T
+            )
+            plan, plain = plan_at(T), plan_at(T, promote=False)
+            segment = cake_backend.segment_blocks(plain)
+            where = (arch, sm_count, d_in, d_out, T, plain.template, segment)
+            assert segment > threshold, where
+            twin = _registered_twin(arch, plain, registered)
+            assert twin is not None, where
+            assert (plan.template, plan.promote_blocks) == (
+                twin,
+                cake_backend.K1_PROMOTE_BLOCKS,
+            ), (where, plan.template, _twin_refusal(arch, plain, twin))
+            assert (
+                dataclasses.replace(plan, template=plain.template, promote_blocks=0)
+                == plain
+            ), where
+
+
+def _long_segment_gpu_cases(arch, sm_count, l2_bytes):
+    """The cases of ``test_gpu_long_segment_wgrad_rows_meet_the_naive_tier`` on a part of ``arch`` with ``sm_count``
+    SMs, ``(d_in, d_out, T, seeds)``: the cells of ``LONG_SEGMENT_MISSED_CELLS`` of the class, and for each promoted
+    twin the class runs at the threshold's edge (``_segment_edge``), on the first row of ``_long_segment_rows`` that
+    does, three token counts on ``SEED``: the edge (a longest segment of at most 128 K blocks), the next token
+    count (more than 128) and the last token count whose plan's longest segment holds at most 256 K blocks (the
+    longest segment without promoted chunks up to version 0.3.5)."""
+    cases = list(LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ()))
+    forms = set()
+    for d_in, d_out in _long_segment_rows():
+        plan_at = _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes=l2_bytes)
+        T = _segment_edge(plan_at, cake_backend.K1_PROMOTE_MIN_SEGMENT)
+        if T is None:
+            continue
+        edge = plan_at(T + 1)
+        if not edge.promote_blocks or edge.template in forms:
+            continue
+        forms.add(edge.template)
+        top = _segment_edge(plan_at, 256)
+        cases += [(d_in, d_out, t, (SEED,)) for t in (T, T + 1, top) if t is not None]
+    return cases
+
+
+def _long_segment_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` weight gradient at ``T`` tokens
+    from ``seed``, drawn as :func:`_make_inputs` draws a projection row: ``X``, the weight ``[d_out, d_in]`` scaled by
+    ``d_in ** -0.5`` (drawn for the order of the generator alone), then ``G``, each standard normal."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, G
+
+
+def _judge_long_segment_wgrad(record_property, name, launch, X, G, out, seed):
+    """Judge the weight gradient ``out [d_out, d_in]`` that ``launch()`` writes from the operands ``X [T, d_in]`` and
+    ``G [T, d_out]`` it is bound to against the naive BF16 tier over the draws of ``seed`` (:func:`judge_gemm`): each
+    draw's operands (:func:`_long_segment_operands`) written in place and ``out`` filled with NaN; the oracle and the
+    tier in the orientation of :func:`_d2_product` (``wgrad_views`` without an architecture: ``X.T @ G`` against
+    ``out.T`` where it swaps)."""
+    (T, d_in), d_out = X.shape, G.shape[1]
+    A, B, transposed = wgrad_views(G, X)
+
+    def draw(s):
+        operands = _long_segment_operands(T, d_in, d_out, s, X.device)
+        for dst, src in zip((X, G), operands, strict=True):
+            dst.copy_(src)
+        nan_fill([out])
+        return SimpleNamespace(A=A, B=B)
+
+    def run(_inputs):
+        launch()
+        torch.cuda.synchronize()
+        return {name: out.t() if transposed else out}
+
+    def product(v, dtype):
+        return {name: torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+
+
+def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
+    """On the device's class, each case of ``_long_segment_gpu_cases`` (the cells of ``LONG_SEGMENT_MISSED_CELLS`` and
+    three token counts around the threshold per promoted twin) runs the default plan of the weight-gradient entry: the
+    promoted twin exactly where the plan's longest segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the
+    architecture registers the twin (every missed cell does).  The output is judged against the FP64 oracle beside the
+    naive BF16 tier over the draws of each listed seed (:func:`_judge_long_segment_wgrad`); every failing cell is
+    reported.  A class without such cases skips."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch, sm_count = arch_for(device), _sm_count()
+    cases = _long_segment_gpu_cases(arch, sm_count, _l2_bytes())
+    if not cases:
+        pytest.skip(
+            f"no promoted weight-gradient twin at the threshold on {arch} with {sm_count} SMs"
+        )
+    missed = {case[:3] for case in LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ())}
+    failures = []
+    for d_in, d_out, T, seeds in cases:
+        cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        prepared = cake_dense_gemm_det_train_projection_wgrad_prepare(G, X, out)
+        plan = prepared.plan
+        segment = cake_backend.segment_blocks(plan)
+        where = (arch, sm_count, d_in, d_out, T, prepared.template, segment)
+        plain = prepared.template.replace(f"_kc{cake_backend.K1_PROMOTE_BLOCKS}", "")
+        assert prepared.template == _promoted(arch, plan, plain), where
+        assert (d_in, d_out, T) not in missed or plan.promote_blocks, where
+        for seed in seeds:
+            try:
+                _judge_long_segment_wgrad(
+                    record_property,
+                    f"wgrad_{d_in}x{d_out}_t{T}_s{seed}",
+                    prepared.launch,
+                    X,
+                    G,
+                    out,
+                    seed,
+                )
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+    print(f"LONG_SEGMENT_WGRAD {arch} sm_count={sm_count}: {len(cases)} cases")
+    assert not failures, "\n".join(failures)
+
+
+# ---------------------------------------------------------------------------
+# The K-major rows of version 0.3.7: the BF16 forward and input-gradient rows with K > 8192 at small token counts plan
+# a split of the tail's K steps into three or four units per tail tile, or the 128-row program without the row's
+# rule, below a token floor (ROW_RULE_MIN_T, every part of sm_100a and sm_103a) and in token ranges of the 212-SM
+# sm_107a part (ROW_RULE_RANGES_BY_SM)
+# ---------------------------------------------------------------------------
+
+#: The token tiers of version 0.3.7 (cake_backend.ROW_RULE_MIN_T): ragged key -> ((bound, rule), ...).  sm_103a reads
+#: the sm_100a tiers of the rows it has no ``ROW_RULES`` key for (``RULE_PARENT``): the o_proj and dense_down forwards
+#: and the q_b and dense_gate_up input gradients.
+# fmt: off
+_K_SPLIT3 = {"pro": 7, "sk_parts": 3}
+_K_SPLIT4 = {"pro": 7, "sk_parts": 4}
+_K_PLAIN = {"pro": 7}
+K_MAJOR_TIERS = {
+    ("sm_100a", False, False, False, False, False, 4096, 12288, None): ((257, _K_SPLIT3), (1025, {"cgrp": True, "pro": 7, "group_m": 8})),
+    ("sm_100a", False, False, False, False, False, 5120, 17408, None): ((257, _K_SPLIT3), (769, {"cgrp": True, "pro": 7, "group_m": 8})),
+    ("sm_100a", False, False, False, False, False, 6144, 16384, None): ((769, _K_PLAIN),),
+    ("sm_100a", False, False, False, False, False, 6144, 12288, None): ((257, _K_SPLIT3), (769, _K_PLAIN)),
+    ("sm_100a", False, True, False, False, False, 2048, 16384, None): ((513, _K_SPLIT4), (2049, _K_PLAIN)),
+    ("sm_100a", False, True, False, False, False, 4096, 12288, None): ((257, _K_SPLIT3), (1025, _K_PLAIN)),
+    ("sm_100a", False, True, False, False, False, 5120, 17408, None): ((257, _K_SPLIT3), (769, _K_PLAIN)),
+    ("sm_100a", False, True, False, False, False, 6144, 12288, None): ((257, _K_SPLIT3), (769, _K_PLAIN)),
+    ("sm_103a", False, False, False, False, False, 4096, 12288, None): ((257, _K_SPLIT3), (1025, {"cgrp": True, "pro": 7, "group_m": 16})),
+    ("sm_103a", False, False, False, False, False, 5120, 17408, None): ((257, _K_SPLIT3), (769, {"cgrp": True, "pro": 7, "group_m": 8})),
+    ("sm_103a", False, True, False, False, False, 4096, 12288, None): ((257, _K_SPLIT3), (1025, _K_PLAIN)),
+    ("sm_103a", False, True, False, False, False, 5120, 17408, None): ((257, _K_SPLIT3), (769, _K_PLAIN)),
+}
+#: The BF16 token ranges of the 212-SM sm_107a part of version 0.3.7 (cake_backend.ROW_RULE_RANGES_BY_SM): ragged key
+#: -> ((lo, hi, rule), ...).  The 17408 -> 5120 forward and the 5120 -> 17408 input gradient have no ``ROW_RULES`` key
+#: on sm_107a: their range key is the ragged key all the same.
+K_MAJOR_RANGES_212 = {
+    ("sm_107a", False, False, False, False, False, 6144, 16384, None): ((1, 256, {"pro": 15, "sk_parts": 4}), (257, 1024, {"cgrp": True, "pro": 15, "group_m": 8})),
+    ("sm_107a", False, False, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 15, "sk_parts": 4}),),
+    ("sm_107a", False, True, False, False, False, 5120, 17408, None): ((16, 256, _K_SPLIT4),),
+    ("sm_107a", False, True, False, False, False, 4096, 12288, None): ((1, 256, _K_SPLIT4),),
+}
+#: The ranged keys without a ``ROW_RULES`` entry.
+K_MAJOR_RULELESS_212 = frozenset(
+    ("sm_107a", False, b_mn, False, False, False, 5120, 17408, None) for b_mn in (False, True)
+)
+#: The measured plans of each band: key -> (the device classes measured, ((lo, hi, program, {longest segment in K
+#: blocks: the measured token counts}), ...)).  Every measured class of a key planned the same program and segment at
+#: each measured token count, with the band's rule injected as an exact ``ROW_RULES`` key of the row at that count.
+#: GB200 (a 152-SM sm_100a part) was measured after the bounds were set, at the token counts of B200.
+_KK_PRO7 = "dense_proj_det_gemm_kk_n256_pro7"
+_KK_CG_PRO7 = "dense_proj_det_gemm_kk_n256_cg_pro7"
+_KN_PRO7 = "dense_proj_det_gemm_kn_n256_pro7"
+_KK_PRO15 = "dense_proj_det_gemm_kk_n256_pro15"
+_KK_CG_PRO15 = "dense_proj_det_gemm_kk_n256_cg_pro15"
+_SMALL_T = (1, 16, 33, 64, 97, 128, 129, 192, 256)
+_B200 = (("sm_100a", 148),)
+_B200_GB200 = _B200 + (("sm_100a", 152),)
+_B300_GB300 = (("sm_103a", 148), ("sm_103a", 152))
+_GB_ALL = _B200_GB200 + _B300_GB300
+_VR200 = (("sm_107a", 212),)
+K_MAJOR_BAND_PLANS = {
+    ("sm_100a", False, False, False, False, False, 4096, 12288, None): (_B200_GB200, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_100a", False, False, False, False, False, 5120, 17408, None): (_B200_GB200, ((1, 256, _KK_PRO7, {91: _SMALL_T}), (257, 768, _KK_CG_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_100a", False, False, False, False, False, 6144, 16384, None): (_GB_ALL, ((1, 768, _KK_PRO7, {128: _SMALL_T, 256: (257, 384, 512, 640, 768)}),)),
+    ("sm_100a", False, False, False, False, False, 6144, 12288, None): (_GB_ALL, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 768, _KK_PRO7, {192: (257, 384, 512, 768)}))),
+    ("sm_100a", False, True, False, False, False, 2048, 16384, None): (_GB_ALL, ((1, 512, _KN_PRO7, {64: (*_SMALL_T, 257, 384, 512)}), (513, 2048, _KN_PRO7, {128: (513, 768, 769, 1001, 1024), 256: (1536, 2048)}))),
+    ("sm_100a", False, True, False, False, False, 4096, 12288, None): (_B200_GB200, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 1024, _KN_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_100a", False, True, False, False, False, 5120, 17408, None): (_B200_GB200, ((1, 256, _KN_PRO7, {91: _SMALL_T}), (257, 768, _KN_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_100a", False, True, False, False, False, 6144, 12288, None): (_GB_ALL, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 768, _KN_PRO7, {192: (257, 384, 512, 768)}))),
+    ("sm_103a", False, False, False, False, False, 4096, 12288, None): (_B300_GB300, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_103a", False, False, False, False, False, 5120, 17408, None): (_B300_GB300, ((1, 256, _KK_PRO7, {91: _SMALL_T}), (257, 768, _KK_CG_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_103a", False, True, False, False, False, 4096, 12288, None): (_B300_GB300, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 1024, _KN_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_103a", False, True, False, False, False, 5120, 17408, None): (_B300_GB300, ((1, 256, _KN_PRO7, {91: _SMALL_T}), (257, 768, _KN_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_107a", False, False, False, False, False, 6144, 16384, None): (_VR200, ((1, 256, _KK_PRO15, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO15, {128: (257, 384, 512), 256: (513, 768, 769, 1001, 1024)}))),
+    ("sm_107a", False, False, False, False, False, 5120, 17408, None): (_VR200, ((16, 256, _KK_PRO15, {68: _SMALL_T[1:]}),)),
+    ("sm_107a", False, True, False, False, False, 5120, 17408, None): (_VR200, ((16, 256, _KN_PRO7, {68: _SMALL_T[1:]}),)),
+    ("sm_107a", False, True, False, False, False, 4096, 12288, None): (_VR200, ((1, 256, _KN_PRO7, {48: _SMALL_T}),)),
+}
+#: The cells the plans of version 0.3.6 missed the naive BF16 tier on (judged on ``SEED``, 758, 1, 2 and 3, 32 draws
+#: each), per device class: (arch, SM count) -> ``((op, d_in, d_out, T, seeds), ...)``: a row at one token count with
+#: the seeds it missed on, one cell per seed.  B200 (a 148-SM sm_100a part): 49 cells, B300 (a 148-SM sm_103a part): 47,
+#: GB300 (a 152-SM sm_103a part): 35, GB200 (a 152-SM sm_100a part): the same 35, VR200 (a 212-SM sm_107a part): 4.
+#: Those plans summed 192 to 272 K blocks of a tile in one FP32 accumulator there; the plans of version 0.3.7 hold at
+#: most 128.
+K_MAJOR_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (SEED, 758)), ("dgrad", 2048, 16384, 1, (SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (1, 2, 758)), ("dgrad", 2048, 16384, 384, (1, 2)),
+        ("dgrad", 2048, 16384, 513, (2,)), ("dgrad", 5120, 17408, 1, (2,)), ("dgrad", 5120, 17408, 16, (SEED, 1, 2)),
+        ("dgrad", 5120, 17408, 64, (SEED,)), ("dgrad", 5120, 17408, 97, (SEED,)), ("dgrad", 5120, 17408, 128, (SEED,)),
+        ("dgrad", 5120, 17408, 129, (SEED,)), ("dgrad", 5120, 17408, 192, (SEED,)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_100a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (SEED, 758)), ("dgrad", 2048, 16384, 1, (SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (2,)), ("dgrad", 2048, 16384, 384, (1, 2)), ("dgrad", 2048, 16384, 513, (2,)),
+        ("dgrad", 5120, 17408, 1, (2,)), ("dgrad", 5120, 17408, 16, (SEED, 1, 2)), ("dgrad", 5120, 17408, 64, (SEED,)),
+        ("dgrad", 5120, 17408, 97, (SEED,)), ("dgrad", 5120, 17408, 128, (SEED,)), ("dgrad", 5120, 17408, 129, (SEED,)),
+        ("dgrad", 5120, 17408, 192, (SEED,)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_107a", 212): (
+        ("fwd", 16384, 6144, 16, (SEED,)), ("fwd", 16384, 6144, 33, (1,)), ("dgrad", 4096, 12288, 1, (1,)),
+        ("dgrad", 4096, 12288, 64, (758,)),
+    ),
+}
+#: The device classes of the CPU checks: (arch, SM count).
+K_MAJOR_CLASSES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 208),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+    ("sm_107a", 224),
+)
+#: The token counts of the routing sweep: the band ends and the token counts around them.
+K_MAJOR_SWEEP_TOKENS = (1, 2, 16, 33, 128, 129, 256, 257, 512, 513, 768, 769, 1024, 1025, 1536, 1537, 2048, 2049, 4096)
+# fmt: on
+
+
+def _k_major_row(key):
+    """``(op, d_in, d_out)`` of a K-major ragged key: a forward ``(N, K) = (d_out, d_in)``, an input gradient
+    ``(N, K) = (d_in, d_out)``."""
+    _arch, _a_mn, b_mn, _f32, _out_t, _batched, N, K, _M = key
+    return ("dgrad", N, K) if b_mn else ("fwd", K, N)
+
+
+def _k_major_key(arch, op, d_in, d_out):
+    """The ragged BF16 key of the ``d_in -> d_out`` forward or input gradient on ``arch``."""
+    if op == "fwd":
+        return (arch, False, False, False, False, False, d_out, d_in, None)
+    return (arch, False, True, False, False, False, d_in, d_out, None)
+
+
+#: The rows of the K-major tables: (op, d_in, d_out).
+K_MAJOR_ROWS = tuple(sorted({_k_major_row(key) for key in K_MAJOR_BAND_PLANS}))
+
+
+def _k_major_rules(key):
+    """The bands of a K-major key, ``((lo, hi, rule), ...)``: its tiers as inclusive token ranges, or its ranges."""
+    if key in K_MAJOR_RANGES_212:
+        return K_MAJOR_RANGES_212[key]
+    bands, lo = [], 1
+    for bound, rule in K_MAJOR_TIERS[key]:
+        bands.append((lo, bound - 1, rule))
+        lo = bound
+    return tuple(bands)
+
+
+def _k_major_band(arch, sm_count, op, d_in, d_out, T):
+    """``(key, lo, hi, rule, program)`` of the K-major band that plans the row at ``T`` tokens on a part of ``arch``
+    with ``sm_count`` SMs, else ``None``: a tier of the architecture's key (sm_103a: the sm_100a key of a row it has
+    no key of its own for) on every part of sm_100a and sm_103a, a range on the 212-SM sm_107a part alone."""
+    key = _k_major_key(arch, op, d_in, d_out)
+    if arch == "sm_107a":
+        if sm_count != 212 or key not in K_MAJOR_RANGES_212:
+            return None
+    elif key not in K_MAJOR_TIERS:
+        if arch != "sm_103a" or key in ROW_RULES:
+            return None
+        key = ("sm_100a",) + key[1:]
+        if key not in K_MAJOR_TIERS:
+            return None
+    for (lo, hi, rule), (b_lo, b_hi, program, _segments) in zip(
+        _k_major_rules(key), K_MAJOR_BAND_PLANS[key][1], strict=True
+    ):
+        assert (lo, hi) == (b_lo, b_hi), key
+        if lo <= T <= hi:
+            return key, lo, hi, rule, program
+    return None
+
+
+def _k_major_classes(key):
+    """The device classes whose plans the K-major entry ``key`` sets: every class of its architecture in
+    ``K_MAJOR_CLASSES`` (with the sm_103a classes for an sm_100a key sm_103a reads), the 212-SM part for a range."""
+    op, d_in, d_out = _k_major_row(key)
+    return tuple(
+        (arch, sm_count)
+        for arch, sm_count in K_MAJOR_CLASSES
+        if (band := _k_major_band(arch, sm_count, op, d_in, d_out, _k_major_rules(key)[0][0]))
+        is not None
+        and band[0] == key
+    )
+
+
+def _k_major_segments(segments):
+    """``{T: longest segment}`` of a band's ``{segment: token counts}``."""
+    return {T: segment for segment, tokens in segments.items() for T in tokens}
+
+
+def _k_major_plan(op, arch, sm_count, d_in, d_out, T, out_dtype="bf16"):
+    """The planner's plan (with the registry fallback) of the ``d_in -> d_out`` forward (``X[T, d_in] @
+    W[d_out, d_in].T``) or input gradient (``G[T, d_out] @ W[d_out, d_in]``) at ``T`` tokens on a part of ``arch`` with
+    ``sm_count`` SMs (CPU views, nothing launched)."""
+    bf16 = torch.bfloat16
+    odt = torch.float32 if out_dtype == "f32" else bf16
+    W = torch.empty(d_out, d_in, dtype=bf16)
+    if op == "fwd":
+        A, B, out = torch.empty(T, d_in, dtype=bf16), W.t(), torch.empty(T, d_out, dtype=odt)
+    else:
+        A, B, out = torch.empty(T, d_out, dtype=bf16), W, torch.empty(T, d_in, dtype=odt)
+    return cake_dense_gemm_det_train_projection_plan(
+        A, B, out, sm_count=sm_count, l2_bytes=L2_BYTES, arch=arch
+    )[0]
+
+
+def _k_major_tail(plan, rule):
+    """``(form, (num_full, tail_tiles, sk_units, iters_per_unit))`` of the tail policy of ``rule`` on the plan's tiles
+    (``stream_k_plan``): ``parts:<p>`` where the rule's ``sk_parts`` split is admitted, else the launcher's ``auto``
+    policy: ``auto`` (the two-way split of a single partial wave) or ``none`` (whole tiles)."""
+    pairs, k_blocks, tiles = plan.sm_pairs, plan.k_blocks, plan.pair_tiles
+    parts = rule.get("sk_parts")
+    sk, max_units = sk_parts_plan(tiles, k_blocks, pairs, parts) if parts else ("auto", None)
+    fields = stream_k_plan(tiles, k_blocks, pairs, sk, max_units)
+    form = f"parts:{parts}" if sk is True else ("auto" if fields[2] else "none")
+    return form, fields
+
+
+def _pre_037_tables(m):
+    """Put the tables of version 0.3.6 in place (``m``: a monkeypatch context): no K-major tier, no K-major range."""
+    for key in K_MAJOR_TIERS:
+        m.delitem(cake_backend.ROW_RULE_MIN_T, key)
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
+    m.setitem(
+        cake_backend.ROW_RULE_RANGES_BY_SM,
+        ("sm_107a", 212),
+        {key: ranges for key, ranges in part.items() if key not in K_MAJOR_RANGES_212},
+    )
+
+
+def test_k_major_tier_and_range_tables():
+    """The K-major entries of version 0.3.7: ``ROW_RULE_MIN_T`` holds ``K_MAJOR_TIERS`` and the 212-SM sm_107a part of
+    ``ROW_RULE_RANGES_BY_SM`` the BF16 ranges ``K_MAJOR_RANGES_212``; every key is a ragged BF16 key of a forward (both
+    operands K-major) or input gradient with K > 8192, unbatched, with the row's ``ROW_RULES`` entry (the tiers apply
+    only under one; the 17408 -> 5120 forward and 5120 -> 17408 input gradient of sm_107a have none), tiers sorted by
+    bound, ranges sorted, disjoint and inclusive; no exact ``ROW_RULES`` key of a row at a token count of its bands
+    (such a key would win); the measured bands of ``K_MAJOR_BAND_PLANS`` are the bands of the tables, each program
+    registered on the architecture (and on sm_103a for an sm_100a key it reads).  sm_103a reads the sm_100a tiers of
+    the o_proj and dense_down forwards and of the q_b and dense_gate_up input gradients.  ``_measured_row_rule`` reads
+    a band's rule at its ends; a range with the 212-SM count alone."""
+    tiers = {key: v for key, v in cake_backend.ROW_RULE_MIN_T.items() if key in K_MAJOR_TIERS}
+    assert tiers == K_MAJOR_TIERS
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
+    assert {key: v for key, v in part.items() if not key[3]} == K_MAJOR_RANGES_212
+    assert set(K_MAJOR_BAND_PLANS) == set(K_MAJOR_TIERS) | set(K_MAJOR_RANGES_212)
+    assert len(K_MAJOR_ROWS) == 8
+    read = {
+        _k_major_row(key)
+        for key in K_MAJOR_TIERS
+        if key[0] == "sm_100a" and ("sm_103a",) + key[1:] not in ROW_RULES
+    }
+    assert read == {
+        ("fwd", 16384, 6144),
+        ("fwd", 12288, 6144),
+        ("dgrad", 2048, 16384),
+        ("dgrad", 6144, 12288),
+    }
+    for key, (measured, bands) in K_MAJOR_BAND_PLANS.items():
+        arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M = key
+        op, d_in, d_out = _k_major_row(key)
+        assert (a_mn, out_f32, out_t, batched, M) == (False, False, False, False, None), key
+        assert K > 8192 and (d_in, d_out) == ((N, K) if b_mn else (K, N)), key
+        assert (key in ROW_RULES) == (key not in K_MAJOR_RULELESS_212), key
+        rules = _k_major_rules(key)
+        assert [(lo, hi) for lo, hi, _ in rules] == [(lo, hi) for lo, hi, *_ in bands], key
+        assert rules[0][0] in (1, 16) and all(
+            lo <= hi < nxt for (lo, hi, _), (nxt, *_) in zip(rules, rules[1:])
+        ), key
+        if key in K_MAJOR_TIERS:
+            assert key not in K_MAJOR_RANGES_212 and rules[0][0] == 1, key
+        else:
+            assert key not in cake_backend.ROW_RULE_MIN_T, key
+        arches = {arch} | ({"sm_103a"} if _k_major_row(key) in read and arch == "sm_100a" else set())
+        assert not [
+            exact
+            for exact in ROW_RULES
+            if exact[0] in arches
+            and exact[1:8] == key[1:8]
+            and exact[8] is not None
+            and exact[8] <= rules[-1][1]
+        ], key
+        for lo, hi, program, segments in bands:
+            assert all(program in _registered(a) for a in arches), (key, program)
+            assert all(lo <= T <= hi for T in _k_major_segments(segments)), key
+        assert set(measured) <= set(_k_major_classes(key)), key
+        for lo, hi, rule in rules:
+            for T in (lo, hi):
+                ident = key[1:8] + (T,)
+                sm_count = 212 if arch == "sm_107a" else None
+                assert cake_backend._measured_row_rule(arch, *ident, sm_count=sm_count) == rule, (key, T)
+                if arch == "sm_107a":
+                    for other in (None, 208, 216):
+                        assert cake_backend._measured_row_rule(
+                            arch, *ident, sm_count=other
+                        ) == ROW_RULES.get(key, {}), (key, T, other)
+
+
+@pytest.mark.parametrize("key", list(K_MAJOR_BAND_PLANS))
+def test_k_major_bands_plan_the_measured_rule(monkeypatch, key):
+    """At every measured token count of each band of the K-major entry ``key`` and at the band's ends, on every device
+    class the entry plans (``_k_major_classes``): the plan equals the plan of the band's rule as an exact ``ROW_RULES``
+    key at that token count without the entry (the form the rule was measured in), with no fallback flag, the band's
+    program and the band's tail policy (``_k_major_tail``: the rule's split of the tail's K steps into three or four
+    units per tail tile, else the two-way split of a single partial wave or whole tiles); on a measured class the
+    measured longest segment; at a cell of ``K_MAJOR_MISSED_CELLS`` a longest segment of at most 128 K blocks where
+    the plan without the entry held more.  At the floor of a tier key and one token count outside each range the plan
+    is the plan without the entry (the row's ``ROW_RULES`` entry); the 208-, 216- and 224-SM sm_107a parts plan the
+    row as without the entry."""
+    op, d_in, d_out = _k_major_row(key)
+    measured, bands = K_MAJOR_BAND_PLANS[key]
+    ranged = key in K_MAJOR_RANGES_212
+    rules = _k_major_rules(key)
+    classes = _k_major_classes(key)
+    assert classes, key
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
+
+    def plan_without(arch, sm_count, T, rule=None):
+        # the tables without this entry; with ``rule``, the rule as an exact key of the row at T on the class's arch
+        with monkeypatch.context() as m:
+            if ranged:
+                m.setitem(
+                    cake_backend.ROW_RULE_RANGES_BY_SM,
+                    ("sm_107a", 212),
+                    {k: v for k, v in part.items() if k != key},
+                )
+            else:
+                m.delitem(cake_backend.ROW_RULE_MIN_T, key)
+            if rule is not None:
+                m.setitem(ROW_RULES, (arch,) + key[1:8] + (T,), dict(rule))
+            return _k_major_plan(op, arch, sm_count, d_in, d_out, T)
+
+    checked = set()
+    for arch, sm_count in classes:
+        missed = {
+            T
+            for row_op, row_in, row_out, T, _seeds in K_MAJOR_MISSED_CELLS.get((arch, sm_count), ())
+            if (row_op, row_in, row_out) == (op, d_in, d_out)
+        }
+        for (lo, hi, rule), (_lo, _hi, program, segments) in zip(rules, bands, strict=True):
+            measured_at = _k_major_segments(segments)
+            for T in sorted({lo, hi} | set(measured_at)):
+                checked.add(T)
+                plan = _k_major_plan(op, arch, sm_count, d_in, d_out, T)
+                where = (arch, sm_count, T, plan.template)
+                assert plan == plan_without(arch, sm_count, T, rule), where
+                assert plan.template == program, where
+                assert not (
+                    plan.rule_fallback
+                    or plan.knob_fallback
+                    or plan.swap_fallback
+                    or plan.wave_fallback
+                ), where
+                assert plan.cta_rows == 128 and plan.cgrp == bool(rule.get("cgrp")), where
+                assert plan.group_m == rule.get("group_m", plan.group_m), where
+                form, fields = _k_major_tail(plan, rule)
+                fields_of_plan = (plan.num_full, plan.tail_tiles, plan.sk_units, plan.iters_per_unit)
+                assert fields_of_plan == fields, (where, form)
+                parts = rule.get("sk_parts")
+                if parts:
+                    # every tile is a tail tile there; the tail's K steps form ``parts`` units per tile of
+                    # ceil(k_blocks / parts) K blocks each, laid in one line over the tail (with K 17408 a unit
+                    # runs on into the next tile: a tile sums three or four partials)
+                    assert form == f"parts:{parts}", where
+                    assert fields_of_plan == (
+                        0,
+                        plan.pair_tiles,
+                        parts * plan.pair_tiles,
+                        -(-plan.k_blocks // parts),
+                    ), where
+                else:
+                    assert form in ("auto", "none"), where
+                segment = cake_backend.segment_blocks(plan)
+                if (arch, sm_count) in measured and T in measured_at:
+                    assert segment == measured_at[T], (where, segment)
+                if T in missed:
+                    before = plan_without(arch, sm_count, T)
+                    assert segment <= 128 < cake_backend.segment_blocks(before), (
+                        where,
+                        segment,
+                        before.template,
+                    )
+        if ranged:
+            outside = {T for lo, hi, _ in rules for T in (lo - 1, hi + 1)}
+            outside = {T for T in outside if T >= 1 and not any(lo <= T <= hi for lo, hi, _ in rules)}
+        else:
+            outside = {rules[-1][1] + 1}
+        for T in sorted(outside):
+            plan = _k_major_plan(op, arch, sm_count, d_in, d_out, T)
+            assert plan == plan_without(arch, sm_count, T), (arch, sm_count, T, plan.template)
+            checked.add(T)
+    if ranged:
+        for sm_count in (208, 216, 224):
+            for T in sorted(checked):
+                assert _k_major_plan(op, "sm_107a", sm_count, d_in, d_out, T) == plan_without(
+                    "sm_107a", sm_count, T
+                ), (sm_count, T)
+
+
+def test_k_major_missed_cells_plan_short_segments(monkeypatch):
+    """Each cell of ``K_MAJOR_MISSED_CELLS`` on its class: the plan of version 0.3.6 (``_pre_037_tables``) held a
+    longest segment of more than 128 K blocks; the plan now holds at most 128, runs the program of its K-major band and
+    differs from that plan."""
+    assert {part: len([s for *_, seeds in cells for s in seeds]) for part, cells in K_MAJOR_MISSED_CELLS.items()} == {
+        ("sm_100a", 148): 49,
+        ("sm_100a", 152): 35,
+        ("sm_103a", 148): 47,
+        ("sm_103a", 152): 35,
+        ("sm_107a", 212): 4,
+    }
+    for (arch, sm_count), cells in K_MAJOR_MISSED_CELLS.items():
+        for op, d_in, d_out, T, _seeds in cells:
+            where = (arch, sm_count, op, d_in, d_out, T)
+            band = _k_major_band(arch, sm_count, op, d_in, d_out, T)
+            assert band is not None, where
+            plan = _k_major_plan(op, arch, sm_count, d_in, d_out, T)
+            with monkeypatch.context() as m:
+                _pre_037_tables(m)
+                before = _k_major_plan(op, arch, sm_count, d_in, d_out, T)
+            assert plan.template == band[4], (where, plan.template)
+            assert cake_backend.segment_blocks(plan) <= 128, (where, plan.template)
+            assert cake_backend.segment_blocks(before) > 128, (where, before.template)
+            assert _plan_signature(plan) != _plan_signature(before), where
+
+
+def test_routing_037_changes_exactly_the_k_major_bands(monkeypatch):
+    """Byte for byte against the tables of version 0.3.6 (``_pre_037_tables``), over the K-major rows (BF16, and the
+    FP32 output of the input gradients) at ``K_MAJOR_SWEEP_TOKENS`` on every class of ``K_MAJOR_CLASSES``: a BF16 plan
+    changes exactly inside a band of ``_k_major_band`` (every part of sm_100a and sm_103a, the 212-SM sm_107a part) and
+    runs the band's program there, a program the architecture registers; every other plan (the FP32 outputs, the token
+    counts above each band, T 1 - 15 of the K 17408 rows on the 212-SM sm_107a part and every token count on the 208-,
+    216- and 224-SM sm_107a parts) is the plan of version 0.3.6."""
+    changed = {}
+    for op, d_in, d_out in K_MAJOR_ROWS:
+        for out_dtype in ("bf16", "f32") if op == "dgrad" else ("bf16",):
+            for T in K_MAJOR_SWEEP_TOKENS:
+                for arch, sm_count in K_MAJOR_CLASSES:
+                    where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                    plan = _k_major_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                    with monkeypatch.context() as m:
+                        _pre_037_tables(m)
+                        before = _k_major_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                    band = (
+                        _k_major_band(arch, sm_count, op, d_in, d_out, T)
+                        if out_dtype == "bf16"
+                        else None
+                    )
+                    if band is None:
+                        assert _plan_signature(plan) == _plan_signature(before), (
+                            where,
+                            plan.template,
+                            before.template,
+                        )
+                        continue
+                    changed[arch] = changed.get(arch, 0) + 1
+                    assert plan.template == band[4], (where, plan.template)
+                    assert _plan_signature(plan) != _plan_signature(before), where
+                    assert band[4] in _registered(arch), where
+    # 8 rows on 2 sm_100a and 3 sm_103a classes: 13 token counts on the rows with a floor of 1025, 17 on q_b (floor
+    # 2049), 11 on the others (floor 769), 98 per class; the 212-SM sm_107a part: 13 on the o_proj forward, 7 on the
+    # 4096 -> 12288 input gradient, 5 on each K 17408 row (from T 16)
+    assert changed == {"sm_100a": 2 * 98, "sm_103a": 3 * 98, "sm_107a": 13 + 7 + 5 + 5}
+
+
+def _k_major_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]``, ``W [d_out, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` row at
+    ``T`` tokens from ``seed``, drawn as :func:`_make_inputs` draws a projection row: ``X``, the weight scaled by
+    ``d_in ** -0.5``, then ``G``, each standard normal, from one generator."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    W = normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, W, G
+
+
+def _k_major_views(op, X, W, G):
+    """``(A, B)`` of the forward (``X @ W.T``) or the input gradient (``G @ W``)."""
+    return (X, W.t()) if op == "fwd" else (G, W)
+
+
+def _judge_k_major(record_property, name, launch, op, X, W, G, out, seed):
+    """Judge the forward or input gradient ``out`` that ``launch()`` writes from the operands ``X``, ``W`` and ``G`` it
+    is bound to against the naive BF16 tier over the draws of ``seed`` (:func:`judge_gemm`): each draw's operands
+    (:func:`_k_major_operands`) written in place and ``out`` filled with NaN; the oracle and the tier ``A @ B`` of
+    :func:`_k_major_views`."""
+    (T, d_in), d_out = X.shape, W.shape[0]
+    A, B = _k_major_views(op, X, W, G)
+
+    def draw(s):
+        operands = _k_major_operands(T, d_in, d_out, s, X.device)
+        for dst, src in zip((X, W, G), operands, strict=True):
+            dst.copy_(src)
+        nan_fill([out])
+        return SimpleNamespace(A=A, B=B)
+
+    def run(_inputs):
+        launch()
+        torch.cuda.synchronize()
+        return {name: out}
+
+    def product(v, dtype):
+        return {name: torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+
+
+def _k_major_gpu_cases(arch, sm_count):
+    """The cases of ``test_gpu_k_major_rows_meet_the_naive_tier`` on a part of ``arch`` with ``sm_count`` SMs,
+    ``(op, d_in, d_out, T, seeds)``: the cells of ``K_MAJOR_MISSED_CELLS`` of the class on the seeds they missed on,
+    and on ``SEED`` the lowest and the highest measured token count of each K-major band that plans a row on the class
+    (a band end that is also a missed cell is judged on its missed seeds and on ``SEED``)."""
+    cases = {case[:4]: case[4] for case in K_MAJOR_MISSED_CELLS.get((arch, sm_count), ())}
+    for key, (_measured, bands) in K_MAJOR_BAND_PLANS.items():
+        op, d_in, d_out = _k_major_row(key)
+        for _lo, _hi, _program, segments in bands:
+            tokens = sorted(_k_major_segments(segments))
+            for T in (tokens[0], tokens[-1]):
+                band = _k_major_band(arch, sm_count, op, d_in, d_out, T)
+                if band is None or band[0] != key:
+                    continue
+                seeds = cases.get((op, d_in, d_out, T), ())
+                if SEED not in seeds:
+                    cases[(op, d_in, d_out, T)] = (*seeds, SEED)
+    return [(*cell, seeds) for cell, seeds in cases.items()]
+
+
+def test_gpu_k_major_rows_meet_the_naive_tier(record_property):
+    """On the device's class, each case of ``_k_major_gpu_cases`` (the cells of ``K_MAJOR_MISSED_CELLS`` on the seeds
+    they missed on, and the ends of each K-major band on ``SEED``) runs the default plan of the forward or
+    input-gradient entry: the program of its K-major band, at a missed cell with a longest segment of at most 128 K
+    blocks.  The output is judged against the FP64 oracle beside the naive BF16 tier over the draws of each listed seed
+    (:func:`_judge_k_major`) and gives the same bits on three more launches into NaN; every failing case is reported.
+    A class without such cases (the 208-, 216- and 224-SM sm_107a parts) skips."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch, sm_count = arch_for(device), _sm_count()
+    cases = _k_major_gpu_cases(arch, sm_count)
+    if not cases:
+        pytest.skip(f"no K-major band of version 0.3.7 on {arch} with {sm_count} SMs")
+    missed = {case[:4] for case in K_MAJOR_MISSED_CELLS.get((arch, sm_count), ())}
+    failures = []
+    for op, d_in, d_out, T, seeds in cases:
+        cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        W = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=torch.bfloat16, device=device)
+        A, B = _k_major_views(op, X, W, G)
+        prepared = cake_dense_gemm_det_train_projection_prepare(A, B, out)
+        plan = prepared.plan
+        segment = cake_backend.segment_blocks(plan)
+        where = (arch, sm_count, op, d_in, d_out, T, prepared.template, segment)
+        band = _k_major_band(arch, sm_count, op, d_in, d_out, T)
+        assert band is not None and prepared.template == band[4], where
+        assert (op, d_in, d_out, T) not in missed or segment <= 128, where
+        for seed in seeds:
+            try:
+                _judge_k_major(
+                    record_property,
+                    f"{op}_{d_in}x{d_out}_t{T}_s{seed}",
+                    prepared.launch,
+                    op,
+                    X,
+                    W,
+                    G,
+                    out,
+                    seed,
+                )
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+        out.fill_(float("nan"))
+        prepared.launch()
+        torch.cuda.synchronize()
+        first = out.clone()
+        for _ in range(3):
+            out.fill_(float("nan"))
+            prepared.launch()
+            torch.cuda.synchronize()
+            if not torch.equal(out.view(torch.int16), first.view(torch.int16)):
+                failures.append(f"{where}: another bit pattern on a repeated launch")
+                break
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+    print(f"K_MAJOR_ROWS {arch} sm_count={sm_count}: {len(cases)} cases")
+    assert not failures, "\n".join(failures)
 
 
 def _d3_wgrad_operands(T, M, N, seed, device):
@@ -13853,6 +15195,1010 @@ def test_sm107a_t16384_wgrad_key_and_the_plan_without_it_meet_the_naive_tier(
         product=product,
     )
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# The part ranges of version 0.3.8 (ROW_RULE_RANGES_BY_SM): the FP32 input gradients 4096 -> 32 / 48 / 64 / 128,
+# 5120 -> 32 / 48 / 64 / 128, 8192 -> 128 and 6144 -> 128 (the rows of the 148-SM sm_100a part rules; on 148-SM
+# sm_103a parts all but 5120 -> 128 and 8192 -> 128, on 152-SM sm_100a parts all but 8192 -> 128) run the single-CTA
+# program of those part rules over token ranges of the 148- and 152-SM sm_103a parts and the 152-SM sm_100a part, and
+# the FP32 weight-gradient ranges of the 212-SM sm_107a part grow (SM107A_212_F32_RANGES, SM107A_212_F32_MEASURED_038)
+# ---------------------------------------------------------------------------
+
+#: The rows of the FP32 input-gradient part ranges, ``(d_in, d_out)``: the rows of the 148-SM sm_100a part rules.
+_DGRAD_F32_PART_ROWS = (
+    (4096, 32),
+    (4096, 48),
+    (4096, 64),
+    (4096, 128),
+    (5120, 32),
+    (5120, 48),
+    (5120, 64),
+    (5120, 128),
+    (8192, 128),
+    (6144, 128),
+)
+#: The rows of the 152-SM sm_100a part with one range over all its measured token counts.
+_SM100A_152_DGRAD_F32_SPAN_ROWS = (
+    (4096, 32),
+    (4096, 48),
+    (4096, 64),
+    (4096, 128),
+    (5120, 32),
+    (5120, 48),
+    (5120, 64),
+)
+#: The FP32 input-gradient ranges of version 0.3.8 (cake_backend.ROW_RULE_RANGES_BY_SM): (arch, SM count) ->
+#: {(d_in, d_out): ((lo, hi), ...)}, the sorted disjoint ranges of a row under its ragged-M key (T = M); a range with
+#: lo == hi holds that one token count.  Each runs the single-CTA program of the 148-SM sm_100a part rules
+#: (``SM100A_148_DGRAD_F32_PROGRAM``: 128-column tiles, two TMA-store slots, four stages), the 6144 -> 128 row in
+#: raster groups of 2.
+DGRAD_F32_PART_RANGES = {
+    ("sm_103a", 148): {
+        (4096, 32): ((8192, 32768),),
+        (4096, 48): ((8192, 32768),),
+        (4096, 64): ((8192, 32768),),
+        (4096, 128): ((8192, 16384),),
+        (5120, 32): ((8192, 16384),),
+        (5120, 48): ((16231, 16384),),
+        (5120, 64): ((8192, 32768),),
+        (6144, 128): ((8192, 32768),),
+    },
+    ("sm_103a", 152): dict.fromkeys(_DGRAD_F32_PART_ROWS, ((16172, 16384),)),
+    ("sm_100a", 152): {
+        **dict.fromkeys(_SM100A_152_DGRAD_F32_SPAN_ROWS, ((16172, 16384),)),
+        (5120, 128): ((16172, 16172), (16384, 16384)),
+        (6144, 128): ((16172, 16172),),
+    },
+}
+#: The token counts measured inside the ranges (at every one the rule was faster than the plan before on two nodes of
+#: the part, with its bits): (arch, SM count) -> {(d_in, d_out): token counts}.  The ends of each range are measured
+#: token counts.
+DGRAD_F32_PART_MEASURED = {
+    ("sm_103a", 148): {
+        (4096, 32): (8192, 16231, 16384, 32768),
+        (4096, 48): (8192, 16231, 16384, 32768),
+        (4096, 64): (8192, 16231, 16384, 32768),
+        (4096, 128): (8192, 16231, 16384),
+        (5120, 32): (8192, 16231, 16384),
+        (5120, 48): (16231, 16384),
+        (5120, 64): (8192, 16231, 16384, 32768),
+        (6144, 128): (8192, 16172, 16231, 32768),
+    },
+    ("sm_103a", 152): dict.fromkeys(_DGRAD_F32_PART_ROWS, (16172, 16231, 16384)),
+    ("sm_100a", 152): {
+        **dict.fromkeys(_SM100A_152_DGRAD_F32_SPAN_ROWS, (16172, 16231, 16384)),
+        (5120, 128): (16172, 16384),
+        (6144, 128): (16172,),
+    },
+}
+#: The measured token counts outside the ranges, where a row keeps its plan of version 0.3.7: (arch, SM count) ->
+#: {(d_in, d_out): token counts}.  The rule missed the bar there, or was not timed (5120 -> 128 and 8192 -> 128 at
+#: T 16231 on the 152-SM sm_100a part); no range spans such a token count.
+DGRAD_F32_PART_KEPT = {
+    ("sm_103a", 148): {
+        (4096, 128): (32768,),
+        (5120, 32): (32768,),
+        (5120, 48): (8192, 32768),
+        (5120, 128): (8192, 16231, 16384, 32768),
+        (8192, 128): (8192, 16231, 16384, 32768),
+    },
+    ("sm_103a", 152): {},
+    ("sm_100a", 152): {
+        (5120, 128): (16231,),
+        (6144, 128): (16231, 16384),
+        (8192, 128): (16172, 16231, 16384),
+    },
+}
+#: The program of each row's plan without the ranges (version 0.3.7) on these parts: the row's own ragged rule, the
+#: sm_100a rule (through ``RULE_PARENT`` on sm_103a) for the 6144 -> 128 row.
+DGRAD_F32_PART_BEFORE = {
+    row: (
+        "dense_proj_det_gemm_kn_n128_f32_tma1_pro7"
+        if row == (6144, 128)
+        else "dense_proj_det_gemm_kn_n256_f32_tma2_pd2_pro15"
+    )
+    for row in _DGRAD_F32_PART_ROWS
+}
+#: The device classes the checks of the part ranges plan the rows on: the parts of ``DGRAD_F32_PART_RANGES``, the
+#: 148-SM sm_100a part (its exact part rules), a 160-SM part of either architecture and the 212-SM sm_107a part.
+_DGRAD_PART_CLASSES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_100a", 160),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 212),
+)
+
+
+def _dgrad_part_key(arch, d_in, d_out):
+    """The ragged-M ``ROW_RULES`` key of the ``arch`` FP32 input gradient ``d_in -> d_out``
+    (``G[T, d_out] @ W[d_out, d_in]``)."""
+    return (arch, False, True, True, False, False, d_in, d_out, None)
+
+
+def _dgrad_part_rule(d_in, d_out):
+    """The rule of a range of ``DGRAD_F32_PART_RANGES``: the rule of the 148-SM sm_100a part rules (the 6144 -> 128
+    row in raster groups of 2)."""
+    return {
+        "block_n": 128,
+        "epi": "tma",
+        "slots": 2,
+        "stages": 4,
+        "cta1": True,
+        **({"group_m": 2} if (d_in, d_out) == (6144, 128) else {}),
+    }
+
+
+def _dgrad_part_band(arch, sm_count, d_in, d_out, T):
+    """``(lo, hi)`` of the range of the ``arch`` part of ``sm_count`` SMs that holds the FP32 input gradient
+    ``d_in -> d_out`` at ``T`` tokens, else ``None``."""
+    for lo, hi in DGRAD_F32_PART_RANGES.get((arch, sm_count), {}).get((d_in, d_out), ()):
+        if lo <= T <= hi:
+            return lo, hi
+    return None
+
+
+def test_dgrad_f32_part_range_tables(monkeypatch):
+    """The sm_100a and sm_103a parts of ``ROW_RULE_RANGES_BY_SM`` (version 0.3.8) are ``DGRAD_F32_PART_RANGES``: 8 FP32
+    input-gradient rows on the 148-SM sm_103a part, 10 on the 152-SM sm_103a part and 9 on the 152-SM sm_100a part, the
+    ranges of a row under its ragged-M key, with the rule ``ROW_RULES_BY_SM`` holds for the row on the 148-SM sm_100a
+    part (the 6144 -> 128 row in raster groups of 2), whose program both registries ship.  The ranges of a row are
+    sorted and disjoint, the ends of each are measured token counts, every measured token count lies inside a range,
+    every token count of ``DGRAD_F32_PART_KEPT`` outside them, and one of them between any two ranges of a row; no token
+    tier on a key and no exact ``ROW_RULES`` key of a row inside its ranges (on sm_103a or sm_100a).
+    ``_measured_row_rule`` reads a range with the part's architecture and SM count alone: the range's rule at its ends
+    and middle; the row's rule without the ranges one token count outside, at the token counts of
+    ``DGRAD_F32_PART_KEPT``, and without an SM count; on the other parts of the architecture in
+    ``_DGRAD_PART_CLASSES`` outside their own ranges the rule without the ranges (on the 148-SM sm_100a part its exact
+    part rule where it has one); the other architecture at the part's SM count, without its own part there, reads the
+    same rule with and without the part (sm_103a reads the sm_100a rules through ``RULE_PARENT``, never the sm_100a
+    part's ranges).  The two 152-SM sm_103a keys version 0.3.9 changed are put back first (``_tables_038``;
+    ``test_raster_039_tables`` checks them)."""
+    _tables_038(monkeypatch)
+    assert {
+        part for part in cake_backend.ROW_RULE_RANGES_BY_SM if part[0] in ("sm_100a", "sm_103a")
+    } == set(DGRAD_F32_PART_RANGES)
+    assert {part: len(rows) for part, rows in DGRAD_F32_PART_RANGES.items()} == {
+        ("sm_103a", 148): 8,
+        ("sm_103a", 152): 10,
+        ("sm_100a", 152): 9,
+    }
+    assert set(DGRAD_F32_PART_MEASURED) == set(DGRAD_F32_PART_KEPT) == set(DGRAD_F32_PART_RANGES)
+    for arch in ("sm_100a", "sm_103a"):
+        assert SM100A_148_DGRAD_F32_PROGRAM in _registered(arch), arch
+    part_rules = cake_backend.ROW_RULES_BY_SM[("sm_100a", 148)]
+    for part, rows in DGRAD_F32_PART_RANGES.items():
+        arch, sm_count = part
+        other_arch = "sm_103a" if arch == "sm_100a" else "sm_100a"
+        assert cake_backend.ROW_RULE_RANGES_BY_SM[part] == {
+            _dgrad_part_key(arch, *row): tuple((lo, hi, _dgrad_part_rule(*row)) for lo, hi in bands)
+            for row, bands in rows.items()
+        }, part
+        assert set(DGRAD_F32_PART_MEASURED[part]) == set(rows), part
+        assert set(DGRAD_F32_PART_KEPT[part]) <= set(_DGRAD_F32_PART_ROWS), part
+        for d_in, d_out in _DGRAD_F32_PART_ROWS:
+            key = _dgrad_part_key(arch, d_in, d_out)
+            where = (part, d_in, d_out)
+            rule = _dgrad_part_rule(d_in, d_out)
+            bands = rows.get((d_in, d_out), ())
+            measured = DGRAD_F32_PART_MEASURED[part].get((d_in, d_out), ())
+            kept = DGRAD_F32_PART_KEPT[part].get((d_in, d_out), ())
+            assert bands or kept, where
+            assert all(lo <= hi for lo, hi in bands), where
+            assert all(a[1] < b[0] for a, b in zip(bands, bands[1:])), where
+            assert all(lo in measured and hi in measured for lo, hi in bands), where
+            assert all(_dgrad_part_band(arch, sm_count, d_in, d_out, T) for T in measured), where
+            assert not any(_dgrad_part_band(arch, sm_count, d_in, d_out, T) for T in kept), where
+            for (_lo, a_hi), (b_lo, _hi) in zip(bands, bands[1:]):
+                assert any(a_hi < T < b_lo for T in kept), (where, a_hi, b_lo)
+            for exact, part_rule in part_rules.items():
+                if exact[6:8] == (d_in, d_out):
+                    assert part_rule == rule, (where, exact)
+            for a in ("sm_100a", "sm_103a"):
+                assert (a,) + key[1:] not in cake_backend.ROW_RULE_MIN_T, (where, a)
+            assert not [
+                exact
+                for exact in ROW_RULES
+                if exact[0] in ("sm_103a", "sm_100a")
+                and exact[1:8] == key[1:8]
+                and exact[8] is not None
+                and any(lo <= exact[8] <= hi for lo, hi in bands)
+            ], where
+            inside = {T for lo, hi in bands for T in (lo, (lo + hi) // 2, hi)}
+            outside = {T for lo, hi in bands for T in (lo - 1, hi + 1)} | set(kept)
+            outside = {T for T in outside if _dgrad_part_band(arch, sm_count, d_in, d_out, T) is None}
+            for T in sorted(inside | outside):
+                ident = (False, True, True, False, False, d_in, d_out, T)
+                plain = cake_backend._measured_row_rule(arch, *ident)
+                got = cake_backend._measured_row_rule(arch, *ident, sm_count=sm_count)
+                if T in inside:
+                    assert plain != rule and got == rule, (where, T, plain)
+                else:
+                    assert got == plain, (where, T, got)
+                for a, sm in _DGRAD_PART_CLASSES:
+                    if a != arch or sm == sm_count or _dgrad_part_band(a, sm, d_in, d_out, T):
+                        continue
+                    want = cake_backend.ROW_RULES_BY_SM.get((a, sm), {}).get((a,) + ident, plain)
+                    assert cake_backend._measured_row_rule(a, *ident, sm_count=sm) == want, (where, T, sm)
+                with monkeypatch.context() as m:
+                    # without the other architecture's own part at this SM count, only a leak shows the part
+                    if (other_arch, sm_count) in cake_backend.ROW_RULE_RANGES_BY_SM:
+                        m.delitem(cake_backend.ROW_RULE_RANGES_BY_SM, (other_arch, sm_count))
+                    other = cake_backend._measured_row_rule(other_arch, *ident, sm_count=sm_count)
+                    m.delitem(cake_backend.ROW_RULE_RANGES_BY_SM, part)
+                    assert (
+                        cake_backend._measured_row_rule(other_arch, *ident, sm_count=sm_count)
+                        == other
+                    ), (where, T, other_arch)
+
+
+@pytest.mark.parametrize(
+    "part, row",
+    [
+        (part, row)
+        for part, rows in DGRAD_F32_PART_RANGES.items()
+        for row in _DGRAD_F32_PART_ROWS
+        if row in rows or row in DGRAD_F32_PART_KEPT[part]
+    ],
+    ids=lambda v: "-".join(str(x) for x in v),
+)
+def test_dgrad_f32_part_ranges_plan_the_measured_rule(monkeypatch, part, row):
+    """At the ends and the middle of each range of ``DGRAD_F32_PART_RANGES`` and at its measured token counts, the plan
+    on the part equals the plan of the range's rule as an exact ``ROW_RULES`` key at that token count without the
+    ranges, and the plan of the program's knobs (its symbol's) laid over the row's rule without the ranges: the
+    single-CTA program ``SM100A_148_DGRAD_F32_PROGRAM`` with no fallback flag, whole tiles (no stream-K unit, no
+    promoted chunk), in raster groups of 16 (2 on the 6144 -> 128 row).  Without the ranges the row plans the program of
+    version 0.3.7 (``DGRAD_F32_PART_BEFORE``), another plan.  One token count outside each range and at the token counts
+    of ``DGRAD_F32_PART_KEPT`` (a row without a range on the part: those alone) the plan is the plan without the ranges,
+    at the latter the program of version 0.3.7.  At every checked token count every other class of
+    ``_DGRAD_PART_CLASSES`` outside its own range plans the row as without the ranges.  The checks read the tables of
+    version 0.3.8 (``_tables_038``; the raster groups of version 0.3.9:
+    ``test_raster_039_ranges_plan_the_group_of_2``)."""
+    _tables_038(monkeypatch)
+    arch, sm_count = part
+    d_in, d_out = row
+    bands = DGRAD_F32_PART_RANGES[part].get(row, ())
+    key = _dgrad_part_key(arch, d_in, d_out)
+    rule = _dgrad_part_rule(d_in, d_out)
+    knobs = cake_backend._template_knobs(SM100A_148_DGRAD_F32_PROGRAM)
+    assert knobs is not None and knobs.pop("kser") == 0
+
+    def plan_at(a, sm, T, **kw):
+        return _rows_plan("dgrad", a, sm, d_in, d_out, T, "f32", **kw)
+
+    def plan_without(a, sm, T, exact=None, **kw):
+        # the plan without the part ranges; with ``exact``, that rule as an exact key of the row at T
+        with monkeypatch.context() as m:
+            _without_dgrad_parts(m)
+            if exact is not None:
+                m.setitem(ROW_RULES, key[:8] + (T,), dict(exact))
+            return plan_at(a, sm, T, **kw)
+
+    checked = sorted(
+        {T for lo, hi in bands for T in (lo, (lo + hi) // 2, hi)}
+        | set(DGRAD_F32_PART_MEASURED[part].get(row, ()))
+    )
+    for T in checked:
+        plan = plan_at(arch, sm_count, T)
+        before = plan_without(arch, sm_count, T)
+        where = (part, row, T, plan.template, before.template)
+        assert plan == plan_without(arch, sm_count, T, rule), where
+        merged = plan_without(arch, sm_count, T, **knobs)
+        assert _plan_signature(merged) == _plan_signature(plan), where
+        assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+        assert not (
+            plan.rule_fallback
+            or plan.knob_fallback
+            or plan.swap_fallback
+            or plan.wave_fallback
+        ), where
+        assert plan.sk_units == 0 and plan.promote_blocks == 0, where
+        assert plan.group_m == rule.get("group_m", 16), where
+        assert before.template == DGRAD_F32_PART_BEFORE[row], where
+        assert _plan_signature(plan) != _plan_signature(before), where
+    kept = DGRAD_F32_PART_KEPT[part].get(row, ())
+    outside = {T for lo, hi in bands for T in (lo - 1, hi + 1)} | set(kept)
+    outside = {T for T in outside if _dgrad_part_band(arch, sm_count, d_in, d_out, T) is None}
+    assert outside, (part, row)
+    for T in sorted(outside):
+        plan = plan_at(arch, sm_count, T)
+        assert plan == plan_without(arch, sm_count, T), (part, row, T)
+        if T in kept:
+            assert plan.template == DGRAD_F32_PART_BEFORE[row], (part, row, T, plan.template)
+    for T in sorted({*checked, *outside}):
+        for a, sm in _DGRAD_PART_CLASSES:
+            if (a, sm) != part and _dgrad_part_band(a, sm, d_in, d_out, T) is None:
+                assert plan_at(a, sm, T) == plan_without(a, sm, T), (row, a, sm, T)
+
+
+#: The device classes of the routing check of version 0.3.8: those of version 0.3.4 and the 224-SM sm_107a part.
+ROUTING_038_CLASSES = (*ROUTING_034_CLASSES, ("sm_107a", 224))
+#: The token counts of the FP32 input-gradient rows of the part ranges in the sweep: around each range end of the three
+#: parts, the middles of the ranges and the measured token counts.
+# fmt: off
+_DGRAD_PART_SWEEP_TOKENS = (
+    8191, 8192, 12288, 16171, 16172, 16173, 16230, 16231, 16232, 16278, 16307, 16383, 16384, 16385, 20480, 32768, 32769
+)
+# fmt: on
+
+
+def _merged_sweep(*sweeps):
+    """One sweep of ``(op, d_in, d_out, out dtype, token counts)`` rows: the rows of ``sweeps`` in the order they
+    first appear, each with the sorted union of its token counts."""
+    merged = {}
+    for sweep in sweeps:
+        for op, d_in, d_out, out_dtype, token_counts in sweep:
+            merged.setdefault((op, d_in, d_out, out_dtype), set()).update(token_counts)
+    return tuple((*row, tuple(sorted(tokens))) for row, tokens in merged.items())
+
+
+# The rows and token counts of the routing check of version 0.3.8: the sweep of version 0.3.4 and the rows of the
+# ranges of version 0.3.8.
+# fmt: off
+ROUTING_038_SWEEP = _merged_sweep(
+    ROUTING_034_SWEEP,
+    (
+        # the FP32 input gradients of the part ranges, the indexer_hw row beside them, and the BF16 forms
+        *(("dgrad", d_in, d_out, "f32", _DGRAD_PART_SWEEP_TOKENS) for d_in, d_out in (*_DGRAD_F32_PART_ROWS, (6144, 32))),
+        *(("dgrad", d_in, d_out, "bf16", (8192, 16231, 32768)) for d_in, d_out in _DGRAD_F32_PART_ROWS),
+        # the rows of the 212-SM sm_107a FP32 ranges at the token counts version 0.3.8 measured and around each range
+        # end, and the BF16 forms of the weight gradients
+        *((op, d_in, d_out, "f32", tuple(sorted({4096, 6208, 8128, 12288, 16384}
+                                                | {T for lo, hi, *_ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)})))
+          for op, d_in, d_out, ranges, _before in SM107A_212_F32_RANGES.values()),
+        *(("wgrad", d_in, d_out, "bf16", (6208, 12288))
+          for op, d_in, d_out, *_ in SM107A_212_F32_RANGES.values() if op == "wgrad"),
+    ),
+)
+# fmt: on
+
+
+def _changed_038(op, d_in, d_out, out_dtype, T, arch, sm_count):
+    """The program a plan of version 0.3.8 runs where it differs from the plan of version 0.3.7, else ``None``."""
+    if out_dtype != "f32":
+        return None
+    if arch in ("sm_100a", "sm_103a") and op == "dgrad":
+        held = _dgrad_part_band(arch, sm_count, d_in, d_out, T) is not None
+        return SM100A_148_DGRAD_F32_PROGRAM if held else None
+    if (arch, sm_count) == ("sm_107a", 212):
+        now = _vr212_rule_at(op, d_in, d_out, T)
+        before = _vr212_rule_at(op, d_in, d_out, T, version_037=True)
+        return now[0] if now is not None and before is None else None
+    return None
+
+
+def test_routing_038_changes_exactly_the_measured_plans(monkeypatch):
+    """Byte for byte against the part tables of version 0.3.7 (``_pre_038_tables``), over ``ROUTING_038_SWEEP`` (the
+    sweep of version 0.3.4 and the rows and token counts of the ranges of version 0.3.8) on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly where ``_changed_038`` names a program, and runs that program, one
+    the architecture registers - the FP32 input gradients of the part ranges inside their ranges on the 148- and 152-SM
+    sm_103a parts and the 152-SM sm_100a part, and the FP32 rows of the 212-SM sm_107a ranges at the token counts
+    version 0.3.8 added to the ranges.  Every other plan (the 160-SM sm_103a part, the 148-SM sm_100a part, the 208-,
+    216- and 224-SM sm_107a parts, the BF16 forms, the token counts outside the ranges and inside the ranges of version
+    0.3.7, the other rows) is the plan of version 0.3.7.  The current side reads the tables of version 0.3.8
+    (``_tables_038``; version 0.3.9: ``test_routing_039_changes_exactly_the_raster_plans``)."""
+    _tables_038(monkeypatch)
+    changed = {}
+    for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _pre_038_tables(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                program = _changed_038(op, d_in, d_out, out_dtype, T, arch, sm_count)
+                if program is None:
+                    assert _plan_signature(plan) == _plan_signature(before), (
+                        where,
+                        plan.template,
+                        before.template,
+                    )
+                    continue
+                changed[(arch, sm_count)] = changed.get((arch, sm_count), 0) + 1
+                assert plan.template == program, (where, plan.template)
+                assert _plan_signature(plan) != _plan_signature(before), where
+                assert program in _registered(arch), (where, program)
+    # the 148-SM sm_103a part: 15 token counts of the sweep on the five rows of T 8192 - 32768, 12 on the two of
+    # T 8192 - 16384 and 6 on 5120 -> 48; the 152-SM sm_103a part: 9 on each of its 10 rows; the 152-SM sm_100a part:
+    # 9 on each of its seven rows of T 16172 - 16384, 2 on 5120 -> 128 (16172, 16384) and 1 on 6144 -> 128 (16172); the
+    # 212-SM sm_107a part: 4096 -> 12288 at 6 T (4096, 6208, 8128, 8191, 16232, 16384), 17408 -> 5120 at T 12288,
+    # 5120 -> 17408 at 6 T (4096, 6144, 6208, 8128, 8191, 12288), the o_proj weight gradient at 6 T (4097, 6144, 6208,
+    # 8128, 8191, 12288), 12288 -> 6144 at 5 T (4096, 6144, 6208, 8128, 8191)
+    assert changed == {
+        ("sm_103a", 148): 5 * 15 + 2 * 12 + 6,
+        ("sm_103a", 152): 10 * 9,
+        ("sm_100a", 152): 7 * 9 + 2 + 1,
+        ("sm_107a", 212): 6 + 1 + 6 + 6 + 5,
+    }
+
+
+def _dgrad_part_gpu_cases():
+    """The GPU cases of the FP32 input-gradient part ranges: each row at each token count measured inside a range of
+    a part (the ends of each range among them), run on every part whose ranges of the row hold that token count; the
+    output keeps the bits of the plan before."""
+    token_counts = {}
+    for part, rows in DGRAD_F32_PART_MEASURED.items():
+        for row, measured in rows.items():
+            token_counts.setdefault(row, set()).update(measured)
+    cases = []
+    for row, Ts in sorted(token_counts.items()):
+        for T in sorted(Ts):
+            parts = [
+                part
+                for part in DGRAD_F32_PART_RANGES
+                if _dgrad_part_band(*part, *row, T) is not None
+            ]
+            cases.append(
+                _Routing034Case(
+                    "dgrad",
+                    *row,
+                    T,
+                    "f32",
+                    dict.fromkeys(parts, SM100A_148_DGRAD_F32_PROGRAM),
+                    scoped=True,
+                    same_bits=True,
+                )
+            )
+    return tuple(cases)
+
+
+# GPU cases of the plans version 0.3.8 changed: the FP32 input-gradient ranges of the 148- and 152-SM sm_103a parts and
+# the 152-SM sm_100a part at their measured token counts, and the 212-SM sm_107a FP32 ranges at the token counts
+# version 0.3.8 measured (the ends of the o_proj weight-gradient range T 4096 - 8192 are cases of version 0.3.5,
+# ``ROUTING_034_GPU_CASES``).  Each runs on its listed device classes alone.
+ROUTING_038_GPU_CASES = (
+    *_dgrad_part_gpu_cases(),
+    *(
+        _vr212_gpu_case(*SM107A_212_F32_RANGES[key][:3], T)
+        for key, token_counts in SM107A_212_F32_MEASURED_038.items()
+        for T in token_counts
+    ),
+)
+
+
+@pytest.mark.parametrize(
+    "case",
+    ROUTING_038_GPU_CASES,
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs))
+    + f"-{c.op}-{c.d_in}x{c.d_out}-T{c.T}-{c.out_dtype}",
+)
+def test_routing_038_rows_meet_the_naive_tier_and_repeat_bitwise(
+    case, monkeypatch, record_property
+):
+    """Each row of ``ROUTING_038_GPU_CASES`` runs its default plan on its listed device classes, the listed program:
+    its output is judged against the FP64 oracle beside the naive BF16 tier over the draws (among them the plans whose
+    bits change: the synchronised split of 4096 -> 12288 at T 4096 and 16384, the two-way split of the o_proj weight
+    gradient at T 6208 and 8128 and its three-way split of the 256-row tiles at T 12288), and it returns the same bits
+    on three more launches into NaN.  Its plan differs from the plan of the part tables of version 0.3.7
+    (``_pre_038_tables``) on the device in a planned field: the program, or for the three-way split, whose program is
+    the program of the plan before, the split.  A ``same_bits`` case also equals, bit for bit, that plan: the FP32
+    input-gradient part ranges at their measured token counts, the whole-tile form at T 4096 and the half-height tail
+    of the 256-row tiles at T 12288 of the 212-SM sm_107a ranges."""
+    _run_routing_gpu_case(
+        case,
+        monkeypatch,
+        record_property,
+        _pre_038_tables,
+        "version 0.3.8",
+        plan_changes=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The raster groups of version 0.3.9 (ROW_RULE_RANGES_BY_SM[("sm_103a", 152)]): on 152-SM sm_103a parts the FP32 input
+# gradients 6144 -> 32 (indexer_hw) at T 16172 - 32768 and 8192 -> 128 at T 16231 - 16384 run the single-CTA program
+# of version 0.3.8 in raster groups of 2 row tiles; 8192 -> 128 keeps the group of 16 at T 16172 - 16230
+# ---------------------------------------------------------------------------
+
+#: The part of the raster ranges of version 0.3.9.
+_RASTER_039_PART = ("sm_103a", 152)
+#: The raster ranges of version 0.3.9: ``(d_in, d_out) -> (lo, hi)`` of the FP32 input gradient on ``_RASTER_039_PART``.
+RASTER_039_RANGES = {(6144, 32): (16172, 32768), (8192, 128): (16231, 16384)}
+#: The token counts measured inside them: the raster group of 2 met the bar of version 0.3.8 on two GB300 nodes there,
+#: with the bits of the plan before.  The ends of each range are among them.
+RASTER_039_MEASURED = {(6144, 32): (16172, 16231, 16384, 32768), (8192, 128): (16231, 16384)}
+#: The measured token counts outside them, where the row keeps its plan of version 0.3.8 (the group missed the bar).
+RASTER_039_KEPT = {(6144, 32): (8192,), (8192, 128): (16172,)}
+#: The rule of each range: the row's rule of version 0.3.8 at those token counts (6144 -> 32: its sm_100a ``ROW_RULES``
+#: rule, read through ``RULE_PARENT``; 8192 -> 128: the rule of its 0.3.8 range) in raster groups of 2.
+RASTER_039_RULES = {
+    (6144, 32): {"block_n": 128, "slots": 2, "stages": 4, "cta1": True, "group_m": 2},
+    (8192, 128): {"block_n": 128, "epi": "tma", "slots": 2, "stages": 4, "cta1": True, "group_m": 2},
+}
+
+
+def _raster_039_band(sm_count, d_in, d_out, T):
+    """``(lo, hi)`` of the raster range of version 0.3.9 that holds the sm_103a FP32 input gradient ``d_in -> d_out``
+    at ``T`` tokens on a part of ``sm_count`` SMs, else ``None``."""
+    band = RASTER_039_RANGES.get((d_in, d_out)) if ("sm_103a", sm_count) == _RASTER_039_PART else None
+    return band if band is not None and band[0] <= T <= band[1] else None
+
+
+def _tables_038(m):
+    """Put the 152-SM sm_103a ranges of version 0.3.8 back (``m``: a monkeypatch context): 8192 -> 128 in raster groups
+    of 16 at T 16172 - 16384 and no 6144 -> 32 range; and the 148-SM tables of version 0.3.9 (``_tables_039``)."""
+    _tables_039(m)
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[_RASTER_039_PART]
+    m.setitem(
+        part,
+        _dgrad_part_key("sm_103a", 8192, 128),
+        ((16172, 16384, _dgrad_part_rule(8192, 128)),),
+    )
+    m.delitem(part, _dgrad_part_key("sm_103a", 6144, 32))
+
+
+def test_raster_039_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.8 (``_tables_038``) in two keys of the 152-SM sm_103a part
+    alone: 6144 -> 32 gets one range, T 16172 - 32768 with its ``RASTER_039_RULES`` rule (its sm_100a ``ROW_RULES`` rule
+    in raster groups of 2); 8192 -> 128 splits its range of version 0.3.8 at T 16231: that range's rule at
+    T 16172 - 16230, the raster group of 2 at T 16231 - 16384.  The ends of each raster range are measured token counts,
+    every measured token count lies inside it and every kept one outside; no token tier and no exact ``ROW_RULES`` key
+    of the rows on sm_103a or sm_100a lies inside a raster range."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
+    part = cake_backend.ROW_RULE_RANGES_BY_SM[_RASTER_039_PART]
+    c1 = _dgrad_part_rule(8192, 128)
+    assert RASTER_039_RULES[(8192, 128)] == {**c1, "group_m": 2}
+    assert RASTER_039_RULES[(6144, 32)] == {
+        **ROW_RULES[_dgrad_part_key("sm_100a", 6144, 32)],
+        "group_m": 2,
+    }
+    assert part[_dgrad_part_key("sm_103a", 6144, 32)] == (
+        (16172, 32768, RASTER_039_RULES[(6144, 32)]),
+    )
+    assert part[_dgrad_part_key("sm_103a", 8192, 128)] == (
+        (16172, 16230, c1),
+        (16231, 16384, RASTER_039_RULES[(8192, 128)]),
+    )
+    now = {p: dict(table) for p, table in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_038(m)
+        before = {p: dict(table) for p, table in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    assert set(now) == set(before)
+    changed = {
+        (p, key)
+        for p in now
+        for key in set(now[p]) | set(before[p])
+        if now[p].get(key) != before[p].get(key)
+    }
+    assert changed == {
+        (_RASTER_039_PART, _dgrad_part_key("sm_103a", *row)) for row in RASTER_039_RANGES
+    }
+    for row, (lo, hi) in RASTER_039_RANGES.items():
+        measured, kept = RASTER_039_MEASURED[row], RASTER_039_KEPT[row]
+        assert lo in measured and hi in measured, row
+        assert all(_raster_039_band(152, *row, T) == (lo, hi) for T in measured), row
+        assert not any(_raster_039_band(152, *row, T) for T in kept), row
+        key = _dgrad_part_key("sm_103a", *row)
+        for a in ("sm_100a", "sm_103a"):
+            assert (a,) + key[1:] not in cake_backend.ROW_RULE_MIN_T, (row, a)
+        assert not [
+            exact
+            for exact in ROW_RULES
+            if exact[0] in ("sm_103a", "sm_100a")
+            and exact[1:8] == key[1:8]
+            and exact[8] is not None
+            and lo <= exact[8] <= hi
+        ], row
+
+
+@pytest.mark.parametrize("row", sorted(RASTER_039_RANGES), ids=lambda r: f"{r[0]}x{r[1]}")
+def test_raster_039_ranges_plan_the_group_of_2(monkeypatch, row):
+    """At the ends and the middle of the raster range of version 0.3.9 and at its measured token counts, the 152-SM
+    sm_103a plan is the plan of the range's rule as an exact ``ROW_RULES`` key at that token count without the part
+    ranges: the single-CTA program ``SM100A_148_DGRAD_F32_PROGRAM`` with no fallback flag, whole tiles (no stream-K
+    unit, no promoted chunk), in raster groups of 2.  The plan of version 0.3.8 (``_tables_038``) runs the same program
+    in another group and differs from it in the raster group and at most the L2 hints the group's wave working set
+    selects: the same tiles, the same sums.  One token count outside each end and at the kept token counts the plan is
+    the plan of version 0.3.8, and at every checked token count every other class of ``_DGRAD_PART_CLASSES`` plans the
+    row as in version 0.3.8."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
+    d_in, d_out = row
+    lo, hi = RASTER_039_RANGES[row]
+    key = _dgrad_part_key("sm_103a", d_in, d_out)
+    rule = RASTER_039_RULES[row]
+
+    def plan_at(a, sm, T):
+        return _rows_plan("dgrad", a, sm, d_in, d_out, T, "f32")
+
+    def plan_038(a, sm, T):
+        with monkeypatch.context() as m:
+            _tables_038(m)
+            return plan_at(a, sm, T)
+
+    def plan_exact(T):
+        # the range's rule as an exact key of the row at T, without the part ranges
+        with monkeypatch.context() as m:
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), dict(rule))
+            return plan_at(*_RASTER_039_PART, T)
+
+    inside = sorted({lo, (lo + hi) // 2, hi, *RASTER_039_MEASURED[row]})
+    for T in inside:
+        plan, before = plan_at(*_RASTER_039_PART, T), plan_038(*_RASTER_039_PART, T)
+        where = (row, T, plan.template, before.template)
+        assert plan == plan_exact(T), where
+        assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+        assert not (
+            plan.rule_fallback
+            or plan.knob_fallback
+            or plan.swap_fallback
+            or plan.wave_fallback
+        ), where
+        assert plan.sk_units == 0 and plan.promote_blocks == 0, where
+        assert plan.group_m == 2 and before.group_m != 2, (where, before.group_m)
+        assert before.template == plan.template, where
+        now, was = _plan_signature(plan), _plan_signature(before)
+        assert {f for f in now if now[f] != was[f]} <= {"group_m", "hints"}, (where, now, was)
+    outside = sorted({lo - 1, hi + 1, *RASTER_039_KEPT[row]})
+    for T in outside:
+        assert plan_at(*_RASTER_039_PART, T) == plan_038(*_RASTER_039_PART, T), (row, T)
+    for T in (*inside, *outside):
+        for a, sm in _DGRAD_PART_CLASSES:
+            if (a, sm) != _RASTER_039_PART:
+                assert plan_at(a, sm, T) == plan_038(a, sm, T), (row, a, sm, T)
+
+
+def test_routing_039_changes_exactly_the_raster_plans(monkeypatch):
+    """Byte for byte against the tables of version 0.3.8 (``_tables_038``), over ``ROUTING_038_SWEEP`` (it holds
+    6144 -> 32 and 8192 -> 128 at the token counts around the ranges of both versions) on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly at the FP32 input gradients of ``RASTER_039_RANGES`` inside their
+    ranges on 152-SM sm_103a parts, and only in its raster group (2; the L2 hints may follow the group): the same
+    program.  Every other plan is the plan of version 0.3.8."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
+    changed = 0
+    for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_038(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                now, was = _plan_signature(plan), _plan_signature(before)
+                held = (
+                    op == "dgrad"
+                    and out_dtype == "f32"
+                    and arch == "sm_103a"
+                    and _raster_039_band(sm_count, d_in, d_out, T) is not None
+                )
+                if not held:
+                    assert now == was, (where, plan.template, before.template)
+                    continue
+                changed += 1
+                assert plan.template == before.template == SM100A_148_DGRAD_F32_PROGRAM, where
+                assert plan.group_m == 2 and before.group_m != 2, (where, before.group_m)
+                assert {f for f in now if now[f] != was[f]} <= {"group_m", "hints"}, where
+    # on 152-SM sm_103a parts: 6144 -> 32 at the 12 token counts of the sweep from 16172 to 32768 (16172, 16173,
+    # 16230, 16231, 16232, 16278, 16307, 16383, 16384, 16385, 20480 and 32768); 8192 -> 128 at 16231, 16232, 16278,
+    # 16307, 16383 and 16384
+    assert changed == 12 + 6
+
+
+def _raster_039_gpu_cases():
+    """The GPU cases of the raster ranges of version 0.3.9: each row at each token count measured inside its range, on
+    the 152-SM sm_103a part alone; the output keeps the bits of the plan of version 0.3.8."""
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            *row,
+            T,
+            "f32",
+            {_RASTER_039_PART: SM100A_148_DGRAD_F32_PROGRAM},
+            scoped=True,
+            same_bits=True,
+        )
+        for row, measured in sorted(RASTER_039_MEASURED.items())
+        for T in measured
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _raster_039_gpu_cases(),
+    ids=lambda c: f"sm_103a-152-dgrad-{c.d_in}x{c.d_out}-T{c.T}-f32",
+)
+def test_raster_039_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each row of the raster ranges of version 0.3.9 at each measured token count runs its default plan on a 152-SM
+    sm_103a part, the single-CTA program in raster groups of 2: its output is judged against the FP64 oracle beside the
+    naive BF16 tier over the draws, it returns the same bits on three more launches into NaN, its plan differs from the
+    plan of version 0.3.8 (``_tables_038``) on the device, and its output equals that plan's bit for bit.  Another
+    device skips."""
+    _run_routing_gpu_case(
+        case,
+        monkeypatch,
+        record_property,
+        _tables_038,
+        "version 0.3.9",
+        plan_changes=True,
+        raster=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The raster groups of version 0.3.10 (ROW_RULE_RANGES_BY_SM[("sm_103a", 148)] and [("sm_100a", 148)]): on 148-SM
+# sm_103a (B300) and sm_100a (B200) parts FP32 input gradients run the single-CTA program in raster groups of 2 or 4
+# row tiles; on the 148-SM sm_100a part 8192 -> 128 moves from its two part rules (T 16231 and 16384) to a token range
+# ---------------------------------------------------------------------------
+
+#: The raster ranges of version 0.3.10: ``(arch, SM count) -> {(d_in, d_out): ((lo, hi, group_m), ...)}`` of the FP32
+#: input gradient; each range's rule is the 148-SM sm_100a part rule (``_dgrad_part_rule(8192, 128)``) in raster groups
+#: of ``group_m`` row tiles.
+RASTER_0310_RANGES = {
+    ("sm_103a", 148): {(8192, 128): ((8192, 32768, 2),), (6144, 32): ((8192, 8192, 4),)},
+    ("sm_100a", 148): {
+        (8192, 128): ((8192, 32768, 2),),
+        (5120, 128): ((16384, 32768, 2),),
+        (6144, 128): ((16384, 32768, 2),),
+        (6144, 32): ((16231, 16231, 4), (32768, 32768, 2)),
+    },
+}
+#: The token counts version 0.3.10 measured on its rows (two nodes of each part, against the plan of version 0.3.9):
+#: inside a range a raster group met the bar there with the bits of the plan before; outside, the row keeps its plan.
+RASTER_0310_MEASURED = (8192, 16231, 16384, 32768)
+#: The measured rows of each part (5120 -> 128 on the 148-SM sm_103a part has no range: at T 8192 the plan before was
+#: more than 1% off a second copy of itself in one node and mode pair, and at the other token counts the groups missed
+#: the bar).
+RASTER_0310_ROWS = {
+    ("sm_103a", 148): ((8192, 128), (6144, 32), (5120, 128)),
+    ("sm_100a", 148): ((8192, 128), (5120, 128), (6144, 128), (6144, 32)),
+}
+#: The two part rules of version 0.3.9 that the 148-SM sm_100a range of 8192 -> 128 replaces.
+_PART_RULES_039_8192 = tuple(("sm_100a", False, True, True, False, False, 8192, 128, T) for T in (16231, 16384))
+
+
+def _raster_0310_group(arch, sm_count, d_in, d_out, T):
+    """The raster group of the range of version 0.3.10 that holds the FP32 input gradient ``d_in -> d_out`` at ``T``
+    tokens on an ``arch`` part of ``sm_count`` SMs, else ``None``."""
+    for lo, hi, group in RASTER_0310_RANGES.get((arch, sm_count), {}).get((d_in, d_out), ()):
+        if lo <= T <= hi:
+            return group
+    return None
+
+
+def _raster_0310_rule(group):
+    """The rule of a range of version 0.3.10: the 148-SM sm_100a part rule in raster groups of ``group``."""
+    return {**_dgrad_part_rule(8192, 128), "group_m": group}
+
+
+def _tables_039(m):
+    """Put the 148-SM tables of version 0.3.9 back (``m``: a monkeypatch context; applying it again in a nested context
+    is a no-op): no 148-SM sm_100a part ranges, no 8192 -> 128 or 6144 -> 32 range on the 148-SM sm_103a part, and the
+    148-SM sm_100a part rules of 8192 -> 128 at T 16231 and 16384 (the default raster group)."""
+    m.delitem(cake_backend.ROW_RULE_RANGES_BY_SM, ("sm_100a", 148), raising=False)
+    b300 = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 148)]
+    for row in ((8192, 128), (6144, 32)):
+        m.delitem(b300, _dgrad_part_key("sm_103a", *row), raising=False)
+    for key in _PART_RULES_039_8192:
+        m.setitem(cake_backend.ROW_RULES_BY_SM[("sm_100a", 148)], key, _dgrad_part_rule(8192, 128))
+
+
+def test_raster_0310_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` and ``ROW_RULES_BY_SM`` differ from version 0.3.9 (``_tables_039``) in the rows of
+    ``RASTER_0310_RANGES`` alone: the 148-SM sm_103a part gets the 8192 -> 128 and 6144 -> 32 ranges (its other keys as
+    they were), a new 148-SM sm_100a part holds the ranges of its four rows, and the 148-SM sm_100a part rules lose the
+    two 8192 -> 128 keys (T 16231 and 16384) that its range now covers; every other part is as it was.  Each range's
+    rule is the 148-SM sm_100a part rule in its raster group, the ranges of a key are sorted and disjoint, their ends
+    are measured token counts, and no part rule and no token tier of a row lies inside one of its ranges (a part rule
+    would shadow the range)."""
+    ranges_now = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_039(m)
+        ranges_039 = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+        rules_039 = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    expected = {
+        part: {
+            _dgrad_part_key(part[0], *row): tuple((lo, hi, _raster_0310_rule(group)) for lo, hi, group in bands)
+            for row, bands in rows.items()
+        }
+        for part, rows in RASTER_0310_RANGES.items()
+    }
+    b300, b200 = ("sm_103a", 148), ("sm_100a", 148)
+    assert b200 not in ranges_039 and set(ranges_now) == set(ranges_039) | {b200}
+    assert ranges_now[b200] == expected[b200]
+    assert not set(expected[b300]) & set(ranges_039[b300])
+    assert ranges_now[b300] == {**ranges_039[b300], **expected[b300]}
+    for part, table in ranges_039.items():
+        if part != b300:
+            assert ranges_now[part] == table, part
+    assert set(rules_now) == set(rules_039) == {b200}
+    assert set(rules_039[b200]) - set(rules_now[b200]) == set(_PART_RULES_039_8192)
+    assert {k: v for k, v in rules_039[b200].items() if k not in _PART_RULES_039_8192} == rules_now[b200]
+    assert all(rules_039[b200][key] == _dgrad_part_rule(8192, 128) for key in _PART_RULES_039_8192)
+    for part, rows in RASTER_0310_RANGES.items():
+        for row, bands in rows.items():
+            key = _dgrad_part_key(part[0], *row)
+            assert all(lo <= hi for lo, hi, _ in bands) and all(a[1] < b[0] for a, b in zip(bands, bands[1:])), row
+            assert all(lo in RASTER_0310_MEASURED and hi in RASTER_0310_MEASURED for lo, hi, _ in bands), row
+            for a in ("sm_100a", "sm_103a"):
+                assert (a,) + key[1:] not in cake_backend.ROW_RULE_MIN_T, (part, row, a)
+            assert not [
+                k
+                for k in rules_now.get(part, {})
+                if k[:8] == key[:8] and any(lo <= k[8] <= hi for lo, hi, _ in bands)
+            ], (part, row)
+
+
+_RASTER_0310_CASES = tuple((part, row) for part, rows in sorted(RASTER_0310_RANGES.items()) for row in sorted(rows))
+#: The measured token counts inside the ranges of version 0.3.10 whose plan of version 0.3.9 is already the single-CTA
+#: program (in another raster group), ``(arch, sm_count, d_in, d_out, T)``: there the range changes only the raster
+#: group; at the other measured token counts inside the ranges it replaces another program.
+RASTER_0310_SAME_PROGRAM = {
+    ("sm_103a", 148, 6144, 32, 8192),
+    ("sm_100a", 148, 8192, 128, 16231),
+    ("sm_100a", 148, 8192, 128, 16384),
+    ("sm_100a", 148, 6144, 32, 16231),
+    ("sm_100a", 148, 6144, 32, 32768),
+}
+
+
+@pytest.mark.parametrize(
+    "part,row", _RASTER_0310_CASES, ids=[f"{a}-{s}-{r[0]}x{r[1]}" for (a, s), r in _RASTER_0310_CASES]
+)
+def test_raster_0310_ranges_plan_their_group(monkeypatch, part, row):
+    """At the ends and the middle of each raster range of version 0.3.10 and at its measured token counts, the part's
+    plan is the plan of the range's rule as an exact ``ROW_RULES`` key at that token count without the part tables:
+    the single-CTA program ``SM100A_148_DGRAD_F32_PROGRAM`` with no fallback flag, whole tiles (no stream-K unit, no
+    promoted chunk), in the range's raster group, where the tables of version 0.3.9 (``_tables_039``) plan another
+    program or another group (the same K order: the bits of the plan before, checked on the GPU).  One token count
+    outside each end and at the measured token counts outside every range the plan is the plan of version 0.3.9, and
+    at every checked token count every class of ``_DGRAD_PART_CLASSES`` without a range of the row there plans the row
+    as in version 0.3.9."""
+    arch, sm = part
+    d_in, d_out = row
+    key = _dgrad_part_key(arch, d_in, d_out)
+    bands = RASTER_0310_RANGES[part][row]
+
+    def plan_at(a, s, T):
+        return _rows_plan("dgrad", a, s, d_in, d_out, T, "f32")
+
+    def plan_039(a, s, T):
+        with monkeypatch.context() as m:
+            _tables_039(m)
+            return plan_at(a, s, T)
+
+    def plan_exact(T, group):
+        # the range's rule as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), _raster_0310_rule(group))
+            return plan_at(arch, sm, T)
+
+    inside = sorted(
+        {T for lo, hi, _ in bands for T in (lo, (lo + hi) // 2, hi)}
+        | {T for T in RASTER_0310_MEASURED if _raster_0310_group(arch, sm, d_in, d_out, T) is not None}
+    )
+    for T in inside:
+        group = _raster_0310_group(arch, sm, d_in, d_out, T)
+        plan, before = plan_at(arch, sm, T), plan_039(arch, sm, T)
+        where = (part, row, T, plan.template, before.template)
+        assert plan == plan_exact(T, group), where
+        assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+        assert not (
+            plan.rule_fallback
+            or plan.knob_fallback
+            or plan.swap_fallback
+            or plan.wave_fallback
+        ), where
+        assert plan.sk_units == 0 and plan.promote_blocks == 0, where
+        assert plan.group_m == group, where
+        assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+        if T in RASTER_0310_MEASURED:
+            same = (arch, sm, d_in, d_out, T) in RASTER_0310_SAME_PROGRAM
+            assert (before.template == plan.template) == same, where
+    outside = sorted(
+        ({T for lo, hi, _ in bands for T in (lo - 1, hi + 1)} | set(RASTER_0310_MEASURED)) - set(inside)
+    )
+    for T in outside:
+        assert _raster_0310_group(arch, sm, d_in, d_out, T) is None, (part, row, T)
+        assert plan_at(arch, sm, T) == plan_039(arch, sm, T), (part, row, T)
+    for T in (*inside, *outside):
+        for a, s in _DGRAD_PART_CLASSES:
+            if (a, s) != part and _raster_0310_group(a, s, d_in, d_out, T) is None:
+                assert plan_at(a, s, T) == plan_039(a, s, T), (part, row, a, s, T)
+
+
+def test_raster_0310_kept_rows_plan_as_in_0_3_9(monkeypatch):
+    """The measured rows of version 0.3.10 at their measured token counts outside every range (5120 -> 128 on the
+    148-SM sm_103a part at all four) plan as in version 0.3.9 on their part."""
+    kept = 0
+    for (arch, sm), rows in RASTER_0310_ROWS.items():
+        for d_in, d_out in rows:
+            for T in RASTER_0310_MEASURED:
+                if _raster_0310_group(arch, sm, d_in, d_out, T) is not None:
+                    continue
+                plan = _rows_plan("dgrad", arch, sm, d_in, d_out, T, "f32")
+                with monkeypatch.context() as m:
+                    _tables_039(m)
+                    before = _rows_plan("dgrad", arch, sm, d_in, d_out, T, "f32")
+                assert plan == before, (arch, sm, d_in, d_out, T)
+                kept += 1
+    # B300: 6144 -> 32 at 16231, 16384 and 32768, 5120 -> 128 at all four; B200: 5120 -> 128 and 6144 -> 128 at 8192
+    # and 16231, 6144 -> 32 at 8192 and 16384
+    assert kept == (3 + 4) + (2 + 2 + 2)
+
+
+def test_routing_0310_changes_exactly_the_raster_plans(monkeypatch):
+    """Byte for byte against the tables of version 0.3.9 (``_tables_039``), over ``ROUTING_038_SWEEP`` (it holds the
+    rows of ``RASTER_0310_RANGES`` at the token counts around and inside the ranges) on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly at the FP32 input gradients of ``RASTER_0310_RANGES`` inside their
+    ranges on their part, to the single-CTA program in the range's raster group.  Every other plan is the plan of
+    version 0.3.9."""
+    changed = 0
+    for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_039(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                group = (
+                    _raster_0310_group(arch, sm_count, d_in, d_out, T)
+                    if (op, out_dtype) == ("dgrad", "f32")
+                    else None
+                )
+                if group is None:
+                    assert _plan_signature(plan) == _plan_signature(before), (where, plan.template, before.template)
+                    continue
+                changed += 1
+                assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+                assert plan.group_m == group, (where, plan.group_m)
+                assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+    # the sweep's token counts of these rows (_DGRAD_PART_SWEEP_TOKENS): 15 from 8192 to 32768.  B300: 8192 -> 128 at
+    # those 15, 6144 -> 32 at 8192; B200: 8192 -> 128 at those 15, 5120 -> 128 and 6144 -> 128 at 16384, 16385, 20480
+    # and 32768, 6144 -> 32 at 16231 and 32768
+    assert changed == (15 + 1) + (15 + 4 + 4 + 2)
+
+
+def _raster_0310_gpu_cases():
+    """The GPU cases of the raster ranges of version 0.3.10: each row at each token count measured inside its ranges,
+    on its part alone; the output keeps the bits of the plan of version 0.3.9."""
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "f32",
+            {part: SM100A_148_DGRAD_F32_PROGRAM},
+            scoped=True,
+            same_bits=True,
+        )
+        for part, rows in sorted(RASTER_0310_RANGES.items())
+        for (d_in, d_out) in sorted(rows)
+        for T in RASTER_0310_MEASURED
+        if _raster_0310_group(*part, d_in, d_out, T) is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _raster_0310_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-f32",
+)
+def test_raster_0310_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each row of the raster ranges of version 0.3.10 at each token count measured inside its ranges runs its default
+    plan on its part (148-SM sm_103a or sm_100a), the single-CTA program in the range's raster group: its output is
+    judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on three more
+    launches into NaN, its plan differs from the plan of version 0.3.9 (``_tables_039``) on the device (another
+    program, or at ``RASTER_0310_SAME_PROGRAM`` the same program in another raster group), and its output equals that
+    plan's bit for bit.  Another device skips."""
+    ((arch, sm_count),) = case.programs
+    _run_routing_gpu_case(
+        case,
+        monkeypatch,
+        record_property,
+        _tables_039,
+        "version 0.3.10",
+        plan_changes=True,
+        raster=(arch, sm_count, case.d_in, case.d_out, case.T) in RASTER_0310_SAME_PROGRAM,
+    )
 
 
 # The determinism contract of the package: a prepared launch rerun over the same operands gives the same bits.

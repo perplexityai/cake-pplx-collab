@@ -50,11 +50,14 @@ A backward that computes no weight gradient (``compute_grad_weight=False``)
 runs a program built without it (``NODW_ROLES``, :func:`nodw_module`): the
 BF16 backward's row arithmetic with all weight-gradient work removed at build
 time, so ``dx`` and ``dz`` are the bits of the BF16 backward on the same rows
-(at every grid).  The strided program (``bwd_bf16_nodw_strided``: CTA ``b``
-runs the blocks ``b``, ``b + grid``, ... with no claim, no ticket and no
-workspace) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed
-program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket and
-workspace; sm_100a and sm_103a) past it, and the long one
+(at every grid).  The strided program (``bwd_bf16_nodw_strided``: the BF16
+backward's 256-thread CTAs of 16-row blocks, CTA ``b`` running the blocks
+``b``, ``b + grid``, ... with no claim, no ticket and no workspace; on
+packed rows its 128-thread build ``bwd_bf16_nodw_strided_packed``: 8-row
+blocks, a row to each 16 lanes as in the BF16 backward, packed rows read at
+their linear offsets) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM,
+the claimed program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket
+and workspace; sm_100a and sm_103a) past it, and the long one
 (``bwd_bf16_nodw_long``: its look-ahead loop) where :func:`backward_module`
 runs ``bwd_bf16_long``; sm_107a routes no claimed program, so there the
 strided program runs every row count short of the long one.  An
@@ -73,13 +76,16 @@ one block per CTA its CTAs claim the blocks in chunks whose rows are fixed by
 the row count and the grid, add each thread's FP32 runs of rows into plain
 FP32 words and each CTA's FP32 column words exactly into fixed-point digits,
 so the weight gradient's bits depend on the rows and
-the SM count only, not on which CTA runs a chunk.  The strided program
-launches the same ``min(blocks, ctas_per_sm * SMs)`` CTAs, its CTAs walking
-their blocks with no claim.  The backward's workspace
+the SM count only, not on which CTA runs a chunk.  A strided program
+launches ``min(blocks, ctas_per_sm * SMs)`` CTAs of its own rule (the
+256-thread one the BF16 backward's 16-row blocks and 4 CTAs per SM, the
+128-thread one of packed rows 8-row blocks and 8 CTAs per SM:
+``min(ceil(rows / 8), 8 * SMs)``), its CTAs walking their blocks with no
+claim.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
 64-bit digits per column, then one 32-bit flag word per column and the two
 32-bit words of the arrival ticket and the claim counter) starts zero and the
-kernel leaves it zero; the strided program's record has none, and it reads
+kernel leaves it zero; a strided program's record has none, and it reads
 and writes no workspace word.  No module is cooperative, and none waits for another
 CTA or grid inside a kernel.  A kernel resident on another stream delays a
 call roughly by its share of the SMs; a forward CTA whose slot such a kernel
@@ -634,11 +640,12 @@ MODULES: dict[str, dict[str, Any]] = {
     # built without the weight gradient (all of its work removed at build
     # time), CTA b running the 16-row blocks b, b + grid, ... with no claim,
     # no ticket and no workspace word, so dx and dz are the BF16 backward's
-    # bits at any grid; the BF16 backward's kernel parameters (the
-    # weight-gradient and workspace ones unread) and CTA count; a call with
-    # compute_grad_weight=False runs it up to NODW_STRIDED_ROWS_PER_SM rows
-    # per SM, on sm_107a at every row count but the long program's (build
-    # {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
+    # bits at any grid; the BF16 backward's kernel
+    # parameters (the weight-gradient and workspace ones unread) and CTA
+    # count; a call with compute_grad_weight=False runs it on rows that are
+    # not packed (packed rows run bwd_bf16_nodw_strided_packed) up to
+    # NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at every row count
+    # (build {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
     # "prefetch_share": None, "strided": True, "threads": 256}).
     "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d": {
         "arches": [
@@ -712,6 +719,95 @@ MODULES: dict[str, dict[str, Any]] = {
             "z_tok": "z_tok",
         },
         "role": "bwd_bf16_nodw_strided",
+    },
+    # The backward without the weight gradient, strided, for packed rows: the
+    # BF16 backward's row arithmetic built without the weight gradient (all
+    # of its work removed at build time) in 128-thread CTAs at most 8 per SM,
+    # a row to each 16 lanes as in the BF16 backward, CTA b running the 8-row
+    # blocks b, b + grid, ... with no claim, no ticket and no workspace word
+    # (packed rows read at their linear offsets; a CTA of one block takes its
+    # block count and prefetch test without an integer division), so dx and
+    # dz are the BF16 backward's bits at any grid; the BF16 backward's kernel
+    # parameters (the weight-gradient and workspace ones unread) and its own
+    # grid, min(ceil(rows / 8), 8 * SMs) CTAs; a call with
+    # compute_grad_weight=False runs it in the strided program's place on
+    # packed rows (dy, x and z of head stride 128 and token stride
+    # heads * 128) up to NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at
+    # every row count but the long program's (build {"dw": False, "math":
+    # "ax", "min_blocks": 8, "out": "bf16", "prefetch_share": None,
+    # "strided": True, "threads": 128}).
+    "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 8,
+            "kind": "strided_row_blocks",
+            "rows_per_block": 8,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_nodw_strided_packed",
     },
     # The backward without the weight gradient, claimed: the BF16 backward
     # built without the weight gradient, with its claims, its arrival ticket
@@ -897,6 +993,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -907,6 +1004,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_nodw": "cake_rmsnorm_silu_gate_det_train_cefc51faec88b7212f3c",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -917,6 +1015,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
+        "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -940,24 +1039,36 @@ LONG_ROLES = ("bwd_bf16_long", "bwd_f32_long")
 # The suffixes of the roles of a backward without the weight gradient, and
 # those roles (:func:`nodw_module`): the BF16 backward built without the
 # weight gradient, claimed (``bwd_bf16_nodw``), strided
-# (``bwd_bf16_nodw_strided``: no claim, no ticket, no workspace) and in the
-# look-ahead loop (``bwd_bf16_nodw_long``); a call with
-# ``compute_grad_weight=False`` runs one of them where its architecture routes
-# it.
+# (``bwd_bf16_nodw_strided``: no claim, no ticket, no workspace), strided
+# for packed rows (``bwd_bf16_nodw_strided_packed``: its 128-thread build,
+# the strided role's program for packed rows) and in the look-ahead loop
+# (``bwd_bf16_nodw_long``); a call with ``compute_grad_weight=False`` runs one
+# of them where its architecture routes it.
 NODW = "_nodw"
 STRIDED = "_strided"
-NODW_ROLES = ("bwd_bf16_nodw", "bwd_bf16_nodw_strided", "bwd_bf16_nodw_long")
+PACKED = "_packed"
+NODW_ROLES = (
+    "bwd_bf16_nodw",
+    "bwd_bf16_nodw_strided",
+    "bwd_bf16_nodw_strided_packed",
+    "bwd_bf16_nodw_long",
+)
 GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks")
 # A call without the weight gradient runs the strided program (``role + NODW
-# + STRIDED``) up to this many rows per SM, by architecture and role, and the
+# + STRIDED``, on packed rows ``role + NODW + STRIDED + PACKED`` where
+# routed) up to this many rows per SM, by architecture and role, and the
 # claimed program (``role + NODW``) past it: a role has a cut where its
 # architecture routes both.  The cuts are measured per architecture (CUDA
 # Graph replays, cold L2): up to them the strided program is the faster.
 # sm_107a routes no claimed program (its strided program is as fast or
 # faster at every row count measured), so it has no cut and the strided
 # program runs every row count (:func:`nodw_module`).  The strided program
-# launches the claimed program's ``min(blocks, ctas_per_sm * SMs)`` CTAs
-# (no claim and no ticket).  Host plan only: a new cut needs no new program.
+# launches the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)`` 256-thread
+# CTAs, the one of packed rows its own ``min(ceil(rows / 8), 8 * SMs)``
+# 128-thread CTAs (no claim and no ticket): measured on sm_107a, the
+# 128-thread build is the faster on packed rows and the 256-thread one on
+# other layouts once a 128-thread CTA walks two or more blocks.  Host plan
+# only: a new cut needs no new program.
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 768},
     "sm_103a": {"bwd_bf16": 768},
@@ -1055,6 +1166,31 @@ def forward_module(
     return module_for_rows(arch, "fwd", rows, sm_count)
 
 
+def backward_packed(
+    heads: int,
+    dy_tok: int,
+    dy_head: int,
+    x_tok: int,
+    x_head: int,
+    z_tok: int,
+    z_head: int,
+) -> bool:
+    """Whether the backward kernels read ``dy``, ``x`` and ``z`` of ``heads``
+    heads, given their token and head strides (in elements), as packed rows:
+    all three head strides 128 and all three token strides ``heads * 128``
+    (the kernel's own test)."""
+
+    row = heads * HEAD_DIM
+    return (
+        dy_head == HEAD_DIM
+        and x_head == HEAD_DIM
+        and z_head == HEAD_DIM
+        and dy_tok == row
+        and x_tok == row
+        and z_tok == row
+    )
+
+
 def backward_module(
     arch: str,
     role: str,
@@ -1073,7 +1209,9 @@ def backward_module(
     the token and head strides (in elements) the kernel reads ``dy``, ``x`` and
     ``z`` with: :func:`module_for_rows`, told the rows are packed when all
     three head strides are 128 and all three token strides ``heads * 128`` (the
-    kernel's own test).  Every module of the role gives the same bits."""
+    kernel's own test, :func:`backward_packed`, spelled out here: a call of
+    it would cost a small backward's host path more than the test).  Every
+    module of the role gives the same bits."""
 
     row = heads * HEAD_DIM
     packed = (
@@ -1087,29 +1225,57 @@ def backward_module(
     return module_for_rows(arch, role, rows, sm_count, packed)
 
 
-def nodw_module(arch: str, name: str, rows: int, sm_count: int) -> str:
+def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
+    """The ROUTES keys :func:`nodw_module` looks up for a module of backward
+    ``role``: for a long role ``base + LONG`` the key ``base + NODW + LONG``
+    (the other three empty), else ``None``, ``role + NODW + STRIDED``, that
+    key ``+ PACKED`` and ``role + NODW``."""
+
+    if role.endswith(LONG):
+        return role[: -len(LONG)] + NODW + LONG, "", "", ""
+    return None, role + NODW + STRIDED, role + NODW + STRIDED + PACKED, role + NODW
+
+
+# The keys of every role a module record names, spelled once at import: a
+# call without the weight gradient then builds no string (its host path is
+# most of the time of a small call).
+_NODW_KEYS = {
+    record["role"]: _nodw_keys(record["role"]) for record in MODULES.values()
+}
+
+
+def nodw_module(
+    arch: str, name: str, rows: int, sm_count: int, packed: bool = False
+) -> str:
     """The module of a backward without the weight gradient for ``rows``
     rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
     :func:`backward_module` names for the call's role (``bwd_bf16``), rows
-    and layout: for a long module (packed rows past its cut) the role's long
-    module without the weight gradient (``role + NODW + LONG``) where
-    ``arch`` routes one, else ``name`` itself (run with ``weight_grad`` 0);
-    otherwise the strided module (``role + NODW + STRIDED``) where ``arch``
-    routes one and ``rows <= NODW_STRIDED_ROWS_PER_SM[arch][role] *
-    sm_count``, else the claimed module (``role + NODW``) where routed, else
-    the strided module where routed (an architecture without a claimed
-    module has no cut: its strided module runs every row count), else
-    ``name``.  Every one gives the ``dx`` and ``dz`` bits of ``name``."""
+    and layout, and ``packed``, whether the kernel reads packed rows
+    (:func:`backward_packed`): for a long module (packed rows past its cut)
+    the role's long module without the weight gradient (``role + NODW +
+    LONG``) where ``arch`` routes one, else ``name`` itself (run with
+    ``weight_grad`` 0); otherwise the strided module (``role + NODW +
+    STRIDED``; for packed rows ``role + NODW + STRIDED + PACKED`` in its
+    place where ``arch`` routes that too) where ``arch`` routes one and
+    ``rows <= NODW_STRIDED_ROWS_PER_SM[arch][role] * sm_count``, else the
+    claimed module (``role + NODW``) where routed, else the strided module
+    where routed (an architecture without a claimed module has no cut: its
+    strided module runs every row count), else ``name``.  Every one gives
+    the ``dx`` and ``dz`` bits of ``name``."""
 
     routes = ROUTES.get(arch, {})
     role = MODULES[name]["role"]
-    if role.endswith(LONG):
-        return routes.get(role[: -len(LONG)] + NODW + LONG, name)
-    strided = routes.get(role + NODW + STRIDED)
+    keys = _NODW_KEYS.get(role) or _nodw_keys(role)
+    long_key, strided_key, packed_key, claimed_key = keys
+    if long_key is not None:
+        return routes.get(long_key, name)
+    strided = routes.get(strided_key)
+    if packed and strided is not None:
+        strided = routes.get(packed_key, strided)
     cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
     if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
         return strided
-    claimed = routes.get(role + NODW)
+    claimed = routes.get(claimed_key)
     if claimed is not None:
         return claimed
     return name if strided is None else strided
@@ -1119,7 +1285,7 @@ def workspace_elements(name: str) -> int:
     """FP32 elements of the workspace of backward module ``name``: its
     accumulator (``slots * limbs * HEAD_DIM`` 64-bit digits, two FP32 elements
     each), one 32-bit flag word per column, and the arrival ticket and the
-    claim counter (a module whose record has a workspace: not the strided
+    claim counter (a module whose record has a workspace: not a strided
     program)."""
 
     shape = MODULES[name]["workspace"]
@@ -1135,7 +1301,7 @@ def launch_grid(
     and from there the fewest whole waves of ``ctas_per_sm * sm_count`` CTAs
     whose CTAs walk at most ``max_blocks_per_cta`` blocks each, and at most one
     CTA per block; the backward ``min(blocks, ctas_per_sm * sm_count)`` CTAs,
-    and so does the strided program."""
+    and so do the strided programs, each of its own rule."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
@@ -1208,6 +1374,51 @@ def specs_for_arch(arch: str) -> list[Any]:
     return cake_build.jit_specs(arch)
 
 
+_GRID_AXES = {"grid_x": 0, "grid_y": 1, "grid_z": 2}
+
+
+@functools.cache
+def _arguments(name: str) -> tuple[tuple[bool, Any, str], ...]:
+    """Kernel arguments of module record ``name`` in launch order:
+    ``(True, grid axis, parameter)`` for a grid dimension, else ``(False,
+    logical name, parameter)``.  Cached: the module records are constant."""
+
+    record = MODULES[name]
+    logical = record["logical"]
+    return tuple(
+        (True, _GRID_AXES[key], key) if kind == "grid" else (False, logical[key], key)
+        for kind, key in record["arg_plan"]
+    )
+
+
+@functools.cache
+def _entry(name: str, device_index: int) -> Any:
+    """The tvm-ffi function of module record ``name`` on CUDA device ``device_index``."""
+
+    return getattr(load(name, device_arch(device_index)), MODULES[name]["ffi_entry"])
+
+
+@functools.cache
+def _ffi_device(device_index: int) -> Any:
+    """The tvm-ffi device of CUDA device ``device_index``."""
+
+    return tvm_ffi.device(f"cuda:{device_index}")
+
+
+@functools.cache
+def current_raw_stream() -> Any:
+    """A function of a CUDA device index that returns the handle of torch's
+    current stream on that device (``torch.cuda.current_stream(index).cuda_stream``
+    without making a stream object)."""
+
+    import torch
+
+    raw = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if raw is not None:
+        return raw
+    return lambda index: torch.cuda.current_stream(index).cuda_stream
+
+
 def run_module(
     name: str, values: dict[str, Any], *, rows: int, device_index: int
 ) -> None:
@@ -1216,27 +1427,26 @@ def run_module(
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
     grid is the module's :func:`launch_grid` on the device's SM count, and the
-    kernel runs on the current torch stream.
+    kernel runs on torch's current stream of CUDA device ``device_index``, the
+    device of its tensors.
     """
 
-    record = MODULES[name]
-    logical = record["logical"]
-    grid = launch_grid(record, rows=rows, sm_count=device_sm_count(device_index))
-    grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
-    args = []
-    for kind, key in record["arg_plan"]:
-        if kind == "grid":
-            args.append(grid_values[key])
-            continue
-        logical_name = logical[key]
-        if logical_name not in values:
-            raise ValueError(
-                f"module {name} needs {logical_name!r} (kernel parameter {key!r})"
-            )
-        args.append(values[logical_name])
-    module = load(name, device_arch(device_index))
-    with tvm_ffi.use_torch_stream():
-        getattr(module, record["ffi_entry"])(*args)
+    grid = launch_grid(MODULES[name], rows=rows, sm_count=device_sm_count(device_index))
+    arguments = _arguments(name)
+    try:
+        args = [grid[slot] if axis else values[slot] for axis, slot, _ in arguments]
+    except KeyError:
+        for axis, slot, key in arguments:
+            if not axis and slot not in values:
+                raise ValueError(
+                    f"module {name} needs {slot!r} (kernel parameter {key!r})"
+                ) from None
+        raise
+    entry = _entry(name, device_index)
+    with tvm_ffi.use_raw_stream(
+        _ffi_device(device_index), current_raw_stream()(device_index)
+    ):
+        entry(*args)
 
 
 __all__ = [
@@ -1252,6 +1462,7 @@ __all__ = [
     "NODW",
     "NODW_ROLES",
     "NODW_STRIDED_ROWS_PER_SM",
+    "PACKED",
     "PACKED_ROLES",
     "PACKED_ROWS",
     "ROLES",
@@ -1259,6 +1470,8 @@ __all__ = [
     "STRIDED",
     "arch_for_capability",
     "backward_module",
+    "backward_packed",
+    "current_raw_stream",
     "device_arch",
     "device_sm_count",
     "forward_module",
