@@ -189,7 +189,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # a (row, run) task (3 runs a row, 4 tasks a CTA), a lane's 3 loads of its run.
     "cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb",
         "launch": {
