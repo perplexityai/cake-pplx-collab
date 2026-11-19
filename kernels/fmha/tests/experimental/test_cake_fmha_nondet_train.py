@@ -34,7 +34,10 @@ must be written: the preprocess (``dPsum``, ``LSE_log2``, the cleared ``dQ_accum
 stage on its own inputs (the FP32 ``LSE_log2`` and ``dPsum``, a zeroed ``dQ_accum``) for every variant, judged on
 ``dQ_accum``, ``dK`` and ``dV``; the postprocess (``dq`` in the input layout) at both head dimensions.  The public
 backward, which composes the three stages, judged for every variant at four heads (the source tests' cases), one head
-and five heads; each variant launched through the three records ``RECORD_OF`` names for it, its inputs left unchanged.
+and five heads; each variant launches the kernels of the three records ``RECORD_OF`` names for it, in order and no
+other (observed on the device), its inputs left unchanged; the same records, ``dk`` and ``dv`` bitwise and ``dq`` within
+the tier when the host sequence's ``run`` returns ``False`` (the workspace from Python) and without a host sequence
+(the stage launchers).
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -516,46 +519,85 @@ def test_the_backward_matches_the_reference(D, causal, case, device, record_prop
     judge_draws(record_property, draw)
 
 
+def _launched(call, trace: Path) -> tuple[object, list[tuple[str, str]]]:
+    """``(result, launched)``: ``call()``'s result and the CUDA kernels it ran, in launch order, observed on the device
+    (``torch.profiler``; the trace is written to ``trace``), each as ``(stage, record)`` of the registry record whose
+    kernel it is, or ``("no record", name)``."""
+    record_of = {rec["kernel_symbol"]: (rec["stage"], name) for name, rec in cake_jit.MODULES.items()}
+    activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
+    torch.cuda.synchronize()
+    with torch.profiler.profile(activities=activities) as prof:
+        result = call()
+        torch.cuda.synchronize()
+    prof.export_chrome_trace(str(trace))
+    events = json.loads(trace.read_text())["traceEvents"]
+    kernels = sorted((event for event in events if event.get("cat") == "kernel"), key=lambda event: event["ts"])
+    return result, [record_of.get(event["name"], ("no record", event["name"])) for event in kernels]
+
+
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
-def test_the_backward_launches_the_records_of_its_variant(D, causal, device, monkeypatch) -> None:
+def test_the_backward_launches_the_records_of_its_variant(D, causal, device, tmp_path) -> None:
     """The backward of a variant launches, in order, the preprocess, main-stage and postprocess records that
-    ``RECORD_OF`` names for it, through the host sequence of the variant (one host call running the records of its
-    ``SEQUENCES`` entry) or, without one, through the stage launchers; it writes none of its inputs."""
-    launched = []
-    for stage in STAGES:
-        launcher = f"launch_{stage}"
-
-        def spy(name, *args, _launch=getattr(cake_backend, launcher), _stage=stage, **kwargs):
-            launched.append((_stage, name))
-            return _launch(name, *args, **kwargs)
-
-        monkeypatch.setattr(cake_backend, launcher, spy)
-
-    def sequence_spy(D_, causal_, arch, _sequence=cake_backend._sequence):
-        found = _sequence(D_, causal_, arch)
-        if found is None:
-            return None
-        library, run, run_with_workspace = found
-        records = list(zip(STAGES, cake_jit.SEQUENCES[(D_, causal_)]["records"], strict=True))
-
-        def run_spy(*args):
-            done = run(*args)
-            if done:
-                launched.extend(records)
-            return done
-
-        def run_with_workspace_spy(*args):
-            launched.extend(records)
-            return run_with_workspace(*args)
-
-        return library, run_spy, run_with_workspace_spy
-
-    monkeypatch.setattr(cake_backend, "_sequence", sequence_spy)
+    ``RECORD_OF`` names for it, and no other kernel: the kernels one call runs, observed on the device, are those
+    records' kernels; it writes none of its inputs."""
     x = make_inputs(Case(2, 3, 256), D, causal=causal, seed=11, device=device)
     inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
     before = [t.clone() for t in inputs]
-    dq, dk, dv = cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
+
+    def call():
+        return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
+
+    (dq, dk, dv), launched = _launched(call, tmp_path / "trace.json")
     assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
     assert_backward_contract("routed", x, {"dq": dq, "dk": dk, "dv": dv})
     for name, old, new in zip(("q", "k", "v", "out", "lse", "dout"), before, inputs, strict=True):
         assert torch.equal(old, new), f"the backward wrote its input {name}"
+
+
+# The backward's paths besides the host sequence's ``run``: ``run`` returns False (no tvm-ffi environment allocator, or
+# a failed allocation: the workspace from Python, then ``run_with_workspace``), and no host sequence for the variant
+# (the stage launchers).
+FALLBACKS = ("run_with_workspace", "stage_launchers")
+
+
+@pytest.mark.parametrize("path", FALLBACKS)
+@pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
+def test_the_backward_without_run_launches_the_same_records(
+    D, causal, path, device, monkeypatch, tmp_path, record_property
+) -> None:
+    """When ``run`` returns ``False`` and when the variant has no host sequence, the backward launches the variant's
+    three records in order, its ``dk`` and ``dv`` are bitwise those of ``run`` (one fixed order) and its ``dq`` meets
+    the tier."""
+    arch = cake_backend.device_arch(device.index)
+    found = cake_backend._sequence(D, causal, arch)
+    assert found is not None, "every variant ships a host sequence"
+    library, run, run_with_workspace = found
+    x = make_inputs(Case(2, 3, 256), D, causal=causal, seed=11, device=device)
+    inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
+    _, dk, dv = cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
+    calls = []
+
+    def without_allocator(*args):
+        calls.append(len(args))
+        return False
+
+    replacement = None if path == "stage_launchers" else (library, without_allocator, run_with_workspace)
+    monkeypatch.setattr(cake_backend, "_sequence", lambda *variant: replacement)
+
+    def call():
+        return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
+
+    (dq_path, dk_path, dv_path), launched = _launched(call, tmp_path / "trace.json")
+    assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
+    assert calls == ([] if replacement is None else [11])
+    assert torch.equal(dk_path, dk) and torch.equal(dv_path, dv)
+    assert_backward_contract(path, x, {"dq": dq_path, "dk": dk_path, "dv": dv_path})
+
+    def draw(seed: int):
+        y = make_inputs(Case(2, 3, 256), D, causal=causal, seed=seed, device=device)
+        got = cake_backend.cake_fmha_nondet_train_backward(
+            y.q, y.k, y.v, y.out, y.lse, y.dout, softmax_scale=y.softmax_scale, causal=causal
+        )
+        return judged_backward(y, {path: dict(zip(("dq", "dk", "dv"), got, strict=True))})
+
+    judge_draws(record_property, draw)

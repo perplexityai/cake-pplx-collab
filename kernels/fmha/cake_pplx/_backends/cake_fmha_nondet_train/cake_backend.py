@@ -211,7 +211,8 @@ def _sequence(D: int, causal: bool, arch: str) -> Optional[tuple[Any, Any, Any]]
     dk, dv, softmax_scale, softmax_scale_log2)`` launches the records ``RECORD_OF`` names for the variant, in order,
     with the arguments and grids of their stage launchers, in one host call; ``lse_log2``, ``dpsum`` and ``dq_accum``
     come from the tvm-ffi environment allocator (PyTorch's caching allocator, on the current stream).  It returns
-    ``False`` without launching when no environment allocator is set.  ``run_with_workspace(q, k, v, out, lse, dout,
+    ``False`` without launching when no environment allocator is set, and raises the builtin ``MemoryError``
+    before any launch when an allocation fails.  ``run_with_workspace(q, k, v, out, lse, dout,
     dq, dk, dv, lse_log2, dpsum, dq_accum, softmax_scale, softmax_scale_log2)`` takes the three buffers from the
     caller."""
     found = cake_jit.SEQUENCES.get((D, causal))
@@ -676,9 +677,15 @@ def cake_fmha_nondet_train_backward(
         dk = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
         dv = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
         scale_log2 = _fp32(scale * LOG2_E)
-        if run(q, k, v, out, lse, dout, dq, dk, dv, scale, scale_log2):
+        try:
+            done = run(q, k, v, out, lse, dout, dq, dk, dv, scale, scale_log2)
+        except MemoryError:
+            # The environment allocator failed, before any launch (tvm-ffi raises the builtin MemoryError): the
+            # workspace is allocated here instead, so a lasting shortage raises torch.OutOfMemoryError.
+            done = False
+        if done:
             return dq, dk, dv
-        # No tvm-ffi environment allocator: the workspace is allocated here.
+        # No tvm-ffi environment allocator, or it failed: the workspace is allocated here.
         lse_log2 = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
         dpsum = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
         dq_accum = torch.empty(B * H * Sq * D, dtype=torch.float32, device=device)  # cleared by bwd_pre

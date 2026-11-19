@@ -27,13 +27,14 @@ On SM100 / SM103 / SM107: the entry's ``dq``, ``dk`` and ``dv`` for every varian
 not) meet the naive BF16 tier against an FP64 oracle (``tests/cake_naive.py``, 32 independent draws), with the default
 and a given ``softmax_scale``, and with operands off a 256-byte boundary (16-byte aligned; ``lse`` 4-byte aligned);
 every documented ``ValueError`` (dtype, device, layout, rank, shapes, head dimension, lengths, head count, causal
-lengths, grid and index limits, a non-finite scale, a base not 16-byte aligned); under
-``torch.use_deterministic_algorithms`` the alert (a ``RuntimeError``; with ``warn_only=True`` one ``UserWarning``,
-then the results meet the tier); an empty batch returns empty gradients and alerts nothing; the launches run on the
-current stream without synchronizing; a call captured in a CUDA graph replays to results that meet the tier; a device
-outside the exported architectures is a ``RuntimeError``; with two devices, operands on the device that is not current
-give results there that meet the tier, and operands on two devices are a ``ValueError``.  The package promises no bits:
-no test compares two runs bit for bit. """
+lengths, grid and index limits, a non-finite scale, a base not 16-byte aligned); a call whose FP32 workspace does
+not fit is PyTorch's ``torch.OutOfMemoryError``; under ``torch.use_deterministic_algorithms`` the alert (a
+``RuntimeError``; with ``warn_only=True`` one ``UserWarning``, then the results meet the tier); an empty batch returns
+empty gradients and alerts nothing; the launches run on the current stream without synchronizing; a call
+captured in a CUDA graph replays to results that meet the tier; a device outside the exported architectures is a
+``RuntimeError``; with two devices, operands on the device that is not current give results there that meet the tier,
+and operands on two devices are a ``ValueError``.  The package promises no bits: no test compares two runs bit for
+bit. """
 
 from __future__ import annotations
 
@@ -389,6 +390,27 @@ def test_sizes_past_the_kernels_limits_are_a_value_error(sizes) -> None:
 
 # ----------------------------------------------------------------------------------------------------------------
 # On SM100 / SM103 / SM107: torch.use_deterministic_algorithms, empty batches, streams and devices
+
+
+def test_a_workspace_that_does_not_fit_is_torch_out_of_memory_error() -> None:
+    """A call whose FP32 workspace does not fit raises ``torch.OutOfMemoryError`` (a ``RuntimeError``), the error of
+    a PyTorch allocation: the process is held by ``torch.cuda.set_per_process_memory_fraction`` to its operands, the
+    three gradients and 60 MiB, below ``dq_accum``'s 160 MiB."""
+    device = _device_or_skip()
+    _call(_operands(device))  # loads the libraries
+    ops = _operands(device, H=16, Sq=20480, Skv=20480)  # each BF16 operand and gradient 80 MiB
+    torch.cuda.synchronize(device)
+    torch.cuda.empty_cache()
+    gradients = 3 * ops["q"].numel() * ops["q"].element_size()
+    limit = torch.cuda.memory_reserved(device) + gradients + (60 << 20)
+    torch.cuda.set_per_process_memory_fraction(limit / torch.cuda.get_device_properties(device).total_memory, device)
+    try:
+        with pytest.raises(torch.OutOfMemoryError):
+            _call(ops)
+    finally:
+        torch.cuda.set_per_process_memory_fraction(1.0, device)
+        del ops
+        torch.cuda.empty_cache()
 
 
 def test_deterministic_mode_raises_the_alert() -> None:
