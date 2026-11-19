@@ -5565,25 +5565,36 @@ SPLIT_ROLES = ("fwd", "bwd")
 # architecture's floor, or the floor of :data:`FORWARD_NARROW_ROW_MIN_S` for
 # the rows of its routes and tap dtypes from a channel-vector count upward.
 # The rows below 72 vectors (C = 520 to 568): each row's floor is the smallest
-# measured token count from which no measured cell -- every forward route;
-# the forward, the training step and the checkpointed step; eager and under
-# CUDA Graph replay -- ran slower with the narrower tiles than with the single
-# tile beyond the timing noise (and at least one ran faster); untimed token
+# measured token count from which no measured cell -- any forward route; this
+# package or the det package; the forward, the training step and the
+# checkpointed step; eager and under CUDA Graph replay -- ran slower with the
+# narrower tiles than with the single tile beyond the timing noise, with at
+# least one faster cell at every measured token count from it; untimed token
 # counts below it keep the single tile.  The measured cells are the tile
-# probes and two release timings (this package's forward against the 0.2.3
+# probes and the release timings (this package's forward against the 0.2.3
 # package's on the same GPU, and the same for the det package); GB200 and
-# GB300 cells are pooled for sm_100a and sm_103a.  The slower cells next
-# below the floors: on GB200 and GB300 C = 520, 528, 544 and 560 at 16384; on
-# the VR200 C = 568 at 12288, C = 552 and 560 at 16384, C = 544 at 20480, C =
-# 528 at 31292 and C = 520 at 32767.  The release timings set the floors of C
-# = 520 and 544, and of C = 528 on the VR200: with FP32 taps and bias the
-# 0.2.3 forward took 0.9684 / 0.9743 (C = 520) and 0.9801 / 0.9754 (C = 544)
-# times this package's time on a GB200 at 16384, and 0.9876 / 0.9732 (C = 520
-# at 24576), 0.9690 / 0.9632 (C = 520 at 31292), 0.9885 / 0.9827 (C = 520 at
-# 32767) and 0.9862 / 0.9775 (C = 544 at 20480) times it on the VR200, eager
-# / under CUDA Graph replay; with FP32 taps and no bias it took 0.9524 /
-# 0.9549 times it at C = 528, 31292 on the VR200 (slower at 24576 too).  The
-# width floor of a row below 72 vectors is its row floor.
+# GB300 cells are pooled for sm_100a and sm_103a.  The slower cells next below
+# the floors: on GB200 and GB300 C = 520, 528, 544 and 560 at 16384; on the
+# VR200 C = 568 at 12288, C = 552 and 560 at 16384, C = 544 at 20480, C = 528
+# at 31292 and C = 520 at 36864.  The release timings set the floors of
+# C = 520 and 544, and of C = 528 on the VR200; their slower cells below those
+# floors (the 0.2.3 time over this package's, eager / under CUDA Graph replay
+# where both modes were slower, else the mode is named; the cells of this
+# package unless det, the det package, is named): on GB200 and GB300, C = 520
+# at S = 16384 (GB200, FP32 taps and bias: forward 0.9684 / 0.9743); floor
+# 20480. C = 544 at S = 16384 (GB200, FP32 taps and bias: forward
+# 0.9801 / 0.9754); floor 20480. On the VR200, C = 520 at S = 24576 (FP32 taps
+# and bias: forward 0.9876 / 0.9732), S = 31292 (FP32 taps and bias: forward
+# 0.9690 / 0.9632, det forward 0.9784 / 0.9736; FP32 taps, no bias: step
+# 0.9796 / 0.9828), S = 32767 (FP32 taps and bias: forward 0.9885 / 0.9827)
+# and S = 36864 (FP32 taps and bias: forward 0.9910 / 0.9864); floor 40960.
+# C = 528 at S = 24576 (FP32 taps, no bias: forward graph 0.9855, step eager
+# 0.9843, checkpointed step eager 0.9837) and S = 31292 (FP32 taps, no bias:
+# forward 0.9524 / 0.9549, step 0.9725 / 0.9735, checkpointed step eager
+# 0.9840, det forward 0.9611 / 0.9580, det step 0.9822 / 0.9820, det
+# checkpointed step eager 0.9876); floor 62585. C = 544 at S = 20480 (FP32
+# taps and bias: forward 0.9862 / 0.9775); floor 24576. The width floor of a
+# row below 72 vectors is its row floor.
 # On sm_103a the ``fwd_bias`` rows of 89 to 96 vectors (C = 712 to 768) read
 # the dtype of the call's taps (``bf16_taps``; the ``fwd`` route's taps are
 # FP32 and the ``fwd_dt`` route's BF16): with FP32 taps they take 20480 (on a
@@ -5619,7 +5630,7 @@ FORWARD_NARROW_WIDTHS: dict[int, int] = {65: 13, 66: 11, 68: 17, 69: 23, 70: 14,
 FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
     "sm_100a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
     "sm_103a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
-    "sm_107a": {65: 32768, 66: 62585, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
+    "sm_107a": {65: 40960, 66: 62585, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
 }
 # ``{arch: {cv: S}}``: on ``arch`` the narrow forward row of ``cv`` channel
 # vectors below 72 (C = 520 to 568) plans as the deterministic forward from
@@ -5628,7 +5639,7 @@ FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
 FORWARD_NARROW_ROW_FLOORS: dict[str, dict[int, int]] = {
     "sm_100a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
     "sm_103a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
-    "sm_107a": {65: 32768, 66: 62585, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
+    "sm_107a": {65: 40960, 66: 62585, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
 }
 # The rows below this many channel vectors take :data:`FORWARD_NARROW_ROW_FLOORS`.
 FORWARD_ROW_FLOOR_VECTORS = 72

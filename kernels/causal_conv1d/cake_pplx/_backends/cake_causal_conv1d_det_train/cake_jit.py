@@ -5040,7 +5040,7 @@ NARROW_WIDTH_FLOORS: dict[str, dict[str, dict[int, int]]] = {
             80: 24576,
         },
         "sm_107a": {
-            65: 32768,
+            65: 40960,
             66: 62585,
             68: 24576,
             69: 24576,
@@ -5059,31 +5059,39 @@ NARROW_WIDTH_FLOORS: dict[str, dict[str, dict[int, int]]] = {
 # 32-vector tiles (C = 536 and 568 as (32, 4, 3)); below it, in a plan made
 # without ``S`` or without the architecture, and on an architecture the table
 # does not list, one tile (the plan of the package's 0.2.3 release).  Each
-# floor is the smallest measured ``S`` from which no measured cell of the
-# row was slower than one tile beyond the noise band in both timed copies
-# (forward, forward + backward and a recomputed forward + backward, eager
-# and CUDA Graph replay), with at least one faster cell: paired probes of
-# the narrower tiles against one tile (same GPU, 7 rotated groups, a 15-group
-# repeat of every slower row, ``y`` and ``dx`` bit for bit) at S = 12288 to
-# 250340, and a timing of the nondet package's 0.2.3 release against this
-# release (same GPU, the same forward plans) at S = 12288 to 500680.  On
-# GB200 (sm_100a) and GB300 (sm_103a), whose cells are pooled, the probes
-# found C = 528 and 560 slower at 16384 (20480 untimed) and C = 520 and 544
-# at 12288; the release timing then put the 0.2.3 / new time ratio of the
-# forward with FP32 taps and an FP32 bias at 0.9684 / 0.9743 (eager / graph)
-# at C = 520 and 0.9801 / 0.9754 at C = 544, both at 16384 on GB200, which
-# moved those two floors to 20480.  On VR200 (sm_107a) the probes found C =
-# 520, 528, 544, 552 and 560 slower at 16384 and C = 568 at 12288; the
-# release timing put that ratio at 0.9876 / 0.9732 at C = 520, S = 24576 and
-# 0.9862 / 0.9775 at C = 544, S = 20480, a second release timing (the nondet
-# package and this one, the latter in parentheses) at 0.9690 / 0.9632
-# (0.9784 / 0.9736) at C = 520, S = 31292 and, with FP32 taps and no bias,
-# 0.9524 / 0.9549 (0.9611 / 0.9580) at C = 528, S = 31292, with C = 528 also
-# slower at 24576, and a third at 0.9885 / 0.9827 (0.9961 / 0.9865) at C =
-# 520, S = 32767; those floors are 32768 (C = 520), 24576 (C = 544) and
-# 62585 (C = 528).  At S = 250340 x 520 the forward under CUDA Graph replay
-# ran 127.17 -> 98.69 us on GB200.  B200 (148 SMs) takes GB200's floors.
-# C = 776 (97 vectors) was slower at S = 131072-250340 and keeps one tile.
+# floor is the smallest measured ``S`` from which no measured cell of the row
+# -- any route, of the nondet or the det package; the forward, forward +
+# backward and a recomputed forward + backward; eager and CUDA Graph replay --
+# was slower than one tile beyond the noise band in both timed copies, with at
+# least one faster cell at every measured ``S`` from it.  The measured cells:
+# paired probes of the narrower tiles against one tile (same GPU, 7 rotated
+# groups, a 15-group repeat of every slower row, ``y`` and ``dx`` bit for bit)
+# at S = 12288 to 250340, and timings of the 0.2.3 release against this
+# release (same GPU, the same forward plans; the nondet package, and in the
+# later timings this package too) at S = 12288 to 500680.  On GB200 (sm_100a)
+# and GB300 (sm_103a), whose cells are pooled, the probes found C = 528 and
+# 560 slower at 16384 (20480 untimed) and C = 520 and 544 at 12288; on VR200
+# (sm_107a) C = 520, 528, 544, 552 and 560 at 16384 and C = 568 at 12288.  The
+# release timings raised C = 520 and 544, and C = 528 on VR200; their slower
+# cells below those floors (the 0.2.3 / new time ratio, eager / graph where
+# both modes were slower, else the mode is named; the nondet package unless
+# det is named): on GB200 and GB300, C = 520 at S = 16384 (GB200, FP32 taps
+# and bias: forward 0.9684 / 0.9743); floor 20480. C = 544 at S = 16384
+# (GB200, FP32 taps and bias: forward 0.9801 / 0.9754); floor 20480.  On
+# VR200, C = 520 at S = 24576 (FP32 taps and bias: forward 0.9876 / 0.9732),
+# S = 31292 (FP32 taps and bias: forward 0.9690 / 0.9632, det forward
+# 0.9784 / 0.9736; FP32 taps, no bias: step 0.9796 / 0.9828), S = 32767 (FP32
+# taps and bias: forward 0.9885 / 0.9827) and S = 36864 (FP32 taps and bias:
+# forward 0.9910 / 0.9864); floor 40960. C = 528 at S = 24576 (FP32 taps, no
+# bias: forward graph 0.9855, step eager 0.9843, checkpointed step eager
+# 0.9837) and S = 31292 (FP32 taps, no bias: forward 0.9524 / 0.9549, step
+# 0.9725 / 0.9735, checkpointed step eager 0.9840, det forward
+# 0.9611 / 0.9580, det step 0.9822 / 0.9820, det checkpointed step eager
+# 0.9876); floor 62585. C = 544 at S = 20480 (FP32 taps and bias: forward
+# 0.9862 / 0.9775); floor 24576.  At S = 250340 x 520 the forward under CUDA
+# Graph replay ran 127.17 -> 98.69 us on GB200.  B200 (148 SMs) takes GB200's
+# floors.  C = 776 (97 vectors) was slower at S = 131072-250340 and keeps one
+# tile.
 NARROW_ROW_FLOORS: dict[str, dict[str, dict[int, int]]] = {
     "fwd": {
         "sm_100a": {
@@ -5105,7 +5113,7 @@ NARROW_ROW_FLOORS: dict[str, dict[str, dict[int, int]]] = {
             71: 12288,
         },
         "sm_107a": {
-            65: 32768,
+            65: 40960,
             66: 62585,
             67: 16384,
             68: 24576,
