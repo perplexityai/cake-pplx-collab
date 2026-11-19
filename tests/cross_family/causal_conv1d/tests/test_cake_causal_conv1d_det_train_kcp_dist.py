@@ -45,10 +45,12 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
   no device allocation (``tests/experimental/test_helpers/cake_host_sync.py``), bitwise the first call;
 - per-document zigzag rows: the longest document is a chain of ``2 W`` fragments over every rank.
 
-``ROWS`` are W = 2 / 4 / 8; ``F_ROWS`` are W = 2 / 4 at C = 528 and 568 with the ranks' token counts on both sides of
-the forward's token floor of the channel count; ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at
-W = 64 a document of 128 fragments, and documents of one- and two-token fragments whose history comes from up to three
-predecessor ranks).  Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
+``ROWS`` are W = 2 / 4 / 8; ``F_ROWS`` are W = 2 / 4 at C = 528 and 568 around the forward's token floor of the
+channel count on the running architecture (``cake_jit.NARROW_ROW_FLOORS["fwd"]``): its ``floor:`` rows take the ranks'
+token counts from that table at run time (a rank at the floor and one a token below it), its other rows fixed counts
+(the comment above ``F_ROWS``); ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at W = 64 a document of 128
+fragments, and documents of one- and two-token fragments whose history comes from up to three predecessor ranks).
+Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
 ``torch.multiprocessing`` (``pytest``: skipped when fewer than ``W`` CUDA devices are visible) and one process per Slurm
 task (``SLURM_NTASKS == W``; the rendezvous from ``MASTER_ADDR`` / ``MASTER_PORT``; rows of another ``W`` are skipped
 under a multi-task step).  The ``ROWS_SCALE`` rows run in a multi-node Slurm step of ``W`` tasks.
@@ -83,16 +85,22 @@ ROWS = [
     ((2048, 5, 3000, 1), 8, "zigzag_per_document", 384),
     ((6, 1, 2, 3, 4000), 8, "ragged:1,1,1,3,0,2,4000,4", 256),
 ]
-# Rows of C = 528 and 568 whose ranks' token counts lie on both sides of the forward's token floor of those channel
-# counts (``cake_jit.NARROW_ROW_FLOORS["fwd"]``: C = 528 24576 on every architecture; C = 568 12288 on sm_100a /
-# sm_103a, 16384 on sm_107a), so the single-rank main program of one rank runs the narrower tiles of its floor and
-# that of another rank the single tile, at W = 2 and 4 (at W = 4 a rank exactly at C = 528's floor and one a token
-# below it, and ranks at 16384 / 12288 / 12287 tokens at C = 568).  Kept out of ``ROWS`` (other suites import it).
+# Rows of C = 528 and 568 around the forward's token floor of the channel count on the running architecture
+# (``cake_jit.NARROW_ROW_FLOORS["fwd"]``; the nondet package's ``FORWARD_NARROW_ROW_FLOORS`` holds the same floors):
+# from its floor the single-rank main program of a rank runs the narrower tiles of the row, below it the single tile.
+# The ``floor:`` rows (C = 528, W = 2 and 4) take their ranks' token counts from that table at run time
+# (:func:`_floor_row`; ``f`` is the floor): a rank at the floor and one a token below it, so on every architecture one
+# rank runs the narrower tiles and another the single tile; the last document takes the tokens the others leave.  A
+# row of fixed counts crosses the floor of an architecture where the floor lies above its smallest count and at most
+# its largest (C = 528: 26000 / 10003 and 24576 / 24575 / 1 / 9000 tokens; C = 568: 20000 / 6003 and 16384 / 12288 /
+# 12287 / 3044 tokens).  Kept out of ``ROWS`` (other suites import it).
 F_ROWS = [
     ((20000, 10003, 6000), 2, "ragged:26000,10003", 528),
     ((30000, 19151, 9001), 4, "ragged:24576,24575,1,9000", 528),
     ((9000, 11000, 6003), 2, "ragged:20000,6003", 568),
     ((20000, 15000, 9000, 3), 4, "ragged:16384,12288,12287,3044", 568),
+    ((20000, 10003, "rest"), 2, "floor:f,f-1", 528),
+    ((30000, 19000, "rest"), 4, "floor:f,f-1,1,3", 528),
 ]
 # Per-document zigzag at W = 16 / 32 / 64: every document is cut into 2 W fragments, so the longest is a chain over
 # every rank (128 fragments at W = 64); the short documents give one- and two-token fragments and empty ones.  Kept
@@ -110,6 +118,35 @@ REPEATS = 5
 def _row_id(row) -> str:
     lengths, W, layout, C = row
     return "s" + "_".join(map(str, lengths)) + f"-w{W}-{layout.split(':')[0]}-c{C}"
+
+
+def _floor_row(row, arch: str):
+    """``row`` with the token counts of a ``floor:`` layout on ``arch``, as :func:`_partition` takes it (other rows
+    unchanged).  The layout lists the ranks' token counts: ``f`` is the forward's token floor of ``C`` on ``arch``
+    (``cake_jit.NARROW_ROW_FLOORS["fwd"]``, checked equal to the nondet package's ``FORWARD_NARROW_ROW_FLOORS``),
+    ``f-N`` a count ``N`` tokens below it, a number that count; the last document (``"rest"``) takes the tokens the
+    other documents leave."""
+
+    lengths, W, layout, C = row
+    if not layout.startswith("floor:"):
+        return row
+    from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit as det_jit
+    from cake_pplx._backends.cake_causal_conv1d_nondet_train import (
+        cake_jit as nondet_jit,
+    )
+
+    # the floors are keyed by channel vectors of 8 BF16 channels
+    floor = det_jit.NARROW_ROW_FLOORS["fwd"][arch][C // 8]
+    assert nondet_jit.FORWARD_NARROW_ROW_FLOORS[arch][C // 8] == floor, (arch, C)
+    t_r = [
+        floor + int(t[1:] or 0) if t.startswith("f") else int(t)
+        for t in layout.split(":")[1].split(",")
+    ]
+    *docs, rest = lengths
+    docs.append(sum(t_r) - sum(docs))
+    # a rank at or above the floor and one below it; the last document holds tokens
+    assert rest == "rest" and docs[-1] > 0 and min(t_r) < floor <= max(t_r), row
+    return tuple(docs), W, "ragged:" + ",".join(map(str, t_r)), C
 
 
 def _partition(partition, lengths, W: int, layout: str):
@@ -252,9 +289,9 @@ def _run_rank(
         cake_kcp_plan as plan,
     )
 
-    lengths, _w, layout, C = row
     device = torch.device("cuda", local_id % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
+    lengths, _w, layout, C = _floor_row(row, conv_kcp._device_arch(device))
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", str(port))

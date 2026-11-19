@@ -17,8 +17,10 @@ Multi-GPU rows of the non-deterministic ``cake_causal_conv1d_nondet_kcp``: ``W``
 deterministic KCP suite's partitions (contiguous, zigzag, per-document zigzag, ragged tables with a zero-token rank,
 one-token fragments, a fragment that reads its history from three predecessor ranks), plus W = 16 rows (``-k w16``) on
 the layouts any world size partitions: contiguous, zigzag and per-document zigzag (the ragged tables are written for at
-most eight ranks), and the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 and 568, the ranks' token counts on
-both sides of the forward's token floor of the channel count).  The outputs are judged by the naive judge
+most eight ranks), and the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 and 568 around the forward's token
+floor of the channel count on the running architecture, ``cake_jit.FORWARD_NARROW_ROW_FLOORS``: its ``floor:`` rows take
+the ranks' token counts from that floor at run time, a rank at it and one a token below it, so on every architecture
+one rank's forward runs the narrower tiles and another's the single tile).  The outputs are judged by the naive judge
 (``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of 32 seeds (the same on every
 rank), runs the call on its tokens and judges its ``y`` / ``dx`` rows and the sum of the ranks' ``dweight`` partials
 (all-gathered and added in rank order) against the float64 oracle of the whole pack and PyTorch's BF16 naive
@@ -68,6 +70,7 @@ from tests.test_cake_causal_conv1d_det_train_kcp_dist import (
     ROWS,
     WIDTH,
     _Counter,
+    _floor_row,
     _free_port,
     _local,
     _partition,
@@ -100,9 +103,9 @@ def _run_rank(
     )
     from tests.cake.test_helpers.cake_causal_conv1d_oracle import judge_draws, problem
 
-    lengths, _w, layout, C = row
     device = torch.device("cuda", local_id % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
+    lengths, _w, layout, C = _floor_row(row, conv_kcp._device_arch(device))
     if not dist.is_initialized():
         os.environ.setdefault("MASTER_ADDR", "127.0.0.1")
         os.environ.setdefault("MASTER_PORT", str(port))
