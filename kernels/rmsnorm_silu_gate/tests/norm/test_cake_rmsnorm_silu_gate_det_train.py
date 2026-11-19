@@ -1751,6 +1751,7 @@ def test_caller_workspace_buffers_follow_the_tensor():
     with pytest.raises(ValueError) as info:
         backward(dy, x, z, w, EPS, workspace=ws)
     assert str(info.value) == unfit(x.device, elements), str(info.value)
+    del info  # its traceback holds this frame: no cycle keeping the tensors
     assert id(ws) not in pkg._CALLER_WORKSPACES
     assert bool(ws.eq(1).all())
     ws = workspace_for(1, x.device)
