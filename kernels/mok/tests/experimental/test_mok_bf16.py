@@ -40,7 +40,13 @@ import dataclasses
 import pytest
 import torch
 
-from tests.experimental._mok_one_gpu import OneGpuGroup, bound_multiplier, one_gpu_workspace
+from tests.experimental._mok_one_gpu import (
+    CHANGED_COUNTS,
+    OneGpuGroup,
+    bound_multiplier,
+    one_gpu_source_workspace,
+    one_gpu_workspace,
+)
 from tests.experimental._mok_reference import production_inputs, require_gpu, single_rank_schedule
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -2499,3 +2505,91 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     for _ in range(2):
         graph.replay()
         assert _same(first, snapshot(captured))
+
+
+@pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
+def test_before_down_adapter_top6_changed_counts(ep, experts):
+    """The adapter's top-6 router-weight-before-down step over changing source counts on one source workspace, as rank
+    0 of its EP group emulated on one GPU (:class:`OneGpuGroup`, every emulated peer at this rank's count): the counts
+    of :data:`CHANGED_COUNTS` in order (1031, 257 and 513 rows: padded staging of rows ``[count, shared_rows)``; 768:
+    unpadded), a new schedule per count, several macrobatches.  Before each step every workspace row past the count
+    holds other values (as after a larger count or another layer), so the staging alone decides those rows: the
+    context step and the checkpointed step (context-free forward, recompute with the router weights, backward, another
+    router weight in the workspace between them) give exactly the bytes of the context step on a fresh zeroed
+    workspace, the outputs have the count's rows, and no count after the first loads a kernel.  The accuracy of these
+    steps is judged in ``test_mok_accuracy.py`` (``test_before_down_adapter_top6_changed_counts_accuracy``)."""
+    _require_role("forward_clamped_wbd")
+    _require_role(f"count_{ep}_{experts}")
+    topk, hidden, intermediate, macro, mini, limit = 6, 512, 256, 1536, 256, 0.125
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    config = MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    fresh_workspaces = []  # alive to the end: no later workspace takes a freed one's address
+    loads = None
+    for index, count in enumerate(CHANGED_COUNTS):
+        x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6151 + index)
+        ids = torch.rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+
+        def step(ws, checkpointed):
+            schedule = functional.build_schedule(ws, config, ids, num_local_experts=experts)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            y, context = functional.forward(
+                config, ws, schedule, x, scores, *weights, swiglu_limit=limit, save_context=not checkpointed
+            )  # fmt: skip
+            if checkpointed:
+                # Another layer's router weights in the workspace: the recompute and the backward stage their own.
+                ws.storage.router_weight_buffer.fill_(0.75)
+                context = functional.recompute_forward_context(
+                    config, ws, schedule, x, weights[0], weights[1], weights[3], weights[4], swiglu_limit=limit,
+                    router_weights=scores,
+                )  # fmt: skip
+                ws.storage.router_weight_buffer.fill_(0.75)
+            grads = functional.backward(
+                config, ws, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            return tuple(value.clone() for value in (y, *grads))
+
+        def poison(ws):
+            """Every workspace row past the count: values no staging of this count writes."""
+            storage = ws.storage
+            for buffer, rows, value in (
+                (storage.x_buffer, count, 3.0),
+                (storage.d_y_buffer, count, -5.0),
+                (storage.router_weight_buffer, count, 0.75),
+                (storage.d_router_weight_buffer, count, 9.0),
+                (storage.combine_buffer, count * topk, 7.0),
+                (storage.d_x_routed_buffer, count * topk, -7.0),
+            ):
+                buffer[rows:].fill_(value)
+
+        fresh_workspaces.append(one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)[0])
+        reference = step(fresh_workspaces[-1], False)
+        assert [tuple(v.shape) for v in reference[:3]] == [(count, hidden), (count, hidden), (count, topk)]
+        assert all(torch.isfinite(value).all().item() for value in reference)
+        assert all(torch.count_nonzero(value).item() > 0 for value in reference)
+        for checkpointed in (False, True):
+            poison(workspace)
+            values = step(workspace, checkpointed)
+            differs = [i for i, (a, b) in enumerate(zip(reference, values, strict=True)) if not torch.equal(a, b)]
+            assert not differs, (count, "checkpointed" if checkpointed else "context", differs)
+        # A changed source count builds a new schedule and launch plan on the workspace; it loads no kernel.
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (count, "kernel loads", loads, misses)

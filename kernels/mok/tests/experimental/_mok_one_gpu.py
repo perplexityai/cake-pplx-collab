@@ -17,19 +17,27 @@ Independent single-GPU fixtures for the MoK kernel tests.
 One-GPU emulation of rank 0 of an EP group, for the adapter at the 384-expert layouts without a process group.
 
 :class:`OneGpuGroup` stands in for the group's communication and :func:`one_gpu_workspace` builds rank 0's native
-workspace with every peer pointer at this rank's own buffers.  With every token routed to this rank's experts (the
-gathered expert ids of every rank are this rank's), each route reaches this rank once from every emulated peer, and
-the peers' writes of a combine row, an input-gradient row or a router-weight gradient are equal bytes to one address:
-``y``, ``dx`` and the router-weight gradients are those of a single-rank layer over this rank's experts, and each
-routed weight gradient sums EP copies of every route.  Not a distributed run: no peer barrier and no cross-rank race
-is exercised.
+workspace with every peer pointer at this rank's own buffers; :func:`one_gpu_source_workspace` wraps it as the source
+workspace of changing source counts.  With every token routed to this rank's experts (the gathered expert ids of every
+rank are this rank's), each route reaches this rank once from every emulated peer, and the peers' writes of a combine
+row, an input-gradient row or a router-weight gradient are equal bytes to one address: ``y``, ``dx`` and the
+router-weight gradients are those of a single-rank layer over this rank's experts, and each routed weight gradient sums
+EP copies of every route.  Not a distributed run: no peer barrier and no cross-rank race is exercised.
 """
+
+import math
 
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 
+backend = cake_package("cake_mok_bf16", "backend")
 workspace_module = cake_package("cake_mok_bf16", "workspace")
+
+#: Source rows of the top-6 steps over changing counts on one source workspace, in order: 1031, 257 and 513 rows are
+#: not multiples of the 256-row tile (padded staging of rows ``[count, shared_rows)``), 257 and 513 come after a larger
+#: count, and 768 is a multiple of the tile (unpadded staging).
+CHANGED_COUNTS = (1031, 768, 257, 513)
 
 
 def bound_multiplier(tokens, topk, ep, experts):
@@ -91,3 +99,15 @@ def one_gpu_workspace(ep, tokens, hidden, topk, capacity, device):
         barrier_buffer_multicast_ptr=barrier.data_ptr(),
         barrier_target=torch.zeros(1, dtype=torch.int32, device=device),
     )
+
+
+def one_gpu_source_workspace(ep, experts, counts, hidden, topk, device):
+    """Rank 0's source workspace (:class:`MoKSourceWorkspace`, as ``create_mok_bf16_workspace`` returns it) on one GPU
+    for the source counts ``counts``: the physical rows that factory reserves (the largest count rounded up to its row
+    alignment, at least 512) and the worst-case multiplier at those rows.  Returns the workspace and the multiplier."""
+    alignment = math.lcm(256, 512 // math.gcd(topk, 512))
+    rows = -(-max(512, *counts) // alignment) * alignment
+    multiplier = bound_multiplier(rows, topk, ep, experts)
+    capacity = workspace_module.schedule_capacity_for(rows, topk, ep, multiplier)
+    storage = one_gpu_workspace(ep, rows, hidden, topk, capacity, device)
+    return backend.MoKSourceWorkspace(storage, (counts[0],) * ep), multiplier

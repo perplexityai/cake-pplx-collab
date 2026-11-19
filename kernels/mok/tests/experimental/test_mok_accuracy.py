@@ -26,7 +26,8 @@ three geometries, top-6 over 6 to 96 local experts, half of the weights exactly 
 distribution at hidden 5120 / intermediate 2304 over 6 and 48 local experts
 (:func:`tests.experimental._mok_reference.production_inputs`, its gate and up exactly at the limit on one route), and
 the adapter's top-6 step at each 384-expert layout as rank 0 of its EP group emulated on one GPU
-(:mod:`tests.experimental._mok_one_gpu`; ``y``, ``dx`` and the router-weight gradients).
+(:mod:`tests.experimental._mok_one_gpu`; ``y``, ``dx`` and the router-weight gradients), and at the EP64 and EP8 layouts
+over changing source counts on one workspace (padded and unpadded staging; also the shared weight gradients).
 
 An FP32 weight-gradient accumulator is judged by its increment, ``accumulator - start`` in float64 (exact for these
 values), against the oracle's weight gradient: the same error as the accumulator's against ``start`` plus the exact
@@ -50,7 +51,13 @@ from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import TierJudge, judge_case
 from tests.experimental import _mok_gaps as gaps
 from tests.experimental import _mok_naive as naive
-from tests.experimental._mok_one_gpu import OneGpuGroup, bound_multiplier, one_gpu_workspace
+from tests.experimental._mok_one_gpu import (
+    CHANGED_COUNTS,
+    OneGpuGroup,
+    bound_multiplier,
+    one_gpu_source_workspace,
+    one_gpu_workspace,
+)
 from tests.experimental._mok_reference import (
     mxfp8_quantize,
     production_inputs,
@@ -736,4 +743,89 @@ def test_before_down_adapter_top6_accuracy(record_property, ep, experts):
         record_property,
         gaps.OUTPUTS,
         gaps.judged(("before_down_adapter", ep, experts), lambda: _before_down_adapter_case(ep=ep, experts=experts)),
+    )
+
+
+#: The shared weight gradients of :func:`tests.experimental._mok_naive.layer` (``dw`` entries 3-5, stacked over one
+#: source rank) and their indexes in the adapter's ``backward`` result.
+SHARED_DW = (("dw_shared_gate", 3, 5), ("dw_shared_up", 4, 6), ("dw_shared_down", 5, 7))
+
+
+def _before_down_adapter_counts_case(
+    *, ep, experts, hidden=512, intermediate=256, macro=1536, mini=256, swiglu_limit=0.125, seed=8423
+):  # fmt: skip
+    """The adapter's top-6 router-weight-before-down step over the source counts of
+    :data:`tests.experimental._mok_one_gpu.CHANGED_COUNTS` in order, on one source workspace whose capacity covers the
+    largest (padded staging of rows ``[count, shared_rows)`` at 1031, 257 and 513 rows, each smaller count after a
+    larger one; unpadded at 768), as rank 0 of its EP group emulated on one GPU (as :func:`_before_down_adapter_case`).
+    Per draw and count: new inputs, a new schedule, ``forward`` and ``backward`` with zeroed FP32 accumulators;
+    ``y``, ``dx``, the router-weight gradients and the shared weight gradients (this rank's own, over the count's rows
+    and the zero rows of the padding) are judged against the oracle beside the naive implementation of the
+    single-rank layer, as ``rows<count>:<output>``."""
+    topk = 6
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    config = workspace_module.MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    options = dict(device=device, dtype=torch.bfloat16)
+    naive_values = {}
+
+    def run(j, _draw):
+        shared, routed = _weights(experts, hidden, intermediate, options)
+        weights = (*shared, *routed)
+        outputs, oracle, naive_values[j] = {}, {}, {}
+        for count in CHANGED_COUNTS:
+            x = torch.randn(count, hidden, **options) * 0.125
+            dy = torch.randn_like(x) * 0.125
+            scores = _before_down_weights(count, topk, False)
+            ids = torch.rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            y, context = functional.forward(
+                config, workspace, schedule, x, scores, *weights, swiglu_limit=swiglu_limit
+            )  # fmt: skip
+            gradients = functional.backward(
+                config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=swiglu_limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            values = dict(y=y, dx=gradients[0], d_scores=gradients[1])
+            values.update((name, gradients[index]) for name, _, index in SHARED_DW)
+            segments = _segments(single_rank_schedule(ids, experts))
+            for dtype, target in ((naive.ORACLE, oracle), (naive.NAIVE, naive_values[j])):
+                r = naive.layer(x, dy, scores, shared, routed, segments, swiglu_limit, dtype, weight_before_down=True)
+                reference = dict(y=r["y"], dx=r["dx"], d_scores=r["d_scores"])
+                reference.update((name, r["dw"][index][0]) for name, index, _ in SHARED_DW)
+                target.update((f"rows{count}:{name}", reference[name]) for name in values)
+            outputs.update((f"rows{count}:{name}", value.clone()) for name, value in values.items())
+        return outputs, oracle
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + ep + experts)
+    return judge, TierJudge(), failures
+
+
+@pytest.mark.parametrize("ep,experts", [(64, 6), (8, 48)], ids=["ep64-local6", "ep8-local48"])
+def test_before_down_adapter_top6_changed_counts_accuracy(record_property, ep, experts):
+    """The adapter's top-6 step over changing source counts on one source workspace (1031, 768, 257 and 513 rows; the
+    padded staging at every count that is not a multiple of 256), at the requester's EP64 and EP8 layouts, emulated on
+    one GPU as rank 0 of the group with every route on this rank: per count ``y``, ``dx``, the router-weight gradients
+    and the shared weight gradients."""
+    _require_before_down()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(
+            ("before_down_adapter_counts", ep, experts),
+            lambda: _before_down_adapter_counts_case(ep=ep, experts=experts),
+        ),
     )

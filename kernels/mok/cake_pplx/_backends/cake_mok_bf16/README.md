@@ -534,13 +534,17 @@ SM103a or SM107a device):
   GPU), the refusal on an SM107a device, and on SM100a / SM103a the fused
   training at top-2 and top-6 (6 to 96 local experts; another
   communication-SM split gives the same bytes), zero weights, recompute and
-  the context-free forward, the exact limit, the 384-expert scheduler layouts
-  and the scheduler and the adapter at the worst-case schedule capacity; in
-  `test_mok_accuracy.py` the same cases, the requester's input distribution at
-  H 5120 / I 2304 and the adapter's top-6 step at every 384-expert layout (one
-  GPU, emulated peers) judged against the naive tier; in
-  `test_mok_distributed.py` the adapter at EP1 over changing source counts,
-  with another communication-SM split and a test-local autograd function;
+  the context-free forward, the exact limit, the 384-expert scheduler layouts,
+  the scheduler and the adapter at the worst-case schedule capacity, and the
+  adapter's top-6 step over changing source counts on one workspace (1031,
+  768, 257 and 513 rows: padded and unpadded staging; the bytes of a fresh
+  workspace whatever the rows past the count hold); in `test_mok_accuracy.py`
+  the same cases, the requester's input distribution at H 5120 / I 2304, the
+  adapter's top-6 step at every 384-expert layout and over those changing
+  counts at EP64 and EP8 (one GPU, emulated peers) judged against the naive
+  tier; in `test_mok_distributed.py` the adapter at EP1 over changing source
+  counts, with another communication-SM split and a test-local autograd
+  function;
   `tests/test_mok_naive_wbd.py` (CPU) the oracle and naive forms.
   `tests/experimental/report_mok_wbd.py` (a measurement report, not a test)
   prints the issue's stage-rounded reference errors on those inputs.
