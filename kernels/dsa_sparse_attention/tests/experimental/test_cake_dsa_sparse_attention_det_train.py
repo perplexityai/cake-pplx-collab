@@ -3015,26 +3015,39 @@ def _sink_autograd(inp, dst_map, **kw):
 
 
 def test_nope_sink_repeats_bit_for_bit_on_every_path():
-    """Every output of a call with a sink repeats bit for bit: the eager pair (and one key pass, four key passes and
-    the policy's count give the same bits), the autograd entry, a second backward through a retained graph, an
-    activation-checkpointed step, a step under ``torch.use_deterministic_algorithms(True)`` (no alert), and a
-    prepared runner eagerly and replayed from a CUDA graph (the eager pair's bits).  The sink-gradient stage runs
-    right after the delta stage, once."""
+    """Every output of a call with a sink repeats bit for bit: the eager pair (one key pass and the policy's count
+    give the same bits; with four key passes every output but dQ keeps those bits, and dQ, summed through the FP32
+    partial between passes, repeats bit for bit for that count), the autograd entry, a second backward through a
+    retained graph, an activation-checkpointed step, a step under ``torch.use_deterministic_algorithms(True)`` (no
+    alert), and a prepared runner eagerly and replayed from a CUDA graph (the eager pair's bits).  The sink-gradient
+    stage runs right after the delta stage, once."""
     _require_nope_sink_program()
     inp = nope_ref.make_sink_inputs(1024, 640, seed=SINK_SEED + 600)
     S = inp.total_k
     dst_map = (torch.arange(S, device="cuda", dtype=torch.int32) // 2).contiguous()
     first = _sink_eager(inp, dst_map)
     assert float(first[4].abs().sum()) > 0
-    for kw in ({}, {}, {"key_passes": 1}, {"key_passes": 4}, {"o_lo_scratch": True}):
+    for kw in ({}, {}, {"key_passes": 1}, {"o_lo_scratch": True}):
         for a, b in zip(_sink_eager(inp, dst_map, **kw), first, strict=True):
             assert _same_bits(a, b), kw
+    # four key passes: dQ (index 2) follows the plan; the other outputs keep the bits of one pass
+    four = _sink_eager(inp, dst_map, key_passes=4)
+    again = _sink_eager(inp, dst_map, key_passes=4)
+    for i, (a, b) in enumerate(zip(again, four, strict=True)):
+        assert _same_bits(a, b), i
+    for i, (a, b) in enumerate(zip(four, first, strict=True)):
+        assert i == 2 or _same_bits(a, b), i
     plain = _sink_autograd(inp, dst_map)
     for _ in range(REPEATS - 1):
         for a, b in zip(_sink_autograd(inp, dst_map), plain, strict=True):
             assert _same_bits(a, b)
-    for a, b in zip(_sink_autograd(inp, dst_map, key_passes=4), plain, strict=True):
-        assert _same_bits(a, b)
+    four_autograd = _sink_autograd(inp, dst_map, key_passes=4)
+    again = _sink_autograd(inp, dst_map, key_passes=4)
+    for i, (a, b) in enumerate(zip(again, four_autograd, strict=True)):
+        assert _same_bits(a, b), i
+    for i, (a, b) in enumerate(zip(four_autograd, plain, strict=True)):
+        assert i == 2 or _same_bits(a, b), i
+    assert _same_bits(four_autograd[2], four[2])
     # a retained graph: the second backward replays the forward with the saved sink
     q_leaf = inp.q.detach().clone().requires_grad_()
     sink_leaf = inp.sink.detach().clone().requires_grad_()
