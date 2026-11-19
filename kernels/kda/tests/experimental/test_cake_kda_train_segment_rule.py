@@ -44,6 +44,7 @@ import itertools
 from collections import Counter
 
 import pytest
+import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -57,9 +58,14 @@ ARENA = {
     PACKAGES[0]: BACKEND[PACKAGES[0]].CakeKDADetArena,
     PACKAGES[1]: BACKEND[PACKAGES[1]].CakeKDANondetArena,
 }
-KCP_PLAN = {
-    PACKAGES[0]: cake_package("cake.cake_kda_det_train_kcp", "cake_kcp_plan"),
-    PACKAGES[1]: cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_plan"),
+KCP_PACKAGE = {
+    PACKAGES[0]: "cake.cake_kda_det_train_kcp",
+    PACKAGES[1]: "cake.cake_kda_nondet_train_kcp",
+}
+KCP_PLAN = {name: cake_package(KCP_PACKAGE[name], "cake_kcp_plan") for name in PACKAGES}
+KCP_WORKSPACE = {
+    PACKAGES[0]: "CakeKDADetKcpWorkspace",
+    PACKAGES[1]: "CakeKDANondetKcpWorkspace",
 }
 
 # GB300: the architecture and SM count of the rule's envelope
@@ -665,24 +671,87 @@ def test_det_and_nondet_choose_the_same_plan() -> None:
         ), (S, N, H, gate, l2n, rule)
 
 
-def test_the_context_parallel_local_plans_keep_the_occupancy_rule() -> None:
-    """The context-parallel packages plan each rank's local problem, its
-    workspace and its byte predictions with the occupancy rule
-    (``LOCAL_SEGMENT_RULE``): the keyword is passed where the token-aware rule
-    may decide (its SM and head counts), and nowhere else, where both rules
-    give the same plan."""
-    for name in PACKAGES:
-        kcp_plan, backend = KCP_PLAN[name], BACKEND[name]
-        assert kcp_plan.LOCAL_SEGMENT_RULE == "occupancy"
-        assert kcp_plan.LOCAL_SEGMENT_RULE in backend.SEGMENT_RULES
-        rule = {"segment_rule": "occupancy"}
-        for H in (4, 8, 16):
-            assert kcp_plan.local_segment_rule_kwargs(SM, H) == rule
-        for sm, H in ((148, 4), (216, 8), (SM, 2), (SM, 12), (SM, 64)):
-            assert kcp_plan.local_segment_rule_kwargs(sm, H) == {}, (sm, H)
-        S, N, H = sum(DOCS3_LENGTHS), len(DOCS3_LENGTHS), DOCS3_HEADS
-        local = backend.plan(
-            S, N, H, SM, ARCH, **kcp_plan.local_segment_rule_kwargs(SM, H)
-        )
-        assert local is backend.plan(S, N, H, SM, ARCH, segment_rule="occupancy")
-        assert (local.P, local.NSEG) == (38, 114)
+def _context_on_cuda(name: str, sm: int):
+    """Rank 0's context of a two-rank contiguous pack of two documents with
+    ``sm`` SMs, built on the host and seen as a context on ``cuda:0``: the byte
+    query reads the context's host fields and its ``device``."""
+    kcp_plan, prefix = KCP_PLAN[name], KCP_PACKAGE[name].removeprefix("cake.")
+    part = getattr(kcp_plan, f"{prefix}_partition")([0, 3000, 8192], 2)
+    ctx = getattr(kcp_plan, f"{prefix}_build_context")(
+        part, None, 0, "cpu", 4, sm_count=sm
+    )
+    assert ctx.T_r > 0
+
+    class OnDevice:
+        def __getattr__(self, attr: str):
+            return getattr(ctx, attr)
+
+    view = OnDevice()
+    view.device = torch.device("cuda", 0)
+    return view
+
+
+LOCAL_BYTE_QUERY_CALLS = ("plan", "workspace_bytes", "tables_bytes")
+
+
+@pytest.mark.parametrize("name", PACKAGES, ids=PACKAGE_IDS)
+def test_the_context_parallel_local_plans_keep_the_occupancy_rule(
+    name, monkeypatch
+) -> None:
+    """The context-parallel package plans each rank's local problem with the
+    occupancy rule (``LOCAL_SEGMENT_RULE``) where the token-aware rule may
+    decide (its SM and head counts), and passes no rule elsewhere, where both
+    rules give the same plan.  On a CUDA device of GB300's architecture faked on
+    the host: the workspace's local plan, and the plan, arena and table calls
+    of the byte query, at 152 SMs with 4 heads (the keyword), at 148 SMs and at
+    64 heads (none)."""
+    kcp_plan, backend, jit = KCP_PLAN[name], BACKEND[name], JIT[name]
+    kcp = cake_package(KCP_PACKAGE[name], "cake_kcp")
+    assert kcp_plan.LOCAL_SEGMENT_RULE == "occupancy"
+    assert kcp_plan.LOCAL_SEGMENT_RULE in backend.SEGMENT_RULES
+    rule = {"segment_rule": "occupancy"}
+    for H in (4, 8, 16):
+        assert kcp_plan.local_segment_rule_kwargs(SM, H) == rule
+    for sm, H in ((148, 4), (216, 8), (SM, 2), (SM, 12), (SM, 64)):
+        assert kcp_plan.local_segment_rule_kwargs(sm, H) == {}, (sm, H)
+    S, N = sum(DOCS3_LENGTHS), len(DOCS3_LENGTHS)
+    tokens = backend.plan(S, N, DOCS3_HEADS, SM, ARCH)
+    local = backend.plan(S, N, DOCS3_HEADS, SM, ARCH, segment_rule="occupancy")
+    assert (tokens.P, local.P, local.NSEG) == (15, 38, 114)
+    cases = ((SM, DOCS3_HEADS, rule), (148, DOCS3_HEADS, {}), (SM, 64, {}))
+    ws = getattr(kcp, KCP_WORKSPACE[name])()
+    # a CUDA device of GB300's architecture (``ARCH``) on the host
+    capability = {arch: cap for cap, arch in jit.ARCH_BY_CAPABILITY.items()}
+    monkeypatch.setattr(torch.cuda, "is_available", lambda: True)
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda index=None: capability[ARCH]
+    )
+    monkeypatch.setattr(kcp_plan, "_cuda_arch", lambda index: ARCH)
+    monkeypatch.setattr(jit, "device_arch", lambda index: ARCH)
+    if hasattr(kcp, "_ARCH_BY_INDEX"):  # a per-device cache of the architecture
+        monkeypatch.setattr(kcp, "_ARCH_BY_INDEX", {})
+    # the workspace's local plan: the forward's and the arena's
+    for sm, H, kw in cases:
+        monkeypatch.setattr(jit, "sm_count", lambda index, _sm=sm: _sm)
+        got = ws._local_plan((S, N, H), torch.device("cuda", 0))
+        assert got is backend.plan(S, N, H, sm, ARCH, **kw), (sm, H)
+    # the byte query's calls of the single-rank backend (the real functions run);
+    # every context's intra record is taken to write its scratch table set
+    seen: list[tuple[str, str]] = []
+    for call in LOCAL_BYTE_QUERY_CALLS:
+
+        def spy(*args, _real=getattr(backend, call), _call=call, **kwargs):
+            seen.append((_call, kwargs.get("segment_rule", "not passed")))
+            return _real(*args, **kwargs)
+
+        monkeypatch.setattr(backend, call, spy)
+    monkeypatch.setattr(kcp_plan, "intra_writes_tables", lambda *a, **k: True)
+    workspace_bytes = getattr(
+        kcp_plan, f"{KCP_PACKAGE[name].removeprefix('cake.')}_workspace_bytes"
+    )
+    for sm, H, kw in cases:
+        seen.clear()
+        assert workspace_bytes(_context_on_cuda(name, sm), H=H) > 0
+        want = kw.get("segment_rule", "not passed")
+        assert seen == [(call, want) for call in LOCAL_BYTE_QUERY_CALLS], (sm, H)
