@@ -120,7 +120,7 @@ void Run(TensorView a_c, TensorView a_z, TensorView a_cu_seqlens, TensorView a_c
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(256, 1, 1);
-  config.dynamicSmemBytes = 2176;
+  config.dynamicSmemBytes = 128;
   config.stream = stream;
   cudaLaunchAttribute attrs[1] = {};
   int n = 0;

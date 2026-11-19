@@ -51,16 +51,17 @@ The roles, in launch order:
   ``out[r] = BF16(softmax-weighted sum of C[t0], C[t1])`` in FP32.  A row
   ``r >= cu_pairs[S]`` (a caller ``G`` above the pair count) is stored as
   zeros and reads nothing.  A launch of ``S <= fuse_docs`` documents (the
-  record's ``fuse_docs`` leaf) builds the pair table itself: every CTA scans
-  ``cu_seqlens`` into shared memory and searches it there, it reads no entry
-  of ``cu_pairs``, and CTA 0 writes all ``S + 1`` entries, the bytes
-  ``pair_table`` writes, for the backward.  A launch of more documents reads
-  the table ``pair_table`` wrote.  The role has two records, one kernel with
-  two schedules, each the faster on its architectures: ``fwd`` on ``sm_100a``
-  and ``sm_103a`` reads ``C`` and ``Z`` in 128-bit lanes (4 FP32 channels,
-  128 lanes a row); ``fwd_sm_107a`` on ``sm_107a`` reads them in 256-bit
-  lanes (8 channels, 64 lanes a row), with the same FP32 operations per
-  element.
+  record's ``fuse_docs`` leaf) builds the pair table itself and does not
+  search: row ``r``'s ``t0`` is ``cu_seqlens[0] + 2 r`` plus the number of
+  odd-length documents before ``r``'s document, counted from ``cu_seqlens``.
+  It reads no entry of ``cu_pairs``, and CTA 0 writes all ``S + 1`` entries,
+  the bytes ``pair_table`` writes, for the backward.  A launch of more
+  documents searches the table ``pair_table`` wrote.  The role has two
+  records, one kernel with two schedules, each the faster on its
+  architectures: ``fwd`` on ``sm_100a`` and ``sm_103a`` reads ``C`` and ``Z``
+  in 128-bit lanes (4 FP32 channels, 128 lanes a row); ``fwd_sm_107a`` on
+  ``sm_107a`` reads them in 256-bit lanes (8 channels, 64 lanes a row), with
+  the same FP32 operations per element.
 * ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
   the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
   ``v >= cu_pairs[S]``).  Row ``v >= G`` is document ``s = v - G``: when its
@@ -178,7 +179,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 2176,
+            "dynamic_smem_bytes": 128,
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_748a06110130c8ab8ec4",
@@ -209,7 +210,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 2176,
+            "dynamic_smem_bytes": 128,
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
