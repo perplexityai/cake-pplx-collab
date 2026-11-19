@@ -3684,6 +3684,29 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
 # ``ChunkMeta`` (:func:`_drop_meta_plans`).
 # ``FWD_PLAN = False`` keeps every forward on the general path.
 FWD_PLAN = True
+# The record gate (``FWD_PLAN_GATE``; it picks among the three paths, which give the same bits, by host time only): a
+# forward builds its plan key only from the ``FWD_PLAN_REPEAT``-th forward of its layout in its tape mode, and records
+# only while the record credit holds one recording.  Each replay adds ``1 / FWD_PLAN_PAYBACK`` recording to the
+# credit, each gated call ``1 / FWD_PLAN_TRICKLE``, a recording takes one, and the credit starts at and holds at most
+# ``FWD_PLAN_BUDGET``.  So for any sequence of calls, recordings <= BUDGET + replays / PAYBACK + calls / TRICKLE, and
+# with PAYBACK at least the host time of a recording over the host time a replay saves, the recordings cost no more
+# host time than the replays save.  A layout used once never builds a key.  A key whose calls cannot be planned keeps
+# its layout and tape mode on the general path without a key.  ``FWD_PLAN_GATE = False``: every key records at its
+# first call.
+FWD_PLAN_GATE = True
+FWD_PLAN_REPEAT = 2
+FWD_PLAN_PAYBACK = 32
+FWD_PLAN_BUDGET = 4
+FWD_PLAN_TRICKLE = 4096
+# (id(meta), tape) -> [weakref(meta), its forwards so far (at most FWD_PLAN_REPEAT), its state]; the oldest entry
+# leaves first at _FWD_SEEN_LIMIT entries (two tape modes per cached layout)
+_FWD_SEEN: dict = {}
+_FWD_SEEN_LIMIT = 512
+# a layout and tape mode with no plan yet, with one, and whose key cannot be planned
+_UNPLANNED, _PLANNED, _REFUSED = range(3)
+# the record credit in integer units: a gated call adds FWD_PLAN_PAYBACK, a replay FWD_PLAN_TRICKLE, a recording
+# takes FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+_FWD_CREDIT = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
 # plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first, and the plans of a
 # layout leave with its ChunkMeta (:func:`_drop_meta_plans`)
 _FWD_PLANS: dict = {}
@@ -3790,6 +3813,20 @@ def _storages(obj, out: set, depth: int = 0) -> None:
             _storages(getattr(obj, f.name), out, depth + 1)
 
 
+def _tensors(obj, out: list, depth: int = 0) -> None:
+    """Append the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested) to ``out``; the ints,
+    floats and strs of a tuple (``seq_lens``, ``order``) are passed over without a call."""
+    if isinstance(obj, torch.Tensor):
+        out.append(obj)
+    elif depth < 4 and isinstance(obj, (tuple, list)):
+        for x in obj:
+            if not isinstance(x, (int, float, str)):
+                _tensors(x, out, depth + 1)
+    elif depth < 4 and is_dataclass(obj) and not isinstance(obj, type):
+        for f in fields(obj):
+            _tensors(getattr(obj, f.name), out, depth + 1)
+
+
 def _reached_globals(roots) -> set[str]:
     """The module globals that the functions ``roots`` read, themselves or through this module's functions they reach
     (found from their code)."""
@@ -3855,6 +3892,55 @@ def _drop_meta_plans(meta: ChunkMeta) -> None:
             plan = _FWD_PLANS.get(key)
             if plan is not None and plan.meta is meta:
                 del _FWD_PLANS[key]
+
+
+def _fwd_gate(meta: ChunkMeta, tape: bool):
+    """The record gate's entry of the call's layout and tape mode when the call builds its plan key (to replay or to
+    record), else ``None``: an early forward of the layout in that mode, a layout and mode whose key cannot be planned,
+    or no plan yet and less credit than one recording.  Each call adds its share to the credit."""
+    global _FWD_CREDIT
+    full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
+    _FWD_CREDIT = credit = credit if credit < full else full
+    key = (id(meta), tape)
+    seen = _FWD_SEEN.get(key)
+    # a new layout, or the id of one that died
+    if seen is None or seen[0]() is not meta:
+        seen = [weakref.ref(meta), 0, _UNPLANNED]
+        with _PLANS_LOCK:
+            _FWD_SEEN.pop(key, None)
+            if len(_FWD_SEEN) >= _FWD_SEEN_LIMIT:
+                del _FWD_SEEN[next(iter(_FWD_SEEN))]
+            _FWD_SEEN[key] = seen
+    if seen[1] < FWD_PLAN_REPEAT:
+        seen[1] += 1
+        if seen[1] < FWD_PLAN_REPEAT:
+            return None
+    state = seen[2]
+    if state == _PLANNED or (
+        state == _UNPLANNED and credit >= FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    ):
+        return seen
+    return None
+
+
+def _fwd_spend() -> bool:
+    """Take one recording from the record credit (``False``: it holds less)."""
+    global _FWD_CREDIT
+    cost = FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    with _PLANS_LOCK:
+        if _FWD_CREDIT < cost:
+            return False
+        _FWD_CREDIT -= cost
+    return True
+
+
+def _fwd_replayed() -> None:
+    """Add a replay's share to the record credit."""
+    global _FWD_CREDIT
+    full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
+    credit = _FWD_CREDIT + FWD_PLAN_TRICKLE
+    _FWD_CREDIT = credit if credit < full else full
 
 
 def _slot_layout(slots) -> tuple:
@@ -3931,10 +4017,11 @@ def _drop_steps(ops, inputs: int, kept) -> tuple:
 class _SlotRecorder(_DirectExecutor):
     """A general path that also records its steps.  ``slots``: the call's tensors the plan starts from.  Every tensor
     a recorded step reads is a slot (one of those, or one a recorded step made: an allocation, a workspace of the
-    stream's pool, :meth:`take`, an eager result), a dim-0 range of a slot, or a view of a constant of the plan
-    (:meth:`_constants`: a chunk table of ``meta``, the cached walk); anything else, or a :meth:`refuse`, leaves the
-    call without a plan.  The recorder refers to the slots weakly: each goes when the general path lets it go, so a
-    recording needs no more device memory than the general path."""
+    stream's pool, :meth:`take`, an eager result), a dim-0 range of a slot, or a constant of the plan or a view of one
+    (:meth:`_constant_tensors`: a chunk table of ``meta``, the cached walk); anything else, or a :meth:`refuse`, leaves
+    the call without a plan.  The recorder refers to the slots weakly: each goes when the general path lets it go, so
+    a recording needs no more device memory than the general path.  It walks the constants once per recording, at the
+    first operand that is not a slot, and their storage addresses once more only at the first view of one."""
 
     __slots__ = (
         "slots",
@@ -3946,6 +4033,9 @@ class _SlotRecorder(_DirectExecutor):
         "meta",
         "streams",
         "ranges",
+        "const_ids",
+        "const_ptrs",
+        "const_tensors",
     )
 
     def __init__(self, slots, index: int, meta: ChunkMeta):
@@ -3958,6 +4048,10 @@ class _SlotRecorder(_DirectExecutor):
         self.meta = meta
         self.streams = None
         self.ranges: dict = {}
+        # the constants (:meth:`_constant_tensors`), their ids and their storage addresses, each made when first read
+        self.const_tensors: list | None = None
+        self.const_ids: set | None = None
+        self.const_ptrs: set | None = None
 
     def refuse(self, reason: str) -> None:
         if self.why is None:
@@ -3972,13 +4066,27 @@ class _SlotRecorder(_DirectExecutor):
         i = self.slot_of.get(id(t))
         return i if i is not None and self.slots[i]() is t else None
 
-    def _ref(self, t, constants):
+    def _constant_tensors(self) -> list:
+        """The plan's constants: the tables of ``meta`` (a pooled workspace is a slot, :meth:`take`)."""
+        out: list = []
+        _tensors(self.meta, out)
+        return out
+
+    def _ref(self, t):
         """The slot of ``t`` (a range of a slot gets a slot of its own, filled by a narrow step), ``None`` for a
-        constant, ``-1`` for a tensor the plan cannot rebuild; ``constants()`` gives the storage addresses of the
-        plan's constants (:meth:`_step_constants`)."""
+        constant or a view of one, ``-1`` for a tensor the plan cannot rebuild.  A constant itself is found by its id
+        before the ranges: it is no range of a slot (the slots are the call's inputs, its allocations, eager results
+        and pooled workspaces, and views of those).  The recorder holds ``meta`` and the walks, so no id of theirs is
+        reused during the recording."""
         i = self._slot(t)
         if i is not None:
             return i
+        # once per recording, at its first operand that is not a slot
+        if self.const_ids is None:
+            self.const_tensors = self._constant_tensors()
+            self.const_ids = {id(c) for c in self.const_tensors}
+        if id(t) in self.const_ids:
+            return None
         ptr = t.untyped_storage().data_ptr()
         for i, ref in enumerate(self.slots):
             s = ref()  # None for a slot that is gone
@@ -4000,26 +4108,12 @@ class _SlotRecorder(_DirectExecutor):
                     j = self.ranges[key] = self._add(t)
                     self.ops.append((_OP_NARROW, j, i, start, t.shape[0]))
                 return j
-        return None if ptr in constants() else -1
-
-    def _step_constants(self):
-        """A getter of the constants' storage addresses (:meth:`_constants`) that collects them at its first call
-        only: nothing is allocated between the operand checks of one step, so one set serves them all (a layout of
-        many sequences records on every call)."""
-        found: list[set] = []
-
-        def get() -> set:
-            if not found:
-                found.append(set())
-                self._constants(found[0])
-            return found[0]
-
-        return get
-
-    def _constants(self, out: set) -> None:
-        """Add the storage addresses of the plan's constants: the tables of ``meta`` (a pooled workspace is a slot,
-        :meth:`take`)."""
-        _storages(self.meta, out)
+        # once per recording, at its first view of a constant
+        if self.const_ptrs is None:
+            self.const_ptrs = {
+                c.untyped_storage().data_ptr() for c in self.const_tensors
+            }
+        return None if ptr in self.const_ptrs else -1
 
     def _tables(self):
         return _POOLED.tables.get(self.stream)
@@ -4029,10 +4123,9 @@ class _SlotRecorder(_DirectExecutor):
         ``None`` and ``(position, slot)`` of each of those; ``None`` after a refusal (``what`` reads a tensor the
         plan cannot rebuild)."""
         template, refs = list(values), []
-        constants = self._step_constants()
         for pos, value in enumerate(values):
             if isinstance(value, torch.Tensor):
-                i = self._ref(value, constants)
+                i = self._ref(value)
                 if i == -1:
                     self.refuse(
                         f"{what} reads a tensor that is neither a slot nor a constant"
@@ -4160,10 +4253,11 @@ def _watched(recorder):
 
 class _ForwardPlan:
     """One recorded forward (:class:`_FwdRecorder`): its steps, the number of its slots, the stream it runs on (the
-    caller's, ``main``, and its side stream), the layout's ``ChunkMeta``, the module globals, pool tables and cached
-    walks it was recorded with, and the entries of its result (:data:`_FWD_OUTPUTS`, each ``(name, 0, slot)`` or
-    ``(name, 2, value)``).  ``ops`` is ``None`` for a key whose forward cannot be planned: its calls run the general
-    path without recording."""
+    caller's, ``main``, and its side stream), the layout's ``ChunkMeta``, the module globals, pool tables (whose
+    workspaces its take steps take again) and cached walks it was recorded with, and the entries of its result
+    (:data:`_FWD_OUTPUTS`, each ``(name, 0, slot)`` or ``(name, 2, value)``).  ``ops`` is ``None`` for a key whose
+    forward cannot be planned: its calls run the general path without recording.  A plan leaves the plan cache with
+    its ``ChunkMeta`` (:func:`_drop_meta_plans`); a pool eviction leaves it in place."""
 
     __slots__ = ("ops", "size", "stream", "main", "side", "meta", "names", "tables", "walks", "outputs",
                  "fork_event", "join_event", "events")  # fmt: skip
@@ -4225,10 +4319,11 @@ class _FwdRecorder(_SlotRecorder):
         finally:
             self.trusted -= 1
 
-    def _constants(self, out: set) -> None:
-        super()._constants(out)
-        for _key, entry in self.uses:
-            out.add(entry[0].untyped_storage().data_ptr())
+    def _constant_tensors(self) -> list:
+        """The tables of ``meta`` and the cached walks the call used."""
+        out = super()._constant_tensors()
+        out += [entry[0] for _key, entry in self.uses]
+        return out
 
     def view(self, t, dtype):
         out = t.view(dtype)
@@ -4314,6 +4409,12 @@ class _FwdRecorder(_SlotRecorder):
             super().use(key, entry)
         self.uses.append((key, entry))
         self.ops.append((_OP_USE, entry, key[0]))
+        # a walk used after the constants were first read is a constant too
+        if self.const_ids is not None:
+            self.const_tensors.append(entry[0])
+            self.const_ids.add(id(entry[0]))
+        if self.const_ptrs is not None:
+            self.const_ptrs.add(entry[0].untyped_storage().data_ptr())
 
     @contextmanager
     def fill(self):
@@ -5039,7 +5140,9 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields.  A call with the forward's
     plan of its key replays it (:func:`_replay_forward`); any other runs the general path, which records the plan of
     the key when the call has one (a layout of the host table cache with ``host_cache``, outside a CUDA graph capture:
-    a plan's launches read the pooled workspaces of its stream, and a capture takes its own)."""
+    a plan's steps take the pooled workspaces of its stream, and a capture takes its own) and the record gate lets it
+    (:data:`FWD_PLAN_GATE`: from the ``FWD_PLAN_REPEAT``-th forward of the layout in its tape mode, while the record
+    credit holds a recording)."""
     batch, seq_len, num_heads, key_dim = q.shape
     num_v_heads = v.shape[2]
     index = _tensor_index(q)
@@ -5058,7 +5161,8 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
         ),
     )
     tape = _forward_tape()
-    plan = recorder = None
+    plan = recorder = seen = None
+    gated = FWD_PLAN_GATE
     # a layout of the host table cache (host-built or equal-length) with host_cache: the forward's plan.  A host q runs
     # the general path, which pools nothing and refuses it at the first launch (the key's layouts do not name the
     # device: such a call must not replay a plan of device inputs)
@@ -5068,9 +5172,14 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
         and (cu_seqlens is None or cu_seqlens_cpu is not None)
         and q.is_cuda
     ):
-        stream = _stream_key(index)
+        # the record gate: an early forward of the layout in its tape mode builds no key (:func:`_fwd_gate`)
+        if gated:
+            seen = _fwd_gate(meta, tape)
+        stream = _stream_key(index) if not gated or seen is not None else None
         # a CUDA graph capture (never on the default stream) runs the general path on its own workspaces
-        if not (stream[1] and torch.cuda.is_current_stream_capturing()):
+        if stream is not None and not (
+            stream[1] and torch.cuda.is_current_stream_capturing()
+        ):
             # besides meta's tables and the module globals (ready()), the key holds what the general path's steps
             # follow: the stream, the tape mode (a checkpoint's first pass and its recompute differ), the arguments,
             # the inputs' layouts and which inputs are one object (a call with ``k is q`` records q's slot for both,
@@ -5086,12 +5195,21 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
                     num_v_heads, _float_bits(scale), bool(use_qk_l2norm_in_kernel), bool(output_final_state),
                     _slot_layout(inputs), alias, level)  # fmt: skip
             plan = _FWD_PLANS.get(fkey)
-            if plan is None or (plan.ops is not None and not plan.ready(meta, stream)):
-                plan, recorder = None, _FwdRecorder(inputs, index, meta)
-            elif plan.ops is None:  # the key's calls keep the general path
+            if plan is not None and plan.ops is None:
+                plan = None  # the key's calls keep the general path
+                if gated:
+                    seen[2] = _REFUSED
+            elif plan is None or not plan.ready(meta, stream):
                 plan = None
+                if not gated or _fwd_spend():
+                    recorder = _FwdRecorder(inputs, index, meta)
+                else:  # no key until the credit holds a recording
+                    seen[2] = _UNPLANNED
     if plan is not None:
         fwd = _replay_forward(plan, inputs)
+        if gated:
+            seen[2] = _PLANNED
+            _fwd_replayed()
     elif recorder is None:
         fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                              output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
@@ -5113,6 +5231,10 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
                     None, 0, recorder.stream, None, None, meta, (), None, (), 0, ()
                 )
             _keep_fwd_plan(fkey, meta, recorded)
+            if gated:
+                seen[2] = _PLANNED if recorded.ops is not None else _REFUSED
+        elif gated:
+            seen[2] = _UNPLANNED
     # a fixed saved list of 13: the state the architecture's tape level keeps under save_state
     # (cake_plan.tape_state: w, h and v_new under T_full), a placeholder of the same shape, dtype and device for
     # the rest (a checkpoint's first pass compares the two passes' saved lists); the backward reads only the state

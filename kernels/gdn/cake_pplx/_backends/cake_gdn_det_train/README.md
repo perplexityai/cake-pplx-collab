@@ -186,34 +186,45 @@ on the A of `wy_a` then store no `w`, `h` or `v_new`.  The saved list keeps its
 the state not kept, which the backward never reads.
 
 The autograd forward of a host-table or equal-length call with
-`host_cache=True` records its steps on its first call for a layout, stream,
-tape mode, set of arguments, input layout (shape, strides, dtype and 16-byte
-base alignment of each input) and pattern of inputs given as one tensor (such
-as `k` given as `q`): its allocations, the PyTorch operations it runs between
-its launches (input copies and casts, the split forward's index fills, selects
-and copies), its launches, its stream switches and the event records and waits
-between its streams.  A checkpoint's first pass, which keeps no tape, and its
-recompute have separate records.  Later calls replay that record: their
-inputs and the tensors they allocate fill its slots, and every other argument
-is a pooled workspace of the stream, a chunk table of the layout, the cached
-identity walk or a scalar.  A replay launches the same kernels with the same
-arguments, on the same streams, in the same order as the general path, so the
-output, the final state, the saved tensors and the gradients have the general
-path's bits (the tests compare them bitwise); it only takes less host time.
-A replay lets each tensor of the call go after the last step that reads it
-(one that the side stream reads, after the join), and the record holds none
-of them, so a replay or a recording needs no more device memory than the
-general path.  A replay needs the stream's pool tables and side stream, the
-cached tables and the module tables and settings the record was made with;
-otherwise the call runs the general path and records again.  A call whose steps the record
-cannot hold runs the general path, and so do the later calls of its key (a
-call whose recording overlapped another package's recording records again).
-These calls always run the general path: a forward inside a CUDA graph capture
-(it neither replays nor records), the device route, `host_cache=False` and a
-host `q`; `cake_gdn_det_train_forward` too.  A record keeps the layout's tables
-and the pooled workspaces it reads.  At most 256 records are kept (the oldest
-leaves first), and a workspace eviction drops them all.
-`cake_chain.FWD_PLAN = False` keeps every forward on the general path.
+`host_cache=True` records its steps once its layout recurs: from the second
+forward of a layout in one tape mode, a call records the steps of its class (a
+layout, stream, tape mode, set of arguments, input layout (shape, strides,
+dtype and 16-byte base alignment of each input) and pattern of inputs given as
+one tensor, such as `k` given as `q`) while its record credit allows.  Each
+replay earns `1 / FWD_PLAN_PAYBACK` of a recording and each recording spends
+one, beyond a budget of `FWD_PLAN_BUDGET` recordings and one more per
+`FWD_PLAN_TRICKLE` calls; with `FWD_PLAN_PAYBACK` at least the host time of a
+recording over the host time a replay saves, the recordings cost no more host
+time than the replays save.  A layout used once is never recorded.  A record
+holds the call's allocations, the pooled workspaces it takes, the PyTorch
+operations it runs between its launches (input copies and casts, the split
+forward's index fills, selects and copies), its launches, its stream switches
+and the event records and waits between its streams.  A checkpoint's first
+pass, which keeps no tape, and its recompute have separate records.  Later
+calls of the class replay that record: their inputs and the tensors they
+allocate fill its slots, the pooled workspaces of the stream are taken again by
+each replay, as the general path takes them, and every other argument is a
+chunk table of the layout, the cached identity walk or a scalar.
+A replay launches the same kernels with the same arguments, on the same
+streams, in the same order as the general path, so the output, the final
+state, the saved tensors and the gradients have the general path's bits (the
+tests compare them bitwise); it only takes less host time.  A replay lets each
+tensor of the call go after the last step that reads it (one that the side
+stream reads, after the join), and the record holds none of them, so a replay
+or a recording needs no more device memory than the general path.  A replay
+needs the stream's pool tables and side stream, the cached tables and the
+module tables and settings the record was made with; otherwise the call runs
+the general path and records again.  A call whose steps the record cannot hold
+runs the general path, and so do the later calls of its layout and tape mode
+(a call whose recording overlapped another package's recording records
+again).  These calls always run the general path: a forward inside a CUDA
+graph capture (it neither replays nor records), the device route,
+`host_cache=False` and a host `q`; `cake_gdn_det_train_forward` too.  A record
+keeps the layout's tables and leaves with them; it holds no pooled workspace,
+and a workspace eviction leaves it in place.  At most 512 records are kept
+(the oldest leaves first).  `cake_chain.FWD_PLAN = False` keeps every forward
+on the general path; `cake_chain.FWD_PLAN_GATE = False` records each class at
+its first call.
 
 On the host-table route, where the `dhu_tc2` adjoint scan (serial, or the second
 pass of a split plan) feeds the fused tail of a value-head group of two with a
