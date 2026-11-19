@@ -219,11 +219,12 @@ saved set do not change.
 - The keyword is the only switch: the package reads no environment variable.
 - Row records: the registry maps each forward intra record to a twin
   (`cake_jit.HANDOFF_TWINS`: `fwd_intra_v19` for `fwd_intra_v14`,
-  `fwd_intra_v20` for `fwd_intra`).  The twin is the same program and also
-  writes every `gk` row and the internal beta.  A recompute that launches
-  the twin keeps `gk`, `kg`, `beta_int`, and `kb` where it keeps no `w`, in
-  a row record.  Its backward launches no prep, and one fill kernel zeroes
-  the `dv2` pad rows.  A record without these rows is a tape record.
+  `fwd_intra_v20` for `fwd_intra`).  The twin writes the intra record's
+  bytes and also every `gk` row and the internal beta.  A recompute that
+  launches the twin keeps `gk`, `kg`, `beta_int`, and `kb` where it keeps
+  no `w`, in a row record.  Its backward launches no prep, and one fill
+  kernel zeroes the `dv2` pad rows.  A record without these rows is a tape
+  record.
 - The recompute asks for a row record only on the devices of
   `cake_backend.HANDOFF_ROWS_VERIFIED` (architecture, SM count, full toolkit
   version such as `13.4.92`), at the `HANDOFF_HEADS` head counts, for a call

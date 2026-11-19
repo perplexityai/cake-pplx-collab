@@ -235,8 +235,8 @@ either gate mode; a tape backward may launch the tape WY twin below (``wy`` is
 no l2n stage) in place of ``wy_bwd``, writing the same ``w``.
 
 The checkpoint hand-off's intra twins (:data:`HANDOFF_TWINS`): ``fwd_intra_v19``
-and ``fwd_intra_v20`` are the programs of ``fwd_intra_v14`` and ``fwd_intra``
-built to also write every ``gk`` row and the internal ``beta`` (``beta_int``,
+and ``fwd_intra_v20`` write what ``fwd_intra_v14`` and ``fwd_intra`` write,
+byte for byte, and also every ``gk`` row and the internal ``beta`` (``beta_int``,
 one parameter after the parent's), the rows the backward prep writes
 otherwise.  Each record is its parent's with ``beta_int`` added, under a rule no
 path admits; only the hand-off's recompute launches a twin, in place of its
@@ -821,7 +821,7 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "chunks", "x_factor": 1},
-        "kernel_symbol": "kernel_cake_kda_train_c9395e21a813579c4bfc",
+        "kernel_symbol": "kernel_cake_kda_train_fd884735e2c9a37b0329",
         "l2n": ["off", "fallback", "fused"],
         "launch": {
             "block": (256, 1, 1),
@@ -830,7 +830,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 76160,
             "use_pdl": False,
         },
-        "library": "cake_kda_train_c9395e21a813579c4bfc",
+        "library": "cake_kda_train_fd884735e2c9a37b0329",
         "logical": {
             "akk_ext": "akk_ext",
             "akk_int": "akk_int",
@@ -915,7 +915,7 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "chunks", "x_factor": 1},
-        "kernel_symbol": "kernel_cake_kda_train_3162ed758e5ddfb97c17",
+        "kernel_symbol": "kernel_cake_kda_train_15f1e7cab9222dccd78b",
         "l2n": ["off", "fallback"],
         "launch": {
             "block": (256, 1, 1),
@@ -924,7 +924,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 76160,
             "use_pdl": False,
         },
-        "library": "cake_kda_train_3162ed758e5ddfb97c17",
+        "library": "cake_kda_train_15f1e7cab9222dccd78b",
         "logical": {
             "akk_ext": "akk_ext",
             "akk_int": "akk_int",
@@ -10554,10 +10554,10 @@ S1_RECORDS = (
     "glm_intra_v22",
     "glm_intra_v23",
 )
-# The checkpoint hand-off's intra twins, intra record -> twin: the same program built to also write every ``gk``
-# row and the internal ``beta`` (``beta_int``), the rows the backward prep writes otherwise.  No rule selects a
-# twin (``path_in`` with no path); the hand-off's recompute launches it in place of the intra record its plan
-# selects, on that record's grid, and the backward that takes the record launches no prep.
+# The checkpoint hand-off's intra twins, intra record -> twin: a program that writes the intra record's bytes and
+# also every ``gk`` row and the internal ``beta`` (``beta_int``), the rows the backward prep writes otherwise.  No
+# rule selects a twin (``path_in`` with no path); the hand-off's recompute launches it in place of the intra record
+# its plan selects, on that record's grid, and the backward that takes the record launches no prep.
 HANDOFF_TWINS = {"fwd_intra": "fwd_intra_v20", "fwd_intra_v14": "fwd_intra_v19"}
 # The tape path's w-only WY twin, WY record -> twin: the same program without the u half (no v / beta operands, no u
 # output), which the tape backward never reads (it takes v_new from the tape).  No rule selects a twin; the tape
