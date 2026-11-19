@@ -270,6 +270,18 @@ def _routed(stage: str, rows: int, device_index: int) -> str:
     return ((large if table[rows] else small) if rows < limit else tail)[0]
 
 
+def _program(stage: str, device_index: int, program: str) -> str:
+    """The ``program`` (``"small"`` or ``"large"``) of ``stage`` on device ``device_index``."""
+    _, _, small, large, _ = pkg._route(stage, device_index)
+    return (small if program == "small" else large)[0]
+
+
+def _device_edges(stage: str, device_index: int) -> tuple[int, ...]:
+    """The edges of the windows of ``stage`` on device ``device_index`` (:func:`cake_jit.route`)."""
+    sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
+    return cake_jit.route(stage, pkg.device_arch(device_index), sm_count)[0]
+
+
 def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[list[list[int | None]], str, str]:
     """``(windows, small, large)`` of ``stage`` on ``arch``: the windows of rows per SM of its large-R role on ``arch``
     (``WINDOWS``), the record of the stage's role and the one of its large-R role (none: no window and the small-R
@@ -928,7 +940,7 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     """Row counts 1 to 4097 and each edge of the device's windows of each stage and one row past it, both layouts, a
     strided layout, weighted and unweighted calls and three limits load one library per program they run, once: no
     recompilation (``rows``, ``limit``, the weight flag and the strides are launch arguments)."""
-    edges = sorted({edge for stage in STAGES for edge in pkg._route(stage, device.index)[0]})
+    edges = sorted({edge for stage in STAGES for edge in _device_edges(stage, device.index)})
     cases = [Case(1), Case(4097), Case(3, "merged", "none", L=7.3), Case(129, "strided", L=1.5), Case(2)]
     cases += [Case(rows, "merged") for edge in edges for rows in (edge, edge + 1)]
     cake_build = cake_package("cake_clamped_swiglu_det_train", "cake_build")
@@ -962,7 +974,8 @@ def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, program
     at its ``hi`` edge) and the small-R program outside, and every launch forced to the small-R programs and every
     launch forced to the large-R programs give the routed call's bits of ``h``, ``d_gate``, ``d_up`` and
     ``d_weight``."""
-    edges, small, large = pkg._route(stage, device.index)
+    edges = _device_edges(stage, device.index)
+    small, large = (_program(stage, device.index, program) for program in PROGRAMS)
     if not edges:
         pytest.skip(f"no large-R {stage} program on {pkg.device_arch(device.index)}")
     for index, edge in enumerate(edges):
@@ -974,13 +987,13 @@ def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, program
             programs_run.clear()
             want = step_outputs(forward, backward, t)
             assert programs_run == [_routed(s, rows, device.index) for s in STAGES], (rows, w)
-            assert programs_run[STAGES.index(stage)] == (large if inside else small)[0], (rows, w)
-            for k, program in enumerate(PROGRAMS):
+            assert programs_run[STAGES.index(stage)] == (large if inside else small), (rows, w)
+            for program in PROGRAMS:
                 with monkeypatch.context() as patch:
                     _force(patch, program)
                     programs_run.clear()
                     got = step_outputs(forward, backward, t)
-                assert programs_run == [pkg._route(s, device.index)[1 + k][0] for s in STAGES], (program, rows, w)
+                assert programs_run == [_program(s, device.index, program) for s in STAGES], (program, rows, w)
                 assert_same_outputs(got, want, f"{program} programs, {rows} rows, w={w}")
 
 
@@ -1245,8 +1258,7 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
-    chosen = 1 + PROGRAMS.index(program)
-    assert programs_run == [pkg._route(stage, device.index)[chosen][0] for stage in STAGES] * 2, program
+    assert programs_run == [_program(stage, device.index, program) for stage in STAGES] * 2, program
     for k in range(3):
         na = make_inputs(Case(R, "merged"), seed=50 + k, device=device)
         nb = make_inputs(Case(R, "split", "none", L=7.3), seed=60 + k, device=device)
