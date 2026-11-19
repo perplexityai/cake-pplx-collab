@@ -1157,15 +1157,13 @@ RECUT_FP32_BACKWARD_TWINS: dict[
 # route's: (arch, hidden, residual) -> {FP32-weight window: the first 8 hex digits of the BF16 program whose record over
 # that window (no route selects it) is the BF16 twin of the FP32-weight window's}.  SM100 H = 5120 runs the twin of
 # c145ef19 above 6144 rows where the BF16 route runs b482c84d, and SM100 H = 6144 with a residual keeps the twin of
-# c1a3be94 above 42496 rows where the BF16 route runs 84385468.  SM100 H = 512 keeps the twin of 8877322a above 32768
-# rows where the BF16 route runs ad1a5a3c, and SM107 H = 4096 the twin of e9e21bbe over (24064, 50176] where it runs
-# a647fccc (re-cut windows: the twin's record has a grid rule of its own).
+# c1a3be94 above 42496 rows where the BF16 route runs 84385468.  SM107 H = 4096 keeps the twin of e9e21bbe over
+# (24064, 50176] where the BF16 route runs a647fccc (a re-cut window: the twin's record has a grid rule of its own).
 SWAPPED_FP32_BACKWARD_TWINS: dict[
     tuple[str, int, bool], dict[tuple[int, int | None], str]
 ] = {
     ("sm_100a", 5120, False): {(6144, 50688): "c145ef19", (50688, None): "c145ef19"},
     ("sm_100a", 6144, True): {(42496, None): "c1a3be94"},
-    ("sm_100a", 512, False): {(32768, None): "8877322a"},
     ("sm_107a", 4096, False): {(24064, 50176): "e9e21bbe"},
 }
 

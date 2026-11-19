@@ -1392,70 +1392,6 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H 512 above 32768 rows: the program of the window below at its host plan (A/B on GB200).
-    "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036__32768_inf": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 8,
-            "tail_div": 6,
-        },
-        "hidden": 512,
-        "kernel": "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 32768,
-            "at_most": None,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 16,
-            "kind": "chunk_partials",
-        },
-    },
-    # A window of the re-cut FP32-weight route of sm_100a, above 32768 rows: 659bfc53, the FP32-weight twin of 8877322a.
-    "cake_rmsnorm_det_train_659bfc53e5372850ae2e__ov100_32768_inf": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 8,
-            "tail_div": 12,
-        },
-        "hidden": 512,
-        "kernel": "cake_rmsnorm_det_train_659bfc53e5372850ae2e",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_det_train_659bfc53e5372850ae2e",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 32768,
-            "at_most": None,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 16,
-            "kind": "chunk_partials",
-        },
-    },
     "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__4096_32768": {
         "arches": [
             "sm_100a",
@@ -1475,29 +1411,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": {
             "above": 4096,
             "at_most": 32768,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__32768_inf": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas": 16,
-            "kind": "fixed",
-        },
-        "hidden": 512,
-        "kernel": "cake_rmsnorm_det_train_7097069b8eea6ba44d5a",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_det_train_7097069b8eea6ba44d5a",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 32768,
-            "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -19863,11 +19776,11 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_det_train_09601d42628de24f6f87__227_1024",
             "cake_rmsnorm_det_train_123db0b2f7fb38cfab03",
             "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036",
-            "cake_rmsnorm_det_train_ad1a5a3c5f88e3d10036__32768_inf",
+            "cake_rmsnorm_det_train_8877322a3002e3a4fefd",
             "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__227_1024",
             "cake_rmsnorm_det_train_fef03ce50a792c8704bd",
             "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__4096_32768",
-            "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__32768_inf",
+            "cake_rmsnorm_det_train_122721bd6b4650866553",
         ],
         "bwd_w32_h512": [
             "cake_rmsnorm_det_train_78bf5eb3ee33f8dc220a",
@@ -19875,7 +19788,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_det_train_9f07cea1d13b923ed91e__227_1024",
             "cake_rmsnorm_det_train_632ca6ff01848a71f9f2",
             "cake_rmsnorm_det_train_1f628cf4fd17b4ea9441",
-            "cake_rmsnorm_det_train_659bfc53e5372850ae2e__ov100_32768_inf",
+            "cake_rmsnorm_det_train_659bfc53e5372850ae2e",
             "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__227_1024",
             "cake_rmsnorm_det_train_fef03ce50a792c8704bd",
             "cake_rmsnorm_det_train_7097069b8eea6ba44d5a__4096_32768",

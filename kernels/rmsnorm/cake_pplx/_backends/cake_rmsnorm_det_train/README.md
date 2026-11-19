@@ -105,13 +105,7 @@ first eight hex digits of the program name.
 | `bwd_h512` | (227, 1024] | 09601d42 | plain | tail_div 12, max_halving 5 | 7097069b (tree) |
 | `bwd_h512` | (1024, 4096] | 123db0b2 | plain | tail_div 12, max_halving 5 | fef03ce5 (tree) |
 | `bwd_h512` | (4096, 32768] | ad1a5a3c | plain | tail_div 6, max_halving 5 | 7097069b (tree) |
-| `bwd_h512` | (32768, inf) | ad1a5a3c | plain | tail_div 6, max_halving 5 | 7097069b (tree) |
-| `bwd_w32_h512` | (0, 1] | 78bf5eb3 | column task | - | - |
-| `bwd_w32_h512` | (1, 227] | 404c8f54 | column task | - | - |
-| `bwd_w32_h512` | (227, 1024] | 9f07cea1 | plain | tail_div 12, max_halving 5 | 7097069b (tree) |
-| `bwd_w32_h512` | (1024, 4096] | 632ca6ff | plain | tail_div 12, max_halving 5 | fef03ce5 (tree) |
-| `bwd_w32_h512` | (4096, 32768] | 1f628cf4 | plain | tail_div 6, max_halving 5 | 7097069b (tree) |
-| `bwd_w32_h512` | (32768, inf) | 659bfc53 | plain | tail_div 12, max_halving 5 | 122721bd (tree) |
+| `bwd_h512` | (32768, inf) | 8877322a | plain | tail_div 12, max_halving 5 | 122721bd (tree) |
 | `bwd_h5120` | (0, 1] | 080e0a6c | column task | - | - |
 | `bwd_h5120` | (1, 256] | dd3a3573 | column task | - | - |
 | `bwd_h5120` | (256, 6144] | b482c84d | plain | tail_div 4, max_halving 5 | c5831b29 (tree) |

@@ -4407,7 +4407,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H512 bf16 weight: (32768, inf] a det pair of the deterministic package (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package.
+    # sm_100a H512 bf16 weight: (32768, inf] the deterministic package's det pair of these rows (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_8877322a3002e3a4fefd__32768_inf": {
         "arches": [
             "sm_100a",
