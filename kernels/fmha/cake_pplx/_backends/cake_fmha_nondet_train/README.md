@@ -68,9 +68,13 @@ scores, `dP`, `dK`, `dV`, `dQ` and the row sums; `P` and `dS` are rounded to
 BF16 only as MMA operands.  Every launch is a plain stream-ordered launch:
 nothing cooperative, no PDL.
 
-Each call allocates its outputs and an FP32 workspace from PyTorch's caching
-allocator: `dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
-(`B * H * Sq` elements each).
+The three launches run in one host call: each variant has a host sequence
+library (`SEQUENCES` in `cake_jit.py`) whose `build.json` entries compile the
+three kernel units with a host unit that launches them in order.  Each call
+allocates its outputs and an FP32 workspace from PyTorch's caching allocator:
+`dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
+(`B * H * Sq` elements each).  The host call takes the workspace through the
+tvm-ffi environment allocator, on the current stream.
 
 ## Determinism
 

@@ -501,7 +501,8 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: the backend maps it to ``sm_107a``, and
-    ``build.json`` holds an ``sm_107a`` library for every record (nothing is built or launched here)."""
+    ``build.json`` holds an ``sm_107a`` library for every record and every host sequence (nothing is built or launched
+    here)."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     path = Path(cake_jit.__file__).parent / "build.json"
@@ -518,7 +519,7 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
     assert sorted(entry["name"] for entry in entries) == sorted(
-        f"{rec['library']}_sm_107a" for rec in cake_jit.MODULES.values()
+        f"{rec['library']}_sm_107a" for rec in (*cake_jit.MODULES.values(), *cake_jit.SEQUENCES.values())
     )
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 

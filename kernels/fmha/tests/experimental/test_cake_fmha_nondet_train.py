@@ -21,10 +21,11 @@ arrival order, so no test compares two runs bit for bit.
 
 Without a device: the registry (the three stages in launch order, one program per record, every record delivered for
 the three architectures and for no other, the launch facts), the routing table ``RECORD_OF`` (the preprocess,
-main-stage and postprocess record of each head dimension and causal flag, every record used), the launch grids, the
-stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
-registry-ordered launch), the build manifest (every record's library, the recorded source digests), the standalone
-loader, the prebuilt libraries served first, and no environment read outside the JIT shim.
+main-stage and postprocess record of each head dimension and causal flag, every record used) and the host sequence of
+each variant (``SEQUENCES``: its three records), the launch grids, the stage launchers' keywords, their positional
+launch of every routed record (the FFI arguments and grid of the registry-ordered launch), the build manifest (every
+record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries
+served first, and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, each stage judged on its own against the naive BF16 tier (``tests/cake_naive.py``: the error
 against an FP64 oracle of the same inputs over 32 independent draws, in the L2 and the max norm, median and largest,
@@ -185,6 +186,12 @@ def test_routing_table_names_three_records_per_variant() -> None:
     assert table[(64, False)][2] != table[(128, False)][2]
     assert len({table[variant][1] for variant in VARIANTS}) == len(VARIANTS)
     assert used == set(cake_jit.MODULES)
+    # The host sequence of each variant runs its three records, in order, on the three architectures.
+    assert set(cake_jit.SEQUENCES) == set(table)
+    for variant, sequence in cake_jit.SEQUENCES.items():
+        assert tuple(sequence["records"]) == tuple(table[variant]), variant
+        assert tuple(sequence["arches"]) == ARCHES, variant
+    assert len({sequence["library"] for sequence in cake_jit.SEQUENCES.values()}) == len(VARIANTS)
 
 
 def test_no_record_is_delivered_outside_the_architectures() -> None:
@@ -281,9 +288,10 @@ def test_manifest_covers_every_record_and_its_sources() -> None:
     assert manifest["schema"] == "cake-build/1"
     assert manifest["package"] == PACKAGE_IMPORT
     entries = {entry["name"]: entry for entry in manifest["libraries"]}
-    wanted = {f"{rec['library']}_{arch}" for rec in cake_jit.MODULES.values() for arch in rec["arches"]}
+    libraries = (*cake_jit.MODULES.values(), *cake_jit.SEQUENCES.values())
+    wanted = {f"{rec['library']}_{arch}" for rec in libraries for arch in rec["arches"]}
     assert set(entries) == wanted
-    assert len(entries) == len(cake_jit.MODULES) * len(ARCHES)
+    assert len(entries) == len(libraries) * len(ARCHES)
     for name, entry in entries.items():
         assert entry["arch"] in ARCHES, name
         assert name.endswith("_" + entry["arch"]), name
@@ -307,7 +315,7 @@ def test_the_loader_imports_standalone_by_path() -> None:
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=300)
     assert result.returncode == 0, result.stderr
-    records = sum(len(rec["arches"]) for rec in cake_jit.MODULES.values())
+    records = sum(len(rec["arches"]) for rec in (*cake_jit.MODULES.values(), *cake_jit.SEQUENCES.values()))
     assert result.stdout.strip() == f"ok {PACKAGE_IMPORT} {records}"
 
 
@@ -511,7 +519,8 @@ def test_the_backward_matches_the_reference(D, causal, case, device, record_prop
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
 def test_the_backward_launches_the_records_of_its_variant(D, causal, device, monkeypatch) -> None:
     """The backward of a variant launches, in order, the preprocess, main-stage and postprocess records that
-    ``RECORD_OF`` names for it, through the stage launchers; it writes none of its inputs."""
+    ``RECORD_OF`` names for it, through the host sequence of the variant (one host call running the records of its
+    ``SEQUENCES`` entry) or, without one, through the stage launchers; it writes none of its inputs."""
     launched = []
     for stage in STAGES:
         launcher = f"launch_{stage}"
@@ -521,6 +530,27 @@ def test_the_backward_launches_the_records_of_its_variant(D, causal, device, mon
             return _launch(name, *args, **kwargs)
 
         monkeypatch.setattr(cake_backend, launcher, spy)
+
+    def sequence_spy(D_, causal_, arch, _sequence=cake_backend._sequence):
+        found = _sequence(D_, causal_, arch)
+        if found is None:
+            return None
+        library, run, run_with_workspace = found
+        records = list(zip(STAGES, cake_jit.SEQUENCES[(D_, causal_)]["records"], strict=True))
+
+        def run_spy(*args):
+            done = run(*args)
+            if done:
+                launched.extend(records)
+            return done
+
+        def run_with_workspace_spy(*args):
+            launched.extend(records)
+            return run_with_workspace(*args)
+
+        return library, run_spy, run_with_workspace_spy
+
+    monkeypatch.setattr(cake_backend, "_sequence", sequence_spy)
     x = make_inputs(Case(2, 3, 256), D, causal=causal, seed=11, device=device)
     inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
     before = [t.clone() for t in inputs]
