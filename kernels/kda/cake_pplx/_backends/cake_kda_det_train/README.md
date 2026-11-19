@@ -166,7 +166,9 @@ no larger than the `Aqk` / `Akk` set (`3 * NSEG * H * 65536 <= 2 * S * H *
 H <= 4`; 37 on `sm_100a`), `NSEG * H` is at most `4 * sm_count` (that much for `num_docs * H >=
 10` unless the per-SM cap binds, which brings it down to `num_docs *
 sm_count`), so the states cost at most about `12 * sm_count * 64 KiB` (115 MiB
-on a 152-SM device) independent of `S`, and the threshold is about 58k tokens
+on a 152-SM device) independent of `S` (the token-aware rule's counts are at
+most these, and its plan saves the states exactly when the occupancy plan
+does), and the threshold is about 58k tokens
 at `H = 4` (four documents), 29k at `H = 8`,
 `384 * 38 * num_docs` tokens with at most four chains (14592 for one document
 at `H = 1`, 58368 for four; `384 * 37 * num_docs` on `sm_100a`: 14208 and
@@ -490,7 +492,8 @@ that refuse an option skip it).
 
 ## Kernel structure of one training step
 
-The host resolves one plan per `(S, num_docs, H, sm_count, arch, gate)`: which
+The host resolves one plan per `(S, num_docs, H, sm_count, arch, gate, l2n,
+segment_rule)`: which
 record of each stage runs on each path and with which grid.  The paths are
 `fwd` (the forward with `save_for_backward`: its programs read the saved
 `Aqk` / `Akk` token rows where a form for them ships and the intra program
@@ -512,6 +515,27 @@ most `sm_count // H`, and at most 38 (37 on `sm_100a`) when `num_docs * H <= 4`
 (the "few-chain" rows, which also take proportional segment lengths: `seg_arg =
 -num_docs`); `cake_jit.SEGMENTS` holds the constants (`small_segments_by_arch`
 the per-architecture few-chain counts).
+
+That count `P_old` is the occupancy rule.  By default a plan takes the
+token-aware rule (`cake_backend.plan(..., segment_rule="tokens")`,
+`cake_jit.segment_route(..., num_tokens=S)`, constants in
+`cake_jit.TOKEN_SEGMENTS`).  On GB300 (`sm_103a` with 152 SMs) with 4, 8 or 16
+heads it also reads the token count `S`: a pack too short for the occupancy
+plan to save the segment states (`S < 384 * num_docs * P_old`) takes `P_u =
+max(P_ns, 12, ceil(S / 1408))` segments per document when `P_u < P_old`, where
+`P_ns = S // (384 * num_docs) + 1` is the fewest that save no state either.
+The block table keeps its form (uniform above four chains, proportional at or
+below), so the saved set and the arena never grow, the route never changes,
+and every arena option, the batched one included, runs the same plan.  The
+bounds come from GB300 measurements of the forward and backward kernel time
+against the occupancy plan, on even and skewed packs (one document holding
+most of the tokens), with 2k to 262k tokens: uniform tables of 8 or fewer
+segments per document and segments longer than 1408 tokens were slower on
+skewed packs.  Other architectures, SM counts and head counts, and the serial
+route, keep the occupancy rule.  `segment_rule="occupancy"` selects the
+occupancy rule everywhere; the context-parallel package's local plans take
+it.  The records whose rules read the segment count (`walk_ctas_*`,
+`segments_heads_*`) are selected at the plan's count.
 
 Forward (`fwd`): the chunk tables from `cu_seqlens` -- on the segmented route
 up to 256 documents no table launch: the intra program `fwd_intra_v14`, launched
