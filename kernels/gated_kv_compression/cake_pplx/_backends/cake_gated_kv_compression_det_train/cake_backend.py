@@ -26,15 +26,18 @@ library from a prebuilt ``aot/`` file when a builder compiled it and otherwise
 through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources
 and flags of ``build.json``.
 
-A forward call runs ``pair_table`` (the exclusive prefix of the pair counts,
-int32 ``[S + 1]``) and ``fwd`` (one output row per pair); a backward call runs
-``pair_table`` (unless the caller passes the table as ``pair_offsets``) and
-``bwd`` (the ``dC`` / ``dZ`` rows of every pair's two tokens and the zero rows
-of the odd-length documents' tail tokens).  Every launch is a plain
-stream-ordered launch on the current torch stream of the operands' device.
-Nothing here reads an environment variable, reads device memory or
-synchronizes: grids and buffer sizes come from tensor shapes and the caller's
-pair count ``G``, never from ``cu_seqlens``.
+A forward call runs ``fwd`` (one output row per pair), after ``pair_table``
+(the exclusive prefix of the pair counts, int32 ``[S + 1]``) when ``S`` is
+above the forward record's ``fuse_docs`` (:func:`.cake_jit.fuse_docs`): a
+forward of at most ``fuse_docs`` documents builds the table itself and writes
+it to ``cu_pairs``.  A backward call runs ``pair_table`` (unless the caller
+passes the table as ``pair_offsets``) and ``bwd`` (the ``dC`` / ``dZ`` rows of
+every pair's two tokens and the zero rows of the odd-length documents' tail
+tokens).  Every launch is a plain stream-ordered launch on the current torch
+stream of the operands' device.  Nothing here reads an environment variable,
+reads device memory or synchronizes: grids, buffer sizes and the pair-table
+launch come from tensor shapes and the caller's pair count ``G``, never from
+``cu_seqlens``.
 
 This is the deterministic package of its family, and the family's only
 package: every output element is one fixed chain of FP32 operations on its own
@@ -314,7 +317,8 @@ def launch_fwd(
 ) -> None:
     """Launch the ``fwd`` role (record ``fwd`` on SM100 / SM103, ``fwd_sm_107a`` on SM107): ``out [G, 512]`` (BF16)
     from the FP32 ``c`` and ``z`` rows (row strides ``c_ld`` and ``z_ld`` elements), ``cu_seqlens`` and its pair table
-    ``cu_pairs`` (``S >= 1``, ``G >= 1``)."""
+    ``cu_pairs`` (``S >= 1``, ``G >= 1``).  For ``S <= cake_jit.fuse_docs(arch)`` the launch reads no entry of
+    ``cu_pairs``: it builds the table itself and writes all ``S + 1`` entries."""
     S, G = int(cu_seqlens.numel()) - 1, int(out.shape[0])
     values = {
         "c": c,
@@ -396,7 +400,9 @@ def _forward(
         out.zero_()
         return out, None
     cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
-    launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs)
+    if S > cake_jit.fuse_docs(device_arch(device.index)):
+        # A forward of at most fuse_docs documents builds the table itself and writes cu_pairs for the backward.
+        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs)
     launch_fwd(c=c, z=z, cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, out=out, c_ld=c_ld, z_ld=z_ld)
     return out, cu_pairs
 

@@ -29,10 +29,11 @@ On SM100 / SM103 / SM107: the entries' ``out``, ``dC`` and ``dZ`` meet the naive
 caller outputs (the gradients in the halves of one buffer); every documented ``ValueError`` and ``TypeError``; the
 empty problems launch nothing and return empty or zero-filled outputs; the launches run on the current stream without
 synchronizing; a captured CUDA graph replays to the bits of the eager call; ``torch.use_deterministic_algorithms(True)``
-changes nothing; the autograd nodes save their inputs and the pair table only, compute only the requested gradients,
-read an incoming gradient of any layout, and replay bit for bit under ``torch.utils.checkpoint(...,
-use_reentrant=False)``; a device outside the delivered architectures is a ``RuntimeError`` and a device of capability
-(10, 7) is served; with two devices, operands on the device that is not current give results there.
+changes nothing; a forward launches the pair table only past 256 documents (its kernel builds the table of fewer);
+the autograd nodes save their inputs and the pair table only, compute only the requested gradients, read an incoming
+gradient of any layout, and replay bit for bit under ``torch.utils.checkpoint(..., use_reentrant=False)``; a device
+outside the delivered architectures is a ``RuntimeError`` and a device of capability (10, 7) is served; with two
+devices, operands on the device that is not current give results there.
 """
 
 from __future__ import annotations
@@ -615,6 +616,31 @@ def test_the_autograd_node_saves_its_inputs_and_the_pair_table_only(form) -> Non
     retained = api.cake_gated_kv_compression_det_train_memory_bytes(x.T, x.S)["retained_for_backward"]
     assert retained == tables[0].numel() * tables[0].element_size()
     out.backward(x.dout)
+
+
+# Packs at the forward's fused bound (256 documents) and past it: one document, 256 and 257 documents of 0 to 6 tokens.
+BOUND_PACKS = tuple(Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}") for n in (1, 256, 257))
+
+
+@pytest.mark.parametrize("pack", BOUND_PACKS, ids=[p.id for p in BOUND_PACKS])
+def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launches) -> None:
+    """A forward of at most ``fuse_docs`` (256) documents launches the forward kernel alone, which writes the pair
+    table the autograd node saves; a forward of more launches the pair table first.  The saved table is the prefix of
+    the pair counts either way, and the explicit forward gives the bits of the autograd one."""
+    device = _device_or_skip()
+    jit = _jit()
+    assert jit.fuse_docs(jit.device_arch(device.index)) == 256
+    x = make_inputs(pack, seed=53, device=device, layout="halves")
+    saved = []
+    c = x.c.detach().clone().requires_grad_(True)
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t) or t, lambda t: t):
+        out = api.cake_gated_kv_compression_det(c, x.z, x.cu, x.G)
+    assert launches == (["fwd"] if pack.S <= 256 else ["pair_table", "fwd"]), pack.id
+    tables = [t for t in saved if t.dtype == torch.int32 and t.data_ptr() != x.cu.data_ptr()]
+    assert len(tables) == 1
+    assert_bitwise(tables[0], pair_table_of(pack.lengths, device), f"{pack.id}: saved pair table")
+    explicit = api.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
+    assert_bitwise(explicit, out.detach(), f"{pack.id}: out")
 
 
 def test_only_the_requested_gradients_are_returned() -> None:

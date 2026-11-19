@@ -80,8 +80,8 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 
 | Role | Kernel | Grid |
 |---|---|---|
-| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA with a carried running total | `(1, 1, 1)` |
-| `fwd` | per output row `r < G`: the document by a binary search of `cu_pairs`, the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros | rows `G` |
+| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total | `(1, 1, 1)` |
+| `fwd` | per output row `r < G`: the document by a binary search of `cu_pairs`, the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  With `S <= fuse_docs` (256) every CTA builds the pair table in shared memory and searches it there, and CTA 0 writes `cu_pairs` | rows `G` |
 | `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
 
 Each role has one registry record per architecture.  The forward has two, one kernel in two
@@ -91,8 +91,10 @@ schedules, each the faster on its architectures: record `fwd` on SM100 / SM103 r
 CTA).  `pair_table` and `bwd` (256-bit lanes) are one record each on all three.  A launch
 picks the record of the operands' device.
 
-A forward call launches `pair_table` then `fwd`; a backward call launches `pair_table` (not
-when `pair_offsets` is given, as the autograd backward does) then `bwd`.  Every launch is a
+A forward call launches `fwd`, after `pair_table` only when `S` is above the forward
+record's `fuse_docs` (256; `cake_jit.fuse_docs`): a forward of at most 256 documents builds
+the table itself and writes it to `cu_pairs`, the same bytes.  A backward call launches
+`pair_table` (not when `pair_offsets` is given, as the autograd backward does) then `bwd`.  Every launch is a
 plain stream-ordered launch on the current torch stream of the operands' device; nothing
 synchronizes.  Numerics: FP32 throughout, IEEE round to nearest, no flush to zero; the
 logit gap is `u = z1 - z0`, `e = exp(-|u|)` (precise `expf`), the larger-logit token's

@@ -42,14 +42,21 @@ The roles, in launch order:
 * ``pair_table``: the exclusive prefix of the pair counts,
   ``cu_pairs[0] = 0`` and ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1]
   - cu_seqlens[s]) // 2`` (int32 ``[S + 1]``), by one CTA that walks the
-  documents in tiles with a carried running total.
+  documents in passes with a carried running total.  A forward launches it
+  only for ``S > fuse_docs`` (:func:`fuse_docs`); an explicit backward without
+  a table launches it for every ``S``.
 * ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
   of ``r`` by a binary search of ``cu_pairs``, the tokens
   ``t0 = cu_seqlens[s] + 2 (r - cu_pairs[s])`` and ``t1 = t0 + 1``, and
   ``out[r] = BF16(softmax-weighted sum of C[t0], C[t1])`` in FP32.  A row
   ``r >= cu_pairs[S]`` (a caller ``G`` above the pair count) is stored as
-  zeros and reads nothing.  The role has two records, one kernel with two
-  schedules, each the faster on its architectures: ``fwd`` on ``sm_100a``
+  zeros and reads nothing.  A launch of ``S <= fuse_docs`` documents (the
+  record's ``fuse_docs`` leaf) builds the pair table itself: every CTA scans
+  ``cu_seqlens`` into shared memory and searches it there, it reads no entry
+  of ``cu_pairs``, and CTA 0 writes all ``S + 1`` entries, the bytes
+  ``pair_table`` writes, for the backward.  A launch of more documents reads
+  the table ``pair_table`` wrote.  The role has two records, one kernel with
+  two schedules, each the faster on its architectures: ``fwd`` on ``sm_100a``
   and ``sm_103a`` reads ``C`` and ``Z`` in 128-bit lanes (4 FP32 channels,
   128 lanes a row); ``fwd_sm_107a`` on ``sm_107a`` reads them in 256-bit
   lanes (8 channels, 64 lanes a row), with the same FP32 operations per
@@ -118,8 +125,9 @@ MAX_DOCS = 1 << 24
 MAX_TOKENS = INT32_MAX
 
 # The derived leaves of every record (``library``, ``kernel_symbol``, ``launch.block``, ``launch.cluster``,
-# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``) are rewritten by the
-# generator from the rendered program; every other field is host plan.
+# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``) and the ``fuse_docs`` of
+# the forward records (the most documents a forward launch builds the pair table for) are rewritten by the generator
+# from the rendered program; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -134,15 +142,15 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "one_cta"},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_68cbef2c67f1d183366f",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_8997a924b74a8200ddac",
         "launch": {
-            "block": (256, 1, 1),
+            "block": (1024, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 128,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_68cbef2c67f1d183366f",
+        "library": "cake_gated_kv_compression_det_train_8997a924b74a8200ddac",
         "role": "pair_table",
     },
     "fwd": {
@@ -163,16 +171,17 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
+        "fuse_docs": 256,
         "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_748a06110130c8ab8ec4",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 2176,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "library": "cake_gated_kv_compression_det_train_748a06110130c8ab8ec4",
         "role": "fwd",
     },
     "fwd_sm_107a": {
@@ -193,16 +202,17 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
+        "fuse_docs": 256,
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 2176,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "library": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
         "role": "fwd",
     },
     "bwd": {
@@ -273,6 +283,14 @@ def role_record(role: str, arch: str) -> str:
         if found["role"] == role and arch in found["arches"]:
             return name
     raise KeyError(f"no record of the Cake gated KV compression registry serves role {role!r} on {arch}")
+
+
+@functools.cache
+def fuse_docs(arch: str) -> int:
+    """The most documents a forward launch on ``arch`` builds the pair table for itself (the ``fuse_docs`` leaf of the
+    ``fwd`` record serving ``arch``; 0 when the record has none): the host launches ``pair_table`` before the forward
+    only for more documents.  Cached per architecture."""
+    return int(record(role_record("fwd", arch)).get("fuse_docs", 0))
 
 
 def record(name: str) -> dict[str, Any]:
@@ -437,6 +455,7 @@ __all__ = [
     "WIDTH",
     "arch_for_capability",
     "device_arch",
+    "fuse_docs",
     "launch_grid",
     "library_name",
     "load",

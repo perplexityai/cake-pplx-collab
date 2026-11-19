@@ -20,7 +20,8 @@ SM100, SM103 and SM107.
 
 Without a device: the registry (the pair-table, forward and backward roles, each served on each of the three
 architectures by exactly one record and delivered for no other: the forward by ``fwd`` on sm_100a / sm_103a and
-``fwd_sm_107a`` on sm_107a; the launch facts, the kernel parameters each record takes), the record each role launches on
+``fwd_sm_107a`` on sm_107a, each building the pair table of up to 256 documents; the launch facts, the kernel
+parameters each record takes), the record each role launches on
 each architecture, the launch grids (every row covered, the pair table on one CTA), the launchers' keywords and the
 kernel arguments they pass, the exact overlap rule of two row-strided views (the two column halves of one buffer share
 no element), the memory report, the build manifest (every record's library, the recorded source digests), the standalone
@@ -36,7 +37,8 @@ small packs with empty and one-token documents, close pairs, gate extremes, many
 performance packs; the forward rows past the pair count stored as +0.0, and a forward ``G`` below the pair count
 giving the first ``G`` rows.  Then the documented invariances, bit for bit: repeated calls, the two layouts, one call
 with four different row strides (judged too), a ``G`` past the pair count in the explicit and autograd backward, each
-document alone against the pack, the tail tokens' values, and the records each call launches.
+document alone against the pack, the tail tokens' values, and the records each call launches (no pair table before a
+forward of at most 256 documents).
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -221,6 +223,14 @@ def test_registry_records_are_well_formed() -> None:
         assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "rows", name
     if rendered:
         assert len(libraries) == len(cake_jit.MODULES)
+
+
+def test_the_forward_records_build_the_table_of_up_to_256_documents() -> None:
+    """Each forward record carries ``fuse_docs`` (the rendered bound: 256), and :func:`cake_jit.fuse_docs` reads the
+    one of the forward record serving each architecture; the pair-table and backward records carry none."""
+    for name, rec in cake_jit.MODULES.items():
+        assert rec.get("fuse_docs") == (256 if rec["role"] == "fwd" else None), name
+    assert {arch: cake_jit.fuse_docs(arch) for arch in ARCHES} == dict.fromkeys(ARCHES, 256)
 
 
 def test_each_role_has_one_record_per_architecture() -> None:
@@ -827,9 +837,11 @@ def test_the_tail_tokens_change_no_output(pack, device) -> None:
 
 
 def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
-    """The forward launches ``pair_table`` then ``fwd`` (the record of the device's architecture: ``fwd`` on sm_100a /
-    sm_103a, ``fwd_sm_107a`` on sm_107a); the backward ``pair_table`` then ``bwd``, or ``bwd`` alone with
-    ``pair_offsets``; the autograd entries launch no pair table in the backward.  No call writes its inputs."""
+    """The forward of a pack of at most ``fuse_docs`` (256) documents launches ``fwd`` alone (the record of the
+    device's architecture: ``fwd`` on sm_100a / sm_103a, ``fwd_sm_107a`` on sm_107a), which builds the pair table
+    itself; the forward of more documents launches ``pair_table`` then ``fwd``; the backward ``pair_table`` then
+    ``bwd``, or ``bwd`` alone with ``pair_offsets``; the autograd entries launch no pair table in the backward.  No
+    call writes its inputs."""
     launched = []
     entries = []
     original = cake_jit.run_module
@@ -846,11 +858,19 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     monkeypatch.setattr(cake_jit, "run_module", spy)
     monkeypatch.setattr(cake_jit, "_entry", entry_spy)
     arch = cake_jit.device_arch(device.index)
+    forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
+    assert cake_jit.fuse_docs(arch) == 256
+    many = make_inputs(Pack((1, 3, 5, 7) * 75), seed=41, device=device, layout="halves")
+    pkg.cake_gated_kv_compression_det_train_forward(many.c, many.z, many.cu, many.G)
+    assert launched == ["pair_table", "fwd"]
+    assert entries == [("pair_table", arch), (forward, arch)]
+    launched.clear()
+    entries.clear()
     x = make_inputs(MIXED, seed=37, device=device, layout="halves")
     before = [t.clone() for t in (x.cz, x.cu, x.dout)]
     pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
-    assert launched == ["pair_table", "fwd"]
-    assert entries == [("pair_table", arch), ("fwd_sm_107a" if arch == "sm_107a" else "fwd", arch)]
+    assert launched == ["fwd"]
+    assert entries == [(forward, arch)]
     launched.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu)
     assert launched == ["pair_table", "bwd"]
@@ -865,6 +885,6 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         launched.clear()
         cz = x.cz.detach().clone().requires_grad_(True)
         entry(*args(cz)).backward(x.dout)
-        assert launched == ["pair_table", "fwd", "bwd"], entry.__name__
+        assert launched == ["fwd", "bwd"], entry.__name__
     for old, new in zip(before, (x.cz, x.cu, x.dout), strict=True):
         assert torch.equal(old, new), "a call wrote its input"
