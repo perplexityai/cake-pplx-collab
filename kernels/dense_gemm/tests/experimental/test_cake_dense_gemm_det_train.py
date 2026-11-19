@@ -9679,13 +9679,13 @@ def test_segment_blocks_reads_the_longest_segment():
 def test_long_segments_plan_the_promoted_twin(monkeypatch):
     """The 32 x 4096 BF16 weight gradient on a 152-SM sm_100a part plans the 64-row ``hen`` program of its rule
     (two K halves of each of its 32 tiles): with the program's twin registered, a plan whose longest segment holds more
-    than 256 K blocks (32769 tokens and more) runs the twin, the same plan but for the template and
-    ``promote_blocks``; at 16384 and 32768 tokens (128 and 256 blocks) it keeps the program.  ``promote=False`` keeps
-    the program at any length, ``promote=True`` runs the twin at any length; without the twin registered the plan
-    keeps the program and ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall
-    tile (the kernel's refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 128 blocks the twin runs from
-    16385 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all) keeps the
-    program unless ``promote=True``."""
+    than 128 K blocks (16385 tokens and more) runs the twin, the same plan but for the template and ``promote_blocks``;
+    at 16384 tokens (128 blocks) it keeps the program.  ``promote=False`` keeps the program at any length,
+    ``promote=True`` runs the twin at any length; without the twin registered the plan keeps the program and
+    ``promote=True`` raises, as it does for an FP32 output (no twin), a K-major layout and a tall tile (the kernel's
+    refusal).  ``K1_PROMOTE_MIN_SEGMENT`` moves the threshold (at 256 blocks, the threshold up to version 0.3.5, the
+    twin runs from 32769 tokens on), and a row of ``K1_PROMOTE_EXEMPT_ROWS`` (exact at one token count, ragged at all)
+    keeps the program unless ``promote=True``."""
     arch, sm_count = "sm_100a", 152
     program = "dense_proj_det_gemm_nn_n128_m64_hen_t_pro15"
     twin = _twin_of(program)
@@ -9716,14 +9716,13 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         with pytest.raises(ValueError, match="not registered"):
             plan_at(65536, promote=True)
     _register_twins(monkeypatch, arch, program)
-    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 256
-    for T in (16384, 16385, 32768):
-        short = plan_at(T)
-        assert (short.template, short.promote_blocks) == (program, 0), T
-        forced = plan_at(T, promote=True)
-        assert (forced.template, forced.promote_blocks) == (twin, 128), T
-        assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
-    for T in (32769, 65536):
+    assert cake_backend.K1_PROMOTE_MIN_SEGMENT == 128
+    short = plan_at(16384)
+    assert (short.template, short.promote_blocks) == (program, 0)
+    forced = plan_at(16384, promote=True)
+    assert (forced.template, forced.promote_blocks) == (twin, 128)
+    assert dataclasses.replace(forced, template=program, promote_blocks=0) == short
+    for T in (16385, 32768, 32769, 65536):
         plan, plain = plan_at(T), plan_at(T, promote=False)
         assert (plan.template, plan.promote_blocks) == (twin, 128), T
         assert (plain.template, plain.promote_blocks) == (program, 0), T
@@ -9761,12 +9760,12 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
             transposed_out=v.get("transposed", False),
             promote=True,
         )
-    # the threshold: at 128 blocks the twin runs from 16385 tokens (129 blocks a half) on
+    # the threshold: at 256 blocks (up to version 0.3.5) the twin runs from 32769 tokens (257 blocks a half) on
     with monkeypatch.context() as m:
-        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 128)
-        assert plan_at(16384).template == program
-        assert plan_at(16385).template == plan_at(32768).template == twin
-        assert plan_at(16384, promote=True).template == twin
+        m.setattr(cake_backend, "K1_PROMOTE_MIN_SEGMENT", 256)
+        assert plan_at(16385).template == plan_at(32768).template == program
+        assert plan_at(32769).template == plan_at(65536).template == twin
+        assert plan_at(32768, promote=True).template == twin
     # the exempt rows: an exact key at 65536 tokens, a ragged key at every token count; promote=True runs the twin
     row = (arch, True, True, False, True, False, 32)
     with monkeypatch.context() as m:
@@ -9780,7 +9779,7 @@ def test_long_segments_plan_the_promoted_twin(monkeypatch):
         m.setattr(
             cake_backend, "K1_PROMOTE_EXEMPT_ROWS", frozenset({row + (None, 4096)})
         )
-        assert plan_at(32769).template == plan_at(65536).template == program
+        assert plan_at(16385).template == plan_at(65536).template == program
         assert plan_at(65536, promote=True).template == twin
 
 
@@ -9837,9 +9836,9 @@ def test_promoted_twins_registered_are_twins_of_registered_programs():
 
 
 # The promoted twins on the device: (d_out, d_in, T of a plan whose longest segment holds more than
-# ``K1_PROMOTE_MIN_SEGMENT`` (256) K blocks, T of the same row's plan at one chunk a segment, the architectures).
+# ``K1_PROMOTE_MIN_SEGMENT`` (128) K blocks, T of the same row's plan at one chunk a segment, the architectures).
 # 512 x 4096 plans the 64-row 256-wide ``hen`` program of its rule, 32 x 4096 the 64-row 128-wide one; at T 65536 a
-# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 256), at T 8192 128, so no
+# tile holds 1024 K blocks (the test asserts that the longest segment holds more than 128), at T 8192 128, so no
 # segment holds more than one chunk.  Both programs are rendered from the kernel source the twins are, on these
 # architectures (the sm_107a 32 x 4096 rule names a carried ``skx`` program).
 PROMOTED_GPU_CASES = (
@@ -13240,7 +13239,8 @@ def test_routing_034_changes_exactly_the_measured_plans(monkeypatch):
     5120 -> 64 / 128 BF16 weight gradients of sm_100a from T 32768 on, the FP32 rows of the 212-SM sm_107a token ranges
     inside their ranges on that part.  Every other plan (the 152- and 160-SM parts but for the 5120 -> 64 / 128 rows,
     the 208- and 216-SM sm_107a parts, the other FP32 outputs, the BF16 forms of the ranged rows, one token count
-    outside each range, the other rows and token counts) is the plan of version 0.3.3."""
+    outside each range, the other rows and token counts) is the plan of the tables of version 0.3.3 (at the current
+    promotion threshold)."""
     changed = changed_212 = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_034_SWEEP:
         for T in token_counts:
@@ -13460,8 +13460,8 @@ def test_sm100a_5120_wgrad_long_token_rule():
     """The sm_100a 5120 -> 64 / 128 BF16 weight-gradient rules (the swapped orientation, ragged in T) are the sm_103a
     rules of the rows: the synchronised split of the 20-tile tail (20 collectors, margin 16: s = ceil((k_blocks + 16)
     / 2)), whose segments promote (the ``_kc128`` twin), from T 32768 on, where the main parts hold 264 K blocks (more
-    than ``K1_PROMOTE_MIN_SEGMENT``); below T 32768 their token tier keeps the 64-row program of version 0.3.3.  Both
-    on the 148- and the 152-SM part."""
+    than ``K1_PROMOTE_MIN_SEGMENT``); below T 32768 their token tier keeps the 64-row program of version 0.3.3 (its
+    promoted twin above ``K1_PROMOTE_MIN_SEGMENT``).  Both on the 148- and the 152-SM part."""
     for key, tiers in SM100A_5120_WGRAD_TIERS.items():
         assert cake_backend.ROW_RULE_MIN_T[key] == tiers, key
         own = ("sm_103a",) + key[1:]
@@ -13775,6 +13775,454 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
         torch.cuda.synchronize()
         assert torch.equal(before_out.view(bits), first.view(bits)), case
     cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+
+
+# ---------------------------------------------------------------------------
+# The promotion threshold of version 0.3.6: a BF16 weight-gradient plan whose longest segment holds more than
+# K1_PROMOTE_MIN_SEGMENT (128) K blocks runs the promoted twin of its program where the architecture registers it
+# ---------------------------------------------------------------------------
+
+#: The device classes of the CPU checks of the promotion threshold: (arch, SM count).
+LONG_SEGMENT_CLASSES = (
+    ("sm_100a", 148),
+    ("sm_100a", 152),
+    ("sm_103a", 148),
+    ("sm_103a", 152),
+    ("sm_103a", 160),
+    ("sm_107a", 208),
+    ("sm_107a", 212),
+    ("sm_107a", 216),
+    ("sm_107a", 224),
+)
+#: The rows of ``LONG_SEGMENT_MISSED_CELLS`` without a BF16 weight-gradient key in ``ROW_RULES``: (d_in, d_out).
+LONG_SEGMENT_RULELESS_ROWS = ((4096, 16), (4096, 96), (6144, 48), (6144, 64))
+#: The token counts of the promotion sweep: the measured token counts and, for each plan form, those whose longest
+#: segment holds 128 / 129, 192 / 193 and 256 / 257 K blocks (whole tiles: ``T / 64`` K blocks; two or three parts of
+#: a tile's K blocks; the synchronised split with a margin of 16 or 38 K steps: ``(T / 64 + margin) / 2``).
+# fmt: off
+LONG_SEGMENT_TOKENS = tuple(sorted(
+    {1001, 4096, 8192, 12288, 16172, 16231, 16384, 24576, 28672, 31744, 31745, 32768, 40960, 49152, 65536}
+    | {t for s in (128, 192, 256)
+       for edge in (64 * s, 128 * s, 192 * s, 128 * s - 64 * 16, 128 * s - 64 * 38)
+       for t in (edge, edge + 1)}
+))
+# fmt: on
+#: The BF16 weight-gradient cells that missed the naive BF16 tier on plans whose longest segment held 129 to 256 K
+#: blocks without promoted chunks (the threshold of versions up to 0.3.5), per device class: (arch, SM count) ->
+#: ``((d_in, d_out, T, seeds), ...)``: a row at one token count with the seeds it missed on, one cell per seed.  B200
+#: (a 148-SM sm_100a part), GB200 (a 152-SM sm_100a part), B300 (a 148-SM sm_103a part), GB300 (a 152-SM sm_103a part)
+#: and VR200 (a 212-SM sm_107a part): judged on ``SEED``, 758, 1, 2 and 3.  At the threshold of 128 K blocks every plan
+#: of these cells runs its promoted twin.
+# fmt: off
+LONG_SEGMENT_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)), (4096, 32, 31745, (SEED, 1)),
+        (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)), (4096, 48, 31745, (SEED, 1)),
+        (4096, 48, 32768, (SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (SEED,)), (4096, 96, 32768, (SEED,)),
+        (4096, 128, 31744, (SEED, 1, 2, 758)), (4096, 128, 32768, (SEED, 2, 3, 758)),
+        (5120, 32, 31744, (SEED, 1, 3)), (5120, 32, 31745, (1, 2)), (5120, 32, 32768, (SEED, 1)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (1, 2, 3, 758)), (5120, 48, 31745, (1,)),
+        (5120, 48, 32768, (SEED, 1, 2, 3, 758)),
+        (5120, 64, 16231, (SEED,)), (5120, 64, 16384, (3,)),
+        (5120, 128, 13312, (SEED,)), (5120, 128, 15361, (758,)), (5120, 128, 16172, (1,)), (5120, 128, 16231, (758,)),
+        (5120, 128, 16383, (758,)), (5120, 128, 16384, (SEED,)),
+        (6144, 32, 13312, (SEED,)), (6144, 32, 15360, (SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (SEED, 3)),
+    ),
+    ("sm_100a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (SEED, 758)),
+        (4096, 32, 31744, (SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (SEED, 3)),
+        (4096, 64, 31744, (SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)), (4096, 64, 32768, (SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (SEED, 3, 758)), (4096, 128, 31745, (SEED, 2)), (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 31744, (SEED, 1, 3, 758)), (5120, 32, 32768, (3, 758)),
+        (5120, 48, 32768, (3,)),
+        (5120, 64, 14336, (758,)), (5120, 64, 15360, (2,)), (5120, 64, 15361, (1, 3)), (5120, 64, 16172, (3,)),
+        (5120, 64, 16231, (1,)),
+        (5120, 128, 12288, (3,)), (5120, 128, 16172, (758,)), (5120, 128, 16231, (758,)), (5120, 128, 16383, (1, 2, 3)),
+        (5120, 128, 16384, (2,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (SEED,)), (6144, 128, 16231, (SEED,)), (6144, 128, 16384, (SEED,)),
+    ),
+    ("sm_103a", 148): (
+        (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
+        (4096, 32, 20480, (3,)), (4096, 32, 23552, (2,)), (4096, 32, 31744, (2,)), (4096, 32, 31745, (SEED, 1)),
+        (4096, 32, 32768, (1, 2, 758)),
+        (4096, 48, 20480, (SEED,)), (4096, 48, 28672, (1,)), (4096, 48, 31744, (2, 3)), (4096, 48, 31745, (SEED, 1)),
+        (4096, 48, 32768, (SEED, 1, 2)),
+        (4096, 64, 31744, (758,)), (4096, 64, 32768, (SEED, 3)),
+        (4096, 96, 31744, (1,)), (4096, 96, 31745, (SEED,)), (4096, 96, 32768, (SEED,)),
+        (4096, 128, 31744, (SEED, 1, 2, 758)), (4096, 128, 32768, (SEED, 2, 3, 758)),
+        (5120, 32, 31744, (SEED, 1, 3, 758)),
+        (5120, 48, 28672, (2,)), (5120, 48, 31744, (3,)),
+        (5120, 64, 31744, (SEED, 2, 3, 758)),
+        (6144, 32, 13312, (SEED,)), (6144, 32, 15360, (SEED,)), (6144, 32, 15361, (3, 758)),
+        (6144, 32, 16172, (SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
+        (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
+        (6144, 128, 16384, (SEED, 3)),
+    ),
+    ("sm_103a", 152): (
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (SEED, 758)),
+        (4096, 32, 31744, (SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (SEED, 3)),
+        (4096, 64, 31744, (SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)), (4096, 64, 32768, (SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (SEED, 3, 758)), (4096, 128, 31745, (SEED, 2)), (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 23553, (3,)), (5120, 32, 31744, (SEED, 1, 758)),
+        (5120, 48, 15361, (SEED,)), (5120, 48, 28672, (1,)), (5120, 48, 31744, (SEED, 1, 2, 3, 758)),
+        (5120, 64, 31744, (1,)),
+        (5120, 128, 12288, (3,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (SEED,)), (6144, 128, 16231, (SEED,)), (6144, 128, 16384, (SEED,)),
+    ),
+    ("sm_107a", 212): (
+        (4096, 16, 31744, (3,)), (4096, 16, 31745, (2, 3)), (4096, 16, 32768, (758,)),
+        (4096, 32, 40960, (2,)),
+        (4096, 96, 31744, (2,)), (4096, 96, 31745, (1, 2)), (4096, 96, 32768, (2, 758)),
+        (4096, 512, 16172, (1,)), (4096, 512, 16231, (3,)),
+        (5120, 32, 31744, (SEED, 3)), (5120, 32, 31745, (SEED, 3)), (5120, 32, 32768, (SEED, 2)),
+        (5120, 48, 31744, (2, 3)), (5120, 48, 31745, (SEED, 758)), (5120, 48, 32768, (1, 2, 758)),
+        (5120, 64, 31744, (2,)), (5120, 64, 31745, (2, 3)), (5120, 64, 32768, (3, 758)),
+        (5120, 128, 31744, (SEED, 2, 758)), (5120, 128, 31745, (1,)), (5120, 128, 32768, (SEED, 1, 2, 3, 758)),
+        (6144, 32, 40960, (2,)), (6144, 32, 49152, (758,)),
+        (6144, 48, 31744, (2, 3, 758)), (6144, 48, 32768, (2, 3, 758)),
+        (6144, 64, 28672, (SEED,)), (6144, 64, 31744, (2, 758)), (6144, 64, 31745, (1, 3)), (6144, 64, 32768, (1, 3)),
+        (6144, 128, 31745, (1, 2)), (6144, 128, 32768, (SEED, 758)),
+        (8192, 128, 31744, (3, 758)), (8192, 128, 31745, (1,)),
+    ),
+}
+# fmt: on
+#: The L2 size of the part each class of ``LONG_SEGMENT_MISSED_CELLS`` was measured on (the hint gate of a plan reads
+#: it): (arch, SM count) -> bytes.
+LONG_SEGMENT_L2_BYTES = {
+    ("sm_100a", 148): 132644864,
+    ("sm_100a", 152): 135528448,
+    ("sm_103a", 148): 132644864,
+    ("sm_103a", 152): 135528448,
+    ("sm_107a", 212): 132120576,
+}
+
+
+def _long_segment_rows():
+    """``(d_in, d_out)`` of the BF16 weight gradients the promotion checks plan: every unbatched BF16 weight-gradient
+    key of ``ROW_RULES`` (either orientation, every architecture; the projection rows among them) and the rows of
+    ``LONG_SEGMENT_RULELESS_ROWS``."""
+    rows = set(LONG_SEGMENT_RULELESS_ROWS)
+    for _arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M in ROW_RULES:
+        if a_mn and b_mn and not out_f32 and not batched and K is None:
+            # a swapped key names (d_out, None, d_in), a direct one (d_in, None, d_out)
+            rows.add((M, N) if out_t else (N, M))
+    return tuple(sorted(rows))
+
+
+def _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes=L2_BYTES, t_max=65536):
+    """``plan_at(T, **knobs)``: the planner's plan (with the registry fallback) of the ``d_in -> d_out`` BF16 weight
+    gradient at ``T <= t_max`` tokens on a part of ``arch`` with ``sm_count`` SMs, in the orientation of
+    ``wgrad_views`` (CPU views of one buffer per operand, nothing launched)."""
+    G = torch.empty(t_max, d_out, dtype=torch.bfloat16)
+    X = torch.empty(t_max, d_in, dtype=torch.bfloat16)
+    out = torch.empty(d_out, d_in, dtype=torch.bfloat16)
+
+    def plan_at(T, **knobs):
+        A, B, transposed = wgrad_views(G[:T], X[:T], arch=arch)
+        return cake_dense_gemm_det_train_projection_plan(
+            A,
+            B,
+            out,
+            sm_count=sm_count,
+            l2_bytes=l2_bytes,
+            transposed_out=transposed,
+            arch=arch,
+            **knobs,
+        )[0]
+
+    return plan_at
+
+
+def _segment_edge(plan_at, threshold, lo=1024, hi=65536):
+    """The token count ``T`` in ``[lo, hi)`` whose plan without promotion (``promote=False``) holds a longest segment of
+    at most ``threshold`` K blocks while the plan at ``T + 1`` holds more (bisection), else ``None`` (no plan up to
+    ``hi`` tokens holds more)."""
+
+    def long(T):
+        return cake_backend.segment_blocks(plan_at(T, promote=False)) > threshold
+
+    if not long(hi):
+        return None
+    assert not long(lo), lo
+    while hi - lo > 1:
+        mid = (lo + hi) // 2
+        if long(mid):
+            hi = mid
+        else:
+            lo = mid
+    return lo
+
+
+def _registered_twin(arch, plan, registered):
+    """The promoted twin of the program of ``plan`` (a plan without promotion) where ``arch`` registers it (a template
+    of ``registered``) and the row is no row of ``K1_PROMOTE_EXEMPT_ROWS``, else ``None``."""
+    twin = _twin_of(plan.template)
+    if (
+        twin == plan.template
+        or twin not in registered
+        or cake_backend._promote_exempt(arch, plan)
+    ):
+        return None
+    return twin
+
+
+def _twin_refusal(arch, plan, twin):
+    """Why the plan ``plan`` (without promotion) cannot run on its promoted twin ``twin`` (the stream-K contract,
+    ``check_stream_k_plan``), ``""`` where it can."""
+    try:
+        check_stream_k_plan(
+            dataclasses.replace(
+                plan, template=twin, promote_blocks=cake_backend.K1_PROMOTE_BLOCKS
+            ),
+            arch,
+        )
+    except ValueError as error:
+        return str(error)
+    return ""
+
+
+def test_promotion_threshold_edges_plan_the_twin():
+    """At ``K1_PROMOTE_MIN_SEGMENT`` (128 K blocks), for each BF16 weight gradient of ``_long_segment_rows`` on each
+    class of ``LONG_SEGMENT_CLASSES``: at the token count ``T`` whose plan's longest segment holds at most 128 K blocks
+    while the plan at ``T + 1`` holds more (``_segment_edge``), the plan at ``T`` is the plan without promotion, and at
+    ``T + 1`` a program whose promoted twin the architecture registers (outside ``K1_PROMOTE_EXEMPT_ROWS``) runs the
+    twin, every other plan field the plan's without promotion; a program without a registered twin keeps its plan.
+    Every class has such edges of registered twins."""
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    assert threshold == cake_backend.K1_PROMOTE_BLOCKS == 128
+    rows = _long_segment_rows()
+    assert set(PROJECTION_ROWS.values()) <= set(rows)
+    for arch, sm_count in LONG_SEGMENT_CLASSES:
+        registered = _registered(arch)
+        twins = set()
+        for d_in, d_out in rows:
+            plan_at = _long_segment_planner(arch, sm_count, d_in, d_out)
+            T = _segment_edge(plan_at, threshold)
+            if T is None:
+                continue
+            where = (arch, sm_count, d_in, d_out, T)
+            short = plan_at(T)
+            assert short == plan_at(T, promote=False), (where, short.template)
+            assert cake_backend.segment_blocks(short) <= threshold, where
+            plan, plain = plan_at(T + 1), plan_at(T + 1, promote=False)
+            assert cake_backend.segment_blocks(plain) > threshold, where
+            twin = _registered_twin(arch, plain, registered)
+            if twin is None:
+                assert plan == plain, (where, plan.template)
+                continue
+            assert (plan.template, plan.promote_blocks) == (
+                twin,
+                cake_backend.K1_PROMOTE_BLOCKS,
+            ), (where, plan.template, _twin_refusal(arch, plain, twin))
+            assert (
+                dataclasses.replace(plan, template=plain.template, promote_blocks=0)
+                == plain
+            ), where
+            twins.add(twin)
+        assert twins, (arch, sm_count)
+        print(f"PROMOTION_EDGES {arch} sm_count={sm_count}: {sorted(twins)}")
+
+
+def test_promotion_threshold_sweep_promotes_exactly_the_long_segments():
+    """Over the BF16 weight gradients of ``_long_segment_rows`` at ``LONG_SEGMENT_TOKENS`` on each class of
+    ``LONG_SEGMENT_CLASSES``: a plan whose program has a promoted twin the architecture registers (outside
+    ``K1_PROMOTE_EXEMPT_ROWS``) runs the twin exactly where its longest segment holds more than
+    ``K1_PROMOTE_MIN_SEGMENT`` K blocks, every other plan field the plan's without promotion; a plan whose program has
+    no registered twin keeps its program at any length.  Every class sweeps plans of each kind: promoted, a program
+    with a registered twin at a segment of at most 128 K blocks, and a program without one."""
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    for arch, sm_count in LONG_SEGMENT_CLASSES:
+        registered = _registered(arch)
+        seen = {"promoted": 0, "short": 0, "no_twin": 0}
+        for d_in, d_out in _long_segment_rows():
+            plan_at = _long_segment_planner(arch, sm_count, d_in, d_out)
+            for T in LONG_SEGMENT_TOKENS:
+                plan = plan_at(T)
+                segment = cake_backend.segment_blocks(plan)
+                where = (arch, sm_count, d_in, d_out, T, plan.template, segment)
+                if plan.promote_blocks:
+                    plain = plan_at(T, promote=False)
+                    assert plan.promote_blocks == cake_backend.K1_PROMOTE_BLOCKS, where
+                    twin = _registered_twin(arch, plain, registered)
+                    assert plan.template == twin, where
+                    assert (
+                        dataclasses.replace(
+                            plan, template=plain.template, promote_blocks=0
+                        )
+                        == plain
+                    ), where
+                    assert segment > threshold, where
+                    seen["promoted"] += 1
+                    continue
+                twin = _registered_twin(arch, plan, registered)
+                if twin is None:
+                    seen["no_twin"] += 1
+                    continue
+                assert segment <= threshold, (*where, _twin_refusal(arch, plan, twin))
+                seen["short"] += 1
+        assert all(seen.values()), (arch, sm_count, seen)
+        print(f"PROMOTION_SWEEP {arch} sm_count={sm_count}: {seen}")
+
+
+def test_long_segment_missed_cells_plan_the_promoted_twin():
+    """Each cell of ``LONG_SEGMENT_MISSED_CELLS``, planned for its class with the L2 of the part it was measured on
+    (``LONG_SEGMENT_L2_BYTES``): the plan without promotion holds a longest segment of more than
+    ``K1_PROMOTE_MIN_SEGMENT`` K blocks, and the plan runs the promoted twin of its program, a twin the architecture
+    registers, every other plan field the plan's without promotion."""
+    assert set(LONG_SEGMENT_MISSED_CELLS) == set(LONG_SEGMENT_L2_BYTES)
+    threshold = cake_backend.K1_PROMOTE_MIN_SEGMENT
+    for (arch, sm_count), cells in LONG_SEGMENT_MISSED_CELLS.items():
+        registered = _registered(arch)
+        l2_bytes = LONG_SEGMENT_L2_BYTES[(arch, sm_count)]
+        for d_in, d_out, T, _seeds in cells:
+            plan_at = _long_segment_planner(
+                arch, sm_count, d_in, d_out, l2_bytes=l2_bytes, t_max=T
+            )
+            plan, plain = plan_at(T), plan_at(T, promote=False)
+            segment = cake_backend.segment_blocks(plain)
+            where = (arch, sm_count, d_in, d_out, T, plain.template, segment)
+            assert segment > threshold, where
+            twin = _registered_twin(arch, plain, registered)
+            assert twin is not None, where
+            assert (plan.template, plan.promote_blocks) == (
+                twin,
+                cake_backend.K1_PROMOTE_BLOCKS,
+            ), (where, plan.template, _twin_refusal(arch, plain, twin))
+            assert (
+                dataclasses.replace(plan, template=plain.template, promote_blocks=0)
+                == plain
+            ), where
+
+
+def _long_segment_gpu_cases(arch, sm_count, l2_bytes):
+    """The cases of ``test_gpu_long_segment_wgrad_rows_meet_the_naive_tier`` on a part of ``arch`` with ``sm_count``
+    SMs, ``(d_in, d_out, T, seeds)``: the cells of ``LONG_SEGMENT_MISSED_CELLS`` of the class, and for each promoted
+    twin the class runs at the threshold's edge (``_segment_edge``), on the first row of ``_long_segment_rows`` that
+    does, three token counts on ``SEED``: the edge (a longest segment of at most 128 K blocks), the next token
+    count (more than 128) and the last token count whose plan's longest segment holds at most 256 K blocks (the
+    longest segment without promoted chunks up to version 0.3.5)."""
+    cases = list(LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ()))
+    forms = set()
+    for d_in, d_out in _long_segment_rows():
+        plan_at = _long_segment_planner(arch, sm_count, d_in, d_out, l2_bytes=l2_bytes)
+        T = _segment_edge(plan_at, cake_backend.K1_PROMOTE_MIN_SEGMENT)
+        if T is None:
+            continue
+        edge = plan_at(T + 1)
+        if not edge.promote_blocks or edge.template in forms:
+            continue
+        forms.add(edge.template)
+        top = _segment_edge(plan_at, 256)
+        cases += [(d_in, d_out, t, (SEED,)) for t in (T, T + 1, top) if t is not None]
+    return cases
+
+
+def _long_segment_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` weight gradient at ``T`` tokens
+    from ``seed``, drawn as :func:`_make_inputs` draws a projection row: ``X``, the weight ``[d_out, d_in]`` scaled by
+    ``d_in ** -0.5`` (drawn for the order of the generator alone), then ``G``, each standard normal."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, G
+
+
+def _judge_long_segment_wgrad(record_property, name, launch, X, G, out, seed):
+    """Judge the weight gradient ``out [d_out, d_in]`` that ``launch()`` writes from the operands ``X [T, d_in]`` and
+    ``G [T, d_out]`` it is bound to against the naive BF16 tier over the draws of ``seed`` (:func:`judge_gemm`): each
+    draw's operands (:func:`_long_segment_operands`) written in place and ``out`` filled with NaN; the oracle and the
+    tier in the orientation of :func:`_d2_product` (``wgrad_views`` without an architecture: ``X.T @ G`` against
+    ``out.T`` where it swaps)."""
+    (T, d_in), d_out = X.shape, G.shape[1]
+    A, B, transposed = wgrad_views(G, X)
+
+    def draw(s):
+        operands = _long_segment_operands(T, d_in, d_out, s, X.device)
+        for dst, src in zip((X, G), operands, strict=True):
+            dst.copy_(src)
+        nan_fill([out])
+        return SimpleNamespace(A=A, B=B)
+
+    def run(_inputs):
+        launch()
+        torch.cuda.synchronize()
+        return {name: out.t() if transposed else out}
+
+    def product(v, dtype):
+        return {name: torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+    judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+
+
+def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
+    """On the device's class, each case of ``_long_segment_gpu_cases`` (the cells of ``LONG_SEGMENT_MISSED_CELLS`` and
+    three token counts around the threshold per promoted twin) runs the default plan of the weight-gradient entry: the
+    promoted twin exactly where the plan's longest segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the
+    architecture registers the twin (every missed cell does).  The output is judged against the FP64 oracle beside the
+    naive BF16 tier over the draws of each listed seed (:func:`_judge_long_segment_wgrad`); every failing cell is
+    reported.  A class without such cases skips."""
+    if not _device_supported():
+        pytest.skip(
+            "requires a device with a registered generated instance "
+            f"(compute capability {_registered_capabilities()})"
+        )
+    device = torch.device("cuda")
+    arch, sm_count = arch_for(device), _sm_count()
+    cases = _long_segment_gpu_cases(arch, sm_count, _l2_bytes())
+    if not cases:
+        pytest.skip(
+            f"no promoted weight-gradient twin at the threshold on {arch} with {sm_count} SMs"
+        )
+    missed = {case[:3] for case in LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ())}
+    failures = []
+    for d_in, d_out, T, seeds in cases:
+        cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        prepared = cake_dense_gemm_det_train_projection_wgrad_prepare(G, X, out)
+        plan = prepared.plan
+        segment = cake_backend.segment_blocks(plan)
+        where = (arch, sm_count, d_in, d_out, T, prepared.template, segment)
+        plain = prepared.template.replace(f"_kc{cake_backend.K1_PROMOTE_BLOCKS}", "")
+        assert prepared.template == _promoted(arch, plan, plain), where
+        assert (d_in, d_out, T) not in missed or plan.promote_blocks, where
+        for seed in seeds:
+            try:
+                _judge_long_segment_wgrad(
+                    record_property,
+                    f"wgrad_{d_in}x{d_out}_t{T}_s{seed}",
+                    prepared.launch,
+                    X,
+                    G,
+                    out,
+                    seed,
+                )
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+    cake_backend.cake_dense_gemm_det_train_convenience_cache_clear()
+    print(f"LONG_SEGMENT_WGRAD {arch} sm_count={sm_count}: {len(cases)} cases")
+    assert not failures, "\n".join(failures)
 
 
 def _d3_wgrad_operands(T, M, N, seed, device):
