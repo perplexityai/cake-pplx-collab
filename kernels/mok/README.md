@@ -4,8 +4,8 @@ Cake MoK (Mixture of Kittens) training kernels: one expert-parallel MoE layer wi
 scheduler, the fused forward, the context-only recompute and the fused backward. Public module:
 
 - `cake_pplx.cake_mok_det_train`: `prepare_mok_bf16`, `create_mok_bf16_workspace`,
-  `quantize_mok_mxfp8_weights`, and the communication-SM tables and resolvers (`COMM_SMS`,
-  `resolve_comm_sms`, ...).
+  `quantize_mok_mxfp8_weights`, the communication-SM tables and resolvers (`COMM_SMS`,
+  `resolve_comm_sms`, ...) and `ROUTER_WEIGHT_POSITIONS`.
 
 Install this family alone, pinned to a commit:
 
@@ -15,7 +15,11 @@ pip install "cake-pplx-mok @ git+https://github.com/perplexityai/cake-pplx-colla
 
 Routed experts run in BF16, or in MXFP8 with caller-prequantized weights; the shared expert runs in BF16.
 Plain and clamped SwiGLU, BF16 or FP32 weight-gradient accumulation, and unequal (including zero) source
-counts per rank are supported. The backend README
+counts per rank are supported. `prepare_mok_bf16(router_weight_position="before_down")` applies each route's
+FP32 router weight to the SwiGLU activation before the down projection (`h = BF16(w * a)`, an unweighted
+combine, router-weight gradient `dot(dh, a)`): top-k 6 over 384 routed experts at EP 4/8/16/32/64 (and top-k
+2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a` and
+`sm_103a`; `recompute_forward_context` then takes the router weights. The backend README
 ([`cake_pplx/_backends/cake_mok_bf16/README.md`](cake_pplx/_backends/cake_mok_bf16/README.md)) has the
 full API, contract, memory rules and measured communication-SM tables.
 
@@ -23,36 +27,39 @@ full API, contract, memory rules and measured communication-SM tables.
 
 The module is deterministic. Each output repeats bit for bit from run to run: `y`, the forward context,
 the recomputed context (identical to the forward's), `dx`, `dscores` and the six weight gradients (or the
-six FP32 accumulators), for BF16 and MXFP8 and for plain and clamped SwiGLU. The scope is the same inputs,
-weights, `MoKConfig` values other than the communication-SM split, precision, `swiglu_limit`,
-`fp32_wgrad`, EP group, package build and GPU model. No bit depends on the communication-SM split, on
-CUDA Graph replay versus eager launches, or on other kernels resident on other streams. Every reduction
-runs in a fixed order; atomics act on integers only.
+six FP32 accumulators), for BF16 and MXFP8, for plain and clamped SwiGLU and for both router-weight
+positions. The scope is the same inputs, weights, `MoKConfig` values other than the communication-SM split,
+precision, `swiglu_limit`, `fp32_wgrad`, `router_weight_position`, EP group, package build and GPU model.
+No bit depends on the communication-SM split, on CUDA Graph replay versus eager launches, or on other kernels
+resident on other streams. Every reduction runs in a fixed order; atomics act on integers only.
 
 ## Requirements
 
 | Item | Requirement |
 |---|---|
-| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7) |
+| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7); `router_weight_position="before_down"`: `sm_100a` or `sm_103a` |
 | CUDA toolkit (`nvcc`, JIT) | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` |
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
 | EP sizes | 1, 4, 8, 16, 32, 64 (EP1 uses plain tensors) |
-| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8 |
+| Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2 |
+| Schedule capacity | `schedule_capacity_multiplier` at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` holds every routing (`E` local experts, `T` source rows per rank); no upper bound |
 
 ## Builds
 
-`build.json` lists 152 builds of 52 kernels: 50 kernels for each of `sm_100a`, `sm_103a` and `sm_107a`, and two
-more for `sm_107a` only. Every build is generated from one kernel source revision.
+`build.json` lists 182 builds of 67 kernels: 50 kernels for each of `sm_100a`, `sm_103a` and `sm_107a`, 15 more for
+`sm_100a` and `sm_103a` only (the router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler
+kernels of the 384-expert layouts) and two more for `sm_107a` only. Every build is generated from one kernel source
+revision.
 
 | Group | Kernels |
 |---|---|
-| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients) |
+| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection (`sm_100a`, `sm_103a`): clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
 | MXFP8 fused | forward, context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); `sm_107a` only: the multi-macrobatch forward (plain, clamped) |
 | Scheduler | count and rows per scheduler layout, pad per EP size |
 | Layout | the expert layout, zero |
 | Communication | barrier, gather |
-| Epilogues | forward and backward, top-k 2 and 8 |
+| Epilogues | forward (weighted sum), top-k 2 and 8; backward (unweighted sum, also the router-weight-before-down forward's), top-k 2, 6 and 8 |
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work over the two dies of an
 `sm_107a` GPU, are not part of this package.
@@ -96,6 +103,12 @@ judge every floating output of the fused kernels (`tests/cake_naive.py`):
 - Score gradient, in both: `y_e` is the routed expert's output as the backward holds it. With MXFP8 routed experts that
   is the SwiGLU of the gate and up the backward reads, by the backward's copy of the down weight (the forward output
   reads the forward's copy).
+- Router weight before the down projection: in both, `h = s * a` is formed before the down projection (the naive
+  implementation promotes the BF16 activation by the FP32 weight and casts once), `dY` reaches the down projection
+  unscaled and `d_scores = (dh * a).sum(-1)`; the cases include the requester's inputs at H 5120 / I 2304 (unit-RMS
+  `x`, `sqrtsoftplus` top-6 weights times 1.5 with exact zeros, gate and up past the limit 10 and exactly at it).
+  `tests/experimental/report_mok_wbd.py` reports, as measurements, the errors against the issue's stage-rounded
+  float64 reference on those inputs.
 - Rule: over 32 random inputs per case, the kernel's error against the oracle in the L2 norm has a median and a
   largest value at most 1.005 times the naive implementation's. In the max norm, the kernel's error is at most 1.005
   times the naive error on at least 16 of the 32 inputs; 11 or fewer fail, and with 12 to 15 the case runs 96 more
