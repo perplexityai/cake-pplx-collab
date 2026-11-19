@@ -123,8 +123,10 @@ nothing here reads an environment variable.
 from __future__ import annotations
 
 import math
+import struct
 import threading
 import warnings
+import weakref
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -3621,8 +3623,9 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
 # eagerly fill its slots, every other operand is a constant of the plan (a per-stream workspace of the pool, a chunk
 # table of the layout's ``ChunkMeta``, the cached walk, a scalar).  A replay makes the general path's allocations,
 # eager calls, launches and event records and waits in its order on its streams, with the same arguments: the same
-# kernels and the same bits.  The plan holds no tensor of a call.  ``FWD_PLAN = False`` keeps every forward on the
-# general path.
+# kernels and the same bits.  The plan holds no tensor of a call, and a replay lets each tensor of the call go after
+# its last step (:func:`_drop_steps`), no later than the general path does, so it needs no more device memory.
+# ``FWD_PLAN = False`` keeps every forward on the general path.
 FWD_PLAN = True
 # plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first
 _FWD_PLANS: dict = {}
@@ -3631,9 +3634,9 @@ _FWD_PLANS_LIMIT = 256
 _PLANS_LOCK = threading.Lock()
 # the steps of a plan: a launch, an allocation, a dim-0 range of a slot, the fork of the side stream, a stream switch,
 # the join, a dtype view of a slot, an eager call, an event recorded on one stream of the fork and a wait for it, the
-# use of a cached walk
+# use of a cached walk, the end of some slots (the replay lets them go)
 _OP_LAUNCH, _OP_EMPTY, _OP_NARROW, _OP_FORK, _OP_STREAM, _OP_JOIN = range(6)
-_OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE = range(6, 11)
+_OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE, _OP_DROP = range(6, 12)
 # the forward functions a plan stands for (the direct executor's steps reach some of them only through ``_DIRECT``): a
 # plan replays only while they and the module globals they read are the recorded objects (:func:`_fwd_plan_globals`)
 _FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_wy_outputs",
@@ -3793,15 +3796,77 @@ def _slot_layout(slots) -> tuple:
     )
 
 
+def _float_bits(x) -> bytes | None:
+    """The 8 bytes of ``x`` as a double (``None`` for ``None``): a key field that tells -0.0 from 0.0 and one NaN from
+    another, which ``==`` does not (a launch argument of -0.0 is not one of 0.0)."""
+    return None if x is None else struct.pack("<d", float(x))
+
+
+def _no_slot() -> None:
+    """The reference of an absent input (``initial_state`` ``None``)."""
+
+
+def _drop_steps(ops, inputs: int, kept) -> tuple:
+    """``ops`` with a :data:`_OP_DROP` step after the last step that reads each slot, which lets the replay's reference
+    to it go: the general path's tensors go when nothing refers to them any more, which is no earlier.  The call's
+    inputs (slots below ``inputs``) and the plan's results (``kept``) stay.  A slot that the side stream reads goes at
+    the next join, not before: the caching allocator could hand its memory to the caller's stream while the side
+    stream still reads it.  A slot made on the side stream stays until the replay returns."""
+    last: dict[int, int] = {}
+    stay = set(kept)
+    side = False
+    side_reads: list[int] = []
+    for j, op in enumerate(ops):
+        code = op[0]
+        if code == _OP_STREAM:
+            side = bool(op[1])
+            continue
+        if code == _OP_JOIN:
+            last.update(dict.fromkeys(side_reads, j))
+            side_reads.clear()
+            continue
+        if code == _OP_LAUNCH:
+            reads, made = [i for _pos, i in op[5]], None
+        elif code == _OP_CALL:
+            reads, made = [i for _pos, i in op[3]], op[4]
+        elif code in (_OP_VIEW, _OP_NARROW):
+            reads, made = [op[2]], op[1]
+        elif code == _OP_EMPTY:
+            reads, made = [], op[1]
+        else:
+            continue
+        for i in reads:
+            last[i] = j
+        if made is not None:
+            last[made] = j  # a slot no step reads goes right away
+        if side:
+            side_reads += reads
+            if made is not None:
+                stay.add(made)
+    stay.update(side_reads)  # read on the side stream with no join after it
+    drops: dict[int, list[int]] = {}
+    for i, j in last.items():
+        if i >= inputs and i not in stay:
+            drops.setdefault(j, []).append(i)
+    steps = []
+    for j, op in enumerate(ops):
+        steps.append(op)
+        if j in drops:
+            steps.append((_OP_DROP, tuple(sorted(drops[j]))))
+    return tuple(steps)
+
+
 class _SlotRecorder(_DirectExecutor):
     """A general path that also records its steps.  ``slots``: the call's tensors the plan starts from.  Every tensor
     a recorded step reads is a slot (one of those, or one a recorded step made), a dim-0 range of a slot, or a view of
     a constant of the plan (:meth:`_constants`: a pooled workspace of the stream, a chunk table of ``meta``); anything
-    else, or a :meth:`refuse`, leaves the call without a plan."""
+    else, or a :meth:`refuse`, leaves the call without a plan.  The recorder refers to the slots weakly: each goes
+    when the general path lets it go, so a recording needs no more device memory than the general path."""
 
     __slots__ = (
         "slots",
         "slot_of",
+        "inputs",
         "ops",
         "why",
         "stream",
@@ -3811,8 +3876,9 @@ class _SlotRecorder(_DirectExecutor):
     )
 
     def __init__(self, slots, index: int, meta: ChunkMeta):
-        self.slots = list(slots)
-        self.slot_of = {id(t): i for i, t in enumerate(self.slots) if t is not None}
+        self.slots = [_no_slot if t is None else weakref.ref(t) for t in slots]
+        self.slot_of = {id(t): i for i, t in enumerate(slots) if t is not None}
+        self.inputs = len(self.slots)
         self.ops: list = []
         self.why: str | None = None
         self.stream = _stream_key(index)
@@ -3825,13 +3891,13 @@ class _SlotRecorder(_DirectExecutor):
             self.why = reason
 
     def _add(self, t) -> int:
-        self.slots.append(t)
+        self.slots.append(weakref.ref(t))
         self.slot_of[id(t)] = len(self.slots) - 1
         return len(self.slots) - 1
 
     def _slot(self, t):
         i = self.slot_of.get(id(t))
-        return i if i is not None and self.slots[i] is t else None
+        return i if i is not None and self.slots[i]() is t else None
 
     def _ref(self, t, constants):
         """The slot of ``t`` (a range of a slot gets a slot of its own, filled by a narrow step), ``None`` for a
@@ -3841,7 +3907,8 @@ class _SlotRecorder(_DirectExecutor):
         if i is not None:
             return i
         ptr = t.untyped_storage().data_ptr()
-        for i, s in enumerate(self.slots):
+        for i, ref in enumerate(self.slots):
+            s = ref()  # None for a slot that is gone
             if (
                 not isinstance(s, torch.Tensor)
                 or s.dim() == 0
@@ -3966,7 +4033,8 @@ def _watch_hook(name: str, original):
 def _watched(recorder):
     """Run a forward's recording by ``recorder`` with the operations of :data:`_WATCHED` hooked.  Another hook set in
     place of one of these during the recording (another package's recording) would not report this one's calls: the
-    recording is refused, and the last exit leaves such an attribute as it is (it restores only its own hooks)."""
+    recording is refused for this call only (``recorder.again``: the key's next call records again), and the last exit
+    leaves such an attribute as it is (it restores only its own hooks)."""
     with _WATCH_LOCK:
         if not _WATCH_STATE["count"]:
             saved = []
@@ -3988,7 +4056,9 @@ def _watched(recorder):
                 getattr(owner, name) is not hook
                 for owner, name, _original, _own, hook in saved
             ):
+                # not kept: the key's next call records again, most likely without the other hook in flight
                 recorder.refuse("a watched function was replaced during the recording")
+                recorder.again = True
             _WATCH_STATE["count"] -= 1
             if not _WATCH_STATE["count"]:
                 for owner, name, original, own, hook in saved:
@@ -4046,18 +4116,19 @@ class _FwdRecorder(_SlotRecorder):
     """The forward's general path that also records its steps (:meth:`plan`).  ``slots``: the call's ``q``, ``k``,
     ``v``, ``g``, ``beta`` and ``initial_state``; the views, the allocations and the eager results of the call are
     slots too, the cached walks it uses (:meth:`use`) constants.  A cache it fills (:meth:`fill`: the walk's build and
-    the event after it) is not recorded, since a later general-path call does not repeat it; a refusal of such a call
-    is not kept (``filled``).  ``trusted``: inside one of the recorder's own stream or event steps or a fill, which
-    :func:`_watched` lets pass."""
+    the event after it) is not recorded, since a later general-path call does not repeat it.  ``again``: a refusal of
+    this call is not kept, so the key's next call records again (a call that filled a cache, or whose recording another
+    hook of :data:`_WATCHED` overlapped: :func:`_watched`).  ``trusted``: inside one of the recorder's own stream or
+    event steps or a fill, which :func:`_watched` lets pass."""
 
-    __slots__ = ("uses", "events", "trusted", "filled")
+    __slots__ = ("uses", "events", "trusted", "again")
 
     def __init__(self, inputs, index: int, meta: ChunkMeta):
         super().__init__(inputs, index, meta)
         self.uses: list = []
         self.events: list = []
         self.trusted = 0
-        self.filled = False
+        self.again = False
 
     @contextmanager
     def _trust(self):
@@ -4159,7 +4230,7 @@ class _FwdRecorder(_SlotRecorder):
 
     @contextmanager
     def fill(self):
-        self.filled = True
+        self.again = True
         with self._trust():
             yield
 
@@ -4178,7 +4249,9 @@ class _FwdRecorder(_SlotRecorder):
                 return None  # an entry that is not a slot of the call
             outputs.append((name, 0, i))
         main, side = self.streams or (None, None)
-        return _ForwardPlan(tuple(self.ops), len(self.slots), self.stream, main, side, self.meta, _fwd_plan_globals(),
+        kept = [i for _name, kind, i in outputs if kind == 0]
+        ops = _drop_steps(self.ops, self.inputs, kept)
+        return _ForwardPlan(ops, len(self.slots), self.stream, main, side, self.meta, _fwd_plan_globals(),
                             self._tables(), tuple(self.uses), len(self.events), tuple(outputs))  # fmt: skip
 
 
@@ -4212,6 +4285,11 @@ def _replay_forward(plan: _ForwardPlan, inputs) -> dict[str, Any]:
                 out = op[1](*args)
                 if op[4] is not None:
                     slots[op[4]] = out
+            elif code == _OP_DROP:
+                for i in op[1]:
+                    slots[i] = None
+                # the last launch's values and the last call's arguments and result may hold them too
+                values = args = out = None
             elif code == _OP_USE:
                 _use_table(op[1][0], op[1][1], op[2])
             elif code == _OP_FORK:
@@ -4901,9 +4979,10 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
             inputs = (q, k, v, g, beta, initial_state)
             alias = (None if len({id(t) for t in inputs}) == len(inputs)
                      else tuple(next(j for j, s in enumerate(inputs) if s is t) for t in inputs))  # fmt: skip
-            fkey = (id(meta), stream, arch, options, tape, packed, num_heads, num_v_heads, float(scale),
-                    bool(use_qk_l2norm_in_kernel), bool(output_final_state), _slot_layout(inputs), alias,
-                    level)  # fmt: skip
+            # (a float argument by its bits: -0.0 == 0.0, yet a replay passes the recorded one to the launches)
+            fkey = (id(meta), stream, arch, options, _float_bits(options.warmup_log2), tape, packed, num_heads,
+                    num_v_heads, _float_bits(scale), bool(use_qk_l2norm_in_kernel), bool(output_final_state),
+                    _slot_layout(inputs), alias, level)  # fmt: skip
             plan = _FWD_PLANS.get(fkey)
             if plan is None or (plan.ops is not None and not plan.ready(meta, stream)):
                 plan, recorder = None, _FwdRecorder(inputs, index, meta)
@@ -4918,10 +4997,11 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
                                  options=options, tape=tape, ex=_DIRECT if recorder is None else recorder)  # fmt: skip
     if recorder is not None:
         recorded = recorder.plan(fwd)
-        # the call's tensors that are not in its result go now, as the general path's go when it returns
+        # the recorder's (weak) references to the call's tensors
         recorder.slots.clear()
-        # a refusal of a call that filled a table cache is not kept: the key's next call records again
-        if recorded is not None or not recorder.filled:
+        # a refusal of a call that filled a table cache or met another hook is not kept: the key's next call records
+        # again
+        if recorded is not None or not recorder.again:
             if recorded is None:  # the key's calls keep the general path
                 recorded = _ForwardPlan(
                     None, 0, recorder.stream, None, None, meta, (), None, (), 0, ()

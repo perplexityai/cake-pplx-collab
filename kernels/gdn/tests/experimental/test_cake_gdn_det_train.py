@@ -80,8 +80,8 @@ non-leaf row with another consumer, a row without a gradient, and a checkpoint (
 eager call's bits.  The forward's recorded plan (``cake_chain.FWD_PLAN``): without a device its cache, the input
 layout of its key, the module globals it holds, its replay, the torch functions a recording watches and the steps the
 forward makes outside its executor (none); on a device each replay against the general path (launches, stream events,
-memory peak, saved tensors and bits) on every route and tape mode, the plan's key and invalidation, the calls it never
-serves, and the caller's stream and device after a replay.
+saved tensors and bits, no higher memory peak) on every route and tape mode, the plan's key and invalidation, the
+calls it never serves, and the caller's stream and device after a replay.
 
 Accuracy has no tolerance.  Each judged output is measured against the FP64 recurrence (:func:`_reference`) beside
 the naive BF16 recurrence on the same inputs (``token_recurrence`` of ``test_helpers/cake_gdn_naive.py``) over the
@@ -110,6 +110,7 @@ import json
 import math
 import random
 import re
+import struct
 import threading
 import time
 import types
@@ -6494,10 +6495,10 @@ def test_fwd_a_serial_keep_on_r200(device, monkeypatch) -> None:
 # records and waits once per call class (cake_chain.FWD_PLAN) and replay them afterwards.  Without a device: the plan
 # cache, the input layout of its key, the module globals it holds, a replay of a hand-built plan, the torch functions a
 # recording watches and the steps the forward makes outside its executor.  On a device: every replay against the
-# general path (FWD_PLAN off: the same launches, stream switches and events, memory peak, saved tensors and bits) on
-# every route and tape mode, the plan's key and invalidation, the calls it never serves (a CUDA graph capture, the
-# device route, a host q), the caller's stream and device after a replay, and the bits under other overlaps of the two
-# streams.  Nothing is judged here: a planned call has the bits of the general path, which the tests above judge.
+# general path (FWD_PLAN off: the same launches, stream switches and events, saved tensors and bits, no higher memory
+# peak) on every route and tape mode, the plan's key and invalidation, the calls it never serves (a CUDA graph capture,
+# the device route, a host q), the caller's stream and device after a replay, and the bits under other overlaps of the
+# two streams.  Nothing is judged here: a planned call has the bits of the general path, which the tests above judge.
 
 
 def _counted_forward_replays(monkeypatch) -> list:
@@ -6531,6 +6532,13 @@ def test_the_forward_plan_key_holds_each_input_layout() -> None:
     assert layout[2][3] == (rows.data_ptr() + 2) % 16 != layout[0][3]
     assert layout[3] == layout[0]
     assert layout[4][:3] == (torch.Size([8, 4]), (1, 8), torch.bfloat16)
+    # a float argument by its bits (scale, warmup_log2): -0.0 is not 0.0, and one NaN is not another
+    bits = cake_chain._float_bits
+    assert bits(None) is None and bits(1) == bits(1.0) and len(bits(1)) == 8
+    assert bits(-0.0) != bits(0.0)
+    nan = float("nan")
+    other = struct.unpack("<d", struct.pack("<Q", 0x7FF8000000000001))[0]
+    assert bits(nan) == bits(nan) != bits(other)
 
 
 def test_the_forward_plan_cache_keeps_the_newest_plans(monkeypatch) -> None:
@@ -6666,12 +6674,66 @@ def test_a_replay_runs_the_recorded_steps(monkeypatch) -> None:
     assert len(launches) == 2 and len(other) == 1
 
 
+def test_a_plan_lets_each_slot_go_after_its_last_read() -> None:
+    # the plan's steps let a slot go right after the last step that reads it (one that no step reads, right after the
+    # step that makes it): the general path's tensors go no earlier.  A slot that the side stream reads goes at the
+    # join; the inputs, the plan's results and a slot made on the side stream stay
+    empty, launch = cake_chain._OP_EMPTY, cake_chain._OP_LAUNCH
+    drop, f32 = cake_chain._OP_DROP, torch.float32
+    ops = (
+        (empty, 2, (4,), f32, "cpu"),
+        (empty, 3, (4,), f32, "cpu"),
+        (launch, "a", (1, 1, 1), 0, (None, None), ((0, 0), (1, 2))),  # input 0 and slot 2
+        (cake_chain._OP_VIEW, 4, 3, torch.int32),
+        (cake_chain._OP_FORK,),
+        (cake_chain._OP_STREAM, 1),
+        (launch, "b", (1, 1, 1), 0, (None,), ((0, 4),)),  # slot 4 on the side stream
+        (empty, 5, (4,), f32, "cpu"),  # made on the side stream
+        (cake_chain._OP_STREAM, 0),
+        (launch, "c", (1, 1, 1), 0, (None,), ((0, 2),)),  # slot 2 on the caller's stream, before the join
+        (cake_chain._OP_JOIN,),
+        (cake_chain._OP_CALL, torch.Tensor.mul, (None, 2.0), ((0, 3),), 6),
+        (cake_chain._OP_NARROW, 7, 6, 0, 1),  # slot 7: a result of the plan
+        (empty, 8, (4,), f32, "cpu"),  # read by no step
+    )  # fmt: skip
+    want = (*ops[:10], (drop, (2,)), ops[10], (drop, (4,)), ops[11], (drop, (3,)), ops[12], (drop, (6,)), ops[13],
+            (drop, (8,)))  # fmt: skip
+    assert cake_chain._drop_steps(ops, 2, (7,)) == want
+    assert cake_chain._drop_steps(list(ops), 2, (7,)) == want
+
+
+def test_a_replay_lets_a_dropped_slot_go(monkeypatch) -> None:
+    # after a drop step nothing of the replay refers to the slot (not the last launch's values either): its tensor is
+    # freed before the next step
+    inputs = (torch.zeros(4), None)
+    ops = (
+        (cake_chain._OP_EMPTY, 2, (4,), torch.float32, "cpu"),
+        (cake_chain._OP_LAUNCH, "make", (1, 1, 1), 0, (None,), ((0, 2),)),
+        (cake_chain._OP_DROP, (2,)),
+        (cake_chain._OP_LAUNCH, "after", (1, 1, 1), 0, (0,), ()),
+    )
+    outputs = (("mode", 2, "tag"),)
+    plan = cake_chain._ForwardPlan(ops, 3, (0, 0), None, None, None, (), None, (), 0, outputs)  # fmt: skip
+    seen = []
+
+    def launch_stage(stage, grid, values, device_index):
+        if stage == "make":
+            seen.append(weakref.ref(values[0]))
+        else:
+            seen.append(seen[0]() is None)
+
+    monkeypatch.setattr(cake_backend, "launch_stage", launch_stage)
+    assert cake_chain._replay_forward(plan, inputs) == {"mode": "tag"}
+    assert seen[1:] == [True]
+
+
 class _StandInRecorder:
-    """The fields of a forward's recorder that the watched functions read."""
+    """The fields of a forward's recorder that the watched functions read and set."""
 
     def __init__(self):
         self.trusted = 0
         self.why = None
+        self.again = False
 
     def refuse(self, reason: str) -> None:
         if self.why is None:
@@ -6716,17 +6778,20 @@ def test_a_recording_watches_the_stream_operations(monkeypatch) -> None:
     with cake_chain._watched(third):
         monkeypatch.setattr(torch.cuda, "set_stream", foreign)
     assert third.why is not None and "replaced" in third.why, third.why
+    assert third.again and not outer.again  # the key's next call records again
     for (owner, name), before in zip(cake_chain._WATCHED, found, strict=True):
         want = foreign if name == "set_stream" else before
         assert getattr(owner, name) is want, name
     assert cake_chain._WATCH_STATE == {"count": 0, "saved": ()}
 
 
-# the forward's functions that take its executor: every allocation, copy, eager tensor op, launch, stream switch,
-# event and use of a cached table goes through it (a step outside it would be missing from a replay)
+# the forward's functions that take its executor, and the helpers that hand them pooled workspaces, shapes or their
+# result: every allocation, copy, eager tensor op, launch, stream switch, event and use of a cached table goes through
+# the executor (a step outside it would be missing from a replay)
 FWD_EXECUTOR_FUNCTIONS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_first_wave",
                           "_wy_outputs", "_launch_wy", "_walk", "_launch_fwd_ho", "_tma_operands", "_start_state",
-                          "_launch_wy_a", "_forward_tape_tensors")  # fmt: skip
+                          "_launch_wy_a", "_forward_tape_tensors", "_split_workspaces", "_forward_state",
+                          "_forward_result")  # fmt: skip
 # the calls they make only through it: allocations, events and stream switches, the launch, the copies of its rows
 # steps and the uses of a cached table; torch.arange and _table_ready only inside _walk's cache fill (ex.fill())
 FWD_OUTSIDE_CALLS = frozenset(("torch.empty", "torch.zeros", "torch.full", "torch.arange", "torch.cuda.Event",
@@ -6737,6 +6802,10 @@ FWD_FILL_CALLS = frozenset(("torch.arange", "_table_ready"))
 # the tensor methods they call only on the executor (any method ending in "_" too: an in-place op)
 FWD_OUTSIDE_METHODS = frozenset(("contiguous", "float", "clone", "view", "to", "narrow", "index_select", "record",
                                  "wait_event", "wait_stream"))  # fmt: skip
+# the dicts they store into by subscript (a store into a tensor writes it in place): the forward's result, and the walk
+# cache inside _walk's cache fill
+FWD_DICT_STORES = frozenset(("fwd",))
+FWD_FILL_STORES = frozenset(("_WALKS",))
 
 
 def _dotted(node) -> str | None:
@@ -6750,9 +6819,27 @@ def _dotted(node) -> str | None:
     return ".".join([node.id, *reversed(parts)])
 
 
+def _subscript_stores(node) -> list:
+    """The stores by subscript of an assignment ``node`` (``t[i] = x``), none for another node."""
+    if isinstance(node, ast.Assign):
+        targets = node.targets
+    elif isinstance(node, ast.AnnAssign):
+        targets = [node.target]
+    else:
+        return []
+    return [
+        sub
+        for target in targets
+        for sub in ast.walk(target)
+        if isinstance(sub, ast.Subscript) and isinstance(sub.ctx, ast.Store)
+    ]
+
+
 def _steps_outside_the_executor(fn) -> list[str]:
-    """The calls in ``fn``'s source that a step of the forward would make outside its executor ``ex``
-    (:data:`FWD_OUTSIDE_CALLS`, :data:`FWD_OUTSIDE_METHODS` on another receiver), as ``"line: call"``."""
+    """The steps in ``fn``'s source that the forward would make outside its executor ``ex``, as ``"line: step"``:
+    the calls of :data:`FWD_OUTSIDE_CALLS`, :data:`FWD_OUTSIDE_METHODS` and in-place methods on another receiver, a
+    call with an ``out=`` keyword, a store by subscript into anything but a dict of :data:`FWD_DICT_STORES` (or
+    :data:`FWD_FILL_STORES` in ``_walk``'s fill) and an augmented assignment (``t += x`` is in place on a tensor)."""
     tree = ast.parse(inspect.getsource(fn))
     ast.increment_lineno(tree, fn.__code__.co_firstlineno - 1)
     found = []
@@ -6764,6 +6851,15 @@ def _steps_outside_the_executor(fn) -> list[str]:
             for item in node.items
         ):
             in_fill = True
+        if isinstance(node, ast.AugAssign):
+            found.append(f"{node.lineno}: {ast.unparse(node)}")
+        for sub in _subscript_stores(node):
+            store = _dotted(sub.value)
+            cache = in_fill and fn.__name__ == "_walk" and store in FWD_FILL_STORES
+            if store not in FWD_DICT_STORES and not cache:
+                found.append(f"{node.lineno}: {ast.unparse(sub)} =")
+        if isinstance(node, ast.Call) and any(kw.arg == "out" for kw in node.keywords):
+            found.append(f"{node.lineno}: {ast.unparse(node.func)}(out=)")
         if isinstance(node, ast.Call):
             name = _dotted(node.func)
             if name in FWD_OUTSIDE_CALLS:
@@ -6787,9 +6883,10 @@ def _steps_outside_the_executor(fn) -> list[str]:
 
 def test_the_forward_steps_go_through_the_executor() -> None:
     # a recording refuses a call that reads a tensor made outside the executor, but an in-place op outside it on a
-    # tensor the plan holds would go unnoticed and be missing from every replay: no forward function makes one, nor
-    # any other step of FWD_OUTSIDE_CALLS / FWD_OUTSIDE_METHODS outside the executor.  The check finds the steps of a
-    # function that takes no executor (the backward's rebuild of h and v_new)
+    # tensor the plan holds (a method, an out= call, a store by subscript, t += x) would go unnoticed and be missing
+    # from every replay: no forward function or helper makes one, nor any other step of FWD_OUTSIDE_CALLS /
+    # FWD_OUTSIDE_METHODS outside the executor.  The check finds the steps of a function that takes no executor (the
+    # backward's rebuild of h and v_new) and each in-place write of _writes_in_place
     found = {
         name: _steps_outside_the_executor(getattr(cake_chain, name))
         for name in FWD_EXECUTOR_FUNCTIONS
@@ -6799,6 +6896,15 @@ def test_the_forward_steps_go_through_the_executor() -> None:
     }
     assert "torch.arange" in inspect.getsource(cake_chain._walk)
     assert _steps_outside_the_executor(cake_chain._launch_fwd_h)
+    assert len(_steps_outside_the_executor(_writes_in_place)) == 3
+
+
+def _writes_in_place(t, x, i):
+    """Three in-place writes that call no tensor method (the check of
+    :func:`test_the_forward_steps_go_through_the_executor` finds each)."""
+    t[i] = x
+    t += x
+    torch.add(t, x, out=t)
 
 
 # --- on a device
@@ -7064,30 +7170,35 @@ def _assert_same_saved(got, want) -> None:
 # prep's two sequence groups on a small device view, :func:`_small_device`), a route of FWD_ROUTES (forced,
 # :func:`_fwd_route`) or None (the device's own); the layout ((H, HV), sequence lengths; sequence lengths None: an
 # equal-length batch of two 640-token sequences), or the FWD_A_CASES / FWD_SPLIT_CASES case of a route of FWD_ROUTES;
-# beta's dtype; q / k / v (:func:`_fwd_plan_call`); the pins; whether the call takes an initial state and returns the
-# final state (in the longest-first table order: the state rows are gathered on the way in and scattered on the way
-# out)
+# beta's dtype; q / k / v (:func:`_fwd_plan_call`); the pins; the dtype of the initial state the call takes, when it
+# takes one and returns the final state (in the longest-first table order: the state rows are gathered on the way in
+# and scattered on the way out; a BF16 state is also cast to FP32 on the way in), else None
 FWD_PLAN_CASES = {
     # a value-head group of four: the serial prep forward on one stream (fwd_ho_vh2 on sm_107a)
-    "prep": ("prep", ((2, 8), (300, 77, 640, 1000)), torch.float32, "views", {"segment_chunks": 0, "streams": 1}, False),
+    "prep": ("prep", ((2, 8), (300, 77, 640, 1000)), torch.float32, "views", {"segment_chunks": 0, "streams": 1}, None),
     "prep-segmented": ("prep-segmented", ((2, 6), SPLIT_STREAM_LAYOUT), torch.bfloat16, "views",
-                       {"scan_config": (64, 1), "segment_chunks": 4}, False),
-    "p_form": ("p_form", ((2, 4), STREAM_LAYOUT), torch.bfloat16, "views", STREAM_PINS, False),
-    "one-stream": ("p_form", ((2, 4), STREAM_LAYOUT), torch.bfloat16, "views", {**STREAM_PINS, "streams": 1}, False),
-    "prep-states": ("prep", ((2, 6), (300, 77, 640)), torch.bfloat16, "views", {}, True),
-    "a": ("a", "g3", torch.float32, "views", {}, False),
-    "a-states": ("a", "g3", torch.float32, "views", {}, True),
-    "split_w": ("split_w", "g3", torch.float32, "views", {}, False),
+                       {"scan_config": (64, 1), "segment_chunks": 4}, None),
+    "p_form": ("p_form", ((2, 4), STREAM_LAYOUT), torch.bfloat16, "views", STREAM_PINS, None),
+    "one-stream": ("p_form", ((2, 4), STREAM_LAYOUT), torch.bfloat16, "views", {**STREAM_PINS, "streams": 1}, None),
+    "prep-states": ("prep", ((2, 6), (300, 77, 640)), torch.bfloat16, "views", {}, torch.float32),
+    "prep-bf16-states": ("prep", ((2, 6), (300, 77, 640)), torch.bfloat16, "views", {}, torch.bfloat16),
+    "a": ("a", "g3", torch.float32, "views", {}, None),
+    "a-states": ("a", "g3", torch.float32, "views", {}, torch.float32),
+    "a-bf16-states": ("a", "g3", torch.float32, "views", {}, torch.bfloat16),
+    "split_w": ("split_w", "g3", torch.float32, "views", {}, None),
     # sequences of one piece beside split ones: wave 1's end states reach the segment state through an index_select
-    "split_a": ("split_a", "g3", torch.float32, "views", {}, False),
-    "split_a-every-sequence": ("split_a", "g3-all", torch.float32, "views", {}, True),
+    "split_a": ("split_a", "g3", torch.float32, "views", {}, None),
+    "split_a-every-sequence": ("split_a", "g3-all", torch.float32, "views", {}, torch.float32),
+    # the summary and wave 1 on the caller's stream
+    "split_w-one-stream": ("split_w", "g3", torch.float32, "views", {"streams": 1}, None),
+    "split_a-one-stream": ("split_a", "g3", torch.float32, "views", {"streams": 1}, None),
     # fwd_ho_a's aligned copy of v
-    "unaligned-v": ("a", "g3", torch.float32, "unaligned_v", {}, False),
-    # the plain prep on aligned copies of q / k
-    "unaligned-qk": ("prep", ((2, 6), (300, 77, 640)), torch.bfloat16, "unaligned_qk", {}, False),
-    "equal-length": (None, ((2, 6), None), torch.float32, "views", {}, False),
+    "unaligned-v": ("a", "g3", torch.float32, "unaligned_v", {}, None),
+    # the plain prep (pinned: the rule takes prep_tma on the copies) on aligned copies of q / k
+    "unaligned-qk": ("prep", ((2, 6), (300, 77, 640)), torch.bfloat16, "unaligned_qk", {"prep": "plain"}, None),
+    "equal-length": (None, ((2, 6), None), torch.float32, "views", {}, None),
     # the packed row the round-once tail writes (CakeGDNDetPackedFunction)
-    "packed": (None, ((2, 6), (300, 77, 640, 17)), torch.float32, "packed", {}, False),
+    "packed": (None, ((2, 6), (300, 77, 640, 17)), torch.float32, "packed", {}, None),
 }  # fmt: skip
 
 
@@ -7110,8 +7221,9 @@ def _fwd_plan_case(case, device, monkeypatch) -> tuple:
     batch = 1 if seq_lens else 2
     inputs = _inputs(seq_lens or (640,), heads, beta_dtype, device, seed=7161, batch=batch)  # fmt: skip
     h0 = dht = None
-    if states:
+    if states is not None:
         h0, dht = _state_pair(seq_lens, heads, device, 7162)
+        h0 = h0.to(states)
     return inputs, h0, dht, seq_lens
 
 
@@ -7124,15 +7236,25 @@ def _ran_fwd_plan_route(case, log) -> bool:
         streams = {stream for stage, _grid, stream, _values in log if stage == "fwd_ho"}
         return bool(preps) and len(streams) == pins.get("streams", 2)
     if route == "prep":
+        if not preps or "wy_a" in stages:
+            return False
+        if form != "unaligned_qk":
+            return True
+        # the plain prep on the call's copies of q / k, not on the leaves (0 and 1)
         tma = any(stage.startswith("prep_tma") for stage in preps)
-        return bool(preps) and "wy_a" not in stages and not (tma and form == "unaligned_qk")  # fmt: skip
+        first = next(values for stage, _grid, _stream, values in log if stage in preps)
+        origins = [value[3] for value in first if isinstance(value, tuple)]
+        return not tma and not any(o[0] == "input" and o[1] in (0, 1) for o in origins)
     if route == "prep-segmented":
         pre = any(stage.startswith("fwd_h_pre") for stage in stages)
         return bool(preps) and pre and "stitch" in stages
     if route == "a":
         return "fwd_ho_a" in stages and not preps
     if route in FWD_SPLIT_ROUTES:
-        return ("fwd_summary_a" if route == "split_a" else "fwd_summary") in stages
+        # under streams=1 the summary runs on the stream of wy_a (the caller's)
+        summary = "fwd_summary_a" if route == "split_a" else "fwd_summary"
+        streams = {s for stage, _grid, s, _values in log if stage in (summary, "wy_a")}
+        return summary in stages and (pins.get("streams") != 1 or len(streams) == 1)
     return bool(stages)
 
 
@@ -7146,11 +7268,11 @@ def test_the_forward_plan_replays_the_general_path(
     # and three replays each run over poisoned workspaces (a step the plan missed would read NaN) and make the same
     # launches (stage, grid, stream, every value's shape, strides, dtype and origin: an input at its offset, a pooled
     # workspace or a cached table or walk at its address, or a tensor of the call), the same stream switches and event
-    # records and waits, the same peak of requested device memory and the same saved tensors, with the general path's
+    # records and waits, no higher peak of requested device memory and the same saved tensors, with the general path's
     # bits on every output and gradient.  A checkpoint's first pass and its recompute are two call classes
     inputs, h0, dht, seq_lens = _fwd_plan_case(case, device, monkeypatch)
     route, _layout, _beta, form, pins, states = FWD_PLAN_CASES[case]
-    names = _fwd_plan_names(mode, states)
+    names = _fwd_plan_names(mode, states is not None)
     passes = 2 if mode in ("checkpoint", "reentrant") else 1
     leaves: list = []
     launches = _logged_launches(monkeypatch, leaves)
@@ -7183,16 +7305,12 @@ def test_the_forward_plan_replays_the_general_path(
     assert len(plans) == passes and all(p.ops is not None for p in plans), plans
     assert len(replays) == 3 * passes, len(replays)
     assert {id(p) for p in replays} == {id(p) for p in plans}
-    # a recording and a replay hold the call's tensors until the forward returns; the prep forward's general path lets
-    # its longest-first copy of the initial state go before it allocates the final state in the caller's order, so
-    # there a planned call can hold one state buffer more at that point (the step's peak where the forward has it)
-    slack = 0
-    if route == "prep" and states:
-        slack = len(seq_lens) * inputs["v"].shape[2] * HEAD_DIM * HEAD_DIM * 4
+    # a recording holds the call's tensors weakly and a replay lets each go after its last step: neither holds one
+    # longer than the general path (a replay can let one go sooner)
     for i, (got, got_launches, got_events, peak) in enumerate(planned):
         assert got_launches == general_launches, (i, _first_difference(got_launches, general_launches))  # fmt: skip
         assert got_events == general_events, (i, _first_difference(got_events, general_events))  # fmt: skip
-        assert 0 <= peak - general_peak <= slack, (i, peak, general_peak)
+        assert peak <= general_peak, (i, peak, general_peak)
         _assert_bitwise(got, general, names)
         if mode == "taped":
             assert got["node"] == general["node"], (got["node"], general["node"])
@@ -7251,10 +7369,12 @@ def test_aliased_inputs_take_a_forward_plan_of_their_own(
 # variant -> the second call class beside the call of the default pins on (300, 77, 640, 17) at (H, HV) = (2, 6) (the
 # prep's forward: BF16 beta): other offsets of as many sequences and tokens, a pin, the pre-scans' warm-up threshold
 # (both calls segmented), another caller stream, q / k / v as head views of one packed row, q / k 2 bytes past a
-# 16-byte boundary, H = 1 (only the q / k heads differ), another scale, the final state returned, and q / k normalized
-# by the caller instead of the prep
+# 16-byte boundary, H = 1 (only the q / k heads differ), another scale, the final state returned, q / k normalized by
+# the caller instead of the prep, and a scale or a warm-up threshold of -0.0 beside one of 0.0 (equal floats that are
+# other launch arguments)
 FWD_PLAN_CLASSES = ("offsets", "streams", "prep", "save_state", "segment_chunks", "warmup_log2", "stream", "packed",
-                    "unaligned-qk", "heads", "scale", "output_final_state", "normalize")  # fmt: skip
+                    "unaligned-qk", "heads", "scale", "output_final_state", "normalize", "scale-sign",
+                    "warmup_log2-sign")  # fmt: skip
 FWD_PLAN_CLASS_LAYOUT = ((300, 77, 640, 17), (2, 6))
 # the keywords of the second call of a variant that is the default call's with other keywords
 FWD_PLAN_CLASS_KEYWORDS = {
@@ -7277,9 +7397,13 @@ def _fwd_plan_classes(variant, device, stream) -> tuple:
     def call(**keywords):
         return lambda: _run(inputs, seq_lens, **keywords)
 
-    if variant == "warmup_log2":
+    if variant in ("warmup_log2", "warmup_log2-sign"):
         segmented = {"scan_config": (64, 1), "segment_chunks": 4}
+        if variant == "warmup_log2-sign":
+            return call(**segmented, warmup_log2=0.0), call(**segmented, warmup_log2=-0.0)  # fmt: skip
         return call(**segmented), call(**segmented, warmup_log2=-30.0)
+    if variant == "scale-sign":
+        return call(scale=0.0), call(scale=-0.0)
     if variant in FWD_PLAN_CLASS_KEYWORDS:
         return call(), call(**FWD_PLAN_CLASS_KEYWORDS[variant])
     if variant == "offsets":
@@ -7591,6 +7715,45 @@ def test_a_stream_operation_outside_the_executor_refuses_the_forward_plan(
     assert not replays
     assert all(a is b for a, b in zip(_watched_functions(), watched, strict=True))
     for got in refused:
+        _assert_bitwise(got, want, OUTPUT_NAMES)
+
+
+def test_a_recording_overlapped_by_another_hook_records_again(
+    device, monkeypatch
+) -> None:
+    # another hook set over a watched function during a recording (as another package's recording on another thread
+    # does) refuses that recording only: the key's next call records its plan and the call after it replays it.  Every
+    # call has the bits of the general path (FWD_PLAN off)
+    seq_lens, heads = (300, 77, 640), (2, 4)
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=7189)
+    # torch.cuda.set_stream as it is now comes back at the end, whatever the test leaves in its place
+    original = torch.cuda.set_stream
+    monkeypatch.setattr(torch.cuda, "set_stream", original)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "FWD_PLAN", False)
+        want = _run(inputs, seq_lens)  # the table caches too
+    launch = cake_backend.launch_stage
+    hooked = []
+
+    def hooking_once(stage, grid, values, **kwargs):
+        if not hooked:  # the other hook, over the recording's own
+            inner = torch.cuda.set_stream
+            hooked.append(inner)
+            torch.cuda.set_stream = lambda stream: inner(stream)
+        return launch(stage, grid, values, **kwargs)
+
+    replays = _counted_forward_replays(monkeypatch)
+    with monkeypatch.context() as m:
+        m.setattr(cake_backend, "launch_stage", hooking_once)
+        runs = [_run(inputs, seq_lens)]
+    assert hooked and hooked[0] is not original, "the hook went in during the recording"
+    assert not cake_chain._FWD_PLANS, "the refusal of an overlapped recording is kept"
+    assert cake_chain._WATCH_STATE == {"count": 0, "saved": ()}
+    torch.cuda.set_stream = original  # the other recording ends
+    runs += [_run(inputs, seq_lens) for _ in range(2)]
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert plan.ops is not None and replays == [plan]
+    for got in runs:
         _assert_bitwise(got, want, OUTPUT_NAMES)
 
 

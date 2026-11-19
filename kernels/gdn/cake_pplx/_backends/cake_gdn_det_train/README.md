@@ -200,10 +200,14 @@ identity walk or a scalar.  A replay launches the same kernels with the same
 arguments, on the same streams, in the same order as the general path, so the
 output, the final state, the saved tensors and the gradients have the general
 path's bits (the tests compare them bitwise); it only takes less host time.
-A replay needs the stream's pool tables and side stream, the cached tables
-and the module tables and settings the record was made with; otherwise the
-call runs the general path and records again.  A call whose steps the record
-cannot hold runs the general path, and so do the later calls of its key.
+A replay lets each tensor of the call go after the last step that reads it
+(one that the side stream reads, after the join), and the record holds none
+of them, so a replay or a recording needs no more device memory than the
+general path.  A replay needs the stream's pool tables and side stream, the
+cached tables and the module tables and settings the record was made with;
+otherwise the call runs the general path and records again.  A call whose steps the record
+cannot hold runs the general path, and so do the later calls of its key (a
+call whose recording overlapped another package's recording records again).
 These calls always run the general path: a forward inside a CUDA graph capture
 (it neither replays nor records), the device route, `host_cache=False` and a
 host `q`; `cake_gdn_det_train_forward` too.  A record keeps the layout's tables
