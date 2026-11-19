@@ -1714,16 +1714,16 @@ def test_program_of_packed_rows_only_gives_the_bits_of_the_strided_builds(
 # ``_one_token_packed`` holds) and a gate whose heads lie 256 elements apart
 # (not packed rows).
 SINGLE_TOKEN_LAYOUTS = ("contiguous", "projection", "head_major", "wide_heads")
-SINGLE_TOKEN_HEADS = ("1", "48", "3120", "small+1", "long")
+SINGLE_TOKEN_HEADS = ("1", "48", "3120", "small", "small+1", "long")
 
 
 @pytest.mark.parametrize("heads", SINGLE_TOKEN_HEADS)
 @pytest.mark.parametrize("layout", SINGLE_TOKEN_LAYOUTS)
 def test_single_token_runs_the_programs_of_packed_rows(layout, heads, monkeypatch):
-    """One token of ``H`` heads (1, 48, 3120, a row past this device's cut
-    of the build of packed rows only, and the long modules' first row count
-    where no strided cut is; past that cut where no strided cut is, one
-    token keeps the token stride 0): a call with
+    """One token of ``H`` heads (1, 48, 3120, this device's cut of the build
+    of packed rows only and a row past it, and the long modules' first row
+    count where no strided cut is; past that cut where no strided cut is,
+    one token keeps the token stride 0): a call with
     ``compute_grad_weight=False`` on heads of stride 128 passes the token
     stride ``H * 128`` (packed rows) and runs the program ``_strided_role``
     names for packed rows where ``_one_token_packed`` holds (else, as on the
@@ -1737,6 +1737,10 @@ def test_single_token_runs_the_programs_of_packed_rows(layout, heads, monkeypatc
         if _nodw_cut(arch) is not None:
             pytest.skip(f"{arch} runs the claimed program past its strided cut")
         H = LONG_MIN_ROWS_PER_SM[arch] * sms
+    elif heads == "small":
+        if not small:
+            pytest.skip(f"{arch} has no cut of the build of packed rows only")
+        H = small * sms
     elif heads == "small+1":
         H = small * sms + 1
     else:
