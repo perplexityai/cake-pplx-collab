@@ -36,7 +36,9 @@ outputs):
   its stage prints as unavailable with the reason.  A stage times only when every code object it runs holds a
   compiled Dynamo cache entry after its untimed call (the counts are in the stage and in the arm's ``compile``
   record); if Dynamo compiles a graph while the timers run, the stage is timed again, and prints as unavailable if
-  it compiles again.
+  it compiles again.  Each guard fails closed: a torch without ``fail_on_recompile_limit_hit`` makes the arm
+  unavailable, and one without Dynamo's cache-entry lookup, or whose graph counter counts no graph after a compiled
+  call, makes the stage unavailable, instead of timing a call that could have run eagerly.
 * ``eager``: the explicit FP32 formulas in eager PyTorch: ``torch.clamp`` for ``min(g, L)`` and ``clamp(u, -L, L)``,
   ``torch.where`` for the inclusive gradient masks, and in the merged layout ``torch.cat`` (a separate copy) of the
   two gradient halves.
@@ -53,10 +55,12 @@ outputs):
   calls instead (which include the host's issue time) and is kept only when no plan captures.  The arm's ``plans``
   record holds the number of candidates, each one's time, timer or error, the timer that ranked them, the chosen plan's
   index and name, each plan's behavior notes, and whether runtime-compiled engines were searched.  If every build of all
-  plans is refused, the graph runs the first plan of the modes A and FALLBACK that builds; if the frontend has no
-  indexed plan calls or no candidate runs, it runs the frontend's selected plan; the record says why.  The composite's
-  two graphs are also timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints as unavailable
-  with the error.
+  plans is refused, the graph runs the first plan of the modes A and FALLBACK that builds, runtime-compiled engines
+  not filtered (its record says ``runtime_compiled_engines: not filtered``): when every plan of a graph carries
+  ``RUNTIME_COMPILATION``, deselecting them refuses every build, and this fallback is what runs.  If the frontend
+  has no indexed plan calls or no candidate runs, it runs the frontend's selected plan; the record says why.  The
+  composite's two graphs are also timed one by one (``parts`` of its ``bwd`` stage).  A stage no graph builds prints
+  as unavailable with the error.
 
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
@@ -86,21 +90,42 @@ Timers (``--timers``):
 
 The ratio columns are baseline / Cake (above 1: Cake is faster) per timer.  ``--copy-bw`` adds the bandwidth of a
 2 GiB device-to-device copy under the ``cupti`` timer, the reference for the bandwidth column.  The header prints the
-GPU, the SM count, the CUDA version of torch and every library version; ``--json`` writes everything.
+GPU, the SM count, the CUDA version of torch and every library version; ``--json`` writes everything, with the
+interpreter, the CPU model, the page size, the CPUs the process may run on and whether ``torch.Tensor`` has
+``__dlpack_c_exchange_api__`` after ``import tvm_ffi`` (the C DLPack exchange tvm-ffi uses for tensor arguments when
+it is present).
+
+``--deterministic`` runs everything under ``torch.use_deterministic_algorithms(True)`` with
+``torch.utils.deterministic.fill_uninitialized_memory`` set, so every arm pays PyTorch's NaN fill of each tensor it
+allocates through PyTorch; ``args`` and ``identity.determinism`` record it.
+
+``--host`` times only the host path of Cake's entry points instead of the arms: the forward step, the backward step
+and one autograd step (the forward, then ``torch.autograd.grad`` with ``dh``), each merged and split, weighted and
+unweighted, at ``--host-rows`` rows (default 1 and 4097).  Each round makes ``--host-calls`` back-to-back eager calls
+(default 1000, after ``--host-warmup`` untimed calls): ``time.perf_counter`` around them gives the host's issue time
+per call (the calls return before their kernels finish), and CUDA events recorded before the first and after the
+last call give the device wall time per call.  The record holds the median, the lowest and the highest of
+``--host-rounds`` rounds (default 9).
 
 Example::
 
     python benchmarks/bench_cake_clamped_swiglu_det_train.py --rows 98304 196608 4097 --copy-bw --json rows.json
+    python benchmarks/bench_cake_clamped_swiglu_det_train.py --host --json host.json
 """
 
 from __future__ import annotations
 
 import argparse
 import contextlib
+import importlib
 import importlib.metadata as md
 import json
+import os
+import platform
 import statistics
 import subprocess
+import sys
+import time
 import types
 from collections.abc import Callable
 from typing import Any, Optional
@@ -410,6 +435,11 @@ def _formula_arm(x: types.SimpleNamespace, compiled: bool) -> dict[str, Any]:
     codes: dict[str, types.CodeType] = {}
     if compiled:
         notes["compile"] = _reset_dynamo()
+        if notes["compile"]["fail_on_recompile_limit_hit"] is not True:
+            raise Unavailable(
+                "torch.compile: torch._dynamo.config has no fail_on_recompile_limit_hit, so a call past the recompile "
+                "limit could run eagerly and be timed as compiled"
+            )
         row = f"R{x.R}_{x.layout}_{'weighted' if x.weight is not None else 'unweighted'}"
         fwd = _compiled(_formula_forward, f"{row}_fwd")
         bwd = _compiled(_formula_backward, f"{row}_bwd")
@@ -656,9 +686,13 @@ class CudnnGraphs:
         """The graph of ``ops`` built and set to its fastest plan, or None with the error recorded under ``what``.
 
         The first attempt builds every plan of the heuristics modes A, B and FALLBACK and times them, the second (if
-        the first is refused) every plan of the modes A and FALLBACK; the last builds the first plan of the modes A and
-        FALLBACK that builds (the frontend's default policy).  The record under ``self.plans[what]`` holds the
-        refusals."""
+        the first is refused) every plan of the modes A and FALLBACK; both deselect the runtime-compiled engines unless
+        ``--cudnn-runtime-compiled`` keeps them.  The last builds the first plan of the modes A and FALLBACK that builds
+        (the frontend's default policy) and deselects nothing: it runs that plan whatever its behavior notes, a
+        runtime-compiled engine included.  The record under ``self.plans[what]`` holds ``heuristics``, ``policy``
+        (``ALL`` or ``default``), ``runtime_compiled_engines`` (``included``, ``excluded`` or ``not filtered``), the
+        ``refused`` attempts, and the selection: the :meth:`_select_plan` record, or under ``selection`` why there
+        was none."""
         c = self.c
         all_plans = getattr(getattr(c, "build_plan_policy", None), "ALL", None)
         attempts = [(("A", "FALLBACK"), None)]
@@ -709,7 +743,8 @@ class CudnnGraphs:
         g.build_operation_graph()
         g.create_execution_plans([getattr(c.heur_mode, mode) for mode in modes])
         if policy is not None and not CUDNN_OPTIONS["runtime_compiled"]:
-            # Before check_support, which builds a plan to check it: no runtime-compiled engine is built.
+            # Deselect right after create_execution_plans, before check_support and build_plans, so that neither
+            # builds a runtime-compiled engine.
             note = getattr(getattr(c, "behavior_note", None), "RUNTIME_COMPILATION", None)
             if note is None or not hasattr(g, "deselect_behavior_notes"):
                 raise RuntimeError("the frontend cannot deselect the runtime-compiled engines")
@@ -724,10 +759,13 @@ class CudnnGraphs:
 
     def _select_plan(self, built: types.SimpleNamespace) -> dict[str, Any]:
         """Times every plan of ``built`` and sets ``built.index`` and ``built.workspace`` to the fastest one's; returns
-        the record (the number of candidates, each one's time, timer or error, the timer that ranked them, the chosen
-        index and name).  The plans that run in a CUDA graph are ranked by their replay time (GPU time); a plan that
-        does not is ranked by its eager time only when no plan does.  When the selection cannot run, ``built.index``
-        stays None (the frontend's selected plan runs) and the record says why."""
+        the record: ``candidates`` (the number of plans), ``timed`` (how many ran), ``candidate_us`` (per plan its
+        ``index``, ``name``, ``behavior_notes``, ``workspace_bytes``, ``us`` and ``timer``, or ``unavailable`` with
+        the error; ``graph_unavailable`` when its capture failed and eager calls timed it), ``ranked_by``,
+        ``chosen_index``, ``chosen_name`` and ``chosen_us``.  The plans that run in a CUDA graph are ranked by their
+        replay time (GPU time); a plan that does not is ranked by its eager time only when no plan does.  When the
+        selection cannot run, ``built.index`` stays None (the frontend's selected plan runs) and ``selection`` says
+        why."""
         g = built.graph
         calls = ("get_execution_plan_count", "get_workspace_size_plan_at_index", "execute_plan_at_index")
         missing = [name for name in calls if not hasattr(g, name)]
@@ -988,9 +1026,21 @@ def _time_call(
         return {"unavailable": missing["call"]}
     codes = arm.get("codes") or {}
     entries = {name: _cache_entries(codes[name]) for name in CODES.get(stage, ()) if name in codes}
+    unknown = [name for name, count in entries.items() if count is None]
+    if unknown:
+        return {
+            "unavailable": "torch.compile: this torch has no Dynamo cache-entry lookup "
+            f"(torch._dynamo.eval_frame._debug_get_cache_entry_list), so {', '.join(unknown)} cannot be shown to run "
+            "a compiled graph"
+        }
     eager = [name for name, count in entries.items() if count == 0]
     if eager:
         return {"unavailable": f"torch.compile ran {', '.join(eager)} without a compiled graph (no Dynamo cache entry)"}
+    if arm.get("compiled") and _dynamo_graphs() == 0:
+        return {
+            "unavailable": "torch.compile: Dynamo's graph counter (counters['stats']['unique_graphs']) counts no graph "
+            "after a compiled call, so a graph compiled while the timers run could not be seen"
+        }
     graphs = _dynamo_graphs if arm.get("compiled") else lambda: 0
     compiled_while: list[int] = []  # the graphs Dynamo compiled during each timing that is repeated
     for _ in range(2):
@@ -1155,6 +1205,84 @@ def _plan_text(plan: dict[str, Any]) -> str:
 
 
 # ----------------------------------------------------------------------------------------------------------------
+# Host path (``--host``)
+
+# The entry points ``--host`` times: the forward step, the backward step and one autograd step.
+HOST_ENTRIES = ("fwd", "bwd", "autograd fwd+bwd")
+
+
+def _host_calls(x: types.SimpleNamespace) -> dict[str, Callable[[], object]]:
+    """Cake's entry points on the inputs ``x``, by :data:`HOST_ENTRIES` name: the forward step, the backward step,
+    and the autograd forward followed by ``torch.autograd.grad`` with ``dh`` (fresh leaves that require grad)."""
+    leaves = [None if t is None else t.detach().clone().requires_grad_(True) for t in (x.first, x.second, x.weight)]
+    wants = [t for t in leaves if t is not None]
+
+    def autograd_step():
+        h = cake_clamped_swiglu_det(*leaves, limit=x.L)
+        return torch.autograd.grad(h, wants, x.dh)
+
+    return {
+        "fwd": lambda: cake_clamped_swiglu_det_train_forward(x.first, x.second, x.weight, limit=x.L),
+        "bwd": lambda: cake_clamped_swiglu_det_train_backward(x.dh, x.first, x.second, x.weight, limit=x.L),
+        "autograd fwd+bwd": autograd_step,
+    }
+
+
+def _spread(samples: list[float]) -> dict[str, float]:
+    return {"median": float(statistics.median(samples)), "min": min(samples), "max": max(samples)}
+
+
+def _host_times(fn: Callable[[], object], calls: int, rounds: int, warmup: int) -> dict[str, Any]:
+    """Per-call microseconds of ``calls`` back-to-back eager calls of ``fn``, ``rounds`` times after ``warmup`` untimed
+    calls: ``host_us`` is ``time.perf_counter`` around the calls (the host's issue time: a call returns before its
+    kernels finish), ``device_us`` the CUDA events recorded before the first and after the last call (the device wall
+    time, which is the issue time when the host is the bottleneck); each as the median, lowest and highest round."""
+    for _ in range(warmup):
+        fn()
+    torch.cuda.synchronize()
+    host, device = [], []
+    for _ in range(rounds):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        t0 = time.perf_counter()
+        for _ in range(calls):
+            fn()
+        t1 = time.perf_counter()
+        end.record()
+        torch.cuda.synchronize()
+        host.append((t1 - t0) / calls * 1e6)
+        device.append(start.elapsed_time(end) / calls * 1e3)
+    return {"calls": calls, "rounds": rounds, "host_us": _spread(host), "device_us": _spread(device)}
+
+
+def bench_host(args: argparse.Namespace) -> list[dict[str, Any]]:
+    """The ``--host`` records: every entry point of :data:`HOST_ENTRIES`, merged and split, weighted and unweighted,
+    at each of ``--host-rows`` rows, all in this process."""
+    records = []
+    print("| entry | R | layout | weight | host us per call (median [min..max]) | device us per call |")
+    print("|---|---|---|---|---|---|")
+    for rows in args.host_rows:
+        for layout in args.layouts:
+            for weighted in (True, False):
+                x = make_inputs(rows, layout, weighted, args.limit, args.seed, args.deep_gate)
+                for entry, fn in _host_calls(x).items():
+                    record = {"entry": entry, "R": rows, "layout": layout, "weighted": weighted}
+                    record.update(_host_times(fn, args.host_calls, args.host_rounds, args.host_warmup))
+                    records.append(record)
+                    host, device = record["host_us"], record["device_us"]
+                    print(
+                        f"| {entry} | {rows} | {layout} | {'weighted' if weighted else 'unweighted'} | "
+                        f"{host['median']:.2f} [{host['min']:.2f}..{host['max']:.2f}] | "
+                        f"{device['median']:.2f} [{device['min']:.2f}..{device['max']:.2f}] |",
+                        flush=True,
+                    )
+                del x
+                torch.cuda.empty_cache()
+    return records
+
+
+# ----------------------------------------------------------------------------------------------------------------
 # Identity and main
 
 
@@ -1165,11 +1293,47 @@ def _version(dist: str) -> Optional[str]:
         return None
 
 
+def _cpu_model() -> Optional[str]:
+    """The CPU model of ``/proc/cpuinfo``: its first ``model name``, else (Arm) its implementer and part."""
+    try:
+        with open("/proc/cpuinfo") as fh:
+            lines = fh.read().splitlines()
+    except OSError:
+        return None
+    fields: dict[str, str] = {}
+    for line in lines:
+        key, sep, value = line.partition(":")
+        if sep:
+            fields.setdefault(key.strip(), value.strip())
+    if "model name" in fields:
+        return fields["model name"]
+    parts = [f"{key} {fields[key]}" for key in ("CPU implementer", "CPU part") if key in fields]
+    return ", ".join(parts) or None
+
+
+def _host_identity() -> dict[str, Any]:
+    """The interpreter and the host CPU the timings ran on."""
+    found: dict[str, Any] = {
+        "python": sys.version,
+        "executable": sys.executable,
+        "machine": platform.machine(),
+        "cpu_model": _cpu_model(),
+        "page_bytes": None,
+        "affinity_cpus": None,
+    }
+    with contextlib.suppress(AttributeError, OSError, ValueError):
+        found["page_bytes"] = os.sysconf("SC_PAGE_SIZE")
+    with contextlib.suppress(AttributeError, OSError):
+        found["affinity_cpus"] = len(os.sched_getaffinity(0))
+    return found
+
+
 def identity() -> dict[str, Any]:
     p = torch.cuda.get_device_properties(torch.cuda.current_device())
     dists = (
         "cake-pplx-clamped-swiglu",
         "apache-tvm-ffi",
+        "torch-c-dlpack-ext",
         "torch",
         "triton",
         "transformer-engine",
@@ -1187,7 +1351,21 @@ def identity() -> dict[str, Any]:
         "torch": torch.__version__,
         "torch_cuda": torch.version.cuda,
         "versions": {d: _version(d) for d in dists},
+        "host": _host_identity(),
+        "determinism": {
+            "deterministic_algorithms": torch.are_deterministic_algorithms_enabled(),
+            "fill_uninitialized_memory": None,
+        },
     }
+    with contextlib.suppress(ImportError, AttributeError):
+        deterministic = importlib.import_module("torch.utils.deterministic")
+        out["determinism"]["fill_uninitialized_memory"] = deterministic.fill_uninitialized_memory
+    # Cake's tensor arguments go through tvm-ffi, whose import may give torch.Tensor the C DLPack exchange API.
+    try:
+        importlib.import_module("tvm_ffi")
+    except Exception as exc:  # noqa: BLE001 - recorded, not fatal
+        out["tvm_ffi_import"] = f"{type(exc).__name__}: {exc}"
+    out["torch_dlpack_c_exchange_api"] = hasattr(torch.Tensor, "__dlpack_c_exchange_api__")
     query = ["nvidia-smi", f"--id=GPU-{p.uuid}", "--query-gpu=driver_version,power.limit,clocks.max.sm"]
     with contextlib.suppress(Exception):
         q = subprocess.run([*query, "--format=csv,noheader"], capture_output=True, text=True, timeout=20, check=False)
@@ -1229,10 +1407,28 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--rounds", type=int, default=15, help="eager / graph samples timed")
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--copy-bw", action="store_true", help="also time a 2 GiB device-to-device copy")
+    parser.add_argument(
+        "--deterministic",
+        action="store_true",
+        help="run every arm under torch.use_deterministic_algorithms(True) with "
+        "torch.utils.deterministic.fill_uninitialized_memory (each tensor PyTorch allocates is NaN-filled)",
+    )
+    parser.add_argument(
+        "--host",
+        action="store_true",
+        help="time the host path of Cake's entry points (perf_counter and CUDA events) instead of the arms",
+    )
+    parser.add_argument("--host-rows", type=int, nargs="+", default=[1, 4097], help="rows of the --host calls")
+    parser.add_argument("--host-calls", type=int, default=1000, help="back-to-back calls per --host round")
+    parser.add_argument("--host-rounds", type=int, default=9, help="--host rounds per entry point")
+    parser.add_argument("--host-warmup", type=int, default=100, help="untimed calls before the --host rounds")
     parser.add_argument("--json", default=None)
     args = parser.parse_args(argv)
     args.arms = list(dict.fromkeys(["cake", *args.arms]))  # cake first: the other arms are compared with its outputs
     CUDNN_OPTIONS["runtime_compiled"] = args.cudnn_runtime_compiled
+    if args.deterministic:
+        torch.use_deterministic_algorithms(True)
+        importlib.import_module("torch.utils.deterministic").fill_uninitialized_memory = True
     ident = identity()
     ident["deep_gate"] = {"columns": list(DEEP_GATE_COLUMNS), "value": DEEP_GATE} if args.deep_gate else None
     print(
@@ -1240,6 +1436,16 @@ def main(argv: Optional[list[str]] = None) -> int:
         f"(CUDA {ident['torch_cuda']}), driver/power/max clock {ident.get('driver_power_maxclock')}"
     )
     print(f"# versions: {json.dumps(ident['versions'])}")
+    print(
+        f"# host: {json.dumps(ident['host'])}; torch.Tensor.__dlpack_c_exchange_api__: "
+        f"{ident['torch_dlpack_c_exchange_api']}; determinism: {json.dumps(ident['determinism'])}"
+    )
+    if args.host:
+        records = bench_host(args)
+        if args.json:
+            with open(args.json, "w") as fh:
+                json.dump({"identity": ident, "args": vars(args), "host": records}, fh, indent=1)
+        return 0
     if args.copy_bw:
         ident["copy"] = copy_bandwidth()
         copy = ident["copy"]

@@ -8,7 +8,10 @@ The facade `cake_pplx.cake_clamped_swiglu_det_train` is a stable API.  This back
 internal names may change.  The facade imports the backend on first use.  The supported architectures are SM100
 (B200 / GB200), SM103 (B300 / GB300) and SM107 (R200).  Another device raises `RuntimeError`.  The package loads its
 libraries prebuilt from `aot/` when a builder compiled them.  Otherwise the package JIT-builds them from the sources
-and flags that `build.json` records.  The package reads no environment variable.
+and flags that `build.json` records.  No environment variable changes a call; every control is an argument.  A JIT
+build (no prebuilt `aot/` library) reads the JIT variables listed in the repository README, section JIT build and
+cache.  A JIT build needs a CUDA toolkit of at least 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`
+(`build.json` `min_cuda`); an older toolkit raises `RuntimeError`, naming the floor, when that library is built.
 
 ## Usage
 
@@ -55,22 +58,43 @@ required keyword everywhere.
   row width); otherwise it is refused (`ValueError`).  An output (`out`, `grad_gate_up_or_gate`, `grad_up`,
   `grad_weight`) must not overlap any input or another output; this is not checked.
 - A wrong type, or a `limit` that is not a Python number, raises `TypeError` (a tensor `limit` would need a host
-  read).  A wrong device, dtype or shape, a non-finite or non-positive `limit`, or an unfit output raises
-  `ValueError`.  An unsupported device raises `RuntimeError`, also with `R = 0`.
+  read).  A wrong device, dtype or shape, a non-finite or non-positive `limit` or one past FP32 (an integer or a
+  fraction past every Python float too), or an unfit output raises `ValueError`.  An unsupported device raises
+  `RuntimeError`, also with `R = 0`.
+- Every argument is checked before an input is copied or an output allocated: a call refused for its arguments copies,
+  allocates and launches nothing.
 - `R = 0` returns empty outputs and launches nothing.
 
 ## Programs
 
-Two programs, one for `fwd` and one for `bwd` (`cake_jit.MODULES`, keyed by program name; `cake_jit.PROGRAM_OF` maps
-a stage to its program), each delivered for `sm_100a`, `sm_103a` and `sm_107a` and compiled with the exact `-gencode`
-flag of each (`build.json`).  Each is one kernel: 32 lanes own a row, each lane 9 loads of 8 BF16 values of the gate
-and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a warp is
-contiguous.  The forward's CTA of 256 threads owns 8 consecutive rows, and the backward's CTA of 128 threads owns 4;
-the grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`).  A row past
-`R` loads the last row and stores nothing.  The backward splits a lane's 9 loads into 3 runs of 3, so it holds fewer
-registers and more warps fit on an SM.  No program uses shared
-memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the limit, the weight flag
-and the strides are launch arguments, so one library per program and architecture serves every call.
+Each stage has two programs (`cake_jit.MODULES`, keyed by program name): a small-R program (role `fwd` or `bwd`) and
+a large-R program (role `fwd_large` or `bwd_large`).  `cake_jit.PROGRAM_OF` maps a role and an architecture to its
+program.  A program is compiled with the exact `-gencode` flag of each architecture it is delivered for (`build.json`).
+A call runs the large-R program when `R` is at least the record's `min_rows_per_sm` of the device's architecture times
+the device's SM count, and the small-R program otherwise (`cake_jit.route`).  The package reads the architecture once
+per device and the SM count once per stage and device.  An architecture without a large-R program of a stage runs the
+small-R one at every `R`.
+
+Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
+of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
+warp is contiguous.  The programs differ in their schedule:
+
+| stage | program | architectures | CTA | a lane's 9 loads |
+|---|---|---|---|---|
+| `fwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
+| `fwd` | large-R | `sm_100a`, `sm_103a` | 256 threads, 8 rows | one run |
+| `fwd` | large-R | `sm_107a` | 128 threads, 4 rows | one run; the values of each load are stored as soon as they are computed |
+| `bwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
+| `bwd` | large-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3, one run at a time |
+
+More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`,
+from the launch block and `cake_jit.BUILD_OF`).  A row past `R` loads the last row and stores nothing.  The programs of
+a stage compute each element with the same FP32 operations (the exact sigmoid gives the bits of the fast one wherever
+the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's
+columns in load order with the same lanes.  So both programs store the same bits for every input: the route changes no
+output bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The
+row count, the limit, the weight flag and the strides are launch arguments, so one library per program and
+architecture serves every call.
 
 ## Numerics
 
@@ -92,16 +116,23 @@ and the strides are launch arguments, so one library per program and architectur
 
 Every output is elementwise or a sum within one row in one fixed order, so every call gives the same bits for the same
 inputs on the same architecture, whatever the row count, the layout (merged, two tensors, strided), the stream or a CUDA
-graph replay.  No call alerts under `torch.use_deterministic_algorithms(True)`, and no entry point takes a
-`deterministic` keyword.  The family has no non-deterministic module: there is no reduction across rows or CTAs to
-reorder.
+graph replay.  No call alerts under `torch.use_deterministic_algorithms(True)`, and no output bit changes; no entry
+point takes a `deterministic` keyword.  The family has no non-deterministic module: there is no reduction across rows
+or CTAs to reorder.
+
+With `torch.use_deterministic_algorithms(True)` and `torch.utils.deterministic.fill_uninitialized_memory` (on by
+default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per
+new output (`h`; `d_gate_up`, or `d_gate` and `d_up`; `d_weight`, also the one an unweighted backward drops) and per
+copied input.  Output buffers allocated once and passed to every call (`out=`, `grad_gate_up_or_gate=`, `grad_up=`,
+`grad_weight=`) avoid the fills of those outputs.  The kernels write every element of every output, so a fill never
+reaches a result.
 
 ## Workspace and retained state
 
 - Workspace: none.  An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops
-  them.  An unweighted launch passes the device's one-element FP32 buffer, set to 1, as the weight.  The kernels read
-  its one element and ignore it.  The buffer is kept for the process; the device's first unweighted launch fills it
-  once, one more launch on the same stream.
+  them.  An unweighted launch passes, as the weight, one cached one-element FP32 buffer of the device, set to 1, which
+  the process's first unweighted call on that device makes (that call may be a CUDA graph capture).  The kernels read
+  it and ignore it.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
   the backward recomputes it.
@@ -109,6 +140,8 @@ reorder.
 ## Limitations
 
 - The intermediate width is 2304 only (a compile-time width of the kernels).
-- No double backward (`create_graph`); not tested under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
-- The library builds on first use; before capturing a CUDA graph, run one eager call (or build the libraries with
-  `specs_for_arch`).
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
+  under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
+- A program's library builds at its first launch, and the row count picks the program (see Programs).  Before
+  capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the
+  architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).
