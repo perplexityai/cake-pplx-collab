@@ -2537,9 +2537,11 @@ def test_l2n_local_stage_values_cover_the_records(
     ctx = _cpu_ctx(sm=sm)
     T = int(ctx.T_r)
     assert T > 0
+    # the local problem's plans: the KCP's segment rule (occupancy)
     plans = {
         mode: cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )
         for mode in ("off", form)
     }  # fmt: skip
@@ -3071,8 +3073,10 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
 
     def drive(ctx, mode: str, backward: bool = True):
         T = int(ctx.T_r)
+        # the local problem's plan: the KCP's segment rule (occupancy)
         plan = cake_backend.plan(
-            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, **cake_kcp_plan.qk_l2norm_plan_kwargs(mode)
+            ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate, segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
+            **cake_kcp_plan.qk_l2norm_plan_kwargs(mode),
         )  # fmt: skip
         zeros = torch.zeros(T, H, D, dtype=torch.bfloat16)
         q_raw, k_raw, _ = _packed_qk(zeros, zeros)
@@ -3195,7 +3199,13 @@ def test_l2n_backward_rows_ride_in_the_arena(H, arch, sm, gate, form, kind) -> N
     )
     assert sum(allocs) - sum(allocs_off) == extra
     assert p.workspace_bytes("replay") == cake_backend.plan(
-        ctx.T_r, ctx.n_frag, H, sm, arch, gate=gate
+        ctx.T_r,
+        ctx.n_frag,
+        H,
+        sm,
+        arch,
+        gate=gate,
+        segment_rule=cake_kcp_plan.LOCAL_SEGMENT_RULE,
     ).workspace_bytes("replay")
     # nothing moves on a forward or where the rows exceed twice the tokens (one-token documents)
     fwd, _, _ = drive(ctx, form, backward=False)
