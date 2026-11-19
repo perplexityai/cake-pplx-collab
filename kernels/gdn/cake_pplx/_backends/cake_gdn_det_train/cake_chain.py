@@ -123,13 +123,15 @@ nothing here reads an environment variable.
 from __future__ import annotations
 
 import math
+import threading
 import warnings
 from collections.abc import Mapping
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, fields, is_dataclass, replace
 from functools import cache, lru_cache
-from types import MappingProxyType
+from operator import is_, itemgetter
+from types import CodeType, FunctionType, MappingProxyType
 from typing import Any, cast
 
 import torch
@@ -1287,6 +1289,8 @@ class Workspaces:
             buffer = buffers[key] = torch.empty(shape, dtype=dtype, device=device)
             if len(buffers) > WORKSPACE_SHAPES_PER_ROLE:
                 buffers.pop(next(iter(buffers)), None)
+                # no recorded forward plan keeps a buffer the pool let go
+                _clear_plans()
         return buffer
 
 
@@ -3606,8 +3610,47 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
 
 
 # --------------------------------------------------------------------------- #
-# the forward's executor
+# the forward's executor and its recorded plan
 # --------------------------------------------------------------------------- #
+# The forward's host work (the route's checks, its allocations and copies, every launch's arguments in its record's
+# parameter order) is the same for every call of one class: one layout on one stream, one tape mode (a checkpoint's
+# first pass and its recompute are two), one set of arguments, and inputs of one shape, strides, dtype and 16-byte
+# base alignment each, the same ones being one object.  The autograd functions record it once per class, as the
+# straight step sequence of a :class:`_ForwardPlan` (the general path run through a :class:`_FwdRecorder`), and replay
+# that sequence afterwards (:func:`_replay_forward`): the inputs and the tensors the call allocates, views and computes
+# eagerly fill its slots, every other operand is a constant of the plan (a per-stream workspace of the pool, a chunk
+# table of the layout's ``ChunkMeta``, the cached walk, a scalar).  A replay makes the general path's allocations,
+# eager calls, launches and event records and waits in its order on its streams, with the same arguments: the same
+# kernels and the same bits.  The plan holds no tensor of a call.  ``FWD_PLAN = False`` keeps every forward on the
+# general path.
+FWD_PLAN = True
+# plan key (:func:`_function_forward`) -> :class:`_ForwardPlan`; the oldest entry leaves first
+_FWD_PLANS: dict = {}
+_FWD_PLANS_LIMIT = 256
+# the insert and eviction of the plan cache (threads that record at once)
+_PLANS_LOCK = threading.Lock()
+# the steps of a plan: a launch, an allocation, a dim-0 range of a slot, the fork of the side stream, a stream switch,
+# the join, a dtype view of a slot, an eager call, an event recorded on one stream of the fork and a wait for it, the
+# use of a cached walk
+_OP_LAUNCH, _OP_EMPTY, _OP_NARROW, _OP_FORK, _OP_STREAM, _OP_JOIN = range(6)
+_OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE = range(6, 11)
+# the forward functions a plan stands for (the direct executor's steps reach some of them only through ``_DIRECT``): a
+# plan replays only while they and the module globals they read are the recorded objects (:func:`_fwd_plan_globals`)
+_FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_wy_outputs",
+                   "_launch_wy_a", "_launch_fwd_ho", "_first_wave", "_start_state", "_walk", "_prepared", "_fire",
+                   "_side_stream", "_use_table")  # fmt: skip
+_FWD_PLAN_GLOBALS: Any = None  # their getter, made at the first call
+# the entries of the forward's result that :func:`_function_forward` reads, the ones a plan returns
+_FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w", "u", "h", "v_new", "output",
+                "final_state", "mode")  # fmt: skip
+
+
+def _stream_key(device_index: int) -> tuple[int, int]:
+    """(device, handle of its current stream): the key of the stream's pooled workspaces (:meth:`Workspaces.table`)
+    and of its side stream."""
+    return device_index, torch._C._cuda_getCurrentRawStream(device_index)
+
+
 class _DirectExecutor:
     """The forward's launches, allocations, views, eager calls, stream switches and uses of cached tables as
     :func:`_train_forward` reaches them."""
@@ -3672,6 +3715,532 @@ class _DirectExecutor:
 
 
 _DIRECT = _DirectExecutor()
+
+
+def _storages(obj, out: set, depth: int = 0) -> None:
+    """Add the storage addresses of the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested)."""
+    if isinstance(obj, torch.Tensor):
+        out.add(obj.untyped_storage().data_ptr())
+    elif depth < 4 and isinstance(obj, (tuple, list)):
+        for x in obj:
+            _storages(x, out, depth + 1)
+    elif depth < 4 and is_dataclass(obj) and not isinstance(obj, type):
+        for f in fields(obj):
+            _storages(getattr(obj, f.name), out, depth + 1)
+
+
+def _reached_globals(roots) -> set[str]:
+    """The module globals that the functions ``roots`` read, themselves or through this module's functions they reach
+    (found from their code)."""
+    g = globals()
+    names, seen = set(), set()
+    todo = [g[name].__code__ for name in roots]
+    while todo:
+        code = todo.pop()
+        if code in seen:
+            continue
+        seen.add(code)
+        todo.extend(c for c in code.co_consts if isinstance(c, CodeType))
+        for name in code.co_names:
+            if name not in g:
+                continue
+            names.add(name)
+            fn = getattr(g[name], "__wrapped__", g[name])
+            if isinstance(fn, FunctionType) and fn.__globals__ is g:
+                todo.append(fn.__code__)
+    return names
+
+
+def _fwd_plan_globals() -> tuple:
+    """``cake_backend.device_arch``, the forward's functions (:data:`_FWD_PLAN_ROOTS`) and the module globals they read
+    (through this module's functions, found once from their code), one flat tuple: a plan replays only while each is
+    the object it was recorded with.  The plan compares them by identity: some are table caches (``_WALKS``: a dict of
+    tensors, which ``==`` would read)."""
+    global _FWD_PLAN_GLOBALS
+    if _FWD_PLAN_GLOBALS is None:
+        names = {*_FWD_PLAN_ROOTS, *_reached_globals(_FWD_PLAN_ROOTS)}
+        _FWD_PLAN_GLOBALS = itemgetter(*sorted(names))
+    try:
+        return (cake_backend.device_arch, *_FWD_PLAN_GLOBALS(globals()))
+    except KeyError:  # a global of the forward was deleted: a new object, which no plan holds (none replays)
+        return (object(),)
+
+
+def _keep_plan(plans: dict, limit: int, key, plan) -> None:
+    """``plans[key] = plan``, the oldest entry leaving first at ``limit`` entries; under one lock, since threads that
+    record at once would evict one entry twice."""
+    with _PLANS_LOCK:
+        plans.pop(key, None)
+        if len(plans) >= limit:
+            del plans[next(iter(plans))]
+        plans[key] = plan
+
+
+def _clear_plans() -> None:
+    """Drop every recorded plan, under :func:`_keep_plan`'s lock: a pool let go of a buffer that one may read."""
+    with _PLANS_LOCK:
+        _FWD_PLANS.clear()
+
+
+def _slot_layout(slots) -> tuple:
+    """The shape, strides, dtype and 16-byte base alignment of every tensor of ``slots`` (``None`` for another
+    entry): what a recorded plan's steps assume of the inputs beyond their addresses."""
+    return tuple(
+        (t.shape, t.stride(), t.dtype, t.data_ptr() % 16)
+        if isinstance(t, torch.Tensor)
+        else None
+        for t in slots
+    )
+
+
+class _SlotRecorder(_DirectExecutor):
+    """A general path that also records its steps.  ``slots``: the call's tensors the plan starts from.  Every tensor
+    a recorded step reads is a slot (one of those, or one a recorded step made), a dim-0 range of a slot, or a view of
+    a constant of the plan (:meth:`_constants`: a pooled workspace of the stream, a chunk table of ``meta``); anything
+    else, or a :meth:`refuse`, leaves the call without a plan."""
+
+    __slots__ = (
+        "slots",
+        "slot_of",
+        "ops",
+        "why",
+        "stream",
+        "meta",
+        "streams",
+        "ranges",
+    )
+
+    def __init__(self, slots, index: int, meta: ChunkMeta):
+        self.slots = list(slots)
+        self.slot_of = {id(t): i for i, t in enumerate(self.slots) if t is not None}
+        self.ops: list = []
+        self.why: str | None = None
+        self.stream = _stream_key(index)
+        self.meta = meta
+        self.streams = None
+        self.ranges: dict = {}
+
+    def refuse(self, reason: str) -> None:
+        if self.why is None:
+            self.why = reason
+
+    def _add(self, t) -> int:
+        self.slots.append(t)
+        self.slot_of[id(t)] = len(self.slots) - 1
+        return len(self.slots) - 1
+
+    def _slot(self, t):
+        i = self.slot_of.get(id(t))
+        return i if i is not None and self.slots[i] is t else None
+
+    def _ref(self, t, constants):
+        """The slot of ``t`` (a range of a slot gets a slot of its own, filled by a narrow step), ``None`` for a
+        constant, ``-1`` for a tensor the plan cannot rebuild; ``constants()`` gives the storage addresses of the
+        plan's constants (:meth:`_step_constants`)."""
+        i = self._slot(t)
+        if i is not None:
+            return i
+        ptr = t.untyped_storage().data_ptr()
+        for i, s in enumerate(self.slots):
+            if (
+                not isinstance(s, torch.Tensor)
+                or s.dim() == 0
+                or s.stride(0) <= 0
+                or s.dtype != t.dtype
+                or s.stride() != t.stride()
+                or s.shape[1:] != t.shape[1:]
+                or s.untyped_storage().data_ptr() != ptr
+            ):
+                continue
+            start, rest = divmod(t.storage_offset() - s.storage_offset(), s.stride(0))
+            if rest == 0 and start >= 0 and start + t.shape[0] <= s.shape[0]:
+                key = (i, start, t.shape[0])
+                j = self.ranges.get(key)
+                if j is None:
+                    j = self.ranges[key] = self._add(t)
+                    self.ops.append((_OP_NARROW, j, i, start, t.shape[0]))
+                return j
+        return None if ptr in constants() else -1
+
+    def _step_constants(self):
+        """A getter of the constants' storage addresses (:meth:`_constants`) that collects them at its first call
+        only: nothing is allocated between the operand checks of one step, so one set serves them all (a layout of
+        many sequences records on every call)."""
+        found: list[set] = []
+
+        def get() -> set:
+            if not found:
+                found.append(set())
+                self._constants(found[0])
+            return found[0]
+
+        return get
+
+    def _constants(self, out: set) -> None:
+        """Add the storage addresses of the plan's constants: the pooled workspaces of the stream and the tables of
+        ``meta``."""
+        for buffers in (self._tables() or {}).values():
+            _storages(list(buffers.values()), out)
+        _storages(self.meta, out)
+
+    def _tables(self):
+        return _POOLED.tables.get(self.stream)
+
+    def _operands(self, values, what):
+        """``(template, refs)`` of a step that reads ``values``: ``values`` with each slot or range of a slot as
+        ``None`` and ``(position, slot)`` of each of those; ``None`` after a refusal (``what`` reads a tensor the
+        plan cannot rebuild)."""
+        template, refs = list(values), []
+        constants = self._step_constants()
+        for pos, value in enumerate(values):
+            if isinstance(value, torch.Tensor):
+                i = self._ref(value, constants)
+                if i == -1:
+                    self.refuse(
+                        f"{what} reads a tensor that is neither a slot nor a constant"
+                    )
+                    return None
+                if i is not None:
+                    template[pos] = None
+                    refs.append((pos, i))
+        return tuple(template), tuple(refs)
+
+    def launch(self, stage, gx, gy, gz, *values):
+        """Run a launch of :func:`_prepared` and record it (in the order the launches run)."""
+        launch = _prepared(stage, gx, gy, gz, *values)
+        _fire(launch)
+        self._record(launch)
+
+    def _record(self, launch) -> None:
+        if self.why is not None:
+            return
+        stage, grid, ordered, device_index = launch
+        found = self._operands(ordered, stage)
+        if found is not None:
+            self.ops.append((_OP_LAUNCH, stage, grid, device_index, *found))
+
+    def empty(self, shape, dtype, device):
+        t = torch.empty(shape, dtype=dtype, device=device)
+        self.ops.append((_OP_EMPTY, self._add(t), tuple(shape), dtype, device))
+        return t
+
+    def fork(self, index):
+        main, side = super().fork(index)
+        if self.streams is not None and self.streams != (main, side):
+            self.refuse("two forks on different streams")
+        self.streams = (main, side)
+        self.ops.append((_OP_FORK,))
+        return main, side
+
+    def join(self, main, side):
+        super().join(main, side)
+        self.ops.append((_OP_JOIN,))
+
+
+# A forward's recording watches the stream and event operations of :data:`_WATCHED` (:func:`_watched`): one that the
+# recording thread makes outside the recorder's own steps and cache fills would be missing from the plan, so it leaves
+# the call without one.  The first recording in flight installs the hooks and the last one removes them; a call of
+# another thread, or of this one outside a recording, passes through.
+_WATCHED = ((torch.cuda, "set_stream"), (torch.cuda.Event, "record"), (torch.cuda.Event, "wait"),
+            (torch.cuda.Stream, "wait_event"))  # fmt: skip
+# the recorder of the recording in flight on this thread
+_WATCHING: ContextVar[Any] = ContextVar("cake_gdn_det_watching", default=None)
+_WATCH_LOCK = threading.Lock()
+# the recordings in flight, and (owner, name, original, whether the owner itself held it, the hook) of every hooked
+# attribute
+_WATCH_STATE: dict[str, Any] = {"count": 0, "saved": ()}
+_NO_WATCH = nullcontext()
+
+
+def _watch_hook(name: str, original):
+    def hook(*args, **kwargs):
+        recorder = _WATCHING.get()
+        if recorder is not None and not recorder.trusted:
+            recorder.refuse(f"{name} outside the forward's executor")
+        return original(*args, **kwargs)
+
+    return hook
+
+
+@contextmanager
+def _watched(recorder):
+    """Run a forward's recording by ``recorder`` with the operations of :data:`_WATCHED` hooked.  Another hook set in
+    place of one of these during the recording (another package's recording) would not report this one's calls: the
+    recording is refused, and the last exit leaves such an attribute as it is (it restores only its own hooks)."""
+    with _WATCH_LOCK:
+        if not _WATCH_STATE["count"]:
+            saved = []
+            for owner, name in _WATCHED:
+                original = getattr(owner, name)
+                hook = _watch_hook(name, original)
+                saved.append((owner, name, original, name in vars(owner), hook))
+                setattr(owner, name, hook)
+            _WATCH_STATE["saved"] = tuple(saved)
+        _WATCH_STATE["count"] += 1
+    token = _WATCHING.set(recorder)
+    try:
+        yield
+    finally:
+        _WATCHING.reset(token)
+        with _WATCH_LOCK:
+            saved = _WATCH_STATE["saved"]
+            if any(
+                getattr(owner, name) is not hook
+                for owner, name, _original, _own, hook in saved
+            ):
+                recorder.refuse("a watched function was replaced during the recording")
+            _WATCH_STATE["count"] -= 1
+            if not _WATCH_STATE["count"]:
+                for owner, name, original, own, hook in saved:
+                    if getattr(owner, name) is not hook:
+                        continue
+                    if own:
+                        setattr(owner, name, original)
+                    else:
+                        delattr(owner, name)
+                _WATCH_STATE["saved"] = ()
+
+
+class _ForwardPlan:
+    """One recorded forward (:class:`_FwdRecorder`): its steps, the number of its slots, the stream it runs on (the
+    caller's, ``main``, and its side stream), the layout's ``ChunkMeta``, the module globals, pool tables and cached
+    walks it was recorded with, and the entries of its result (:data:`_FWD_OUTPUTS`, each ``(name, 0, slot)`` or
+    ``(name, 2, value)``).  ``ops`` is ``None`` for a key whose forward cannot be planned: its calls run the general
+    path without recording."""
+
+    __slots__ = ("ops", "size", "stream", "main", "side", "meta", "names", "tables", "walks", "outputs",
+                 "fork_event", "join_event", "events")  # fmt: skip
+
+    def __init__(self, ops, size, stream, main, side, meta, names, tables, walks, signals, outputs):  # fmt: skip
+        self.ops = ops
+        self.size = size
+        self.stream = stream
+        self.main = main
+        self.side = side
+        self.meta = meta
+        self.names = names
+        self.tables = tables
+        self.walks = walks
+        self.outputs = outputs
+        # the fork and the join of a plan with a side stream (recorded right before each wait), and the events one
+        # stream records for the other (:meth:`_DirectExecutor.signal`)
+        self.fork_event = torch.cuda.Event() if main is not None else None
+        self.join_event = torch.cuda.Event() if main is not None else None
+        self.events = tuple(torch.cuda.Event() for _ in range(signals))
+
+    def ready(self, meta: ChunkMeta, stream) -> bool:
+        """Whether this call (of the plan's key) may replay the plan: the layout's ``ChunkMeta``, the pool's tables of
+        the stream, its side stream and the cached walks it uses are the ones of the recording (a cleared cache makes
+        new ones), and so is every module global the forward reads (:func:`_fwd_plan_globals`, by identity)."""
+        if self.meta is not meta or _POOLED.tables.get(stream) is not self.tables:
+            return False
+        if self.side is not None and _SIDE_STREAMS.get(stream) is not self.side:
+            return False
+        if not all(_WALKS.get(key) is entry for key, entry in self.walks):
+            return False
+        names = _fwd_plan_globals()
+        return len(names) == len(self.names) and all(map(is_, names, self.names))
+
+
+class _FwdRecorder(_SlotRecorder):
+    """The forward's general path that also records its steps (:meth:`plan`).  ``slots``: the call's ``q``, ``k``,
+    ``v``, ``g``, ``beta`` and ``initial_state``; the views, the allocations and the eager results of the call are
+    slots too, the cached walks it uses (:meth:`use`) constants.  A cache it fills (:meth:`fill`: the walk's build and
+    the event after it) is not recorded, since a later general-path call does not repeat it; a refusal of such a call
+    is not kept (``filled``).  ``trusted``: inside one of the recorder's own stream or event steps or a fill, which
+    :func:`_watched` lets pass."""
+
+    __slots__ = ("uses", "events", "trusted", "filled")
+
+    def __init__(self, inputs, index: int, meta: ChunkMeta):
+        super().__init__(inputs, index, meta)
+        self.uses: list = []
+        self.events: list = []
+        self.trusted = 0
+        self.filled = False
+
+    @contextmanager
+    def _trust(self):
+        self.trusted += 1
+        try:
+            yield
+        finally:
+            self.trusted -= 1
+
+    def _constants(self, out: set) -> None:
+        super()._constants(out)
+        for _key, entry in self.uses:
+            out.add(entry[0].untyped_storage().data_ptr())
+
+    def view(self, t, dtype):
+        out = t.view(dtype)
+        i = self._slot(t)
+        if i is not None:  # a view of a constant is a constant
+            self.ops.append((_OP_VIEW, self._add(out), i, dtype))
+        return out
+
+    def call(self, fn, *args):
+        out = fn(*args)
+        self._call(fn, args, out)
+        return out
+
+    def rows(self, fn, t, *args):
+        out = fn(t, *args)
+        if out is not t:  # ``t`` itself: the layout in the key fixes that, no step
+            self._call(fn, (t, *args), out)
+        return out
+
+    def _call(self, fn, args, out) -> None:
+        if self.why is not None:
+            return
+        found = self._operands(args, getattr(fn, "__name__", fn))
+        if found is None:
+            return
+        # a new tensor is a slot; an in-place call returns one of its operands
+        slot = None
+        if isinstance(out, torch.Tensor) and not any(out is value for value in args):
+            slot = self._add(out)
+        self.ops.append((_OP_CALL, fn, *found, slot))
+
+    def fork(self, index):
+        with self._trust():
+            return super().fork(index)
+
+    @contextmanager
+    def on(self, side):
+        self.ops.append((_OP_STREAM, 1))
+        context = torch.cuda.stream(side)
+        with self._trust():
+            context.__enter__()
+        try:
+            yield
+        finally:
+            with self._trust():
+                context.__exit__(None, None, None)
+        self.ops.append((_OP_STREAM, 0))
+
+    def join(self, main, side):
+        with self._trust():
+            super().join(main, side)
+
+    def _role(self, stream) -> int | None:
+        """0 for the caller's stream of the fork, 1 for its side stream, ``None`` for another or before the fork."""
+        for role, s in enumerate(self.streams or ()):
+            if stream is s:
+                return role
+        return None
+
+    def signal(self, stream):
+        with self._trust():
+            event = super().signal(stream)
+        role = self._role(stream)
+        if role is None:
+            self.refuse("an event recorded outside the fork")
+        else:
+            self.ops.append((_OP_SIGNAL, len(self.events), role))
+        self.events.append(event)
+        return event
+
+    def wait(self, stream, event) -> None:
+        with self._trust():
+            super().wait(stream, event)
+        role = self._role(stream)
+        k = next((k for k, e in enumerate(self.events) if e is event), None)
+        if role is None or k is None:
+            self.refuse("an event wait outside the fork")
+        else:
+            self.ops.append((_OP_WAIT, k, role))
+
+    def use(self, key, entry) -> None:
+        with self._trust():
+            super().use(key, entry)
+        self.uses.append((key, entry))
+        self.ops.append((_OP_USE, entry, key[0]))
+
+    @contextmanager
+    def fill(self):
+        self.filled = True
+        with self._trust():
+            yield
+
+    def plan(self, fwd: dict) -> _ForwardPlan | None:
+        """The recorded plan of a call whose general path returned ``fwd``, ``None`` when the call refused one."""
+        if self.why is not None:
+            return None
+        outputs = []
+        for name in _FWD_OUTPUTS:
+            value = fwd.get(name)
+            if not isinstance(value, torch.Tensor):
+                outputs.append((name, 2, value))
+                continue
+            i = self._slot(value)
+            if i is None:
+                return None  # an entry that is not a slot of the call
+            outputs.append((name, 0, i))
+        main, side = self.streams or (None, None)
+        return _ForwardPlan(tuple(self.ops), len(self.slots), self.stream, main, side, self.meta, _fwd_plan_globals(),
+                            self._tables(), tuple(self.uses), len(self.events), tuple(outputs))  # fmt: skip
+
+
+def _replay_forward(plan: _ForwardPlan, inputs) -> dict[str, Any]:
+    """Run ``plan`` on the call's ``q``, ``k``, ``v``, ``g``, ``beta`` and ``initial_state`` (``inputs``); returns the
+    entries of the forward's result that :func:`_function_forward` reads (:data:`_FWD_OUTPUTS`).  A stream switch
+    makes the stream's device current, which the general path's stream context restores on its exit: a plan with a
+    side stream makes the caller's current device current again when it returns or raises."""
+    slots = [*inputs]
+    slots += [None] * (plan.size - len(slots))
+    launch_stage = cake_backend.launch_stage
+    main, side = plan.main, plan.side
+    caller = None if main is None else torch.cuda.current_device()
+    forked = False
+    try:
+        for op in plan.ops:
+            code = op[0]
+            if code == _OP_LAUNCH:
+                values = list(op[4])
+                for pos, i in op[5]:
+                    values[pos] = slots[i]
+                launch_stage(op[1], op[2], tuple(values), device_index=op[3])
+            elif code == _OP_EMPTY:
+                slots[op[1]] = torch.empty(op[2], dtype=op[3], device=op[4])
+            elif code == _OP_VIEW:
+                slots[op[1]] = slots[op[2]].view(op[3])
+            elif code == _OP_CALL:
+                args = list(op[2])
+                for pos, i in op[3]:
+                    args[pos] = slots[i]
+                out = op[1](*args)
+                if op[4] is not None:
+                    slots[op[4]] = out
+            elif code == _OP_USE:
+                _use_table(op[1][0], op[1][1], op[2])
+            elif code == _OP_FORK:
+                plan.fork_event.record(main)
+                side.wait_event(plan.fork_event)
+                forked = True
+            elif code == _OP_STREAM:
+                torch.cuda.set_stream(side if op[1] else main)
+            elif code == _OP_SIGNAL:
+                plan.events[op[1]].record(side if op[2] else main)
+            elif code == _OP_WAIT:
+                (side if op[2] else main).wait_event(plan.events[op[1]])
+            elif code == _OP_JOIN:
+                plan.join_event.record(side)
+                main.wait_event(plan.join_event)
+                forked = False
+            else:  # a dim-0 range of a slot
+                slots[op[1]] = slots[op[2]].narrow(0, op[3], op[4])
+    except BaseException:
+        if forked:  # back on the caller's stream, after the side stream's work (as the general path's join)
+            torch.cuda.set_stream(main)
+            main.wait_stream(side)
+        raise
+    finally:
+        if caller is not None and caller != plan.stream[0]:
+            torch.cuda.set_device(caller)
+    return {
+        name: slots[value] if kind == 0 else value for name, kind, value in plan.outputs
+    }
 
 
 # --------------------------------------------------------------------------- #
@@ -4291,7 +4860,10 @@ def _chunk_meta(
 def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_state, cu_seqlens, cu_seqlens_cpu,
                       use_qk_l2norm_in_kernel, options):  # fmt: skip
     """The forward of :class:`CakeGDNDetFunction` and :class:`CakeGDNDetPackedFunction` over q / k / v (the inputs,
-    or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields."""
+    or the head views of the packed row): the chain, the saved tape and ``ctx``'s fields.  A call with the forward's
+    plan of its key replays it (:func:`_replay_forward`); any other runs the general path, which records the plan of
+    the key when the call has one (a layout of the host table cache with ``host_cache``, outside a CUDA graph capture:
+    a plan's launches read the pooled workspaces of its stream, and a capture takes its own)."""
     batch, seq_len, num_heads, key_dim = q.shape
     num_v_heads = v.shape[2]
     index = _tensor_index(q)
@@ -4310,17 +4882,58 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
         ),
     )
     tape = _forward_tape()
-    fwd = cake_gdn_det_train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale,
-                                     initial_state=initial_state, output_final_state=output_final_state,
-                                     normalize_qk=use_qk_l2norm_in_kernel, options=options,
-                                     tape=tape)  # fmt: skip
+    level = cake_plan.tape_state(arch, options.save_state)
+    # a layout of the host table cache (host-built or equal-length) with host_cache: the forward's plan
+    host = options.host_cache and (cu_seqlens is None or cu_seqlens_cpu is not None)
+    # CakeGDNDetPackedFunction's forward sets row_shape
+    packed = getattr(ctx, "row_shape", None) is not None
+    plan = recorder = None
+    # a host q runs the general path, which pools nothing and refuses it at the first launch (the key's layouts do not
+    # name the device: such a call must not replay a plan of device inputs)
+    if FWD_PLAN and host and q.is_cuda:
+        stream = _stream_key(index)
+        # a CUDA graph capture (never on the default stream) runs the general path on its own workspaces
+        if not (stream[1] and torch.cuda.is_current_stream_capturing()):
+            # besides meta's tables and the module globals (ready()), the key holds what the general path's steps
+            # follow: the stream, the tape mode (a checkpoint's first pass and its recompute differ), the arguments,
+            # the inputs' layouts and which inputs are one object (a call with ``k is q`` records q's slot for both,
+            # so a plan of another pattern would read k for q)
+            inputs = (q, k, v, g, beta, initial_state)
+            alias = (None if len({id(t) for t in inputs}) == len(inputs)
+                     else tuple(next(j for j, s in enumerate(inputs) if s is t) for t in inputs))  # fmt: skip
+            fkey = (id(meta), stream, arch, options, tape, packed, num_heads, num_v_heads, float(scale),
+                    bool(use_qk_l2norm_in_kernel), bool(output_final_state), _slot_layout(inputs), alias,
+                    level)  # fmt: skip
+            plan = _FWD_PLANS.get(fkey)
+            if plan is None or (plan.ops is not None and not plan.ready(meta, stream)):
+                plan, recorder = None, _FwdRecorder(inputs, index, meta)
+            elif plan.ops is None:  # the key's calls keep the general path
+                plan = None
+    if plan is not None:
+        fwd = _replay_forward(plan, inputs)
+    else:
+        with _NO_WATCH if recorder is None else _watched(recorder):
+            fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                                 output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                                 options=options, tape=tape, ex=_DIRECT if recorder is None else recorder)  # fmt: skip
+    if recorder is not None:
+        recorded = recorder.plan(fwd)
+        # the call's tensors that are not in its result go now, as the general path's go when it returns
+        recorder.slots.clear()
+        # a refusal of a call that filled a table cache is not kept: the key's next call records again
+        if recorded is not None or not recorder.filled:
+            if recorded is None:  # the key's calls keep the general path
+                recorded = _ForwardPlan(
+                    None, 0, recorder.stream, None, None, meta, (), None, (), 0, ()
+                )
+            _keep_plan(_FWD_PLANS, _FWD_PLANS_LIMIT, fkey, recorded)
     # a fixed saved list of 13: the state the architecture's tape level keeps under save_state
     # (cake_plan.tape_state: w, h and v_new under T_full), a placeholder of the same shape, dtype and device for
     # the rest (a checkpoint's first pass compares the two passes' saved lists); the backward reads only the state
     # the level keeps (_function_backward).  A forward without a tape (a checkpoint's first pass, whose saved list is
     # dropped, or a call that records no backward) saves the state it formed anyway, which retains nothing, and
     # placeholders only for the state it did not form
-    kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
+    kept = level if tape else ()
     state_tensors = [
         fwd.get(name) if not tape or name in kept else None
         for name in cake_plan.STATE_NAMES
