@@ -4374,11 +4374,13 @@ class CakeKDADetKcpWorkspace:
         index = (
             device.index if device.index is not None else torch.cuda.current_device()
         )
+        sm = cake_jit.sm_count(index)
         return cake_backend.plan(
             *key,
-            cake_jit.sm_count(index),
+            sm,
             cake_jit.device_arch(index),
             gate=self.gate,
+            **cake_kcp_plan.local_segment_rule_kwargs(sm, key[2]),
             **cake_kcp_plan.qk_l2norm_plan_kwargs(self.l2n),
         )
 
@@ -4444,8 +4446,9 @@ class CakeKDADetKcpWorkspace:
                 self._local_plan(key, device), passes=self.lean_passes
             )
         if passes is None:
-            self.local = cake_backend.CakeKDADetWorkspace.for_problem(
-                *key,
+            # CakeKDADetWorkspace.for_problem(*key, device, ...) with the plan of _local_plan (its segment rule)
+            self.local = cake_backend.CakeKDADetWorkspace(
+                self._local_plan(key, device),
                 device,
                 backward=kind,
                 save_mode=self.save_mode,

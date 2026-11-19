@@ -4662,11 +4662,13 @@ class CakeKDANondetKcpWorkspace:
         index = (
             device.index if device.index is not None else torch.cuda.current_device()
         )
+        sm = cake_jit.sm_count(index)
         return cake_backend.plan(
             *key,
-            cake_jit.sm_count(index),
+            sm,
             _arch_of(index),
             gate=self.gate,
+            **cake_kcp_plan.local_segment_rule_kwargs(sm, key[2]),
             **cake_kcp_plan.qk_l2norm_plan_kwargs(self.l2n),
         )
 
