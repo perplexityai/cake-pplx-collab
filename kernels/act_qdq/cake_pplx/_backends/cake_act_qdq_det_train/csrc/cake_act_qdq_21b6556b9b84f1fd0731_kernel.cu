@@ -53,14 +53,36 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 #define LAUNCH_MIN_BLOCKS 32
 #endif
 
+__device__ __forceinline__ uint32_t cvt_bf16x2_e4m3x2(uint16_t src) {
+    uint32_t dst;
+#if defined(__CUDACC_VER_MAJOR__) && (__CUDACC_VER_MAJOR__ > 13 || (__CUDACC_VER_MAJOR__ == 13 && __CUDACC_VER_MINOR__ >= 2)) && defined(__CUDA_ARCH__) && (__CUDA_ARCH__ >= 1000)
+    asm("cvt.rn.bf16x2.e4m3x2 %0, %1;" : "=r"(dst) : "h"(src));
+#else
+    uint32_t _f16x2;
+    asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_f16x2) : "h"(src));
+    uint16_t _h0 = (uint16_t)(_f16x2 & 0xFFFFu);
+    uint16_t _h1 = (uint16_t)((_f16x2 >> 16) & 0xFFFFu);
+    float _f0;
+    float _f1;
+    asm("cvt.f32.f16 %0, %1;" : "=f"(_f0) : "h"(_h0));
+    asm("cvt.f32.f16 %0, %1;" : "=f"(_f1) : "h"(_h1));
+    asm("cvt.rn.bf16x2.f32 %0, %1, %2;" : "=r"(dst) : "f"(_f1), "f"(_f0));
+#endif
+    return dst;
+}
+
 #include <math_constants.h>
 
-
-__device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
-    float r;
-    asm("mul.rn.f32 %0, %1, %2;" : "=f"(r) : "f"(a), "f"(b));
+__device__ __forceinline__ float2 mul_f32x2_noftz(float2 a, float2 b) {
+    float2 r;
+    asm("mul.rn.f32x2 %0, %1, %2;"
+        : "=l"(*(unsigned long long*)&r)
+        : "l"(*(unsigned long long*)&a), "l"(*(unsigned long long*)&b));
     return r;
 }
+
+
+// ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
 
 extern "C" {
 
@@ -140,43 +162,36 @@ kernel_cake_act_qdq_21b6556b9b84f1fd0731(const __nv_bfloat16* x, __nv_bfloat16* 
             am = fmaxf(am, _shfl_xor_sync_3);
             float s = 0.0f;
             float inv = 0.0f;
+            int sbits = 0;
             int abits = 0;
             abits = reinterpret_cast<int*>(&am)[0];
             int rounded = (abits >> 23) - 8 + (((abits & 8388607) > 6291456) ? 1 : 0);
             int sbyte = ((rounded > 105) ? rounded : 105);
-            int sbits = sbyte << 23;
+            sbits = sbyte << 23;
             int ibits = 254 - sbyte << 23;
             s = reinterpret_cast<float*>(&sbits)[0];
             inv = reinterpret_cast<float*>(&ibits)[0];
-            float u[8];
-            #pragma unroll
-            for (int k_1 = 0; k_1 < 8; k_1++) {
-                u[k_1] = mul_f32_rn_noftz(v[k_1], inv);
-            }
-            unsigned int halves[4];
+            unsigned int s_word = (unsigned int)(sbits | sbits >> 16);
+            float2 inv2 = make_float2(inv, inv);
+            float2 s2 = make_float2(s, s);
+            float2 neg_inv2 = make_float2(-inv, -inv);
+            float2 u[4];
             #pragma unroll
             for (int p = 0; p < 4; p++) {
-                uint16_t _cvt_satfinite_e4m3x2_f32_5;
-                asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_cvt_satfinite_e4m3x2_f32_5) : "f"(u[2 * p + 1]), "f"(u[2 * p]));
-                uint32_t _cvt_f16x2_e4m3x2_4;
-                asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_cvt_f16x2_e4m3x2_4) : "h"((uint16_t)(_cvt_satfinite_e4m3x2_f32_5)));
-                halves[p] = _cvt_f16x2_e4m3x2_4;
-            }
-            float yq[8];
-            #pragma unroll
-            for (int p_1 = 0; p_1 < 4; p_1++) {
-                float _cvt_f32_f16_6;
-                asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_6) : "h"((uint16_t)(halves[p_1])));
-                yq[2 * p_1] = mul_f32_rn_noftz(_cvt_f32_f16_6, s);
-                float _cvt_f32_f16_7;
-                asm("cvt.f32.f16 %0, %1;" : "=f"(_cvt_f32_f16_7) : "h"((uint16_t)(halves[p_1] >> 16)));
-                yq[2 * p_1 + 1] = mul_f32_rn_noftz(_cvt_f32_f16_7, s);
+                float2 x2 = make_float2(v[2 * p], v[2 * p + 1]);
+                u[p] = mul_f32x2_noftz(x2, inv2);
             }
             unsigned int packed[4];
             #pragma unroll
-            for (int _lp = 0; _lp < 4; _lp++) {
-                __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(yq[_lp*2 + 0], yq[_lp*2+1 + 0]));
-                packed[_lp] = *(uint32_t*)&_bf2;
+            for (int p_1 = 0; p_1 < 4; p_1++) {
+                unsigned int q_word = 0;
+                uint16_t _cvt_satfinite_e4m3x2_f32_5;
+                asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_cvt_satfinite_e4m3x2_f32_5) : "f"(u[p_1].y), "f"(u[p_1].x));
+                uint32_t _cvt_bf16x2_e4m3x2_4 = cvt_bf16x2_e4m3x2(_cvt_satfinite_e4m3x2_f32_5);
+                q_word = _cvt_bf16x2_e4m3x2_4;
+                uint32_t y_word;
+                asm volatile("mul.rn.bf16x2 %0, %1, %2;" : "=r"(y_word) : "r"(q_word), "r"(s_word));
+                packed[p_1] = y_word;
             }
             asm volatile("{ .reg .pred p_; setp.ne.b32 p_, %5, 0; @p_ st.global.v4.b32 [%0], {%1, %2, %3, %4}; }" :: "l"(y + (long long)i_1 * 8ll), "r"(packed[(0) + 0]), "r"(packed[(0) + 1]), "r"(packed[(0) + 2]), "r"(packed[(0) + 3]), "r"((unsigned int)(i_1 < n_vecs)) : "memory");
         }
