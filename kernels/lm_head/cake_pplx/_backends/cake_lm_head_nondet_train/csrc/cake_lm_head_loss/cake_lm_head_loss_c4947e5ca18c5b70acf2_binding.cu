@@ -22,7 +22,7 @@
 
 #include <cstdint>
 
-extern "C" __global__ void kernel_cake_lm_head_loss_c4947e5ca18c5b70acf2(float* __restrict__ acc, float* __restrict__ g, int* __restrict__ scan, int* __restrict__ idx_lo, __nv_bfloat16* __restrict__ out, int row_vecs, int num_rows);
+extern "C" __global__ void kernel_cake_lm_head_loss_c4947e5ca18c5b70acf2(float* __restrict__ acc, float* __restrict__ g, int* __restrict__ scan, int* __restrict__ idx_lo, __nv_bfloat16* __restrict__ out, int row_vecs, int num_rows, long long* __restrict__ labels, float* __restrict__ rlab, __nv_bfloat16* __restrict__ W, int V, int fold_lo, int fold_hi);
 
 namespace cake_binding_kernel_cake_lm_head_loss_c4947e5ca18c5b70acf2 {
 
@@ -37,7 +37,7 @@ void CheckCuda(cudaError_t status, const char* what) {
 
 void* DataPtr(const TensorView& t) { return static_cast<char*>(t.data_ptr()) + t.byte_offset(); }
 
-void Run(TensorView a_acc, TensorView a_g, TensorView a_scan, TensorView a_idx_lo, TensorView a_out, int64_t a_row_vecs, int64_t a_num_rows, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_acc, TensorView a_g, TensorView a_scan, TensorView a_idx_lo, TensorView a_out, int64_t a_row_vecs, int64_t a_num_rows, TensorView a_labels, TensorView a_rlab, TensorView a_W, int64_t a_V, int64_t a_fold_lo, int64_t a_fold_hi, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_acc.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_acc, "acc");
@@ -56,6 +56,21 @@ void Run(TensorView a_acc, TensorView a_g, TensorView a_scan, TensorView a_idx_l
   TVM_FFI_CHECK(a_num_rows >= -2147483648LL && a_num_rows <= 2147483647LL, ValueError)
       << KERNEL_NAME << ": 'num_rows' = " << a_num_rows
       << " is outside the i32 range [-2147483648, 2147483647]";
+  check_cuda_tensor(a_labels, "labels");
+  check_dtype(a_labels, DLDataType{kDLInt, 64, 1}, "labels");
+  check_cuda_tensor(a_rlab, "rlab");
+  check_dtype(a_rlab, DLDataType{kDLFloat, 32, 1}, "rlab");
+  check_cuda_tensor(a_W, "W");
+  check_dtype(a_W, DLDataType{kDLBfloat, 16, 1}, "W");
+  TVM_FFI_CHECK(a_V >= -2147483648LL && a_V <= 2147483647LL, ValueError)
+      << KERNEL_NAME << ": 'V' = " << a_V
+      << " is outside the i32 range [-2147483648, 2147483647]";
+  TVM_FFI_CHECK(a_fold_lo >= -2147483648LL && a_fold_lo <= 2147483647LL, ValueError)
+      << KERNEL_NAME << ": 'fold_lo' = " << a_fold_lo
+      << " is outside the i32 range [-2147483648, 2147483647]";
+  TVM_FFI_CHECK(a_fold_hi >= -2147483648LL && a_fold_hi <= 2147483647LL, ValueError)
+      << KERNEL_NAME << ": 'fold_hi' = " << a_fold_hi
+      << " is outside the i32 range [-2147483648, 2147483647]";
   check_contiguous(a_acc, "acc");
   check_contiguous(a_g, "g");
   check_same_device(a_g, a_acc, "g", "acc");
@@ -65,6 +80,12 @@ void Run(TensorView a_acc, TensorView a_g, TensorView a_scan, TensorView a_idx_l
   check_same_device(a_idx_lo, a_acc, "idx_lo", "acc");
   check_contiguous(a_out, "out");
   check_same_device(a_out, a_acc, "out", "acc");
+  check_contiguous(a_labels, "labels");
+  check_same_device(a_labels, a_acc, "labels", "acc");
+  check_contiguous(a_rlab, "rlab");
+  check_same_device(a_rlab, a_acc, "rlab", "acc");
+  check_contiguous(a_W, "W");
+  check_same_device(a_W, a_acc, "W", "acc");
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
@@ -77,7 +98,13 @@ void Run(TensorView a_acc, TensorView a_g, TensorView a_scan, TensorView a_idx_l
   void* v_out = DataPtr(a_out);
   int32_t v_row_vecs = static_cast<int32_t>(a_row_vecs);
   int32_t v_num_rows = static_cast<int32_t>(a_num_rows);
-  void* kernel_args[] = {&v_acc, &v_g, &v_scan, &v_idx_lo, &v_out, &v_row_vecs, &v_num_rows};
+  void* v_labels = DataPtr(a_labels);
+  void* v_rlab = DataPtr(a_rlab);
+  void* v_W = DataPtr(a_W);
+  int32_t v_V = static_cast<int32_t>(a_V);
+  int32_t v_fold_lo = static_cast<int32_t>(a_fold_lo);
+  int32_t v_fold_hi = static_cast<int32_t>(a_fold_hi);
+  void* kernel_args[] = {&v_acc, &v_g, &v_scan, &v_idx_lo, &v_out, &v_row_vecs, &v_num_rows, &v_labels, &v_rlab, &v_W, &v_V, &v_fold_lo, &v_fold_hi};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
   config.blockDim = dim3(256, 1, 1);
