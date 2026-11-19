@@ -1426,7 +1426,8 @@ def test_nope_public_entries_resolve_the_environment_and_reject_other_backends(
 
 def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
     """What the wrappers hand to ``cake_backend.cake_dsa_sparse_attention_nondet_nope`` / ``_varlen``: every keyword as given,
-    ``dkv_direct`` / ``check_dst_map`` resolved from the environment when ``None`` and taken as given otherwise."""
+    ``dkv_direct`` / ``check_dst_map`` resolved from the environment when ``None`` and taken as given otherwise; the
+    flat entry's ``sink`` as given (``None`` by default), and a packed entry refuses a sink before the backend."""
     seen = {}
 
     def flat(q, kv, indices, **kwargs):
@@ -1458,7 +1459,11 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         dkv_dst_map=None,
         dkv_direct=None,
         check_dst_map=False,
+        sink=None,
     )
+    sink = torch.zeros(NUM_HEADS)
+    cake_dsa_sparse_attention_nondet_nope(q, kv, idx, sink=sink)
+    assert seen["flat"][3]["sink"] is sink
     monkeypatch.setenv(public_api.DKV_DIRECT_ENV, "1")
     monkeypatch.setenv(public_api.CHECK_DST_MAP_ENV, "1")
     cake_dsa_sparse_attention_nondet_nope(
@@ -1512,6 +1517,127 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         q, kv, idx, cu_q, cu_k, check_cu_seqlens=True
     )
     assert seen["varlen"][7]["check_cu_seqlens"] is True
+    # the packed entry has no sink build: a sink is refused before the backend is reached
+    del seen["varlen"]
+    with pytest.raises(NotImplementedError, match="sink"):
+        cake_dsa_sparse_attention_nondet_nope_varlen(
+            q, kv, idx, cu_q, cu_k, 8, 16, sink=sink
+        )
+    assert "varlen" not in seen
+
+
+def test_nope_step_entries_forward_the_sink_and_packed_steps_refuse_it(monkeypatch):
+    """The flat step pair hands ``sink`` to the backend's ``forward_nope`` / ``backward_nope`` as given (``None`` by
+    default, so the step backward's return is the backend's ``(dq, dkv)``); the packed step pair has no sink build and
+    refuses a sink before the backend is reached."""
+    seen = {}
+
+    def forward_nope(q, kv, indices, **kwargs):
+        seen["forward"] = kwargs
+        return "forward"
+
+    def backward_nope(q, kv, indices, out, o_lo, lse, dout, **kwargs):
+        seen["backward"] = kwargs
+        return "backward"
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a packed step with a sink must not reach the backend")
+
+    monkeypatch.setattr(cake_backend, "forward_nope", forward_nope)
+    monkeypatch.setattr(cake_backend, "backward_nope", backward_nope)
+    monkeypatch.setattr(cake_backend, "forward_nope_varlen", refuse)
+    q, kv, idx = _nope_host_inputs()
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    sink = torch.zeros(NUM_HEADS)
+    step_forward, step_backward = _step_entries("nope")
+    assert step_forward(q, kv, idx) == "forward" and seen["forward"]["sink"] is None
+    step_forward(q, kv, idx, sink=sink)
+    assert seen["forward"]["sink"] is sink
+    assert step_backward(q, kv, idx, out, out, lse, out) == "backward"
+    assert seen["backward"]["sink"] is None
+    step_backward(q, kv, idx, out, out, lse, out, sink=sink)
+    assert seen["backward"]["sink"] is sink
+    seen.clear()
+    cu_q = torch.tensor([0, 8], dtype=torch.int32)
+    cu_k = torch.tensor([0, 16], dtype=torch.int32)
+    lengths = torch.full((8,), 5, dtype=torch.int32)
+    varlen_forward, varlen_backward = _step_entries("nope_varlen")
+    with pytest.raises(NotImplementedError, match="sink"):
+        varlen_forward(q, kv, idx, cu_q, cu_k, sink=sink)
+    with pytest.raises(NotImplementedError, match="sink"):
+        varlen_backward(
+            q, kv, idx, out, out, lse, out, cu_k, topk_length=lengths, sink=sink
+        )
+    assert seen == {}
+
+
+def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
+    record_property,
+):
+    """The flat step pair with a sink on the rows of the sink's model (width 640, scale ``512 ** -0.5``): the forward's
+    ``lse`` includes the sink, the backward returns ``(dq, dkv, dsink)`` (``dkv`` ``None`` with ``dkv_acc``), and every
+    output is judged against the FP64 oracle beside the BF16 naive tier; the same pair without a sink returns ``(dq,
+    dkv)``."""
+    _require_nope_program(backward=True)
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    if arch not in cake_jit.stage_arches(
+        cake_jit.NOPE_SINK_FORWARD_STAGE, NOPE_PROGRAM
+    ):
+        pytest.skip(f"no sink build for {arch}")
+    step_forward, step_backward = _step_entries("nope")
+
+    def case(s, j):
+        inp = nope_ref.make_sink_inputs(512, 640, seed=s)
+        scale = nope_ref.SINK_SCALE
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        out, lse, o_lo = step_forward(
+            inp.q, inp.kv, inp.indices, softmax_scale=scale, sink=inp.sink
+        )
+        dq, none, dsink = step_backward(
+            inp.q,
+            inp.kv,
+            inp.indices,
+            out,
+            o_lo,
+            lse,
+            inp.dout,
+            softmax_scale=scale,
+            sink=inp.sink,
+            dkv_acc=acc,
+        )
+        o2, l2, lo2 = step_forward(inp.q, inp.kv, inp.indices, softmax_scale=scale)
+        plain = step_backward(
+            inp.q, inp.kv, inp.indices, o2, lo2, l2, inp.dout, softmax_scale=scale
+        )
+        torch.cuda.synchronize()
+        assert none is None and len(plain) == 2
+        problem = nv.Problem(
+            q_latent=inp.q,
+            kv_latent=inp.kv,
+            indices=inp.indices,
+            dout=inp.dout,
+            scale=scale,
+            sink=inp.sink,
+        )
+        run = dict(
+            out=out,
+            lse=lse,
+            o_lo=o_lo,
+            dq=dq,
+            dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+            dsink=dsink,
+        )
+        return nv.merge(
+            nv.judged(problem, {"": run}, prefix="sink "),
+            nv.judged(
+                problem.with_(sink=None),
+                {"": dict(out=o2, lse=l2, o_lo=lo2, dq=plain[0], dkv=plain[1])},
+                prefix="no sink ",
+            ),
+        )
+
+    nv.judge_draws(record_property, case, seed=NOPE_SEED + 750)
 
 
 def test_nope_autograd_explicit_backward_and_accumulator(record_property):

@@ -3576,9 +3576,13 @@ def test_nope_stage_names_and_registry_accessors():
     assert cake_jit.NOPE_STAGES[1:] == tuple(
         cake_jit.stage_name(s, NOPE_PROGRAM) for s in cake_jit.STAGES[1:]
     )
+    # the NoPE program's trainable-sink stages close its order: the forward's sink build, then the sink gradient
+    assert cake_jit.NOPE_SINK_STAGES == ("nope_fwd_sink", "nope_bwd_dsink")
     assert cake_jit.STAGES_OF == {
         cake_jit.PROGRAM: cake_jit.STAGES + (cake_jit.SCAN_STAGES["fwd"],),
-        NOPE_PROGRAM: cake_jit.NOPE_STAGES + (cake_jit.SCAN_STAGES["nope_fwd"],),
+        NOPE_PROGRAM: cake_jit.NOPE_STAGES
+        + (cake_jit.SCAN_STAGES["nope_fwd"],)
+        + cake_jit.NOPE_SINK_STAGES,
     }
     assert cake_jit.stage_name("bwd_main_pass_natural", NOPE_PROGRAM) == (
         "nope_bwd_main_pass_natural"
@@ -4445,7 +4449,9 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
     """Without the natural stage the one permuted accumulator feeds the main stage and the cast: the cast writes
     the fresh ``dkv`` densely (``out_f32``) or adds into ``dkv_acc`` (``dst_packed`` / ``dst_map``), its rope
     operands are zero-size placeholders of the declared dtypes; a direct plan binds the FP32 buffer itself as the
-    main stage's ``dkv_f32`` and no cast operands; the single-pass placeholders are the same as the rope plan's."""
+    main stage's ``dkv_f32`` and no cast operands; the single-pass placeholders are the same as the rope plan's; a
+    sink plan adds the sink-gradient stage's partials and its completion counter (an unsigned 32-bit view of the
+    int32 ticket region)."""
     S = 8
     base = dict(
         indices=torch.zeros(2, 4, dtype=torch.int32),
@@ -4464,6 +4470,7 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
         dkv_direct=False,
         fresh_dkv=True,
         key_passes=1,
+        sink=False,
     )
     t = dict(base, dkv_latent_acc=acc_perm, dkv=dkv)
     values = cake_backend._bound_values_nope(plan, t)
@@ -4501,6 +4508,7 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
         dkv_direct=True,
         fresh_dkv=False,
         key_passes=1,
+        sink=False,
     )
     values = cake_backend._bound_values_nope(
         plan, dict(base, dkv_acc=acc, dkv_dst_map=dst_map)
@@ -4511,6 +4519,17 @@ def test_bound_values_nope_serve_the_main_and_cast_operands():
     plan.constants = dict(dkv_stride=D_LATENT, dkv_has_map=0)
     values = cake_backend._bound_values_nope(plan, dict(base, dkv=dkv))
     assert values["dkv_f32"] is dkv and values["dkv_dst_map"] is base["topk_length"]
+    assert "partials" not in values and "counter" not in values
+    # a sink plan binds the sink-gradient stage's partials and its counter as an unsigned view of the ticket
+    partial = torch.zeros(1, NUM_HEADS)
+    ticket = torch.zeros(1, dtype=torch.int32)
+    plan.sink = True
+    values = cake_backend._bound_values_nope(
+        plan, dict(base, dkv=dkv, dsink_partial=partial, dsink_ticket=ticket)
+    )
+    assert values["partials"] is partial and values["counter"].dtype == torch.uint32
+    assert tuple(values["counter"].shape) == (1,)
+    assert values["counter"].data_ptr() == ticket.data_ptr()
     # a forward plan binds no backward operands
     plan = SimpleNamespace(constants={}, backward=False)
     values = cake_backend._bound_values_nope(plan, dict(base))
@@ -10627,3 +10646,911 @@ def test_nope_backward_over_alternating_dout_layouts_and_a_failed_allocation(
         torch.autograd.grad(out, leaves, inp.dout, allow_unused=True)
     torch.cuda.synchronize()
     assert torch.equal(acc, before)
+
+
+# ---------------------------------------------------------------------------
+# Trainable per-head sink of the flat NoPE entries (sm_100a / sm_103a)
+# ---------------------------------------------------------------------------
+
+NOPE_SINK_FORWARD_STAGE = cake_jit.NOPE_SINK_FORWARD_STAGE
+NOPE_DSINK_STAGE = cake_jit.NOPE_DSINK_STAGE
+SINK_ARCHES = ("sm_100a", "sm_103a")
+SINK_SCALE = nope_ref.SINK_SCALE
+SINK_SEED = NOPE_SEED + 7500
+# the forward's sink build takes the forward's argument list with the sink after ``lse``
+NOPE_FWD_SINK_ARGS = NOPE_FWD_ARGS[:5] + ("sink",) + NOPE_FWD_ARGS[5:]
+# the sink-gradient kernel: ``lse`` and ``delta`` [T, 64] FP32, the sink, the ``dsink`` output [64], the per-chunk
+# FP32 partials, the u32 completion counter and the token count
+NOPE_DSINK_ARGS = (
+    "lse",
+    "delta",
+    "sink",
+    "dsink",
+    "partials",
+    "counter",
+    "num_tokens",
+    "grid_x",
+    "grid_y",
+    "grid_z",
+)
+# The acceptance bounds of the sink (beside the judge), per draw.  out: e, its rel-L2 over the rel-L2 of the FP64
+# reference rounded to BF16, at most SINK_REL_L2_FACTOR x the e of the same call without a sink (the issue's
+# definition: no BF16 output is closer to the reference than its rounding, and the sink moves that floor -- without a
+# sink, a row with one valid slot is a row of kv exactly).  dq and the accumulator's increment: rel-L2 at most
+# SINK_REL_L2_FACTOR x the same call's without a sink.  Every finite lse within SINK_LSE_FACTOR x the largest lse error
+# without a sink plus SINK_LSE_REL x |lse_ref|; dsink within SINK_DSINK_REL_L2 rel-L2 and every head within
+# SINK_DSINK_HEAD x max |dsink_ref|.  Each call also reports the raw out ratio (rel-L2 with the sink over rel-L2
+# without it) and the same ratio over the rows with more than SINK_MANY_KEYS valid slots.
+SINK_REL_L2_FACTOR = 1.1
+SINK_MANY_KEYS = 16
+SINK_LSE_FACTOR = 4.0
+SINK_LSE_REL = 1e-6
+SINK_DSINK_REL_L2 = 5e-3
+SINK_DSINK_HEAD = 5e-3
+
+
+def _sink_partial_rows(num_queries: int) -> int:
+    """Rows of the sink-gradient stage's partials: one per 64-token chunk."""
+    return -(-int(num_queries) // 64)
+
+
+def _require_nope_sink_program():
+    """The registered NoPE program with its backward and the sink stages on this device's architecture."""
+    _require_nope_program(backward=True)
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    if arch not in cake_jit.stage_arches(NOPE_SINK_FORWARD_STAGE, NOPE_PROGRAM):
+        pytest.skip(
+            f"no sink build for {arch}: the sink stages ship for {list(SINK_ARCHES)}"
+        )
+
+
+# --- registry, launchers and host layer (CPU) ---
+
+
+def test_nope_sink_stages_are_registered_for_sm100a_and_sm103a():
+    """The NoPE record registers the trainable-sink stages last in its launch order, each for ``sm_100a`` /
+    ``sm_103a`` only: the forward's sink build (its own library, the forward's launch geometry, no scanner-warp build)
+    and the sink-gradient stage (256 threads, one CTA per cluster, no cooperative or programmatic dependent
+    launch)."""
+    record = cake_jit.record(NOPE_PROGRAM)
+    stages = cake_jit.registered_stages(NOPE_PROGRAM)
+    assert cake_jit.NOPE_SINK_STAGES == (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
+    assert stages[-2:] == cake_jit.NOPE_SINK_STAGES
+    assert tuple(record["stages"][-2:]) == cake_jit.NOPE_SINK_STAGES
+    for stage in cake_jit.NOPE_SINK_STAGES:
+        assert cake_jit.stage_arches(stage, NOPE_PROGRAM) == SINK_ARCHES
+        assert record[stage]["ffi_entry"] == "run"
+        assert record[stage]["library"].startswith(f"{NOPE_PROGRAM}_")
+        for arch in SINK_ARCHES:
+            assert cake_jit.stage_for(stage, arch, NOPE_PROGRAM) == stage
+            assert cake_jit.library_name(stage, arch, NOPE_PROGRAM) == (
+                f"{record[stage]['library']}_{arch}"
+            )
+        with pytest.raises(RuntimeError, match="ships for"):
+            cake_jit.library_name(stage, "sm_107a", NOPE_PROGRAM)
+    assert NOPE_SINK_FORWARD_STAGE not in cake_jit.SCAN_STAGES
+    others = {
+        record[s]["library"] for s in stages if s not in cake_jit.NOPE_SINK_STAGES
+    }
+    forward, dsink = (record[stage] for stage in cake_jit.NOPE_SINK_STAGES)
+    assert forward["library"] not in others and dsink["library"] not in others
+    assert forward["library"] != dsink["library"]
+    assert forward["launch"] == record["nope_fwd"]["launch"]
+    assert dsink["launch"]["block"] == [256, 1, 1]
+    assert dsink["launch"]["cluster"] == [1, 1, 1]
+    assert dsink["launch"]["cooperative"] is False
+    assert dsink["launch"]["use_pdl"] is False
+
+
+def test_nope_sink_launchers_bind_the_kernel_argument_lists_and_grids():
+    """The generated launchers of the sink stages pass the kernels' lists positionally -- the forward's list with
+    ``sink`` after ``lse``, and the sink gradient's own -- followed by the grid: the forward's one CTA per query, and
+    at least one and at most one CTA per 64-token chunk for the sink gradient (its sum does not depend on the
+    grid)."""
+    missing = [s for s in cake_jit.NOPE_SINK_STAGES if s not in cake_launch.STAGE_ARGS]
+    if missing:
+        pytest.skip(f"export pending: no generated launcher yet for {missing}")
+    args = {s: tuple(cake_launch.STAGE_ARGS[s]) for s in cake_jit.NOPE_SINK_STAGES}
+    assert args[NOPE_SINK_FORWARD_STAGE] == NOPE_FWD_SINK_ARGS
+    assert args[NOPE_DSINK_STAGE] == NOPE_DSINK_ARGS
+    for stage, names in args.items():
+        values = {name: object() for name in names[:-3]}
+        recorder = _Recorder()
+        cake_launch.LAUNCH[stage](recorder, values, (7, 1, 1))
+        assert recorder.calls == [
+            tuple(values[name] for name in names[:-3]) + (7, 1, 1)
+        ]
+    grid = cake_launch.GRID
+    for T in (0, 1, 64, 65, 130, 16384):
+        assert grid[NOPE_SINK_FORWARD_STAGE](T, 4096, 640) == grid["nope_fwd"](
+            T, 4096, 640
+        )
+        x, y, z = grid[NOPE_DSINK_STAGE](T, 4096, 640)
+        assert (y, z) == (1, 1) and 1 <= x <= max(1, _sink_partial_rows(T)), (T, x)
+
+
+def test_nope_sink_needs_the_sink_stages_of_the_architecture(monkeypatch):
+    """A call with a sink plans only where the record ships its stages: the forward's sink build, and the
+    sink-gradient stage for a backward.  ``sm_107a`` has no sink build in this package (``NotImplementedError`` naming
+    the architecture), and a record without a stage refuses the calls that need it."""
+    for arch in SINK_ARCHES:
+        for backward in (False, True):
+            cake_backend._require_nope_sink_stages(arch, backward=backward)
+    for backward in (False, True):
+        with pytest.raises(NotImplementedError, match="sm_107a"):
+            cake_backend._require_nope_sink_stages("sm_107a", backward=backward)
+    record = dict(cake_jit.record(NOPE_PROGRAM))
+    del record[NOPE_DSINK_STAGE]
+    monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, record)
+    cake_backend._require_nope_sink_stages("sm_100a", backward=False)
+    with pytest.raises(NotImplementedError, match=NOPE_DSINK_STAGE):
+        cake_backend._require_nope_sink_stages("sm_100a", backward=True)
+
+
+def test_nope_sink_check_reads_metadata_only():
+    """The sink is a contiguous FP32 ``[64]`` tensor; its values are not read (no device synchronization), so a
+    ``-inf`` head (supported) and a NaN (unsupported, documented) pass the check alike."""
+    check = cake_backend._check_sink
+    check(torch.zeros(NUM_HEADS))
+    check(torch.full((NUM_HEADS,), -math.inf))
+    check(torch.full((NUM_HEADS,), math.nan))
+    check(torch.zeros(2, NUM_HEADS)[1])  # a contiguous row of a wider buffer
+    with pytest.raises(TypeError, match="sink"):
+        check([0.0] * NUM_HEADS)
+    for bad in (
+        torch.zeros(NUM_HEADS, dtype=torch.float64),
+        torch.zeros(NUM_HEADS, dtype=torch.bfloat16),
+        torch.zeros(NUM_HEADS // 2),
+        torch.zeros(1, NUM_HEADS),
+    ):
+        with pytest.raises(ValueError, match=r"float32 \[64\]"):
+            check(bad)
+    with pytest.raises(ValueError, match="contiguous"):
+        check(torch.zeros(2 * NUM_HEADS)[::2])
+
+
+@pytest.mark.parametrize("T", [1, 64, 65, 300])
+def test_workspace_layout_nope_sink_regions(T):
+    """A backward with a sink adds the sink-gradient scratch to the layout of the same binding without one, and
+    changes no other region: ``dsink_partial`` (one FP32 partial per 64-token chunk and head) and ``dsink_ticket``
+    (the 4-byte completion counter).  A forward binding has no backward scratch with or without a sink."""
+    S, topk = 1000, 96
+    rows = cake_backend.nope_dsink_partial_rows(T)
+    assert cake_backend.NOPE_DSINK_CHUNK_TOKENS == 64 and rows == _sink_partial_rows(T)
+    for kw in ({}, {"dkv_direct": True}, {"key_passes": 3}):
+        plain = workspace_layout_nope(T, S, topk, backward=True, **kw)
+        sink = workspace_layout_nope(T, S, topk, backward=True, sink=True, **kw)
+        assert set(sink) - set(plain) == {"dsink_partial", "dsink_ticket"}
+        assert all(sink[k][1] == plain[k][1] for k in plain if k != "total")
+        assert sink["dsink_partial"][1] == rows * NUM_HEADS * 4
+        assert sink["dsink_ticket"][1] == 4
+        regions = [k for k in sink if k != "total"]
+        offsets = [sink[k][0] for k in regions]
+        assert offsets == sorted(offsets)
+        assert all(o % WORKSPACE_ALIGN == 0 for o in offsets)
+        assert sink["total"] - plain["total"] == rows * NUM_HEADS * 4 + WORKSPACE_ALIGN
+    assert workspace_layout_nope(T, S, topk, backward=False, sink=True) == (
+        workspace_layout_nope(T, S, topk, backward=False)
+    )
+
+
+def test_nope_binding_keys_end_with_the_sink_geometry():
+    """The forward and backward keys of a call with a sink are those of the call without one with the sink's
+    geometry in place of the trailing ``None`` (the values are not part of them), so the positions the autograd
+    settlement slices keep their meaning."""
+    q, kv, idx = _nope_host_inputs()
+    scale = NOPE_SOFTMAX_SCALE
+    sink = torch.zeros(NUM_HEADS)
+    geometry = cake_backend._geometry(sink)
+    base = forward_binding_key_nope(q, kv, idx, None, scale)
+    keyed = forward_binding_key_nope(q, kv, idx, None, scale, False, sink)
+    assert base[-1] is None and geometry is not None
+    assert keyed[:-1] == base[:-1] and keyed[-1] == geometry
+    assert keyed == forward_binding_key_nope(
+        q, kv, idx, None, scale, False, torch.full((NUM_HEADS,), -math.inf)
+    )
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    bwd = backward_binding_key_nope(q, kv, idx, out, out, lse, out, None, scale)
+    bwd_sink = backward_binding_key_nope(
+        q, kv, idx, out, out, lse, out, None, scale, sink=sink
+    )
+    assert bwd[-1] is None and bwd_sink[-1] == geometry
+    assert bwd_sink[:-1] == bwd[:-1]
+    assert bwd_sink[:7] == bwd[:7] and bwd_sink[8:12] == bwd[8:12]
+    acc = torch.zeros(16, D_LATENT)
+    assert (
+        backward_binding_key_nope(
+            q, kv, idx, out, out, lse, out, None, scale, None, 1, acc, sink=sink
+        )[-1]
+        == geometry
+    )
+
+
+def test_nope_sink_calls_without_query_rows_neither_bind_nor_launch(monkeypatch):
+    """Without query rows a call with a sink returns empty outputs, the eager backward ``(dq, dkv, dsink)`` with a
+    zero ``dsink`` (no row to sum; nothing accumulated into ``dkv_acc``), and the autograd entry a zero gradient for
+    the sink (its thirteenth input); the sink's metadata is still checked."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a call without query rows must neither bind nor launch")
+
+    monkeypatch.setattr(cake_backend, "record_for", refuse)
+    monkeypatch.setattr(cake_backend, "_binding", refuse)
+    monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", refuse)
+    q, kv, idx = _nope_host_inputs(total_q=0)
+    sink = torch.randn(NUM_HEADS)
+    out, lse, o_lo = forward_nope(q, kv, idx, sink=sink)
+    assert tuple(out.shape) == (0, NUM_HEADS, D_LATENT) and tuple(lse.shape) == (
+        0,
+        NUM_HEADS,
+    )
+    assert tuple(o_lo.shape) == tuple(out.shape)
+    dout = torch.zeros(0, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    dq, dkv, dsink = backward_nope(q, kv, idx, out, o_lo, lse, dout, sink=sink)
+    assert tuple(dq.shape) == (0, NUM_HEADS, D_LATENT) and torch.all(dkv == 0)
+    assert dsink.dtype == torch.float32 and tuple(dsink.shape) == (NUM_HEADS,)
+    assert torch.all(dsink == 0)
+    acc = torch.ones(16, D_LATENT)
+    dq, none, dsink = backward_nope(
+        q, kv, idx, out, o_lo, lse, dout, dkv_acc=acc, sink=sink
+    )
+    assert none is None and torch.all(acc == 1) and torch.all(dsink == 0)
+    assert len(backward_nope(q, kv, idx, out, o_lo, lse, dout)) == 2
+    with pytest.raises(ValueError, match="float32"):
+        forward_nope(q, kv, idx, sink=sink.double())
+    with pytest.raises(ValueError, match="float32"):
+        backward_nope(q, kv, idx, out, o_lo, lse, dout, sink=sink[:32])
+    leaf = sink.clone().requires_grad_()
+    q_leaf = q.clone().requires_grad_()
+    out, lse = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
+        q_leaf,
+        kv,
+        idx,
+        None,
+        NOPE_SOFTMAX_SCALE,
+        None,
+        None,
+        None,
+        1,
+        False,
+        None,
+        False,
+        leaf,
+    )
+    assert len(out.grad_fn.saved_tensors) == 8
+    (grad,) = torch.autograd.grad(out, (leaf,), torch.zeros_like(out))
+    assert grad.dtype == torch.float32 and torch.equal(grad, torch.zeros(NUM_HEADS))
+    out = cake_backend.cake_dsa_sparse_attention_nondet_nope(q_leaf, kv, idx, sink=leaf)
+    (grad,) = torch.autograd.grad(out, (leaf,), torch.zeros_like(out))
+    assert torch.equal(grad, torch.zeros(NUM_HEADS))
+
+
+# --- plans with a sink over the completed record with recording launch entries (supported device, no kernel) ---
+
+
+def _stand_in_sink_launchers(monkeypatch):
+    """The generated tables completed with launchers over the sink stages' lists where the render has not written
+    them yet (the export writes the real ones with the stages)."""
+    rules = {
+        NOPE_SINK_FORWARD_STAGE: (NOPE_FWD_SINK_ARGS, cake_launch.GRID["nope_fwd"]),
+        NOPE_DSINK_STAGE: (
+            NOPE_DSINK_ARGS,
+            lambda num_queries, num_kv, topk: (
+                max(1, _sink_partial_rows(num_queries)),
+                1,
+                1,
+            ),
+        ),
+    }
+    for stage, (names, rule) in rules.items():
+        if stage in cake_launch.LAUNCH:
+            continue
+
+        def launch(run, values, grid, names=names[:-3]):
+            run(*(values[name] for name in names), *grid)
+
+        monkeypatch.setitem(cake_launch.LAUNCH, stage, launch)
+        monkeypatch.setitem(cake_launch.GRID, stage, rule)
+        monkeypatch.setitem(cake_launch.STAGE_ARGS, stage, list(names))
+
+
+def test_nope_sink_plans_launch_the_sink_build_and_the_sink_gradient_once(monkeypatch):
+    """With a sink the forward launches the forward's sink build (the forward's values plus ``sink``; a plan of its
+    own beside the call without one), and the backward launches the delta stage, then the sink-gradient stage once
+    over all ``T`` rows -- ``lse``, the delta buffer, the ``sink``, the fresh ``dsink [64]``, the FP32 partials
+    ``[ceil(T / 64), 64]``, the zero-filled u32 counter and ``num_tokens = T`` -- then the main stages, with one and
+    with four key passes.  The autograd entry saves the sink as its eighth tensor and returns the stage's ``dsink`` as
+    the sink's gradient; the prepared runner launches the same order, zero-fills a stale counter and returns ``(dq,
+    dkv, dsink)``, and its workspace is that of the binding without a sink plus the sink-gradient scratch.  On
+    ``sm_107a`` a sink is refused before any launch."""
+    calls = []
+    _stand_in_nope_program(monkeypatch, calls)
+    _stand_in_sink_launchers(monkeypatch)
+    device = torch.device("cuda")
+    arch = cake_backend.arch_for(device)
+    T, S, K = 130, 1040, 5
+    q, kv, idx, dout = _nope_device_inputs(T, S, K)
+    sink = torch.randn(NUM_HEADS, device="cuda")
+    if arch not in SINK_ARCHES:
+        with pytest.raises(NotImplementedError, match=arch):
+            forward_nope(q, kv, idx, sink=sink)
+        out, lse, o_lo = _saved_outputs(T)
+        with pytest.raises(NotImplementedError, match=arch):
+            backward_nope(q, kv, idx, out, o_lo, lse, dout, sink=sink)
+        assert calls == []
+        return
+    with pytest.raises(ValueError, match="one CUDA device"):
+        forward_nope(q, kv, idx, sink=sink.cpu())
+    out, lse, o_lo = forward_nope(q, kv, idx, sink=sink)
+    assert [c[0] for c in calls] == [NOPE_SINK_FORWARD_STAGE]
+    v = calls[0][1]
+    assert v["sink"] is sink and v["q_latent"] is q and v["kv_latent"] is kv
+    assert v["out"] is out and v["lse"] is lse and v["o_lo"] is o_lo
+    assert (v["num_queries"], v["num_kv"], v["topk"]) == (T, S, K)
+    assert (v["grid_x"], v["grid_y"], v["grid_z"]) == (T, 1, 1)
+    del calls[:]
+    forward_nope(q, kv, idx)
+    assert [c[0] for c in calls] == [cake_jit.stage_for("nope_fwd", arch, NOPE_PROGRAM)]
+    assert "sink" not in calls[0][1]
+    keys = [k for k in cake_backend.BINDING_CACHE._entries if k[0] == "nope_fwd"]
+    assert sorted(k[-1] is None for k in keys) == [False, True]
+    for passes in (1, 4):
+        del calls[:]
+        dq, dkv, dsink = backward_nope(
+            q, kv, idx, out, o_lo, lse, dout, key_passes=passes, sink=sink
+        )
+        stages = [c[0] for c in calls]
+        assert stages[:2] == ["nope_bwd_delta", NOPE_DSINK_STAGE], stages
+        assert stages.count(NOPE_DSINK_STAGE) == 1 and len(stages) > 2, stages
+        if passes > 1:
+            assert "nope_bwd_compact" in stages, stages
+        delta, d = calls[0][1], calls[1][1]
+        assert d["lse"] is lse and d["sink"] is sink and d["dsink"] is dsink
+        assert d["delta"] is delta["delta"] and d["num_tokens"] == T
+        assert d["partials"].dtype == torch.float32
+        assert tuple(d["partials"].shape) == (_sink_partial_rows(T), NUM_HEADS)
+        assert d["counter"].dtype == torch.uint32 and tuple(d["counter"].shape) == (1,)
+        assert int(d["counter"].view(torch.int32)[0]) == 0
+        assert (d["grid_y"], d["grid_z"]) == (1, 1)
+        assert 1 <= d["grid_x"] <= _sink_partial_rows(T)
+        assert dsink.dtype == torch.float32 and tuple(dsink.shape) == (NUM_HEADS,)
+        assert (
+            tuple(dq.shape) == (T, NUM_HEADS, D_LATENT) and dkv.dtype == torch.float32
+        )
+    # the autograd entry: the sink is the thirteenth input and the eighth saved tensor
+    cake_backend.BINDING_CACHE._entries.clear()
+    q_leaf = q.detach().clone().requires_grad_()
+    sink_leaf = sink.detach().clone().requires_grad_()
+    del calls[:]
+    out_a, lse_a = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+        q_leaf, kv, idx, return_lse=True, sink=sink_leaf
+    )
+    assert [c[0] for c in calls] == [NOPE_SINK_FORWARD_STAGE]
+    saved = out_a.grad_fn.saved_tensors
+    assert len(saved) == 8 and saved[7].data_ptr() == sink_leaf.data_ptr()
+    prep = out_a.grad_fn.nope_prep
+    assert prep.has_sink and prep.sink_key == cake_backend._geometry(sink_leaf)
+    del calls[:]
+    dq_a, dsink_a = torch.autograd.grad(out_a, (q_leaf, sink_leaf), dout)
+    stages = [c[0] for c in calls]
+    assert stages[:2] == ["nope_bwd_delta", NOPE_DSINK_STAGE], stages
+    assert calls[1][1]["dsink"].data_ptr() == dsink_a.data_ptr()
+    assert calls[1][1]["sink"].data_ptr() == sink_leaf.data_ptr()
+    (bwd_key,) = [k for k in cake_backend.BINDING_CACHE._entries if k[0] == "nope_bwd"]
+    assert bwd_key[-1] == cake_backend._geometry(sink_leaf)
+    out_n = cake_backend.cake_dsa_sparse_attention_nondet_nope(q_leaf, kv, idx)
+    assert (
+        len(out_n.grad_fn.saved_tensors) == 7 and not out_n.grad_fn.nope_prep.has_sink
+    )
+    # the prepared runner
+    del calls[:]
+    runner = prepare_dsa_nope_train(q, kv, idx, dout=dout, sink=sink)
+    assert runner.has_sink and {"dsink_partial", "dsink_ticket"} <= set(runner.layout)
+    plain = dsa_nope_train_workspace_size(T, S, K, device)
+    assert runner.layout["total"] == dsa_nope_train_workspace_size(
+        T, S, K, device, sink=True
+    )
+    assert runner.layout["total"] - plain == (
+        _sink_partial_rows(T) * NUM_HEADS * 4 + WORKSPACE_ALIGN
+    )
+    # a stale counter: every backward starts it at zero
+    runner.tensors["dsink_ticket"].fill_(5)
+    runner.forward()
+    dq_r, dkv_r, dsink_r = runner.backward()
+    stages = [c[0] for c in calls]
+    assert stages[:3] == [
+        NOPE_SINK_FORWARD_STAGE,
+        "nope_bwd_delta",
+        NOPE_DSINK_STAGE,
+    ], stages
+    d = calls[2][1]
+    assert d["dsink"] is dsink_r and int(d["counter"].view(torch.int32)[0]) == 0
+    assert d["partials"].data_ptr() == runner.tensors["dsink_partial"].data_ptr()
+    mine = torch.empty(NUM_HEADS, device="cuda")
+    given = prepare_dsa_nope_train(q, kv, idx, dout=dout, sink=sink, dsink=mine)
+    assert given.backward()[2] is mine
+    with pytest.raises(ValueError, match="dsink"):
+        prepare_dsa_nope_train(q, kv, idx, dout=dout, dsink=mine)
+    with pytest.raises(ValueError, match="dsink"):
+        prepare_dsa_nope_train(q, kv, idx, sink=sink, dsink=mine)
+    with pytest.raises(ValueError, match="dsink"):
+        prepare_dsa_nope_train(
+            q, kv, idx, dout=dout, sink=sink, dsink=torch.empty(32, device="cuda")
+        )
+
+
+# --- accuracy with a sink (GPU, the delivered kernels) ---
+
+# name -> (T, index row width, make_sink_inputs keywords, key_passes): the widths 640 and 128 of the model's layers
+# at T 1,024 and 4,096, and at T 1,024 width 640 the variants of the acceptance: q x 5, a head-major dout, the
+# all-compressed layout (ratio 1), and one and four key passes.  Every case has one-token documents, holes in the
+# middle of the rows, a row without a valid slot and a destination map with repeated rows.
+SINK_CASES = {
+    "w640_t1024": (1024, 640, {}, None),
+    "w640_t4096": (4096, 640, {}, None),
+    "w128_t1024": (1024, 128, {}, None),
+    "w128_t4096": (4096, 128, {}, None),
+    "w640_t1024_q_x5": (1024, 640, {"q_scale": 5.0}, None),
+    "w640_t1024_head_major_dout": (1024, 640, {"dout_layout": "head_major"}, None),
+    "w640_t1024_ratio1": (1024, 640, {"ratio": 1}, None),
+    "w640_t1024_key_passes1": (1024, 640, {}, 1),
+    "w640_t1024_key_passes4": (1024, 640, {}, 4),
+}
+
+
+def _sink_problem(inp, *, sink=True) -> "nv.Problem":
+    """The judged problem of a sink draw: the draw's rows at the sink scale, with its sink (``sink=False``: the same
+    problem without one)."""
+    return nv.Problem(
+        q_latent=inp.q,
+        kv_latent=inp.kv,
+        indices=inp.indices,
+        dout=inp.dout,
+        scale=SINK_SCALE,
+        sink=inp.sink if sink else None,
+    )
+
+
+def _rel_l2(value: torch.Tensor, ref: torch.Tensor) -> float:
+    """``||value - ref|| / ||ref||`` in FP64 over the elements where ``ref`` is finite."""
+    ref = ref.double()
+    keep = torch.isfinite(ref)
+    ref = torch.where(keep, ref, 0.0)
+    diff = torch.where(keep, value.double() - ref, 0.0)
+    return float(torch.linalg.vector_norm(diff) / torch.linalg.vector_norm(ref))
+
+
+def _max_abs_error(value: torch.Tensor, ref: torch.Tensor) -> float:
+    """The largest ``|value - ref|`` in FP64 over the elements where ``ref`` is finite."""
+    ref = ref.double()
+    keep = torch.isfinite(ref)
+    return float(
+        torch.where(
+            keep, (value.double() - torch.where(keep, ref, 0.0)).abs(), 0.0
+        ).max()
+    )
+
+
+def _sink_calls(inp, *, sink, key_passes, dst_map, acc_rows, gen) -> dict:
+    """The calls of one draw with ``sink`` (``None``: the same calls without one), by label: the flat autograd entry
+    (``dq`` and, with a sink, ``dsink`` from one ``autograd.grad``; the FP32 accumulator through ``dst_map``, judged by
+    its increment over random contents, with columns past 512 no key reaches) and the eager pair ``forward_nope`` /
+    ``backward_nope`` (the step entries' backend: ``o_lo``, and the accumulator over zeros)."""
+    acc = torch.randn(acc_rows, D_LATENT + 8, device="cuda", generator=gen)
+    before = acc.clone()
+    q_leaf = inp.q.detach().clone().requires_grad_()
+    wrt = [q_leaf]
+    sink_leaf = None
+    if sink is not None:
+        sink_leaf = sink.detach().clone().requires_grad_()
+        wrt.append(sink_leaf)
+    out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+        q_leaf,
+        inp.kv,
+        inp.indices,
+        softmax_scale=SINK_SCALE,
+        return_lse=True,
+        key_passes=key_passes,
+        dkv_acc=acc,
+        dkv_dst_map=dst_map,
+        sink=sink_leaf,
+    )
+    grads = torch.autograd.grad(out, wrt, inp.dout)
+    autograd = dict(
+        out=out.detach(),
+        lse=lse,
+        dq=grads[0],
+        dkv_acc=nv.Acc(before=before, after=acc, dst_map=dst_map),
+    )
+    o, l, o_lo = forward_nope(
+        inp.q, inp.kv, inp.indices, softmax_scale=SINK_SCALE, sink=sink
+    )
+    acc_e = torch.zeros(acc_rows, D_LATENT, device="cuda")
+    got = backward_nope(
+        inp.q,
+        inp.kv,
+        inp.indices,
+        o,
+        o_lo,
+        l,
+        inp.dout,
+        softmax_scale=SINK_SCALE,
+        key_passes=key_passes,
+        dkv_acc=acc_e,
+        dkv_dst_map=dst_map,
+        sink=sink,
+    )
+    torch.cuda.synchronize()
+    assert got[1] is None and len(got) == (2 if sink is None else 3)
+    eager = dict(
+        out=o,
+        lse=l,
+        o_lo=o_lo,
+        dq=got[0],
+        dkv_acc=nv.Acc(before=torch.zeros_like(acc_e), after=acc_e, dst_map=dst_map),
+    )
+    if sink is not None:
+        autograd["dsink"], eager["dsink"] = grads[1], got[2]
+    return {"autograd": autograd, "eager": eager}
+
+
+def _sink_out_ratios(found, oracle, form: str, many_keys: torch.Tensor) -> dict:
+    """The ``out`` ratios of one call with the sink to the same call without it (outputs ``"sink <form> out"`` and
+    ``"no sink <form> out"``): ``raw``, of their rel-L2 errors; ``floor``, of the rel-L2 errors of their FP64
+    references rounded to BF16; ``e = raw / floor``, of their e (a call's rel-L2 over its floor), the bounded one;
+    and ``many_keys``, the raw ratio over the rows ``many_keys`` selects (``[T]``, more than :data:`SINK_MANY_KEYS`
+    valid slots)."""
+    errors = []
+    for side in ("sink", "no sink"):
+        got, ref = found[f"{side} {form} out"], oracle[f"{side} {form} out"]
+        errors.append(
+            (
+                _rel_l2(got, ref),
+                _rel_l2(ref.to(torch.bfloat16), ref),
+                _rel_l2(got[many_keys], ref[many_keys]),
+            )
+        )
+    (raw_s, floor_s, many_s), (raw_n, floor_n, many_n) = errors
+    raw, floor = raw_s / raw_n, floor_s / floor_n
+    return dict(raw=raw, floor=floor, e=raw / floor, many_keys=many_s / many_n)
+
+
+def _assert_sink_bounds(found, oracle, out_ratios: dict) -> None:
+    """The acceptance bounds of one draw beside the judge, for each form of ``out_ratios`` (form ->
+    :func:`_sink_out_ratios`; outputs named ``"sink <form> <name>"`` with the sink and ``"no sink <form> <name>"`` for
+    the same call without it): the ``e`` ratio of ``out`` at most :data:`SINK_REL_L2_FACTOR`; the rel-L2 of ``dq``
+    and the accumulator's increment at most :data:`SINK_REL_L2_FACTOR` x the call's without a sink; every finite
+    ``lse`` within :data:`SINK_LSE_FACTOR` x the largest ``lse`` error without a sink plus :data:`SINK_LSE_REL` x
+    ``|lse_ref|``, and ``-inf`` exactly where the reference is; ``dsink`` within :data:`SINK_DSINK_REL_L2` rel-L2 and
+    every head within :data:`SINK_DSINK_HEAD` x ``max |dsink_ref|``; on the dominant head (about 100 above the
+    scores) ``lse`` is the sink to FP32 rounding on every row."""
+    dominant = max(nope_ref.SINK_SPECIAL_HEADS, key=nope_ref.SINK_SPECIAL_HEADS.get)
+    top = nope_ref.SINK_SPECIAL_HEADS[dominant]
+    half_ulp = 0.5 * torch.finfo(torch.float32).eps * 2.0 ** math.floor(math.log2(top))
+    for form, ratios in out_ratios.items():
+        with_sink, without = f"sink {form} ", f"no sink {form} "
+        assert ratios["e"] <= SINK_REL_L2_FACTOR, (
+            f"{form} out: e (rel-L2 over its BF16 floor) {ratios['e']:.4f} x the call's without a sink "
+            f"(raw {ratios['raw']:.4f} x, floor {ratios['floor']:.4f} x; at most {SINK_REL_L2_FACTOR} x)"
+        )
+        for name in ("dq", "dkv_acc"):
+            base = _rel_l2(found[without + name], oracle[without + name])
+            got = _rel_l2(found[with_sink + name], oracle[with_sink + name])
+            assert got <= SINK_REL_L2_FACTOR * base, (
+                f"{form} {name}: rel-L2 {got:.4e} with the sink, {base:.4e} without "
+                f"(at most {SINK_REL_L2_FACTOR} x)"
+            )
+        base_lse = _max_abs_error(found[without + "lse"], oracle[without + "lse"])
+        lse = found[with_sink + "lse"].double()
+        ref = oracle[with_sink + "lse"].double()
+        finite = torch.isfinite(ref)
+        assert torch.equal(torch.isfinite(lse), finite), (
+            f"{form} lse: non-finite where the reference is finite"
+        )
+        assert torch.equal(lse[~finite], ref[~finite]), (
+            f"{form} lse: not -inf where the reference is"
+        )
+        ref0 = torch.where(finite, ref, 0.0)
+        err = torch.where(finite, (lse - ref0).abs(), 0.0)
+        excess = float(
+            (err - SINK_LSE_FACTOR * base_lse - SINK_LSE_REL * ref0.abs()).max()
+        )
+        assert excess <= 0.0, (
+            f"{form} lse: an error exceeds {SINK_LSE_FACTOR} x {base_lse:.3e} + {SINK_LSE_REL} |lse_ref| "
+            f"by {excess:.3e}"
+        )
+        worst = float((lse[:, dominant] - ref[:, dominant]).abs().max())
+        assert worst <= half_ulp, (
+            f"{form} lse of the dominant head: {worst:.3e} from the sink"
+        )
+        dsink = found[with_sink + "dsink"].double()
+        want = oracle[with_sink + "dsink"].double()
+        rel = float(
+            torch.linalg.vector_norm(dsink - want) / torch.linalg.vector_norm(want)
+        )
+        assert rel <= SINK_DSINK_REL_L2, f"{form} dsink: rel-L2 {rel:.3e}"
+        head = float((dsink - want).abs().max())
+        limit = SINK_DSINK_HEAD * float(want.abs().max())
+        assert head <= limit, f"{form} dsink: a head's error {head:.3e} > {limit:.3e}"
+
+
+@pytest.mark.parametrize("case", sorted(SINK_CASES))
+def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
+    case, record_property
+):
+    """Per draw, the rows of the sink's model (window slots, then compressed slots; two one-token documents, holes in
+    the middle of the rows, one row without a valid slot), the sink vector of the acceptance (ordinary heads, a
+    ``-inf``, a dominant and a negligible head), the scale ``512 ** -0.5`` and an accumulator whose destination rows
+    each receive two key rows: the flat autograd entry and the eager pair, with the sink and without it.  Every
+    output -- ``out``, ``lse``, ``o_sum``, ``dq``, the accumulator's increment and ``dsink`` -- is judged against the
+    FP64 oracle beside the BF16 naive tier (the calls without a sink against the problem without one), the contract
+    holds (``lse`` the sink on the row without a valid slot, zero ``out`` / ``dq`` there, ``dsink`` exactly 0 on the
+    ``-inf`` head, every output finite), and the acceptance bounds hold (:func:`_assert_sink_bounds`).  Each call's
+    ``out`` ratios (:func:`_sink_out_ratios`: ``e``, raw, floor and the rows with more than :data:`SINK_MANY_KEYS`
+    valid slots) are recorded (``sink_out_ratios``) and printed, one line per call."""
+    _require_nope_sink_program()
+    T, width, make_kw, key_passes = SINK_CASES[case]
+
+    def draw(s, j):
+        inp = nope_ref.make_sink_inputs(T, width, seed=s, **make_kw)
+        S = inp.total_k
+        # every destination row receives two key rows; five more rows no key row maps to
+        dst_map = (torch.arange(S, device="cuda", dtype=torch.int32) // 2).contiguous()
+        acc_rows = (S + 1) // 2 + 5
+        gen = torch.Generator(device="cuda").manual_seed(s + 3)
+        judged = [
+            nv.judged(
+                _sink_problem(inp, sink=sink is not None),
+                _sink_calls(
+                    inp,
+                    sink=sink,
+                    key_passes=key_passes,
+                    dst_map=dst_map,
+                    acc_rows=acc_rows,
+                    gen=gen,
+                ),
+                prefix=prefix,
+            )
+            for prefix, sink in (("sink ", inp.sink), ("no sink ", None))
+        ]
+        found, oracle, naive = nv.merge(*judged)
+        many_keys = (inp.indices >= 0).sum(1) > SINK_MANY_KEYS
+        out_ratios = {
+            form: _sink_out_ratios(found, oracle, form, many_keys)
+            for form in ("autograd", "eager")
+        }
+        for form, r in out_ratios.items():
+            record_property("sink_out_ratios", dict(case=case, draw=j, form=form, **r))
+            print(
+                f"sink out {case} draw {j} {form}: e {r['e']:.4f} raw {r['raw']:.4f} "
+                f"floor {r['floor']:.4f} rows over {SINK_MANY_KEYS} valid slots {r['many_keys']:.4f}"
+            )
+        _assert_sink_bounds(found, oracle, out_ratios)
+        return found, oracle, naive
+
+    nv.judge_draws(
+        record_property, draw, seed=SINK_SEED + 17 * sorted(SINK_CASES).index(case)
+    )
+
+
+def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
+    """A call whose every row has no valid slot (``-1`` slots, then slots past ``S``): ``out``, ``o_lo`` and ``dq``
+    exactly 0, ``lse`` exactly the sink on every row (``-inf`` on the ``-inf`` head), no contribution to the
+    accumulator (its bits unchanged) or to the fresh ``dkv``, and ``dsink`` exactly 0 -- through the autograd entry
+    and the eager pair.  These outputs do not change with the inputs: the contract alone holds them."""
+    _require_nope_sink_program()
+    T, S, width = 192, 512, 640
+    sink = nope_ref.sink_vector(torch.Generator().manual_seed(SINK_SEED + 9))
+    q, kv, dout = _nope_qkv(T, S, seed=SINK_SEED + 9)
+    zero_rows = torch.zeros(T, NUM_HEADS, D_LATENT, dtype=torch.bfloat16, device="cuda")
+    for fill in (-1, S):
+        idx = torch.full((T, width), fill, dtype=torch.int32, device="cuda")
+        q_leaf = q.detach().clone().requires_grad_()
+        sink_leaf = sink.detach().clone().requires_grad_()
+        acc = torch.randn(S, D_LATENT + 8, device="cuda")
+        before = acc.clone()
+        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            q_leaf,
+            kv,
+            idx,
+            softmax_scale=SINK_SCALE,
+            return_lse=True,
+            dkv_acc=acc,
+            sink=sink_leaf,
+        )
+        dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), dout)
+        o, l, o_lo = forward_nope(q, kv, idx, softmax_scale=SINK_SCALE, sink=sink)
+        dq_e, dkv_e, dsink_e = backward_nope(
+            q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
+        )
+        torch.cuda.synchronize()
+        for got in (out, dq, o, o_lo, dq_e):
+            assert torch.equal(got, zero_rows), fill
+        for got in (lse, l):
+            assert torch.equal(got, sink.expand(T, NUM_HEADS)), fill
+        assert torch.equal(acc.view(torch.int32), before.view(torch.int32)), fill
+        assert torch.equal(dkv_e, torch.zeros(S, D_LATENT, device="cuda")), fill
+        for got in (dsink, dsink_e):
+            assert torch.equal(got, torch.zeros(NUM_HEADS, device="cuda")), fill
+
+
+def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(record_property):
+    """``torch.utils.checkpoint(..., use_reentrant=False)`` over the flat entry with a sink: the recomputed forward
+    meets the same sink, and ``out``, ``dq``, the accumulator's increment and ``dsink`` are judged.  An eager call with
+    a sink saves the seven tensors of a call without one plus the reference to the caller's ``sink``, and a
+    checkpointed call with a sink keeps no more device memory after its forward than the same call without one."""
+    _require_nope_sink_program()
+
+    def call(q, kv, indices, sink, acc):
+        return cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            q, kv, indices, softmax_scale=SINK_SCALE, dkv_acc=acc, sink=sink
+        )
+
+    def draw(s, j):
+        inp = nope_ref.make_sink_inputs(1024, 640, seed=s)
+        q_leaf = inp.q.detach().clone().requires_grad_()
+        sink_leaf = inp.sink.detach().clone().requires_grad_()
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        out = checkpoint(
+            call, q_leaf, inp.kv, inp.indices, sink_leaf, acc, use_reentrant=False
+        )
+        dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), inp.dout)
+        torch.cuda.synchronize()
+        run = dict(
+            out=out.detach(),
+            dq=dq,
+            dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+            dsink=dsink,
+        )
+        return nv.judged(_sink_problem(inp), {"": run})
+
+    nv.judge_draws(record_property, draw, seed=SINK_SEED + 200)
+    inp = nope_ref.make_sink_inputs(1024, 640, seed=SINK_SEED + 201)
+    acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+    q_leaf = inp.q.detach().clone().requires_grad_()
+    sink_leaf = inp.sink.detach().clone().requires_grad_()
+    saved = call(q_leaf, inp.kv, inp.indices, sink_leaf, acc).grad_fn.saved_tensors
+    assert len(saved) == 8 and saved[7].data_ptr() == sink_leaf.data_ptr()
+    plain = call(q_leaf, inp.kv, inp.indices, None, acc).grad_fn.saved_tensors
+    assert len(plain) == 7
+    assert [t.data_ptr() for t in saved[:2]] == [t.data_ptr() for t in plain[:2]]
+    del saved, plain
+    kept = {}
+    for label, sink in (
+        ("sink", sink_leaf),
+        ("none", None),
+        ("sink", sink_leaf),
+        ("none", None),
+    ):
+        # the second round is measured: the first planned the bindings
+        kept[label] = _ckpt_retained_mib(call, q_leaf, inp.kv, inp.indices, sink, acc)
+    assert kept["sink"] <= kept["none"] + 512 / MIB, kept
+
+
+def test_nope_sink_step_captures_into_a_cuda_graph_and_does_not_synchronize(
+    record_property,
+):
+    """A step of the flat entry with a sink (forward and ``autograd.grad`` to ``q`` and ``sink``, the accumulator
+    through a destination map with repeated rows) captures into a CUDA graph and replays, judged beside the eager
+    step; in steady state the step makes no pageable host-to-device copy and no synchronizing call and returns while
+    queued device work still runs, and the prepared runner's step with a sink neither synchronizes nor allocates."""
+    from tests.experimental.test_helpers.cake_host_sync import (
+        census,
+        nonblocking,
+        summary,
+    )
+
+    _require_nope_sink_program()
+
+    def stepper(inp):
+        S = inp.total_k
+        dst_map = (torch.arange(S, device="cuda", dtype=torch.int32) // 2).contiguous()
+        acc = torch.zeros((S + 1) // 2, D_LATENT, device="cuda")
+        q_leaf = inp.q.detach().clone().requires_grad_()
+        sink_leaf = inp.sink.detach().clone().requires_grad_()
+
+        def step():
+            acc.zero_()
+            out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+                q_leaf,
+                inp.kv,
+                inp.indices,
+                softmax_scale=SINK_SCALE,
+                return_lse=True,
+                dkv_acc=acc,
+                dkv_dst_map=dst_map,
+                sink=sink_leaf,
+            )
+            dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), inp.dout)
+            return out, lse, dq, dsink, acc
+
+        return step, dst_map
+
+    def case(s, j):
+        inp = nope_ref.make_sink_inputs(1024, 640, seed=s)
+        step, dst_map = stepper(inp)
+        eager, captured = _graph_capture(step)
+        replayed = [t.detach().clone() for t in captured]
+        runs = {}
+        for label, got in (("eager", eager), ("graph", replayed)):
+            run = dict(zip(("out", "lse", "dq", "dsink"), got[:4], strict=True))
+            run["dkv_acc"] = nv.Acc(
+                before=torch.zeros_like(got[4]), after=got[4], dst_map=dst_map
+            )
+            runs[label] = run
+        return nv.judged(_sink_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SINK_SEED + 300)
+    inp = nope_ref.make_sink_inputs(1024, 640, seed=SINK_SEED + 301)
+    step, dst_map = stepper(inp)
+    step()
+    torch.cuda.synchronize()
+    c = census(step, torch.device("cuda"))
+    assert nonblocking(c), summary(c)
+    acc = torch.zeros(dst_map.numel() // 2 + 1, D_LATENT, device="cuda")
+    runner = prepare_dsa_nope_train(
+        inp.q,
+        inp.kv,
+        inp.indices,
+        dout=inp.dout,
+        softmax_scale=SINK_SCALE,
+        dkv_acc=acc,
+        dkv_dst_map=dst_map,
+        sink=inp.sink,
+    )
+    runner.step()
+    torch.cuda.synchronize()
+    c = census(runner.step, torch.device("cuda"))
+    assert nonblocking(c), summary(c)
+    assert c["device_alloc"] == 0, summary(c)
+
+
+def test_nope_sink_new_token_and_key_counts_load_no_new_module(record_property):
+    """New ``T`` and ``S`` values run on the modules already loaded (one library per stage and architecture, no
+    shape in its build): after a warm-up step, the step of every draw -- each with its own ``T`` and hence its own
+    ``S``, all on the one-launch route of the flat entry -- adds no entry and no miss to the module loader's cache,
+    and its outputs are judged."""
+    _require_nope_sink_program()
+
+    def step(inp):
+        q_leaf = inp.q.detach().clone().requires_grad_()
+        sink_leaf = inp.sink.detach().clone().requires_grad_()
+        acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
+        out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope(
+            q_leaf,
+            inp.kv,
+            inp.indices,
+            softmax_scale=SINK_SCALE,
+            return_lse=True,
+            dkv_acc=acc,
+            sink=sink_leaf,
+        )
+        dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), inp.dout)
+        torch.cuda.synchronize()
+        return dict(
+            out=out.detach(),
+            lse=lse,
+            dq=dq,
+            dkv_acc=nv.Acc(before=torch.zeros_like(acc), after=acc),
+            dsink=dsink,
+        )
+
+    step(nope_ref.make_sink_inputs(600, 640, seed=SINK_SEED + 400))
+    loaded = cake_jit.load_cake_dsa_train_module.cache_info()
+
+    def draw(s, j):
+        T = 600 + 31 * j  # T * 640 < 2^20 slots on every draw: one route
+        assert cake_backend.nope_flat_index_mode(T, 640) == "mask"
+        inp = nope_ref.make_sink_inputs(T, 640, seed=s)
+        run = step(inp)
+        after = cake_jit.load_cake_dsa_train_module.cache_info()
+        assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (
+            T,
+            inp.total_k,
+            loaded,
+            after,
+        )
+        return nv.judged(_sink_problem(inp), {"": run})
+
+    nv.judge_draws(record_property, draw, seed=SINK_SEED + 400)

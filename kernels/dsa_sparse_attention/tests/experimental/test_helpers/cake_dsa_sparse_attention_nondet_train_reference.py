@@ -997,3 +997,140 @@ def calibrate_beta_nope(
         else:
             hi = mid
     return 0.5 * (lo + hi)
+
+
+# ---------------------------------------------------------------------------------------------------------------------
+# The trainable per-head sink of the NoPE form: the index rows and inputs of the model the sink serves (a shared
+# 512-wide KV row, K = V, 64 heads, scale 512 ** -0.5, a window of 128 slots followed by 512 compressed slots).
+# ---------------------------------------------------------------------------------------------------------------------
+
+SINK_WINDOW = 128
+SINK_TOPK = 512
+SINK_SCALE = D_LATENT**-0.5
+#: The special heads of :func:`sink_vector`: a disabled (``-inf``), a dominant (107: about 100 above the scores, past
+#: FP32's ``exp`` range) and a negligible (-30) head; the others are ``7 + 2 * randn`` (near the rows' log-sum-exp of
+#: 640 scores).
+SINK_SPECIAL_HEADS = {0: float("-inf"), 1: 107.0, 2: -30.0}
+
+
+def sink_index_rows(
+    doc_lens,
+    ratio: int,
+    gen: torch.Generator,
+    *,
+    window: int = SINK_WINDOW,
+    topk: int = SINK_TOPK,
+) -> tuple[torch.Tensor, int]:
+    """Packed index rows ``[T, window + topk]`` (``[T, window]`` for ``ratio == 0``) and the key count ``S`` of the
+    model's layer layout, on the host: the window slots of a document's token ``i`` address its last ``window`` token
+    rows (``-1`` past the token, at the row's end for the first tokens), the compressed slots a sorted random top-k
+    of the document's ``i // ratio`` visible compressed rows (rows ``T..`` of ``kv``, each document's after the
+    previous document's; ``-1`` where fewer are visible).  ``ratio`` 2 or 1: the compressed layers (width 640);
+    ``ratio`` 0: the window-only layers (width 128)."""
+    total, rows, comp_base = sum(doc_lens), [], 0
+    width = topk if ratio else 0
+    start = 0
+    for n in doc_lens:
+        end = torch.arange(n)[:, None]
+        win = (end - window + 1).clamp(0) + torch.arange(min(n, window))
+        win = torch.where(win > end, -1, win + start)
+        win = torch.cat([win, win.new_full((n, window - win.shape[1]), -1)], 1)
+        sel = torch.full((n, width), -1, dtype=torch.long)
+        n_comp = n // ratio if ratio else 0
+        if n_comp:
+            lens = (torch.arange(1, n + 1) // ratio)[:, None]
+            score = torch.rand(n, n_comp, generator=gen).masked_fill(
+                torch.arange(n_comp) >= lens, -torch.inf
+            )
+            k = min(topk, n_comp)
+            top = score.topk(k, -1).indices.sort(-1).values
+            sel[:, :k] = torch.where(top < lens, top + total + comp_base, -1)
+        rows.append(torch.cat([win, sel], 1))
+        comp_base += n_comp
+        start += n
+    return torch.cat(rows).int(), total + comp_base
+
+
+def sink_vector(gen: torch.Generator, device="cuda") -> torch.Tensor:
+    """FP32 ``[64]``: ``7 + 2 * randn`` with the :data:`SINK_SPECIAL_HEADS`."""
+    sink = 7 + 2 * torch.randn(NUM_HEADS, generator=gen)
+    for head, value in SINK_SPECIAL_HEADS.items():
+        sink[head] = value
+    return sink.float().to(device)
+
+
+def sink_doc_lens(total_q: int) -> list[int]:
+    """Document lengths of a ``total_q``-token pack with two one-token documents, a short one and a long one."""
+    assert total_q > 40, total_q
+    return [1, 1, 37, total_q - 39]
+
+
+@dataclass
+class SinkInputs:
+    """One NoPE problem with a sink: BF16 ``q [T, 64, 512]`` (times ``q_scale``), ``kv [S, 512]``, ``dout``
+    (contiguous or head-major), int32 global ``indices [T, width]`` with holes inside the rows and one row without a
+    valid slot, and the FP32 ``sink [64]``."""
+
+    q: torch.Tensor
+    kv: torch.Tensor
+    indices: torch.Tensor
+    sink: torch.Tensor
+    dout: torch.Tensor
+    ratio: int
+    empty_row: int
+
+    @property
+    def total_q(self) -> int:
+        return int(self.q.shape[0])
+
+    @property
+    def total_k(self) -> int:
+        return int(self.kv.shape[0])
+
+
+def make_sink_inputs(
+    total_q: int,
+    width: int,
+    *,
+    seed: int,
+    ratio: Optional[int] = None,
+    q_scale: float = 1.0,
+    dout_layout: str = "contiguous",
+    device="cuda",
+) -> SinkInputs:
+    """The inputs of the sink tests and benchmark: :func:`sink_index_rows` over :func:`sink_doc_lens` (``ratio`` 2 for
+    width 640 and 0 for width 128 unless given), a hole planted in the middle of every row that has three valid
+    slots or more (the slot halfway between its first and last valid one), the row ``T // 2`` emptied (all ``-1``),
+    ``q`` scaled by ``q_scale`` before the BF16 rounding, and :func:`sink_vector`."""
+    if ratio is None:
+        ratio = 2 if width == SINK_WINDOW + SINK_TOPK else 0
+    if (SINK_WINDOW + (SINK_TOPK if ratio else 0)) != width:
+        raise ValueError(f"width {width} does not match ratio {ratio}")
+    gen = torch.Generator().manual_seed(seed)
+    rows, num_kv = sink_index_rows(sink_doc_lens(total_q), ratio, gen)
+    valid = rows >= 0
+    count = valid.sum(1)
+    slot = torch.arange(width)
+    first = torch.where(valid, slot, width).min(1).values
+    last = torch.where(valid, slot, -1).max(1).values
+    mid = (first + last) // 2
+    plant = (count >= 3) & valid[torch.arange(total_q), mid.clamp(0, width - 1)]
+    rows[torch.arange(total_q)[plant], mid[plant]] = -1
+    empty_row = total_q // 2
+    rows[empty_row] = -1
+    dgen = torch.Generator(device=device).manual_seed(seed + 1)
+    q = (
+        torch.randn(total_q, NUM_HEADS, D_LATENT, device=device, generator=dgen)
+        * q_scale
+    ).to(torch.bfloat16)
+    kv = _randn_bf16((num_kv, D_LATENT), dgen, device)
+    dout = _randn_dout(total_q, dout_layout, dgen, device)
+    return SinkInputs(
+        q=q,
+        kv=kv,
+        indices=rows.to(device).contiguous(),
+        sink=sink_vector(gen, device),
+        dout=dout,
+        ratio=ratio,
+        empty_row=empty_row,
+    )
