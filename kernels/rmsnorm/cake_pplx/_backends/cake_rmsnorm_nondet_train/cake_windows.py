@@ -518,7 +518,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (256, 1024, "cake_rmsnorm_train_16545056022785f2a7d8"),
             (1024, 4096, "cake_rmsnorm_train_78c26a53e83c9803bcbf"),
             (4096, 48640, "cake_rmsnorm_train_626aed743358c27513f1"),
-            (48640, 65536, "cake_rmsnorm_train_cb164a27c0157ed0712d"),
+            (48640, 65536, "cake_rmsnorm_train_a8eb754739a1589de3ec"),
             (65536, 262144, "cake_rmsnorm_train_bd22da7e2d4914167050"),
             (262144, None, "cake_rmsnorm_train_36790f79b8845172d188"),
         ),
@@ -771,7 +771,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (256, 1024, "cake_rmsnorm_train_a647fccc3d9fa9134733"),
             (1024, 4096, "cake_rmsnorm_train_d41a514f5210e9adc39f"),
             (4096, 24064, "cake_rmsnorm_train_ee4a9053bb25b8d49fcf"),
-            (24064, 24576, "cake_rmsnorm_train_e9e21bbe4fa478075868"),
+            (24064, 24576, "cake_rmsnorm_train_a647fccc3d9fa9134733"),
             (24576, 65536, "cake_rmsnorm_train_23573e0c42a194a04876"),
             (65536, None, "cake_rmsnorm_train_f11a86167db4f8e9a5da"),
         ),
@@ -2020,7 +2020,7 @@ WHOLE_SM: dict[str, dict[str, tuple[tuple[int, int | None], ...]]] = {
         "bwd_w32_h1536": ((16384, 65536),),
         "bwd_h2048": ((256, 50176), (50688, 65536)),
         "bwd_w32_h2048": ((256, 1024), (16384, 50176)),
-        "bwd_h4096": ((1024, 24576),),
+        "bwd_h4096": ((1024, 24064),),
         "bwd_w32_h4096": ((1024, 65536),),
         "bwd_residual_h6144": ((320, 447), (3584, 7168)),
         "bwd_w32_residual_h6144": ((3584, 7168),),
@@ -2125,16 +2125,17 @@ deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 655
 the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
 65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
-48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+48640 (above it the twin of that package's 512-thread row-issuer program).  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
 runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
 131072) and the single kernel of its top window, which sum in plain FP32 words.  On
 sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
-from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
-(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
-``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+from T 24064 to 65536 the FP32-weight det pair the deterministic package's
+``bwd_w32_h4096`` runs from T 24064 (that package cuts it at T 50176).  On sm_107a
+``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
+to 65536 run the
 det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
 from T 50688 to 65536 runs the det pair the deterministic package runs there (its
 eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
@@ -2306,16 +2307,17 @@ deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 655
 the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
 65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
-48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+48640 (above it the twin of that package's 512-thread row-issuer program).  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
 runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
 131072) and the single kernel of its top window, which sum in plain FP32 words.  On
 sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
-from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
-(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
-``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+from T 24064 to 65536 the FP32-weight det pair the deterministic package's
+``bwd_w32_h4096`` runs from T 24064 (that package cuts it at T 50176).  On sm_107a
+``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
+to 65536 run the
 det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
 from T 50688 to 65536 runs the det pair the deterministic package runs there (its
 eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
@@ -2573,16 +2575,17 @@ deterministic package's own edge) to 78784 and ``bwd_h4096`` from T 44032 to 655
 the det pair the deterministic package runs there, and ``bwd_w32_h4096`` from T 44032 to
 65536 the FP32-weight det pair that package runs there.  On sm_103a ``bwd_w32_h4096``
 from T 4096 to 65536 runs FP32-weight det pairs of the deterministic package, split at T
-48640; above it the FP32-pair one, which that package runs to T 51200.  On sm_100a
+48640 (above it the twin of that package's 512-thread row-issuer program).  On sm_100a
 ``bwd_w32_h5120`` from T 6144 to 56256 runs the FP32-pair det pair, which that package
 runs at every T above 6144; above T 56256 the route runs the flush single kernel (to T
 131072) and the single kernel of its top window, which sum in plain FP32 words.  On
 sm_107a ``bwd_h4096`` from T 24064 to 24576 and ``bwd_w32_h5120``
 from T 4096
 to 32767 run the det pair the deterministic package runs there, and ``bwd_w32_h4096``
-from T 24064 to 65536 the FP32-weight twin of the det pair of ``bwd_h4096`` from T 24064
-(the deterministic package cuts that pair at T 50176).  On sm_107a ``bwd_h1536`` and
-``bwd_w32_h1536`` from T 45056, the deterministic package's top edge, to 65536 run the
+from T 24064 to 65536 the FP32-weight det pair the deterministic package's
+``bwd_w32_h4096`` runs from T 24064 (that package cuts it at T 50176).  On sm_107a
+``bwd_h1536`` and ``bwd_w32_h1536`` from T 45056, the deterministic package's top edge,
+to 65536 run the
 det pair that package runs there (its four-row block form).  On sm_107a ``bwd_h2048``
 from T 50688 to 65536 runs the det pair the deterministic package runs there (its
 eight-row block form), for speed.  On sm_100a ``bwd_w32_h1536`` from T 1024 to 4096 runs
@@ -2734,7 +2737,7 @@ Beside those, leave some SMs free of the resident kernel.
 * ``sm_107a`` ``bwd_w32_h1536``: (16384, 65536]
 * ``sm_107a`` ``bwd_h2048``: (256, 50176], (50688, 65536]
 * ``sm_107a`` ``bwd_w32_h2048``: (256, 1024], (16384, 50176]
-* ``sm_107a`` ``bwd_h4096``: (1024, 24576]
+* ``sm_107a`` ``bwd_h4096``: (1024, 24064]
 * ``sm_107a`` ``bwd_w32_h4096``: (1024, 65536]
 * ``sm_107a`` ``bwd_residual_h6144``: (320, 447], (3584, 7168]
 * ``sm_107a`` ``bwd_w32_residual_h6144``: (3584, 7168]
@@ -2849,7 +2852,7 @@ Beside those, leave some SMs free of the resident kernel.
   (4, 16] b378ba00 (one cluster) ? (16, 32] 8274f36f = (32, 152] 27615d0e =
   (152, 256] 3fd77c8c (det pair) = (256, 1024] 16545056 (det pair) =
   (1024, 4096] 78c26a53 (det pair) = (4096, 48640] 626aed74 (det pair) ?
-  (48640, 65536] cb164a27 (det pair) ? (65536, 262144] bd22da7e = (262144, inf) 36790f79
+  (48640, 65536] a8eb7547 (det pair) ? (65536, 262144] bd22da7e = (262144, inf) 36790f79
 * ``sm_103a`` ``bwd_h5120``: (0, 4] dbc680f3 (one cluster) ? (4, 16] 29bcbde1 ?
   (16, 64] 080e0a6c ? (64, 1024] 2fc4932f (det pair) ? (1024, 5120] 2fc4932f (det pair)
   = (5120, 61952] 2fc4932f (det pair) = (61952, 393216] e21acade =
@@ -2905,7 +2908,7 @@ Beside those, leave some SMs free of the resident kernel.
 * ``sm_107a`` ``bwd_h4096``: (0, 4] 945a0afd (one cluster) ?
   (4, 16] 41f44b4b (one cluster) ? (16, 256] c1de7e41 = (256, 1024] a647fccc (det pair)
   = (1024, 4096] d41a514f (det pair) = (4096, 24064] ee4a9053 (det pair) ?
-  (24064, 24576] e9e21bbe (det pair) ? (24576, 65536] 23573e0c ? (65536, inf) f11a8616
+  (24064, 24576] a647fccc (det pair) ? (24576, 65536] 23573e0c ? (65536, inf) f11a8616
 * ``sm_107a`` ``bwd_w32_h4096``: (0, 4] f6bd1634 (one cluster) ?
   (4, 16] b378ba00 (one cluster) ? (16, 256] 30ec8bb6 = (256, 1024] dc439f83 (det pair)
   = (1024, 4096] b0863320 (det pair) = (4096, 24064] 0f1859b9 (det pair) ?
