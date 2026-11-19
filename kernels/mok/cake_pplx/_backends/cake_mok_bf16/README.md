@@ -49,6 +49,10 @@ Distributed ranks must share one peer-accessible NVLink domain (peers may span
 hosts of one NVL72 domain).
 
 ```python
+import math
+
+import torch
+
 from cake_pplx.cake_mok_det_train import (
     create_mok_bf16_workspace,
     prepare_mok_bf16,
@@ -83,11 +87,22 @@ context = backend.recompute_forward_context(
     config, workspace, schedule, x, *weights[:2], *weights[3:5])
 grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *weights)
 
-# Router weight before the down projection: 384 experts at EP64, top-6.
-backend = prepare_mok_bf16(ep_size=64, local_experts=6, topk=6, clamped_swiglu=True,
+# Router weight before the down projection: 384 experts at EP64 (6 local
+# experts), top-6, on a workspace of its own at the worst-case schedule
+# capacity (n source rows per rank; see Contract). ids: int64 [n, 6] expert
+# IDs; router_w: FP32 [n, 6] router weights; weights: BF16, 6 routed experts.
+ep, local, k = 64, 6, 6
+m = math.ceil((min(k, local) * n * ep + local * 255) / (n * k)) / ep
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=5120, topk=k,
+    minibatch_size=4096, macrobatch_size=262144, schedule_capacity_multiplier=m,
+)
+backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, clamped_swiglu=True,
                            fp32_wgrad=True, router_weight_position="before_down")
 backend.prepare(10.0, save_context=False)  # compile before CUDA Graph capture
 backend.prepare_recompute(10.0)
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=local)
+accumulators = [torch.zeros(w.shape, device=device) for w in weights]  # FP32
 y, _ = backend.forward(config, workspace, schedule, x, router_w, *weights,
                        swiglu_limit=10.0, save_context=False)
 context = backend.recompute_forward_context(
@@ -334,8 +349,9 @@ across communication-SM splits and under CUDA Graph replay.
   `(16, 16)`, `(32, 8)`, `(64, 4)`); 288 routed experts at EP8
   and EP32 (`(8, 36)`, `(32, 9)`). Top-k is 2 or 8.
 - Router-weight positions (`router_weight_position`; any other combination
-  raises `ValueError`, a non-string position `TypeError`, before any kernel is
-  loaded or launched):
+  raises `ValueError`, a non-string position and, with `"before_down"`, a
+  top-k that is not an `int` `TypeError`, before any kernel is loaded or
+  launched):
 
   | Position | Layouts (EP, local experts) | Top-k | SwiGLU | Weight gradients | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- |
@@ -461,9 +477,11 @@ across communication-SM splits and under CUDA Graph replay.
   enforced. The 384-expert layouts at this bound (`(64, 6)` and `(8, 48)` at
   16,384 rows, macrobatch 262,144, minibatch 4,096, every route on one rank)
   run on one GPU with emulated peers: finite outputs, the same bytes run to
-  run, routed x ring rows past 2^31 bytes checked exactly, and `y`, `dx` and the
-  router-weight gradients equal to a 32,768-row macrobatch run. Multi-GPU runs
-  at these layouts are a separate test.
+  run, routed x ring rows past 2^31 bytes checked exactly, `y`, `dx` and the
+  router-weight gradients equal to a 32,768-row macrobatch run, and the routed
+  weight gradients of a step where only tokens that share no expert keep their
+  router weights equal to that run and exactly EP times one BF16 product per
+  element. Multi-GPU runs at these layouts are a separate test.
 - Routed weight gradients are summed across macrobatches in BF16 (or in the
   FP32 accumulators). MXFP8 adds quantization error to the routed outputs and
   gradients; the shared expert path is unchanged.
@@ -500,15 +518,19 @@ SM103a or SM107a device):
   serves, argument forwarding and the refused router-weight combinations).
 - `router_weight_position="before_down"`: in `test_mok_bf16.py` the launchers'
   arguments against `sources.json` and the refusals before device work (no
-  GPU), and on SM100a / SM103a the fused training at top-2 and top-6 (6 to 96
-  local experts), zero weights, recompute and the context-free forward, the
-  384-expert scheduler layouts and the scheduler and the adapter at the
-  worst-case schedule capacity; in `test_mok_accuracy.py` the same cases and
-  the requester's input distribution at H 5120 / I 2304 judged against the
-  naive tier; in `test_mok_distributed.py` the adapter at EP1 with a test-local
-  autograd function; `tests/test_mok_naive_wbd.py` (CPU) the oracle and naive
-  forms. `tests/experimental/report_mok_wbd.py` (a measurement report, not a
-  test) prints the issue's stage-rounded reference errors on those inputs.
+  GPU), the refusal on an SM107a device, and on SM100a / SM103a the fused
+  training at top-2 and top-6 (6 to 96 local experts; another
+  communication-SM split gives the same bytes), zero weights, recompute and
+  the context-free forward, the exact limit, the 384-expert scheduler layouts
+  and the scheduler and the adapter at the worst-case schedule capacity; in
+  `test_mok_accuracy.py` the same cases, the requester's input distribution at
+  H 5120 / I 2304 and the adapter's top-6 step at every 384-expert layout (one
+  GPU, emulated peers) judged against the naive tier; in
+  `test_mok_distributed.py` the adapter at EP1 over changing source counts,
+  with another communication-SM split and a test-local autograd function;
+  `tests/test_mok_naive_wbd.py` (CPU) the oracle and naive forms.
+  `tests/experimental/report_mok_wbd.py` (a measurement report, not a test)
+  prints the issue's stage-rounded reference errors on those inputs.
 
 The CUDA schedules derive from Cursor Research's Apache-2.0 Mixture of Kittens
 implementation at revision `caeb2963f855c7ad53bb50c8bbf211086405cb98`. Copyright and modification notices are
