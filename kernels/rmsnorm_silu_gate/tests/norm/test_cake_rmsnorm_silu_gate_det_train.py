@@ -1318,13 +1318,14 @@ def _one_token_packed(arch, rows, sm_count):
     (token stride ``H * 128``; this test's own reading of the tables): where
     the build of packed rows only has a cut (``PACKED_SMALL_ROWS_PER_SM``), at
     every row count where a strided cut is (a claimed program past it), else
-    below the long modules' first row count (``LONG_MIN_ROWS_PER_SM``);
-    elsewhere its token stride stays 0 and it runs as other layouts do."""
-    if loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0) <= 0:
+    up to that cut; elsewhere its token stride stays 0 and it runs as other
+    layouts do."""
+    small = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
+    if small <= 0:
         return False
     if loader.NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16") is not None:
         return True
-    return rows < LONG_MIN_ROWS_PER_SM[arch] * sm_count
+    return rows <= small * sm_count
 
 
 def _strided_role(arch, rows, sm_count, packed, routes=None):
@@ -1720,8 +1721,8 @@ SINGLE_TOKEN_HEADS = ("1", "48", "3120", "small+1", "long")
 def test_single_token_runs_the_programs_of_packed_rows(layout, heads, monkeypatch):
     """One token of ``H`` heads (1, 48, 3120, a row past this device's cut
     of the build of packed rows only, and the long modules' first row count
-    where no strided cut is: there one token keeps the token stride 0): a
-    call with
+    where no strided cut is; past that cut where no strided cut is, one
+    token keeps the token stride 0): a call with
     ``compute_grad_weight=False`` on heads of stride 128 passes the token
     stride ``H * 128`` (packed rows) and runs the program ``_strided_role``
     names for packed rows where ``_one_token_packed`` holds (else, as on the
@@ -3376,18 +3377,20 @@ def test_one_token_is_packed_rows_only_where_a_small_cut_is():
     where the build of packed rows only has a cut
     (``PACKED_SMALL_ROWS_PER_SM``): sm_100a, sm_103a and sm_107a (from
     version 0.2.8; in version 0.2.7 sm_100a and sm_103a), at every row count
-    where a strided cut is (sm_100a, sm_103a) and below the long modules'
-    first row count where none is (sm_107a, from 1536 rows per SM: the
-    256-thread program of version 0.2.7)."""
-    limits = pkg._ONE_TOKEN_PACKED_BELOW_ROWS_PER_SM
-    assert set(limits) == {"sm_100a", "sm_103a", "sm_107a"}
-    assert limits == {"sm_100a": 2**31, "sm_103a": 2**31, "sm_107a": 1536}
+    where a strided cut is (sm_100a, sm_103a) and up to the cut of that
+    build where none is (sm_107a, 384 rows per SM; past it the 256-thread
+    program of version 0.2.7)."""
+    limits = pkg._ONE_TOKEN_PACKED_ROWS_PER_SM
+    assert limits == {"sm_100a": 2**31, "sm_103a": 2**31, "sm_107a": 384}
     for arch in loader.ARCHES:
+        small = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
         for sm_count in GRID_SM_COUNTS:
-            for per_sm in (1, LONG_MIN_ROWS_PER_SM[arch]):
+            for per_sm in (1, small, small + 1, LONG_MIN_ROWS_PER_SM[arch]):
                 for rows in (per_sm * sm_count - 1, per_sm * sm_count):
+                    if rows < 1:
+                        continue
                     want = _one_token_packed(arch, rows, sm_count)
-                    got = rows < limits.get(arch, 0) * sm_count
+                    got = rows <= limits.get(arch, 0) * sm_count
                     assert got == want, (arch, sm_count, rows)
 
 

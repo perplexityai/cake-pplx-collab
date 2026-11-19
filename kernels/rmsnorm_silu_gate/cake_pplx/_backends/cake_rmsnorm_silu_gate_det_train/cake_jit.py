@@ -741,8 +741,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # min(ceil(rows / 8), 8 * SMs) CTAs; a call with compute_grad_weight=False
     # runs it in the strided program's place on packed rows (dy, x and z of
     # head stride 128 and token stride heads * 128, or, where
-    # PACKED_SMALL_ROWS_PER_SM has a cut, one token of head stride 128) past
-    # PACKED_SMALL_ROWS_PER_SM rows per SM up to
+    # PACKED_SMALL_ROWS_PER_SM and NODW_STRIDED_ROWS_PER_SM have a cut, one
+    # token of head stride 128) past PACKED_SMALL_ROWS_PER_SM rows per SM up to
     # NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at every row count but
     # the long program's, and on rows of any layout up to
     # NODW_ANY_LAYOUT_ROWS_PER_SM rows per SM (build {"dw": False, "math":
@@ -1403,7 +1403,7 @@ def nodw_module(
     and layout, and ``packed``, whether the kernel reads packed rows
     (:func:`backward_packed`; the backward also passes one token of head
     stride 128 as packed rows where ``PACKED_SMALL_ROWS_PER_SM[arch]`` has a
-    cut):
+    cut, on an architecture without a strided cut only up to that cut):
 
     - for a long module (packed rows past its cut) the role's long module
       without the weight gradient (``role + NODW + LONG``) where ``arch``
