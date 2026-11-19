@@ -6,9 +6,11 @@ The public, experimental-marked entry points are re-exported by
 :mod:`cake_pplx.cake_mok_det_train`; this module imports nothing outside this package.
 """
 
-from ._kernels import ROUTER_WEIGHT_POSITIONS
+from . import _kernels
 
 MOK_PRECISIONS = ("bf16", "mxfp8")
+# The router-weight positions of ``prepare_mok_bf16`` (a facade name).
+ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
 
 # Imbalance-aware communication split, keyed by device compute capability, SM
 # count and routed precision. Only devices with a measured gain have a row;
