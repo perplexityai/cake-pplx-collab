@@ -20,9 +20,9 @@ and its workspace bound, the argument checks and the refusal of an architecture 
 SM100 / SM103 device the exact sets against the FP64 oracle
 (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs with source-layer and
 synthetic candidate rows, the unrestricted sets from the source layer's own candidates and from every visible block,
-keys outside the pool that never count, row-strided keys read in place, batches of fewer than 8 keys, the partition
-knobs that keep the set, the Gaussian rule, bitwise repetition, the caller-owned workspace and outputs, and the
-absence of host synchronization.
+keys outside the pool that never count, row-strided keys read in place, batches of fewer than 8 keys, rows that
+repeat ids (their result stays in their own row), the partition knobs that keep the ids and the score bits, the
+Gaussian rule, bitwise repetition, the caller-owned workspace and outputs, and the absence of host synchronization.
 """
 
 import contextlib
@@ -108,6 +108,12 @@ FEW_KEYS = {
             [2147483647, -1, 0, -1],
         ],
     ),
+}
+# the layouts of the rows that repeat ids (``_repeated_ids``): both exact layouts and a batch of fewer than 8 keys
+REPEAT_LAYOUTS = {
+    "default_offsets": LAYOUTS["default_offsets"],
+    "explicit_offsets": LAYOUTS["explicit_offsets"],
+    "q2q3_k3k4_offsets": FEW_KEYS["q2q3_k3k4_offsets"][:3],
 }
 
 
@@ -253,6 +259,56 @@ def _scores64_of_ids(q, k, w, cq, ck, rows, ids) -> torch.Tensor:
         s = (w[r].double()[:, :, None] * torch.relu(cb.EXACT_SCALE * x)).sum(1) + 0.0
         out[sel] = torch.where(j >= 0, s, -math.inf)
     return out
+
+
+def _same_rows(a, b, rows, *, scores=True) -> bool:
+    """Whether the rows ``rows`` of two ``(indices, scores)`` results agree: bit for bit with the rows in ascending id
+    order (det), else the same ids with the same scores in any slot order (``scores=False``: the ids alone)."""
+    sel = torch.as_tensor(list(rows), dtype=torch.long, device=a[0].device)
+    a = tuple(t.index_select(0, sel) for t in a)
+    b = tuple(t.index_select(0, sel) for t in b)
+    if ORDERED:
+        return ref.same_bits(a, b)
+    a, b = naive.canonical(a), naive.canonical(b)
+    return torch.equal(a[0], b[0]) and (not scores or torch.equal(a[1], b[1]))
+
+
+def _repeated_ids(cand, ns, *, seed):
+    """``cand`` with three rows that see keys replaced by rows that repeat non-negative ids: ``W`` copies of block 0
+    (a complete block where a row has one), ``W`` copies of the row's newest block (a partial one where a row has
+    one), and visible ids, ids past the visible blocks and past the keys, each at least twice, among ``-1`` in
+    shuffled order.  Returns that table, the same table with every repeat of an id set to ``-1`` (the first
+    occurrence kept) and the three row indices."""
+    rng = random.Random(seed)
+    width = cand.shape[1]
+    seen = [r for r, n in enumerate(ns) if n > 0]
+
+    def pick(prefer, avoid):
+        rows = [r for r in seen if r not in avoid]
+        return rng.choice([r for r in rows if prefer(ns[r])] or rows)
+
+    newest = pick(lambda n: n % 8 and n > 8, ())
+    zero = pick(lambda n: n >= 8, (newest,))
+    mixed = pick(lambda n: n > 8, (newest, zero))
+    repeated = cand.cpu().clone()
+    repeated[zero] = 0
+    repeated[newest] = (ns[newest] + 7) // 8 - 1
+    nb = (ns[mixed] + 7) // 8
+    distinct = rng.sample(range(nb), min(nb, 64)) + [nb, nb + 3, 2147483647]
+    ids = 2 * distinct
+    ids += [rng.choice(distinct) for _ in range(width // 2 - len(ids))]
+    ids += [-1] * (width - len(ids))
+    rng.shuffle(ids)
+    repeated[mixed] = torch.tensor(ids, dtype=torch.int32)
+    unique = repeated.clone()
+    for r in (zero, newest, mixed):
+        row, kept = repeated[r].tolist(), set()
+        for i, b in enumerate(row):
+            if b >= 0:
+                row[i] = -1 if b in kept else b
+                kept.add(b)
+        unique[r] = torch.tensor(row, dtype=torch.int32)
+    return repeated.to(cand.device), unique.to(cand.device), (zero, newest, mixed)
 
 
 # ---------------------------------------------------------------------------
@@ -640,10 +696,11 @@ def test_fewer_than_eight_keys(layout, case):
 
 @pytest.mark.parametrize("top_k", (64, TOP_K))
 def test_partition_knobs_keep_the_set(top_k):
-    """``cand_cap`` / ``check_period`` and ``grid_ctas`` partition the work and never change the selected set: the
+    """``cand_cap`` / ``check_period`` and ``grid_ctas`` partition the work and never change the result: the
     smallest buffer the plan admits (``cand_cap = top_k + 128``, ``check_period = 1``), persistent grids of 1 and 3
-    CTAs and both together give every row the default call's set, on exact inputs (where that set is the FP64
-    oracle's) for synthetic candidate rows and the source layer's own, and on Gaussian inputs for synthetic rows."""
+    CTAs and both together give every row the default call's ids and score bits, on exact inputs (where each call's
+    sets and scores are the FP64 oracle's) for synthetic candidate rows and the source layer's own, and on Gaussian
+    inputs for synthetic rows."""
     _require_cand_program()
     knobs = (
         {"cand_cap": top_k + 128, "check_period": 1},
@@ -678,27 +735,68 @@ def test_partition_knobs_keep_the_set(top_k):
         draws.append((f"gaussian / {kind}", gargs, gauss.kwargs(), gns, rows))
     failures = []
     for name, args, kw, rows_n, cand in draws:
+        exact = name.startswith("exact")
         base = prepare_in_candidates(*args, cand, **kw)
         assert base.choice.cand_cap == max(4096, 4 * top_k)
         assert base.choice.grid_ctas > 3
         want = naive.cloned(base())
         failures += [f"{name}: {f}" for f in _structure_failures(*want, cand, rows_n)]
-        if name.startswith("exact"):
+        if exact:
             failures += [
                 f"{name}: {f}" for f in _exact_failures(*args, off, cand, want)
             ]
         for knob in knobs:
+            tag = f"{name} / {knob}"
             runner = prepare_in_candidates(*args, cand, **kw, **knob)
             assert all(getattr(runner.choice, key) == v for key, v in knob.items())
             got = naive.cloned(runner())
-            failures += [
-                f"{name} / {knob}: {f}" for f in _structure_failures(*got, cand, rows_n)
-            ]
-            if not torch.equal(
-                cb.ascending(got[0].long()), cb.ascending(want[0].long())
-            ):
-                failures.append(f"{name} / {knob}: sets differ from the default call's")
+            failures += [f"{tag}: {f}" for f in _structure_failures(*got, cand, rows_n)]
+            if exact:
+                failures += [
+                    f"{tag}: {f}" for f in _exact_failures(*args, off, cand, got)
+                ]
+            if not _same_rows(got, want, range(len(rows_n)), scores=exact):
+                failures.append(f"{tag}: outputs differ from the default call's")
     assert not failures, f"top_k {top_k}:\n" + "\n".join(failures[:20])
+
+
+@pytest.mark.parametrize("top_k", (3, TOP_K))
+@pytest.mark.parametrize("layout", sorted(REPEAT_LAYOUTS))
+def test_repeated_candidate_ids_stay_in_their_row(layout, top_k):
+    """A row whose non-negative ids repeat breaks the caller's precondition and gets an unspecified result for that
+    row alone, without out-of-bounds access: with a row of ``W`` copies of block 0, one of ``W`` copies of its newest
+    block and one that mixes repeated and distinct ids (ids past the visible blocks and past the keys among them)
+    beside rows of distinct ids, on exact inputs, every row's ids are ``-1`` or in ``[0, n)``, its scores finite or
+    ``-inf`` and at most ``top_k`` of its slots valid, and every other row equals, bit for bit, the call with the
+    repeats removed, whose rows equal the FP64 oracle's."""
+    _require_cand_program()
+    seg_q, seg_k, offsets = REPEAT_LAYOUTS[layout]
+    seed = 8300 + 7 * sorted(REPEAT_LAYOUTS).index(layout) + (top_k == TOP_K)
+    q, k, w, cq, ck = cb.exact_inputs(
+        "MXFP4-grid", seg_q, seg_k, seed=seed, device="cuda"
+    )
+    off = _offsets_tensor(offsets, q.device)
+    ns = _visible_counts(cq, ck, off)
+    cand = cb.synthetic_rows(ns, CAND_WIDTH_MAX, "subset", seed=seed, device=q.device)
+    repeated, unique, rows = _repeated_ids(cand, ns, seed=seed)
+    got = _call(q, k, w, cq, ck, repeated, offsets=off, top_k=top_k)
+    want = _call(q, k, w, cq, ck, unique, offsets=off, top_k=top_k)
+    failures = _structure_failures(*want, unique, ns)
+    failures += _exact_failures(q, k, w, cq, ck, off, unique, want)
+    ids, scores = got[0].long(), got[1]
+    n = torch.tensor(ns, dtype=torch.int64, device=ids.device)[:, None]
+    allowed = scores.isfinite() | scores.isneginf()
+    for what, bad in (
+        ("an id neither -1 nor in [0, n)", ((ids < -1) | (ids >= n)).any(1)),
+        ("a score neither finite nor -inf", ~allowed.all(1)),
+        ("more than top_k valid slots", (ids >= 0).sum(1) > top_k),
+    ):
+        if bool(bad.any()):
+            failures.append(f"{what} in rows {bad.nonzero().flatten()[:5].tolist()}")
+    others = [r for r in range(len(ns)) if r not in rows]
+    if not _same_rows(got, want, others):
+        failures.append(f"rows other than {rows} differ from the call without repeats")
+    assert not failures, f"{layout} / top_k {top_k}:\n" + "\n".join(failures[:20])
 
 
 @pytest.mark.parametrize("shape", sorted(SHAPES))
