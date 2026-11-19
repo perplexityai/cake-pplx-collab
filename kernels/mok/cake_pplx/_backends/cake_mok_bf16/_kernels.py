@@ -25,13 +25,113 @@ SCHEDULER_LAYOUTS = (
     (64, 4),
     (8, 36),
     (32, 9),
+    (4, 96),
+    (8, 48),
+    (16, 24),
+    (32, 12),
+    (64, 6),
 )
-EPILOGUE_TOPKS = (2, 8)
+# The 384-routed-expert layouts: top-k 6 with the router weight before the down
+# projection only.
+SCHEDULER_LAYOUTS_384 = ((4, 96), (8, 48), (16, 24), (32, 12), (64, 6))
+EPILOGUE_TOPKS = (2, 6, 8)
+# Top-k values with a weighted forward epilogue; top-k 6 has the unweighted one only.
+WEIGHTED_EPILOGUE_TOPKS = (2, 8)
+# Where the FP32 router weight multiplies a routed expert: on its output, in the
+# combine (``"after_down"``), or on its SwiGLU activation before the down
+# projection, ``h = BF16(w * a)``, with an unweighted combine (``"before_down"``).
+ROUTER_WEIGHT_POSITIONS = ("after_down", "before_down")
+# (EP size, local experts) -> top-k of ``router_weight_position="before_down"``:
+# the 384-expert layouts at top-k 6 and the diagnostic layouts at top-k 2.
+BEFORE_DOWN_LAYOUTS = {
+    (1, 4): 2,
+    (4, 4): 2,
+    (4, 96): 6,
+    (8, 48): 6,
+    (16, 24): 6,
+    (32, 12): 6,
+    (64, 6): 6,
+}
+# Targets with the router-weight-before-down kernels (top-k 6, 384-expert layouts).
+BEFORE_DOWN_TARGETS = ("sm_100a", "sm_103a")
 SWIGLU_BWD_TILES = 8  # 128 x 128 tiles per backward SwiGLU task half.
 
 
-def _role(base, clamped=False, fp32_wgrad=False):
-    return base + ("_clamped" if clamped else "") + ("_fp32" if fp32_wgrad else "")
+def _role(
+    base, clamped=False, fp32_wgrad=False, *, noctx=False, weight_before_down=False
+):
+    """Kernel role name: ``base`` plus the ``_clamped``, ``_fp32``, ``_noctx`` and
+    ``_wbd`` (router weight before the down projection) suffixes, in that order."""
+    return (
+        base
+        + ("_clamped" if clamped else "")
+        + ("_fp32" if fp32_wgrad else "")
+        + ("_noctx" if noctx else "")
+        + ("_wbd" if weight_before_down else "")
+    )
+
+
+def check_configuration(
+    ep, local_experts, topk, *, clamped_swiglu, fp32_wgrad, router_weight_position
+):
+    """Refuse a configuration the package has no kernels for, before any device work.
+
+    ``"after_down"`` keeps the weighted layouts: top-k 2 or 8 on the layouts of
+    :data:`SCHEDULER_LAYOUTS` other than the 384-expert ones (the caller's check
+    names any other combination). ``"before_down"`` runs the layouts of
+    :data:`BEFORE_DOWN_LAYOUTS` at their top-k, with clamped SwiGLU and FP32
+    weight-gradient accumulation."""
+    if not isinstance(router_weight_position, str):
+        raise TypeError(
+            f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
+            f"got {router_weight_position!r}"
+        )
+    if router_weight_position not in ROUTER_WEIGHT_POSITIONS:
+        raise ValueError(
+            f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
+            f"got {router_weight_position!r}"
+        )
+    layout = (ep, local_experts)
+    if router_weight_position == "after_down":
+        if topk == 6:
+            raise ValueError(
+                "top-k 6 is supported only with router_weight_position='before_down' "
+                "(its combine is unweighted)"
+            )
+        if layout in SCHEDULER_LAYOUTS_384:
+            raise ValueError(
+                f"the 384-expert layout {layout} is supported only with "
+                "router_weight_position='before_down' and topk=6"
+            )
+        return
+    if BEFORE_DOWN_LAYOUTS.get(layout) != topk or type(topk) is not int:
+        supported = ", ".join(
+            str((*key, value)) for key, value in BEFORE_DOWN_LAYOUTS.items()
+        )
+        raise ValueError(
+            "router_weight_position='before_down' supports (EP, local experts, top-k) "
+            f"{supported}; got {(ep, local_experts, topk)}"
+        )
+    if not clamped_swiglu:
+        raise ValueError(
+            "router_weight_position='before_down' runs clamped SwiGLU only: pass "
+            "clamped_swiglu=True and a swiglu_limit to every call"
+        )
+    if not fp32_wgrad:
+        raise ValueError(
+            "router_weight_position='before_down' accumulates weight gradients in FP32 "
+            "only: pass fp32_wgrad=True and weight_grad_accumulators to backward"
+        )
+
+
+def check_target(router_weight_position, arch):
+    """Refuse ``"before_down"`` on a target without its kernels (``arch`` as
+    :func:`jit.target_arch` names it), before any kernel is loaded."""
+    if router_weight_position == "before_down" and arch not in BEFORE_DOWN_TARGETS:
+        raise ValueError(
+            "router_weight_position='before_down' (top-k 6 and the 384-expert layouts) "
+            f"has no {arch} build in this package; use an sm_100a or sm_103a device"
+        )
 
 
 def check_swiglu_limit(swiglu_limit, clamped):
@@ -502,6 +602,23 @@ def _peer_table(cache, device, *pointer_lists):
     return cache[key]
 
 
+def _check_weight_ptrs(weight_before_down, weight_ptrs, x_ptrs):
+    """``weight_ptrs`` (one pointer per rank to its FP32 ``[tokens, topk]``
+    router-weight buffer) is required by the router-weight-before-down
+    forward and recompute and taken by no other launcher."""
+    if not weight_before_down:
+        if weight_ptrs is not None:
+            raise ValueError(
+                "weight_ptrs are read only by the router-weight-before-down kernels"
+            )
+        return
+    if weight_ptrs is None or len(weight_ptrs) != len(x_ptrs):
+        raise ValueError(
+            "The router-weight-before-down kernels need weight_ptrs: one FP32 "
+            "[tokens, topk] router-weight buffer pointer per rank"
+        )
+
+
 class MoKForward:
     """Low-level native-signature BF16 forward; caller owns peer barriers.
 
@@ -516,15 +633,36 @@ class MoKForward:
     up storage and returns ``None`` in their four places. ``y_shared``, the
     combine rows, ``hidden_*`` and ``x_routed`` are the context forward's
     words.
+
+    ``weight_before_down=True`` (clamped SwiGLU only) loads the
+    router-weight-before-down forward (role ``forward_clamped[_noctx]_wbd``):
+    dispatch gathers each routed row's FP32 router weight ``w`` from the
+    peers' ``[tokens, topk]`` router-weight buffers (``weight_ptrs``, one
+    pointer per rank) into a per-call ``[macro_size]`` FP32 ring, the routed
+    hidden is ``BF16(w * a)`` (``a`` the SwiGLU output) and the combine rows
+    are the down projections of that hidden: the weighted routed outputs, to
+    be summed unweighted.
     """
 
-    def __init__(self, clamped=False, context=True):
+    def __init__(self, clamped=False, context=True, weight_before_down=False):
         from .jit import load_kernel
 
         if type(context) is not bool:
             raise TypeError("context must be a boolean")
+        if type(weight_before_down) is not bool:
+            raise TypeError("weight_before_down must be a boolean")
+        if weight_before_down and not clamped:
+            raise ValueError(
+                "The router-weight-before-down forward is built for clamped SwiGLU only"
+            )
         self.clamped, self.context = clamped, context
-        role = _role("forward", clamped) + ("" if context else "_noctx")
+        self.weight_before_down = weight_before_down
+        role = _role(
+            "forward",
+            clamped,
+            noctx=not context,
+            weight_before_down=weight_before_down,
+        )
         self.module = load_kernel(role)
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}
@@ -553,10 +691,12 @@ class MoKForward:
         mini_size,
         *,
         layout=None,
+        weight_ptrs=None,
     ):
         import torch
 
         check_swiglu_limit(swiglu_limit, self.clamped)
+        _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         intermediate, experts = shared_gate.shape[0], counts.numel()
         capacity = peer_rank.numel()
@@ -576,6 +716,15 @@ class MoKForward:
         x_peers, y_peers = _peer_table(
             self._peer_tables, x.device, x_ptrs, combine_ptrs
         )
+        router_weight = {}
+        if self.weight_before_down:
+            (weight_peers,) = _peer_table(self._peer_tables, x.device, weight_ptrs)
+            router_weight = dict(
+                weight_peers=weight_peers,
+                row_weights=torch.empty(
+                    macro_size, dtype=torch.float32, device=x.device
+                ),
+            )
         options = dict(device=x.device, dtype=torch.bfloat16)
         x_routed = torch.empty((macro_size, hidden), **options)
         if self.context:
@@ -661,6 +810,7 @@ class MoKForward:
                 minis_per_macro_div=g.minis_per_macro_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
                 down_col_blocks_div=g.down_col_blocks_div,
+                **router_weight,
             )
         return (
             x_routed,
@@ -687,6 +837,8 @@ class MoKForward:
         comm_sms,
         macro_size,
         mini_size,
+        *,
+        weight_ptrs=None,
     ):
         """Validated launch plan for one geometry, split and SwiGLU variant.
 
@@ -695,11 +847,14 @@ class MoKForward:
         counter slab are bound into the plan. Per call
         :meth:`launch_planned` allocates the outputs and passes the weights
         and the schedule, exactly the arguments ``__call__`` passes. The same
-        checks as ``__call__`` run here, once.
+        checks as ``__call__`` run here, once. ``weight_ptrs``: as in
+        ``__call__`` (router-weight-before-down only); the per-call FP32
+        ``row_weights`` ring is allocated by :meth:`launch_planned`.
         """
         import torch
 
         check_swiglu_limit(swiglu_limit, self.clamped)
+        _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         if (
             x.dtype != torch.bfloat16
@@ -732,6 +887,11 @@ class MoKForward:
         slab, (x_ready, hidden_ready, y_ready, y_done) = _counter_slab(
             x.device, g.minis, g.shared_rows + g.routed_rows, g.minis, capacity // 128
         )
+        router_weight = {}
+        if self.weight_before_down:
+            (router_weight["weight_peers"],) = _peer_table(
+                self._peer_tables, x.device, weight_ptrs
+            )
         return _Plan(
             self.module,
             (2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
@@ -739,6 +899,7 @@ class MoKForward:
                 x_shared=x,
                 x_peers=x_peers,
                 y_peers=y_peers,
+                **router_weight,
                 hidden_ready=hidden_ready,
                 x_ready=x_ready,
                 y_ready=y_ready,
@@ -777,6 +938,7 @@ class MoKForward:
                 "schedule_token",
                 "num_tokens",
                 "counts",
+                *(("row_weights",) if self.weight_before_down else ()),
             ),
             slab=slab,
             extra=(
@@ -786,6 +948,7 @@ class MoKForward:
                 (macro_size, intermediate),
                 3 * experts + capacity // 256,
                 self.context,
+                macro_size if self.weight_before_down else None,
             ),
         )
 
@@ -808,7 +971,17 @@ class MoKForward:
         context-free launcher). The caller resets ``plan.slab`` on this
         stream before the launch, validated the weights against the plan's
         geometry and runs this inside ``_ffi_stream()``."""
-        x, routed_rows, shared_shape, routed_shape, layout_numel, context = plan.extra
+        import torch
+
+        (
+            x,
+            routed_rows,
+            shared_shape,
+            routed_shape,
+            layout_numel,
+            context,
+            weight_ring,
+        ) = plan.extra
         if layout.numel() != layout_numel:
             raise ValueError("layout does not match the schedule geometry")
         x_routed = x.new_empty(routed_rows)
@@ -827,6 +1000,12 @@ class MoKForward:
             gate_shared = gate_routed = up_shared = up_routed = None
             maps = (hidden_shared, hidden_routed, hidden_shared, hidden_routed)
         y_shared, y_routed = x.new_empty(x.shape), x.new_empty(routed_rows)
+        # The router-weight-before-down kernel's per-row FP32 weight ring.
+        row_weights = (
+            ()
+            if weight_ring is None
+            else (x.new_empty((weight_ring,), dtype=torch.float32),)
+        )
         plan.launch(
             (
                 x_routed,
@@ -845,6 +1024,7 @@ class MoKForward:
                 peer_token,
                 num_tokens,
                 layout,
+                *row_weights,
             )
         )
         return (
@@ -867,13 +1047,28 @@ class MoKRecompute:
     expert): dispatch and gate/up/SwiGLU tiles only, without down
     projections, combine or the output epilogue. Launch-invariant geometry
     is memoised per geometry; the counters are one zero-filled slab per call.
+
+    ``weight_before_down=True`` (clamped SwiGLU only) loads the
+    router-weight-before-down recompute (role ``recompute_clamped_wbd``),
+    which gathers the routed rows' router weights as that forward does
+    (``weight_ptrs``) and rebuilds its context: the routed hidden is
+    ``BF16(w * a)``.
     """
 
-    def __init__(self, clamped=False):
+    def __init__(self, clamped=False, weight_before_down=False):
         from .jit import load_kernel
 
+        if type(weight_before_down) is not bool:
+            raise TypeError("weight_before_down must be a boolean")
+        if weight_before_down and not clamped:
+            raise ValueError(
+                "The router-weight-before-down recompute is built for clamped SwiGLU only"
+            )
         self.clamped = clamped
-        self.module = load_kernel(_role("recompute", clamped))
+        self.weight_before_down = weight_before_down
+        self.module = load_kernel(
+            _role("recompute", clamped, weight_before_down=weight_before_down)
+        )
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}
         self._geometry = {}
@@ -897,10 +1092,12 @@ class MoKRecompute:
         mini_size,
         *,
         layout=None,
+        weight_ptrs=None,
     ):
         import torch
 
         check_swiglu_limit(swiglu_limit, self.clamped)
+        _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         intermediate, experts = shared_gate.shape[0], counts.numel()
         capacity = peer_rank.numel()
@@ -918,6 +1115,15 @@ class MoKRecompute:
                 "MoK native BF16 tile and communication geometry is required"
             )
         (x_peers,) = _peer_table(self._peer_tables, x.device, x_ptrs)
+        router_weight = {}
+        if self.weight_before_down:
+            (weight_peers,) = _peer_table(self._peer_tables, x.device, weight_ptrs)
+            router_weight = dict(
+                weight_peers=weight_peers,
+                row_weights=torch.empty(
+                    macro_size, dtype=torch.float32, device=x.device
+                ),
+            )
         options = dict(device=x.device, dtype=torch.bfloat16)
         # Identical context storage to the forward ring.
         x_routed = torch.empty((macro_size, hidden), **options)
@@ -984,6 +1190,7 @@ class MoKRecompute:
                 swiglu_limit=0.0 if swiglu_limit is None else float(swiglu_limit),
                 mini_tasks_div=g.mini_tasks_div,
                 fused_col_blocks_div=g.fused_col_blocks_div,
+                **router_weight,
             )
         return (
             x_routed,
@@ -1007,11 +1214,14 @@ class MoKRecompute:
         comm_sms,
         macro_size,
         mini_size,
+        *,
+        weight_ptrs=None,
     ):
         """Validated launch plan; see :meth:`MoKForward.plan`."""
         import torch
 
         check_swiglu_limit(swiglu_limit, self.clamped)
+        _check_weight_ptrs(self.weight_before_down, weight_ptrs, x_ptrs)
         local_tokens, hidden = x.shape
         if (
             x.dtype != torch.bfloat16
@@ -1042,12 +1252,18 @@ class MoKRecompute:
         slab, (x_ready, hidden_ready) = _counter_slab(
             x.device, g.minis, g.shared_rows + g.routed_rows
         )
+        router_weight = {}
+        if self.weight_before_down:
+            (router_weight["weight_peers"],) = _peer_table(
+                self._peer_tables, x.device, weight_ptrs
+            )
         return _Plan(
             self.module,
             (2 * (g.shared_tasks + g.minis * g.mini_tasks) + comm_sms, 1, 1),
             dict(
                 x_shared=x,
                 x_peers=x_peers,
+                **router_weight,
                 hidden_ready=hidden_ready,
                 x_ready=x_ready,
                 local_tokens=local_tokens,
@@ -1078,6 +1294,7 @@ class MoKRecompute:
                 "schedule_token",
                 "num_tokens",
                 "counts",
+                *(("row_weights",) if self.weight_before_down else ()),
             ),
             slab=slab,
             extra=(
@@ -1086,6 +1303,7 @@ class MoKRecompute:
                 (local_tokens, intermediate),
                 (macro_size, intermediate),
                 3 * experts + capacity // 256,
+                macro_size if self.weight_before_down else None,
             ),
         )
 
@@ -1103,7 +1321,11 @@ class MoKRecompute:
     ):
         """Launch a :meth:`plan`; returns the seven context tensors of
         ``__call__``. Same caller contract as :meth:`MoKForward.launch_planned`."""
-        x, routed_rows, shared_shape, routed_shape, layout_numel = plan.extra
+        import torch
+
+        x, routed_rows, shared_shape, routed_shape, layout_numel, weight_ring = (
+            plan.extra
+        )
         if layout.numel() != layout_numel:
             raise ValueError("layout does not match the schedule geometry")
         # Identical context storage to the forward ring.
@@ -1112,6 +1334,11 @@ class MoKRecompute:
         up_shared, up_routed = x.new_empty(shared_shape), x.new_empty(routed_shape)
         hidden_shared = x.new_empty(shared_shape)
         hidden_routed = x.new_empty(routed_shape)
+        row_weights = (
+            ()
+            if weight_ring is None
+            else (x.new_empty((weight_ring,), dtype=torch.float32),)
+        )
         plan.launch(
             (
                 x_routed,
@@ -1129,6 +1356,7 @@ class MoKRecompute:
                 peer_token,
                 num_tokens,
                 layout,
+                *row_weights,
             )
         )
         return (
@@ -1151,13 +1379,36 @@ class MoKBackward:
     contribution into caller-owned FP32 accumulators. Launch-invariant
     geometry is memoised per geometry; the counters are one zero-filled slab
     per call.
+
+    ``weight_before_down=True`` (clamped SwiGLU with ``fp32_wgrad`` only)
+    loads the router-weight-before-down backward (role
+    ``backward_clamped_fp32_wbd``, the arguments of ``backward_clamped_fp32``):
+    ``dy`` reaches the down projection unscaled, the activation gradient is
+    ``w * dh`` and the router-weight gradient is ``dot(dh, a)``, with ``dh``
+    the gradient of the down projection's input and ``a`` the SwiGLU output:
+    no division, so a zero weight has its own gradient.
     """
 
-    def __init__(self, clamped=False, fp32_wgrad=False):
+    def __init__(self, clamped=False, fp32_wgrad=False, weight_before_down=False):
         from .jit import load_kernel
 
+        if type(weight_before_down) is not bool:
+            raise TypeError("weight_before_down must be a boolean")
+        if weight_before_down and not (clamped and fp32_wgrad):
+            raise ValueError(
+                "The router-weight-before-down backward is built for clamped SwiGLU "
+                "with FP32 weight-gradient accumulation only"
+            )
         self.clamped, self.fp32_wgrad = clamped, fp32_wgrad
-        self.module = load_kernel(_role("backward", clamped, fp32_wgrad))
+        self.weight_before_down = weight_before_down
+        self.module = load_kernel(
+            _role(
+                "backward",
+                clamped,
+                fp32_wgrad,
+                weight_before_down=weight_before_down,
+            )
+        )
         self.zero_module = load_kernel("zero")
         self.layout_module = load_kernel("expert_layout")
         self._peer_tables = {}
@@ -2815,18 +3066,43 @@ class MoKEpilogues:
     Per vector the arithmetic is native: FP32 accumulation from the shared
     row, then the routed rows in ascending expert-slot order, one BF16
     rounding.
+
+    ``weighted`` (default: whether ``top_k`` has a weighted form, 2 and 8)
+    also loads the weighted forward epilogue; ``weighted=False`` loads the
+    unweighted sum only (:meth:`backward`, ``plan(routed, False)``), which is
+    also the forward epilogue of the router-weight-before-down mode, whose
+    routed rows already carry their weights. Top-k 6 has the unweighted sum
+    only.
     """
 
-    def __init__(self, top_k: int):
+    def __init__(self, top_k: int, *, weighted=None):
         from .jit import load_kernel
 
         if type(top_k) is not int or top_k not in EPILOGUE_TOPKS:
-            raise ValueError("Exported epilogues support top_k=2 or 8")
+            raise ValueError("The epilogues support top_k=2, 6 or 8")
+        if weighted is None:
+            weighted = top_k in WEIGHTED_EPILOGUE_TOPKS
+        if type(weighted) is not bool:
+            raise TypeError("weighted must be a boolean or None")
+        if weighted and top_k not in WEIGHTED_EPILOGUE_TOPKS:
+            raise ValueError(
+                f"top-k {top_k} has only the unweighted epilogue "
+                "(router_weight_position='before_down')"
+            )
         self.top_k = top_k
-        self.forward_module = load_kernel(f"epilogue_forward_{top_k}")
+        self.forward_module = (
+            load_kernel(f"epilogue_forward_{top_k}") if weighted else None
+        )
         self.backward_module = load_kernel(f"epilogue_backward_{top_k}")
         self._sms: dict = {}
         self._no_scores: dict = {}
+
+    def _require_weighted(self):
+        if self.forward_module is None:
+            raise ValueError(
+                f"These top-k {self.top_k} epilogues have no weighted form: sum the "
+                "routed rows unweighted with backward() or plan(routed, False)"
+            )
 
     def _check(self, shared, routed):
         import torch
@@ -2849,6 +3125,7 @@ class MoKEpilogues:
     def forward(self, shared, routed, scores):
         import torch
 
+        self._require_weighted()
         self._check(shared, routed)
         tokens, hidden = shared.shape
         if (
@@ -2884,9 +3161,11 @@ class MoKEpilogues:
         (see :meth:`launch_planned`)."""
         import torch
 
+        backward = scores is False
+        if not backward:
+            self._require_weighted()
         tokens, hidden = routed.shape[0] // self.top_k, routed.shape[1]
         self._check(routed[:tokens], routed)
-        backward = scores is False
         if not backward and (
             tuple(scores.shape) != (tokens, self.top_k)
             or scores.dtype != torch.float32

@@ -37,6 +37,14 @@ class MoKConfig:
     imbalance_threshold: float = 4.0
     minibatch_size: int = 4096
     macrobatch_size: int = 131072
+    # Routed-row capacity per rank: ``num_local_tokens * topk * max(2,
+    # ceil(ep_size * multiplier))`` rows (:func:`schedule_capacity_for`). A
+    # routed-row overflow traps the kernel. The capacity holds every padded
+    # route of any routing when the multiplier is at least
+    # ``ceil((min(topk, E) * T * ep_size + E * 255) / (T * topk)) / ep_size``
+    # (``E`` local experts, ``T`` the workspace's physical source rows): all
+    # ranks' routes to this rank's experts plus each expert's padding to 256
+    # rows, about ``(ep_size + 1) / ep_size``. No upper bound is enforced.
     schedule_capacity_multiplier: float = 0.5
     all_gather_top_experts_chunk_bytes: int = 2048
     # Diagnostics of the imbalance-aware path: ``True`` prints each change of
@@ -126,6 +134,14 @@ class MoKWorkspace:
     launch_plans: dict = field(
         default_factory=dict, init=False, repr=False, compare=False
     )
+
+
+def schedule_capacity_for(
+    num_local_tokens: int, topk: int, ep_size: int, multiplier: float
+) -> int:
+    """Routed-row capacity of a workspace: ``num_local_tokens * topk *
+    max(2, ceil(ep_size * multiplier))`` (see ``MoKConfig``)."""
+    return num_local_tokens * topk * max(2, math.ceil(ep_size * multiplier))
 
 
 def validate_workspace_args(
@@ -241,9 +257,6 @@ def create_workspace(
     group_name = group.group_name
     ep_rank = dist.get_rank(group=group)
     ep_size = dist.get_world_size(group=group)
-    schedule_capacity_factor = max(
-        2, math.ceil(ep_size * config.schedule_capacity_multiplier)
-    )
 
     local_shape = torch.tensor(
         [num_local_tokens, hidden_size, topk], dtype=torch.int64, device=device
@@ -262,7 +275,9 @@ def create_workspace(
     if ep_size > 1:
         symm_mem.enable_symm_mem_for_group(group_name)
 
-    schedule_capacity = num_local_tokens * topk * schedule_capacity_factor
+    schedule_capacity = schedule_capacity_for(
+        num_local_tokens, topk, ep_size, config.schedule_capacity_multiplier
+    )
 
     def allocate_buffer(
         *shape: int, dtype: torch.dtype, zero: bool = False

@@ -8,7 +8,10 @@ Copies, barriers, scheduler, epilogues and empty-expert zeroing retain the
 native launch boundaries. Unequal source lengths use masked rows in common
 symmetric storage; the fused kernels keep the same runtime-shape entrypoints.
 Routed experts run in BF16, or natively in MXFP8 when the routed weights are
-passed as caller-prequantized MXFP8 tuples, as in MoK's functional API.
+passed as caller-prequantized MXFP8 tuples, as in MoK's functional API. The FP32
+router weight multiplies each routed expert's output in the combine
+(``router_weight_position="after_down"``), or its SwiGLU activation before the
+down projection, with an unweighted combine (``"before_down"``).
 """
 
 from dataclasses import dataclass
@@ -22,6 +25,8 @@ from . import workspace as native
 from ._kernels import (
     EPILOGUE_TOPKS,
     SCHEDULER_LAYOUTS,
+    check_configuration,
+    check_target,
     MoKBackward,
     MoKBackwardMXFP8,
     MoKCommunication,
@@ -198,8 +203,20 @@ def select_multimacro(tokens, macro_size):
 class MoKFunctional:
     """Precompile kernels before capture; retain native function signatures."""
 
+    # Class defaults, so an adapter built without ``__init__`` (host tests) is
+    # the router-weight-after-down adapter.
+    router_weight_position = "after_down"
+    weight_before_down = False
+
     def __init__(
-        self, ep, local_experts, topk, *, clamped_swiglu=False, fp32_wgrad=False
+        self,
+        ep,
+        local_experts,
+        topk,
+        *,
+        clamped_swiglu=False,
+        fp32_wgrad=False,
+        router_weight_position="after_down",
     ):
         """``clamped_swiglu`` selects which SwiGLU variant is compiled now.
 
@@ -211,13 +228,38 @@ class MoKFunctional:
         :meth:`prepare`. ``fp32_wgrad`` selects backward kernels that add
         weight gradients into caller-owned FP32 accumulators
         (``backward(weight_grad_accumulators=...)``).
+
+        ``router_weight_position`` (:data:`ROUTER_WEIGHT_POSITIONS`) places the
+        FP32 router weight ``w`` of each route. ``"after_down"`` (default)
+        weights each routed expert's output in the combine,
+        ``y = S(x) + sum_k w_k E_k(x)``. ``"before_down"`` weights the SwiGLU
+        activation ``a`` before the down projection, ``h = BF16(w * a)``,
+        ``y = S(x) + sum_k h_k Wd_k^T``, with ``d_w = dot(dh, a)`` (``dh`` the
+        gradient of ``h``; a zero weight is allowed and has its gradient); it
+        needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
+        ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
+        device. Every unsupported combination raises ``ValueError`` here,
+        before any device work.
         """
+        check_configuration(
+            ep,
+            local_experts,
+            topk,
+            clamped_swiglu=clamped_swiglu,
+            fp32_wgrad=fp32_wgrad,
+            router_weight_position=router_weight_position,
+        )
         if (ep, local_experts) not in SCHEDULER_LAYOUTS or topk not in EPILOGUE_TOPKS:
             raise ValueError("Unsupported exported (EP, local experts, top-k) layout")
         if type(clamped_swiglu) is not bool or type(fp32_wgrad) is not bool:
             raise TypeError("clamped_swiglu and fp32_wgrad must be booleans")
         self.ep, self.local_experts, self.topk = ep, local_experts, topk
+        self.router_weight_position = router_weight_position
+        self.weight_before_down = router_weight_position == "before_down"
         self.device = torch.device("cuda", torch.cuda.current_device())
+        from .jit import target_arch
+
+        check_target(router_weight_position, target_arch(self.device))
         self.communication = MoKCommunication()
         self.scheduler = MoKScheduler(ep, local_experts)
         self.fp32_wgrad = fp32_wgrad
@@ -234,16 +276,41 @@ class MoKFunctional:
         # per MoE layer and operation, no reference to any weight.
         self._validated = {}
         self._kernels(1.0 if clamped_swiglu else None)
-        self.epilogues = MoKEpilogues(topk)
+        self.epilogues = MoKEpilogues(topk, weighted=not self.weight_before_down)
+
+    def _check_variant(self, swiglu_limit, mxfp8):
+        """The per-call refusals of ``router_weight_position="before_down"``,
+        before any copy, barrier or launch: plain SwiGLU and MXFP8 routed
+        weights run with ``"after_down"`` only."""
+        if not self.weight_before_down:
+            return
+        if swiglu_limit is None:
+            raise ValueError(
+                "router_weight_position='before_down' requires swiglu_limit (a finite "
+                "positive number); plain SwiGLU (swiglu_limit=None) runs with "
+                "'after_down'"
+            )
+        if mxfp8:
+            raise ValueError(
+                "router_weight_position='before_down' takes BF16 routed weights; "
+                "MXFP8 routed weights run with 'after_down'"
+            )
 
     def _kernels(self, swiglu_limit, mxfp8=False):
         """Kernel pair for (SwiGLU variant, routed precision); MXFP8 is native."""
+        self._check_variant(swiglu_limit, mxfp8)
         key = (mxfp8, swiglu_limit is not None)
         if key not in self._forward_kernels:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
                     "Call prepare() for this variant before CUDA Graph capture"
                 )
+            if self.weight_before_down:
+                self._forward_kernels[key] = MoKForward(True, weight_before_down=True)
+                self._backward_kernels[key] = MoKBackward(
+                    True, True, weight_before_down=True
+                )
+                return self._forward_kernels[key], self._backward_kernels[key]
             forward, backward = (
                 (MoKForwardMXFP8, MoKBackwardMXFP8)
                 if mxfp8
@@ -260,22 +327,31 @@ class MoKFunctional:
                 "save_context=False requires BF16 routed experts; the MXFP8 "
                 "forward always saves its context"
             )
+        self._check_variant(swiglu_limit, mxfp8)
         key = swiglu_limit is not None
         if key not in self._context_free_forward_kernels:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError(
                     "Call prepare(..., save_context=False) before CUDA Graph capture"
                 )
-            self._context_free_forward_kernels[key] = MoKForward(key, context=False)
+            self._context_free_forward_kernels[key] = MoKForward(
+                key, context=False, weight_before_down=self.weight_before_down
+            )
         return self._context_free_forward_kernels[key]
 
     def _recompute_kernel(self, swiglu_limit, mxfp8=False):
+        self._check_variant(swiglu_limit, mxfp8)
         key = (mxfp8, swiglu_limit is not None)
         if key not in self._recompute_kernels:
             if torch.cuda.is_available() and torch.cuda.is_current_stream_capturing():
                 raise RuntimeError("Call prepare_recompute() before CUDA Graph capture")
-            recompute = MoKRecomputeMXFP8 if mxfp8 else MoKRecompute
-            self._recompute_kernels[key] = recompute(key[1])
+            if self.weight_before_down:
+                self._recompute_kernels[key] = MoKRecompute(
+                    True, weight_before_down=True
+                )
+            else:
+                recompute = MoKRecomputeMXFP8 if mxfp8 else MoKRecompute
+                self._recompute_kernels[key] = recompute(key[1])
         return self._recompute_kernels[key]
 
     def prepare(self, swiglu_limit=None, mxfp8=False, *, save_context=True):
@@ -826,6 +902,11 @@ class MoKFunctional:
         ``recompute_forward_context`` (same schedule, inputs, weights and
         ``swiglu_limit``) before ``backward``. Compile it with
         ``prepare(swiglu_limit, save_context=False)`` before CUDA Graph capture.
+
+        With ``router_weight_position="before_down"`` the peers read this
+        rank's router weights during dispatch: they are staged into the
+        workspace before the peer barrier, and ``y`` sums the routed rows
+        unweighted (they carry their weights).
         """
         if type(save_context) is not bool:
             raise TypeError("save_context must be a boolean")
@@ -842,6 +923,7 @@ class MoKFunctional:
             routed_down_weights,
         )
         mxfp8 = self._weights(x, weights[:3], weights[3:])
+        self._check_variant(swiglu_limit, mxfp8)
         if mxfp8 and not save_context:
             raise ValueError(
                 "save_context=False requires BF16 routed experts; the MXFP8 "
@@ -862,6 +944,7 @@ class MoKFunctional:
         fwd_comm_sms, _ = self._comm_split(config, workspace)
         intermediate = shared_gate_weights.shape[0]
         experts = schedule.tokens_per_expert.numel()
+        before_down = self.weight_before_down
 
         def build():
             x_rows = workspace.x_buffer[:shared_rows]
@@ -879,10 +962,16 @@ class MoKFunctional:
                     fwd_comm_sms,
                     config.macrobatch_size,
                     config.minibatch_size,
+                    weight_ptrs=(
+                        workspace.router_weight_buffer_ptrs if before_down else None
+                    ),
                 ),
                 barrier=self._barrier_plan(workspace),
+                # Before the down projection the routed rows carry their
+                # weights: the unweighted sum.
                 epilogue=self.epilogues.plan(
-                    workspace.combine_buffer[: shared_rows * topk], scores
+                    workspace.combine_buffer[: shared_rows * topk],
+                    False if before_down else scores,
                 ),
                 x_rows=x_rows,
                 scores=scores,
@@ -916,6 +1005,10 @@ class MoKFunctional:
                     source_count * topk : shared_rows * topk
                 ].zero_()
                 scores = plan.scores
+            elif before_down:
+                plan.x_rows.copy_(x)
+                # Peers read the router weights during dispatch.
+                plan.scores.copy_(router_weights)
             else:
                 plan.x_rows.copy_(x)
                 # Peers never read the router weights in forward and no row
@@ -938,7 +1031,9 @@ class MoKFunctional:
             )
             if barrier is not None:
                 barrier.launch(())
-            output = self.epilogues.launch_planned(plan.epilogue, values[7], scores)
+            output = self.epilogues.launch_planned(
+                plan.epilogue, values[7], None if before_down else scores
+            )
         if not save_context:
             return output[:source_count], None
         context = MoKForwardContext(
@@ -992,6 +1087,8 @@ class MoKFunctional:
             forward_kernel = self._context_free_forward_kernel(swiglu_limit)
         fwd_comm_sms, _ = self._comm_split(config, workspace)
         program = {"multimacro": self._multimacro(config, workspace)} if mxfp8 else {}
+        if self.weight_before_down:
+            program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
         values = forward_kernel(
             workspace.x_buffer[:shared_rows],
             workspace.x_buffer_ptrs,
@@ -1013,11 +1110,13 @@ class MoKFunctional:
             **program,
         )
         self._barrier(workspace)
-        output = self.epilogues.forward(
-            values[7],
-            workspace.combine_buffer[: shared_rows * workspace.topk],
-            workspace.router_weight_buffer[:shared_rows],
-        )
+        combine = workspace.combine_buffer[: shared_rows * workspace.topk]
+        if self.weight_before_down:
+            output = self.epilogues.backward(values[7], combine)
+        else:
+            output = self.epilogues.forward(
+                values[7], combine, workspace.router_weight_buffer[:shared_rows]
+            )
         if not save_context:
             return output[:source_count], None
         context = MoKForwardContext(
@@ -1043,6 +1142,8 @@ class MoKFunctional:
         routed_gate_weights,
         routed_up_weights,
         swiglu_limit=None,
+        *,
+        router_weights=None,
     ):
         """Rebuild the backward context for activation checkpointing.
 
@@ -1052,8 +1153,16 @@ class MoKFunctional:
         inputs, weights and ``swiglu_limit`` as the checkpointed forward; the
         returned context is interchangeable with that forward's context. It is
         the only context source after ``forward(..., save_context=False)``.
+
+        ``router_weights`` (FP32 ``[source tokens, topk]``, the forward's): with
+        ``router_weight_position="before_down"`` required, since the routed
+        hidden of the context is ``BF16(w * a)``; staged into the workspace
+        before the peer barrier, as the forward does. With ``"after_down"``
+        they are checked and not read, so one call serves both positions.
         """
-        workspace, source_count = self._inputs(config, workspace, schedule, x, None)
+        workspace, source_count = self._inputs(
+            config, workspace, schedule, x, router_weights
+        )
         self._check_device(workspace)
         weights = (
             shared_gate_weights,
@@ -1062,11 +1171,18 @@ class MoKFunctional:
             routed_up_weights,
         )
         mxfp8 = self._weights(x, weights[:2], weights[2:])
+        self._check_variant(swiglu_limit, mxfp8)
+        before_down = self.weight_before_down
+        if before_down and router_weights is None:
+            raise ValueError(
+                "router_weight_position='before_down' needs router_weights in "
+                "recompute_forward_context"
+            )
         shared_rows = self._shared_rows(source_count)
         if mxfp8 or schedule.layout is None:
             return self._recompute_native(
                 config, workspace, schedule, x, weights, swiglu_limit,
-                shared_rows, mxfp8,
+                shared_rows, mxfp8, router_weights,
             )  # fmt: skip
         kernel = self._recompute_kernel(swiglu_limit, False)
         fwd_comm_sms, _ = self._comm_split(config, workspace)
@@ -1087,10 +1203,14 @@ class MoKFunctional:
                     fwd_comm_sms,
                     config.macrobatch_size,
                     config.minibatch_size,
+                    weight_ptrs=(
+                        workspace.router_weight_buffer_ptrs if before_down else None
+                    ),
                 ),
                 barrier=self._barrier_plan(workspace),
                 epilogue=None,
                 x_rows=x_rows,
+                scores=workspace.router_weight_buffer[:shared_rows],
             )
 
         plan = self._plan(
@@ -1113,8 +1233,14 @@ class MoKFunctional:
             plan.fused.slab.zero_()
             if shared_rows > source_count:
                 self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+                if before_down:
+                    self._copy_source(
+                        workspace.router_weight_buffer, router_weights, 1, shared_rows
+                    )
             else:
                 plan.x_rows.copy_(x)
+                if before_down:
+                    plan.scores.copy_(router_weights)
             if barrier is not None:
                 barrier.launch(())
             values = kernel.launch_planned(
@@ -1128,7 +1254,7 @@ class MoKFunctional:
                 schedule.num_tokens,
                 schedule.layout,
             )
-            # Peers read this rank's x_buffer during dispatch.
+            # Peers read this rank's x_buffer (and router weights) during dispatch.
             if barrier is not None:
                 barrier.launch(())
         return MoKForwardContext(
@@ -1143,7 +1269,16 @@ class MoKFunctional:
         )
 
     def _recompute_native(
-        self, config, workspace, schedule, x, weights, swiglu_limit, shared_rows, mxfp8
+        self,
+        config,
+        workspace,
+        schedule,
+        x,
+        weights,
+        swiglu_limit,
+        shared_rows,
+        mxfp8,
+        router_weights=None,
     ):
         """Unplanned recompute (see :meth:`_forward_native`)."""
         (
@@ -1153,6 +1288,12 @@ class MoKFunctional:
             routed_up_weights,
         ) = weights
         self._copy_source(workspace.x_buffer, x, 0, shared_rows)
+        program = {}
+        if self.weight_before_down:
+            self._copy_source(
+                workspace.router_weight_buffer, router_weights, 1, shared_rows
+            )
+            program["weight_ptrs"] = workspace.router_weight_buffer_ptrs
         self._barrier(workspace)
         fwd_comm_sms, _ = self._comm_split(config, workspace)
         values = self._recompute_kernel(swiglu_limit, mxfp8)(
@@ -1169,8 +1310,9 @@ class MoKFunctional:
             config.macrobatch_size,
             config.minibatch_size,
             layout=schedule.layout,
+            **program,
         )
-        # Peers read this rank's x_buffer during dispatch.
+        # Peers read this rank's x_buffer (and router weights) during dispatch.
         self._barrier(workspace)
         return MoKForwardContext(
             x_routed=values[0],
@@ -1204,7 +1346,12 @@ class MoKFunctional:
         """``weight_grad_accumulators``: with ``fp32_wgrad=True``, six FP32
         tensors (shared gate, up, down, routed gate, up, down) to which this
         call adds the weight gradients in FP32; the same tensors are returned.
-        Routed macrobatch contributions are added in a fixed order."""
+        Routed macrobatch contributions are added in a fixed order.
+
+        ``dscores`` is ``dot(d_hidden, hidden) / score`` with
+        ``router_weight_position="after_down"`` (zero at a zero score) and
+        ``dot(dh, a)`` with ``"before_down"`` (``dh`` the gradient of the down
+        projection's input, ``a`` the SwiGLU output; defined at a zero weight)."""
         workspace, source_count = self._inputs(
             config, workspace, schedule, x, router_weights, grad_output
         )
@@ -1225,6 +1372,7 @@ class MoKFunctional:
             routed_down_weights,
         )
         mxfp8 = self._weights(x, weights[:3], weights[3:])
+        self._check_variant(swiglu_limit, mxfp8)
         if mxfp8 != isinstance(forward_context.x_routed, tuple):
             raise ValueError("Forward context and routed weights differ in precision")
         shared_rows = self._shared_rows(source_count)
