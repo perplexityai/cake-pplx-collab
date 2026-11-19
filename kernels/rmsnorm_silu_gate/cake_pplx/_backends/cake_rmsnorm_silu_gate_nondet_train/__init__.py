@@ -57,6 +57,16 @@ once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
 tensor); a launch still runs on torch's current stream of its tensors'
 device, as in 0.2.5.
+Version 0.2.7 changes nothing in this package and no bits: the deterministic
+package's backward without the weight gradient runs its 128-thread strided
+build on rows of any layout up to 32 rows per SM, and on packed rows up to
+128 rows per SM a build of packed rows only (sm_100a and sm_103a), with the
+same ``dx`` and ``dz`` bits.
+Version 0.2.8 changes nothing in this package and no bits: on sm_107a the
+deterministic package's backward without the weight gradient runs its
+128-thread strided build on rows of any layout up to 96 rows per SM, and on
+packed rows (and one token) up to 192 rows per SM a build of packed rows
+only, with the same ``dx`` and ``dz`` bits.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
