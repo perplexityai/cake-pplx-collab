@@ -6946,6 +6946,62 @@ def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeyp
         runner.values[key] = kept
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_temperature_from_runner_checks_slots_against_the_runner_host_values(
+    module, monkeypatch
+):
+    """A temperature binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot
+    against the host values the runner was prepared with (``runner.values``: :func:`stage_values_temperature` of its
+    tensors) and forms none of them again, through neither :func:`stage_values_temperature` nor
+    :func:`stage_values`; a runner value that is not the slot's view, the compact ``temperature`` rows included,
+    still fails the check.  The template is a reference runner of a compacted log-probability plan with a
+    temperature, marked ``cake``: a stand-in launch of chunk 0's row kernel joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37, ignore_frac=0.2, temperature="hetero")
+    row_index = inp.valid.nonzero().reshape(-1)
+    runner = mod.prepare_lm_head_det_loss_temperature(
+        inp.X,
+        inp.W,
+        inp.labels,
+        chunk_size=16,
+        entry="logprob",
+        backend="reference",
+        compact_rows=row_index,
+        temperature=inp.temperature.index_select(0, row_index).contiguous(),
+    )
+    assert runner.plan.problem.temperature and runner.plan.compact
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    row = (runner.plan.row_finalize_stage, 0)
+    assert gathers and row in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        row: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "logp", "d", "temperature"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+
+    def counting(real):
+        def counted(stage, t, plan, index, **kw):
+            formed.append((stage, index))
+            return real(stage, t, plan, index, **kw)
+
+        return counted
+
+    for name in ("stage_values", "stage_values_temperature"):
+        monkeypatch.setattr(mod, name, counting(getattr(mod, name)))
+    binding = mod._TemperatureBinding.from_runner(runner)
+    assert isinstance(binding, mod._TemperatureBinding)
+    assert not [key for key in formed if key == row or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (row, "temperature")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._TemperatureBinding.from_runner(runner)
+        runner.values[key] = kept
+
+
 def test_default_module_template_only_runner_takes_the_cake_backend():
     """The default module's ``_template_only`` runners (the eager entry points' binding build, which binds the device's
     constant cells) take the ``cake`` backend only, with and without a temperature."""
@@ -8083,6 +8139,35 @@ def test_device_template_runner_binds_constant_cells(glm_weight, monkeypatch):
     with pytest.raises(RuntimeError, match="never launches"):
         runner.forward()
     own = real(inp.X, inp.W, inp.labels, **kw)
+    assert not own._template_only
+    assert not any(own.tensors[name] is constants[name] for name in cells)
+    torch.cuda.synchronize()
+    assert own.tensors["unit_scale"].tolist() == [1.0]
+    assert not bool(own.tensors["f32_dummy"].any())
+
+
+@pytest.mark.parametrize("form", ["loss", "temperature"])
+def test_device_opt_in_template_runner_binds_constant_cells(glm_weight, form):
+    """The opt-in module's template runner (``_template_only``, its eager entry points' binding build), with and
+    without a temperature, binds the device's constant cells (``unit_scale`` / ``f32_dummy``), as the binding's
+    scratch does, rather than filling cells of its own; a runner prepared without the switch fills its own."""
+    _require_program(entry="loss")
+    inp = _device_inputs(4097, W=glm_weight)
+    if form == "temperature":
+        _require_tau_program()
+        prepare = opt_in.prepare_lm_head_det_loss_temperature
+        tau = torch.full((4097,), 0.7, dtype=torch.float32, device=CUDA)
+        kw = dict(entry="logprob", temperature=tau)
+    else:
+        prepare = opt_in.prepare_lm_head_det_loss
+        kw = dict(objective="ce", loss_div=inp.loss_div)
+    kw.update(chunk_size=4096, backend="cake")
+    runner = prepare(inp.X, inp.W, inp.labels, _template_only=True, **kw)
+    assert runner._template_only
+    constants = cake_backend._device_constants(runner.device_index)
+    cells = ("unit_scale", "f32_dummy")
+    assert all(runner.tensors[name] is constants[name] for name in cells)
+    own = prepare(inp.X, inp.W, inp.labels, **kw)
     assert not own._template_only
     assert not any(own.tensors[name] is constants[name] for name in cells)
     torch.cuda.synchronize()
