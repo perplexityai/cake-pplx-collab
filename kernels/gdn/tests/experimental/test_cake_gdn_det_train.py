@@ -6598,7 +6598,7 @@ def test_a_pool_eviction_keeps_the_forward_plans(monkeypatch) -> None:
 FWD_PLAN_HELD = ("_device_props", "_available", "wy_stage", "use_prep_tma", "FWD_A_ARCHS", "FWD_SPLIT_A_MIN_PIECE",
                  "VIEWS_TAKE_PREP_TMA", "WY_TC2_ARCHS", "FWD_HO_VH2_ARCHS", "_POOLED", "_WALKS", "_SIDE_STREAMS",
                  "_GRAPH_TABLES", "LAUNCH_ARGS", "FWD_A_TAPE", "FWD_FUSED_TAPE", "_index_copy_heads", "_aligned",
-                 "_table_rows", "_caller_rows")  # fmt: skip
+                 "_table_rows", "_caller_rows", "_workspaces")  # fmt: skip
 # the switches, caches and state of the forward plan and its record gate: no plan holds them (rebinding one changes no
 # plan's identity)
 FWD_PLAN_NOT_HELD = ("FWD_PLAN", "_FWD_PLANS", "_PLAN_KEYS", "FWD_PLAN_GATE", "FWD_PLAN_REPEAT", "FWD_PLAN_PAYBACK",
@@ -7054,6 +7054,15 @@ def test_the_recorder_classifies_operands(monkeypatch) -> None:
     assert rec.ops[-1] == (*take, ((2, 3), torch.float32))
     assert t is table["role"][((2, 3), torch.float32)]
     assert rec._ref(t) == slot and rec.why is None
+    # the forward takes from the recorder's pool (ex.workspaces) as from the pool itself: each take a take step
+    monkeypatch.setattr(cake_chain, "_workspaces", lambda _options: pool)
+    view = rec.workspaces(None)
+    assert isinstance(view, cake_chain._RecordedPool) and view.pool is pool
+    u = view.take(table, "other", (4,), torch.float32, "cpu")
+    assert rec.ops[-1] == (cake_chain._OP_TAKE, rec._slot(u), "other", (4,), torch.float32, "cpu", ((4,), torch.float32))  # fmt: skip
+    assert u is table["other"][((4,), torch.float32)] and rec.why is None
+    tables = types.SimpleNamespace(table=lambda index: ("the table of", index))
+    assert cake_chain._RecordedPool(rec, tables).table(3) == ("the table of", 3)
     other = cake_chain.Workspaces()
     rec.take(other, other.tables.setdefault((0, 0), {}), "role", (2, 3), torch.float32, "cpu")  # fmt: skip
     assert rec.why is not None and "pool" in rec.why
@@ -7091,13 +7100,35 @@ FWD_OUTSIDE_CALLS = frozenset(("torch.empty", "torch.zeros", "torch.full", "torc
                                "_use_table", "_table_ready"))  # fmt: skip
 FWD_FILL_CALLS = frozenset(("torch.arange", "_table_ready"))
 # the tensor methods they call only on the executor (any method ending in "_" too: an in-place op), and the take of a
-# pooled workspace (a take outside the executor would be missing from a replay's take steps)
+# pooled workspace (a take outside the executor would be missing from a replay's take steps): a take from the
+# executor's pool only (``workspaces``, :data:`FWD_POOLS`)
 FWD_OUTSIDE_METHODS = frozenset(("contiguous", "float", "clone", "view", "to", "narrow", "index_select", "record",
                                  "wait_event", "wait_stream", "take"))  # fmt: skip
 # the dicts they store into by subscript (a store into a tensor writes it in place): the forward's result, and the walk
 # cache inside _walk's cache fill
 FWD_DICT_STORES = frozenset(("fwd",))
 FWD_FILL_STORES = frozenset(("_WALKS",))
+# the name of the executor's pool (``workspaces = ex.workspaces(options)``, or a parameter every caller passes it to):
+# the forward takes its pooled workspaces from it as from the pool itself, and a recorder's pool records each take
+FWD_POOLS = frozenset(("workspaces",))
+# the pool and its getter, which a forward function never names (its pool is the executor's)
+FWD_POOL_NAMES = frozenset(
+    ("_workspaces", "_POOLED", "_FRESH", "Workspaces", "FreshWorkspaces")
+)
+# the steps the general path makes in place, outside the executor: the body of ``if ex is _DIRECT:`` (a test with that
+# comparison) makes the steps of the executor's methods there as they make them, without their Python frames.  Each
+# function's direct branches make exactly these steps outside the executor, in this order (a change is a change of this
+# table); the replay test checks on the device that the general path's launches, stream switches and event records and
+# waits are the recording's, and test_the_direct_branches_make_the_executor_steps checks two of them on the host
+FWD_DIRECT_STEPS = {
+    "_walk": ("_use_table",),
+    "_launch_fwd_ho": ("torch.cuda.current_stream", "_side_stream", "torch.cuda.Event", "fork.record",
+                       "side.wait_event", "torch.cuda.stream", "torch.cuda.Event", "wy_a.record", "main.wait_event",
+                       "main.wait_stream"),
+    "_first_wave": ("torch.cuda.current_stream", "_side_stream", "torch.cuda.Event", "fork.record", "side.wait_event",
+                    "torch.cuda.stream", "main.wait_stream"),
+    "_forward_split_a": ("seg_state[:, :, :, :HEAD_DIM].index_copy_",),
+}  # fmt: skip
 
 
 def _dotted(node) -> str | None:
@@ -7127,16 +7158,36 @@ def _subscript_stores(node) -> list:
     ]
 
 
-def _steps_outside_the_executor(fn) -> list[str]:
+def _direct_test(node) -> bool:
+    """Whether ``node`` is an ``if`` whose test compares ``ex is _DIRECT`` (alone or among other conditions)."""
+    return isinstance(node, ast.If) and any(
+        isinstance(sub, ast.Compare)
+        and _dotted(sub.left) == "ex"
+        and [type(op) for op in sub.ops] == [ast.Is]
+        and _dotted(sub.comparators[0]) == "_DIRECT"
+        for sub in ast.walk(node.test)
+    )
+
+
+def _steps_outside_the_executor(fn, pools=frozenset(), direct=None) -> list[str]:
     """The steps in ``fn``'s source that the forward would make outside its executor ``ex``, as ``"line: step"``:
-    the calls of :data:`FWD_OUTSIDE_CALLS`, :data:`FWD_OUTSIDE_METHODS` and in-place methods on another receiver, a
-    call with an ``out=`` keyword, a store by subscript into anything but a dict of :data:`FWD_DICT_STORES` (or
-    :data:`FWD_FILL_STORES` in ``_walk``'s fill) and an augmented assignment (``t += x`` is in place on a tensor)."""
+    the calls of :data:`FWD_OUTSIDE_CALLS`, :data:`FWD_OUTSIDE_METHODS` and in-place methods on another receiver (a
+    take on a name of ``pools`` aside), a call with an ``out=`` keyword, a store by subscript into anything but a dict
+    of :data:`FWD_DICT_STORES` (or :data:`FWD_FILL_STORES` in ``_walk``'s fill) and an augmented assignment
+    (``t += x`` is in place on a tensor).  ``direct`` (a list): the steps of the body of each ``if ex is _DIRECT:``
+    go there, not among the found ones (:data:`FWD_DIRECT_STEPS`)."""
     tree = ast.parse(inspect.getsource(fn))
     ast.increment_lineno(tree, fn.__code__.co_firstlineno - 1)
     found = []
 
-    def visit(node, in_fill: bool) -> None:
+    def visit(node, in_fill: bool, found: list) -> None:
+        if direct is not None and _direct_test(node):
+            visit(node.test, in_fill, found)
+            for child in node.body:
+                visit(child, in_fill, direct)
+            for child in node.orelse:
+                visit(child, in_fill, found)
+            return
         if isinstance(node, ast.With) and any(
             isinstance(item.context_expr, ast.Call)
             and _dotted(item.context_expr.func) == "ex.fill"
@@ -7160,6 +7211,7 @@ def _steps_outside_the_executor(fn) -> list[str]:
             elif (
                 isinstance(node.func, ast.Attribute)
                 and _dotted(node.func.value) != "ex"
+                and not (node.func.attr == "take" and _dotted(node.func.value) in pools)
             ):
                 method = node.func.attr
                 if method in FWD_OUTSIDE_METHODS or (
@@ -7167,9 +7219,65 @@ def _steps_outside_the_executor(fn) -> list[str]:
                 ):
                     found.append(f"{node.lineno}: {ast.unparse(node.func)}")
         for child in ast.iter_child_nodes(node):
-            visit(child, in_fill)
+            visit(child, in_fill, found)
 
-    visit(tree, False)
+    visit(tree, False, found)
+    return found
+
+
+def _pools_outside_the_executor(fn) -> list[str]:
+    """The pools in ``fn``'s source other than the executor's, as ``"line: what"``: a name of :data:`FWD_POOL_NAMES`,
+    and a binding of a name of :data:`FWD_POOLS` to anything but ``ex.workspaces(...)``."""
+    tree = ast.parse(inspect.getsource(fn))
+    ast.increment_lineno(tree, fn.__code__.co_firstlineno - 1)
+    found = []
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Name) and node.id in FWD_POOL_NAMES:
+            found.append(f"{node.lineno}: {node.id}")
+        targets = (
+            node.targets
+            if isinstance(node, ast.Assign)
+            else [getattr(node, "target", None)]
+        )
+        if isinstance(
+            node, (ast.Assign, ast.AnnAssign, ast.AugAssign, ast.NamedExpr)
+        ) and any(isinstance(t, ast.Name) and t.id in FWD_POOLS for t in targets):
+            value = node.value
+            if not (
+                isinstance(value, ast.Call) and _dotted(value.func) == "ex.workspaces"
+            ):
+                found.append(f"{node.lineno}: {ast.unparse(node)}")
+    return sorted(found, key=lambda step: int(step.split(":", 1)[0]))
+
+
+def _pool_arguments() -> list[str]:
+    """Every call in the module of a forward function with a parameter of :data:`FWD_POOLS`, as ``"caller: callee"``
+    unless the argument it passes there is that name in a forward function (its pool is then the executor's, by
+    :func:`_pools_outside_the_executor`)."""
+    params = {
+        name: [
+            p.name
+            for p in inspect.signature(getattr(cake_chain, name)).parameters.values()
+        ]
+        for name in FWD_EXECUTOR_FUNCTIONS
+    }
+    tree = ast.parse(Path(cake_chain.__file__).read_text())
+    found = []
+    for caller in tree.body:
+        if not isinstance(caller, ast.FunctionDef):
+            continue
+        for node in ast.walk(caller):
+            callee = _dotted(node.func) if isinstance(node, ast.Call) else None
+            pools = [p for p in params.get(callee, ()) if p in FWD_POOLS]
+            for pool in pools:
+                index = params[callee].index(pool)
+                passed = next(
+                    (kw.value for kw in node.keywords if kw.arg == pool), None
+                )
+                if passed is None and index < len(node.args):
+                    passed = node.args[index]
+                if caller.name not in FWD_EXECUTOR_FUNCTIONS or _dotted(passed) != pool:
+                    found.append(f"{caller.name}: {callee}")
     return found
 
 
@@ -7180,17 +7288,39 @@ def test_the_forward_steps_go_through_the_executor() -> None:
     # FWD_OUTSIDE_METHODS outside the executor (a pooled workspace's take among them).  The check finds the steps of a
     # function that takes no executor (the backward's rebuild of h and v_new: its three takes) and each in-place write
     # of _writes_in_place
-    found = {
-        name: _steps_outside_the_executor(getattr(cake_chain, name))
-        for name in FWD_EXECUTOR_FUNCTIONS
-    }
+    found, direct = {}, {}
+    for name in FWD_EXECUTOR_FUNCTIONS:
+        steps: list = []
+        found[name] = _steps_outside_the_executor(getattr(cake_chain, name), FWD_POOLS, steps)  # fmt: skip
+        found[name] += _pools_outside_the_executor(getattr(cake_chain, name))
+        if steps:
+            direct[name] = tuple(step.split(": ", 1)[1] for step in steps)
     assert not any(found.values()), {
         name: steps for name, steps in found.items() if steps
     }
+    # the general path's steps in place: exactly the pinned ones (without the allowance they are steps outside)
+    assert direct == FWD_DIRECT_STEPS, direct
+    for name, steps in FWD_DIRECT_STEPS.items():
+        outside = _steps_outside_the_executor(getattr(cake_chain, name), FWD_POOLS)
+        assert tuple(step.split(": ", 1)[1] for step in outside) == steps, (
+            name,
+            outside,
+        )
+    # every forward function that takes a pool gets the executor's
+    assert not _pool_arguments(), _pool_arguments()
     assert "torch.arange" in inspect.getsource(cake_chain._walk)
     outside = _steps_outside_the_executor(cake_chain._launch_fwd_h)
     assert sum(".take" in step for step in outside) == 3, outside
     assert len(_steps_outside_the_executor(_writes_in_place)) == 3
+    # a take from another pool, the pool's getter and a pool bound to anything but the executor's are found
+    outside = _steps_outside_the_executor(_takes_beside_the_executor, FWD_POOLS, [])
+    assert [step.split(": ", 1)[1] for step in outside] == ["pool.take"], outside
+    pools = _pools_outside_the_executor(_takes_beside_the_executor)
+    assert [step.split(": ", 1)[1] for step in pools] == [
+        "_workspaces",
+        "workspaces = _POOLED",
+        "_POOLED",
+    ], pools
 
 
 def _writes_in_place(t, x, i):
@@ -7199,6 +7329,105 @@ def _writes_in_place(t, x, i):
     t[i] = x
     t += x
     torch.add(t, x, out=t)
+
+
+def _takes_beside_the_executor(ex, options, table):
+    """Takes that are not the executor pool's (never run: the checks of
+    :func:`test_the_forward_steps_go_through_the_executor` find them)."""
+    workspaces = ex.workspaces(options)
+    workspaces.take(table, "role", (1,), torch.float32, "cpu")
+    pool = _workspaces(options)  # noqa: F821
+    pool.take(table, "role", (1,), torch.float32, "cpu")
+    workspaces = _POOLED  # noqa: F821
+    workspaces.take(table, "role", (1,), torch.float32, "cpu")
+
+
+# the steps of the general path's executor: the function or tensor method each stands for
+DIRECT_STEPS = ("launch", "empty", "view", "contiguous", "float", "index_fill_", "index_select", "aligned", "table_rows",
+                "caller_rows", "workspaces")  # fmt: skip
+
+
+def test_the_direct_executor_steps_are_the_functions_themselves() -> None:
+    # the general path's executor holds each step as the function or tensor method itself, in an instance slot: a call
+    # site loads it with one specialized slot load and calls it with no Python frame in between (a class-level
+    # staticmethod would be a descriptor that the interpreter does not specialize; operator.call would call a Python
+    # function from C).  The forward recorder has a method of each name
+    direct = cake_chain._DIRECT
+    want = (cake_chain._launch, torch.empty, torch.Tensor.view, torch.Tensor.contiguous, torch.Tensor.float,
+            torch.Tensor.index_fill_, torch.Tensor.index_select, cake_chain._aligned, cake_chain._table_rows,
+            cake_chain._caller_rows, cake_chain._workspaces)  # fmt: skip
+    assert type(direct).__slots__ == DIRECT_STEPS and not hasattr(direct, "__dict__")
+    for name, fn in zip(DIRECT_STEPS, want, strict=True):
+        assert getattr(direct, name) is fn, name
+        assert isinstance(vars(type(direct))[name], types.MemberDescriptorType), name
+        assert isinstance(getattr(cake_chain._FwdRecorder, name), types.FunctionType), name  # fmt: skip
+
+
+def test_the_direct_branches_make_the_executor_steps(monkeypatch) -> None:
+    # the general path (_DIRECT) makes the fork, side-stream switch and join of _first_wave and the use of a cached walk
+    # in place; another executor (a second _DirectExecutor here, so its methods run) makes them through its steps.
+    # Both make the same calls in the same order, here on host stand-ins of the streams and events
+    log: list = []
+
+    class Stream:
+        def __init__(self, name):
+            self.name = name
+
+        def wait_event(self, event):
+            log.append(("wait_event", self.name, event.name))
+
+        def wait_stream(self, other):
+            log.append(("wait_stream", self.name, other.name))
+
+    class Event:
+        def __init__(self):
+            self.name = f"event{sum(entry[0] == 'event' for entry in log)}"
+            log.append(("event", self.name))
+
+        def record(self, stream=None):
+            log.append(("record", self.name, stream.name))
+
+    @contextlib.contextmanager
+    def on(stream):
+        log.append(("enter", stream.name))
+        yield
+        log.append(("exit", stream.name))
+
+    main, side = Stream("main"), Stream("side")
+
+    def current_stream(index):
+        log.append(("current_stream", index))
+        return main
+
+    def side_stream(index, stream):
+        log.append(("side_stream", index, stream.name))
+        return side
+
+    monkeypatch.setattr(torch.cuda, "current_stream", current_stream)
+    monkeypatch.setattr(torch.cuda, "Event", Event)
+    monkeypatch.setattr(torch.cuda, "stream", on)
+    monkeypatch.setattr(cake_chain, "_side_stream", side_stream)
+    split = types.SimpleNamespace(num_middle=2, num_first=1, one_stream=False)
+    other = cake_chain._DirectExecutor()
+    logs = []
+    for ex in (cake_chain._DIRECT, other):
+        log.clear()
+        cake_chain._first_wave(split, 3, lambda: log.append(("summary",)), lambda: log.append(("wave1",)), ex)  # fmt: skip
+        logs.append(list(log))
+    assert logs[0] == [("current_stream", 3), ("side_stream", 3, "main"), ("event", "event0"),
+                       ("record", "event0", "main"), ("wait_event", "side", "event0"), ("enter", "side"),
+                       ("summary",), ("exit", "side"), ("wave1",), ("wait_stream", "main", "side")], logs[0]  # fmt: skip
+    assert logs[1] == logs[0], logs[1]
+    # a cached walk: the general path's use and the executor's use make the same call
+    uses: list = []
+    monkeypatch.setattr(cake_chain, "_use_table", lambda *args: uses.append(args))
+    walk, ready = torch.arange(5, dtype=torch.int32), object()
+    monkeypatch.setattr(cake_chain, "_WALKS", {(0, 5): (walk, ready)})
+    segs = types.SimpleNamespace(walk=None, num_segments=5)
+    options = types.SimpleNamespace(host_cache=True)
+    for ex in (cake_chain._DIRECT, None, other):
+        assert cake_chain._walk(torch.device("cuda", 0), segs, options, ex) is walk
+    assert uses == [(walk, ready, 0)] * 3, uses
 
 
 # --- on a device
