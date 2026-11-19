@@ -24,8 +24,12 @@ plans), the route of a launch by its rows per SM (1 row, one row below, at and a
 most rows, on the SM counts of the delivered GPUs; windows that are not ascending, untouching lists of integers refused;
 the small-R program at every row count on an architecture without a large-R one; the SM count read once per stage and
 device, no library loaded), the launch grid of each program and the arguments of a launch in its
-plan's order, the build manifest (every record's library, the recorded source digests), the capability map, the required
-``limit`` keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
+plan's order, the entry points' launcher of a stage and device (made once per stage and device, no library loaded; the
+program, arguments and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused
+for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for an
+equal float or int; every other limit takes the full checks and their errors), the build manifest (every record's
+library, the recorded source digests), the capability map, the required ``limit`` keyword, the refusal of CPU tensors
+and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) of each stage's small-R
 and large-R program (each forced through the route) judged against the naive BF16 tier
@@ -43,13 +47,16 @@ BF16; ``R = 0`` returns empty outputs and launches nothing; one library per prog
 weight flag and layout; the small-R and the large-R programs of a stage give the same bits at and one row above each
 edge of the device's windows, where the route runs the large-R program inside the windows and the small-R one outside;
 the same bits at every call, in every layout, at every row count (a row's outputs do not depend on the other rows), on a
-side stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs and under
-``torch.use_deterministic_algorithms``; the autograd function matches the steps bit for bit, saves only its inputs and
-gives the same bits under non-reentrant checkpointing, and gradients computed with ``create_graph=True`` have the steps'
-bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit outputs,
-operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call give the
-launches of the full checks; every unweighted launch of a device passes one cached FP32 buffer, set to 1, as its ignored
-weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against
+side stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs, under
+``torch.use_deterministic_algorithms`` (where every new output, the dropped weight gradient too, holds PyTorch's NaN
+fill when its kernel launches) and with the current device switched to another GPU (each call runs on its operands'
+device); the FFI entries keep the GIL; the autograd function matches the steps bit for bit, saves only its inputs and
+gives the same bits under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a
+saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with
+``create_graph=True`` have the steps' bits and raise when differentiated; inputs the kernels can read are read in place,
+others copied once; unfit outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass
+checks of the common call give the launches of the full checks; every unweighted launch of a device passes one cached
+FP32 buffer, set to 1, as its ignored weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against
 the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each
 output, and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
@@ -60,9 +67,11 @@ from __future__ import annotations
 
 import ast
 import fractions
+import functools
 import hashlib
 import inspect
 import json
+import math
 import re
 import subprocess
 import sys
@@ -96,6 +105,8 @@ cake_jit = cake_package("cake_clamped_swiglu_det_train", "cake_jit")
 forward = pkg.cake_clamped_swiglu_det_train_forward
 backward = pkg.cake_clamped_swiglu_det_train_backward
 clamped_swiglu = pkg.cake_clamped_swiglu_det
+# What makes a launcher of a stage and device, without the package's cache (:func:`_fresh_launchers`).
+LAUNCHER = pkg._launcher.__wrapped__
 
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
@@ -199,17 +210,38 @@ def _manifest_or_skip() -> dict:
     return json.loads(path.read_text())
 
 
+def _fresh_launchers(patch: pytest.MonkeyPatch) -> None:
+    """The test (or the ``patch`` context) gets its own cache of launchers (``pkg._launcher``): the launchers it makes
+    use its patched route, FFI entries or device, and none of them outlives it or reaches another test."""
+    patch.setattr(pkg, "_launcher", functools.cache(LAUNCHER))
+
+
+def _spy_entries(patch: pytest.MonkeyPatch, record) -> None:
+    """Every launch calls ``record(name, values)`` before the FFI entry of its program ``name``, ``values`` naming
+    the program's kernel parameters (the grid left out): each entry is wrapped as it is looked up, and the launchers
+    are made afresh so that they bind the wrapped entries."""
+    entry = pkg._entry
+
+    def spy(name, arch):
+        run, keys = entry(name, arch), pkg.parameters(name)
+
+        def recorded(*args):
+            record(name, dict(zip(keys, args[: len(keys)], strict=True)))
+            return run(*args)
+
+        return recorded
+
+    patch.setattr(pkg, "_entry", spy)
+    _fresh_launchers(patch)
+
+
 @pytest.fixture
 def launches(monkeypatch: pytest.MonkeyPatch) -> list:
-    """``(record, rows, values)`` of every launch, in order."""
+    """``(stage, rows, values)`` of every launch, in order: ``values`` names the kernel parameters of the launch."""
     launched: list = []
-    run_module = pkg.run_module
-
-    def spy(name, values, *, rows, device_index):
-        launched.append((name, rows, dict(values)))
-        return run_module(name, values, rows=rows, device_index=device_index)
-
-    monkeypatch.setattr(pkg, "run_module", spy)
+    _spy_entries(
+        monkeypatch, lambda name, values: launched.append((cake_jit.MODULES[name]["stage"], values["rows"], values))
+    )
     return launched
 
 
@@ -217,13 +249,7 @@ def launches(monkeypatch: pytest.MonkeyPatch) -> list:
 def programs_run(monkeypatch: pytest.MonkeyPatch) -> list:
     """The program name of every launch, in order."""
     names: list = []
-    entry = pkg._entry
-
-    def spy(name, arch):
-        names.append(name)
-        return entry(name, arch)
-
-    monkeypatch.setattr(pkg, "_entry", spy)
+    _spy_entries(monkeypatch, lambda name, values: names.append(name))
     return names
 
 
@@ -231,7 +257,7 @@ def programs_run(monkeypatch: pytest.MonkeyPatch) -> list:
 def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespace]:
     """With no GPU: ``place(arch, sm_count)`` makes every device an ``arch`` device of ``sm_count`` SMs for the
     route, and each launch is recorded in ``calls`` as ``(name, arch, args)`` instead of loading a library.  The route
-    cache is cleared at each placement and after the test."""
+    cache is cleared at each placement and after the test, and each placement makes its launchers afresh."""
     calls: list = []
 
     def place(arch: str, sm_count: int) -> None:
@@ -239,8 +265,10 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
         monkeypatch.setattr(pkg, "device_arch", lambda index: arch)
         monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: properties)
         pkg._route.cache_clear()
+        _fresh_launchers(monkeypatch)
 
     monkeypatch.setattr(pkg, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
+    _fresh_launchers(monkeypatch)
     pkg._route.cache_clear()
     yield types.SimpleNamespace(place=place, calls=calls)
     pkg._route.cache_clear()
@@ -249,7 +277,8 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
 def _force(patch: pytest.MonkeyPatch, program: str) -> None:
     """Every launch runs the ``program`` (``"small"`` or ``"large"``) of its stage on its device, whatever its row
     count: the route's limit becomes 0, so every launch runs its tail, the small-R or the large-R plan.  An
-    architecture without a large-R program of a stage runs the small-R one either way."""
+    architecture without a large-R program of a stage runs the small-R one either way.  The launchers are made afresh
+    on the forced route."""
     route = pkg._route
 
     def forced(stage: str, device_index: int) -> tuple:
@@ -257,6 +286,7 @@ def _force(patch: pytest.MonkeyPatch, program: str) -> None:
         return 0, b"", small, large, large if program == "large" else small
 
     patch.setattr(pkg, "_route", forced)
+    _fresh_launchers(patch)
 
 
 def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bool:
@@ -620,6 +650,99 @@ def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monke
     assert sorted(reads) == [0, 0, 1, 1]
 
 
+@pytest.mark.parametrize("sm_count", SM_COUNTS)
+@pytest.mark.parametrize("arch", ARCHES)
+@pytest.mark.parametrize("stage", STAGES)
+def test_the_launcher_launches_what_run_module_launches(stage, arch, sm_count, host_device, monkeypatch) -> None:
+    """The launcher of a stage and device (the entry points' launch) is made once per stage and device and loads no
+    library when made; at 1 row, one row below, at and above each edge of the windows and ``MAX_ROWS - 1`` rows it
+    runs the program ``run_module`` runs, with the same arguments (the kernel parameters in the plan's order) and grid,
+    and it looks up each program's FFI entry once, at that program's first launch."""
+    host_device.place(arch, sm_count)
+    bound: list = []
+    entry = pkg._entry
+    monkeypatch.setattr(pkg, "_entry", lambda name, on: bound.append((name, on)) or entry(name, on))
+    launch = pkg._launcher(stage, 0)
+    assert pkg._launcher(stage, 0) is launch
+    assert pkg._launcher(stage, 1) is not launch
+    assert bound == [] and host_device.calls == []
+    windows, small, large = _expected_route(stage, arch, sm_count)
+    values = {key: f"<{key}>" for key in PARAMETERS[stage]}
+    rows_list = _edge_rows(_edges(windows, sm_count))
+    launched = []
+    for rows in rows_list:
+        host_device.calls.clear()
+        launch(rows, *(values[key] for key in PARAMETERS[stage]))
+        launched.append(list(host_device.calls))
+    assert sorted(bound) == sorted((name, arch) for name in {small, large}), bound
+    for rows, got in zip(rows_list, launched, strict=True):
+        host_device.calls.clear()
+        pkg.run_module(stage, values, rows=rows, device_index=0)
+        assert got == host_device.calls, rows
+        assert got[0][0] == (large if _in_windows(windows, sm_count, rows) else small), rows
+
+
+def test_the_launcher_refuses_programs_that_take_another_order(host_device, monkeypatch) -> None:
+    """A launcher passes the kernel parameters by position, so it is not made (``RuntimeError`` naming the record) for
+    a stage whose program takes them in another order than the entry points pass them; nothing is launched."""
+    host_device.place("sm_100a", SM_COUNTS[0])
+    name = cake_jit.PROGRAM_OF["bwd_large"]["sm_100a"]
+    plan = [list(item) for item in cake_jit.MODULES[name]["arg_plan"]]
+    plan[0], plan[1] = plan[1], plan[0]  # the up before the gate
+    monkeypatch.setitem(cake_jit.MODULES, name, {**cake_jit.MODULES[name], "arg_plan": plan})
+    pkg.parameters.cache_clear()
+    pkg._plan.cache_clear()
+    try:
+        with pytest.raises(RuntimeError, match=f"record {name}: kernel parameters"):
+            pkg._launcher("bwd", 0)
+        assert host_device.calls == []
+        pkg._launcher("fwd", 0)  # the other stage's programs keep the order
+    finally:
+        pkg.parameters.cache_clear()
+        pkg._plan.cache_clear()
+        pkg._route.cache_clear()
+
+
+def test_the_limit_check_and_its_cached_rounding(monkeypatch) -> None:
+    """``limit`` is the same FP32 value whatever the calls before passed: a float or an int equal to the last
+    accepted limit gets its cached rounding, and every other value (another number, a bool, a float subclass, a
+    fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the full checks, with their
+    errors, also right after an equal valid limit was cached."""
+    monkeypatch.setattr(pkg, "_last_limit", (math.nan, math.nan))
+
+    class Limit(float):
+        pass
+
+    valid = (10.0, 10, 10.0, 7.3, 7.3, 1.5, 3, 2**53 + 1, 2**53 + 1, 1e30, 10**30, fractions.Fraction(3, 2), Limit(7.3))
+    for limit in valid + valid[::-1]:
+        got = pkg._limit(limit)
+        assert type(got) is float and got == fp32(float(limit)), limit
+        assert pkg._last_limit == (float(limit), got), limit
+    invalid = (
+        (True, TypeError),
+        (False, TypeError),
+        (torch.tensor(1.0), TypeError),
+        ("1", TypeError),
+        (None, TypeError),
+        (float("nan"), ValueError),
+        (float("inf"), ValueError),
+        (0.0, ValueError),
+        (-0.0, ValueError),
+        (-1.0, ValueError),
+        (-1, ValueError),
+        (1e39, ValueError),
+        (1e-50, ValueError),
+        (10**400, ValueError),
+        (fractions.Fraction(10**400), ValueError),
+    )
+    for cached in (1.0, 1, 0.5):
+        for bad, kind in invalid:
+            pkg._limit(cached)
+            with pytest.raises(kind):
+                pkg._limit(bad)
+            assert pkg._last_limit == (float(cached), float(cached)), (cached, bad)
+
+
 def test_no_record_is_delivered_outside_its_architectures() -> None:
     for name, record in cake_jit.MODULES.items():
         for arch in record["arches"]:
@@ -808,6 +931,14 @@ def test_the_records_load(device) -> None:
             assert callable(getattr(pkg.load(name, arch), record["ffi_entry"])), name
 
 
+def test_the_ffi_entries_keep_the_gil(device) -> None:
+    """Every FFI entry the launches call keeps the GIL during its call (tvm-ffi's ``release_gil`` off)."""
+    arch = pkg.device_arch(device.index)
+    for name, record in cake_jit.MODULES.items():
+        if arch in record["arches"]:
+            assert pkg._entry(name, arch).release_gil is False, name
+
+
 @pytest.mark.parametrize("program", PROGRAMS)
 @pytest.mark.parametrize("case", CASES, ids=[case.id for case in CASES])
 def test_outputs_meet_the_naive_tier(case, program, device, record_property, monkeypatch) -> None:
@@ -911,6 +1042,7 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
         raise AssertionError("a call with no rows launched or loaded a kernel")
 
     monkeypatch.setattr(pkg, "run_module", refuse)
+    monkeypatch.setattr(pkg, "_launcher", refuse)
     monkeypatch.setattr(pkg, "load", refuse)
     monkeypatch.setattr(pkg, "_entry", refuse)
     t = make_inputs(Case(0, layout, w), seed=1, device=device)
@@ -954,6 +1086,7 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     monkeypatch.setattr(cake_build, "load_library", spy)
     pkg.load.cache_clear()
     pkg._entry.cache_clear()
+    _fresh_launchers(monkeypatch)  # launchers that bind their entries anew, through the spied loader
     try:
         for case in cases:
             step_outputs(forward, backward, make_inputs(case, seed=5, device=device))
@@ -1148,6 +1281,44 @@ def test_autograd_matches_the_steps_and_checkpoint(layout, w, device) -> None:
         clamped_swiglu(*leaves, limit=t.L)
     expected = [(str(x.dtype), x.numel(), x.data_ptr()) for x in leaves if x is not None]
     assert sorted(saved) == sorted(expected)
+
+
+@pytest.mark.parametrize("layout", ["split", "merged"])
+def test_the_autograd_backward_checks_the_saved_operands_again(layout, device) -> None:
+    """The autograd backward reuses the forward's FP32 limit but checks the saved operands again, as a saved-tensors
+    hook (or a ``.data`` assignment) can change them after the forward: unpacked as rows the kernels cannot read in
+    place (a row stride that is not a multiple of 8 elements), they are copied and give the steps' bits; unpacked one
+    row short, the backward raises ``ValueError`` before it launches."""
+    t = make_inputs(Case(129, layout), seed=29, device=device)
+    want = _functional(t)
+
+    def relaid(x: torch.Tensor) -> torch.Tensor:
+        if x.dim() != 2:
+            return x
+        buffer = torch.full((x.shape[0], x.shape[1] + 3), float("nan"), dtype=x.dtype, device=x.device)
+        buffer[:, : x.shape[1]] = x
+        return buffer[:, : x.shape[1]]
+
+    def found(leaves: tuple, h: torch.Tensor) -> dict:
+        got = {"h": h.detach(), "d_first": leaves[0].grad}
+        if leaves[1] is not None:
+            got["d_up"] = leaves[1].grad
+        if leaves[2] is not None:
+            got["d_weight"] = leaves[2].grad
+        return got
+
+    leaves = _leaves(t)
+    with torch.autograd.graph.saved_tensors_hooks(lambda x: x, relaid):
+        h = clamped_swiglu(*leaves, limit=t.L)
+    h.backward(t.dh)
+    assert_same_outputs(found(leaves, h), want, "saved operands unpacked as rows to copy")
+
+    leaves = _leaves(t)
+    with torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x[:-1]):
+        h = clamped_swiglu(*leaves, limit=t.L)
+    with pytest.raises(ValueError):
+        h.backward(t.dh)
+    assert all(leaf is None or leaf.grad is None for leaf in leaves)
 
 
 def test_autograd_returns_the_gradients_that_are_needed(device) -> None:
@@ -1360,6 +1531,39 @@ def test_steps_neither_raise_nor_warn_under_deterministic_algorithms(warn_only, 
         torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
     for i, (a, b) in enumerate(zip(got, want, strict=True)):
         assert_same_outputs(a, b, f"warn_only={warn_only} call {i}")
+
+
+@pytest.mark.parametrize("layout", ["merged", "split", "copied"])
+@pytest.mark.parametrize("w", ["random", "none"])
+def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device, monkeypatch) -> None:
+    """Under ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
+    every output a step allocates holds NaN when its kernel launches (PyTorch filled it): ``h``; ``d_gate_up`` or
+    ``d_gate`` and ``d_up``; ``d_weight``, also the one an unweighted backward drops.  The common call (merged, split)
+    allocates through its first operand, any other call (copied) through ``torch.empty``; the outputs have the bits of
+    the same calls with the setting off."""
+    outputs = {"fwd": ("h",), "bwd": ("d_gate", "d_up", "d_weight")}
+    seen: list = []
+
+    def record(name, values):
+        stage = cake_jit.MODULES[name]["stage"]
+        for key in outputs[stage]:
+            seen.append((stage, key, bool(torch.isnan(values[key]).all())))
+
+    t = make_inputs(Case(77, layout, w), seed=37, device=device)
+    want = step_outputs(forward, backward, t)
+    _spy_entries(monkeypatch, record)
+    enabled = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    fill = torch.utils.deterministic.fill_uninitialized_memory
+    try:
+        torch.use_deterministic_algorithms(True)
+        torch.utils.deterministic.fill_uninitialized_memory = True
+        got = step_outputs(forward, backward, t)
+    finally:
+        torch.utils.deterministic.fill_uninitialized_memory = fill
+        torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
+    assert seen == [(stage, key, True) for stage in STAGES for key in outputs[stage]], seen
+    assert_same_outputs(got, want, f"{layout}, w={w}")
 
 
 def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -> None:
@@ -1704,3 +1908,39 @@ def test_operands_on_another_device(device) -> None:
         assert_same_bits(value.to(device), want[name], f"{name} on {other}")
     with pytest.raises(ValueError):
         forward(t.first, None, o.weight, limit=L)
+
+
+def test_calls_after_set_device_run_on_their_operands_device(device) -> None:
+    """The launchers are per stage and device, and the current device picks none of them: with the current device
+    switched to the other GPU by ``torch.cuda.set_device`` after calls on both, the steps and an autograd step on the
+    first GPU's operands run there (new outputs on that device, the bits of the calls before the switch), and the steps
+    on the other GPU's operands run on the other GPU, before and after switching back."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two GPUs")
+    other = torch.device("cuda", 1 if device.index != 1 else 0)
+    if not pkg.is_cake_clamped_swiglu_det_train_supported(other):
+        pytest.skip(f"{other} is not a supported device")
+    t = make_inputs(Case(129, "merged"), seed=6, device=device)
+    o = make_inputs(Case(129, "merged"), seed=6, device=other)
+    want = step_outputs(forward, backward, t)
+    want_autograd = _autograd_step(t)
+    want_other = step_outputs(forward, backward, o)
+    for stage in STAGES:
+        assert pkg._launcher(stage, device.index) is not pkg._launcher(stage, other.index), stage
+    current = torch.cuda.current_device()
+    try:
+        for switched in (other, device):
+            torch.cuda.set_device(switched)
+            got = step_outputs(forward, backward, t)
+            got_autograd = _autograd_step(t)
+            got_other = step_outputs(forward, backward, o)
+            for found, expected, on in (
+                (got, want, device),
+                (got_autograd, want_autograd, device),
+                (got_other, want_other, other),
+            ):
+                for name, value in found.items():
+                    assert value.device == on, (switched, name)
+                assert_same_outputs(found, expected, f"current device {switched}, operands on {on}")
+    finally:
+        torch.cuda.set_device(current)
