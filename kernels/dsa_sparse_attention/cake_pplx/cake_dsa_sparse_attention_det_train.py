@@ -65,7 +65,9 @@ here.  The backward of either program may split its main stage into key-range
 passes (as the non-deterministic package's policy does, or as ``key_passes``
 asks; the NoPE policy keeps one pass unless ``key_passes`` asks for more).
 Every backward accumulates in one form, and its dK / dV do not depend on the
-pass count.
+pass count.  The flat rope entry and the rope step backward take
+``num_segments``, the packed segment count of the key row (default 1): a
+count above 1 plans one pass, as the packed entry does for the same rows.
 
 Usage::
 
@@ -173,6 +175,27 @@ def _backend(backend: str):
     return _cake_backend()
 
 
+def _check_num_segments(num_segments: Any) -> int:
+    """``num_segments`` as the backend takes it: a Python ``int`` of at least 1.  ``bool``, a tensor (whose value
+    would need a device synchronization), a float, a string or a count below 1 raises ``ValueError`` before the
+    backend is reached."""
+    if (
+        isinstance(num_segments, bool)
+        or not isinstance(num_segments, int)
+        or num_segments < 1
+    ):
+        shown = (
+            repr(num_segments)
+            if isinstance(num_segments, (bool, int, float, str))
+            else f"a {type(num_segments).__name__}"
+        )
+        raise ValueError(
+            "num_segments must be a positive Python int (the packed segment count of the key row), "
+            f"got {shown}"
+        )
+    return int(num_segments)
+
+
 def _refuse_sink(sink: Optional[torch.Tensor]) -> None:
     """The NoPE entries take the ``sink`` keyword of the non-deterministic package's entries, ``None`` only: this
     package has no sink build."""
@@ -200,6 +223,7 @@ def cake_dsa_sparse_attention_det(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
+    num_segments: int = 1,
 ):
     r"""Differentiable top-k sparse MLA attention with absorbed queries (DeepSeek
     Sparse Attention) for training, 64 query heads, SM100 / SM103 / SM107 only;
@@ -288,6 +312,16 @@ def cake_dsa_sparse_attention_det(
         ``CAKE_PPLX_DSA_CHECK_DST_MAP``: unset, empty or ``0`` (its
         default) means no check, anything else enables it.  ``True`` /
         ``False`` decide explicitly and ignore the variable.
+    num_segments : int
+        The packed segment count of the key row, as in the
+        non-deterministic package: ``len(cu_seqlens_k) - 1`` when ``indices``
+        hold the global rows of a packed batch (a Python ``int``, read on the
+        host).  ``1`` (default) keeps the key-pass policy of a one-document
+        row; a count above 1 plans one pass, as
+        :func:`cake_dsa_sparse_attention_det_varlen` does for the same rows.
+        dK / dV do not depend on it; dQ is summed through an FP32 partial
+        between passes, so its bits follow the plan.  ``bool``, a tensor or a
+        value below 1 raises ``ValueError``.
 
     Returns
     -------
@@ -318,8 +352,10 @@ def cake_dsa_sparse_attention_det(
     ``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` -- a positive integer,
     read when this module is imported -- sets the capacity through
     ``BINDING_CACHE.configure(capacity=...)``).  No host synchronization
-    unless ``check_dst_map`` asks for one.
+    unless ``check_dst_map`` asks for one.  Every output repeats bit for bit
+    for the same inputs, ``key_passes`` and ``num_segments``.
     """
+    num_segments = _check_num_segments(num_segments)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).cake_dsa_sparse_attention_det(
@@ -334,6 +370,7 @@ def cake_dsa_sparse_attention_det(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
     )
@@ -714,6 +751,7 @@ def cake_dsa_sparse_attention_det_train_backward(
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
     dkv_fp32: bool = False,
+    num_segments: int = 1,
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Training backward of the rope form without autograd: ``(dq_latent,
     dq_rope, dkv_latent, dk_rope)``.
@@ -727,12 +765,15 @@ def cake_dsa_sparse_attention_det_train_backward(
     tensor ``dkv_acc`` (FP32 ``[S_dst, >= 576]``) the call adds ``dK + dV``
     into it instead (latent columns ``0:512``, rope ``512:576`` of row
     ``dkv_dst_map[s]``; the caller owns the zeroing) and returns ``None`` for
-    both. ``key_passes`` and ``check_dst_map`` as in
+    both. ``key_passes``, ``check_dst_map`` and ``num_segments`` (the packed
+    segment count of the key row, default 1) as in
     :func:`cake_dsa_sparse_attention_det`; ``dkv_direct``: accepted and
     validated, without effect. Every gradient repeats bit for bit and is that
-    of the autograd entry's backward on the same inputs and ``key_passes``.
-    Nothing raises or warns under ``torch.use_deterministic_algorithms(True)``.
+    of the autograd entry's backward on the same inputs, ``key_passes`` and
+    ``num_segments``. Nothing raises or warns under
+    ``torch.use_deterministic_algorithms(True)``.
     """
+    num_segments = _check_num_segments(num_segments)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).backward(
@@ -751,6 +792,7 @@ def cake_dsa_sparse_attention_det_train_backward(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
     )
