@@ -63,7 +63,7 @@ JIT variables):
 - Launches.  One kernel per call.  Each stage has two programs
   (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
   when ``R`` lies in one of its record's windows of rows per SM on the
-  device's architecture, ``lo * SMs < R <= hi * SMs`` for a window
+  device's architecture, ``lo * SMs <= R <= hi * SMs`` for a window
   ``[lo, hi]`` (``cake_jit.route``; the architecture is read once per device
   and the SM count once per stage and device, and an architecture without a
   large-R program runs the small-R one at every ``R``).  Both programs of a stage give the same bits for every

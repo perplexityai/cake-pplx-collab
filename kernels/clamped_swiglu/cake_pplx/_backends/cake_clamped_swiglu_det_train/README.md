@@ -71,20 +71,26 @@ Each stage has two programs (`cake_jit.MODULES`, keyed by program name): a small
 a large-R program (role `fwd_large` or `bwd_large`).  `cake_jit.PROGRAM_OF` maps a role and an architecture to its
 program.  A program is compiled with the exact `-gencode` flag of each architecture it is delivered for (`build.json`).
 A call runs the large-R program when `R` lies in one of the record's windows of rows per SM on the device's
-architecture (`rows_per_sm_windows`): `lo * SMs < R <= hi * SMs` for a window `[lo, hi]`, where `hi` None has no upper
-bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads the architecture once
-per device and the SM count once per stage and device.  An architecture without a large-R program of a stage runs the
-small-R one at every `R`.
+architecture (`rows_per_sm_windows`): `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (both bounds included), where
+`hi` None has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads
+the architecture once per device and the SM count once per stage and device.  An architecture without a large-R program
+of a stage runs the small-R one at every `R`.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
-| `fwd` large-R | above 112 rows per SM | above 384 | above 384 |
-| `bwd` large-R | (12, 20], (32, 40] rows per SM | (12, 20], (32, 40], (48, 56] | (12, 20], (36, 40], above 48 |
+| `fwd` large-R | from 112 rows per SM | from 384 | from 384 |
+| `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
 
-Outside its windows, the small-R program measures at least as fast as the large-R one on that architecture (weighted
-and unweighted, warm and cold L2); inside, the large-R one measures faster on one of them.  Both backward programs run
-4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows an SM a wave), the large-R one 5 (20 rows).  From 12 to 20
-rows per SM and from 36 to 40, the small-R program runs twice the waves of the large-R one and is slower.
+Outside its windows, the small-R program measures at least as fast as the large-R one on that architecture (weighted and
+unweighted, merged and split, warm and cold L2, the stage alone and in a forward + backward or checkpointed step);
+inside, the large-R one measures faster in one of them.  A bound runs the large-R program.  Both backward programs run 4
+rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows an SM a wave), the large-R one 5 (20 rows).  From 12 to 20
+rows per SM and from 36 to 40, the small-R program runs twice the waves of the large-R one and is slower.  Just above 20
+and 40 rows per SM, the large-R program's last wave holds a few CTAs and costs little, so those windows end at 21 and
+41.  Below 36 rows per SM, the large-R program's unweighted backward already measures faster with warm L2 from 32 on
+`sm_100a` and `sm_103a`, and right after a forward from 35 on `sm_107a`.  From 48 rows per SM on, the small-R backward
+measures faster alone, but up to 1.5 % slower right after a forward over the same rows (the checkpointed step,
+unweighted), so the large-R program runs there.
 
 Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
 of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a

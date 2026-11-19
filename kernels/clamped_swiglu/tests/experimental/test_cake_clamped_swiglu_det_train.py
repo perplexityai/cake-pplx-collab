@@ -114,9 +114,9 @@ SM_COUNTS = (148, 152, 212)
 WINDOWS = {
     "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[384, None]], "sm_107a": [[384, None]]},
     "bwd_large": {
-        "sm_100a": [[12, 20], [32, 40]],
-        "sm_103a": [[12, 20], [32, 40], [48, 56]],
-        "sm_107a": [[12, 20], [36, 40], [48, None]],
+        "sm_100a": [[12, 21], [32, 41], [48, None]],
+        "sm_103a": [[12, 21], [32, 41], [48, None]],
+        "sm_107a": [[12, 21], [35, 41], [48, None]],
     },
 }
 LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
@@ -249,7 +249,7 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
 
 def _force(patch: pytest.MonkeyPatch, program: str) -> None:
     """Every launch runs the ``program`` (``"small"`` or ``"large"``) of its stage on its device, whatever its row
-    count: the route's edges become none (no window) or ``(0,)`` (one window from 0 rows on).  An architecture without
+    count: the route's edges become none (no window) or ``(0,)`` (one window from 1 row on).  An architecture without
     a large-R program of a stage runs the small-R one either way."""
     route = pkg._route
     edges = () if program == "small" else (0,)
@@ -257,8 +257,8 @@ def _force(patch: pytest.MonkeyPatch, program: str) -> None:
 
 
 def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bool:
-    """Whether ``rows`` lies in one of ``windows`` of rows per SM: ``lo * sm_count < rows <= hi * sm_count``."""
-    return any(lo * sm_count < rows and (hi is None or rows <= hi * sm_count) for lo, hi in windows)
+    """Whether ``rows`` lies in one of ``windows`` of rows per SM: ``lo * sm_count <= rows <= hi * sm_count``."""
+    return any(lo * sm_count <= rows and (hi is None or rows <= hi * sm_count) for lo, hi in windows)
 
 
 def _routed(stage: str, rows: int, device_index: int) -> str:
@@ -281,8 +281,9 @@ def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[list[list[int
 
 
 def _edges(windows: list[list[int | None]], sm_count: int) -> list[int]:
-    """The bounds of ``windows`` in rows on ``sm_count`` SMs, ascending (an open window's ``lo`` alone)."""
-    return [bound * sm_count for window in windows for bound in window if bound is not None]
+    """The last row count of each run of one program on ``sm_count`` SMs, ascending: ``lo * sm_count - 1`` and
+    ``hi * sm_count`` of each window (an open window's ``lo * sm_count - 1`` alone)."""
+    return [bound * sm_count - (k == 0) for window in windows for k, bound in enumerate(window) if bound is not None]
 
 
 def _edge_rows(edges: list[int]) -> list[int]:
@@ -418,8 +419,8 @@ def test_registry_records_are_well_formed() -> None:
                 assert row and all(type(window) is list and len(window) == 2 for window in row), (name, arch)
                 assert all(type(bound) is int for bound in bounds[:-1]), (name, arch)
                 assert bounds[-1] is None or type(bounds[-1]) is int, (name, arch)
-                edges = _edges(row, 1)
-                assert edges[0] >= 1 and edges == sorted(set(edges)), (name, arch)
+                bounds = [bound for bound in bounds if bound is not None]
+                assert bounds[0] >= 1 and bounds == sorted(set(bounds)), (name, arch)
         else:
             assert "rows_per_sm_windows" not in record, name
     for stage in STAGES:
@@ -511,7 +512,7 @@ def test_launches_pass_the_argument_plan_and_the_grid(host_device) -> None:
 @pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_rows_route_to_the_small_or_the_large_program(stage, arch, sm_count, host_device) -> None:
-    """A launch whose rows lie in a window of the large-R record (``lo * SMs < rows <= hi * SMs`` for a window
+    """A launch whose rows lie in a window of the large-R record (``lo * SMs <= rows <= hi * SMs`` for a window
     ``[lo, hi]`` of its ``rows_per_sm_windows`` on the architecture) runs the stage's large-R program, any other its
     small-R program, on that program's grid: 1 row, one row below, at and above each edge of the windows, and
     ``MAX_ROWS - 1`` rows."""
@@ -950,7 +951,7 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
 def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, programs_run, monkeypatch) -> None:
     """At and one row above each edge of this device's windows of ``stage`` (the row counts where its route changes
     program), weighted on rows at the edge of the FP32 sigmoid and unweighted on gates of -88 beside boundary values:
-    the routed launches run the large-R program of ``stage`` inside its windows (one row above a window's ``lo`` edge,
+    the routed launches run the large-R program of ``stage`` inside its windows (one row above the edge below a window,
     at its ``hi`` edge) and the small-R program outside, and every launch forced to the small-R programs and every
     launch forced to the large-R programs give the routed call's bits of ``h``, ``d_gate``, ``d_up`` and
     ``d_weight``."""
@@ -959,7 +960,7 @@ def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, program
         pytest.skip(f"no large-R {stage} program on {pkg.device_arch(device.index)}")
     for index, edge in enumerate(edges):
         rows = edge + step
-        # an even edge is a window's lo (the window starts one row above it), an odd edge its hi (the last row in it)
+        # an even edge is the last row below a window (which starts one row above it), an odd edge the last row in it
         inside = (index % 2 == 0) == (step == 1)
         for w, data in (("random", "mixed"), ("none", "slow_mixed")):
             t = make_inputs(Case(rows, "merged", w, data=data), seed=43, device=device)

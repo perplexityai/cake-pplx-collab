@@ -48,12 +48,13 @@ the record's ``rows_per_sm_windows`` gives, per architecture, the windows of
 rows per SM in which it runs: ``[lo, hi]`` lists, ascending, each ``hi`` below
 the next ``lo``, only the last ``hi`` None (no upper bound).  A launch of
 ``rows`` rows on a device of ``sm_count`` SMs runs the large-R program when
-``lo * sm_count < rows <= hi * sm_count`` for one of its windows and the
-small-R program otherwise (:func:`route`); an architecture without a large-R
-program runs the small-R one at every row count.  The programs of a stage
-differ in their schedule only (the threads of a CTA, the runs of a lane's
-loads, when the loads of a run are issued and when its values are stored):
-they store the same bits for every input, so the route changes no output bit.
+``lo * sm_count <= rows <= hi * sm_count`` for one of its windows (both bounds
+included) and the small-R program otherwise (:func:`route`); an architecture
+without a large-R program runs the small-R one at every row count.  The
+programs of a stage differ in their schedule only (the threads of a CTA, the
+runs of a lane's loads, when the loads of a run are issued and when its values
+are stored): they store the same bits for every input, so the route changes no
+output bit.
 
 The host finds a program through ``PROGRAM_OF`` (role -> architecture ->
 program name, derived from the records) and never spells a program name:
@@ -177,9 +178,9 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
         "rows_per_sm_windows": {
-            "sm_100a": [[12, 20], [32, 40]],
-            "sm_103a": [[12, 20], [32, 40], [48, 56]],
-            "sm_107a": [[12, 20], [36, 40], [48, None]],
+            "sm_100a": [[12, 21], [32, 41], [48, None]],
+            "sm_103a": [[12, 21], [32, 41], [48, None]],
+            "sm_107a": [[12, 21], [35, 41], [48, None]],
         },
         "role": "bwd_large",
         "stage": "bwd",
@@ -228,12 +229,12 @@ MAX_ROWS = 2**31 - 256
 
 def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, str]:
     """``(edges, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of ``rows`` rows runs the
-    program ``large`` (the stage's large-R role) when ``lo * sm_count < rows <= hi * sm_count`` for a window
+    program ``large`` (the stage's large-R role) when ``lo * sm_count <= rows <= hi * sm_count`` for a window
     ``[lo, hi]`` of its record's ``rows_per_sm_windows[arch]`` (``hi`` None: no upper bound), and the program
-    ``small`` (the stage's role) otherwise.  ``edges`` are the windows' bounds times ``sm_count``, ascending
-    (``lo, hi`` of each window, an open window's ``lo`` alone): a launch runs ``large`` exactly when the count of
-    edges below ``rows``, ``bisect.bisect_left(edges, rows)``, is odd.  Without a large-R program on ``arch``,
-    ``edges`` is empty and ``large`` is ``small``."""
+    ``small`` (the stage's role) otherwise.  ``edges`` are the last row count of each run of one program, ascending:
+    ``lo * sm_count - 1`` and ``hi * sm_count`` of each window (an open window's ``lo * sm_count - 1`` alone).  A
+    launch runs ``large`` exactly when the count of edges below ``rows``, ``bisect.bisect_left(edges, rows)``, is
+    odd.  Without a large-R program on ``arch``, ``edges`` is empty and ``large`` is ``small``."""
     small = PROGRAM_OF[stage][arch]
     large = PROGRAM_OF[stage + LARGE].get(arch)
     if large is None:
@@ -248,9 +249,10 @@ def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, s
         or bounds[0] < 0
     ):
         raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} are not [lo, hi] lists of integers")
-    edges = tuple(bound * int(sm_count) for bound in bounds if bound is not None)
-    if any(below >= above for below, above in zip(edges, edges[1:])):
+    bounds = [bound for bound in bounds if bound is not None]
+    if any(below >= above for below, above in zip(bounds, bounds[1:])):
         raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} do not ascend without touching")
+    edges = tuple(bound * int(sm_count) - (index % 2 == 0) for index, bound in enumerate(bounds))
     return edges, small, large
 
 
