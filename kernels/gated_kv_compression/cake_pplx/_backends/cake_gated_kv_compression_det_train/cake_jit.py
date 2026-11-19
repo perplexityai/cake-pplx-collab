@@ -39,12 +39,17 @@ JIT shim from the same sources and flags.
 
 The roles, in launch order:
 
-* ``pair_table``: the exclusive prefix of the pair counts,
-  ``cu_pairs[0] = 0`` and ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1]
-  - cu_seqlens[s]) // 2`` (int32 ``[S + 1]``), by one CTA that walks the
-  documents in passes with a carried running total.  A forward launches it
-  only for ``S > fuse_docs`` (:func:`fuse_docs`); an explicit backward without
-  a table launches it for every ``S``.
+* ``pair_table`` and ``pair_table_small``: the exclusive prefix of the pair
+  counts, ``cu_pairs[0] = 0`` and ``cu_pairs[s + 1] = cu_pairs[s] +
+  (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`` (int32 ``[S + 1]``), by one CTA
+  that walks the documents in passes with a carried running total:
+  ``pair_table`` in passes of 8192 documents (1024 threads of 8),
+  ``pair_table_small`` in passes of 256 (256 threads of one), the faster for
+  one or two passes.  A pair-table launch of ``S <= small_docs`` documents
+  (:func:`small_docs`, 512) runs ``pair_table_small``, of more ``pair_table``;
+  both write the same bytes.  A forward launches a pair table only for
+  ``S > fuse_docs`` (:func:`fuse_docs`); an explicit backward without a table
+  launches one for every ``S``.
 * ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
   of ``r`` by a binary search of ``cu_pairs``, the tokens
   ``t0 = cu_seqlens[s] + 2 (r - cu_pairs[s])`` and ``t1 = t0 + 1``, and
@@ -65,12 +70,16 @@ The roles, in launch order:
 * ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
   the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
   ``v >= cu_pairs[S]``), its document ``s`` by a binary search of
-  ``cu_pairs``.  A launch of ``S <= 16384`` documents searches in two levels:
-  each CTA with pair rows copies every 16th entry of ``cu_pairs`` to shared
-  memory, and a row picks its window of 16 entries there and searches only
-  that window of ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``: when
-  its length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last
-  token.  Every token row below ``cu_seqlens[S]`` is written exactly once.
+  ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``: when its length is
+  odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last token.  Every
+  token row below ``cu_seqlens[S]`` is written exactly once.  The role has two
+  records, one kernel with two searches, each the faster on its architectures:
+  ``bwd`` on ``sm_100a`` and ``sm_103a`` searches a launch of ``S <= 16384``
+  documents in two levels (each CTA with pair rows copies every 16th entry of
+  ``cu_pairs`` to shared memory, and a row picks its window of 16 entries
+  there and searches only that window of ``cu_pairs``); ``bwd_sm_107a`` on
+  ``sm_107a`` searches all of ``cu_pairs`` in one level.  Both find the same
+  document for every row.
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
@@ -94,9 +103,10 @@ PACKAGE = "cake_pplx._backends.cake_gated_kv_compression_det_train"
 LIBRARY_PREFIX = "cake_gated_kv_compression_det_train"
 MANIFEST = "build.json"
 
-# The roles of the package's programs, in launch order (the pair table first, then the forward or the backward).  Every
-# role is served on every architecture by exactly one record of MODULES (``role_record``).
-ROLES = ("pair_table", "fwd", "bwd")
+# The roles of the package's programs, in launch order (a pair table first, ``pair_table_small`` for at most
+# ``small_docs`` documents and ``pair_table`` for more, then the forward or the backward).  Every role is served on
+# every architecture by exactly one record of MODULES (``role_record``).
+ROLES = ("pair_table", "pair_table_small", "fwd", "bwd")
 GRID_KINDS = ("one_cta", "rows")
 
 # Columns of C, Z, dC, dZ, out and dout; ``cz`` holds C in columns [0, 512) and Z in [512, 1024).
@@ -130,9 +140,10 @@ MAX_DOCS = 1 << 24
 MAX_TOKENS = INT32_MAX
 
 # The derived leaves of every record (``library``, ``kernel_symbol``, ``launch.block``, ``launch.cluster``,
-# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``) and the ``fuse_docs`` of
-# the forward records (the most documents a forward launch builds the pair table for) are rewritten by the generator
-# from the rendered program; every other field is host plan.
+# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``), the ``fuse_docs`` of
+# the forward records (the most documents a forward launch builds the pair table for) and the ``small_docs`` of
+# ``pair_table_small`` (the most documents a pair-table launch runs it for) are rewritten by the generator; every other
+# field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -157,6 +168,31 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_8997a924b74a8200ddac",
         "role": "pair_table",
+    },
+    "pair_table_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "one_cta"},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_68cbef2c67f1d183366f",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_68cbef2c67f1d183366f",
+        "role": "pair_table_small",
+        "small_docs": 512,
     },
     "fwd": {
         "arches": ["sm_100a", "sm_103a"],
@@ -221,7 +257,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "fwd",
     },
     "bwd": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [
             ["buffer", "dout"],
             ["buffer", "c"],
@@ -252,6 +288,40 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_857e5499b5edd675ffd3",
+        "role": "bwd",
+    },
+    "bwd_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
         "role": "bwd",
     },
 }
@@ -288,6 +358,14 @@ def role_record(role: str, arch: str) -> str:
         if found["role"] == role and arch in found["arches"]:
             return name
     raise KeyError(f"no record of the Cake gated KV compression registry serves role {role!r} on {arch}")
+
+
+@functools.cache
+def small_docs(arch: str) -> int:
+    """The most documents a pair-table launch on ``arch`` runs ``pair_table_small`` for (the ``small_docs`` leaf of
+    the record serving that role on ``arch``); a launch of more documents runs ``pair_table``.  Cached per
+    architecture."""
+    return int(record(role_record("pair_table_small", arch))["small_docs"])
 
 
 @functools.cache
@@ -469,5 +547,6 @@ __all__ = [
     "role_record",
     "rows_per_cta",
     "run_module",
+    "small_docs",
     "specs_for_arch",
 ]

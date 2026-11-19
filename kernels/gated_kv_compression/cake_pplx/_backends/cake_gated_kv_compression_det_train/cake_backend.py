@@ -17,8 +17,9 @@ Checks, launches and autograd nodes of the Cake ratio-2 gated KV compression
 (width 512; SM100 / SM103 / SM107).
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
-one record per program (``pair_table``, ``fwd`` on SM100 / SM103,
-``fwd_sm_107a`` on SM107, ``bwd``; the ``build.json`` entries are
+one record per program (``pair_table``, ``pair_table_small``, ``fwd`` on
+SM100 / SM103, ``fwd_sm_107a`` on SM107, ``bwd`` on SM100 / SM103,
+``bwd_sm_107a`` on SM107; the ``build.json`` entries are
 ``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
 :func:`.cake_jit.run_module` the launch of a role: the record serving it on
 the device's architecture (:func:`.cake_jit.role_record`).  :mod:`.cake_build` serves a
@@ -26,15 +27,18 @@ library from a prebuilt ``aot/`` file when a builder compiled it and otherwise
 through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources
 and flags of ``build.json``.
 
-A forward call runs ``fwd`` (one output row per pair), after ``pair_table``
+A forward call runs ``fwd`` (one output row per pair), after a pair table
 (the exclusive prefix of the pair counts, int32 ``[S + 1]``) when ``S`` is
 above the forward record's ``fuse_docs`` (:func:`.cake_jit.fuse_docs`): a
 forward of at most ``fuse_docs`` documents builds the table itself and writes
-it to ``cu_pairs``.  A backward call runs ``pair_table`` (unless the caller
+it to ``cu_pairs``.  A backward call runs a pair table (unless the caller
 passes the table as ``pair_offsets``) and ``bwd`` (the ``dC`` / ``dZ`` rows of
 every pair's two tokens and the zero rows of the odd-length documents' tail
-tokens).  Every launch is a plain stream-ordered launch on the current torch
-stream of the operands' device.  Nothing here reads an environment variable,
+tokens).  The pair table is ``pair_table_small`` for at most
+:func:`.cake_jit.small_docs` documents and ``pair_table`` for more
+(:func:`launch_pair_table`); both write the same bytes.  Every launch is a
+plain stream-ordered launch on the current torch stream of the operands'
+device.  Nothing here reads an environment variable,
 reads device memory or synchronizes: grids, buffer sizes and the pair-table
 launch come from tensor shapes and the caller's pair count ``G``, never from
 ``cu_seqlens``.
@@ -298,11 +302,14 @@ def _pair_count(num_pairs: Any, out: Optional[torch.Tensor]) -> int:
 
 
 def launch_pair_table(*, cu_seqlens: torch.Tensor, cu_pairs: torch.Tensor) -> None:
-    """Launch ``pair_table``: ``cu_pairs[0] = 0``, ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] -
-    cu_seqlens[s]) // 2`` (int32 ``[S + 1]``, ``S >= 1``)."""
+    """Launch a pair table: ``cu_pairs[0] = 0``, ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] -
+    cu_seqlens[s]) // 2`` (int32 ``[S + 1]``, ``S >= 1``), by the ``pair_table_small`` role for ``S <=
+    cake_jit.small_docs(arch)`` and the ``pair_table`` role for more (the same bytes)."""
     S = int(cu_seqlens.numel()) - 1
+    index = cu_seqlens.device.index
+    role = "pair_table_small" if S <= cake_jit.small_docs(cake_jit.device_arch(index)) else "pair_table"
     values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
-    cake_jit.run_module("pair_table", values, rows=1, device_index=cu_seqlens.device.index)
+    cake_jit.run_module(role, values, rows=1, device_index=index)
 
 
 def launch_fwd(
@@ -348,9 +355,9 @@ def launch_bwd(
     dc_ld: int,
     dz_ld: int,
 ) -> None:
-    """Launch ``bwd``: every ``dc`` and ``dz`` row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below
-    ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16), ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``,
-    ``G >= 1``), on ``G + S`` virtual rows."""
+    """Launch the ``bwd`` role (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107): every ``dc`` and ``dz``
+    row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16),
+    ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``, ``G >= 1``), on ``G + S`` virtual rows."""
     S, G = int(cu_seqlens.numel()) - 1, int(dout.shape[0])
     values = {
         "dout": dout,

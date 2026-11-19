@@ -80,21 +80,27 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 
 | Role | Kernel | Grid |
 |---|---|---|
-| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total | `(1, 1, 1)` |
+| `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total, 8 documents a thread | `(1, 1, 1)` |
+| `pair_table_small` | the same table by one CTA of 256 threads, one document a thread; launched for `S <= small_docs` (512) | `(1, 1, 1)` |
 | `fwd` | per output row `r < G`: the document by a binary search of `cu_pairs`, the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  With `S <= fuse_docs` (256) the launch builds the pair table itself and does not search: row `r`'s first token is `cu_seqlens[0] + 2 r` plus the number of odd-length documents before its document, counted from `cu_seqlens`, and CTA 0 writes `cu_pairs` | rows `G` |
-| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  With `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
+| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  On SM100 / SM103 with `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; on SM107 it searches all of `cu_pairs` in one level; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
 
 Each role has one registry record per architecture.  The forward has two, one kernel in two
 schedules, each the faster on its architectures: record `fwd` on SM100 / SM103 reads `C` and
 `Z` in 128-bit lanes (4 FP32 channels, 128 lanes a row, 2 rows per 256-thread CTA); record
 `fwd_sm_107a` on SM107 reads them in 256-bit lanes (8 channels, 64 lanes a row, 4 rows per
-CTA).  `pair_table` and `bwd` (256-bit lanes) are one record each on all three.  A launch
-picks the record of the operands' device.
+CTA).  The backward (256-bit lanes) has two, one kernel with two searches, each the faster on
+its architectures: record `bwd` on SM100 / SM103 (two levels) and record `bwd_sm_107a` on
+SM107 (one level).  `pair_table` and `pair_table_small` are one record each on all three.  A
+launch picks the record of the operands' device.
 
-A forward call launches `fwd`, after `pair_table` only when `S` is above the forward
+A forward call launches `fwd`, after a pair table only when `S` is above the forward
 record's `fuse_docs` (256; `cake_jit.fuse_docs`): a forward of at most 256 documents builds
-the table itself and writes it to `cu_pairs`, the same bytes.  A backward call launches
-`pair_table` (not when `pair_offsets` is given, as the autograd backward does) then `bwd`.  Every launch is a
+the table itself and writes it to `cu_pairs`, the same bytes.  A backward call launches a
+pair table (not when `pair_offsets` is given, as the autograd backward does) then `bwd`.  The
+pair table is `pair_table_small` for at most `small_docs` documents (512;
+`cake_jit.small_docs`), the faster there, and `pair_table` for more; both write the same
+bytes.  Every launch is a
 plain stream-ordered launch on the current torch stream of the operands' device; nothing
 synchronizes.  Numerics: FP32 throughout, IEEE round to nearest, no flush to zero; the
 logit gap is `u = z1 - z0`, `e = exp(-|u|)` (precise `expf`), the larger-logit token's
