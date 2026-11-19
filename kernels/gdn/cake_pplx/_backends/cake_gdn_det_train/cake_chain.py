@@ -2670,7 +2670,7 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
             device=device,
         )
     else:
-        final_state = ex.take(workspaces.take, table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM),
+        final_state = ex.take(workspaces, table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM),
                               torch.float32, device)  # fmt: skip
     if initial_state is not None:
         h0 = ex.rows(torch.Tensor.contiguous, initial_state)
@@ -2690,10 +2690,10 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
             raise ValueError(
                 f"segment_len {segs.segment_len} exceeds the {pre_threads} chunks of {pre}"
             )
-        seg_state = ex.take(workspaces.take, table, "f_seg_state", (segs.num_segments, num_v_heads, HEAD_DIM,
+        seg_state = ex.take(workspaces, table, "f_seg_state", (segs.num_segments, num_v_heads, HEAD_DIM,
                             2 * HEAD_DIM), torch.float32, device)  # fmt: skip
         seg_flag = ex.take(
-            workspaces.take,
+            workspaces,
             table,
             "f_seg_flag",
             (segs.num_segments, num_v_heads),
@@ -2704,7 +2704,7 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
                   seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
                   meta.seq_chunk_start, num_heads, num_v_heads, use_init, 0, seg_flag,
                   warmup_thresh_log2(options))  # fmt: skip
-        seg_start = ex.take(workspaces.take, table, "f_seg_start", (segs.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
+        seg_start = ex.take(workspaces, table, "f_seg_start", (segs.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
                             torch.float32, device)  # fmt: skip
         ex.launch("stitch", meta.num_seqs, num_v_heads, STITCH_VSPLIT, seg_state, h0, seg_start, segs.seq_seg_start,
                   seg_flag, num_v_heads, use_init, 0)  # fmt: skip
@@ -2971,7 +2971,7 @@ def _start_state(initial_state, meta: ChunkMeta, output_final_state: bool, num_v
         final_state = ex.empty((meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device)  # fmt: skip
     else:
         final_state = ex.take(
-            workspaces.take,
+            workspaces,
             table,
             "f_zero_state",
             (0, num_v_heads, HEAD_DIM, HEAD_DIM),
@@ -3053,13 +3053,11 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     table = workspaces.table(index)
     # fwd_ho_a binds every tape tensor it does not write to a one-row stand-in (its tensor map encodes, nothing stores)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
-    rows = ex.take(
-        workspaces.take, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device
-    )
+    rows = ex.take(workspaces, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device)
     h_t = state["h"]
     if h_t is None:
         h_t = ex.take(
-            workspaces.take, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
+            workspaces, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
         )
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     w_t = rows if state["w"] is None else state["w"]
@@ -3314,17 +3312,17 @@ def _split_workspaces(
     """The stitch's segment state ``[B | M]``, its flags and the pieces' start states of a split forward (``ex``: the
     forward's executor)."""
     f32 = torch.float32
-    seg_state = ex.take(workspaces.take, table, "f_seg_state",
+    seg_state = ex.take(workspaces, table, "f_seg_state",
                         (split.num_segments, num_v_heads, HEAD_DIM, 2 * HEAD_DIM), f32, device)  # fmt: skip
     seg_flag = ex.take(
-        workspaces.take,
+        workspaces,
         table,
         "f_seg_flag",
         (split.num_segments, num_v_heads),
         torch.int32,
         device,
     )
-    seg_start = ex.take(workspaces.take, table, "f_seg_start", (split.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
+    seg_start = ex.take(workspaces, table, "f_seg_start", (split.num_segments, num_v_heads, HEAD_DIM, HEAD_DIM),
                         f32, device)  # fmt: skip
     return seg_state, seg_flag, seg_start
 
@@ -3382,13 +3380,11 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     workspaces = _workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_FUSED_TAPE[name] for name in kept if name in FWD_FUSED_TAPE)
-    rows = ex.take(
-        workspaces.take, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device
-    )
+    rows = ex.take(workspaces, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device)
     h_t = state["h"]
     if h_t is None:
         h_t = ex.take(
-            workspaces.take, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
+            workspaces, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
         )
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     final_state, h0, use_init = _start_state(initial_state, meta, output_final_state, num_v_heads, table, workspaces,
@@ -3471,13 +3467,11 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     workspaces = _workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
-    rows = ex.take(
-        workspaces.take, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device
-    )
+    rows = ex.take(workspaces, table, "fa_rows_off", (1, 1, HEAD_DIM), bf16, device)
     h_t = state["h"]
     if h_t is None:
         h_t = ex.take(
-            workspaces.take, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
+            workspaces, table, "fa_h_off", (1, 1, HEAD_DIM, HEAD_DIM), bf16, device
         )
     v_new_t = rows if state["v_new"] is None else state["v_new"]
     w_t = rows if state["w"] is None else state["w"]
@@ -3489,7 +3483,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     first_final = (
         final_state
         if output_final_state
-        else ex.take(workspaces.take, table, "f_first_final", state_shape, f32, device)
+        else ex.take(workspaces, table, "f_first_final", state_shape, f32, device)
     )
     seg_state, seg_flag, seg_start = _split_workspaces(
         split, hv, table, workspaces, device, ex
@@ -3688,11 +3682,13 @@ FWD_PLAN = True
 # forward builds its plan key only from the ``FWD_PLAN_REPEAT``-th forward of its layout in its tape mode, and records
 # only while the record credit holds one recording.  Each replay adds ``1 / FWD_PLAN_PAYBACK`` recording to the
 # credit, each gated call ``1 / FWD_PLAN_TRICKLE``, a recording takes one, and the credit starts at and holds at most
-# ``FWD_PLAN_BUDGET``.  So for any sequence of calls, recordings <= BUDGET + replays / PAYBACK + calls / TRICKLE, and
-# with PAYBACK at least the host time of a recording over the host time a replay saves, the recordings cost no more
-# host time than the replays save.  A layout used once never builds a key.  A key whose calls cannot be planned keeps
-# its layout and tape mode on the general path without a key.  ``FWD_PLAN_GATE = False``: every key records at its
-# first call.
+# ``FWD_PLAN_BUDGET``.  So for any sequence of calls of one thread, recordings <= BUDGET + replays / PAYBACK + calls /
+# TRICKLE, and with PAYBACK at least the host time of a recording over the host time a replay saves, the recordings
+# cost no more host time than the replays save (the additions take no lock: an addition of one thread that overlaps
+# the spend of another can undo that spend, one recording more per such overlap).  A layout used once never builds a
+# key.  A key whose calls cannot be planned keeps its layout and tape mode on the general path without a key; the
+# gate's entry is the layout and tape mode's, which all their call classes share.  ``FWD_PLAN_GATE = False``: every
+# key records at its first call.
 FWD_PLAN_GATE = True
 FWD_PLAN_REPEAT = 2
 FWD_PLAN_PAYBACK = 32
@@ -3738,10 +3734,20 @@ def _stream_key(device_index: int) -> tuple[int, int]:
     return device_index, torch._C._cuda_getCurrentRawStream(device_index)
 
 
+def _take(pool, table, role, shape, dtype, device):
+    """``pool.take(table, role, shape, dtype, device)``: a workspace of the pool ``pool`` (its own
+    :meth:`Workspaces.take`, found at the call)."""
+    return pool.take(table, role, shape, dtype, device)
+
+
+# the cache fill context of the direct executor (:meth:`_DirectExecutor.fill`), one object for every call
+_NO_FILL = nullcontext()
+
+
 class _DirectExecutor:
     """The forward's launches, allocations, views, eager calls, pooled workspaces, stream switches and uses of cached
-    tables as :func:`_train_forward` reaches them.  The steps are the functions themselves, with no Python frame of
-    their own (the general path's host cost):
+    tables as :func:`_train_forward` reaches them.  Most steps are the functions themselves, with no Python frame of
+    their own:
 
     - ``launch(stage, gx, gy, gz, *values)``: :func:`_launch`;
     - ``empty(shape, dtype=..., device=...)``: ``torch.empty``;
@@ -3750,15 +3756,21 @@ class _DirectExecutor:
     - ``rows(fn, t, *args)``: ``fn(t, *args)`` for a function that returns ``t`` itself where ``t`` already has the
       layout it makes (:func:`_aligned`, :func:`_table_rows`, :func:`_caller_rows`, ``Tensor.contiguous``), else a new
       tensor;
-    - ``take(take, table, role, shape, dtype, device)``: ``take(table, role, shape, dtype, device)``, a workspace of
-      the pool whose :meth:`Workspaces.take` is ``take``."""
+    - ``take(pool, table, role, shape, dtype, device)``: ``pool.take(table, role, shape, dtype, device)``, a workspace
+      of the pool ``pool`` (:func:`_take`).
+
+    The class holds these functions from the time the module loads: rebinding ``_launch`` afterwards does not reach the
+    forward's general path (and, ``_launch`` being one of the forward's functions, sends the next call of a plan's key
+    to record again).  A wrapper of ``cake_backend.launch_stage`` sees every launch of the forward: of the general
+    path, of a recording and of a replay."""
 
     __slots__ = ()
 
     launch = staticmethod(_launch)
     empty = staticmethod(torch.empty)
     view = staticmethod(torch.Tensor.view)
-    call = rows = take = staticmethod(_call)
+    call = rows = staticmethod(_call)
+    take = staticmethod(_take)
 
     def fork(self, index):
         """(the caller's stream, its side stream), the side stream after the caller's work so far."""
@@ -3792,7 +3804,7 @@ class _DirectExecutor:
     def fill(self):
         """The context of a cached table's build (its write and the event after it), which a later call does not
         repeat."""
-        return nullcontext()
+        return _NO_FILL
 
     def refuse(self, reason: str) -> None:
         """A step a plan cannot replay (``reason``): the call runs it on the general path."""
@@ -3813,18 +3825,27 @@ def _storages(obj, out: set, depth: int = 0) -> None:
             _storages(getattr(obj, f.name), out, depth + 1)
 
 
+# the field names of each dataclass type that :func:`_tensors` walked
+_FIELD_NAMES: dict = {}
+
+
 def _tensors(obj, out: list, depth: int = 0) -> None:
-    """Append the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested) to ``out``; the ints,
-    floats and strs of a tuple (``seq_lens``, ``order``) are passed over without a call."""
+    """Append the tensors in ``obj`` (a tensor, a tuple / list or a dataclass of them, nested) to ``out``.  A tuple or
+    list whose first entry is an int, float or str (``seq_lens``, ``order``, ``scan_config``) is passed over whole, so
+    the walk takes no time per sequence of the layout (a step that read a tensor of such a tuple would refuse the
+    recording)."""
     if isinstance(obj, torch.Tensor):
         out.append(obj)
     elif depth < 4 and isinstance(obj, (tuple, list)):
-        for x in obj:
-            if not isinstance(x, (int, float, str)):
+        if obj and not isinstance(obj[0], (int, float, str)):
+            for x in obj:
                 _tensors(x, out, depth + 1)
     elif depth < 4 and is_dataclass(obj) and not isinstance(obj, type):
-        for f in fields(obj):
-            _tensors(getattr(obj, f.name), out, depth + 1)
+        names = _FIELD_NAMES.get(type(obj))
+        if names is None:
+            names = _FIELD_NAMES[type(obj)] = tuple(f.name for f in fields(obj))
+        for name in names:
+            _tensors(getattr(obj, name), out, depth + 1)
 
 
 def _reached_globals(roots) -> set[str]:
@@ -3904,9 +3925,11 @@ def _fwd_gate(meta: ChunkMeta, tape: bool):
     _FWD_CREDIT = credit = credit if credit < full else full
     key = (id(meta), tape)
     seen = _FWD_SEEN.get(key)
-    # a new layout, or the id of one that died
+    # a new layout, or the id of one that died; a layout whose entry left with a plan kept on it starts planned (its
+    # next forward builds its key once: a replay, or a recording as an unplanned one would make, else unplanned)
     if seen is None or seen[0]() is not meta:
-        seen = [weakref.ref(meta), 0, _UNPLANNED]
+        first = _PLANNED if id(meta) in _PLAN_KEYS else _UNPLANNED
+        seen = [weakref.ref(meta), 0, first]
         with _PLANS_LOCK:
             _FWD_SEEN.pop(key, None)
             if len(_FWD_SEEN) >= _FWD_SEEN_LIMIT:
@@ -4155,15 +4178,12 @@ class _SlotRecorder(_DirectExecutor):
         self.ops.append((_OP_EMPTY, self._add(t), tuple(shape), dtype, device))
         return t
 
-    def take(self, take, table, role, shape, dtype, device):
-        """``take(table, role, shape, dtype, device)`` of the stream's pool: a slot that each replay takes from the pool
-        again, as the general path does (a hit, or a miss that allocates and evicts); a workspace of another pool or
-        table refuses the call."""
-        t = take(table, role, shape, dtype, device)
-        if (
-            getattr(take, "__self__", None) is not _POOLED
-            or table is not self._tables()
-        ):
+    def take(self, pool, table, role, shape, dtype, device):
+        """``pool.take(table, role, shape, dtype, device)`` of the stream's pool: a slot that each replay takes from the
+        pool again, as the general path does (a hit, or a miss that allocates and evicts); a workspace of another pool
+        or table refuses the call."""
+        t = pool.take(table, role, shape, dtype, device)
+        if pool is not _POOLED or table is not self._tables():
             self.refuse("a workspace outside the stream's pool")
         else:
             shape = tuple(shape)
@@ -5203,7 +5223,7 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
                 plan = None
                 if not gated or _fwd_spend():
                     recorder = _FwdRecorder(inputs, index, meta)
-                else:  # no key until the credit holds a recording
+                else:  # no key until the credit holds a recording (for every call class of the entry)
                     seen[2] = _UNPLANNED
     if plan is not None:
         fwd = _replay_forward(plan, inputs)
