@@ -27,17 +27,27 @@ Requests (``cmd``): ``info``; ``row`` (build the row's tensors and arms, warm ev
 gate of every built arm, ``cake_causal_conv1d_numerics.py``); ``prepare`` (per arm and phase: the eager spin length,
 or the CUDA graph of ``graph`` mode, or the reason it cannot be captured); ``time`` (``iters`` timed iterations of
 one arm, phase and mode, ``cake_causal_conv1d_timer.py``; ``graph`` mode captures the arm's graph for the request
-and drops it after); ``drop_graphs``; ``free``; ``quit``.
+and drops it after); ``counters``; ``drop_graphs``; ``free``; ``quit``.
+
+Provenance (outside every timed request): the ``row`` reply gives each Cake arm the programs, channel split and grid
+the package plans for the row's forward and backward, the records' ``use_pdl`` and the PDL value each mode launches
+with; the ``graph`` mode ``prepare`` capture is made with the graph's debug dump kept and reports the captured
+graph's node counts (kernel nodes, the ``FillFunctor`` kernel nodes of a captured ``torch.zeros``, memset nodes) and
+the change of the package's fill-fallback count over that capture; ``counters`` reads the package's count of captured
+calls that zeroed a buffer of their own (``None`` where the package keeps no such count).
 """
 
 from __future__ import annotations
 
+import collections
 import hashlib
 import importlib
 import importlib.metadata
 import json
 import os
+import re
 import sys
+import tempfile
 import traceback
 from pathlib import Path
 
@@ -57,6 +67,14 @@ WIDTH = 4
 DTYPES = {"float32": torch.float32, "bfloat16": torch.bfloat16}
 PHASES = ("fwd", "bwd", "step", "ckpt")
 CAKE_DISTRIBUTION = "cake-pplx-causal-conv1d"
+# The package backends whose host plans the provenance reads (private names; a missing name is reported, not fatal).
+BACKENDS = {
+    "det": "cake_pplx._backends.cake_causal_conv1d_det_train",
+    "nondet": "cake_pplx._backends.cake_causal_conv1d_nondet_train",
+}
+# The node types of a ``cudaGraphDebugDotPrint`` dump.
+NODE_TYPES = ("KERNEL", "MEMSET", "MEMCPY", "HOST", "EMPTY", "WAIT_EVENT", "EVENT_RECORD", "MEM_ALLOC", "MEM_FREE",
+              "EXT_SEMAS_SIGNAL", "EXT_SEMAS_WAIT", "BATCH_MEM_OP", "CONDITIONAL", "GRAPH")
 # The CUDA toolkit wheels of the interpreter (the Cake JIT and the runtime) and the baselines' libraries.
 CUDA_WHEELS = ("nvidia-cuda-runtime", "nvidia-cuda-nvrtc", "nvidia-cuda-nvcc", "nvidia-cuda-cccl")
 SOTA_LIBRARIES = (
@@ -107,6 +125,114 @@ def _package_identity() -> dict:
         "files": len(files),
         "sha256": digest.hexdigest(),
     }
+
+
+def _dot_nodes(text: str) -> dict:
+    """Node statements of a ``cudaGraphDebugDotPrint`` file: counts per node type, the kernel nodes in order (short
+    names) and the number of ``FillFunctor`` kernel nodes."""
+
+    counts: collections.Counter = collections.Counter()
+    kernels = []
+    for stmt in re.split(r";\s*\n|\n(?=\s*\")", text):
+        s = stmt.strip()
+        if not re.match(r'^"?(graph_\d+_node_\d+)"?\s*\[', s):
+            continue
+        best = None
+        for t in NODE_TYPES:
+            m = re.search(r"\b" + t + r"\b", s)
+            if m and (best is None or m.start() < best[0]):
+                best = (m.start(), t)
+        typ = best[1] if best else "UNKNOWN"
+        counts[typ] += 1
+        if typ == "KERNEL":
+            k = re.search(r"(_Z[\w$]+|cake_causal_conv1d[\w]+|[A-Za-z_][\w:<>, ]*(?:kernel|Kernel)[\w<>:, ]*)", s)
+            kernels.append(k.group(1) if k else "?")
+    short = []
+    for name in kernels:
+        m = re.search(r"(cake_causal_conv1d_\w+?_[0-9a-f]{20})", name)
+        short.append(m.group(1) if m else ("FillFunctor" if "FillFunctor" in name else name[:60]))
+    return {"types": dict(counts), "kernel": counts["KERNEL"], "fill": sum("FillFunctor" in k for k in kernels),
+            "memset": counts["MEMSET"], "kernels": short}
+
+
+def _graph_nodes(graph: torch.cuda.CUDAGraph) -> dict:
+    """:func:`_dot_nodes` of a graph captured with ``enable_debug_mode`` (``{"error": ...}`` when it cannot be
+    dumped)."""
+
+    try:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = os.path.join(tmp, "graph.dot")
+            graph.debug_dump(path)
+            with open(path) as fh:
+                return _dot_nodes(fh.read())
+    except Exception as exc:  # noqa: BLE001 -- provenance only
+        return {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+
+
+def _capture_debug(fn, stream: torch.cuda.Stream) -> torch.cuda.CUDAGraph:
+    """:func:`cake_causal_conv1d_timer.capture_graph` with the graph's debug dump kept (``enable_debug_mode``)."""
+
+    stream.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(stream):
+        fn()
+    torch.cuda.current_stream().wait_stream(stream)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    graph.enable_debug_mode()
+    with torch.cuda.graph(graph, stream=stream):
+        fn()
+    torch.cuda.synchronize()
+    return graph
+
+
+def _pdl(cj, arch: str, use_pdl, capturing: bool):
+    """The PDL value a launch of a record with ``launch.use_pdl`` passes: ``"runtime"`` asks the package's
+    ``pdl_enabled`` for the mode, a bool is the record's fixed value."""
+
+    if use_pdl == "runtime":
+        fn = getattr(cj, "pdl_enabled", None)
+        return None if fn is None else int(fn(arch, capturing=capturing))
+    return int(bool(use_pdl))
+
+
+def _plan_provenance(mode: str, S: int, C: int, num_docs: int, route: dict, device: torch.device) -> dict:
+    """The forward and backward programs, channel split and grid the package plans for the row (host plan only, no
+    launch), with each record's ``use_pdl`` and the PDL value of the ``eager`` and ``graph`` modes."""
+
+    try:
+        be = importlib.import_module(BACKENDS[mode])
+        cj = importlib.import_module(BACKENDS[mode] + ".cake_jit")
+        index = device.index if device.index is not None else torch.cuda.current_device()
+        arch = cj.device_arch(index)
+        bias = route["bias_dtype"] is not None
+        bf16 = route["weight_dtype"] == "bfloat16"
+        policy = route["silu_grad_preactivation"]
+        kinds = {
+            "fwd": cj.forward_route(bias=bias, bf16_taps=bf16),
+            "bwd": cj.backward_route(bias=bias, fp32_grad=policy == "fp32", bf16_taps=bf16, bf16_dweight=bf16),
+        }
+        out: dict = {"arch": arch}
+        for role, kind in kinds.items():
+            if hasattr(be, "_call_plan"):
+                names, record, sc, grid, _ = be._call_plan(
+                    arch, kind, S, C, num_docs, device_index=index, policy=None if role == "fwd" else policy
+                )
+            else:
+                names = be._route(arch, kind, needs="the benchmark provenance", C=C, S=S)
+                record = be._loader.MODULES[names[0]]
+                sc, grid = be._launch(record, S, C, num_docs, device_index=index)
+            use_pdl = record["launch"].get("use_pdl")
+            out[role] = {
+                "kind": kind,
+                "programs": list(names),
+                "split": [int(sc["ct_vec"]), int(sc["n_sub"]), int(sc["n_ch_tiles"])],
+                "grid": [int(g) for g in grid],
+                "use_pdl": use_pdl if isinstance(use_pdl, (bool, str)) or use_pdl is None else str(use_pdl),
+                "enable_pdl": {m: _pdl(cj, arch, use_pdl, m == "graph") for m in ("eager", "graph")},
+            }
+        return out
+    except Exception as exc:  # noqa: BLE001 -- provenance only
+        return {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
 
 
 class Worker:
@@ -202,6 +328,10 @@ class Worker:
             except Exception as exc:  # noqa: BLE001 -- a failing arm is reported, the row goes on
                 arm["entry"]["unsupported"] = f"{type(exc).__name__}: {str(exc)[:300]}"
                 arm["calls"] = arm["run"] = None
+        if self.role == "cake":
+            for mode, arm in arms.items():
+                if "unsupported" not in arm["entry"]:
+                    arm["entry"]["provenance"] = _plan_provenance(mode, S, C, len(lens), route, self.device)
         self.row = {
             "S": S, "C": C, "cu": cu, "lens": lens, "weight_dtype": weight_dtype, "bias_dtype": bias_dtype,
             "arms": arms, "graphs": {}, "spins": {},
@@ -224,10 +354,11 @@ class Worker:
         torch.cuda.empty_cache()
         return {"arms": {name: _jsonable(arm["entry"]) for name, arm in row["arms"].items()}}
 
-    def _graph(self, arm: dict, phase: str) -> torch.cuda.CUDAGraph:
+    def _graph(self, arm: dict, phase: str, debug: bool = False) -> torch.cuda.CUDAGraph:
         """A CUDA graph of one call of ``phase``, captured from a call table of the arm on its own leaves whose every
         call runs on the capture stream (the forward and the backward, so the backward's kernels and the leaves'
-        gradient accumulation are on that stream).  The caller drops it after timing (one graph alive at a time)."""
+        gradient accumulation are on that stream).  The caller drops it after timing (one graph alive at a time).
+        ``debug``: the same capture with the graph's debug dump kept (:func:`_capture_debug`, ``prepare`` only)."""
 
         calls = arm["calls"]
         self.side.wait_stream(torch.cuda.current_stream(self.device))
@@ -236,13 +367,17 @@ class Worker:
             gcalls = baselines.autograd_calls(calls.layer, fresh, calls.dys)
             if phase == "bwd":
                 gcalls["record"]()
-        graph = timer_lib.capture_graph(gcalls[phase], self.side)
+        if debug:
+            graph = _capture_debug(gcalls[phase], self.side)
+        else:
+            graph = timer_lib.capture_graph(gcalls[phase], self.side)
         graph.calls = gcalls
         return graph
 
     def prepare(self, req: dict) -> dict:
         """Per requested ``(arm, phase)``: the eager spin (the arm's forward recorded again first), or a trial capture
-        of the ``graph`` mode (dropped at once; the eager state of every arm is released before it)."""
+        of the ``graph`` mode (dropped at once; the eager state of every arm is released before it) with the captured
+        graph's node counts (:func:`_graph_nodes`)."""
 
         row, mode, out = self.row, req["mode"], {}
         for name in req["arms"]:
@@ -263,10 +398,15 @@ class Worker:
                         else:
                             if arm.pop("ys_recorded", None):
                                 calls.release()
-                            graph = self._graph(arm, phase)
+                            before = self.counters({})["fill_fallbacks"]
+                            graph = self._graph(arm, phase, debug=True)
+                            after = self.counters({})["fill_fallbacks"]
                             graph.replay()
+                            nodes = _graph_nodes(graph)
+                            if before is not None and after is not None:
+                                nodes["fill_fallbacks"] = {k: v - before.get(k, 0) for k, v in after.items()}
                             del graph
-                            out[key] = {"graph": True}
+                            out[key] = {"graph": True, "nodes": nodes}
                 except Exception as exc:  # noqa: BLE001 -- recorded: this arm and phase have no such mode
                     torch.cuda.synchronize(self.device)
                     out[key] = {"error": f"{type(exc).__name__}: {str(exc)[:300]}"}
@@ -288,6 +428,21 @@ class Worker:
                 del graph
                 torch.cuda.synchronize(self.device)
                 torch.cuda.empty_cache()
+
+    def counters(self, _req: dict) -> dict:
+        """The package's count of captures that fell back to a captured zero fill, per ``(device, kind)`` (``None``:
+        the installed package keeps no such count)."""
+
+        if self.role != "cake":
+            return {"fill_fallbacks": None}
+        try:
+            count = getattr(importlib.import_module(BACKENDS["nondet"]), "_CAPTURE_FILL_FALLBACKS", None)
+        except Exception as exc:  # noqa: BLE001 -- provenance only
+            return {"fill_fallbacks": None, "error": f"{type(exc).__name__}: {str(exc)[:200]}"}
+        if count is None:
+            return {"fill_fallbacks": None}
+        return {"fill_fallbacks": {":".join(map(str, key)) if isinstance(key, tuple) else str(key): int(value)
+                                   for key, value in dict(count).items()}}
 
     def drop_graphs(self, _req: dict) -> dict:
         if self.row is not None:
@@ -330,6 +485,7 @@ def main() -> int:
         "gate": worker.gate,
         "prepare": worker.prepare,
         "time": worker.time,
+        "counters": worker.counters,
         "drop_graphs": worker.drop_graphs,
         "free": worker.free,
     }

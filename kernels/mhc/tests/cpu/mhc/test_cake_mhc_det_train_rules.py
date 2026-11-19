@@ -2652,7 +2652,8 @@ def test_pdl_bands_of_record() -> None:
     assert loader.PDL_OFF_BANDS == PDL_OFF_BANDS
     assert tuple(loader.PDL_OFF_BANDS) == ARCHES
     assert set(loader.PDL_EDGES) == {
-        "cake_mhc_det_train_fwd_collapse", "cake_mhc_det_train_bwd_prepare", "cake_mhc_det_train_bwd_slab", "cake_mhc_det_train_bwd_reduce"
+        "cake_mhc_det_train_fwd_collapse", "cake_mhc_det_train_bwd_prepare", "cake_mhc_det_train_bwd_slab", "cake_mhc_det_train_bwd_reduce",
+        "cake_mhc_det_train_collapse_fwd",  # the pre handoff's standalone collapse (K4->C, no band)
     }  # fmt: skip
     rows_of_record = {row["T"] for row in _rows()}
     for arch, edges in loader.PDL_OFF_BANDS.items():

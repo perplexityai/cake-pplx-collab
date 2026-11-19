@@ -51,22 +51,6 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 
 #include <math_constants.h>
 
-__device__ __forceinline__ float2 add_f32x2_noftz(float2 a, float2 b) {
-    float2 r;
-    asm("add.rn.f32x2 %0, %1, %2;"
-        : "=l"(*(unsigned long long*)&r)
-        : "l"(*(unsigned long long*)&a), "l"(*(unsigned long long*)&b));
-    return r;
-}
-
-__device__ __forceinline__ float2 sub_f32x2_noftz(float2 a, float2 b) {
-    float2 r;
-    asm("sub.f32x2 %0, %1, %2;"
-        : "=l"(*(unsigned long long*)&r)
-        : "l"(*(unsigned long long*)&a), "l"(*(unsigned long long*)&b));
-    return r;
-}
-
 
 // ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
 
@@ -83,7 +67,7 @@ __device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 
 extern "C" {
 
 __global__ __launch_bounds__(384, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, double* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -106,8 +90,8 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
     // Prologue
     float* wpart = reinterpret_cast<float*>(smem_raw + 0);
     const int wpart_addr = smem + 0;
-    float* pairs = reinterpret_cast<float*>(smem_raw + 96);
-    const int pairs_addr = smem + 96;
+    float* sums = reinterpret_cast<float*>(smem_raw + 96);
+    const int sums_addr = smem + 96;
 
     // === Task calls (declaration order) ===
     asm volatile("griddepcontrol.wait;" ::: "memory");
@@ -182,24 +166,15 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         }
     }
     float acc[8];
-    float comp[8];
     float dq[2];
     acc[0] = 0.0f;
-    comp[0] = 0.0f;
     acc[1] = 0.0f;
-    comp[1] = 0.0f;
     acc[2] = 0.0f;
-    comp[2] = 0.0f;
     acc[3] = 0.0f;
-    comp[3] = 0.0f;
     acc[4] = 0.0f;
-    comp[4] = 0.0f;
     acc[5] = 0.0f;
-    comp[5] = 0.0f;
     acc[6] = 0.0f;
-    comp[6] = 0.0f;
     acc[7] = 0.0f;
-    comp[7] = 0.0f;
     dq[0] = 0.0f;
     if (rg < T) {
         float2 rr2 = make_float2(rr[0], rr[0]);
@@ -214,18 +189,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_6 = make_float2(x0_0, x1_0);
         float2 gx;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx) : "l"(*(const unsigned long long*)&_f32x2_mul_a_5), "l"(*(const unsigned long long*)&_f32x2_mul_b_6));
-        float2 p;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p) : "l"(*(const unsigned long long*)&gx), "l"(*(const unsigned long long*)&rr2));
-        float2 a = make_float2(acc[0], acc[1]);
-        float2 s = add_f32x2_noftz(a, p);
-        float2 bn = sub_f32x2_noftz(a, s);
-        float2 av = add_f32x2_noftz(s, bn);
-        float2 db = fma_f32x2_rn_noftz(gx, rr2, bn);
-        float2 c = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[0], comp[1]), sub_f32x2_noftz(a, av)), db);
-        acc[0] = s.x;
-        acc[1] = s.y;
-        comp[0] = c.x;
-        comp[1] = c.y;
+        float2 a = fma_f32x2_rn_noftz(gx, rr2, make_float2(acc[0], acc[1]));
+        acc[0] = a.x;
+        acc[1] = a.y;
         float g0_1 = __uint_as_float(gw[1] << 16);
         float g1_1 = __uint_as_float(gw[1] & 4294901760u);
         float x0_1 = __uint_as_float(xw[1] << 16);
@@ -236,18 +202,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_8 = make_float2(x0_1, x1_1);
         float2 gx_0;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_0) : "l"(*(const unsigned long long*)&_f32x2_mul_a_7), "l"(*(const unsigned long long*)&_f32x2_mul_b_8));
-        float2 p_0;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_0) : "l"(*(const unsigned long long*)&gx_0), "l"(*(const unsigned long long*)&rr2));
-        float2 a_0 = make_float2(acc[2], acc[3]);
-        float2 s_0 = add_f32x2_noftz(a_0, p_0);
-        float2 bn_0 = sub_f32x2_noftz(a_0, s_0);
-        float2 av_0 = add_f32x2_noftz(s_0, bn_0);
-        float2 db_0 = fma_f32x2_rn_noftz(gx_0, rr2, bn_0);
-        float2 c_0 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[2], comp[3]), sub_f32x2_noftz(a_0, av_0)), db_0);
-        acc[2] = s_0.x;
-        acc[3] = s_0.y;
-        comp[2] = c_0.x;
-        comp[3] = c_0.y;
+        float2 a_0 = fma_f32x2_rn_noftz(gx_0, rr2, make_float2(acc[2], acc[3]));
+        acc[2] = a_0.x;
+        acc[3] = a_0.y;
         float g0_2 = __uint_as_float(gw[2] << 16);
         float g1_2 = __uint_as_float(gw[2] & 4294901760u);
         float x0_2 = __uint_as_float(xw[2] << 16);
@@ -258,18 +215,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_10 = make_float2(x0_2, x1_2);
         float2 gx_1;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_1) : "l"(*(const unsigned long long*)&_f32x2_mul_a_9), "l"(*(const unsigned long long*)&_f32x2_mul_b_10));
-        float2 p_1;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_1) : "l"(*(const unsigned long long*)&gx_1), "l"(*(const unsigned long long*)&rr2));
-        float2 a_1 = make_float2(acc[4], acc[5]);
-        float2 s_1 = add_f32x2_noftz(a_1, p_1);
-        float2 bn_1 = sub_f32x2_noftz(a_1, s_1);
-        float2 av_1 = add_f32x2_noftz(s_1, bn_1);
-        float2 db_1 = fma_f32x2_rn_noftz(gx_1, rr2, bn_1);
-        float2 c_1 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[4], comp[5]), sub_f32x2_noftz(a_1, av_1)), db_1);
-        acc[4] = s_1.x;
-        acc[5] = s_1.y;
-        comp[4] = c_1.x;
-        comp[5] = c_1.y;
+        float2 a_1 = fma_f32x2_rn_noftz(gx_1, rr2, make_float2(acc[4], acc[5]));
+        acc[4] = a_1.x;
+        acc[5] = a_1.y;
         float g0_3 = __uint_as_float(gw[3] << 16);
         float g1_3 = __uint_as_float(gw[3] & 4294901760u);
         float x0_3 = __uint_as_float(xw[3] << 16);
@@ -280,18 +228,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_12 = make_float2(x0_3, x1_3);
         float2 gx_2;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_2) : "l"(*(const unsigned long long*)&_f32x2_mul_a_11), "l"(*(const unsigned long long*)&_f32x2_mul_b_12));
-        float2 p_2;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_2) : "l"(*(const unsigned long long*)&gx_2), "l"(*(const unsigned long long*)&rr2));
-        float2 a_2 = make_float2(acc[6], acc[7]);
-        float2 s_2 = add_f32x2_noftz(a_2, p_2);
-        float2 bn_2 = sub_f32x2_noftz(a_2, s_2);
-        float2 av_2 = add_f32x2_noftz(s_2, bn_2);
-        float2 db_2 = fma_f32x2_rn_noftz(gx_2, rr2, bn_2);
-        float2 c_2 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[6], comp[7]), sub_f32x2_noftz(a_2, av_2)), db_2);
-        acc[6] = s_2.x;
-        acc[7] = s_2.y;
-        comp[6] = c_2.x;
-        comp[7] = c_2.y;
+        float2 a_2 = fma_f32x2_rn_noftz(gx_2, rr2, make_float2(acc[6], acc[7]));
+        acc[6] = a_2.x;
+        acc[7] = a_2.y;
         dq[0] = dot;
     }
     dq[1] = 0.0f;
@@ -308,18 +247,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_14 = make_float2(x0_4, x1_4);
         float2 gx_3;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_3) : "l"(*(const unsigned long long*)&_f32x2_mul_a_13), "l"(*(const unsigned long long*)&_f32x2_mul_b_14));
-        float2 p_3;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_3) : "l"(*(const unsigned long long*)&gx_3), "l"(*(const unsigned long long*)&rr2_1));
-        float2 a_3 = make_float2(acc[0], acc[1]);
-        float2 s_3 = add_f32x2_noftz(a_3, p_3);
-        float2 bn_3 = sub_f32x2_noftz(a_3, s_3);
-        float2 av_3 = add_f32x2_noftz(s_3, bn_3);
-        float2 db_3 = fma_f32x2_rn_noftz(gx_3, rr2_1, bn_3);
-        float2 c_3 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[0], comp[1]), sub_f32x2_noftz(a_3, av_3)), db_3);
-        acc[0] = s_3.x;
-        acc[1] = s_3.y;
-        comp[0] = c_3.x;
-        comp[1] = c_3.y;
+        float2 a_3 = fma_f32x2_rn_noftz(gx_3, rr2_1, make_float2(acc[0], acc[1]));
+        acc[0] = a_3.x;
+        acc[1] = a_3.y;
         float g0_5 = __uint_as_float(gw[5] << 16);
         float g1_5 = __uint_as_float(gw[5] & 4294901760u);
         float x0_5 = __uint_as_float(xw[5] << 16);
@@ -330,18 +260,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_16 = make_float2(x0_5, x1_5);
         float2 gx_3_1;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_3_1) : "l"(*(const unsigned long long*)&_f32x2_mul_a_15), "l"(*(const unsigned long long*)&_f32x2_mul_b_16));
-        float2 p_3_1;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_3_1) : "l"(*(const unsigned long long*)&gx_3_1), "l"(*(const unsigned long long*)&rr2_1));
-        float2 a_3_1 = make_float2(acc[2], acc[3]);
-        float2 s_3_1 = add_f32x2_noftz(a_3_1, p_3_1);
-        float2 bn_3_1 = sub_f32x2_noftz(a_3_1, s_3_1);
-        float2 av_3_1 = add_f32x2_noftz(s_3_1, bn_3_1);
-        float2 db_3_1 = fma_f32x2_rn_noftz(gx_3_1, rr2_1, bn_3_1);
-        float2 c_3_1 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[2], comp[3]), sub_f32x2_noftz(a_3_1, av_3_1)), db_3_1);
-        acc[2] = s_3_1.x;
-        acc[3] = s_3_1.y;
-        comp[2] = c_3_1.x;
-        comp[3] = c_3_1.y;
+        float2 a_3_1 = fma_f32x2_rn_noftz(gx_3_1, rr2_1, make_float2(acc[2], acc[3]));
+        acc[2] = a_3_1.x;
+        acc[3] = a_3_1.y;
         float g0_6 = __uint_as_float(gw[6] << 16);
         float g1_6 = __uint_as_float(gw[6] & 4294901760u);
         float x0_6 = __uint_as_float(xw[6] << 16);
@@ -352,18 +273,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_18 = make_float2(x0_6, x1_6);
         float2 gx_4;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_4) : "l"(*(const unsigned long long*)&_f32x2_mul_a_17), "l"(*(const unsigned long long*)&_f32x2_mul_b_18));
-        float2 p_4;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_4) : "l"(*(const unsigned long long*)&gx_4), "l"(*(const unsigned long long*)&rr2_1));
-        float2 a_4 = make_float2(acc[4], acc[5]);
-        float2 s_4 = add_f32x2_noftz(a_4, p_4);
-        float2 bn_4 = sub_f32x2_noftz(a_4, s_4);
-        float2 av_4 = add_f32x2_noftz(s_4, bn_4);
-        float2 db_4 = fma_f32x2_rn_noftz(gx_4, rr2_1, bn_4);
-        float2 c_4 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[4], comp[5]), sub_f32x2_noftz(a_4, av_4)), db_4);
-        acc[4] = s_4.x;
-        acc[5] = s_4.y;
-        comp[4] = c_4.x;
-        comp[5] = c_4.y;
+        float2 a_4 = fma_f32x2_rn_noftz(gx_4, rr2_1, make_float2(acc[4], acc[5]));
+        acc[4] = a_4.x;
+        acc[5] = a_4.y;
         float g0_7 = __uint_as_float(gw[7] << 16);
         float g1_7 = __uint_as_float(gw[7] & 4294901760u);
         float x0_7 = __uint_as_float(xw[7] << 16);
@@ -374,18 +286,9 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         float2 _f32x2_mul_b_20 = make_float2(x0_7, x1_7);
         float2 gx_5;
         asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&gx_5) : "l"(*(const unsigned long long*)&_f32x2_mul_a_19), "l"(*(const unsigned long long*)&_f32x2_mul_b_20));
-        float2 p_5;
-        asm("mul.rn.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&p_5) : "l"(*(const unsigned long long*)&gx_5), "l"(*(const unsigned long long*)&rr2_1));
-        float2 a_5 = make_float2(acc[6], acc[7]);
-        float2 s_5 = add_f32x2_noftz(a_5, p_5);
-        float2 bn_5 = sub_f32x2_noftz(a_5, s_5);
-        float2 av_5 = add_f32x2_noftz(s_5, bn_5);
-        float2 db_5 = fma_f32x2_rn_noftz(gx_5, rr2_1, bn_5);
-        float2 c_5 = add_f32x2_noftz(add_f32x2_noftz(make_float2(comp[6], comp[7]), sub_f32x2_noftz(a_5, av_5)), db_5);
-        acc[6] = s_5.x;
-        acc[7] = s_5.y;
-        comp[6] = c_5.x;
-        comp[7] = c_5.y;
+        float2 a_5 = fma_f32x2_rn_noftz(gx_5, rr2_1, make_float2(acc[6], acc[7]));
+        acc[6] = a_5.x;
+        acc[7] = a_5.y;
         dq[1] = dot_1;
     }
     float _warp_reduce_21 = dq[0];
@@ -402,65 +305,32 @@ kernel_cake_rmsnorm_train_6d3986ee0dd962cafd21(__nv_bfloat16* __restrict__ g, __
         wpart[rg * 6 + warp - rg * 6] = dq[0];
         wpart[(2 + rg) * 6 + warp - rg * 6] = dq[1];
     }
-    pairs[rg * 2 * 8 * 192 + ct] = acc[0];
-    pairs[(rg * 2 * 8 + 1) * 192 + ct] = comp[0];
-    pairs[(rg * 2 * 8 + 2) * 192 + ct] = acc[1];
-    pairs[(rg * 2 * 8 + 2 + 1) * 192 + ct] = comp[1];
-    pairs[(rg * 2 * 8 + 4) * 192 + ct] = acc[2];
-    pairs[(rg * 2 * 8 + 4 + 1) * 192 + ct] = comp[2];
-    pairs[(rg * 2 * 8 + 6) * 192 + ct] = acc[3];
-    pairs[(rg * 2 * 8 + 6 + 1) * 192 + ct] = comp[3];
-    pairs[(rg * 2 * 8 + 8) * 192 + ct] = acc[4];
-    pairs[(rg * 2 * 8 + 8 + 1) * 192 + ct] = comp[4];
-    pairs[(rg * 2 * 8 + 10) * 192 + ct] = acc[5];
-    pairs[(rg * 2 * 8 + 10 + 1) * 192 + ct] = comp[5];
-    pairs[(rg * 2 * 8 + 12) * 192 + ct] = acc[6];
-    pairs[(rg * 2 * 8 + 12 + 1) * 192 + ct] = comp[6];
-    pairs[(rg * 2 * 8 + 14) * 192 + ct] = acc[7];
-    pairs[(rg * 2 * 8 + 14 + 1) * 192 + ct] = comp[7];
+    sums[rg * 8 * 192 + ct] = acc[0];
+    sums[(rg * 8 + 1) * 192 + ct] = acc[1];
+    sums[(rg * 8 + 2) * 192 + ct] = acc[2];
+    sums[(rg * 8 + 3) * 192 + ct] = acc[3];
+    sums[(rg * 8 + 4) * 192 + ct] = acc[4];
+    sums[(rg * 8 + 5) * 192 + ct] = acc[5];
+    sums[(rg * 8 + 6) * 192 + ct] = acc[6];
+    sums[(rg * 8 + 7) * 192 + ct] = acc[7];
     __syncthreads();
     float dwo[4];
-    float sc[2];
     int jc_0 = rg * 4;
-    sc[0] = pairs[2 * jc_0 * 192 + ct];
-    sc[1] = pairs[(2 * jc_0 + 1) * 192 + ct];
-    float s_6 = sc[0] + pairs[(16 + 2 * jc_0) * 192 + ct];
-    float bp = s_6 - sc[0];
-    float ap = s_6 - bp;
-    float e = sc[0] - ap + (pairs[(16 + 2 * jc_0) * 192 + ct] - bp);
-    sc[0] = s_6;
-    sc[1] = sc[1] + pairs[(16 + 2 * jc_0 + 1) * 192 + ct] + e;
-    dwo[0] = sc[0] + sc[1];
+    float sk_0 = sums[jc_0 * 192 + ct];
+    sk_0 = sk_0 + sums[(8 + jc_0) * 192 + ct];
+    dwo[0] = sk_0;
     int jc_1 = rg * 4 + 1;
-    sc[0] = pairs[2 * jc_1 * 192 + ct];
-    sc[1] = pairs[(2 * jc_1 + 1) * 192 + ct];
-    float s_6_1 = sc[0] + pairs[(16 + 2 * jc_1) * 192 + ct];
-    float bp_0 = s_6_1 - sc[0];
-    float ap_0 = s_6_1 - bp_0;
-    float e_0 = sc[0] - ap_0 + (pairs[(16 + 2 * jc_1) * 192 + ct] - bp_0);
-    sc[0] = s_6_1;
-    sc[1] = sc[1] + pairs[(16 + 2 * jc_1 + 1) * 192 + ct] + e_0;
-    dwo[1] = sc[0] + sc[1];
+    float sk_1 = sums[jc_1 * 192 + ct];
+    sk_1 = sk_1 + sums[(8 + jc_1) * 192 + ct];
+    dwo[1] = sk_1;
     int jc_2 = rg * 4 + 2;
-    sc[0] = pairs[2 * jc_2 * 192 + ct];
-    sc[1] = pairs[(2 * jc_2 + 1) * 192 + ct];
-    float s_7 = sc[0] + pairs[(16 + 2 * jc_2) * 192 + ct];
-    float bp_1 = s_7 - sc[0];
-    float ap_1 = s_7 - bp_1;
-    float e_1 = sc[0] - ap_1 + (pairs[(16 + 2 * jc_2) * 192 + ct] - bp_1);
-    sc[0] = s_7;
-    sc[1] = sc[1] + pairs[(16 + 2 * jc_2 + 1) * 192 + ct] + e_1;
-    dwo[2] = sc[0] + sc[1];
+    float sk_2 = sums[jc_2 * 192 + ct];
+    sk_2 = sk_2 + sums[(8 + jc_2) * 192 + ct];
+    dwo[2] = sk_2;
     int jc_3 = rg * 4 + 3;
-    sc[0] = pairs[2 * jc_3 * 192 + ct];
-    sc[1] = pairs[(2 * jc_3 + 1) * 192 + ct];
-    float s_8 = sc[0] + pairs[(16 + 2 * jc_3) * 192 + ct];
-    float bp_2 = s_8 - sc[0];
-    float ap_2 = s_8 - bp_2;
-    float e_2 = sc[0] - ap_2 + (pairs[(16 + 2 * jc_3) * 192 + ct] - bp_2);
-    sc[0] = s_8;
-    sc[1] = sc[1] + pairs[(16 + 2 * jc_3 + 1) * 192 + ct] + e_2;
-    dwo[3] = sc[0] + sc[1];
+    float sk_3 = sums[jc_3 * 192 + ct];
+    sk_3 = sk_3 + sums[(8 + jc_3) * 192 + ct];
+    dwo[3] = sk_3;
     {
         float4 _v4 = make_float4(dwo[0 + 0], dwo[0 + 1], dwo[0 + 2], dwo[0 + 3]);
         *reinterpret_cast<float4*>(dw + col + rg * 4) = _v4;

@@ -21,8 +21,10 @@ imported under other names.
 
 This package never imports the deterministic package: a consumer vendors it
 alone.  No entry point takes a ``deterministic`` keyword (passing one raises
-``TypeError``), with or without that package.  The pair under one parent
-serves the backend suites that compare against the deterministic package.
+``TypeError``), with or without that package.  No backend suite compares this
+package's outputs with the deterministic package's; the pair under one parent
+shows that the two vendored copies coexist and that this package's calls never
+reach its vendored sibling.
 
 * Device-free (``cpu_only``): both forms are copied (without ``aot/`` and
   ``__pycache__/``) and imported in a fresh ``python -I`` interpreter: the pair
@@ -36,8 +38,8 @@ serves the backend suites that compare against the deterministic package.
   checks that they load prebuilt; the two copies are then
   put under one parent and the backend suites run against them in a ``python -I``
   child (the ``cake_package`` table pointed at the
-  copies); the suites that do not need the deterministic package run against the
-  lone copy (with no deterministic package importable at all).
+  copies); ``LONE_SUITES`` run against the lone copy (with no deterministic
+  package importable at all).
 """
 
 from __future__ import annotations
@@ -64,8 +66,9 @@ DET = "cake_rmsnorm_det_train"
 PARENT = "vendored_cake_rmsnorm"
 LONE = f"vendored_{NONDET}"
 LONE_DET = f"vendored_{DET}"
-# The backend suites run against the vendored pair, and the ones that do not
-# compare against the deterministic package, run against the lone copy.
+# The backend suites run against the vendored pair (both copies under one
+# parent); LONE_SUITES also run against the lone copy, with no deterministic
+# package importable.
 PAIR_SUITES = (
     "tests/norm/test_cake_rmsnorm_nondet_train.py",
     "tests/norm/test_cake_rmsnorm_nondet_train_pairs.py",

@@ -42,6 +42,14 @@ the training tests' judge).  A baseline counts as the best baseline of a compari
 comparison takes only baselines that claim and show run-to-run bitwise outputs.  A Cake arm that fails the gate is
 reported as failed.
 
+Provenance (recorded outside the timed requests; the timed region is unchanged): the header and every row carry the
+run id (``--run-id``) and each Cake worker's package digest; each Cake arm of a row carries the programs, channel split
+and grid the package plans for the row's forward and backward, the records' ``use_pdl`` and the PDL value each mode
+launches with (``provenance``); each ``graph`` cell carries, per arm, the node counts of the arm's trial capture
+(``graph_nodes``: kernel nodes, ``FillFunctor`` kernel nodes, nodes per type) and, per Cake worker, the change of the
+package's count of captures that fell back to a captured zero fill over the cell (``fill_fallbacks``; ``None`` where
+the package keeps no such count).
+
 Rows (``--rows``): ``owner`` (31 shapes, ``S`` 16384 to 500680, ``C`` 128 to 10240), ``pplx`` (the single-rank
 performance matrix of ``bench_cake_causal_conv1d_nondet_train.py``) or ``custom`` (``--tokens`` x ``--channels``),
 each packed as four documents of 0.37 / 0.29 / 0.21 / rest of ``S`` (each nudged off a multiple of 64); ``--shard
@@ -168,7 +176,9 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
         "silu_grad_preactivation": args.silu_grad_preactivation,
     }
     t0 = time.time()
-    result: dict = {"S": S, "C": C, "lens": lens, "route": route, "arms": {}, "timing": {}, "notes": []}
+    result: dict = {
+        "S": S, "C": C, "lens": lens, "route": route, "arms": {}, "timing": {}, "notes": [], "run_id": args.run_id,
+    }  # fmt: skip
     # Arm name -> worker label; entries by full name.
     owner: dict[str, str] = {}
 
@@ -209,7 +219,10 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
             cell: dict = {"skipped": {}, "arms": {}, "group_orders": []}
             result["timing"][f"{phase}/{mode}"] = cell
             try:
+                counts = _fill_fallbacks(workers) if mode == "graph" else None
                 time_cell(cell, phase, mode, runnable, owner, result, args, workers)
+                if counts is not None:
+                    cell["fill_fallbacks"] = _fill_fallback_delta(counts, _fill_fallbacks(workers))
             except Exception as exc:  # noqa: BLE001 -- keep the other cells; a dead worker ends the row
                 cell["error"] = f"{type(exc).__name__}: {str(exc)[:400]}"
                 traceback.print_exc()
@@ -222,6 +235,23 @@ def bench_row(S: int, C: int, args, workers: dict[str, WorkerProcess], arms_of: 
     for worker in workers.values():
         worker.call("free")
     return result
+
+
+def _fill_fallbacks(workers: dict[str, WorkerProcess]) -> dict:
+    """Per Cake worker: the package's count of captures that fell back to a captured zero fill (``None``: none kept)."""
+
+    return {label: w.call("counters").get("fill_fallbacks") for label, w in workers.items() if w.role == "cake"}
+
+
+def _fill_fallback_delta(before: dict, after: dict) -> dict:
+    out = {}
+    for label, now in after.items():
+        then = before.get(label)
+        if now is None or then is None:
+            out[label] = None
+        else:
+            out[label] = {key: value - then.get(key, 0) for key, value in now.items()}
+    return out
 
 
 def time_cell(cell, phase, mode, runnable, owner, result, args, workers) -> None:
@@ -245,6 +275,8 @@ def time_cell(cell, phase, mode, runnable, owner, result, args, workers) -> None
     for n in timed:
         if "spin_ms" in prepared[n]:
             cell["arms"].setdefault(n, {})["spin_ms"] = prepared[n]["spin_ms"]
+        if "nodes" in prepared[n]:
+            cell["arms"].setdefault(n, {})["graph_nodes"] = prepared[n]["nodes"]
     iters: dict[str, int] = {}
     groups: dict[str, list[float]] = {n: [] for n in timed}
     late: dict[str, int] = {n: 0 for n in timed}
@@ -393,6 +425,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("--seed", type=int, default=0, help="the timed row's input seed")
     parser.add_argument("--gate-seed", type=int, default=0)
     parser.add_argument("--jsonl", default=None)
+    parser.add_argument("--run-id", default=None, help="the run's id in the header and every row (default: time + pid)")
     parser.add_argument("--log-dir", default=None, help="worker logs (default: next to --jsonl)")
     parser.add_argument("--summarize", nargs="*", default=None, help="print the table of these JSONL files")
     parser.add_argument("--old", default="old", help="label of the previous version in --summarize")
@@ -402,6 +435,8 @@ def main(argv: Optional[list[str]] = None) -> int:
         return summarize(args.summarize, args.old, args.new)
     if args.draws and args.draws < 32:
         parser.error("--draws: the gate judges at least 32 draws (or 0: no gate)")
+    if args.run_id is None:
+        args.run_id = f"{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{os.uname().nodename}-{os.getpid()}"
     sota = list(SOTA_ARMS) if args.sota == ["all"] else ([] if args.sota == ["none"] else args.sota)
     unknown = [a for a in sota if a not in SOTA_ARMS]
     if unknown:
@@ -429,6 +464,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         first = next(iter(infos.values()))
         header = {
             "kind": "header",
+            "run_id": args.run_id,
             "device": first["device"],
             "capability": first["capability"],
             "sm_count": first["sm_count"],

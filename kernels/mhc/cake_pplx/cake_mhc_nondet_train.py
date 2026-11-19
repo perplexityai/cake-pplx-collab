@@ -97,6 +97,13 @@ Name map (the same verbs in both modes)::
       CakeMHCDetPrepareFunction                     CakeMHCNondetPrepareFunction
       CakeMHCDetFinishFunction                      CakeMHCNondetFinishFunction
       cake_mhc_det_train_route_key                  cake_mhc_nondet_train_route_key
+      cake_mhc_det_train_handoff_{forward_prepare,  cake_mhc_nondet_train_handoff_{forward_prepare,
+        backward_finish,prepare}                      backward_finish,prepare}
+      cake_mhc_det_train_collapse{,_forward,        cake_mhc_nondet_train_collapse{,_forward,
+        _backward}                                    _backward}
+      is_cake_mhc_det_train_handoff_supported       is_cake_mhc_nondet_train_handoff_supported
+      CakeMHCDetHandoffPrepareFunction              CakeMHCNondetHandoffPrepareFunction
+      CakeMHCDetCollapseFunction                    CakeMHCNondetCollapseFunction
 
 The model's head is a module of its own in this mode:
 ``cake_pplx.cake_mhc_head_nondet_train`` (``cake_mhc_head_nondet_train_forward``
@@ -117,6 +124,22 @@ Usage::
     ws_b = cake_mhc_nondet_train_backward_workspace(T, X.device, hidden=X.shape[2])
     dX, dfn, dscale, dbase = cake_mhc_nondet_train_backward_finish(
         X, dY, dU, B, fn, scale, base, stats, grad_stats, workspace=ws_b)
+
+Pre handoff (DeepSeek-V4.1-Flash; hidden 5120 on SM100 / SM103 / SM107,
+:func:`is_cake_mhc_nondet_train_handoff_supported`): a sublayer collapses its
+streams with the incoming FP32 ``pre_in [T, 4]`` and hands its own ``pre`` on
+as ``pre_next``; its backward takes ``dpre_next`` (the gradient of
+``pre_next``) for the coefficient VJP and returns ``dpre_in``.  The final
+collapse runs alone.  Like every entry point of this module, these make no
+run-to-run bit promise::
+
+    U, pre_next, handle = cake_mhc_nondet_train_handoff_prepare(X, pre_in, fn, scale, base, rms_eps=1e-20)
+    Y = cake_mhc_nondet_train_finish(X, branch(U), handle)
+    head_input = cake_mhc_nondet_train_collapse(Y_last, pre_last)       # the final collapse
+
+    # direct calls: handoff_forward_prepare -> (U, pre_next, stats); forward_finish; backward_prepare;
+    # handoff_backward_finish(X, dY, dU, pre_in, dpre_next, B, fn, scale, base, stats, grad_stats)
+    #   -> (dX, dpre_in, dfn, dscale, dbase); collapse_forward / collapse_backward
 """
 
 from __future__ import annotations
@@ -694,12 +717,325 @@ def cake_mhc_nondet_train_finish(
     return _pkg().cake_mhc_nondet_train_finish(X, B, handle)
 
 
+# ----------------------------------------------------------------------------
+# Pre handoff and standalone collapse (hidden 5120 on SM100 / SM103 / SM107)
+
+
+@cake_api
+def is_cake_mhc_nondet_train_handoff_supported(
+    device: torch.device,
+    hidden: int | None = None,
+) -> bool:
+    """Whether ``device`` (and optionally ``hidden``) has the pre-handoff routes and the standalone collapse.
+
+    Parameters
+    ----------
+    device : torch.device
+        Device to query (``False`` for a device that is not CUDA or not an exported architecture).
+    hidden : int, optional
+        Hidden size to query (5120 on SM100 / SM103 / SM107); ``None`` queries the architecture only.
+
+    Returns
+    -------
+    ``True`` when the device (at ``hidden``, when given) has the routes.
+    """
+
+    return _pkg().is_cake_mhc_nondet_train_handoff_supported(device, hidden)
+
+
+@cake_api
+def cake_mhc_nondet_train_handoff_forward_prepare(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    out: torch.Tensor | None = None,
+    pre_next_out: torch.Tensor | None = None,
+    stats_out: torch.Tensor | None = None,
+    workspace: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""Pre-handoff forward of one sublayer: ``(U, pre_next, stats)``.
+
+    The coefficients ``(pre_next, post, C)`` are those of
+    :func:`cake_mhc_nondet_train_forward_prepare` on ``X``; the collapse takes the
+    incoming ``pre_in`` instead of this sublayer's ``pre``:
+    ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])``.
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        BF16 ``[T, 4, H]`` contiguous residual streams; ``H = 5120`` on SM100 /
+        SM103 / SM107 (another size raises ``ValueError``).
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` contiguous ``pre`` of the previous sublayer (a one-hot
+        ``[1, 0, 0, 0]`` row per token for the first sublayer).
+    fn, scale, base : torch.Tensor
+        FP32 ``[24, 4H]``, ``[3]``, ``[24]`` parameters.
+    rms_eps, hc_eps, sinkhorn_iters, accumulation : float, float, int, str
+        As in :func:`cake_mhc_nondet_train_forward_prepare`.
+    out, pre_next_out, stats_out : torch.Tensor, optional
+        Preallocated BF16 ``[T, H]`` ``U``, FP32 ``[T, 4]`` ``pre_next`` and FP32
+        ``[T, 64]`` ``stats`` (contiguous).
+    workspace : torch.Tensor, optional
+        Caller-owned forward workspace (:func:`cake_mhc_nondet_train_forward_workspace`,
+        ``hidden=X.shape[2]``); a per-device default when omitted.
+
+    Returns
+    -------
+    ``(U, pre_next, stats)``: BF16 ``U``, FP32 ``pre_next`` (this sublayer's
+    ``pre``, the values of ``stats`` columns 25..28) and the ``[T, 64]`` record
+    that :func:`cake_mhc_nondet_train_forward_finish`,
+    :func:`cake_mhc_nondet_train_backward_prepare` and
+    :func:`cake_mhc_nondet_train_handoff_backward_finish` consume.
+    """
+
+    return _pkg().cake_mhc_nondet_train_handoff_forward_prepare(
+        X,
+        pre_in,
+        fn,
+        scale,
+        base,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
+        out=out,
+        pre_next_out=pre_next_out,
+        stats_out=stats_out,
+        workspace=workspace,
+    )
+
+
+@cake_api
+def cake_mhc_nondet_train_handoff_backward_finish(
+    X: torch.Tensor,
+    dY: torch.Tensor,
+    dU: torch.Tensor,
+    pre_in: torch.Tensor,
+    dpre_next: torch.Tensor,
+    B: torch.Tensor | None,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    stats: torch.Tensor,
+    grad_stats: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    accumulate: bool = False,
+    workspace: torch.Tensor | None = None,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
+    dfn: torch.Tensor | None = None,
+    dscale: torch.Tensor | None = None,
+    dbase: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    r"""Pre-handoff backward of one sublayer: ``(dX, dpre_in, dfn, dscale, dbase)``.
+
+    ``dX = BF16(dX_coef + pre_in_i dU + sum_j C_ij dY_j)`` (one FP32 sum, one
+    rounding); the coefficient VJP takes ``dpre_next`` (with ``dpost`` and
+    ``dC`` of ``grad_stats``) and does not depend on ``dU``;
+    ``dpre_in[t, i] = sum_d dU[t, d] X[t, i, d]`` (one FP32 sum per element in a
+    fixed order).  No run-to-run bit promise.
+
+    Parameters
+    ----------
+    X, dY, dU, B, fn, scale, base, stats, grad_stats : torch.Tensor
+        As in :func:`cake_mhc_nondet_train_backward_finish`.
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` ``pre_in`` of the forward.
+    dpre_next : torch.Tensor
+        FP32 ``[T, 4]`` contiguous gradient of ``pre_next`` from its consumer.
+    rms_eps, hc_eps, sinkhorn_iters, accumulation, accumulate, workspace : as in
+        :func:`cake_mhc_nondet_train_backward_finish`.
+    dX, dpre_in, dfn, dscale, dbase : torch.Tensor, optional
+        Preallocated outputs (BF16 ``[T, 4, H]``, FP32 ``[T, 4]``, ``[24, 4H]``,
+        ``[3]``, ``[24]``; the last three required with ``accumulate=True``).
+
+    Returns
+    -------
+    ``(dX, dpre_in, dfn, dscale, dbase)``.
+    """
+
+    return _pkg().cake_mhc_nondet_train_handoff_backward_finish(
+        X,
+        dY,
+        dU,
+        pre_in,
+        dpre_next,
+        B,
+        fn,
+        scale,
+        base,
+        stats,
+        grad_stats,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
+        accumulate=accumulate,
+        workspace=workspace,
+        dX=dX,
+        dpre_in=dpre_in,
+        dfn=dfn,
+        dscale=dscale,
+        dbase=dbase,
+    )
+
+
+@cake_api
+def cake_mhc_nondet_train_handoff_prepare(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    fn: torch.Tensor,
+    scale: torch.Tensor,
+    base: torch.Tensor,
+    *,
+    rms_eps: float = 1e-5,
+    hc_eps: float = 1e-6,
+    sinkhorn_iters: int = 20,
+    accumulation: str = "fp32",
+    save_stats: bool = True,
+    workspace: torch.Tensor | None = None,
+    backward_workspace: torch.Tensor | None = None,
+):
+    """Autograd-enabled ``handoff_forward_prepare``: ``(U, pre_next, handle)``.
+
+    Pass ``handle`` to :func:`cake_mhc_nondet_train_finish` (unchanged) and
+    ``pre_next`` to the next sublayer's ``pre_in`` or to
+    :func:`cake_mhc_nondet_train_collapse`.  The node's backward runs
+    :func:`cake_mhc_nondet_train_handoff_backward_finish` with the gradient
+    ``pre_next`` received (zeros when it reached no loss).
+
+    Parameters
+    ----------
+    X, pre_in, fn, scale, base : torch.Tensor
+        As in :func:`cake_mhc_nondet_train_handoff_forward_prepare` (``X``,
+        ``pre_in`` and the parameters may require gradients).
+    rms_eps, hc_eps, sinkhorn_iters, accumulation, save_stats : as in
+        :func:`cake_mhc_nondet_train_prepare`.
+    workspace, backward_workspace : torch.Tensor, optional
+        As in :func:`cake_mhc_nondet_train_prepare`.
+
+    Returns
+    -------
+    ``(U, pre_next, handle)``.
+    """
+
+    return _pkg().cake_mhc_nondet_train_handoff_prepare(
+        X,
+        pre_in,
+        fn,
+        scale,
+        base,
+        rms_eps=rms_eps,
+        hc_eps=hc_eps,
+        sinkhorn_iters=sinkhorn_iters,
+        accumulation=accumulation,
+        save_stats=save_stats,
+        workspace=workspace,
+        backward_workspace=backward_workspace,
+    )
+
+
+@cake_api
+def cake_mhc_nondet_train_collapse_forward(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    *,
+    out: torch.Tensor | None = None,
+) -> torch.Tensor:
+    r"""Standalone collapse: ``U[t, d] = BF16(sum_i pre_in[t, i] X[t, i, d])`` (no parameters, no workspace).
+
+    Parameters
+    ----------
+    X : torch.Tensor
+        BF16 ``[T, 4, H]`` contiguous streams (``H = 5120`` on SM100 / SM103 /
+        SM107).
+    pre_in : torch.Tensor
+        FP32 ``[T, 4]`` contiguous weights (the last sublayer's ``pre_next``).
+    out : torch.Tensor, optional
+        Preallocated BF16 ``[T, H]`` contiguous ``U``.
+
+    Returns
+    -------
+    BF16 ``U`` of shape ``[T, H]``.
+    """
+
+    return _pkg().cake_mhc_nondet_train_collapse_forward(X, pre_in, out=out)
+
+
+@cake_api
+def cake_mhc_nondet_train_collapse_backward(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+    dU: torch.Tensor,
+    *,
+    dX: torch.Tensor | None = None,
+    dpre_in: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    r"""VJP of the standalone collapse: ``(dX, dpre_in)``.
+
+    ``dX[t, i, d] = BF16(pre_in[t, i] dU[t, d])`` and
+    ``dpre_in[t, i] = sum_d dU[t, d] X[t, i, d]`` (one FP32 sum per element).
+
+    Parameters
+    ----------
+    X, pre_in : torch.Tensor
+        The inputs of :func:`cake_mhc_nondet_train_collapse_forward`.
+    dU : torch.Tensor
+        BF16 ``[T, H]`` contiguous gradient of ``U``.
+    dX, dpre_in : torch.Tensor, optional
+        Preallocated BF16 ``[T, 4, H]`` and FP32 ``[T, 4]`` contiguous outputs.
+
+    Returns
+    -------
+    ``(dX, dpre_in)``.
+    """
+
+    return _pkg().cake_mhc_nondet_train_collapse_backward(
+        X, pre_in, dU, dX=dX, dpre_in=dpre_in
+    )
+
+
+@cake_api
+def cake_mhc_nondet_train_collapse(
+    X: torch.Tensor,
+    pre_in: torch.Tensor,
+) -> torch.Tensor:
+    """Autograd-enabled standalone collapse: ``U``; its backward is
+    :func:`cake_mhc_nondet_train_collapse_backward`.
+
+    Parameters
+    ----------
+    X, pre_in : torch.Tensor
+        As in :func:`cake_mhc_nondet_train_collapse_forward` (both may require
+        gradients).
+
+    Returns
+    -------
+    BF16 ``U`` of shape ``[T, H]``.
+    """
+
+    return _pkg().cake_mhc_nondet_train_collapse(X, pre_in)
+
+
 # The backend objects this module re-exports, resolved on first access so that
 # importing this module imports no backend.
 _LAZY = (
     "ARCHES",
     "SUPPORTED_COMPUTE_CAPABILITIES",
+    "CakeMHCNondetCollapseFunction",
     "CakeMHCNondetFinishFunction",
+    "CakeMHCNondetHandoffPrepareFunction",
     "CakeMHCNondetPrepareFunction",
     "cake_mhc_nondet_train_reset_workspace",
     "cake_mhc_nondet_train_route_key",
@@ -719,20 +1055,29 @@ def __dir__() -> list[str]:
 __all__ = [
     "ARCHES",  # noqa: F822 - resolved by __getattr__
     "SUPPORTED_COMPUTE_CAPABILITIES",  # noqa: F822
+    "CakeMHCNondetCollapseFunction",  # noqa: F822
     "CakeMHCNondetFinishFunction",  # noqa: F822
+    "CakeMHCNondetHandoffPrepareFunction",  # noqa: F822
     "CakeMHCNondetPrepareFunction",  # noqa: F822
     "cake_mhc_nondet_train_backward_finish",
     "cake_mhc_nondet_train_backward_prepare",
     "cake_mhc_nondet_train_backward_workspace",
     "cake_mhc_nondet_train_backward_workspace_bytes",
+    "cake_mhc_nondet_train_collapse",
+    "cake_mhc_nondet_train_collapse_backward",
+    "cake_mhc_nondet_train_collapse_forward",
     "cake_mhc_nondet_train_finish",
     "cake_mhc_nondet_train_forward_finish",
     "cake_mhc_nondet_train_forward_prepare",
     "cake_mhc_nondet_train_forward_stats",
     "cake_mhc_nondet_train_forward_workspace",
     "cake_mhc_nondet_train_forward_workspace_bytes",
+    "cake_mhc_nondet_train_handoff_backward_finish",
+    "cake_mhc_nondet_train_handoff_forward_prepare",
+    "cake_mhc_nondet_train_handoff_prepare",
     "cake_mhc_nondet_train_prepare",
     "cake_mhc_nondet_train_reset_workspace",  # noqa: F822
     "cake_mhc_nondet_train_route_key",  # noqa: F822
+    "is_cake_mhc_nondet_train_handoff_supported",
     "is_cake_mhc_nondet_train_supported",
 ]

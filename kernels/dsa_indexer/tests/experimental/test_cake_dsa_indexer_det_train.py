@@ -310,7 +310,7 @@ def test_registry_records_are_well_formed():
     assert (
         {"scan", "merge", "finalize"}
         <= set(cake_jit.STAGES)
-        <= {"scan", "merge", "finalize", "finalize_rank"}
+        <= {"scan", "merge", "finalize", "finalize_rank", "scan_blocks"}
     )
     for role, plan in cake_jit.ARG_PLANS.items():
         for kind, arg in plan:
@@ -357,9 +357,10 @@ def test_registry_records_are_well_formed():
         rank_keys = sorted(k for k in keys if k.startswith("finalize_rank:"))
         merge_rank_keys = sorted(k for k in keys if k.startswith("merge:rank:"))
         assert scan_keys and finalize_keys and MERGE_KEY in keys, arch
+        cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
         assert set(keys) == set(scan_keys) | set(finalize_keys) | set(rank_keys) | set(
             merge_rank_keys
-        ) | {MERGE_KEY}, arch
+        ) | set(cb_keys) | {MERGE_KEY}, arch
         # the fused merge + rank finalize programs: one merge program per slab rank window, registered exactly where
         # the record turns merge_rank on
         assert bool(merge_rank_keys) == bool(policy.merge_rank), arch
@@ -5927,12 +5928,15 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
             assert all(r != s for r, s in rows), (
                 arch
             )  # every drawing program reads it, no static one does
-    assert cake_jit.ARG_PLANS["scan"][-5] == ["buffer", "TicketWord"]
-    assert cake_jit.ARG_PLANS["scan"][-6] == ["buffer", "K_scale"]
+    # the scan and the candidate-block scan (``scan_blocks``: the scan's plan with its block arguments before
+    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; no other role does
+    for role in ("scan", "scan_blocks"):
+        assert cake_jit.ARG_PLANS[role][-5] == ["buffer", "TicketWord"], role
+        assert cake_jit.ARG_PLANS[role][-6] == ["buffer", "K_scale"], role
     assert all(
         ["buffer", "TicketWord"] not in plan and ["buffer", "K_scale"] not in plan
         for role, plan in cake_jit.ARG_PLANS.items()
-        if role != "scan"
+        if role not in ("scan", "scan_blocks")
     )
 
 

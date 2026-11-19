@@ -34,21 +34,29 @@ Two kinds of resident collective:
 * ``traffic``: both ranks keep ``TRAFFIC_ITERS`` back-to-back collectives of
   ``TRAFFIC_MIB`` MiB in flight (NVLink traffic and its HBM reads and writes)
   while both run the call; the call ends while the traffic is still in flight.
+  The side stream starts the traffic only once all of it is enqueued (it waits
+  on an event behind a ``TRAFFIC_GATE_MS`` spin on the compute stream): a host
+  that enqueues the collectives more slowly than the GPU runs them would
+  otherwise drain the traffic before the call starts.
   The ratio is reported (memory-bandwidth sharing slows the call, not a stall).
 
 In both, a call that waited for the collective would take its lifetime (about
 ``PEER_DELAY_MS``, or the whole traffic sequence): the median busy time may be at
 most ``MAX_ALL_EXTRA_MS`` above the median alone.  Every call's outputs match:
-``y``, ``rstd`` and ``dx`` bitwise across the alone and busy calls, ``dw``
-bitwise for a deterministic program and within ``DW_REL_L2`` for the
-non-deterministic single kernel; the first call alone is checked against FP64 at
-the deterministic budget.  Fewer than two supported GPUs: every case is skipped
-with that reason (not run).
+``y``, ``rstd`` (``h_new``) and ``dx`` bitwise across the alone and busy calls,
+``dw`` bitwise for a deterministic program (the non-deterministic single
+kernel's ``dw`` has no bit constraint).  Every output meets the naive PyTorch
+BF16 tier (no tolerance): its error against an FP64 oracle beside the naive's,
+the largest over the case's calls on its own input, and one untimed call on
+each of 31 more random inputs (``tests/norm/test_helpers/
+cake_rmsnorm_train_reference.py``); the parent records each rank's verdicts.
+Fewer than two supported GPUs: every case is skipped with that reason (not run).
 """
 
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import socket
@@ -60,6 +68,9 @@ from pathlib import Path
 
 import pytest
 import torch
+
+# two processes, one per GPU: the whole file runs alone with the allocation's GPUs visible
+pytestmark = pytest.mark.node_exclusive
 
 WORLD = 2
 COLLECTIVES = ("all_gather", "reduce_scatter")
@@ -77,6 +88,7 @@ SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
 WARMUP = 3
 RUNS = 5
 PRE_SLEEP_CYCLES = 1_000_000
+TRAFFIC_GATE_MS = 20.0
 PEER_DELAY_MS = 50.0
 WAIT_BUFFER_MIB = 4
 TRAFFIC_ITERS = 64
@@ -84,7 +96,6 @@ TRAFFIC_MIB = 64
 MAX_RATIO = 1.5
 MAX_EXTRA_MS = 0.020
 MAX_ALL_EXTRA_MS = 1.0
-DW_REL_L2 = 1e-6
 WORKER_TIMEOUT_S = 2400
 SEED = 7038
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -125,8 +136,8 @@ CASES = list(_cases())
 def _worker(rank: int, port: int, out_dir: Path) -> int:
     import torch.distributed as dist
 
-    from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
     from tests.cake.test_helpers.cake_package import cake_package
+    from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
     torch.cuda.set_device(rank)
     device = torch.device("cuda", rank)
@@ -164,20 +175,41 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
         else:
             dist.reduce_scatter_tensor(outp, inp)
 
-    def timed(call, comm=None):
-        """``(call ms, ms from the call's start to the side stream's completion or None, outputs)``."""
+    def timed(call, comm=None, gate_cycles=0):
+        """``(call ms, ms from the call's start to the side stream's completion or None, outputs)``.
+
+        With ``gate_cycles`` the side stream starts ``comm`` only after a spin of
+        that many cycles on the compute stream, enqueued before ``comm``: the
+        collectives start once the host has enqueued all of them and the call.
+
+        The timed span holds the call alone.  The copies of its outputs that the
+        checks keep are taken after ``end``: a case keeps a copy of every call's
+        outputs, so the copies grow the caching allocator, and a ``cudaMalloc``
+        holds the host thread -- and with it the compute stream the span
+        measures -- for as long as the driver takes.  The call's own outputs
+        reuse the blocks of the previous call's outputs, released once copied.
+        """
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         done = None
         if comm is not None:
+            gate = None
+            if gate_cycles:
+                torch.cuda._sleep(gate_cycles)
+                gate = torch.cuda.Event()
+                gate.record()
             with torch.cuda.stream(side):
+                if gate is not None:
+                    side.wait_event(gate)
                 comm()
                 done = torch.cuda.Event(enable_timing=True)
                 done.record(side)
         torch.cuda._sleep(PRE_SLEEP_CYCLES)
         start.record()
-        result = call()
+        outputs = call()
         end.record()
+        result = tuple(t.clone() for t in outputs)
+        del outputs
         torch.cuda.synchronize()
         return (
             start.elapsed_time(end),
@@ -195,6 +227,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
     probe_b.record()
     torch.cuda.synchronize()
     delay_cycles = int(10_000_000 * PEER_DELAY_MS / probe_a.elapsed_time(probe_b))
+    gate_cycles = int(10_000_000 * TRAFFIC_GATE_MS / probe_a.elapsed_time(probe_b))
 
     for collective in COLLECTIVES:  # NCCL connections before any timing
         for mib in (WAIT_BUFFER_MIB, TRAFFIC_MIB):
@@ -203,21 +236,66 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
     torch.cuda.synchronize()
     dist.barrier(group=cpu)
 
+    def named(result) -> dict:
+        """A call's outputs by name: ``y``, ``rstd`` (``h_new``), ``dx``, ``dw``."""
+        names = ("y", "rstd", "h_new")[: len(result) - 2] + ("dx", "dw")
+        return dict(zip(names, result, strict=True))
+
+    def expected(case_inputs, eps, rstd, normalized) -> tuple[dict, dict]:
+        """``(oracle, naive)`` of every output of a call on ``case_inputs``
+        (the backward at the call's FP32 ``rstd`` and normalized input)."""
+        x, u, g, g_h, weight = case_inputs
+        oracle = ref.oracle_forward(x, weight, eps, u)
+        oracle.update(ref.oracle_backward(g, normalized, weight, rstd, g_h))
+        naive = ref.naive_forward(x, weight, eps, u)
+        naive.update(ref.naive_backward(g, normalized, weight, rstd, eps, g_h))
+        return oracle, naive
+
+    def inputs(case, base: int, draw: int):
+        """``(x, u, g, g_h, weight)`` of draw ``draw`` of ``case`` (0: the timed
+        case's input), ``base`` the case's own seed."""
+        _collective, _mode, _deterministic, hidden, residual, w, rows = case
+        generator = torch.Generator(device=device).manual_seed(
+            ref.draw_seed(base, draw)
+        )
+        kw = {"dtype": torch.float32, "device": device, "generator": generator}
+        x = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
+        u = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
+        g = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
+        g_h = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
+        # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+        weight = (
+            (1 + 0.1 * torch.randn(hidden, **kw)).to(torch.bfloat16).to(ref.W_DTYPES[w])
+        )
+        return x, u, g, g_h, weight
+
+    def run(forward, backward, ws, eps, x, u, g, g_h, weight):
+        """One forward and backward call on ``ws``: the outputs it allocated."""
+        outputs = forward(x, weight, eps, residual=u)
+        normalized = outputs[2] if u is not None else x
+        dx, dw = backward(
+            g,
+            normalized,
+            weight,
+            outputs[1],
+            g_residual=g_h,
+            workspace=ws,
+        )
+        return (*outputs, dx, dw)
+
     for index, case in enumerate(CASES):
         collective, mode, deterministic, hidden, residual, w, rows = case
-        record = {"case": _case_id(case), "rank": rank, "arch": arch, "errors": []}
+        record = {
+            "case": _case_id(case),
+            "rank": rank,
+            "arch": arch,
+            "errors": [],
+            "verdicts": [],
+        }
+        judge = None
+        base = (SEED * 1_000_003 + index * 101 + rank) % (2**31 - 1)
         try:
-            generator = torch.Generator(device=device).manual_seed(
-                (SEED * 1_000_003 + index * 101 + rank) % (2**31 - 1)
-            )
-            kw = dict(dtype=torch.float32, device=device, generator=generator)
-            x = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
-            u = torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
-            g = torch.randn(rows, hidden, **kw).to(torch.bfloat16)
-            g_h = (
-                torch.randn(rows, hidden, **kw).to(torch.bfloat16) if residual else None
-            )
-            weight = (1 + 0.1 * torch.randn(hidden, **kw)).to(ref.W_DTYPES[w])
+            case_inputs = inputs(case, base, 0)
             eps = ref.EPS[hidden]
             # the deterministic arm runs the deterministic package, the other
             # this package (the mode is part of the name)
@@ -230,19 +308,8 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 backward = pkg.cake_rmsnorm_nondet_train_backward
                 workspace = pkg.cake_rmsnorm_nondet_train_backward_workspace
             ws = workspace(rows, hidden, device, residual=residual)
-
-            def call():
-                outputs = forward(x, weight, eps, residual=u)
-                normalized = outputs[2] if residual else x
-                dx, dw = backward(
-                    g,
-                    normalized,
-                    weight,
-                    outputs[1],
-                    g_residual=g_h,
-                    workspace=ws,
-                )
-                return tuple(t.clone() for t in (*outputs, dx, dw))
+            launch = functools.partial(run, forward, backward, ws, eps)
+            call = functools.partial(launch, *case_inputs)
 
             form = (
                 "det"
@@ -255,32 +322,8 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
             record["form"] = form
             for _ in range(WARMUP):
                 timed(call)
-            # FP64 check of one call alone
             first = call()
             torch.cuda.synchronize()
-            y, rstd = first[0], first[1]
-            normalized = first[2] if residual else x
-            dx, dw = first[-2], first[-1]
-            try:
-                y_ref, rstd_ref, _n = ref.reference_forward(x, weight, eps, residual=u)
-                ref.assert_bf16_close(y, y_ref, "y")
-                assert ref.rel_l2(rstd, rstd_ref) <= ref.RSTD_REL_L2, "rstd"
-                dx_ref, dw_ref = ref.reference_backward(
-                    g, normalized, weight, rstd, g_h=g_h
-                )
-                ref.assert_bf16_close(dx, dx_ref, "dx")
-                ref.assert_dw(
-                    dw,
-                    dw_ref,
-                    g,
-                    normalized,
-                    rstd,
-                    "dw",
-                    "pair" if form == "det" else form,
-                )
-            except AssertionError as exc:
-                record["errors"].append(f"fp64: {str(exc)[:400]}")
-
             alone, busy, comm_ms, outs = [], [], [], [first]
             small = buffers(WAIT_BUFFER_MIB, collective)
             big = buffers(TRAFFIC_MIB, collective)
@@ -293,7 +336,7 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                         dist.barrier(group=cpu)
                         if rank == measuring:
                             ms, comm, result = timed(
-                                call, comm=lambda: issue(collective, *small)
+                                call, comm=functools.partial(issue, collective, *small)
                             )
                             busy.append(ms)
                             comm_ms.append(comm)
@@ -306,11 +349,13 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 else:
                     dist.barrier(group=cpu)
 
-                    def traffic():
+                    def traffic(collective=collective, big=big):
                         for _ in range(TRAFFIC_ITERS):
                             issue(collective, *big)
 
-                    ms, comm, result = timed(call, comm=traffic)
+                    ms, comm, result = timed(
+                        call, comm=traffic, gate_cycles=gate_cycles
+                    )
                     busy.append(ms)
                     comm_ms.append(comm)
                     outs.append(result)
@@ -319,11 +364,8 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 for i, (a, b) in enumerate(zip(result, first, strict=True)):
                     is_dw = i == len(first) - 1
                     if is_dw and form == "single":
-                        if ref.rel_l2(a, b) > DW_REL_L2:
-                            record["errors"].append(
-                                f"dw moved: rel-L2 {ref.rel_l2(a, b):.3e}"
-                            )
-                    elif not torch.equal(a, b):
+                        continue  # judged below with every other output
+                    if not torch.equal(a, b):
                         record["errors"].append(f"output {i} differs across calls")
             record.update(
                 alone_ms=alone,
@@ -332,10 +374,34 @@ def _worker(rank: int, port: int, out_dir: Path) -> int:
                 nccl=str(torch.cuda.nccl.version()).replace(" ", ""),
                 device=torch.cuda.get_device_name(device),
             )
+            judge = (outs, case_inputs, eps, launch)
         except Exception:  # noqa: BLE001 - recorded, the parent fails the case
             record["errors"].append(traceback.format_exc()[-1500:])
             torch.cuda.synchronize()
             dist.barrier(group=cpu)
+        # the naive tier, after the case's last barrier: no collective below
+        if judge is not None:
+            outs, case_inputs, eps, launch = judge
+            try:
+                draws = ref.Draws(_case_id(case))
+                first = outs[0]
+                normalized = first[2] if residual else case_inputs[0]
+                oracle, naive = expected(case_inputs, eps, first[1], normalized)
+                for result in outs:  # draw 0: every call on the timed input
+                    draws.add(0, named(result), oracle, naive)
+                del outs[:], oracle, naive
+                for draw in range(1, draws.draws):
+                    draw_inputs = inputs(case, base, draw)
+                    result = launch(*draw_inputs)
+                    torch.cuda.synchronize()
+                    normalized = result[2] if residual else draw_inputs[0]
+                    oracle, naive = expected(draw_inputs, eps, result[1], normalized)
+                    draws.add(draw, named(result), oracle, naive)
+                record["errors"] += draws.failures()[:12]
+                record["verdicts"] = list(draws.judge.verdicts().values())
+            except Exception:  # noqa: BLE001 - recorded, the parent fails the case
+                record["errors"].append(traceback.format_exc()[-1500:])
+            judge = None
         with open(results_path, "a") as out:
             out.write(json.dumps(record) + "\n")
     dist.barrier(group=cpu)
@@ -425,13 +491,21 @@ def nccl_results(tmp_path_factory):
 
 
 @pytest.mark.parametrize("case", CASES, ids=[_case_id(c) for c in CASES])
-def test_forward_backward_beside_a_resident_nccl_collective(case, nccl_results) -> None:
+def test_forward_backward_beside_a_resident_nccl_collective(
+    case, nccl_results, record_property
+) -> None:
     _collective, mode, _deterministic, _hidden, _residual, _w, _rows = case
     case_id = _case_id(case)
     problems = []
     for rank in range(WORLD):
         record = nccl_results.get((case_id, rank))
         assert record is not None, f"{case_id}: no result from rank {rank}"
+        for verdict in record.get("verdicts", []):
+            record_property(
+                "naive_tier", {**verdict, "output": f"rank{rank} {verdict['output']}"}
+            )
+        if not record.get("verdicts"):
+            problems.append(f"rank {rank}: no naive-tier verdicts")
         if record["errors"]:
             problems.append(f"rank {rank}: {record['errors']}")
             continue

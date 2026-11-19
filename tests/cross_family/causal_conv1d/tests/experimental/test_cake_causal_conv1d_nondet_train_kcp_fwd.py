@@ -89,12 +89,15 @@ FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
 # The rows of the zero-history fwd route's programs on sm_107a: C = 2048 (the c_band program), C = 256 from 65536
 # tokens (the two-stage program) and below (the route's fallback); on sm_100a and sm_103a the fallback serves all three.
 # C = 640 from 40003 tokens is above every architecture's floor of the whole 40-vector tiles of the narrow forward
-# plan, so the main program's plan names the architecture as the single-rank forward's does.
+# plan, so the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens
+# lies between the ``fwd`` route's floor of the narrow plan on sm_103a (12288: 32-vector tiles there) and the floors of
+# sm_100a and sm_107a (20480, 16384: one tile there).
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),
     ("c256-s6003", (5000, 1003), (1, 2, 4997, 1003), 256),
     ("c640-s40003", (30000, 10003), (1, 2, 29997, 10003), 640),
+    ("c768-s14003", (10000, 4003), (1, 2, 9997, 4003), 768),
 ]
 
 pytestmark = pytest.mark.skipif(
