@@ -2442,9 +2442,9 @@ def _require_nope_sink_program():
     arch = cake_backend.arch_for(torch.device("cuda"))
     served = cake_jit.stage_for(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM)
     for stage in (served, NOPE_DSINK_STAGE):
-        if stage not in cake_jit.record(NOPE_PROGRAM) or arch not in cake_jit.stage_arches(
-            stage, NOPE_PROGRAM
-        ):
+        if stage not in cake_jit.record(
+            NOPE_PROGRAM
+        ) or arch not in cake_jit.stage_arches(stage, NOPE_PROGRAM):
             pytest.skip(f"no {stage} build for {arch}")
 
 
@@ -2488,7 +2488,11 @@ def test_nope_sink_stages_are_registered_for_every_architecture_of_the_record():
         assert nondet[stage]["library"] == f"{nondet_jit.NOPE_PROGRAM}_{stem}", stage
         assert record[stage]["launch"] == nondet[stage]["launch"], stage
     for arch in SINK_ARCHES:
-        served = NOPE_SCAN_SINK_STAGE if arch in SINK_SCAN_ARCHES else NOPE_SINK_FORWARD_STAGE
+        served = (
+            NOPE_SCAN_SINK_STAGE
+            if arch in SINK_SCAN_ARCHES
+            else NOPE_SINK_FORWARD_STAGE
+        )
         assert cake_jit.stage_for(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM) == served
         assert cake_jit.library_name(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM) == (
             f"{record[served]['library']}_{arch}"
@@ -2515,7 +2519,10 @@ def test_nope_sink_stages_are_registered_for_every_architecture_of_the_record():
     # (this package's grid rules take the destination rows of the accumulator last)
     for T in (0, 1, 64, 65, 130, 16384):
         x, y, z = cake_launch.GRID[NOPE_DSINK_STAGE](T, 4096, 640, 4096)
-        assert (y, z) == (1, 1) and 1 <= x <= max(1, sink_h.sink_partial_rows(T)), (T, x)
+        assert (y, z) == (1, 1) and 1 <= x <= max(1, sink_h.sink_partial_rows(T)), (
+            T,
+            x,
+        )
         for stage in (NOPE_SINK_FORWARD_STAGE, NOPE_SCAN_SINK_STAGE):
             assert cake_launch.GRID[stage](T, 4096, 640, 4096) == (
                 cake_launch.GRID["nope_fwd"](T, 4096, 640, 4096)
@@ -2530,7 +2537,8 @@ def test_nope_sink_needs_the_sink_stages_of_the_architecture(monkeypatch):
     for arch in SINK_ARCHES:
         for backward in (False, True):
             cake_backend._require_nope_sink_stages(arch, backward=backward)
-    record = dict(cake_jit.record(NOPE_PROGRAM))
+    registered = cake_jit.record(NOPE_PROGRAM)
+    record = dict(registered)
     del record[NOPE_SCAN_SINK_STAGE]
     monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, record)
     for arch in SINK_FORWARD_ARCHES:
@@ -2538,7 +2546,7 @@ def test_nope_sink_needs_the_sink_stages_of_the_architecture(monkeypatch):
     for backward in (False, True):
         with pytest.raises(NotImplementedError, match="sm_107a"):
             cake_backend._require_nope_sink_stages("sm_107a", backward=backward)
-    record = dict(cake_jit.record(NOPE_PROGRAM))
+    record = dict(registered)
     del record[NOPE_DSINK_STAGE]
     monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, record)
     for arch in SINK_ARCHES:
@@ -2608,7 +2616,9 @@ def test_nope_binding_keys_end_with_the_sink_geometry():
     keyed = fwd(q, kv, idx, None, scale, False, sink)
     assert base[-1] is None and geometry is not None
     assert keyed[:-1] == base[:-1] and keyed[-1] == geometry
-    assert keyed == fwd(q, kv, idx, None, scale, False, torch.full((NUM_HEADS,), -math.inf))
+    assert keyed == fwd(
+        q, kv, idx, None, scale, False, torch.full((NUM_HEADS,), -math.inf)
+    )
     out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
     lse = torch.zeros(8, NUM_HEADS)
     bwd = cake_backend.backward_binding_key_nope
@@ -2632,9 +2642,14 @@ def test_nope_sink_calls_without_query_rows_neither_bind_nor_launch(monkeypatch)
     q, kv, idx = _sink_host_inputs(T=0)
     sink = torch.randn(NUM_HEADS)
     out, lse, o_lo = cake_backend.forward_nope(q, kv, idx, sink=sink)
-    assert tuple(out.shape) == (0, NUM_HEADS, D_LATENT) and tuple(lse.shape) == (0, NUM_HEADS)
+    assert tuple(out.shape) == (0, NUM_HEADS, D_LATENT) and tuple(lse.shape) == (
+        0,
+        NUM_HEADS,
+    )
     dout = torch.zeros(0, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
-    dq, dkv, dsink = cake_backend.backward_nope(q, kv, idx, out, o_lo, lse, dout, sink=sink)
+    dq, dkv, dsink = cake_backend.backward_nope(
+        q, kv, idx, out, o_lo, lse, dout, sink=sink
+    )
     assert tuple(dq.shape) == (0, NUM_HEADS, D_LATENT) and torch.all(dkv == 0)
     assert dsink.dtype == torch.float32 and torch.equal(dsink, torch.zeros(NUM_HEADS))
     acc = torch.ones(16, D_LATENT)
@@ -2725,7 +2740,9 @@ def _judged_with_and_without_sink(inp, calls, forms, record_property, case, j):
     """Judge the calls with the sink and without it (``calls(sink)`` -> label -> outputs), record and print each
     form's ``out`` ratios and hold the acceptance bounds of the sink (``sink_h.assert_sink_bounds``)."""
     judged = [
-        nv.judged(sink_h.sink_problem(inp, sink=sink is not None), calls(sink), prefix=prefix)
+        nv.judged(
+            sink_h.sink_problem(inp, sink=sink is not None), calls(sink), prefix=prefix
+        )
         for prefix, sink in (("sink ", inp.sink), ("no sink ", None))
     ]
     found, oracle, naive = nv.merge(*judged)
@@ -2742,7 +2759,9 @@ def _judged_with_and_without_sink(inp, calls, forms, record_property, case, j):
 
 
 @pytest.mark.parametrize("case", sorted(sink_h.SINK_CASES))
-def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(case, record_property):
+def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
+    case, record_property
+):
     """Per draw, the rows of the sink's model (window slots, then compressed slots; one-token documents, holes in the
     middle of the rows, one row without a valid slot), the sink vector of the acceptance (ordinary heads, a ``-inf``,
     a dominant and a negligible head), the scale ``512 ** -0.5`` and an accumulator whose destination rows each
@@ -2773,7 +2792,9 @@ def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(case, record_p
         )
 
     nv.judge_draws(
-        record_property, draw, seed=SINK_SEED + 17 * sorted(sink_h.SINK_CASES).index(case)
+        record_property,
+        draw,
+        seed=SINK_SEED + 17 * sorted(sink_h.SINK_CASES).index(case),
     )
 
 
@@ -2844,7 +2865,9 @@ def _force_varlen_route(mp, route: str) -> None:
     """Make the packed entries take ``route`` (``mask``: the slot limit above every table; ``index_prep``: the limit
     at 0; ``kernel``: the route function replaced); skips where the program lacks the route's stage or operands."""
     if route in ("mask", "kernel") and not cake_backend.nope_fwd_converts_indices():
-        pytest.skip(f"the registered NoPE forward program has no conversion operands (route {route})")
+        pytest.skip(
+            f"the registered NoPE forward program has no conversion operands (route {route})"
+        )
     if route == "index_prep":
         if not cake_backend.nope_index_prep_available(torch.device("cuda")):
             pytest.skip("the NoPE record registers no index-preparation stage here")
@@ -2871,7 +2894,9 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
     _require_nope_sink_program()
     T, width = sink_h.SINK_VARLEN_CASES[case]
     routes = sink_h.SINK_VARLEN_ROUTES
-    index = sorted(sink_h.SINK_VARLEN_CASES).index(case) * len(routes) + routes.index(route)
+    index = sorted(sink_h.SINK_VARLEN_CASES).index(case) * len(routes) + routes.index(
+        route
+    )
 
     def draw(s, j):
         inp = sink_h.make_sink_varlen_inputs(T, width, seed=s)
@@ -2906,9 +2931,13 @@ def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
     T, S, width = 192, 512, 640
     sink = nope_ref.sink_vector(torch.Generator().manual_seed(SINK_SEED + 9))
     gen = torch.Generator(device="cuda").manual_seed(SINK_SEED + 9)
-    q = torch.randn(T, NUM_HEADS, D_LATENT, device="cuda", generator=gen).to(torch.bfloat16)
+    q = torch.randn(T, NUM_HEADS, D_LATENT, device="cuda", generator=gen).to(
+        torch.bfloat16
+    )
     kv = torch.randn(S, D_LATENT, device="cuda", generator=gen).to(torch.bfloat16)
-    dout = torch.randn(T, NUM_HEADS, D_LATENT, device="cuda", generator=gen).to(torch.bfloat16)
+    dout = torch.randn(T, NUM_HEADS, D_LATENT, device="cuda", generator=gen).to(
+        torch.bfloat16
+    )
     zero_rows = torch.zeros(T, NUM_HEADS, D_LATENT, dtype=torch.bfloat16, device="cuda")
     for fill in (-1, S):
         idx = torch.full((T, width), fill, dtype=torch.int32, device="cuda")
@@ -2917,10 +2946,18 @@ def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
         acc = torch.randn(S, D_LATENT + 8, device="cuda")
         before = acc.clone()
         out, lse = cake_backend.cake_dsa_sparse_attention_det_nope(
-            q_leaf, kv, idx, softmax_scale=SINK_SCALE, return_lse=True, dkv_acc=acc, sink=sink_leaf
+            q_leaf,
+            kv,
+            idx,
+            softmax_scale=SINK_SCALE,
+            return_lse=True,
+            dkv_acc=acc,
+            sink=sink_leaf,
         )
         dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), dout)
-        o, l, o_lo = cake_backend.forward_nope(q, kv, idx, softmax_scale=SINK_SCALE, sink=sink)
+        o, l, o_lo = cake_backend.forward_nope(
+            q, kv, idx, softmax_scale=SINK_SCALE, sink=sink
+        )
         dq_e, dkv_e, dsink_e = cake_backend.backward_nope(
             q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
         )
@@ -3030,7 +3067,11 @@ def test_nope_sink_repeats_bit_for_bit_on_every_path():
         use_reentrant=False,
     )  # fmt: skip
     dq, dsink = torch.autograd.grad(out, (q_leaf, sink_leaf), inp.dout)
-    for a, b in zip([out.detach(), dq, acc, dsink], [plain[0], plain[2], plain[3], plain[4]], strict=True):
+    for a, b in zip(
+        [out.detach(), dq, acc, dsink],
+        [plain[0], plain[2], plain[3], plain[4]],
+        strict=True,
+    ):
         assert _same_bits(a, b)
     # no alert under the deterministic mode
     previous = torch.are_deterministic_algorithms_enabled()
@@ -3098,7 +3139,9 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
             else sink_h.make_sink_window_inputs(total_q, seed=s)
         )
         q, kv, idx, dout, sink = inp.q, inp.kv, inp.indices, inp.dout, inp.sink
-        o, l, o_lo = cake_backend.forward_nope(q, kv, idx, softmax_scale=SINK_SCALE, sink=sink)
+        o, l, o_lo = cake_backend.forward_nope(
+            q, kv, idx, softmax_scale=SINK_SCALE, sink=sink
+        )
         shipped = cake_backend.backward_nope(
             q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
         )
@@ -3117,18 +3160,26 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
                 torch.cuda.synchronize()
             for a, b in zip(got, shipped, strict=True):
                 assert _same_bits(a, b), (total_q, grid_x)
-        run = dict(out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2])
+        run = dict(
+            out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2]
+        )
         return nv.judged(sink_h.sink_problem(inp), {"": run})
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 700 + total_q)
 
 
-def test_nope_sink_step_does_not_synchronize_and_new_shapes_load_no_new_module(record_property):
+def test_nope_sink_step_does_not_synchronize_and_new_shapes_load_no_new_module(
+    record_property,
+):
     """An autograd step with a sink (the accumulator through a destination map) makes no pageable host-to-device
     copy and no synchronizing call, a prepared runner's step with a sink neither synchronizes nor allocates, and
     new ``T`` / ``S`` values run on the modules already loaded (no entry and no miss in the loader's cache), their
     outputs judged."""
-    from tests.experimental.test_helpers.cake_host_sync import census, nonblocking, summary
+    from tests.experimental.test_helpers.cake_host_sync import (
+        census,
+        nonblocking,
+        summary,
+    )
 
     _require_nope_sink_program()
     inp = nope_ref.make_sink_inputs(1024, 640, seed=SINK_SEED + 800)
@@ -3180,7 +3231,11 @@ def test_nope_sink_step_does_not_synchronize_and_new_shapes_load_no_new_module(r
         draw_inp = nope_ref.make_sink_inputs(T, 640, seed=s)
         run = step(draw_inp)
         after = cake_jit.load_cake_dsa_train_module.cache_info()
-        assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (T, loaded, after)
+        assert (after.misses, after.currsize) == (loaded.misses, loaded.currsize), (
+            T,
+            loaded,
+            after,
+        )
         return nv.judged(sink_h.sink_problem(draw_inp), {"": run})
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 802)

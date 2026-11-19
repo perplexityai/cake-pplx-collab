@@ -195,7 +195,9 @@ def assert_sink_bounds(found, oracle, out_ratios: dict) -> None:
         assert head <= limit, f"{form} dsink: a head's error {head:.3e} > {limit:.3e}"
 
 
-def make_sink_window_inputs(total_q: int, *, seed: int, device="cuda") -> "nope_ref.SinkInputs":
+def make_sink_window_inputs(
+    total_q: int, *, seed: int, device="cuda"
+) -> "nope_ref.SinkInputs":
     """One document of ``total_q`` tokens (any count, one included) on the window-only layout (width 128, ``ratio``
     0) of the sink's model, without planted holes or emptied rows: the short calls :func:`nope_ref.make_sink_inputs`
     (more than 40 tokens) does not make."""

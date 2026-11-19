@@ -216,7 +216,9 @@ def test_nope_entries_hand_num_segments_to_the_backend(monkeypatch):
     )
     assert public_api.cake_dsa_sparse_attention_det_nope(q, kv, idx) == "flat"
     assert seen["flat"] == flat_default
-    public_api.cake_dsa_sparse_attention_det_nope(q, kv, idx, num_segments=8, key_passes=2)
+    public_api.cake_dsa_sparse_attention_det_nope(
+        q, kv, idx, num_segments=8, key_passes=2
+    )
     assert seen["flat"] == dict(flat_default, num_segments=8, key_passes=2)
     assert type(seen["flat"]["num_segments"]) is int
     step_backward = public_api.cake_dsa_sparse_attention_det_train_nope_backward
@@ -226,7 +228,9 @@ def test_nope_entries_hand_num_segments_to_the_backend(monkeypatch):
     step_backward(q, kv, idx, out, out, lse, out, num_segments=3)
     assert seen["backward"] == (7, dict(default[1], num_segments=3))
     assert type(seen["backward"][1]["num_segments"]) is int
-    varlen_backward = public_api.cake_dsa_sparse_attention_det_train_nope_varlen_backward
+    varlen_backward = (
+        public_api.cake_dsa_sparse_attention_det_train_nope_varlen_backward
+    )
     cu_k = torch.tensor([0, 6, 6, 16], dtype=torch.int32)
     varlen_backward(q, kv, idx, out, out, lse, out, cu_k, topk_length=idx[:, 0])
     assert seen["backward"][1]["num_segments"] == 3

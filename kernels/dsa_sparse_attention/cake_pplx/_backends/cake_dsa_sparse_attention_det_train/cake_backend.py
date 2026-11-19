@@ -4494,7 +4494,14 @@ class _NopeBinding(_Binding):
         return (out, lse, o_lo), launch
 
     def _forward_values(
-        self, q_latent, kv_latent, indices, topk_length, extra=None, into=None, sink=None
+        self,
+        q_latent,
+        kv_latent,
+        indices,
+        topk_length,
+        extra=None,
+        into=None,
+        sink=None,
     ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], dict[str, Any]]:
         """The forward's outputs (fresh, or the ``into`` triple) and its bound launch values."""
         T, device = self.plan.num_queries, q_latent.device

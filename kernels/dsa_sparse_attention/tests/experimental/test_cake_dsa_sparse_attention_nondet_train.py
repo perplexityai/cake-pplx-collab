@@ -10754,12 +10754,18 @@ def test_nope_sink_stages_are_registered_for_every_architecture_of_the_record():
         assert record[stage]["ffi_entry"] == "run"
         assert record[stage]["library"].startswith(f"{NOPE_PROGRAM}_")
     for arch in SINK_ARCHES:
-        served = NOPE_SCAN_SINK_STAGE if arch in SINK_SCAN_ARCHES else NOPE_SINK_FORWARD_STAGE
+        served = (
+            NOPE_SCAN_SINK_STAGE
+            if arch in SINK_SCAN_ARCHES
+            else NOPE_SINK_FORWARD_STAGE
+        )
         assert cake_jit.stage_for(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM) == served
         assert cake_jit.library_name(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM) == (
             f"{record[served]['library']}_{arch}"
         )
-        assert cake_jit.stage_for(NOPE_DSINK_STAGE, arch, NOPE_PROGRAM) == NOPE_DSINK_STAGE
+        assert (
+            cake_jit.stage_for(NOPE_DSINK_STAGE, arch, NOPE_PROGRAM) == NOPE_DSINK_STAGE
+        )
         assert cake_jit.library_name(NOPE_DSINK_STAGE, arch, NOPE_PROGRAM) == (
             f"{record[NOPE_DSINK_STAGE]['library']}_{arch}"
         )
@@ -10818,7 +10824,8 @@ def test_nope_sink_needs_the_sink_stages_of_the_architecture(monkeypatch):
     for arch in SINK_ARCHES:
         for backward in (False, True):
             cake_backend._require_nope_sink_stages(arch, backward=backward)
-    record = dict(cake_jit.record(NOPE_PROGRAM))
+    registered = cake_jit.record(NOPE_PROGRAM)
+    record = dict(registered)
     del record[NOPE_SCAN_SINK_STAGE]
     monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, record)
     for arch in SINK_FORWARD_ARCHES:
@@ -10826,7 +10833,7 @@ def test_nope_sink_needs_the_sink_stages_of_the_architecture(monkeypatch):
     for backward in (False, True):
         with pytest.raises(NotImplementedError, match="sm_107a"):
             cake_backend._require_nope_sink_stages("sm_107a", backward=backward)
-    record = dict(cake_jit.record(NOPE_PROGRAM))
+    record = dict(registered)
     del record[NOPE_DSINK_STAGE]
     monkeypatch.setitem(cake_jit.MODULES, NOPE_PROGRAM, record)
     for arch in SINK_ARCHES:
@@ -11322,7 +11329,9 @@ def _force_varlen_route(mp, route: str) -> None:
     at 0) or ``kernel`` (never selected by size: the route function is replaced); skips where the registered program
     lacks the route's stage or operands."""
     if route in ("mask", "kernel") and not cake_backend.nope_fwd_converts_indices():
-        pytest.skip(f"the registered NoPE forward program has no conversion operands (route {route})")
+        pytest.skip(
+            f"the registered NoPE forward program has no conversion operands (route {route})"
+        )
     if route == "index_prep":
         _require_nope_compacting_stage()
         mp.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
@@ -11351,7 +11360,9 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
     _require_nope_sink_program()
     T, width = sink_h.SINK_VARLEN_CASES[case]
     index = sorted(sink_h.SINK_VARLEN_CASES).index(case)
-    index = index * len(sink_h.SINK_VARLEN_ROUTES) + sink_h.SINK_VARLEN_ROUTES.index(route)
+    index = index * len(sink_h.SINK_VARLEN_ROUTES) + sink_h.SINK_VARLEN_ROUTES.index(
+        route
+    )
 
     def draw(s, j):
         inp = sink_h.make_sink_varlen_inputs(T, width, seed=s)
@@ -11416,7 +11427,9 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
         q, kv, idx, dout, sink = inp.q, inp.kv, inp.indices, inp.dout, inp.sink
         problem = _sink_problem(inp)
         o, l, o_lo = forward_nope(q, kv, idx, softmax_scale=SINK_SCALE, sink=sink)
-        shipped = backward_nope(q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink)
+        shipped = backward_nope(
+            q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
+        )
         torch.cuda.synchronize()
         for grid_x in (1, 7, chunks, 2 * chunks):
             with pytest.MonkeyPatch.context() as mp:
@@ -11430,11 +11443,15 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
                     q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
                 )
                 torch.cuda.synchronize()
-            assert torch.equal(got[2].view(torch.int32), shipped[2].view(torch.int32)), (
+            assert torch.equal(
+                got[2].view(torch.int32), shipped[2].view(torch.int32)
+            ), (
                 total_q,
                 grid_x,
             )
-        run = dict(out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2])
+        run = dict(
+            out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2]
+        )
         return nv.judged(problem, {"": run})
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 700 + total_q)
