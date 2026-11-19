@@ -90,9 +90,9 @@ and 40 rows per SM, the large-R program's last wave holds a few CTAs and costs l
 41.  At 36 rows per SM the large-R program's unweighted backward already measures as fast or faster with warm L2
 (small/large 1.003 on B200, 1.016 on GB300), and the sweeps have no point between 32 and 36, so on `sm_100a` and
 `sm_103a` that window starts at 32.  On `sm_107a` the small-R program stays faster up to 35 rows per SM, and right after
-a forward the large-R one turns faster between 35 and 36, so that window starts at 35.  From 48 rows per SM on, the two
-backward programs measure within a few percent of each other alone, and the small-R one up to 1.5 % slower right after a
-forward over the same rows (the checkpointed step, unweighted), so the large-R program runs there.
+a forward the large-R one turns faster between 35 and 36, so that window starts at 35.  From 48 rows per SM on, the
+small-R backward alone measures 0.92 to 1.05 times the large-R one's time (by GPU, input and timer), and up to 1.5 %
+slower right after a forward over the same rows (the checkpointed step, unweighted), so the large-R program runs there.
 
 Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
 of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
