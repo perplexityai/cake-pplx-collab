@@ -1295,17 +1295,16 @@ STRIDED_PROGRAMS = {
 # The shipped cuts of the small-row programs, rows per SM by architecture and
 # role: the build of packed rows only on packed rows
 # (``PACKED_SMALL_ROWS_PER_SM``) and the 128-thread build on any layout
-# (``NODW_ANY_LAYOUT_ROWS_PER_SM``); none on sm_107a, where neither is
-# measured yet.
+# (``NODW_ANY_LAYOUT_ROWS_PER_SM``), each measured on its architecture.
 SMALL_ROWS_PER_SM = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 384},
 }
 ANY_LAYOUT_ROWS_PER_SM = {
     "sm_100a": {"bwd_bf16": 32},
     "sm_103a": {"bwd_bf16": 32},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 96},
 }
 
 
@@ -1313,8 +1312,7 @@ def _one_token_packed(arch):
     """Whether a call without the weight gradient on ``arch`` passes one
     token of head stride 128 as packed rows (token stride ``H * 128``): where
     the build of packed rows only has a cut (``PACKED_SMALL_ROWS_PER_SM``);
-    elsewhere (sm_107a) its token stride stays 0 and it runs as other layouts
-    do."""
+    elsewhere its token stride stays 0 and it runs as other layouts do."""
     return loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0) > 0
 
 
@@ -1599,7 +1597,7 @@ def test_small_row_programs_give_the_bits_at_their_cuts(sm_count, layout, launch
     the 256-thread one past it.  ``REPEATS`` such calls give the same bits,
     the ``dx`` and ``dz`` bits of the BF16 call that computes the weight
     gradient, and leave a caller workspace zero.  Skips where there is no
-    cut (sm_107a: neither program is measured there yet)."""
+    cut."""
     arch, sms = _device()
     sm_count = sm_count or sms
     packed = layout == "flat"
@@ -2743,7 +2741,8 @@ def test_registry_records_reference_the_build_manifest():
     program's 128-thread builds only where the strided one is, the build of
     packed rows only where the 128-thread build is; ``PACKED_SMALL_ROWS_PER_SM``
     and ``NODW_ANY_LAYOUT_ROWS_PER_SM`` are the shipped small-row cuts, each
-    at or below the strided cut), and no other role is routed; every module
+    at or below the strided cut and below the long modules' first row
+    count), and no other role is routed; every module
     record
     names its ``build.json`` library (schema ``cake-build/1``), whose entries
     carry the package's kernel and binding sources and the precise-arithmetic
@@ -2786,6 +2785,7 @@ def test_registry_records_reference_the_build_manifest():
             for per_sm in cuts.values():
                 assert isinstance(per_sm, int) and per_sm >= 1, arch
                 assert cut is None or per_sm <= cut, arch
+                assert per_sm < LONG_MIN_ROWS_PER_SM[arch], arch
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
     assert (
@@ -3354,12 +3354,11 @@ def test_one_token_is_packed_rows_only_where_a_small_cut_is():
     """A call without the weight gradient passes one token of head stride 128
     as packed rows (token stride ``H * 128``) on exactly the architectures
     where the build of packed rows only has a cut
-    (``PACKED_SMALL_ROWS_PER_SM``): sm_100a and sm_103a.  On sm_107a, which
-    has no cut until it is measured, one token keeps the token stride 0 and
-    runs the programs of other layouts, as in version 0.2.6."""
+    (``PACKED_SMALL_ROWS_PER_SM``): sm_100a, sm_103a and sm_107a (from
+    version 0.2.8; in version 0.2.7 sm_100a and sm_103a)."""
     want = frozenset(arch for arch in loader.ARCHES if _one_token_packed(arch))
     assert pkg._ONE_TOKEN_PACKED_ARCHES == want
-    assert want == {"sm_100a", "sm_103a"}
+    assert want == {"sm_100a", "sm_103a", "sm_107a"}
 
 
 def _nodw_program_0_2_6(arch, rows, sm_count, packed):
@@ -3383,8 +3382,8 @@ def test_small_row_cuts_change_only_the_rows_up_to_them(sm_count):
     every row count past the small-row cut of the layout (packed rows:
     ``PACKED_SMALL_ROWS_PER_SM``; other layouts:
     ``NODW_ANY_LAYOUT_ROWS_PER_SM``), so on an architecture without a cut
-    (sm_107a) for every row count, and up to the cut the build of packed
-    rows only (packed rows) or the 128-thread build (other layouts)."""
+    for every row count, and up to the cut the build of packed rows only
+    (packed rows) or the 128-thread build (other layouts)."""
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
         base = routes["bwd_bf16"]
