@@ -874,7 +874,7 @@ _COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 
 @pytest.mark.cpu_only
 def test_kernel_sources_hold_no_fp64() -> None:
-    """No CUDA source of the package uses FP64 (comments aside): every step of the rule is exact in FP32."""
+    """No CUDA source of the package uses FP64 (comments aside): every step of the rule is exact in FP32 or BF16."""
     package = Path(cake_build.__file__).parent
     sources = sorted((package / "csrc").glob("*.cu"))
     assert sources, "the package has no CUDA sources"

@@ -126,10 +126,10 @@ below give the rule's outputs:
 - **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by
   `s`.  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant
   bits, so the BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The
-  `sm_107a` main program of `mxfp8_e8m0_g32` decodes each pair to two FP16 values instead and multiplies each by `s`
-  in FP32; that product has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16
-  range the product is `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8)
-  or `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
+  `sm_107a` main programs of `mxfp8_e8m0_g32`, with and without the scale output, decode each pair to two FP16 values
+  instead and multiply each by `s` in FP32; that product has at most 8 significant bits, so it and its BF16 rounding
+  are exact too.  Above the BF16 range the product is `±inf`, as the rule's own BF16 rounding gives: an element with
+  `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.
