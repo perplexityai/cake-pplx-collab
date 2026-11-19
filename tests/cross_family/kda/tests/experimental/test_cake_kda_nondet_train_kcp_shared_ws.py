@@ -63,6 +63,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
     make_inputs,
 )
+from tests.experimental.test_helpers.cake_kda_fla import FlaReference
 from tests.experimental.test_helpers.cake_kda_known_gaps import settle
 from tests.experimental.test_helpers.cake_kda_naive import (
     fla_of,
@@ -110,11 +111,12 @@ def _cu(lengths) -> list[int]:
 class NaiveJudge:
     """The naive-tier judge of every case of a test over the judge's draws (``tests/cake_naive.py``): each case's arms
     against the FP64 reference of the case's own operands (``cake_kda_naive.oracle_with_grads``) beside the naive BF16
-    tier (``cake_kda_naive.naive_of``) and FLA (``cake_kda_naive.fla_of``; none for ``dw`` and the stacks of
-    :func:`stack_refs`, judged against the tier only), all in one ``TierJudge``.  An output of case ``c`` and arm ``a``
-    is judged as ``"c.a.<output>"`` (empty parts left out); an arm holding a list of results is judged as repeats (the
+    tier (``cake_kda_naive.naive_of``) and FLA (:meth:`fla`; for the stacks of :func:`stack_refs`, FLA's layers
+    composed the same way, :func:`stack_fla`), all in one ``TierJudge``.  An output of case ``c`` and arm ``a`` is
+    judged as ``"c.a.<output>"`` (empty parts left out); an arm holding a list of results is judged as repeats (the
     judge keeps the worst).  ``dw`` (the gradient of the ones leaf ``w`` of a checkpointed ``out * w``) is judged
-    against ``dout * out`` of the reference and of the tier (that product in BF16: the PyTorch graph of the test).
+    against ``dout * out`` of the reference, of the tier and of FLA (the tier's and FLA's product in BF16: the PyTorch
+    graph of the test on their ``out``).
     Every output is held to its contract on every draw; :meth:`result` gives the verdicts and the failures,
     :meth:`settle` records them (``naive_tier``) and settles them against the owner-accepted gaps
     (``cake_kda_known_gaps.settle``)."""
@@ -135,6 +137,18 @@ class NaiveJudge:
         tier["dw"] = stored(inputs["dout"]) * tier["out"]
         return ref, tier
 
+    def fla(
+        self, inputs: dict, *, l2n: bool = False, lower_bound: float = LOWER_BOUND
+    ) -> FlaReference:
+        """FLA's values of one case's operands (``cake_kda_naive.fla_of``), ``dw`` among them: ``dout`` times FLA's
+        ``out`` in FLA's ``out`` dtype (BF16), as :meth:`refs` forms the tier's; or the reason FLA does not run the
+        case (the outputs are then judged against the tier only)."""
+        fla = fla_of(inputs, self.scale, lower_bound, l2n)
+        if fla.values is not None:
+            out = fla.values["out"]
+            fla.values["dw"] = inputs["dout"].to(out.dtype) * out
+        return fla
+
     def add(
         self,
         j: int,
@@ -148,7 +162,7 @@ class NaiveJudge:
         """Draw ``j`` of every arm of ``case`` (``{arm: {output: tensor}}`` or ``{arm: [{output: tensor}, ...]}``)
         on the operands ``inputs``."""
         ref, tier = self.refs(inputs, l2n=l2n, lower_bound=lower_bound)
-        self.add_refs(j, case, arms, ref, tier, fla_of(inputs, self.scale, lower_bound, l2n))
+        self.add_refs(j, case, arms, ref, tier, self.fla(inputs, l2n=l2n, lower_bound=lower_bound))
 
     def add_refs(self, j: int, case: str, arms: dict, ref: dict, tier: dict, fla=None) -> None:
         """:meth:`add` with the reference and the tier given (``{output: tensor}`` each), and FLA's when given."""
@@ -223,14 +237,14 @@ class RankJudge:
         lower_bound: float = LOWER_BOUND,
     ) -> None:
         """Start draw ``j`` on the row's whole operands ``inputs`` (``make_inputs`` form, the same on every rank):
-        rank 0 computes their reference and tier."""
+        rank 0 computes their reference, tier and FLA's values (:meth:`NaiveJudge.fla`)."""
         self.j = j
         self.ref = self.tier = self.fla = None
         if self.naive is not None:
             self.ref, self.tier = self.naive.refs(
                 inputs, l2n=l2n, lower_bound=lower_bound
             )
-            self.fla = fla_of(inputs, self.naive.scale, lower_bound, l2n)
+            self.fla = self.naive.fla(inputs, l2n=l2n, lower_bound=lower_bound)
 
     def judged_outputs(self, res: dict, halve: bool = False) -> dict:
         """The judged outputs of one local result: the token outputs and gradients, the cross-rank parameter sums
@@ -332,6 +346,41 @@ def stack_refs(judge: NaiveJudge, inputs: dict, layers: int) -> tuple[dict, dict
         d_ref, d_tier = r["dv"], t["dv"]
     ref["dv"], tier["dv"] = d_ref, d_tier
     return ref, tier
+
+
+def stack_fla(judge: NaiveJudge, inputs: dict, layers: int) -> FlaReference:
+    """FLA's values of the ``layers`` stacked KDA layers of :func:`stack_refs` on one case's operands, keyed as
+    :func:`stack_refs`: FLA's layers composed as the test composes the kernels' (layer ``l + 1`` reads FLA's ``out``
+    of layer ``l`` as ``v``; ``dout`` on the last layer, FLA's ``dv`` of layer ``l + 1`` as the ``dout`` of layer
+    ``l``), the gradients of the leaves summed over the layers in FLA's dtypes, as autograd accumulates them; or the
+    reason FLA does not run a layer (the stack's outputs are then judged against the tier only)."""
+
+    def fla(x: dict) -> FlaReference:
+        return fla_of(x, judge.scale, LOWER_BOUND, False)
+
+    seconds = 0.0
+    v = [inputs["v"]]
+    for _ in range(layers - 1):  # the next layer's v: FLA's out of this layer
+        step = fla({**inputs, "v": v[-1]})
+        if step.values is None:
+            return step
+        seconds += step.seconds
+        v.append(step.values["out"])
+    values: dict = {}
+    d = inputs["dout"]
+    for i in reversed(range(layers)):
+        step = fla({**inputs, "v": v[i], "dout": d})
+        if step.values is None:
+            return step
+        seconds += step.seconds
+        values[f"out_l{i}"] = step.values["out"] if i == layers - 1 else v[i + 1]
+        if i == layers - 1:
+            values["out"] = step.values["out"]
+        for n in ("dq", "dk", "dg", "dbeta"):
+            values[n] = step.values[n] if n not in values else values[n] + step.values[n]
+        d = step.values["dv"]
+    values["dv"] = d
+    return FlaReference(values, None, seconds)
 
 
 def pack_inputs(part, cu: list[int], ops: dict, device) -> dict:
@@ -632,6 +681,52 @@ def test_shared_workspace_holds_no_context_and_bounds_its_caches() -> None:
         )
         ws.ensure(c, 64, device="cpu", backward=True, host_trim=True)
         assert len(ws._fast) <= cake_kcp.ENSURE_CACHE_MAX
+
+
+def test_fla_values_of_dw_and_of_the_layer_stacks_compose_as_the_tier(monkeypatch) -> None:
+    """FLA's ``dw`` (:meth:`NaiveJudge.fla`) and FLA's layer stack (:func:`stack_fla`) are composed as the naive
+    tier's (:meth:`NaiveJudge.refs`, :func:`stack_refs`): with FLA's step replaced by the naive tier (on the CPU),
+    every value is the tier's bit for bit, three steps for two layers; a step FLA does not run gives its reason for
+    every output."""
+    steps = []
+
+    def tier_as_fla(inputs, scale, lower_bound, l2n):
+        steps.append(inputs["v"])
+        return FlaReference(naive_of(inputs, scale, lower_bound, l2n), None, 0.25)
+
+    monkeypatch.setitem(globals(), "fla_of", tier_as_fla)
+    judge = NaiveJudge()
+    inputs = make_inputs((5, 3), 2, "cpu", seed=0x7815)
+    _, tier = judge.refs(inputs)
+    one = judge.fla(inputs)
+    assert sorted(one.values) == sorted(tier) and one.reason is None
+    for name, want in tier.items():
+        assert torch.equal(one.values[name], want), name
+    steps.clear()
+    _, tier = stack_refs(judge, inputs, 2)
+    stack = stack_fla(judge, inputs, 2)
+    assert stack.reason is None and stack.seconds == 0.75 and len(steps) == 3
+    # layer 1 reads FLA's out of layer 0 as v; layer 0 runs on the operands' v
+    assert torch.equal(steps[1], tier["out_l0"]) and steps[2] is inputs["v"]
+    assert sorted(stack.values) == sorted(tier)
+    for name, want in tier.items():
+        assert torch.equal(stack.values[name], want), name
+    assert stack.value("out", tier["out"]) is stack.values["out"]
+
+    calls = []
+
+    def layer_one_fails(inputs, scale, lower_bound, l2n):
+        calls.append(1)
+        if len(calls) == 2:  # the step of layer 1
+            return FlaReference(None, "fla unavailable: a test reason")
+        return tier_as_fla(inputs, scale, lower_bound, l2n)
+
+    monkeypatch.setitem(globals(), "fla_of", layer_one_fails)
+    stack = stack_fla(judge, inputs, 2)
+    assert stack.values is None and stack.reason == "fla unavailable: a test reason"
+    assert stack.value("dv", tier["dv"]) == "fla unavailable: a test reason"
+    monkeypatch.setitem(globals(), "fla_of", lambda *a: FlaReference(None, "fla unavailable: a test reason"))
+    assert judge.fla(inputs).value("dw", tier["out"]) == "fla unavailable: a test reason"
 
 
 # --------------------------------------------------------------------------- GPU
@@ -1858,8 +1953,9 @@ def test_gpu_recompute_handles_on_a_reserved_shared_workspace(
     backward and none lies in the workspace; no pointer moves.  Out and the five gradients of the two-layer stack on
     one workspace per pack without handles (``direct``) and with the handles (``handle``), and each layer's original
     and recomputed ``out`` (``handle.layer<l>``), are judged per pack against the FP64 reference of the stack beside
-    its naive tier (:func:`stack_refs`; case ``p<i>``).  One rank: no fragment crosses a rank, so the stored tensors
-    are empty here; the W = 4 rows at the end of this file store and check real ones."""
+    its naive tier (:func:`stack_refs`) and FLA's stack (:func:`stack_fla`; case ``p<i>``).  One rank: no fragment
+    crosses a rank, so the stored tensors are empty here; the W = 4 rows at the end of this file store and check real
+    ones."""
     ctxs, _ = _packs(device, H)
     ws = _new_ws()
     ws.reserve(ctxs, H)
@@ -1880,7 +1976,7 @@ def test_gpu_recompute_handles_on_a_reserved_shared_workspace(
             inputs = pack_inputs(_part(lengths), _cu(lengths), ops[i], device)
             r, t = stack_refs(judge, inputs, HANDLE_LAYERS)
             arms = {**handle_arms(ref[i], "direct"), **handle_arms(got[i], "handle")}
-            judge.add_refs(j, f"p{i}", arms, r, t)
+            judge.add_refs(j, f"p{i}", arms, r, t, stack_fla(judge, inputs, HANDLE_LAYERS))
         del ref, got, log
     judge.settle(record_property)
 
@@ -2206,9 +2302,9 @@ def _run_handle_rank(
     poisoned before every forward and backward): no stored ``S_in`` / c1 receive tensor changed before its backward or
     placed in the workspace, every recompute exchange-free and run once per layer, no pointer moved.  Out and the five
     gradients of every arm (``direct``, ``<tier>.<order>``) and each layer's original and recomputed ``out`` are
-    gathered to rank 0 and judged there against the FP64 reference of the two-layer stack (:func:`stack_refs`).  The
-    stored element counts are gathered: the row must store non-empty tensors on some rank (of each tier's members).
-    The flags are gathered to every rank."""
+    gathered to rank 0 and judged there against the FP64 reference of the two-layer stack (:func:`stack_refs`, beside
+    FLA's stack, :func:`stack_fla`).  The stored element counts are gathered: the row must store non-empty tensors on
+    some rank (of each tier's members).  The flags are gathered to every rank."""
     packs, H, _w, _layout, exchange = row
     device, ctxs, parts = _rank_packs(rank, W, row, rdzv)
     kw = {"exchange": exchange}
@@ -2259,6 +2355,7 @@ def _run_handle_rank(
                     ),
                     r,
                     t,
+                    stack_fla(judge, glob, HANDLE_LAYERS),
                 )
         del arms, ops, globs
     report["stored"] = stored

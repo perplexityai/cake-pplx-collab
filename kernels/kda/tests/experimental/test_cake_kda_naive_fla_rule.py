@@ -158,14 +158,14 @@ def test_fla_unavailable_judges_the_naive_tier_only() -> None:
 
 
 def test_an_output_without_an_fla_counterpart_is_judged_against_the_naive_tier_only() -> None:
-    passed = _judge(_const(0.0625), _const(0.125), _const(None), name="dw")
+    passed = _judge(_const(0.0625), _const(0.125), _const(None), name="aqk_int")
     (verdict,) = passed.verdicts().values()
     assert verdict["tier"] == "bf16" and verdict["fla_reason"] == NO_FLA_COUNTERPART
     assert tier_line("t", verdict).endswith(f"| fla: {NO_FLA_COUNTERPART}, naive tier only")
-    failed = _judge(_const(0.1875), _const(0.125), _const(None), name="dw")
+    failed = _judge(_const(0.1875), _const(0.125), _const(None), name="aqk_int")
     assert next(iter(failed.verdicts().values()))["tier"] is None
     (failure,) = failed.failures()
-    assert failure.startswith("dw: misses the naive tier over 32 inputs")
+    assert failure.startswith("aqk_int: misses the naive tier over 32 inputs")
     assert NO_FLA_COUNTERPART in failure
 
 
@@ -226,7 +226,7 @@ def test_fla_reference_values_and_reasons() -> None:
     ref = FlaReference({"out": torch.zeros(3, 2, 128), "ddt_bias": ddt}, None, 0.5)
     assert ref.value("ddt_bias", torch.empty(4, 128)).shape == (4, 128)
     assert ref.value("out", torch.empty(3, 2, 128)).shape == (3, 2, 128)
-    assert ref.value("dw", torch.empty(3, 2, 128)) == "no FLA counterpart: FLA gives no dw"
+    assert ref.value("aqk_int", torch.empty(3, 2, 128)) == "no FLA counterpart: FLA gives no aqk_int"
     gone = FlaReference(None, f"{UNAVAILABLE}: test")
     assert gone.value("out", torch.empty(1)) == f"{UNAVAILABLE}: test"
     steps = FlaSteps()

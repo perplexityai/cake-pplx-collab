@@ -77,6 +77,7 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
     pack_inputs,
     schedule_arms,
     settle_naive,
+    stack_fla,
     stack_refs,
 )
 from tests.experimental.test_helpers.cake_host_sync import (
@@ -1069,7 +1070,8 @@ def test_gpu_lean_handles_graph_replay_and_overlap_schedule(
     run once per layer), ``graph="replay"`` (eager, captured and replayed calls; ``graph_replay_arena`` and
     ``graph_lean``, repeats) and the overlap schedule (the document-end adjoint tape walk under b2; ``overlap_replay``
     and ``overlap_lean``) through ``_kcp_test_knobs``.  Out and every gradient of each judged per pack (case
-    ``p<i>``; the handle arms against the FP64 reference of the two-layer stack, :func:`stack_refs`; :func:`judged`)."""
+    ``p<i>``; the handle arms against the FP64 reference of the two-layer stack, :func:`stack_refs`, beside FLA's
+    stack, :func:`stack_fla`; :func:`judged`)."""
     packs = PACKS + (PROXY_PACK,) if H == 64 else PACKS
     ctxs, _ = _packs_on(device, H, packs)
 
@@ -1137,7 +1139,9 @@ def test_gpu_lean_handles_graph_replay_and_overlap_schedule(
                 if judged(lengths, H):
                     inputs = pack_inputs(_part(lengths), _cu(lengths), ops[i], device)
                     r, t = stack_refs(judge, inputs, HANDLE_LAYERS)
-                    judge.add_refs(j, f"p{i}", stack[i], r, t)
+                    judge.add_refs(
+                        j, f"p{i}", stack[i], r, t, stack_fla(judge, inputs, HANDLE_LAYERS)
+                    )
             del stack, graph_ref, graph_lean, overlap_ref, overlap_lean, arms
     finally:
         kp.enable_test_knobs(previous)
