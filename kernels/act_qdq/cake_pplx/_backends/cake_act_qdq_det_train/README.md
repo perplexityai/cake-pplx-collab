@@ -55,13 +55,17 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has twelve programs: per format, with and without the scale output, a main program and a small one.  Each
-is built for `sm_100a`, `sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json`
-lists 36 libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=...,
-n_vecs=..., in_place=...)`): the small program when `n_vecs` lies in its `vectors` range for the call's kind, and the
-main program otherwise.  Out of place the range is 65,537 to 524,288 on `sm_100a` and `sm_103a` and 1 to 262,144 on
-`sm_107a`; in place it is 1 to 262,144 on `sm_107a`, and `sm_100a` and `sm_103a` have none, since the small program
-measured no faster there in place.
+The package has thirteen programs: per format, with and without the scale output, a main program and a small one, and
+a wide program for MXFP8 without the scale output.  The wide program is built for `sm_100a` and `sm_103a`, every other
+program for `sm_100a`, `sm_103a` and `sm_107a`, each with the exact `-gencode` flag of the architecture, so
+`build.json` lists 38 libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format,
+scale_out=..., n_vecs=..., in_place=...)`): the small or the wide program when `n_vecs` lies in its `vectors` range for
+the call's kind, and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on
+`sm_100a` and `sm_103a` (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1
+to 262,144 on `sm_107a`, and `sm_100a` and `sm_103a` have none, since the small program measured no faster there in
+place.  The wide program's range starts above the main and small programs' sizes: from 131,073 vectors out of place and
+from 262,145 in place, both to 2,147,483,136 (2^31 - 512, since it forms `n_vecs + 511`); the main program runs above
+that.
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
@@ -72,8 +76,11 @@ waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that 
 count is read once per device.  The small program is the same kernel with 256-thread CTAs that take 2 vectors per thread
 on every architecture (tiles of 512 vectors, 8 CTAs per SM, 4 on `sm_107a`).  Its sizes fill at most about one wave,
 where each CTA start costs time (the GPU starts about 1,850 CTAs per microsecond) and its larger tiles need fewer CTAs:
-at 524,288 vectors on `sm_100a` and `sm_103a` the main program launches 4,096 CTAs and the small one 1,024.  Both
-programs give the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
+at 524,288 vectors on `sm_100a` and `sm_103a` the main program launches 4,096 CTAs and the small one 1,024.  The wide
+program is the same kernel with 128-thread CTAs that take 4 vectors per thread (tiles of 512 vectors), launched one CTA
+per tile at every size, and its launch bounds hold it to 48 registers per thread, so 10 CTAs fit on an SM.  It measured
+up to 5 % faster than the main program in its range on B200 and GB300, and up to 9 % slower below it.  Every program
+gives the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
 kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own program, so build
 every library of the architecture before a CUDA graph capture: call `build_and_load()` on each spec of
 `cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output and program (size range and kind

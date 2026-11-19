@@ -33,13 +33,17 @@ Host design (every switch is a keyword; no environment variable):
 - A call runs one program of its route (``cake_jit.selected_module``) on the
   current torch stream: the small program (256-thread CTAs, tiles of 512
   vectors) when ``n_vecs = numel / 8`` lies in its range for the call's kind
-  (out of place: 65,537 to 524,288 on sm_100a and sm_103a, 1 to 262,144 on
-  sm_107a; in place: 1 to 262,144 on sm_107a only), else the main program
-  (64-thread CTAs, tiles of 128 vectors, 256 on sm_107a).  The grid is the
-  ``tiles`` rule of ``cake_jit.launch_grid``: one CTA per tile once the tiles
-  pass 2.5 waves of resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the
-  small program), else the resident CTAs, at most one per tile, walk the
-  tiles.  It does not read device memory on the host and does not
+  (out of place: 65,537 to 524,288 on sm_100a and sm_103a, to 131,072 for
+  MXFP8 without the scales, 1 to 262,144 on sm_107a; in place: 1 to 262,144
+  on sm_107a only); for MXFP8 without the scales on sm_100a and sm_103a, the
+  wide program (128-thread CTAs, tiles of 512 vectors) above those sizes (out
+  of place from 131,073 vectors, in place from 262,145, both to
+  2,147,483,136); else the main
+  program (64-thread CTAs, tiles of 128 vectors, 256 on sm_107a).  The grid
+  is the ``tiles`` rule of ``cake_jit.launch_grid``: one CTA per tile once
+  the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on sm_107a; 8 and
+  4 for the small program), else the resident CTAs, at most one per tile,
+  walk the tiles; the wide program always launches one CTA per tile.  It does not read device memory on the host and does not
   synchronize.  A call with no elements launches nothing.
 - Every output repeats bit for bit for identical inputs: each group is
   quantized by its own threads, and nothing is summed (``README.md``).
