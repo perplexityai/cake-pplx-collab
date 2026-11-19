@@ -266,6 +266,56 @@ def nope_bwd_cast_grid(num_queries, num_kv, topk):
     return (max(1, -(-(num_kv * 16) // 256)), 1, 1)
 
 
+def nope_fwd_sink(run, values, grid):
+    run(
+        values["q_latent"],
+        values["kv_latent"],
+        values["out"],
+        values["o_lo"],
+        values["lse"],
+        values["sink"],
+        values["indices"],
+        values["topk_length"],
+        values["num_queries"],
+        values["num_kv"],
+        values["topk"],
+        values["idx_stride"],
+        values["indices_offset"],
+        values["has_topk_length"],
+        values["derive_length"],
+        values["scale_log2"],
+        values["cu_seqlens_q"],
+        values["cu_seqlens_k"],
+        values["indices_out"],
+        values["num_docs"],
+        values["search_iters"],
+        values["causal"],
+        values["convert"],
+        grid[0],
+        grid[1],
+        grid[2],
+    )
+
+
+def nope_bwd_dsink(run, values, grid):
+    run(
+        values["lse"],
+        values["delta"],
+        values["sink"],
+        values["dsink"],
+        values["partials"],
+        values["counter"],
+        values["num_tokens"],
+        grid[0],
+        grid[1],
+        grid[2],
+    )
+
+
+def nope_bwd_dsink_grid(num_queries, num_kv, topk):
+    return (max(1, -(-(num_queries) // 64)), 1, 1)
+
+
 STAGE_ARGS: dict[str, list[str]] = {
     "fwd": [
         "q_latent",
@@ -796,6 +846,46 @@ STAGE_ARGS: dict[str, list[str]] = {
         "grid_y",
         "grid_z",
     ],
+    "nope_fwd_sink": [
+        "q_latent",
+        "kv_latent",
+        "out",
+        "o_lo",
+        "lse",
+        "sink",
+        "indices",
+        "topk_length",
+        "num_queries",
+        "num_kv",
+        "topk",
+        "idx_stride",
+        "indices_offset",
+        "has_topk_length",
+        "derive_length",
+        "scale_log2",
+        "cu_seqlens_q",
+        "cu_seqlens_k",
+        "indices_out",
+        "num_docs",
+        "search_iters",
+        "causal",
+        "convert",
+        "grid_x",
+        "grid_y",
+        "grid_z",
+    ],
+    "nope_bwd_dsink": [
+        "lse",
+        "delta",
+        "sink",
+        "dsink",
+        "partials",
+        "counter",
+        "num_tokens",
+        "grid_x",
+        "grid_y",
+        "grid_z",
+    ],
 }
 LAUNCH = {
     "fwd": fwd,
@@ -817,6 +907,8 @@ LAUNCH = {
     "nope_bwd_main_pass_natural": nope_bwd_main,
     "nope_bwd_cast": bwd_cast,
     "nope_fwd_scan": nope_fwd,
+    "nope_fwd_sink": nope_fwd_sink,
+    "nope_bwd_dsink": nope_bwd_dsink,
 }
 GRID = {
     "fwd": fwd_grid,
@@ -838,4 +930,6 @@ GRID = {
     "nope_bwd_main_pass_natural": fwd_grid,
     "nope_bwd_cast": nope_bwd_cast_grid,
     "nope_fwd_scan": fwd_grid,
+    "nope_fwd_sink": fwd_grid,
+    "nope_bwd_dsink": nope_bwd_dsink_grid,
 }

@@ -87,6 +87,21 @@ and once per recompute step, never inside a forward.  ``--check-nope-arms`` inst
 every requested NoPE arm on a small row and runs each entry once before the perf rows (a
 signature drift shows up there, not after the timings).
 
+Sink rows (``--sink``, in place of the perf rows).  The trainable per-head sink of the flat NoPE entry on the layer
+layout of the model it serves: ``T`` 16,384 query tokens of a pack with one-token documents, index rows of width 640
+(128 window slots, then 512 compressed slots at compression ratio 2) and 128 (the window-only layers) with ``-1``
+holes, softmax scale ``512 ** -0.5`` and a sink vector of ordinary heads plus a ``-inf``, a dominant and a negligible
+head.  Arms: ``cake_nope_sink`` (the flat entry through autograd: ``dq`` and ``dsink`` from one ``autograd.grad``,
+the fp32 ``dkv_acc`` zero-filled inside the timed backward) and ``cudnn_fe_nope_sink`` (the cuDNN frontend's sparse
+attention with ``attn_sink``, the external baseline where its contract applies).  The frontend's contract differs:
+its ``lse`` excludes the sink and is ``+inf`` on a row without a valid slot (the Cake ``lse`` there is ``-inf``
+without a sink and the sink with one); inside the timed forward that ``+inf`` becomes ``-inf`` and ``logaddexp``
+with the sink then gives the Cake ``lse`` on every row; it takes compact rows
+(valid slots first with ``topk_length``, compacted outside the timed region), its ``dkv`` is BF16 (upcast-added into
+the fp32 accumulator inside the timed backward), and it has no destination map.  Each arm runs with the sink and
+without it (``sink=None``; the frontend: no ``attn_sink`` in the forward, a ``-inf`` sink in the backward) and
+reports the forward, the backward, the step and the recompute step.
+
 Usage::
 
     python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py [--rows doc_4096 ...] [--arms cake,flashmla_cudnn,fa4]
@@ -96,6 +111,8 @@ Usage::
         --dkv-acc --dkv-dst-map perm
     python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --preset nope --check-nope-arms \\
         --arms cake_nope,cake_rope_bridge,fa4_nope,fa4_nope_a2 --json nope.json
+    python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --sink --sink-arms cake_nope_sink,cudnn_fe_nope_sink \\
+        --json sink.json
 """
 
 import argparse
@@ -130,9 +147,12 @@ from tests.experimental.test_helpers.cake_dsa_sparse_attention_nondet_train_refe
     DEFAULT_SCALE,
     DEFAULT_TOPK,
     NUM_HEADS,
+    SINK_SCALE,
+    compact_rows,
     compacted_twin,
     make_inputs,
     make_nope_inputs,
+    make_sink_inputs,
     nope_pools,
 )
 
@@ -2454,6 +2474,339 @@ def run_host_path(args, results):
         torch.cuda.empty_cache()
 
 
+# ---------------------------------------------------------------------------
+# Trainable per-head sink rows (--sink)
+# ---------------------------------------------------------------------------
+
+# name -> (T, index row width): the sink model's layers at T 16,384 -- width 640 (128 window slots, then 512 compressed
+# slots at compression ratio 2) and width 128 (the window-only layers)
+SINK_ROWS = {"sink_w640_t16384": (16384, 640), "sink_w128_t16384": (16384, 128)}
+# every sink arm runs with the row's sink and without one
+SINK_VARIANTS = ("sink", "no_sink")
+
+
+class ArmCakeNopeSink:
+    """The flat NoPE entry ``cake_dsa_sparse_attention_nondet_nope`` through autograd on a sink row, with the row's
+    sink (``variant="sink"``) or ``sink=None``: scale ``512 ** -0.5``, the caller's index rows as given (``-1`` holes
+    included; the entry takes its own route), the fp32 ``dkv_acc [S, 512]`` allocated in the forward and zero-filled
+    inside the timed backward, ``dq`` and (with the sink) ``dsink`` from one ``autograd.grad``."""
+
+    name = "cake_nope_sink"
+
+    def __init__(self, inp, variant):
+        from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
+            cake_dsa_sparse_attention_nondet_nope,
+        )
+
+        program = cake_jit.NOPE_PROGRAM
+        device = inp.q.device
+        if not cake_backend.generated_program_available(
+            device, backward=True, program=program
+        ):
+            raise RuntimeError("skipped: nope stems not installed")
+        stage = getattr(cake_jit, "NOPE_SINK_FORWARD_STAGE", None)
+        arch = cake_backend.arch_for(device)
+        if variant == "sink" and (
+            stage is None or arch not in cake_jit.stage_arches(stage, program)
+        ):
+            raise RuntimeError(f"skipped: no sink build for {arch}")
+        self.fn = cake_dsa_sparse_attention_nondet_nope
+        self.inp, self.variant = inp, variant
+        self.width = int(inp.indices.shape[1])
+        self.q = inp.q.detach().requires_grad_()
+        self.sink = (
+            inp.sink.detach().clone().requires_grad_() if variant == "sink" else None
+        )
+
+    def versions(self):
+        inp = self.inp
+        return dict(
+            entry="cake_dsa_sparse_attention_nondet_nope",
+            sink=self.sink is not None,
+            index_route=cake_backend.nope_flat_index_mode(inp.total_q, self.width),
+        )
+
+    def _call(self, dkv_acc):
+        inp = self.inp
+        return self.fn(
+            self.q,
+            inp.kv,
+            inp.indices,
+            softmax_scale=SINK_SCALE,
+            sink=self.sink,
+            return_lse=True,
+            dkv_acc=dkv_acc,
+        )
+
+    def forward(self):
+        dkv_acc = torch.empty(
+            self.inp.total_k, D_LATENT, dtype=torch.float32, device=self.q.device
+        )
+        out, lse = self._call(dkv_acc)
+        return dict(out=out, lse=lse, dkv_acc=dkv_acc)
+
+    def backward(self, st):
+        # the accumulator's zero fill: once per step, inside the backward
+        st["dkv_acc"].zero_()
+        leaves = (self.q,) if self.sink is None else (self.q, self.sink)
+        grads = torch.autograd.grad(st["out"], leaves, self.inp.dout, retain_graph=True)
+        dsink = grads[1] if len(grads) > 1 else None
+        return dict(dq=grads[0], dkv=st["dkv_acc"], dsink=dsink)
+
+    def workspace(self):
+        inp = self.inp
+        return int(
+            cake_backend.dsa_nope_train_workspace_size(
+                inp.total_q,
+                inp.total_k,
+                self.width,
+                inp.q.device,
+                backward=True,
+                dkv_direct=_dkv_direct_from_environment(),
+                sink=self.sink is not None,
+            )
+        )
+
+
+def _lse_with_sink(lse, sink):
+    """``logaddexp(lse, sink)`` over the head axis of a ``[T, 64]`` or ``[64, T]`` log-sum-exp."""
+    axis = (
+        lse.dim() - 1
+        if lse.shape[-1] == NUM_HEADS
+        else list(lse.shape).index(NUM_HEADS)
+    )
+    shape = [1] * lse.dim()
+    shape[axis] = NUM_HEADS
+    return torch.logaddexp(lse, sink.view(shape))
+
+
+class ArmCudnnFeNopeSink:
+    """The cuDNN frontend's sparse attention on a sink row -- ``sparse_attention_forward_wrapper(..., attn_sink=)`` and
+    ``DSA.sparse_attention_backward_wrapper(..., attn_sink, ...)``, which returns ``d_sink`` -- the external baseline
+    where its contract applies, with the row's sink (``variant="sink"``) or none (no ``attn_sink`` in the forward, a
+    ``-inf`` sink in the backward, its required argument).  Its contract differs from the Cake entry's: the frontend's
+    ``lse`` excludes the sink and is ``+inf`` on a row without a valid slot (the Cake ``lse`` there is ``-inf`` without
+    a sink and the sink with one), so inside the timed forward that ``+inf`` becomes ``-inf`` and, with a sink,
+    ``logaddexp(lse, sink)`` then gives the Cake ``lse`` (the backward takes the frontend's own ``lse``); it takes
+    compact rows (valid slots first, ``-1`` after them, with ``topk_length``), built from the row by the stable
+    compaction outside the timed region (the same key sets); its ``dkv`` is BF16, upcast-added into a fresh fp32
+    accumulator inside the timed backward; and it has no destination map.  A strided ``dout`` is copied to a
+    contiguous array inside the timed backward.  The kv / index ranks its forward accepts are probed once at
+    construction, outside the timed region."""
+
+    name = "cudnn_fe_nope_sink"
+
+    def __init__(self, inp, variant):
+        import cudnn
+        from cudnn import DSA
+        from cudnn.deepseek_sparse_attention.sparse_attention_forward.api import (
+            sparse_attention_forward_wrapper,
+        )
+
+        self.cudnn, self.DSA, self._fwd = cudnn, DSA, sparse_attention_forward_wrapper
+        self.inp, self.variant = inp, variant
+        device = inp.q.device
+        self.idx, self.length = compact_rows(inp.indices, inp.total_k)
+        self.sink = inp.sink if variant == "sink" else None
+        self.bwd_sink = (
+            self.sink
+            if self.sink is not None
+            else torch.full(
+                (NUM_HEADS,), float("-inf"), dtype=torch.float32, device=device
+            )
+        )
+        self.rank3 = None
+        self.forward()  # the rank probe and the first build, outside the timed region
+        torch.cuda.synchronize()
+
+    def versions(self):
+        return dict(
+            cudnn_frontend=self.cudnn.__version__,
+            sink=self.sink is not None,
+            kv_index_rank3=self.rank3,
+            rows="stable compaction (valid slots first, -1 after) with topk_length, outside the timed region",
+            lse="frontend lse, +inf (no valid slot) to -inf, logaddexp(., sink), inside the timed forward"
+            if self.sink is not None
+            else "frontend lse, +inf (no valid slot) to -inf, inside the timed forward",
+            dkv="bf16, upcast-added into a fresh fp32 accumulator inside the timed backward",
+            dkv_dst_map="none",
+        )
+
+    def _call_fwd(self):
+        inp = self.inp
+        kw = dict(
+            attn_sink=self.sink, topk_length=self.length, softmax_scale=SINK_SCALE
+        )
+        if self.rank3 is None:
+            last = None
+            for rank3 in (False, True):
+                try:
+                    res = self._fwd(
+                        inp.q,
+                        inp.kv.unsqueeze(1) if rank3 else inp.kv,
+                        self.idx.unsqueeze(1) if rank3 else self.idx,
+                        **kw,
+                    )
+                    torch.cuda.synchronize()
+                    self.rank3 = rank3
+                    return res
+                except Exception as exc:  # noqa: BLE001 - the other rank may be the accepted one
+                    last = exc
+            raise RuntimeError(
+                f"the frontend forward refused both kv / index ranks: {type(last).__name__}: {last}"
+            )
+        kv = inp.kv.unsqueeze(1) if self.rank3 else inp.kv
+        idx = self.idx.unsqueeze(1) if self.rank3 else self.idx
+        return self._fwd(inp.q, kv, idx, **kw)
+
+    def forward(self):
+        res = self._call_fwd()
+        # the Cake lse: the frontend's is +inf on a row without a valid slot, the Cake lse -inf
+        lse = res["lse"].masked_fill(torch.isposinf(res["lse"]), float("-inf"))
+        if self.sink is not None:
+            # the frontend's lse excludes the sink
+            lse = _lse_with_sink(lse, self.sink)
+        return dict(out=res["out"], lse=lse, fe_lse=res["lse"])
+
+    def backward(self, st):
+        inp = self.inp
+        dq, dkv = torch.empty_like(inp.q), torch.zeros_like(inp.kv)
+        dout = inp.dout if inp.dout.is_contiguous() else inp.dout.contiguous()
+        res = self.DSA.sparse_attention_backward_wrapper(
+            inp.q,
+            inp.kv,
+            st["out"],
+            dout,
+            st["fe_lse"],
+            self.bwd_sink,
+            self.idx,
+            softmax_scale=SINK_SCALE,
+            topk_length=self.length,
+            dq=dq,
+            dkv=dkv,
+        )
+        acc = torch.zeros(inp.total_k, D_LATENT, dtype=torch.float32, device=dq.device)
+        acc.add_(dkv)
+        dsink = res.get("d_sink") if isinstance(res, dict) else None
+        return dict(dq=dq, dkv=acc, dsink=dsink)
+
+    def workspace(self):
+        return None
+
+
+SINK_ARMS = {
+    ArmCakeNopeSink.name: ArmCakeNopeSink,
+    ArmCudnnFeNopeSink.name: ArmCudnnFeNopeSink,
+}
+
+
+def measure_perf_sink(arm, steps):
+    """Median milliseconds of a sink-row arm -- the training forward, the backward, the step (forward + backward)
+    and the recompute step (two forwards + backward) -- plus the workspace and the peak memory above the inputs."""
+    st = arm.forward()
+    arm.backward(st)  # plans the backward outside the timing
+    torch.cuda.synchronize()
+    perf = dict(
+        fwd_ms=median_ms(arm.forward, steps),
+        bwd_ms=median_ms(lambda: arm.backward(st), steps),
+    )
+
+    def step():
+        arm.backward(arm.forward())
+
+    def recompute_step():
+        arm.forward()
+        arm.backward(arm.forward())
+
+    perf["step_ms"] = median_ms(step, steps)
+    perf["recompute_step_ms"] = median_ms(recompute_step, steps)
+    perf["workspace_bytes"] = arm.workspace()
+    st = None  # the timed forward's state is not part of the peak below
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats()
+    base = torch.cuda.memory_allocated()
+    arm.backward(arm.forward())
+    torch.cuda.synchronize()
+    perf["peak_above_inputs_gib"] = gib(torch.cuda.max_memory_allocated() - base)
+    return perf
+
+
+def run_sink(args, results):
+    """The sink rows (``--sink``): every ``--sink-arms`` arm with and without the row's sink."""
+    fmt = lambda v: "   n/a" if v is None else f"{v:8.3f}"  # noqa: E731
+    for row in args.sink_rows:
+        T, width = SINK_ROWS[row]
+        inp = make_sink_inputs(
+            T,
+            width,
+            seed=SEED,
+            dout_layout=args.nope_dout_layout or "contiguous",
+            device=args.device,
+        )
+        entry = dict(
+            row=row,
+            total_q=inp.total_q,
+            total_k=inp.total_k,
+            width=width,
+            ratio=inp.ratio,
+            valid_keys=int((inp.indices >= 0).sum()),
+            softmax_scale=SINK_SCALE,
+            sink=[float(v) for v in inp.sink.tolist()],
+            dout_layout=args.nope_dout_layout or "contiguous",
+            dout_strides=list(inp.dout.stride()),
+            inputs_gib=gib(
+                sum(
+                    t.numel() * t.element_size()
+                    for t in (inp.q, inp.kv, inp.indices, inp.dout, inp.sink)
+                )
+            ),
+            arms={},
+        )
+        print(
+            f"{row:26s} geometry T {inp.total_q} S {inp.total_k} K {width} valid {entry['valid_keys']}",
+            flush=True,
+        )
+        for name in args.sink_arms:
+            entry["arms"][name] = {}
+            for variant in SINK_VARIANTS:
+                label = f"{name}/{variant}"
+                try:
+                    arm = SINK_ARMS[name](inp, variant)
+                except Exception as exc:  # noqa: BLE001 - optional dependency missing or arm unavailable here
+                    text = str(exc)
+                    error = (
+                        text
+                        if text.startswith("skipped:")
+                        else f"{type(exc).__name__}: {text}"
+                    )
+                    entry["arms"][name][variant] = dict(error=error)
+                    print(f"{row:26s} {label:28s} unavailable: {error}", flush=True)
+                    continue
+                try:
+                    perf = measure_perf_sink(arm, args.steps)
+                    perf["versions"] = arm.versions()
+                except Exception as exc:  # noqa: BLE001 - recorded as the arm's error
+                    perf = dict(
+                        error=f"{type(exc).__name__}: {exc}",
+                        traceback=traceback.format_exc(),
+                    )
+                entry["arms"][name][variant] = perf
+                if "error" in perf:
+                    print(f"{row:26s} {label:28s} failed: {perf['error']}", flush=True)
+                else:
+                    print(
+                        f"{row:26s} {label:28s} fwd {fmt(perf['fwd_ms'])} ms  bwd {fmt(perf['bwd_ms'])} ms  "
+                        f"step {fmt(perf['step_ms'])} ms  recompute {fmt(perf['recompute_step_ms'])} ms  "
+                        f"peak {perf['peak_above_inputs_gib']:.2f} GiB",
+                        flush=True,
+                    )
+                del arm
+                torch.cuda.empty_cache()
+        results["sink_rows"].append(entry)
+        del inp
+        torch.cuda.empty_cache()
+
+
 def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
@@ -2557,6 +2910,24 @@ def main():
         action="store_true",
         help="host microseconds per call, eager entry points and prepared runner",
     )
+    parser.add_argument(
+        "--sink",
+        action="store_true",
+        help="the trainable-sink rows in place of the perf rows: T 16,384 at index widths 640 and 128, the "
+        "forward / backward / step / recompute step of every --sink-arms arm with and without the sink",
+    )
+    parser.add_argument(
+        "--sink-rows",
+        nargs="*",
+        default=None,
+        choices=list(SINK_ROWS),
+        help=f"rows for --sink (default {', '.join(SINK_ROWS)})",
+    )
+    parser.add_argument(
+        "--sink-arms",
+        default=",".join(SINK_ARMS),
+        help=f"arms of the sink rows (default {','.join(SINK_ARMS)})",
+    )
     parser.add_argument("--host-calls", type=int, default=20)
     parser.add_argument("--host-rounds", type=int, default=3)
     parser.add_argument("--no-perf", action="store_true")
@@ -2564,6 +2935,14 @@ def main():
     parser.add_argument("--json", type=Path)
     args = parser.parse_args()
     args.arms = [a for a in args.arms.split(",") if a]
+    args.sink_arms = [a for a in args.sink_arms.split(",") if a]
+    unknown_sink = sorted(set(args.sink_arms) - set(SINK_ARMS))
+    if unknown_sink:
+        parser.error(
+            f"unknown sink arms {unknown_sink}; choose from {sorted(SINK_ARMS)}"
+        )
+    if args.sink_rows is None:
+        args.sink_rows = list(SINK_ROWS)
     unknown = sorted(set(args.arms) - set(ARMS) - set(NOPE_ARMS))
     if unknown:
         parser.error(
@@ -2611,13 +2990,21 @@ def main():
             chunk_policy=NOPE_CHUNK,
             accumulator="fp32 dkv zero-filled inside the timed backward, once per step",
         ),
+        sink_options=dict(
+            softmax_scale=SINK_SCALE,
+            dout_layout=args.nope_dout_layout or "contiguous",
+            accumulator="fp32 dkv zero-filled inside the timed backward, once per step",
+        ),
         rows=[],
+        sink_rows=[],
         host_path=[],
         index_glue=[],
     )
     if args.check_nope_arms:
         run_check_nope_arms(args, results)
-    if not args.no_perf:
+    if args.sink:
+        run_sink(args, results)
+    elif not args.no_perf:
         run_perf(args, results)
     if args.host_us:
         run_host_path(args, results)

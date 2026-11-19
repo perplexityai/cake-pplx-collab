@@ -153,7 +153,12 @@ Host design (the knobs are keywords; no environment variable):
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
   launch scalar, ``cake_jit.pdl_enabled`` of the architecture and the mode:
-  ``PDL_EAGER`` outside a CUDA Graph capture, ``PDL_GRAPH`` inside one.
+  ``PDL_EAGER`` outside a CUDA Graph capture, ``PDL_GRAPH`` inside one;
+  but a backward call at a row of ``cake_jit.PDL_OFF_ROWS`` (by its route,
+  ``C`` and ``S``: the ``bwd`` route at C = 1000 to 1008 from S = 187755 and
+  at C = 1016 from S = 155648 on sm_100a, at C = 1000 to 1008 from
+  S = 131073 and at C = 1016 from S = 125171 on sm_103a) passes 0 in both
+  modes.  The forward passes the tables' value at every row.
   With 1 the launch may begin while the stream's preceding kernel finishes;
   every program waits for that kernel (``griddepcontrol.wait``) before it
   reads or writes global memory, so the outputs do not depend on it.  The
@@ -858,7 +863,7 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``, the
     forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim
     tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
-    ``PDL_GRAPH``) is read by every call, not planned."""
+    ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
 
     n = len(_ROW_PLANS)
     _ROW_PLANS.clear()
@@ -1820,7 +1825,8 @@ def cake_causal_conv1d_nondet_train_backward(
         "work": work,
         **scalars,
         "flags": _flags(w, dw_out, b, db_out),
-        "enable_pdl": pdl_enabled(arch, capturing=capturing),
+        # the backward passes its row: a row of ``PDL_OFF_ROWS`` launches without PDL in both modes
+        "enable_pdl": pdl_enabled(arch, capturing=capturing, kind=kind, C=C, S=S),
     }
     if b is not None:
         values["b"] = b

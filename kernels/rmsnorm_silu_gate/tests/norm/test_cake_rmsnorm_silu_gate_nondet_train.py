@@ -58,7 +58,9 @@ cluster each, in the rows of their ``BACKWARD_BANDS`` bands: the short
 backward of a BF16 weight gradient and the exact tiny backwards; no workspace made
 or touched, a caller workspace checked and left as it is, the first row count
 past them on the backward), empty work, a workspace reused across shapes (zero after every
-call), a workspace with nonzero scratch returned to zero by
+call), a caller workspace's checked buffers serving its later calls, made
+again once its storage was freed in place and the tensor rebound, and going
+with the tensor, a workspace with nonzero scratch returned to zero by
 ``cake_rmsnorm_silu_gate_nondet_train_reset_workspace``, two streams with their own
 workspaces, CUDA Graph capture and replay (captured calls without a
 workspace: one workspace per capture and capture stream, zero-filled outside
@@ -108,6 +110,7 @@ imports nothing else from ``cake_pplx``.  The facade is
 
 from __future__ import annotations
 
+import gc
 import inspect
 import math
 import warnings
@@ -1731,6 +1734,56 @@ def _unfit_workspaces(nbytes: int) -> list[torch.Tensor]:
         torch.zeros(nbytes, dtype=torch.int8, device="cuda"),
     ]
 
+
+def test_caller_workspace_buffers_follow_the_tensor():
+    """A caller workspace is checked and viewed by its first call and its
+    buffers serve its later calls; once its storage is freed in place and the
+    tensor rebound to a new zero-filled workspace (the allocator may give it
+    the old address), the next call checks it and makes new buffers, gives
+    the ``dx`` and ``dz`` bits of a call on a fresh workspace (and its weight
+    gradient where the band repeats it) and leaves the new storage zero.
+    Rebound to a buffer one byte short, it is refused and keeps no entry; an
+    entry goes with its tensor."""
+    T, H = 1031, 48
+    name = _backward_module(T * H)
+    x, z, w, dy = make(T, H, seed=31)
+    want = backward(dy, x, z, w, EPS, workspace=workspace_for(1, x.device))
+
+    def check(got, what):
+        for a, b in zip(got[:2], want[:2], strict=True):
+            assert torch.equal(a, b), what
+        assert_dw_repeats(got[2], want[2], varies=_varies(name), what=what)
+
+    ws = workspace_for(1, x.device)
+    for i in range(2):
+        check(backward(dy, x, z, w, EPS, workspace=ws), f"call {i}")
+    held = pkg._CALLER_WORKSPACES[id(ws)]
+    assert held[0]() is ws and held[4].data_ptr() == ws.data_ptr()
+    backward(dy, x, z, w, EPS, workspace=ws)
+    assert pkg._CALLER_WORKSPACES[id(ws)] is held
+    torch.cuda.synchronize()
+    ws.untyped_storage().resize_(0)
+    ws.set_(workspace_for(1, x.device))
+    got = backward(dy, x, z, w, EPS, workspace=ws)
+    torch.cuda.synchronize()
+    again = pkg._CALLER_WORKSPACES[id(ws)]
+    assert again is not held and again[4].data_ptr() == ws.data_ptr()
+    check(got, "rebound")
+    assert not bool(ws.any())
+    del held, again
+    nbytes = ws.numel()
+    ws.set_(torch.ones(nbytes - 1, dtype=torch.uint8, device=x.device))
+    with pytest.raises(ValueError, match="uint8"):
+        backward(dy, x, z, w, EPS, workspace=ws)
+    assert id(ws) not in pkg._CALLER_WORKSPACES
+    assert bool(ws.eq(1).all())
+    ws = workspace_for(1, x.device)
+    backward(dy, x, z, w, EPS, workspace=ws)
+    key = id(ws)
+    assert pkg._CALLER_WORKSPACES[key][0]() is ws
+    del ws
+    gc.collect()
+    assert key not in pkg._CALLER_WORKSPACES
 
 def test_workspace_errors():
     x, z, w, dy = make(65, 48, seed=13)

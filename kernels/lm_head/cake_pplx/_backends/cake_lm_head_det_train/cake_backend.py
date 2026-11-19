@@ -3355,9 +3355,11 @@ def _gather_rows(values: dict[str, Any]) -> None:
 
 
 def _rlab_zero(values: dict[str, Any]) -> None:
-    """Zero the call's FP32 label residuals ``rlab`` ahead of its first row-gradient producer (:func:`_with_rlab_zero`):
-    a row no producer writes -- a row the zero-gradient row skip leaves out, an ignored row, a label outside the head --
-    reads 0, and the slab sum folds nothing into it."""
+    """Zero the call's FP32 label residuals ``rlab`` ahead of its first row-gradient producer (:func:`_with_rlab_zero`)
+    on a plan whose producers can leave a row unwritten (a ``dz`` arm: an ignored row, a label outside the head, a row
+    the zero-gradient row skip leaves out): such a row reads 0, and the slab sum folds nothing into it.  ``row_grad``
+    writes every row of its chunk itself (+0 on a row with no label column), so a plan of ``row_grad`` producers alone
+    has no zero step."""
     values["rlab"].zero_()
 
 
@@ -6057,12 +6059,38 @@ def _dx_keys(plan: Plan, index: int) -> list:
     return keys
 
 
+def _chunks_tile_rows(plan: Plan) -> bool:
+    """Whether the plan's chunks cover its loop rows ``[0, plan.rows)`` in order, each row once: the rows of the call's
+    ``rlab`` (every binding allocates it with ``plan.rows`` rows)."""
+    end = 0
+    for row0, rows_c in plan.chunks:
+        if int(row0) != end:
+            return False
+        end += int(rows_c)
+    return end == plan.rows
+
+
+def _rlab_zero_needed(plan: Plan, keys: list) -> bool:
+    """Whether the launch keys ``keys`` of ``plan`` need the host zero of ``rlab`` (:func:`_rlab_zero`): the plan
+    computes dX and a row of ``rlab`` could stay unwritten by the call's row-gradient producers.  ``row_grad`` stores
+    every row of its chunk, one writer a row: the row's FP32 label residual, and +0 on a row with no label column (an
+    ignored row, a label at or past ``V``).  The ``dz`` arms store only the rows whose label lies in the head, their
+    counted forms only the rows under the count.  So the zero is left out when every producer key is ``row_grad`` and
+    the chunks tile ``rlab`` (:func:`_chunks_tile_rows`), and kept on every other plan that computes dX."""
+    if not plan.need_dx:
+        return False
+    producers = [stage for stage, _ in keys if stage in DZ_PRODUCER_STAGES]
+    return not (
+        all(stage == "row_grad" for stage in producers) and _chunks_tile_rows(plan)
+    )
+
+
 def _with_rlab_zero(plan: Plan, keys: list) -> list:
     """``keys`` with the host step ``("rlab_zero", None)`` (:func:`_rlab_zero`) right before the first row-gradient
-    producer (:data:`DZ_PRODUCER_STAGES`: ``row_grad``, the ``dz`` arms) when the plan computes dX: the slab sums fold
-    the call's FP32 label residuals ``rlab``, and a row no producer writes must read 0.  Before the first producer, so
-    a hidden valid-row count's queued chunk 0 keeps it among the late launches."""
-    if not plan.need_dx:
+    producer (:data:`DZ_PRODUCER_STAGES`: ``row_grad``, the ``dz`` arms) when a row of the call's FP32 label residuals
+    ``rlab`` could stay unwritten (:func:`_rlab_zero_needed`): the slab sums fold ``rlab``, and such a row must read 0.
+    Before the first producer, so a hidden valid-row count's queued chunk 0 keeps it among the late launches."""
+    if not _rlab_zero_needed(plan, keys):
         return keys
     for pos, (stage, _) in enumerate(keys):
         if stage in DZ_PRODUCER_STAGES:
@@ -6184,8 +6212,8 @@ def _store_label_residual(
 ) -> None:
     """The row-gradient producers' label residual (reference): for each row of the chunk whose label lies in
     ``[0, V)``, ``r = s - f32(bf16(s))`` of the label column's FP32 gradient ``s`` (gathered at the clamped label
-    ``index``), 0 where ``bf16(s)`` is not finite, into ``rlab[row0 + r]``; 0 on every other row (the kernels leave
-    those rows to the call's zero fill).  Nothing without an ``rlab`` operand."""
+    ``index``), 0 where ``bf16(s)`` is not finite, into ``rlab[row0 + r]``; 0 on every other row (``row_grad`` stores
+    that +0 itself; the ``dz`` arms leave those rows to the call's zero fill).  Nothing without an ``rlab`` operand."""
     rlab = values.get("rlab")
     if rlab is None:
         return
@@ -7100,7 +7128,8 @@ def prepare_lm_head_det_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; the ``rlab_zero`` step of a call that computes dX zeroes them, :func:`_with_rlab_zero`)
+        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -7564,7 +7593,8 @@ def prepare_lm_head_det_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; the ``rlab_zero`` step of a call that computes dX zeroes them, :func:`_with_rlab_zero`)
+        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
+        # ``dz`` arm of a call that computes dX, :func:`_with_rlab_zero`)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
