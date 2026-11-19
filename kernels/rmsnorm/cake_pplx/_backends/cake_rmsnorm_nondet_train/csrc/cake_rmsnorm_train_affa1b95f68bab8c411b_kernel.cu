@@ -60,7 +60,12 @@ kernel_cake_rmsnorm_train_affa1b95f68bab8c411b(float* __restrict__ partial, floa
 
     extern __shared__ __align__(1024) char smem_raw[];
     int smem;
+#if __CUDA_ARCH__ == 1000
+    asm volatile("{ .reg .u64 smem_ptr; cvta.to.shared.u64 smem_ptr, %1; cvt.u32.u64 %0, smem_ptr; }" : "=r"(smem) : "l"(smem_raw));
+    smem = make_warp_uniform(smem);
+#else
     smem = (int)(unsigned long long)__cvta_generic_to_shared(smem_raw);
+#endif
 
     const int bid = blockIdx.x;
     const int num_bids = gridDim.x;
@@ -79,11 +84,9 @@ kernel_cake_rmsnorm_train_affa1b95f68bab8c411b(float* __restrict__ partial, floa
     int cg = tid - rsub * 4;
     int col = s * 4 + cg;
     float a[1];
-    float c[1];
     #pragma unroll
     for (int e = 0; e < 1; e++) {
         a[e] = 0.0f;
-        c[e] = 0.0f;
     }
     int n_trips = (n_chunks + 31) / 32;
     int n_waves = (n_trips + 23) / 24;
@@ -122,10 +125,7 @@ kernel_cake_rmsnorm_train_affa1b95f68bab8c411b(float* __restrict__ partial, floa
             if (cc_2 < n_chunks) {
                 #pragma unroll
                 for (int e_1 = 0; e_1 < 1; e_1++) {
-                    float y = __fmaf_rn(cur[d_2 + e_1], 1.0f, -c[e_1]);
-                    float t = a[e_1] + y;
-                    c[e_1] = t - a[e_1] - y;
-                    a[e_1] = t;
+                    a[e_1] = a[e_1] + cur[d_2 + e_1];
                 }
             }
         }
@@ -136,31 +136,22 @@ kernel_cake_rmsnorm_train_affa1b95f68bab8c411b(float* __restrict__ partial, floa
     }
     #pragma unroll
     for (int e_2 = 0; e_2 < 1; e_2++) {
-        red_fold[rsub * 4 + cg + e_2] = a[e_2] - c[e_2];
+        red_fold[rsub * 4 + cg + e_2] = a[e_2];
     }
     __syncthreads();
     if (tid < 4) {
         float o4[1];
-        float oc4[1];
         #pragma unroll
         for (int e_3 = 0; e_3 < 1; e_3++) {
             o4[e_3] = 0.0f;
-            oc4[e_3] = 0.0f;
         }
         #pragma unroll
         for (int k = 0; k < 32; k++) {
             #pragma unroll
             for (int e_4 = 0; e_4 < 1; e_4++) {
                 float d_3 = red_fold[k * 4 + tid + e_4];
-                float y_1 = __fmaf_rn(d_3, 1.0f, -oc4[e_4]);
-                float t_1 = o4[e_4] + y_1;
-                oc4[e_4] = t_1 - o4[e_4] - y_1;
-                o4[e_4] = t_1;
+                o4[e_4] = o4[e_4] + d_3;
             }
-        }
-        #pragma unroll
-        for (int e_5 = 0; e_5 < 1; e_5++) {
-            o4[e_5] = o4[e_5] - oc4[e_5];
         }
         int ocol = s * 4 + tid;
         *(reinterpret_cast<float*>(dw) + ((unsigned long long)ocol)) = o4[0];

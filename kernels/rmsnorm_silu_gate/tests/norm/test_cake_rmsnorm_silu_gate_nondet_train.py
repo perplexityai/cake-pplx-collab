@@ -74,7 +74,18 @@ rows of every band of ``BACKWARD_BANDS`` run the band's program; packed rows
 of the last repeatable band of either weight gradient from
 ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on run its long role,
 ``bwd_bf16_rep_long`` or ``bwd_f32_rep_long``, the bits of the repeatable
-backward), and the mode
+backward), the programs without the weight gradient (``NODW_ROLES``, which
+``nodw_module`` names in place of a BF16 band's module for
+``compute_grad_weight=False``: one cluster in the small-row bands, in the
+fused and the repeatable bands the strided program up to
+``NODW_STRIDED_ROWS_PER_SM`` rows per SM (on packed rows its 128-thread
+build where routed: the repeatable band's on sm_107a) and the claimed one
+past it, or the one of them the architecture routes, and the long role's;
+the ``dx`` and ``dz`` bits of the BF16 call around the cut
+on packed and strided rows, in the small-row bands and at grids of 1, 3 and
+7 CTAs; the strided and the one-cluster ones with no stream or reserve
+workspace, also in CUDA Graph capture, and a caller workspace left as it is;
+the claimed ones leaving the workspace zero), and the mode
 policy: the mode is in the name, so no entry point takes a ``deterministic``
 keyword (passing one, of any value, is a ``TypeError`` before any launch); under
 ``torch.use_deterministic_algorithms(True)`` a backward that computes the
@@ -219,6 +230,51 @@ REP_WORKSPACE_BYTES = 18952
 # (256-byte aligned).
 WORKSPACE_BYTES = {"sm_100a": 29192, "sm_103a": 29192, "sm_107a": 36360}
 RESERVE_STRIDE = {"sm_100a": 29440, "sm_103a": 29440, "sm_107a": 36608}
+# The programs without the weight gradient (``NODW_ROLES``) and the band
+# role of the program each runs in place of for ``compute_grad_weight=False``
+# (its twin, whose ``dx`` and ``dz`` bits it gives), whose arguments it
+# takes: the one-cluster and the claimed programs launch as their twin and
+# keep its grid rule and workspace; the strided programs take no workspace
+# and launch by their own rule (``NODW_STRIDED_GRID_RULES``) CTAs of
+# ``NODW_STRIDED_THREADS`` threads: their twin's CTA count of 256-thread CTAs
+# over 16-row blocks, and the repeatable band's strided program of packed
+# rows 128-thread CTAs over 8-row blocks, at most 8 per SM.
+NODW_TWINS = {
+    "bwd_bf16_short_nodw": "bwd_bf16_short",
+    "bwd_bf16_t512_nodw": "bwd_bf16_t512",
+    "bwd_bf16_fused_nodw": "bwd_bf16_fused",
+    "bwd_bf16_fused_nodw_strided": "bwd_bf16_fused",
+    "bwd_bf16_rep_nodw": "bwd_bf16_rep",
+    "bwd_bf16_rep_nodw_strided": "bwd_bf16_rep",
+    "bwd_bf16_rep_nodw_strided_packed": "bwd_bf16_rep",
+    "bwd_bf16_rep_nodw_long": "bwd_bf16_rep_long",
+}
+NODW_STRIDED_GRID_RULES = {
+    "bwd_bf16_fused_nodw_strided": {
+        "ctas_per_sm": 4,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 16,
+    },
+    "bwd_bf16_rep_nodw_strided": {
+        "ctas_per_sm": 4,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 16,
+    },
+    "bwd_bf16_rep_nodw_strided_packed": {
+        "ctas_per_sm": 8,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 8,
+    },
+}
+NODW_STRIDED_THREADS = {
+    "bwd_bf16_fused_nodw_strided": 256,
+    "bwd_bf16_rep_nodw_strided": 256,
+    "bwd_bf16_rep_nodw_strided_packed": 128,
+}
+# The bands with a strided program, which has a cut
+# (``NODW_STRIDED_ROWS_PER_SM``) where the band's architecture routes both
+# its strided and its claimed program.
+NODW_CUT_BANDS = ("bwd_bf16_fused", "bwd_bf16_rep")
 
 # The accuracy matrix (shapes, layouts, edge data and epsilons judged against
 # the PyTorch BF16 naive tier).
@@ -348,6 +404,21 @@ def _backward_module(
     :func:`_backward_packed`) and reach its ``LONG_BACKWARD_ROWS_PER_SM``."""
     role = "bwd_f32" if dw_dtype == torch.float32 else "bwd_bf16"
     return _module(role, rows, packed=packed)
+
+
+def _nodw_module(name: str, rows: int, *, packed: bool = True) -> str:
+    """The program a call with ``compute_grad_weight=False`` runs for
+    ``rows`` rows on this device where ``module_for_rows`` names ``name``
+    for its BF16 bands (``nodw_module``), the rows ``packed`` (the
+    backward's test, :func:`_backward_packed`) or not."""
+    device_index = torch.cuda.current_device()
+    return loader.nodw_module(
+        loader.device_arch(device_index),
+        name,
+        rows,
+        loader.device_sm_count(device_index),
+        packed=packed,
+    )
 
 
 def _chunks(rows: int) -> int:
@@ -526,7 +597,13 @@ def _expected_layout(arch: str, role: str) -> tuple:
     for a row-claims backward, ``FUSED_LAYOUT`` for a fused backward,
     ``REP_LAYOUT`` for the repeatable backward, the layout of its slots
     (``BACKWARD_SLOTS``, ``WORKSPACE_LAYOUTS``) for a static or a claimed
-    backward, none for a small-row backward (one cluster)."""
+    backward, none for a small-row backward (one cluster); a program without
+    the weight gradient (``NODW_TWINS``) its twin's layout, a strided one
+    none."""
+    if role in NODW_TWINS:
+        if role in NODW_STRIDED_GRID_RULES:
+            return ()
+        return _expected_layout(arch, NODW_TWINS[role])
     if role in ROW_CLAIMS_GRID_RULES:
         return ROW_CLAIMS_LAYOUT
     if role in FUSED_ROLES[arch]:
@@ -922,45 +999,435 @@ def test_weight_gradient_accumulation(record_property):
     judge(record_property, run, seed=6)
 
 
-def test_compute_grad_weight_false_touches_no_weight_state(monkeypatch):
-    x, z, w, dy = make(257, 48, seed=12)
-    # dx and dz do not depend on whether the weight gradient is computed
+def _nodw_claimed_rows() -> int | None:
+    """Rows of one head a row past the largest strided cut of this device
+    (``NODW_STRIDED_ROWS_PER_SM``), where a call without the weight gradient
+    runs a claimed program (on a workspace); ``None`` where it does not or
+    the device's architecture has no cut."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    sms = loader.device_sm_count(device_index)
+    cuts = loader.NODW_STRIDED_ROWS_PER_SM[arch]
+    if not cuts:
+        return None
+    rows = max(cuts.values()) * sms + 1
+    nodw = _nodw_module(_backward_module(rows), rows)
+    if loader.MODULES[nodw]["role"] not in loader.NODW_ROLES:
+        return None
+    return rows if loader.workspace_bytes(nodw) else None
+
+
+@pytest.mark.parametrize("program", ["strided", "claimed"])
+def test_compute_grad_weight_false_touches_no_weight_state(
+    program, monkeypatch, launches
+):
+    """``compute_grad_weight=False`` returns ``None`` for the weight gradient,
+    leaves ``grad_weight`` as it is and runs the program ``nodw_module``
+    names, whose ``dx`` and ``dz`` are the bits of the BF16 call that
+    computes it.  At 257 x 48 rows (up to the strided cut of the band on
+    every product that has one) the strided program, which makes no stream
+    workspace and leaves a caller workspace zero; a row past the largest cut
+    (:func:`_nodw_claimed_rows`) a claimed program, which takes the arrival
+    ticket and claims row blocks on the stream's workspace of its own (its
+    buffers, left zero) and leaves a caller workspace zero.  Autograd with a
+    weight that needs no gradient gives the same ``dx`` and ``dz``."""
+    if program == "strided":
+        T, H = 257, 48
+    else:
+        rows = _nodw_claimed_rows()
+        if rows is None:
+            pytest.skip("no claimed program without the weight gradient runs here")
+        T, H = rows, 1
+    rows = T * H
+    nodw = _nodw_module(_backward_module(rows), rows)
+    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, nodw
+    assert bool(loader.workspace_bytes(nodw)) == (program == "claimed"), nodw
+    x, z, w, dy = make(T, H, seed=12)
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
-    ws = workspace_for(257 * 48, x.device)
+    ws = workspace_for(rows, x.device)
     main = torch.full((D,), 3.0, dtype=torch.float32, device="cuda")
+    launches.clear()
     dx, dz, dw = backward(
         dy, x, z, w, EPS, grad_weight=main, compute_grad_weight=False, workspace=ws
     )
+    assert launches == [nodw], launches
     assert dw is None
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
     torch.cuda.synchronize()
     assert torch.equal(main, torch.full_like(main, 3.0))
     assert not bool(ws.any())
-    # without a workspace: the launch still takes the arrival ticket (and the
-    # claimed and the row-claims backwards claim their chunks or blocks), on
-    # the stream's workspace of the BF16 bands' module (its buffers, left zero)
     monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
     dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
     assert dw is None
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
     torch.cuda.synchronize()
-    key = (
-        torch.cuda.current_device(),
-        torch.cuda.current_stream().cuda_stream,
-        _backward_module(257 * 48),
-    )
-    assert list(pkg._STREAM_WORKSPACES) == [key]
-    views = pkg._STREAM_WORKSPACES[key]
-    arch = loader.device_arch(torch.cuda.current_device())
-    layout = _expected_layout(arch, loader.MODULES[key[2]]["role"])
-    assert layout and sorted(views) == sorted(b for b, _, _ in layout), key
-    # (through bytes: uint64 tensors take few operations)
-    assert not any(bool(view.view(torch.uint8).any()) for view in views.values())
+    if program == "strided":
+        assert pkg._STREAM_WORKSPACES == {}
+    else:
+        key = (
+            torch.cuda.current_device(),
+            torch.cuda.current_stream().cuda_stream,
+            nodw,
+        )
+        assert list(pkg._STREAM_WORKSPACES) == [key]
+        views = pkg._STREAM_WORKSPACES[key]
+        layout = loader.workspace_layout(nodw)
+        assert layout and sorted(views) == sorted(b for b, _, _ in layout), key
+        # (through bytes: uint64 tensors take few operations)
+        assert not any(bool(view.view(torch.uint8).any()) for view in views.values())
     # autograd with a weight that needs no gradient
     xa, za = (t.clone().requires_grad_(True) for t in (x, z))
     gated_rmsnorm(xa, za, w, EPS).backward(dy)
     assert torch.equal(xa.grad, dx_d) and torch.equal(za.grad, dz_d)
     assert w.grad is None
+
+
+# Shapes and ``make`` layouts whose BF16 bands run a program without the
+# weight gradient that takes no workspace: a strided program at 257 x 48
+# rows, on packed rows and on a gate and ``grad_out`` sliced from
+# projections (on sm_107a the 128-thread and the 256-thread strided
+# program), one cluster at 5 x 48 (a small-row band on every product).
+NODW_WORKSPACE_FREE_SHAPES = [
+    (257, 48, "contiguous"),
+    (257, 48, "projection"),
+    (5, 48, "contiguous"),
+]
+
+
+@pytest.mark.parametrize("T,H,layout", NODW_WORKSPACE_FREE_SHAPES)
+def test_programs_without_a_workspace_make_none(T, H, layout, monkeypatch, launches):
+    """A call with ``compute_grad_weight=False`` on ``make(T, H,
+    layout=layout)`` whose program takes no workspace (a strided or a
+    one-cluster program without the weight gradient) makes no stream
+    workspace and takes no reserve workspace, eagerly and in CUDA Graph
+    capture, whose graph holds its one kernel (no fill kernel, memset or
+    event wait); a caller workspace filled with 7 is checked and left as it
+    is.  Every call and every replay gives the ``dx`` and ``dz`` bits of the
+    BF16 call that computes the weight gradient."""
+    pytest.importorskip("cuda.bindings.runtime")
+    rows = T * H
+    packed = _backward_packed(T, H, layout)
+    nodw = _nodw_module(_backward_module(rows, packed=packed), rows, packed=packed)
+    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, nodw
+    assert loader.workspace_bytes(nodw) == 0, nodw
+    x, z, w, dy = make(T, H, layout=layout, seed=13)
+    dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+    ws = workspace_for(rows, x.device)
+    ws.fill_(7)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_RESERVES", {})
+    monkeypatch.setattr(pkg, "_CAPTURE_WORKSPACES", {})
+    launches.clear()
+    for workspace in (None, ws, None):
+        dx, dz, dw = backward(
+            dy, x, z, w, EPS, compute_grad_weight=False, workspace=workspace
+        )
+        assert dw is None
+        assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), workspace is None
+    assert launches == [nodw] * 3, launches
+    torch.cuda.synchronize()
+    assert bool((ws == 7).all()), "a program without a workspace wrote the workspace"
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    graph = _kept_graph()
+    with torch.cuda.graph(graph):
+        outs = [
+            backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws_)
+            for ws_ in (None, ws)
+        ]
+    types = _graph_node_types(graph)
+    assert types == ["KERNEL"] * 2, types
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    assert pkg._CAPTURE_WORKSPACES == {}
+    for k in range(3):
+        for dx, dz, _ in outs:
+            dx.zero_()
+            dz.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        for i, (dx, dz, dw) in enumerate(outs):
+            assert dw is None
+            assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), (k, i)
+    assert bool((ws == 7).all()), "a program without a workspace wrote the workspace"
+
+
+# The SM counts at which the programs without the weight gradient are
+# compared with the BF16 call around their strided cut (``device_sm_count``
+# patched; ``0`` is the device's own).
+NODW_CUT_SM_COUNTS = (0, 16, 66)
+
+
+@pytest.mark.parametrize("layout", ["flat", "projection"])
+@pytest.mark.parametrize("sm_count", NODW_CUT_SM_COUNTS)
+@pytest.mark.parametrize("band", NODW_CUT_BANDS)
+def test_programs_without_the_weight_gradient_give_the_bits_at_the_cut(
+    band, sm_count, layout, launches
+):
+    """For each band with a strided program (``NODW_CUT_BANDS``, its module
+    forced through ``module_for_rows``, :func:`_forcing`), at ``cut - 1``
+    and ``cut`` rows per SM, a row past the cut and ``cut + 1`` rows per SM
+    (``NODW_STRIDED_ROWS_PER_SM``; ``device_sm_count`` patched to
+    ``sm_count``), on packed rows and on a gate and ``grad_out`` sliced from
+    projections: a call with ``compute_grad_weight=False`` runs the band's
+    strided program up to the cut (on packed rows its strided program of
+    packed rows where routed) and its claimed program past it (where
+    routed, :func:`nodw_module`), gives the ``dx`` and ``dz`` bits of the BF16
+    call on the band's module and leaves a caller workspace zero.  A band
+    without a cut (no claimed program routed) runs its strided program
+    instead at a row per SM fewer than the repeatable band's long cut
+    (``LONG_BACKWARD_ROWS_PER_SM``) and at a row fewer than it."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    routes = loader.ROUTES[arch]
+    if band + loader.NODW + loader.STRIDED not in routes:
+        pytest.skip(f"{arch} routes no strided program of {band}")
+    sm_count = sm_count or loader.device_sm_count(device_index)
+    cut = loader.NODW_STRIDED_ROWS_PER_SM[arch].get(band)
+    if cut is None:
+        last = loader.LONG_BACKWARD_ROWS_PER_SM[arch]["bwd_bf16_rep"]
+        row_counts = ((last - 1) * sm_count, last * sm_count - 1)
+    else:
+        row_counts = (
+            (cut - 1) * sm_count,
+            cut * sm_count,
+            cut * sm_count + 1,
+            (cut + 1) * sm_count,
+        )
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pkg, "device_sm_count", lambda index: sm_count)
+        patch.setattr(pkg, "module_for_rows", _forcing(band))
+        for rows in row_counts:
+            what = f"{band}: {rows} rows on {sm_count} SMs ({layout})"
+            x, z, w, dy = make(rows, 1, layout=layout, seed=14)
+            ws = workspace_for(rows, x.device)
+            launches.clear()
+            dx_d, dz_d, _ = backward(dy, x, z, w, EPS, workspace=ws)
+            dx, dz, dw = backward(
+                dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws
+            )
+            packed = layout == "flat"
+            nodw = loader.nodw_module(
+                arch, routes[band], rows, sm_count, packed=packed
+            )
+            if cut is None or rows <= cut * sm_count:
+                strided = routes[band + loader.NODW + loader.STRIDED]
+                if packed:
+                    strided = routes.get(
+                        band + loader.NODW + loader.STRIDED + loader.PACKED, strided
+                    )
+                assert nodw == strided, what
+            assert launches == [routes[band], nodw], what
+            assert dw is None
+            assert torch.equal(dx, dx_d), f"{what}: dx"
+            assert torch.equal(dz, dz_d), f"{what}: dz"
+            torch.cuda.synchronize()
+            assert not bool(ws.any()), f"the workspace after {what}"
+
+
+# The programs without the weight gradient that run at a forced grid:
+# ``(band, program, layout)``, the strided one (on packed rows, contiguous,
+# its strided program of packed rows where routed; on a gate and
+# ``grad_out`` sliced from projections the strided one) or (the strided ones
+# unrouted) the claimed one of the band.
+NODW_GRID_CASES = [
+    pytest.param(band, program, layout, id=f"{band}-{program}-{layout}")
+    for band in NODW_CUT_BANDS
+    for program, layout in (
+        ("strided", "contiguous"),
+        ("strided", "projection"),
+        ("claimed", "contiguous"),
+    )
+]
+
+
+@pytest.mark.parametrize("ctas", [1, 3, 7])
+@pytest.mark.parametrize("band,program,layout", NODW_GRID_CASES)
+def test_programs_without_the_weight_gradient_at_forced_grids(
+    band, program, layout, ctas, launches, monkeypatch
+):
+    """On grids of ``ctas`` CTAs (``backward_ctas`` patched), fewer than the
+    row blocks of 257 x 48 rows, the band's strided program (on packed rows
+    its strided program of packed rows where routed, on a gate and
+    ``grad_out`` sliced from projections the strided one) and its claimed
+    program (the strided ones unrouted, ``ROUTES`` patched), the band's
+    module forced through ``module_for_rows`` (:func:`_forcing`), give the
+    ``dx`` and ``dz`` bits of the BF16 call on the band's module at the
+    host's grid; the claimed program leaves a caller workspace zero after
+    back-to-back calls, and the strided ones do not touch it."""
+    arch = loader.device_arch(torch.cuda.current_device())
+    routes = loader.ROUTES[arch]
+    strided = band + loader.NODW + loader.STRIDED
+    strided_packed = strided + loader.PACKED
+    claimed = band + loader.NODW
+    if program == "claimed":
+        want = routes.get(claimed)
+    elif layout == "contiguous" and strided in routes:
+        want = routes.get(strided_packed, routes[strided])
+    else:
+        want = routes.get(strided)
+    if want is None:
+        pytest.skip(f"{arch} routes no {program} program of {band}")
+    T, H = 257, 48
+    x, z, w, dy = make(T, H, layout=layout, seed=15)
+    ws = workspace_for(T * H, x.device)
+    monkeypatch.setattr(pkg, "module_for_rows", _forcing(band))
+    dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+    if program == "claimed":
+        table = {
+            r: name for r, name in routes.items() if r not in (strided, strided_packed)
+        }
+        monkeypatch.setitem(loader.ROUTES, arch, table)
+    monkeypatch.setattr(pkg, "backward_ctas", lambda name, rows, sm_count: ctas)
+    launches.clear()
+    for i in range(3):
+        dx, dz, dw = backward(
+            dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws
+        )
+        assert dw is None
+        assert torch.equal(dx, dx_d), f"{want} on {ctas} CTAs, call {i}: dx"
+        assert torch.equal(dz, dz_d), f"{want} on {ctas} CTAs, call {i}: dz"
+    assert launches == [want] * 3, launches
+    torch.cuda.synchronize()
+    assert not bool(ws.any()), f"the workspace after {want} on {ctas} CTAs"
+
+
+@pytest.mark.parametrize("band", ["bwd_bf16_short", "bwd_bf16_t512"])
+def test_one_cluster_programs_without_the_weight_gradient(band, launches):
+    """In each small-row band of this device (the first, a middle and the
+    last rows of the band, as one head; skipped where this device routes no
+    such band or no program without the weight gradient for it), a call with
+    ``compute_grad_weight=False`` runs the band's one-cluster program without
+    the weight gradient and gives the ``dx`` and ``dz`` bits of the BF16 call
+    on the band's one-cluster module."""
+    found = _device_band(band)
+    nodw = _routes().get(band + loader.NODW)
+    if found is None or nodw is None:
+        pytest.skip(f"this device routes no {band} band without the weight gradient")
+    first, last = found
+    name = _routes()[band]
+    for rows in sorted({first, (first + last) // 2, last}):
+        x, z, w, dy = make(rows, 1, layout="flat", seed=17)
+        launches.clear()
+        dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+        dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+        assert launches == [name, nodw], (rows, launches)
+        assert dw is None
+        assert torch.equal(dx, dx_d), f"{band} at {rows} rows: dx"
+        assert torch.equal(dz, dz_d), f"{band} at {rows} rows: dz"
+
+
+# The layouts of ``BULK_BAND_CASES`` (64 heads: a gate and ``grad_out``
+# sliced from projections, head-major ``x`` and ``z``, contiguous tokens; one
+# token of many heads).
+NODW_LAYOUTS = ("projection", "head_major", "one_token", "contiguous")
+# The BF16 bands of a call with ``compute_grad_weight=False`` and the layouts
+# of ``NODW_LAYOUTS`` (:func:`_nodw_layout_shape`; a long role's band packed
+# rows only).
+NODW_LAYOUT_CASES = [
+    pytest.param(band, layout, id=f"{band}-{layout}")
+    for band in (
+        "bwd_bf16_short",
+        "bwd_bf16_t512",
+        "bwd_bf16_fused",
+        "bwd_bf16_rep",
+        "bwd_bf16_rep_long",
+    )
+    for layout in NODW_LAYOUTS
+]
+
+
+def _nodw_layout_shape(band: str, layout: str) -> tuple[int, int, str] | None:
+    """``(T, H, make's layout)`` of the ``NODW_LAYOUT_CASES`` case ``(band,
+    layout)`` on this device: :func:`_bulk_band_shape`, but ``one_token``
+    takes at least 64 heads (the small-row band's first rows are one row);
+    ``None`` where this device routes no such band or no such shape lies in
+    it."""
+    shape = _bulk_band_shape(band, layout)
+    if shape is None or layout != "one_token":
+        return shape
+    T, H, layout = shape
+    _, last = _device_band(band)
+    H = max(H, 64)
+    return None if last is not None and last < H else (T, H, layout)
+
+
+def _check_nodw_layout(band: str, T: int, H: int, layout: str, nodw: str, launches):
+    """A call with ``compute_grad_weight=False`` on ``make(T, H,
+    layout=layout)`` runs ``nodw`` after the BF16 call on the band's module
+    (``launches``), gives that call's ``dx`` and ``dz`` bits and leaves a
+    caller workspace zero."""
+    rows = T * H
+    name = _routes()[band]
+    x, z, w, dy = make(T, H, layout=layout, seed=91)
+    ws = workspace_for(rows, x.device)
+    launches.clear()
+    dx_d, dz_d, _ = backward(dy, x, z, w, EPS, workspace=ws)
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
+    what = f"{band} ({layout}, {T} x {H})"
+    assert launches == [name, nodw], (what, launches)
+    assert dw is None
+    assert torch.equal(dx, dx_d), f"{what}: dx"
+    assert torch.equal(dz, dz_d), f"{what}: dz"
+    torch.cuda.synchronize()
+    assert not bool(ws.any()), f"the workspace after {what}"
+
+
+@pytest.mark.parametrize("band,layout", NODW_LAYOUT_CASES)
+def test_programs_without_the_weight_gradient_on_strided_layouts(
+    band, layout, launches
+):
+    """``NODW_LAYOUT_CASES`` at the band's first rows of 64 heads (one token
+    of at least 64 heads) on this device: a call with
+    ``compute_grad_weight=False`` runs the program ``nodw_module`` names for
+    the band's module (one cluster, strided, claimed or look-ahead; the
+    strided program of packed rows on the contiguous ones where routed;
+    skipped where this device routes no such band or shape), gives the
+    ``dx`` and ``dz`` bits of the BF16 call on the band's module on the same
+    inputs and leaves a caller workspace zero."""
+    shape = _nodw_layout_shape(band, layout)
+    if shape is None:
+        pytest.skip(f"this device routes no {band} band with a {layout} input")
+    T, H, layout = shape
+    rows = T * H
+    packed = _backward_packed(T, H, layout)
+    name = _backward_module(rows, packed=packed)
+    assert name == _routes()[band], (rows, name)
+    nodw = _nodw_module(name, rows, packed=packed)
+    assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, (band, nodw)
+    _check_nodw_layout(band, T, H, layout, nodw, launches)
+
+
+@pytest.mark.parametrize("layout", NODW_LAYOUTS)
+def test_claimed_programs_without_the_weight_gradient_on_strided_layouts(
+    layout, launches
+):
+    """For each band with a cut on this device (``NODW_STRIDED_ROWS_PER_SM``:
+    its strided program up to the cut, its claimed program past it), the
+    ``NODW_LAYOUTS`` layout just past the cut (the fewest tokens of 64 heads
+    past it; one token of a head past it, a row past the cut): a call with
+    ``compute_grad_weight=False`` runs the band's
+    claimed program without the weight gradient, gives the ``dx`` and ``dz``
+    bits of the BF16 call on the band's module on the same inputs and leaves
+    a caller workspace zero (skipped where this device has no cut)."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    cuts = loader.NODW_STRIDED_ROWS_PER_SM[arch]
+    if not cuts:
+        pytest.skip(f"{arch} routes no claimed program without the weight gradient")
+    sms = loader.device_sm_count(device_index)
+    for band, cut in sorted(cuts.items()):
+        if layout == "one_token":
+            T, H, make_layout = 1, cut * sms + 1, "contiguous"
+        else:
+            T, H, make_layout = cut * sms // 64 + 1, 64, layout
+        rows = T * H
+        packed = _backward_packed(T, H, make_layout)
+        name = _backward_module(rows, packed=packed)
+        assert name == _routes()[band], (band, rows, name)
+        nodw = _nodw_module(name, rows, packed=packed)
+        assert nodw == _routes()[band + loader.NODW], (band, rows, nodw)
+        assert loader.workspace_bytes(nodw), (band, nodw)
+        _check_nodw_layout(band, T, H, make_layout, nodw, launches)
 
 
 # The band roles of the backwards that run on a workspace: the static
@@ -998,9 +1465,11 @@ def test_backward_at_grids_smaller_than_the_chunks(
     the repeatable backward's, whose chunks follow the grid, the bits of a
     second launch at the same grid instead), and judged against the naive
     implementation at the forced grid over the draws of ``judge``;
-    ``compute_grad_weight=False`` (the BF16 bands' module) leaves
-    ``grad_weight`` as it is, ``dx`` and ``dz`` that module's bits at the
-    host's grid; the workspace is zero after every launch."""
+    ``compute_grad_weight=False`` (the program without the weight gradient
+    ``nodw_module`` names for the BF16 bands' module, at the forced grid)
+    leaves ``grad_weight`` as it is, ``dx`` and ``dz`` the bits of the BF16
+    bands' module at the host's grid; the workspace is zero after every
+    launch."""
     shape = _band_shape(band)
     if shape is None:
         pytest.skip(f"this device routes no {band} band")
@@ -1015,12 +1484,14 @@ def test_backward_at_grids_smaller_than_the_chunks(
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS, grad_weight=dw_d)
     main_d = torch.full((D,), 0.25, dtype=dtype, device="cuda")
     backward(dy, x, z, w, EPS, grad_weight=main_d, accumulate_grad_weight=True)
-    # compute_grad_weight=False runs the BF16 bands' module, whose dx and dz
-    # are another program's where that is not the band's module (an FP32
-    # band's rows in the fused band): the bits of its call at the host's grid
+    # compute_grad_weight=False runs the program without the weight gradient
+    # of the BF16 bands' module, whose dx and dz are another program's where
+    # that is not the band's module (an FP32 band's rows in the fused band):
+    # the bits of its call at the host's grid
     dx_n, dz_n = dx_d, dz_d
     if _backward_module(rows) != name:
         dx_n, dz_n, _ = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+    nodw = _nodw_module(_backward_module(rows), rows)
     ws = workspace_for(rows, x.device)
     monkeypatch.setattr(pkg, "backward_ctas", lambda name, rows, sm_count: ctas)
     launches.clear()
@@ -1059,10 +1530,11 @@ def test_backward_at_grids_smaller_than_the_chunks(
     assert torch.equal(dx, dx_n) and torch.equal(dz, dz_n), what
     assert torch.equal(main, torch.full_like(main, 3.0)), what
     assert not bool(ws.any()), what
-    # a call with compute_grad_weight=False runs the BF16 bands' module
-    # whatever the dtype of grad_weight (it writes no weight gradient)
+    # a call with compute_grad_weight=False runs the program without the
+    # weight gradient of the BF16 bands' module whatever the dtype of
+    # grad_weight (it writes no weight gradient)
     repeats = 4 if _rep(name) else 2
-    assert launches == [name] * repeats + [_backward_module(rows)], launches
+    assert launches == [name] * repeats + [nodw], launches
 
     # the weight gradient at the forced grid, alone and accumulated, on the
     # inputs of each draw
@@ -1152,6 +1624,9 @@ def test_workspace_reused_across_shapes_without_reset(record_property):
         module_bytes = loader.workspace_bytes(name)
         if role in loader.BAND_ROLES:
             assert layout == () and module_bytes == 0, role
+        elif role in NODW_TWINS:
+            twin = loader.ROUTES[arch][NODW_TWINS[role]]
+            assert module_bytes == (loader.workspace_bytes(twin) if layout else 0), role
         elif role in ROW_CLAIMS_GRID_RULES:
             assert module_bytes == ROW_CLAIMS_WORKSPACE_BYTES, role
         elif role in FUSED_ROLES[arch]:
@@ -2051,7 +2526,35 @@ def test_registry_records_reference_the_build_manifest():
     fixed-point digits, the flag words and the two words (``REP_LAYOUT``) and
     no chunks, and ship on every architecture (``REP_ROLES``; the long role's
     record launches as its band role's, with the same arguments); the
-    small-row backward records launch one cluster and take no workspace."""
+    small-row backward records launch one cluster and take no workspace.
+    Each program without the weight gradient (``NODW_ROLES``) ships on the
+    architectures that route it, each of which routes its twin
+    (``NODW_TWINS``), launches as its twin with the same arguments and keeps
+    its twin's grid rule and workspace, but a strided program, whose rule is
+    its ``NODW_STRIDED_GRID_RULES`` entry, whose CTAs have its
+    ``NODW_STRIDED_THREADS`` threads and which takes no workspace; the strided
+    cuts (``NODW_STRIDED_ROWS_PER_SM``) of an architecture name exactly the
+    bands of ``NODW_CUT_BANDS`` whose strided and claimed programs it both
+    routes, and an architecture routes a band's strided program of packed
+    rows only where it routes the band's strided program."""
+    assert loader.NODW == "_nodw" and loader.STRIDED == "_strided"
+    assert loader.PACKED == "_packed"
+    assert set(loader.NODW_ROLES) == set(NODW_TWINS), loader.NODW_ROLES
+    assert "strided_row_blocks" in loader.GRID_KINDS
+    assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
+    for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
+        both = {
+            band
+            for band in NODW_CUT_BANDS
+            if {band + loader.NODW, band + loader.NODW + loader.STRIDED}
+            <= set(loader.ROUTES[arch])
+        }
+        assert set(cuts) == both, (arch, cuts)
+        assert all(isinstance(v, int) and v >= 1 for v in cuts.values()), arch
+        for band in NODW_CUT_BANDS:
+            strided = band + loader.NODW + loader.STRIDED
+            if strided + loader.PACKED in loader.ROUTES[arch]:
+                assert strided in loader.ROUTES[arch], (arch, band)
     manifest = cake_build.manifest()
     assert manifest["schema"] == "cake-build/1"
     assert (
@@ -2118,7 +2621,30 @@ def test_registry_records_reference_the_build_manifest():
         clustered = record["grid_rule"]["kind"] == "cluster"
         assert (record["launch"]["cluster"] != (1, 1, 1)) == clustered, name
         plan = [key for _kind, key in record["arg_plan"]]
-        if record["role"] in ("fwd", "fwd_tiny", "fwd_short"):
+        if record["role"] in loader.NODW_ROLES:
+            role = record["role"]
+            routed_on = [a for a in loader.ARCHES if loader.ROUTES[a].get(role) == name]
+            assert record["arches"] == routed_on, (name, record["arches"])
+            strided = role in NODW_STRIDED_GRID_RULES
+            for arch in record["arches"]:
+                twin = loader.MODULES[loader.ROUTES[arch][NODW_TWINS[role]]]
+                assert arch in twin["arches"], (name, arch)
+                for key in ("logical", "arg_plan", "ffi_entry"):
+                    assert record[key] == twin[key], (name, arch, key)
+                for key in ("cluster", "cooperative", "use_pdl"):
+                    assert record["launch"][key] == twin["launch"][key], (name, key)
+                if not strided:
+                    assert record["launch"]["block"] == twin["launch"]["block"], name
+                    assert record["grid_rule"] == twin["grid_rule"], (name, arch)
+                    assert record.get("workspace") == twin.get("workspace"), name
+            if strided:
+                assert record["grid_rule"] == NODW_STRIDED_GRID_RULES[role], name
+                threads = NODW_STRIDED_THREADS[role]
+                assert record["launch"]["block"] == (threads, 1, 1), name
+                assert record.get("workspace") is None, name
+                assert loader.workspace_layout(name) == (), name
+                assert loader.workspace_bytes(name) == 0, name
+        elif record["role"] in ("fwd", "fwd_tiny", "fwd_short"):
             assert record["grid_rule"]["kind"] == "row_blocks"
             assert record.get("workspace") is None
         elif record["role"] in (
@@ -2316,6 +2842,8 @@ def test_row_claims_backward_cta_rule(rows, sm_count, blocks, ctas4, ctas5):
             rule = record["grid_rule"]
             if rule["kind"] != "row_claims" or role in FUSED_ROLES[arch]:
                 continue
+            if NODW_TWINS.get(role) in FUSED_ROLES[arch]:
+                continue
             found.add(role)
             assert rule == ROW_CLAIMS_GRID_RULES[role], (arch, role)
             want = {4: ctas4, 5: ctas5}[rule["ctas_per_sm"]]
@@ -2336,7 +2864,8 @@ def test_row_claims_backward_cta_rule(rows, sm_count, blocks, ctas4, ctas5):
 )
 def test_fused_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
     """The fused backward (``FUSED_ROLES``: ``bwd_bf16_fused`` on every
-    architecture, grid kind ``row_claims``): ``min(ceil(rows / 16), 4 * SMs)``
+    architecture, grid kind ``row_claims``) and its claimed program without
+    the weight gradient (``bwd_bf16_fused_nodw``): ``min(ceil(rows / 16), 4 * SMs)``
     CTAs (``ROW_CLAIMS_GRIDS`` at 4 CTAs per SM; past one wave the CTAs
     claim the blocks at run time), a grid of that many CTAs, and no chunks."""
     assert -(-rows // 16) == blocks, rows
@@ -2344,7 +2873,9 @@ def test_fused_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
     for arch in loader.ARCHES:
         for role, name in loader.ROUTES[arch].items():
             record = loader.MODULES[name]
-            if role not in FUSED_ROLES[arch]:
+            if record["grid_rule"]["kind"] != "row_claims":
+                continue
+            if NODW_TWINS.get(role, role) not in FUSED_ROLES[arch]:
                 continue
             found.add((arch, role))
             assert record["grid_rule"] == FUSED_GRID_RULE, (arch, role)
@@ -2354,7 +2885,13 @@ def test_fused_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
             assert grid == (ctas4, 1, 1)
             with pytest.raises(ValueError, match="chunks"):
                 loader.backward_chunks(name, rows)
-    assert found == {(a, r) for a, roles in FUSED_ROLES.items() for r in roles}
+    want = {(a, r) for a, roles in FUSED_ROLES.items() for r in roles}
+    want |= {
+        (a, "bwd_bf16_fused_nodw")
+        for a in loader.ARCHES
+        if "bwd_bf16_fused_nodw" in loader.ROUTES[a]
+    }
+    assert found == want, found
 
 
 @pytest.mark.parametrize(
@@ -2363,7 +2900,9 @@ def test_fused_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
 def test_repeatable_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
     """The repeatable backwards (``REP_ROLES``: ``bwd_bf16_rep``,
     ``bwd_f32_rep`` and their long roles on every architecture, grid kind
-    ``claimed_row_blocks``):
+    ``claimed_row_blocks``) and the claimed programs without the weight
+    gradient of the BF16 ones (``bwd_bf16_rep_nodw``,
+    ``bwd_bf16_rep_nodw_long``):
     ``min(ceil(rows / 16), 4 * SMs)`` CTAs (``ROW_CLAIMS_GRIDS`` at 4 CTAs
     per SM; past one wave the CTAs claim the blocks at run time), a grid of
     that many CTAs, and no chunks."""
@@ -2382,7 +2921,14 @@ def test_repeatable_backward_cta_rule(rows, sm_count, blocks, ctas4, _ctas5):
             assert grid == (ctas4, 1, 1)
             with pytest.raises(ValueError, match="chunks"):
                 loader.backward_chunks(name, rows)
-    assert found == {(a, r) for a, roles in REP_ROLES.items() for r in roles}
+    want = {(a, r) for a, roles in REP_ROLES.items() for r in roles}
+    want |= {
+        (a, r)
+        for a in loader.ARCHES
+        for r in ("bwd_bf16_rep_nodw", "bwd_bf16_rep_nodw_long")
+        if r in loader.ROUTES[a]
+    }
+    assert found == want, found
 
 
 # The forward bands of each architecture for packed rows: (last rows per SM,
@@ -2544,6 +3090,7 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         for routes in loader.ROUTES.values()
         for name in routes.values()
         if loader.MODULES[name]["grid_rule"]["kind"] == "cluster"
+        and loader.MODULES[name]["role"] not in loader.NODW_ROLES
     }
     assert set(loader.BAND_ROLES) == clustered, (loader.BAND_ROLES, clustered)
     assert loader.ROWS == "rows"
@@ -2994,6 +3541,19 @@ def _rep_calls(
     return got
 
 
+def _rep_launches(
+    arch: str, name: str, rows: int, sm_count: int, calls: int
+) -> list[str]:
+    """The modules the ``calls`` calls of :func:`_rep_calls` launch for
+    ``rows`` packed rows on ``sm_count`` SMs where ``module_for_rows`` names
+    ``name``: ``name``, and for ``compute_grad_weight=False`` (the third
+    call) the program ``nodw_module`` names for it."""
+    names = [name] * calls
+    if calls == 3:
+        names[2] = loader.nodw_module(arch, name, rows, sm_count, packed=True)
+    return names
+
+
 # Packed shapes on which the repeatable backward's long role is compared with
 # the repeatable backward: flat rows a row below, at and a row above the long
 # role's first rows, and the issue's 32737 x 48 rows (claims far past the
@@ -3019,8 +3579,9 @@ def test_long_role_gives_the_bits_of_the_repeatable_backward(
     (:func:`_forcing`), the long role gives the bits of the repeatable
     backward on the same packed inputs and grid, and so do the host's calls:
     ``dx``, ``dz``, the weight gradient, accumulated or not, and for a BF16
-    weight gradient ``compute_grad_weight=False`` (:func:`_rep_calls`); the
-    workspace is zero after the calls."""
+    weight gradient ``compute_grad_weight=False`` (:func:`_rep_calls`; the
+    programs without the weight gradient of the two, :func:`_rep_launches`);
+    the workspace is zero after the calls."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     routes = loader.ROUTES[arch]
@@ -3045,12 +3606,14 @@ def test_long_role_gives_the_bits_of_the_repeatable_backward(
             launches.clear()
             host = _rep_calls(dy, x, z, w, ws, dw_dtype)
             want = long if rows >= start else rep
-            assert launches == [want] * calls, (shape, sm_count, launches)
+            want = _rep_launches(arch, want, rows, sm_count, calls)
+            assert launches == want, (shape, sm_count, launches)
             for forced in (band, band + loader.LONG):
                 patch.setattr(pkg, "module_for_rows", _forcing(forced, role))
                 launches.clear()
                 runs.append(_rep_calls(dy, x, z, w, ws, dw_dtype))
-                assert launches == [routes[forced]] * calls, (forced, launches)
+                want = _rep_launches(arch, routes[forced], rows, sm_count, calls)
+                assert launches == want, (forced, launches)
         torch.cuda.synchronize()
         assert not bool(ws.any()), (shape, sm_count)
         what = f"{shape} ({rows} rows) on the grids of {sm_count} SMs"
@@ -4033,14 +4596,16 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     the fewest rows of every ``BACKWARD_BANDS`` band of this device and of
     every long role's packed rows (:func:`_range_shape`) an FP32 weight
     gradient (accumulation included),
-    ``compute_grad_weight=False`` (the BF16 bands' module, the fused
-    backward included) and the autograd backward of a weight that needs no
-    gradient, and where the band repeats a BF16 weight gradient
-    (:func:`_dw_varies`) the BF16 weight gradient (caller workspace and none)
+    ``compute_grad_weight=False`` (the program without the weight gradient
+    of the BF16 bands' module, the fused backward's included) and the
+    autograd backward of a weight that needs no gradient, and where the band
+    repeats a BF16 weight gradient (:func:`_dw_varies`) the BF16 weight
+    gradient (caller workspace and none)
     and the autograd backward with it, also of a node built before the
     setting was enabled, and non-reentrant checkpointing; no rows; the
     workspace entry points, the reset and the support query.  Every band's
-    module of this device is among the launches."""
+    module of this device, or its program without the weight gradient, is
+    among the launches."""
     forward_rows = _forward_rows()
     assert len(forward_rows) >= 3, forward_rows
     ranges = [
@@ -4127,11 +4692,13 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     modules = set(launches)
     assert set(forward_rows) <= modules, forward_rows
     for T, H in shapes:
+        packed = _backward_packed(T, H)
         assert {
-            _backward_module(T * H),
+            _nodw_module(_backward_module(T * H), T * H, packed=packed),
             _backward_module(T * H, torch.float32),
         } <= modules, (T, H)
     roles = {loader.MODULES[name]["role"] for name in modules}
+    roles = {NODW_TWINS.get(role, role) for role in roles}
     assert set(bands) <= roles, (bands, roles)
     assert not bool(ws.any())
 
@@ -4237,8 +4804,8 @@ def test_backward_alerts_under_deterministic_algorithms(band, edge, launches):
     of the call with the mode off, ``dw`` a finite BF16 weight gradient (the
     accuracy of these bands' weight gradient is judged by the band tests).  The
     forward, the workspace entry points, the reset, the support query, the
-    backward without the weight gradient (on the same row-claims module) and
-    with an FP32 one, and the autograd backward of a weight that needs no
+    backward without the weight gradient (the band's program built without
+    it, ``nodw_module``) and with an FP32 one, and the autograd backward of a weight that needs no
     gradient run without a warning."""
     found = _device_band(band)
     if found is None:
@@ -4564,9 +5131,10 @@ def _unbanded_libraries() -> set[tuple[str, str]]:
     """``(module role, architecture)`` of every module record built for an
     architecture whose bands never select it: not the route of a role of its
     ``FORWARD_BANDS``, ``STRIDED_FORWARD_BANDS`` or ``BACKWARD_BANDS`` bands,
-    of a long role of ``LONG_BACKWARD_ROWS_PER_SM``, or of a backward role
+    of a long role of ``LONG_BACKWARD_ROWS_PER_SM``, of a backward role
     whose bands end without a ``None`` band (:func:`module_for_rows` falls
-    back to its own module)."""
+    back to its own module), or of a program without the weight gradient
+    (``NODW_ROLES``, which :func:`nodw_module` names in its band's place)."""
     found = set()
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
@@ -4583,6 +5151,7 @@ def _unbanded_libraries() -> set[tuple[str, str]]:
             band + loader.LONG
             for band in loader.LONG_BACKWARD_ROWS_PER_SM.get(arch, {})
         }
+        roles |= set(loader.NODW_ROLES) & set(routes)
         selected = {routes[role] for role in roles}
         for name, record in loader.MODULES.items():
             if arch in record["arches"] and name not in selected:
@@ -4838,3 +5407,198 @@ def test_backward_libraries_no_band_selects_run_through_a_forced_route(
     # Per caller-workspace launch a backward and an accumulating one, a
     # projection backward a draw, and the compute_grad_weight=False call.
     assert launches == [name] * (2 * _launch_count(2) + DRAWS + 1), launches
+
+
+# Without a device: SM counts of small MIG-like instances and the products'.
+NODW_SM_COUNTS = (1, 2, 7, 14, 16, 24, 33, 66, 148, 152, 160, 212, 216)
+
+
+@pytest.mark.parametrize("sm_count", NODW_SM_COUNTS)
+def test_nodw_module_and_the_strided_ctas(sm_count):
+    """``nodw_module`` and the strided programs' CTAs (host only), the
+    programs without the weight gradient of a band unrouted in turn
+    (``ROUTES`` patched): for the module of a band with a strided program
+    (``NODW_CUT_BANDS``) the strided program up to
+    ``NODW_STRIDED_ROWS_PER_SM * SMs`` rows where routed (at every row count
+    where the band has no cut), else the claimed program where routed, else
+    the strided one, else the module itself; for a small-row band's module
+    its one-cluster program where routed, else the module; for the long
+    role's module the long program where routed, else the long role's module
+    (run with ``weight_grad`` 0); for any other module the module itself;
+    for packed rows (``packed``; omitted, not packed) the band's strided
+    program of packed rows in the strided program's place where both are
+    routed.  A strided program launches ``min(ceil(rows / rows_per_block),
+    ctas_per_sm * SMs)`` CTAs of its ``NODW_STRIDED_GRID_RULES`` rule at
+    every row count: the 256-thread ones ``min(ceil(rows / 16), 4 * SMs)``,
+    their twin's count, the repeatable band's of packed rows
+    ``min(ceil(rows / 8), 8 * SMs)``."""
+    wave = 4 * sm_count
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        for band in NODW_CUT_BANDS:
+            name = routes[band]
+            per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get(band)
+            cut = None if per_sm is None else per_sm * sm_count
+            strided_role = band + loader.NODW + loader.STRIDED
+            packed_role = strided_role + loader.PACKED
+            claimed_role = band + loader.NODW
+            edges = {1, 7, 8, 9, 15, 16, 17, 16 * wave - 1, 16 * wave, 16 * wave + 1}
+            if cut is not None:
+                edges |= {cut - 1, cut, cut + 1}
+            rows_list = sorted(r for r in edges | {2**31 - 1} if r >= 1)
+            for drop in (
+                (),
+                (packed_role,),
+                (strided_role,),
+                (claimed_role,),
+                (strided_role, claimed_role),
+            ):
+                table = {r: n for r, n in routes.items() if r not in drop}
+                claimed = table.get(claimed_role)
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setitem(loader.ROUTES, arch, table)
+                    for packed in (False, True):
+                        strided = table.get(strided_role)
+                        if packed and strided is not None:
+                            strided = table.get(packed_role, strided)
+                        for rows in rows_list:
+                            if strided is not None and cut is not None and rows <= cut:
+                                want = strided
+                            else:
+                                want = claimed or strided or name
+                            what = (arch, band, drop, packed, rows)
+                            got = loader.nodw_module(
+                                arch, name, rows, sm_count, packed=packed
+                            )
+                            assert got == want, (*what, got)
+                            if not packed:
+                                got = loader.nodw_module(arch, name, rows, sm_count)
+                                assert got == want, (*what, got)
+            for role in (strided_role, packed_role):
+                strided = routes.get(role)
+                if strided is None:
+                    continue
+                record = loader.MODULES[strided]
+                rule = NODW_STRIDED_GRID_RULES[role]
+                for rows in rows_list:
+                    blocks = -(-rows // rule["rows_per_block"])
+                    got = loader.backward_ctas(strided, rows, sm_count)
+                    want = min(blocks, rule["ctas_per_sm"] * sm_count)
+                    assert got == want, (arch, strided, rows, got)
+                    if role == strided_role:
+                        twin = loader.backward_ctas(name, rows, sm_count)
+                        assert got == twin, (arch, strided, rows, got, twin)
+                    grid = loader.launch_grid(
+                        record, rows=rows, sm_count=sm_count, ctas=got
+                    )
+                    assert grid == (want, 1, 1), (arch, strided, rows, grid)
+        long_role = "bwd_bf16_rep" + loader.LONG
+        nodw_long_role = "bwd_bf16_rep" + loader.NODW + loader.LONG
+        long = routes[long_role]
+        without = {r: n for r, n in routes.items() if r != nodw_long_role}
+        for table, want in (
+            (dict(routes), routes.get(nodw_long_role, long)),
+            (without, long),
+        ):
+            with pytest.MonkeyPatch.context() as patch:
+                patch.setitem(loader.ROUTES, arch, table)
+                for rows in (1, 2560 * sm_count, 2**31 - 1):
+                    # the long role runs packed rows only
+                    got = loader.nodw_module(arch, long, rows, sm_count, packed=True)
+                    assert got == want, (arch, rows, got)
+        for band in ("bwd_bf16_short", "bwd_bf16_t512"):
+            if band not in routes:
+                continue
+            name = routes[band]
+            own = band + loader.NODW
+            without = {r: n for r, n in routes.items() if r != own}
+            for table, want in ((dict(routes), routes.get(own, name)), (without, name)):
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setitem(loader.ROUTES, arch, table)
+                    for rows in (1, 256, 512):
+                        got = loader.nodw_module(arch, name, rows, sm_count)
+                        assert got == want, (arch, band, rows, got)
+        others = ("bwd_bf16", "bwd_bf16_rc", "bwd_bf16_rc_mid", "bwd_bf16_mid")
+        others += ("bwd_f32", "bwd_f32_rep", "bwd_f32_rep_long", "bwd_f32_t512")
+        for role in others:
+            if role in routes:
+                got = loader.nodw_module(arch, routes[role], 4096, sm_count)
+                assert got == routes[role], (arch, role, got)
+
+
+# The strides (in elements) of ``dy``, ``x`` and ``z`` of 48 heads as
+# ``_kernel_view`` passes them that the backward reads as packed rows (head
+# stride 128, token stride ``48 * 128``), and of layouts it reads otherwise:
+# a gate and ``dy`` sliced from ``[T, 2 * 48 * 128 + 16]`` projections,
+# ``dy`` alone sliced so, head-major ``x`` and ``z``, and a token-stride-0
+# broadcast of ``x`` and ``z``.
+ROUTE_H = 48
+PACKED_STRIDES = (ROUTE_H * D, D, ROUTE_H * D, D, ROUTE_H * D, D)
+OTHER_STRIDES = {
+    "projection": (
+        2 * ROUTE_H * D + 16,
+        D,
+        ROUTE_H * D,
+        D,
+        2 * ROUTE_H * D + 16,
+        D,
+    ),
+    "dy_projection": (2 * ROUTE_H * D + 16, D, ROUTE_H * D, D, ROUTE_H * D, D),
+    "head_major": (ROUTE_H * D, D, D, 65 * D, D, 65 * D),
+    "broadcast": (ROUTE_H * D, D, 0, D, 0, D),
+}
+
+
+@pytest.mark.parametrize("sm_count", NODW_SM_COUNTS)
+def test_strided_programs_follow_the_layout(sm_count):
+    """On every architecture (host only; ``_backward_packed`` and
+    ``nodw_module`` as the backward calls them), a call without the weight
+    gradient in a band with a strided program (``NODW_CUT_BANDS``, the
+    band's module) below the band's strided cut (where the band has none, up
+    to a row short of the long role's first rows) runs on packed rows the
+    band's strided program of packed rows where routed (sm_107a routes the
+    repeatable band's, 128-thread CTAs, and no other architecture or band
+    routes one) and the band's strided program (256-thread CTAs) on each of
+    ``OTHER_STRIDES``, which without a cut runs them at every row count;
+    past a cut both run the band's claimed program."""
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        packed_roles = {
+            role
+            for role in routes
+            if role.endswith(loader.NODW + loader.STRIDED + loader.PACKED)
+        }
+        want_roles = set()
+        if arch == "sm_107a":
+            want_roles = {"bwd_bf16_rep_nodw_strided_packed"}
+        assert packed_roles == want_roles, (arch, packed_roles)
+        start = LONG_ROWS_PER_SM[arch] * sm_count
+        for band in NODW_CUT_BANDS:
+            strided_role = band + loader.NODW + loader.STRIDED
+            if strided_role not in routes:
+                continue
+            name = routes[band]
+            per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get(band)
+            last = start - 1 if per_sm is None else per_sm * sm_count
+            below = {1, 7, 8, 9, 16, 17, ROUTE_H, 65 * ROUTE_H, last // 2, last}
+            below = {rows for rows in below if rows <= last}
+            packed_role = strided_role + loader.PACKED
+            if packed_role not in routes:
+                packed_role = strided_role
+            cases = [(PACKED_STRIDES, True, packed_role)]
+            cases += [(s, False, strided_role) for s in OTHER_STRIDES.values()]
+            for strides, packed, role in cases:
+                assert pkg._backward_packed(ROUTE_H, *strides) is packed, strides
+                want = routes[role]
+                threads = NODW_STRIDED_THREADS[role]
+                assert loader.MODULES[want]["launch"]["block"] == (threads, 1, 1)
+                rows_list = set(below)
+                if not packed and per_sm is None:
+                    rows_list |= {start, start + 1, 2**31 - 1}
+                for rows in sorted(rows_list):
+                    got = loader.nodw_module(arch, name, rows, sm_count, packed=packed)
+                    assert got == want, (arch, band, rows, strides, got)
+                if per_sm is not None:
+                    rows = per_sm * sm_count + 1
+                    got = loader.nodw_module(arch, name, rows, sm_count, packed=packed)
+                    assert got == routes[band + loader.NODW], (arch, band, rows, got)

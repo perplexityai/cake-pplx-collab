@@ -81,11 +81,9 @@ kernel_cake_rmsnorm_det_train_2030d80884deb8abcf7b(float* __restrict__ partial, 
     int cg = tid - rsub * 8;
     int col = s * 32 + cg * 4;
     float a[4];
-    float c[4];
     #pragma unroll
     for (int e = 0; e < 4; e++) {
         a[e] = 0.0f;
-        c[e] = 0.0f;
     }
     int n_trips = (n_chunks + 127) / 128;
     #pragma unroll 4
@@ -102,67 +100,50 @@ kernel_cake_rmsnorm_det_train_2030d80884deb8abcf7b(float* __restrict__ partial, 
             }
             #pragma unroll
             for (int e_1 = 0; e_1 < 4; e_1++) {
-                float y = __fmaf_rn(_vec_load_0[e_1], 1.0f, -c[e_1]);
-                float t = a[e_1] + y;
-                c[e_1] = t - a[e_1] - y;
-                a[e_1] = t;
+                a[e_1] = a[e_1] + _vec_load_0[e_1];
             }
         }
     }
     #pragma unroll
     for (int e_2 = 0; e_2 < 4; e_2++) {
-        red_fold[rsub * 32 + cg * 4 + e_2] = a[e_2] - c[e_2];
+        red_fold[rsub * 32 + cg * 4 + e_2] = a[e_2];
     }
     __syncthreads();
     if (tid < 64) {
         int gi = tid / 8;
         int lane_1 = tid - gi * 8;
         float o[4];
-        float oc[4];
         #pragma unroll
         for (int e_3 = 0; e_3 < 4; e_3++) {
             o[e_3] = 0.0f;
-            oc[e_3] = 0.0f;
         }
         #pragma unroll
         for (int k_1 = 0; k_1 < 16; k_1++) {
             #pragma unroll
             for (int e_4 = 0; e_4 < 4; e_4++) {
                 float d = red_fold[(gi * 16 + k_1) * 32 + lane_1 * 4 + e_4];
-                float y_1 = __fmaf_rn(d, 1.0f, -oc[e_4]);
-                float t_1 = o[e_4] + y_1;
-                oc[e_4] = t_1 - o[e_4] - y_1;
-                o[e_4] = t_1;
+                o[e_4] = o[e_4] + d;
             }
         }
         #pragma unroll
         for (int e_5 = 0; e_5 < 4; e_5++) {
-            grp_fold[gi * 32 + lane_1 * 4 + e_5] = o[e_5] - oc[e_5];
+            grp_fold[gi * 32 + lane_1 * 4 + e_5] = o[e_5];
         }
     }
     __syncthreads();
     if (tid < 8) {
         float o2[4];
-        float oc2[4];
         #pragma unroll
         for (int e_6 = 0; e_6 < 4; e_6++) {
             o2[e_6] = 0.0f;
-            oc2[e_6] = 0.0f;
         }
         #pragma unroll
         for (int gk = 0; gk < 8; gk++) {
             #pragma unroll
             for (int e_7 = 0; e_7 < 4; e_7++) {
                 float d2 = grp_fold[gk * 32 + tid * 4 + e_7];
-                float y_2 = __fmaf_rn(d2, 1.0f, -oc2[e_7]);
-                float t_2 = o2[e_7] + y_2;
-                oc2[e_7] = t_2 - o2[e_7] - y_2;
-                o2[e_7] = t_2;
+                o2[e_7] = o2[e_7] + d2;
             }
-        }
-        #pragma unroll
-        for (int e_8 = 0; e_8 < 4; e_8++) {
-            o2[e_8] = o2[e_8] - oc2[e_8];
         }
         int ocol2 = s * 32 + tid * 4;
         {

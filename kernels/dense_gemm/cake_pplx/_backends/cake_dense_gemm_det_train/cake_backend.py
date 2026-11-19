@@ -642,6 +642,7 @@ def instance_key(
     sw: int = 0,
     form: str = "",
     kser: int = 0,
+    promote_blocks: int = 0,
 ) -> tuple:
     """The instance tuple the Cake kernel module traces one program per (validation included):
     ``(a_mn, b_mn, out_f32, out_t, block_n, stages, diag, epi, slots, box_rows, cta_rows, pf,
@@ -740,7 +741,12 @@ def instance_key(
     unchanged.  The direction is a pure function of the item and P: run-to-run deterministic, another FP32 summation
     order than ``kser`` 0.  A pair count >= 0 on the plain item walk: no ``cta1``, ``sk_exact`` / ``sk_first`` /
     ``sk_sync`` / ``stt``, ``mg``, ``batch_group`` or ``form``; every other field is unchanged and the OFF form renders
-    byte-identical.
+    byte-identical.  ``promote_blocks`` (field 39 = LAST, symbol ``_kc<KC>`` directly after ``_ks<P>`` and before
+    ``_pro<n>``; 0 = off) is the promoted chunk of the nn pair programs (:data:`K1_PROMOTE_BLOCKS`): each segment's K
+    blocks are cut into balanced contiguous chunks of at most KC blocks, each summed in an accumulator of its own and
+    added in chunk order with one FP32 round-to-nearest addition per element (run-to-run deterministic; one chunk gives
+    the bits of the program without it).  The kernel takes it where :func:`promote_refusal` admits the key; every other
+    field is unchanged and the OFF form renders byte-identical.
     [Cake ``instance_key``]"""
     a_mn, b_mn, out_f32, out_t = bool(a_mn), bool(b_mn), bool(out_f32), bool(out_t)
     block_n, cta_rows, pf = int(block_n), int(cta_rows), int(pf)
@@ -1125,7 +1131,12 @@ def instance_key(
             f"sk_exact={bool(sk_exact)}, sk_first={sk_first}, sk_sync={sk_sync}, stt={stt}, mg={mg}, "
             f"batch_group={batch_group}, form={form!r}"
         )
-    return (
+    promote_blocks = int(promote_blocks)
+    if promote_blocks < 0:
+        raise ValueError(
+            f"promote_blocks is 0 (no promotion) or the K blocks of a promoted chunk, got {promote_blocks}"
+        )
+    key = (
         a_mn,
         b_mn,
         out_f32,
@@ -1164,7 +1175,108 @@ def instance_key(
         sw,
         form,
         kser,
+        promote_blocks,
     )
+    if promote_blocks:
+        refusal = promote_refusal(key)
+        if refusal:
+            raise ValueError(
+                f"promote_blocks (promoted chunks of {promote_blocks} K blocks) needs an nn CTA-pair pro program the "
+                f"kernel admits; got {refusal}"
+            )
+    return key
+
+
+def promote_refusal(key: tuple) -> str:
+    """Why the program of instance key ``key`` takes no promoted chunks (``promote_blocks``; the kernel's refusal):
+    a K-major operand, the tall 256-row tile, a tile width other than 128 / 192 / 256, no pair prologue form (``pro``
+    0), a non-default stage count, the single-CTA form, the ``ovl`` / ``ovr`` / ``htail`` / ``pd`` drains, the
+    load-warp prelude, the whole-tile tile resolve, the quad-transposed stores, a batch or column-grouped raster, the
+    serpentine K walk, the tail-first order, or a slab path other than ``sk_slab`` 2 on the 128-row 192-wide
+    64-byte-panel tile and on the 256-wide tile of an FP32 or row-major store; ``""`` where it takes them.  These
+    drains read only the thread's own accumulator columns of one buffer per segment, which the chunk sum is written
+    back over."""
+    (
+        a_mn,
+        b_mn,
+        out_f32,
+        out_t,
+        block_n,
+        stages,
+        _diag,
+        _epi,
+        slots,
+        _box_rows,
+        cta_rows,
+        _pf,
+        _hints,
+        _f32_v8,
+        quad_store,
+        _park,
+        ovl,
+        htail,
+        b_swz,
+        _sk_exact,
+        batch_group,
+        _store_ef,
+        _store_hint,
+        pd,
+        _sh,
+        _sk_sync,
+        sk_slab,
+        cta1,
+        cgrp,
+        ovr,
+        stt,
+        pro,
+        sk_first,
+        lw,
+        mg,
+        _sw,
+        _form,
+        kser,
+        _promote_blocks,
+    ) = key
+    cg = 1 if cta1 else CTA_GROUP
+    if not (a_mn and b_mn):
+        return "a K-major operand (the promoted programs are the nn weight gradients')"
+    if cta_rows == 256 or block_n not in (128, 192, 256):
+        return f"cta_rows {cta_rows}, block_n {block_n} (64- or 128-row tiles of 128, 192 or 256 columns)"
+    if not pro or stages != default_stages(
+        slots, cta_rows, block_n, b_mn, b_swz, cg, stt
+    ):
+        return f"pro {pro}, {stages} stages (a pair prologue form at the default stage count)"
+    if (
+        cta1
+        or ovl
+        or ovr
+        or htail
+        or pd
+        or lw
+        or mg
+        or quad_store
+        or batch_group
+        or cgrp
+        or kser
+        or sk_first
+    ):
+        return (
+            f"cta1={cta1}, ovl={ovl}, ovr={ovr}, htail={htail}, pd={pd}, lw={lw}, mg={mg}, quad_store={quad_store}, "
+            f"batch_group={batch_group}, cgrp={cgrp}, kser={kser}, sk_first={sk_first} (none of these forms)"
+        )
+    if sk_slab not in (0, 2) or (
+        sk_slab == 2
+        and (
+            cta_rows != 128
+            or (block_n, b_swz) not in ((192, 64), (256, 128))
+            or (block_n == 256 and out_t and not out_f32)
+        )
+    ):
+        return (
+            f"sk_slab {sk_slab} on cta_rows {cta_rows}, block_n {block_n}, b_swz {b_swz} (sk_slab 2 only on the 128-row "
+            "192-wide 64-byte-panel tile and the 256-wide one of an FP32 or row-major store)"
+        )
+    return ""
 
 
 def instance_symbol(key: tuple) -> str:
@@ -1185,7 +1297,8 @@ def instance_symbol(key: tuple) -> str:
     the round-2 shapes tranche adds ``_skf`` directly after ``_skx`` (``sk_first``) and ``_lw`` between ``_or`` and
     ``_pro`` (``lw``); ``_mg`` directly after ``_lw`` for the whole-tile tile resolve (``mg``); ``_sw<n>`` directly
     after ``_mg`` for the paced output stores (``sw``, absent when 0); ``_ks<P>`` directly after ``_sw<n>`` for the
-    serpentine K walk (``kser``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` directly after
+    serpentine K walk (``kser``, absent when 0); ``_kc<KC>`` directly after ``_ks<P>`` and before ``_pro<n>`` for the
+    promoted chunks (``promote_blocks``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` directly after
     ``_pro<n>`` and before the diag tokens for the eight-warp CTA form (``form``, absent when "")).
     [Cake ``instance_symbol``]"""
     (
@@ -1227,6 +1340,7 @@ def instance_symbol(key: tuple) -> str:
         sw,
         form,
         kser,
+        promote_blocks,
     ) = key
     cg = 1 if cta1 else CTA_GROUP
     so = {
@@ -1281,6 +1395,7 @@ def instance_symbol(key: tuple) -> str:
         + ("_mg" if mg else "")
         + (f"_sw{sw}" if sw else "")
         + (f"_ks{kser}" if kser else "")
+        + (f"_kc{promote_blocks}" if promote_blocks else "")
         + (f"_pro{pro}" if pro else "")
         + (f"_{form}" if form else "")
         + "".join(f"_{d}" for d in diag)
@@ -1654,9 +1769,12 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_100a', True, True, False, True, False, 48, None, 4096): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, False, True, False, 48, None, 5120): {"pro": 15},
     ('sm_100a', True, True, False, True, False, 64, None, 4096): {"cta_rows": 64, "pro": 15},
-    ('sm_100a', True, True, False, True, False, 64, None, 5120): {"cta_rows": 64, "pro": 15},
+    # the 5120 -> 64 / 128 weight gradients from T 32768 on: the synchronised stream-K program of the sm_103a rule of
+    # the rows (its promoted twin at these T), measured on B200 and GB200; below T 32768 the row keeps the 64-row
+    # program (ROW_RULE_MIN_T)
+    ('sm_100a', True, True, False, True, False, 64, None, 5120): {"pro": 7, "sk_sync": True, "sk_sync_m": 16},
     ('sm_100a', True, True, False, True, False, 128, None, 4096): {"cta_rows": 64, "pro": 15},
-    ('sm_100a', True, True, False, True, False, 128, None, 5120): {"cta_rows": 64, "pro": 15},
+    ('sm_100a', True, True, False, True, False, 128, None, 5120): {"pro": 7, "sk_sync": True, "sk_sync_m": 16},
     ('sm_100a', True, True, False, True, False, 128, None, 8192): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, True, True, False, 32, None, 4096): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, True, True, False, 32, None, 5120): {"pro": 15},
@@ -1667,12 +1785,16 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_100a', True, True, True, True, False, 128, None, 4096): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, True, True, False, 128, None, 5120): {"cta_rows": 64, "pro": 15},
     ('sm_100a', True, True, True, True, False, 128, None, 8192): {"cta_rows": 64, "pro": 15},
-    ('sm_100a', True, True, False, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "block_n": 224},
-    ('sm_100a', True, True, False, False, False, 4096, None, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True},
+    # ``wave_yield``: the knobs the 4096 x 4096 weight gradient plans with where the exact-wave gate drops its 224-column
+    # tile (148 SMs), from T 8192 on (ROW_RULE_MIN_T); ``sk_exact_fit``: the CTA pair count on which an exact split
+    # whose units exceed the pairs takes max(2, pairs // tail) parts (see the planner); both measured on B200 and B300
+    # at T 8192 - 32768
+    ('sm_100a', True, True, False, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "block_n": 224, "wave_yield": {"sk_sync": True, "sk_slab": 2, "sk_sync_m": 32}},
+    ('sm_100a', True, True, False, False, False, 4096, None, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74},
     ('sm_100a', True, True, False, False, False, 5120, None, 512): {"block_n": 192, "b_swz": 64, "sk_sync": True, "sk_slab": 2, "sk_sync_m": 39, "pro": 15, "hints": ('none', 'evict_first')},
     ('sm_100a', True, True, False, False, False, 5120, None, 1024): {"block_n": 160, "b_swz": 64, "cta_rows": 256, "pro": 15, "hints": ('none', 'evict_first'), "cgrp": True, "group_m": 8},
     ('sm_100a', True, True, False, False, False, 5120, None, 5120): {"cta_rows": 256, "pro": 7, "sk_sync": True, "sk_slab": 2, "sk_sync_m": 32},
-    ('sm_100a', True, True, False, False, False, 12288, None, 4096): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True},
+    ('sm_100a', True, True, False, False, False, 12288, None, 4096): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74},
     ('sm_100a', True, True, False, True, False, 512, None, 4096): {"cta_rows": 64, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_100a', True, True, True, False, False, 4096, None, 1024): {"slots": 1, "epi": 'tma', "pro": 15, "cgrp": True},
     ('sm_100a', True, True, True, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "sk_sync": True, "sk_slab": 3, "sk_sync_m": 32},
@@ -1767,7 +1889,7 @@ ROW_RULES: dict[tuple, dict] = {
     #      exact 16-way stream-K program with the tail-first order, in 2-row raster groups in place of the default 16),
     #      measured on GB200 against the plan without it on two nodes; the raster changes which four output tiles take
     #      the stream-K tail, so the outputs of those tiles differ from that plan's (each plan is deterministic) ----
-    ('sm_100a', True, True, False, False, False, 4096, 16231, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "group_m": 2},
+    ('sm_100a', True, True, False, False, False, 4096, 16231, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74, "group_m": 2},
     # ---- sm_103a: the shapes tranche - forward / input gradient / weight gradient rows at K 4096 - 17408 and N 32 - 17408,
     #      measured with this package's planner against cuBLAS on GB300 at T 16172 - 16384 (see the test table
     #      MEASURED_SHAPE_ROWS); a row whose measured choice equals the planner's default carries no rule ----
@@ -1850,13 +1972,14 @@ ROW_RULES: dict[tuple, dict] = {
     ('sm_103a', True, True, True, True, False, 128, None, 5120): {"pro": 7, "sk_sync": True, "sk_sync_m": 16},
     ('sm_103a', True, True, True, True, False, 128, None, 8192): {"cta_rows": 64, "pro": 15},
     ('sm_103a', True, True, False, False, False, 4096, None, 1024): {"block_n": 224, "pro": 15, "hints": ('none', 'evict_first'), "cgrp": True},
-    ('sm_103a', True, True, False, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "block_n": 224},
-    ('sm_103a', True, True, False, False, False, 4096, None, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True},
+    # ``wave_yield`` / ``sk_exact_fit``: see the sm_100a rules of these rows (measured on B300)
+    ('sm_103a', True, True, False, False, False, 4096, None, 4096): {"cta_rows": 256, "pro": 7, "block_n": 224, "wave_yield": {"sk_sync": True, "sk_slab": 2, "sk_sync_m": 32}},
+    ('sm_103a', True, True, False, False, False, 4096, None, 12288): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74},
     ('sm_103a', True, True, False, False, False, 5120, None, 512): {"block_n": 192, "b_swz": 64, "sk_sync": True, "sk_slab": 2, "sk_sync_m": 39, "pro": 15, "hints": ('none', 'evict_first')},
     ('sm_103a', True, True, False, False, False, 5120, None, 1024): {"block_n": 160, "b_swz": 64, "cta_rows": 256, "pro": 15, "hints": ('none', 'evict_first')},
     ('sm_103a', True, True, False, False, False, 5120, None, 5120): {"cta_rows": 256, "pro": 7, "sk_sync": True, "sk_slab": 2, "sk_sync_m": 32},
     ('sm_103a', True, True, False, False, False, 6144, None, 12288): {"cta_rows": 256, "pro": 7, "sk_sync": True, "sk_slab": 2},
-    ('sm_103a', True, True, False, False, False, 12288, None, 4096): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True},
+    ('sm_103a', True, True, False, False, False, 12288, None, 4096): {"cta_rows": 256, "pro": 7, "sk_exact": 16, "sk_first": True, "sk_exact_fit": 74},
     ('sm_103a', True, True, False, False, False, 12288, None, 6144): {"cta_rows": 256, "pro": 7, "sk_sync": True, "sk_slab": 2},
     ('sm_103a', True, True, False, True, False, 512, None, 4096): {"cta_rows": 64, "pro": 15, "hints": ('evict_first', 'none')},
     ('sm_103a', True, True, True, False, False, 4096, None, 1024): {"block_n": 224, "epi": 'reg', "f32_v8": True, "store_ef": True, "pro": 15},
@@ -1987,13 +2110,22 @@ ARCH_RULE_DEFAULTS: dict[str, dict] = {
 # always wins (either weight-gradient orientation); sm_100a and sm_107a inherit nothing.
 RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 
-# Package-only token tiers of ragged ``ROW_RULES`` keys of the sm_107a 212-SM tranche (measured at T 16172 - 16384):
-# ``key -> ((bound, rule), ...)`` in ascending ``bound``.  At a token count T (``M`` of a forward / input-gradient key,
-# ``K`` of a weight-gradient key) below a tier's ``bound``, the first such tier's ``rule`` plans the row in place of the
-# key's; the last ``bound`` is the key's floor, from which on the key's own rule applies.  A tier rule is the rule
-# the row planned with before the tranche (``{}``: none); the fp32 5120 -> 5120 weight gradient plans with no rule up to
-# T 257.  The counts are the R200 A/B of every plan the tranche changed against the plan before it (212 SMs, CUPTI cold
-# L2, 2026-11-08).  An exact (N, K, M) key has no tiers.
+# Package-only token tiers of ragged ``ROW_RULES`` keys: ``key -> ((bound, rule), ...)`` in ascending ``bound``.  At a
+# token count T (``M`` of a forward / input-gradient key, ``K`` of a weight-gradient key) below a tier's ``bound``, the
+# first such tier's ``rule`` plans the row in place of the key's; the last ``bound`` is the key's floor, from which on
+# the key's own rule applies.  A tier rule is the rule the row planned with before the key's rule changed (``{}``:
+# none).  The sm_107a keys are the 212-SM tranche (measured at T 16172 - 16384); the fp32 5120 -> 5120 weight gradient
+# plans with no rule up to T 257.  Their counts are the R200 A/B of every plan the tranche changed against the plan
+# before it (212 SMs, CUPTI cold L2, 2026-11-08).  The sm_100a 5120 -> 64 / 128 bf16 weight-gradient keys floor the
+# rule's synchronised split at T 32768.  On B200 and GB200 (148 and 152 SMs) that split was 2 to 3 % slower at T 16231
+# and faster at T 32768 (1.04 to 1.06 times), 65535 and 131072.  Its margin of 16 K steps makes the main parts 264 K
+# blocks long at T 32768, so they run the promoted twin, within the naive tier there.  Under the promotion threshold of
+# versions up to 0.3.5 (256 K blocks) the same split with margin 0 (parts of 256 K blocks, no promoted chunks) missed
+# the naive tier on 5120 -> 64 at T 32768, and from T 31744 down the rule's own parts held at most 256 K blocks, without
+# promoted chunks.  Below T 32768 these rows keep their 64-row program, which runs its promoted twin where the longest
+# segment holds more than ``K1_PROMOTE_MIN_SEGMENT`` (128) K blocks.  The 4096 x 4096 bf16 weight-gradient keys of
+# sm_100a and sm_103a floor the rule's ``wave_yield`` at T 8192, the shortest token count it was measured at on B200 and
+# B300 (148 SMs, T 8192 - 32768); below it the rows plan without it, as before.  An exact (N, K, M) key has no tiers.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # q_b 2048 x 16384 input gradient: slower at 11, flat at 3, faster at 1 of the 15 measured T 1 - 1025; faster at
@@ -2019,8 +2151,143 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # 5120 -> 5120 weight gradient: slower at 2, flat at 18, faster at 1 of the 21 measured T 1 - 8192; faster at the
     # 10 from 16129 on
     ('sm_107a', True, True, False, False, False, 5120, None, 5120): ((16129, {}),),
+    # 5120 -> 64 / 128 weight gradient: the 64-row program below T 32768
+    ('sm_100a', True, True, False, True, False, 64, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
+    ('sm_100a', True, True, False, True, False, 128, None, 5120): ((32768, {"cta_rows": 64, "pro": 15}),),
+    # 4096 x 4096 weight gradient: the rule without its ``wave_yield`` below T 8192
+    ('sm_100a', True, True, False, False, False, 4096, None, 4096): ((8192, {"cta_rows": 256, "pro": 7, "block_n": 224}),),
+    ('sm_103a', True, True, False, False, False, 4096, None, 4096): ((8192, {"cta_rows": 256, "pro": 7, "block_n": 224}),),
 }
 # fmt: on
+
+# Package-only rules of exact (N, K, M) ``ROW_RULES`` keys that apply on a part of exactly one SM count,
+# ``(arch, sm_count) -> {key: rule}`` (keys as ``ROW_RULES``).  Such a rule replaces the row's rule on that part alone:
+# the architecture's other parts, its child architectures (``RULE_PARENT``) and every other token count keep the row's
+# ``ROW_RULES`` entry.  The 148-SM sm_100a entries are the fp32 input gradients 4096 -> 32 / 48 / 64 / 128,
+# 5120 -> 32 / 48 / 64 / 128 and 8192 -> 128 and the fp32 6144 -> 128 input gradient, at the token counts measured on
+# B200: the single-CTA program with 128-column tiles, two TMA-store slots and four stages, over the raster group of the
+# row's rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output
+# equal to that plan's bit for bit at every measured key.
+# fmt: off
+_SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
+ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
+    ("sm_100a", 148): {
+        **{
+            ('sm_100a', False, True, True, False, False, N, K, T): dict(_SM100A_148_DGRAD_F32)
+            for N, K, Ts in (
+                (4096, 32, (16231, 16384)),
+                (4096, 48, (16231, 16384)),
+                (4096, 64, (16231, 16384)),
+                (4096, 128, (16231, 16384)),
+                (5120, 32, (16231, 16384)),
+                (5120, 48, (16231, 16384)),
+                (5120, 64, (16231, 16384)),
+                (5120, 128, (16231,)),
+                (8192, 128, (16231, 16384)),
+            )
+            for T in Ts
+        },
+        **{
+            ('sm_100a', False, True, True, False, False, 6144, 128, T): {**_SM100A_148_DGRAD_F32, "group_m": 2}
+            for T in (16172, 16231)
+        },
+    },
+}
+# fmt: on
+
+# Package-only token ranges of ragged ``ROW_RULES`` keys that apply on a part of exactly one SM count,
+# ``(arch, sm_count) -> {key: ((lo, hi, rule), ...)}`` (a ragged key as ``ROW_RULES``: ``K = None`` of a weight
+# gradient, ``M = None`` of a forward / input gradient; the ranges of a key are sorted and disjoint).  At a token count
+# T (``K`` of a weight-gradient key, ``M`` of a forward / input-gradient key) with ``lo <= T <= hi`` the range's rule
+# replaces the row's rule on that part, as an exact ``ROW_RULES`` key at that T would (``row_rule`` still merges
+# ``ARCH_RULE_DEFAULTS`` under it).  The architecture's other parts, its child architectures (``RULE_PARENT``) and
+# every other token count keep the row's ``ROW_RULES`` entry and its ``ROW_RULE_MIN_T`` tiers, and the weight-gradient
+# orientation reads ``ROW_RULES`` alone.  The 212-SM sm_107a entries serve every 212-SM part of the architecture: FP32
+# rows measured on two VR200 nodes against the plan the row had without them, at T 4096, 8192, 16172, 16231 and 16384,
+# in eager launches and CUDA graph replays.  Each range runs from the lowest to the highest measured T at which the
+# rule was faster on both nodes in both modes (the plan has the same form at the T between), within the naive BF16
+# tier and with the same bits run to run:
+#   * the 12288 -> 4096 (T 4096 - 16384) and 4096 -> 12288 (T 8192 - 16231) weight gradients: the synchronised split
+#     of the 26-tile tail (26 collectors, margin 38, slab path 2) through the FP32 v8 evict-first register epilogue
+#     (``nn_n256_f32_v8_ef_sks_sb2_pro7``), 1.05 to 1.09 times faster, another summation order than the plan before;
+#   * the 17408 -> 5120 (T 4096 - 8192), 5120 -> 17408 (T 8192), dense_gate_up 6144 -> 12288 (T 4096 - 8192) and
+#     dense_down 12288 -> 6144 (T 8192) weight gradients: whole 128-row tiles through the FP32 v8 register epilogue
+#     (``nn_n256_f32_v8_pro15``), 1.02 to 1.17 times faster, the bits of the plan before;
+#   * the o_proj 16384 -> 6144 weight gradient at T 4096 and 8192 only: the same program with a two-way K split of
+#     its 52 tail tiles (104 units, each the whole K half of a tile at these T), 1.06 to 1.14 times faster, another
+#     summation order than the plan before;
+#   * the o_proj 16384 -> 6144 input gradient at T 8192 only: the half-height tail wave of the 128-row tiles
+#     (``kn_n256_f32_v8_ht_pro7``, 68 half items of the 34-tile tail), 1.02 to 1.06 times faster, the bits of the
+#     plan before.
+# fmt: off
+_SM107A_212_F32_SKS = {"epi": 'reg', "f32_v8": True, "store_ef": True, "sk_sync": True, "sk_sync_m": 38, "sk_slab": 2}
+_SM107A_212_F32_V8 = {"epi": 'reg', "f32_v8": True, "pro": 15}
+_SM107A_212_F32_V8_SK2 = {"epi": 'reg', "f32_v8": True, "sk_parts": 2, "pro": 15}
+ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, dict], ...]]] = {
+    ("sm_107a", 212): {
+        ('sm_107a', True, True, True, False, False, 12288, None, 4096): ((4096, 16384, _SM107A_212_F32_SKS),),
+        ('sm_107a', True, True, True, False, False, 4096, None, 12288): ((8192, 16231, _SM107A_212_F32_SKS),),
+        ('sm_107a', True, True, True, False, False, 17408, None, 5120): ((4096, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 5120, None, 17408): ((8192, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 16384, None, 6144): ((4096, 4096, _SM107A_212_F32_V8_SK2), (8192, 8192, _SM107A_212_F32_V8_SK2)),
+        ('sm_107a', True, True, True, False, False, 6144, None, 12288): ((4096, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', True, True, True, False, False, 12288, None, 6144): ((8192, 8192, _SM107A_212_F32_V8),),
+        ('sm_107a', False, True, True, False, False, 16384, 6144, None): ((8192, 8192, {"epi": 'reg', "f32_v8": True, "htail": True, "pro": 7}),),
+    },
+}
+# fmt: on
+
+#: Package-only: the K blocks of one promoted chunk of the weight-gradient programs (``promote_blocks``, the twin
+#: templates ``..._kc128_pro<n>`` of :func:`instance_symbol`).  One FP32 accumulator that adds a long token range is
+#: less accurate than the reference, so the promoted program cuts each segment of ``n`` K blocks (a whole tile's K
+#: range, a stream-K unit's part of a tile, a part of the exact split, the main or a collector part of the synchronised
+#: split) into ``ceil(n / K1_PROMOTE_BLOCKS)`` balanced contiguous chunks, sums each in an accumulator of its own and
+#: adds the chunk sums in chunk order, one FP32 round-to-nearest addition per element: the same bits on every run.  The
+#: loads, the plan, the workspace and the launch arguments are the program's without promotion; at one chunk
+#: (``n <= 128``) its bits are that program's.  The planner runs the twin where :func:`k1_promote_blocks` names it (a
+#: segment of more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`.
+K1_PROMOTE_BLOCKS = 128
+#: The longest segment (:func:`segment_blocks`) above which :func:`k1_promote_blocks` names the promoted twin, in K
+#: blocks of 64 tokens: the twin runs where a segment holds more than this many, 128 (8192 tokens in one accumulator,
+#: one chunk of :data:`K1_PROMOTE_BLOCKS`).  So, where the architecture registers the twin, the plan holds the twin's
+#: stream-K contract (:func:`check_stream_k_plan`) and the row is no row of :data:`K1_PROMOTE_EXEMPT_ROWS`, a plan runs
+#: the twin wherever a segment holds more than one chunk.  A plan whose program has no registered twin keeps that
+#: program at any length.  Up to version 0.3.5 the threshold was 256 K blocks, and plans whose longest segment held 129
+#: to 256 K blocks without promoted chunks missed the naive BF16 tier on some BF16 weight gradients (errors up to 1.0096
+#: times the tier's; the tests allow 1.005 times).  A cell is a row at one token count on one seed (32 draws).  The cost
+#: is the twin's over the timed rows and modes (eager launches, CUDA graph replays) whose plan changes, 11 rounds, cold
+#: L2, against the noise of repeated runs of one plan.
+#: B200 (sm_100a, 148 SMs; 1885 cells, 5 seeds): at 256 K blocks 77 cells missed, on segments of 129 to 160 (2), 161 to
+#: 192 (3) and 193 to 256 (72) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768, 5120 -> 32 / 48 at
+#: T 28672 - 32768, and 5120 -> 64 / 128 and 6144 -> 32 / 128 at T 12288 - 16384.  At 128 K blocks none missed (the
+#: promoted plans up to 1.0043, segments of at most 128 K blocks up to 1.0040); at 160 and 192 K blocks 2 and 5 missed
+#: (up to 1.0054 and 1.0063).  Cost: 490 of 546 within the noise, 48 slower by 0.3 to 1.5 %, 8 faster by 0.4 to 0.7 %.
+#: GB200 (sm_100a, 152 SMs; 1870 cells, 5 seeds): at 256 K blocks 58 cells missed, on segments of 129 to 160 (1), 161
+#: to 192 (2) and 193 to 256 (55) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768, 5120 -> 32 / 48 at
+#: T 20992 - 32768, and 5120 -> 64 / 128 and 6144 -> 32 / 128 at T 12288 - 16384.  At 128 K blocks none missed (the
+#: promoted plans up to 1.0041, segments of at most 128 K blocks up to 1.0039); at 160 and 192 K blocks 1 and 3 missed
+#: (up to 1.0065).  Cost: 532 of 546 within the noise, 10 slower by 0.6 to 1.6 %, 4 faster by 0.4 to 0.9 %.
+#: B300 (sm_103a, 148 SMs; 1975 cells, 5 seeds): at 256 K blocks 61 cells missed, on segments of 129 to 160 (2), 161 to
+#: 192 (3) and 193 to 256 (56) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768, 5120 -> 32 / 48 / 64
+#: at T 28672 - 31744, and 6144 -> 32 / 128 at T 12288 - 16384.  At 128 K blocks none missed (the promoted plans up to
+#: 1.0040, segments of at most 128 K blocks up to 1.0040); at 160 and 192 K blocks 2 and 5 missed (up to 1.0054 and
+#: 1.0063).  Cost: 561 of 590 within the noise, 23 slower by 0.4 to 1.2 %, 6 faster by 0.6 to 2.5 %.
+#: GB300 (sm_103a, 152 SMs; 1875 cells, 5 seeds): at 256 K blocks 51 cells missed, on segments of 129 to 160 (2), 161
+#: to 192 (2) and 193 to 256 (47) K blocks: 4096 -> 16 / 32 / 48 / 64 / 96 / 128 at T 20480 - 32768,
+#: 5120 -> 32 / 48 / 64 / 128 at T 12288 - 31744, and 6144 -> 32 / 128 at T 15360 - 16384.  At 128 K blocks none missed
+#: (the promoted plans up to 1.0041, segments of at most 128 K blocks up to 1.0039); at 160 and 192 K blocks 2 and 4
+#: missed (up to 1.0065).  Cost: 581 of 598 within the noise, 13 slower by 0.5 to 1.3 %, 4 faster by 0.6 to 0.9 %.
+#: VR200 (sm_107a, 212 SMs; 1680 cells, 5 seeds): at 256 K blocks 61 cells missed, all on segments of 193 to 256 K
+#: blocks: 5120 -> 32 / 48 / 64 / 128, 6144 -> 128 and 8192 -> 128 at T 31744 - 32768, 4096 -> 16 / 96 and
+#: 6144 -> 48 / 64 at T 28672 - 32768, 4096 -> 512 at T 16172 / 16231, 4096 -> 32 at T 40960 and 6144 -> 32 at
+#: T 40960 / 49152.  At 128 K blocks none missed (the promoted plans up to 1.0040, segments of at most 128 K blocks up
+#: to 1.0036); at 160 and 192 K blocks none missed, but those segments scored up to 1.0044 and 1.0050, above the
+#: promoted plans.  Cost: 385 of 478 within the noise, 93 slower, mostly by 0.5 to 1.5 % (at most 6.5 %).
+K1_PROMOTE_MIN_SEGMENT = 128
+#: Rows whose plans keep the program without promotion where :func:`k1_promote_blocks` names the twin, keyed as
+#: ``ROW_RULES`` (the planned orientation): an exact ``(N, K, M)`` key holds at that token count ``K`` only, a ragged
+#: ``(N, None, M)`` key at every token count.  ``promote=True`` runs the twin on these rows too.
+K1_PROMOTE_EXEMPT_ROWS: frozenset[tuple] = frozenset()
 
 
 def _measured_row_rule(
@@ -2033,14 +2300,32 @@ def _measured_row_rule(
     N: int,
     K: int,
     M: int,
+    *,
+    sm_count: Optional[int] = None,
 ) -> dict:
     """The row's own ``ROW_RULES`` entry without the architecture defaults: the exact (N, K, M) rule, else the
     ragged-M (N, K, None) rule, else the ragged-K (N, None, M) rule, else the parent architecture's entry
     (``RULE_PARENT``: sm_103a reads the sm_100a table for the rows its lanes did not measure), else empty (the lookup
     of Cake ``row_rule``; package-only split so the registry fallback can drop the MEASURED rule alone, see
     ``cake_dense_gemm_det_train_projection_plan``).  A ragged key with token tiers (``ROW_RULE_MIN_T``) yields the
-    first tier whose bound exceeds the token count (``M`` of a ragged-M key, ``K`` of a ragged-K key)."""
+    first tier whose bound exceeds the token count (``M`` of a ragged-M key, ``K`` of a ragged-K key).  Package-only:
+    with ``sm_count``, the part's tables for ``(arch, sm_count)`` come first - an exact key of ``ROW_RULES_BY_SM``, then
+    the range of ``ROW_RULE_RANGES_BY_SM`` that holds the token count (the ragged-M key, then the ragged-K key) - for
+    the architecture's own tables only (the parent lookup does not read them)."""
     ident = (arch, bool(a_mn), bool(b_mn), bool(out_f32), bool(out_t), bool(batched))
+    if sm_count is not None:
+        part = (arch, int(sm_count))
+        part_rule = ROW_RULES_BY_SM.get(part, {}).get(ident + (int(N), int(K), int(M)))
+        if part_rule is not None:
+            return dict(part_rule)
+        ranges = ROW_RULE_RANGES_BY_SM.get(part, {})
+        for tail, tokens in (
+            ((int(N), int(K), None), int(M)),
+            ((int(N), None, int(M)), int(K)),
+        ):
+            for lo, hi, rule in ranges.get(ident + tail, ()):
+                if lo <= tokens <= hi:
+                    return dict(rule)  # the part's rule at this token count
     for tail in (
         (int(N), int(K), int(M)),
         (int(N), int(K), None),
@@ -2069,14 +2354,20 @@ def row_rule(
     N: int,
     K: int,
     M: int,
+    *,
+    sm_count: Optional[int] = None,
 ) -> dict:
     """The measured knob overrides of one row identity: the exact (N, K, M) rule, else the
     ragged-M (N, K, None) rule, else the ragged-K (N, None, M) rule, else the parent architecture's rule
     (``RULE_PARENT``), else empty (the class defaults apply) - each merged over the architecture's
-    ``ARCH_RULE_DEFAULTS`` (round 33: a row rule overrides an architecture default).  [Cake ``row_rule``]"""
+    ``ARCH_RULE_DEFAULTS`` (round 33: a row rule overrides an architecture default).  Package-only: ``sm_count`` reads
+    the part's exact keys of ``ROW_RULES_BY_SM`` and token ranges of ``ROW_RULE_RANGES_BY_SM`` first
+    (``_measured_row_rule``).  [Cake ``row_rule``]"""
     merged = dict(ARCH_RULE_DEFAULTS.get(arch, {}))
     merged.update(
-        _measured_row_rule(arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M)
+        _measured_row_rule(
+            arch, a_mn, b_mn, out_f32, out_t, batched, N, K, M, sm_count=sm_count
+        )
     )
     return merged
 
@@ -2529,6 +2820,10 @@ class CakeDenseGemmDetProjectionPlan:
     # an odd block of P items descending (P = ``sm_pairs``: the wave guard keeps the rule's value on devices with P
     # pairs only) - a program knob, no launch argument, no plan arithmetic (0 = off)
     kser: int = 0
+    # Package-only: the promoted chunk of the planned instance (instance_key field 39, ``_kc<KC>``; 0 = off): each
+    # segment's K blocks summed in chunks of at most this many, added in chunk order (``K1_PROMOTE_BLOCKS``,
+    # ``k1_promote_blocks``) - a program knob, no launch argument, no plan arithmetic
+    promote_blocks: int = 0
     # Package-only: the rule's exact-wave BLOCK_N (224) yielded to the default tile because the device's CTA pairs do
     # not fit its tiles in whole waves and the default tile needs fewer waves (``exact_waves``)
     wave_fallback: bool = False
@@ -2877,6 +3172,7 @@ def cake_dense_gemm_det_train_projection_plan(
     mg: Optional[bool] = None,
     sw: Optional[int] = None,
     form: Optional[str] = None,
+    promote: Optional[bool] = None,
     arch: str = "sm_100a",
     _fallback: bool = True,
     _allow_swap: bool = True,
@@ -2968,7 +3264,10 @@ def cake_dense_gemm_det_train_projection_plan(
     waves (74 pairs of a 148-SM part: the 4096 x 4096 weight gradient's 152 tiles are 2.05 waves against 1.73, the
     4096 x 1024 row's 76 tiles 1.03 against 0.86) the rule's BLOCK_N yields to the default tile; the rule's other knobs
     stay, a caller-forced ``block_n`` is never touched, and the plan is the launcher's wherever the fit is exact or both
-    tiles need the same waves (152 and 160 SMs).
+    tiles need the same waves (152 and 160 SMs).  A rule's ``wave_yield`` names the knobs the row joins where its
+    BLOCK_N yields (the 4096 x 4096 BF16 weight gradient on 148 SMs: the synchronised split of its 54-tile tail, slab
+    path 2, margin 32, measured on B200 and B300 at T 8192 - 32768; below T 8192 its ``ROW_RULE_MIN_T`` tier plans the
+    rule without it).
 
     A third package-only deviation, the synchronised TMA-store gate (:func:`_serves`): the synchronised stream-K
     programs that store their bf16 tiles through the TMA store (``_tma<slots>_sks``) were generated for measured
@@ -2984,7 +3283,31 @@ def cake_dense_gemm_det_train_projection_plan(
     under the same registry fallback), so it runs the plan of :func:`cake_dense_gemm_det_train_projection_wgrad` for
     the same math instead of padding its few output rows into a tall tile; a row without a rule whose output has at
     most 64 columns against 4096 to 8192 rows and ``K >= 256`` is planned swapped too on ``_NARROW_N_SWAP_ARCHES`` (its
-    columns go to the 64-row tile of the transposed store instead of one padded 224- / 256-column tile)."""
+    columns go to the 64-row tile of the transposed store instead of one padded 224- / 256-column tile).
+
+    A fifth package-only deviation, the promoted chunks (``promote``, ``plan.promote_blocks``): once the program and the
+    plan are settled, a plan whose longest segment holds more than :data:`K1_PROMOTE_MIN_SEGMENT` K blocks (128:
+    8192 tokens; :func:`segment_blocks`) runs the promoted twin of its program (``_kc128``, :data:`K1_PROMOTE_BLOCKS`) where the
+    architecture registers it (:func:`k1_promote_blocks`), except on the rows of :data:`K1_PROMOTE_EXEMPT_ROWS`: the
+    same plan, each segment summed in chunks of at most 128 K blocks added in a fixed order, so the bits stay the same
+    on every run.  A plan whose segments hold at most 128 K blocks (one chunk) keeps its program.  ``promote=False``
+    never runs the twin, ``promote=True`` runs it at any length (on the exempt rows too) and raises ``ValueError`` where
+    the program has no registered twin (:func:`promote_refusal`); neither changes the program or the plan.
+
+    A sixth package-only deviation, the exact-split fit: a rule's ``sk_exact_fit`` names the CTA pair count on which
+    the rule's exact split, where admitted and its ``parts * tail`` units exceed the pairs, takes ``max(2, pairs //
+    tail)`` parts instead (one wave of units; the rule's ``sk_first`` and other knobs stay, a caller-forced
+    ``sk_exact`` keeps its parts, and the rule's split stays where the fitted one is not admitted).  The 12288 -> 4096
+    and 4096 -> 12288 BF16 weight gradients of sm_100a and sm_103a name 74 pairs (148 SMs): their 16-way split of a
+    14-tile tail (224 units) becomes a 5-way split (70 units), measured on B200 and B300 at T 8192 - 32768; their
+    plans on every other pair count are the launcher's.
+
+    A seventh, the per-part rules: an exact key of :data:`ROW_RULES_BY_SM` for the device's architecture and SM count
+    replaces the row's rule on that part alone, and so does a token range of :data:`ROW_RULE_RANGES_BY_SM` (a ragged
+    key) at the token counts of the range, as an exact key at that token count would.  The 212-SM sm_107a ranges plan
+    FP32 weight gradients of 4096 to 17408 features at T 4096 - 16384 (the synchronised split of the tail, or whole
+    128-row tiles, or a two-way K split of the tail) and the o_proj FP32 input gradient at T 8192 (the half-height tail
+    wave), each measured faster on two VR200 nodes; on every other part and token count these rows plan as before."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
@@ -3024,6 +3347,7 @@ def cake_dense_gemm_det_train_projection_plan(
         mg=mg,
         sw=sw,
         form=form,
+        promote=promote,
         arch=arch,
     )
     if A.dtype != torch.bfloat16 or B.dtype != torch.bfloat16:
@@ -3063,10 +3387,12 @@ def cake_dense_gemm_det_train_projection_plan(
         and _fallback
         and _allow_swap
         and sk == "auto"
+        # ``promote`` None or False chooses no program (the chain programs have no promoted chunks)
+        and not promote
         and all(
             v is None
             for k, v in _caller_knobs.items()
-            if k not in ("transposed_out", "sk", "arch")
+            if k not in ("transposed_out", "sk", "arch", "promote")
         )
     ):
         # the FP32 weight-gradient rows of ``CHAIN_RANGES_BY_SM`` on this part: the chain program
@@ -3107,12 +3433,30 @@ def cake_dense_gemm_det_train_projection_plan(
         {}
         if _use_rules
         else _measured_row_rule(
-            arch, a_mn, b_mn, out.dtype == torch.float32, transposed_out, L > 1, N, K, M
+            arch,
+            a_mn,
+            b_mn,
+            out.dtype == torch.float32,
+            transposed_out,
+            L > 1,
+            N,
+            K,
+            M,
+            sm_count=sm_count,
         )
     )
     rule = (
         row_rule(
-            arch, a_mn, b_mn, out.dtype == torch.float32, transposed_out, L > 1, N, K, M
+            arch,
+            a_mn,
+            b_mn,
+            out.dtype == torch.float32,
+            transposed_out,
+            L > 1,
+            N,
+            K,
+            M,
+            sm_count=sm_count,
         )
         if _use_rules
         else dict(ARCH_RULE_DEFAULTS.get(arch, {}))
@@ -3149,6 +3493,9 @@ def cake_dense_gemm_det_train_projection_plan(
                 "mg",
                 "sw",
                 "kser",
+                # package-only: the exact-split fit and the exact-wave yield were measured on the rule's own family
+                "sk_exact_fit",
+                "wave_yield",
             )
         }
     if cta1 is None:
@@ -3189,7 +3536,9 @@ def cake_dense_gemm_det_train_projection_plan(
     if block_n is None and rule.get("block_n") == EXACT_WAVE_BLOCK_N:
         # Package-only exact-wave gate: the rule's 224-column tile fills the measuring device's CTA pairs in whole
         # waves (``exact_waves``); where the running device's pairs do not, and the default tile needs fewer waves, the
-        # narrower tile would cost a nearly empty extra wave, so the rule's BLOCK_N yields (its other knobs stay)
+        # narrower tile would cost a nearly empty extra wave, so the rule's BLOCK_N yields (its other knobs stay).  A
+        # rule's ``wave_yield`` names the knobs the row was measured with on such a device and joins them (the 4096 x
+        # 4096 BF16 weight gradient on 148 SMs: the synchronised split of its 54-tile tail)
         m_tiles_g = _ceil_div(M, int(cta_rows))
         m_tiles_g += m_tiles_g % cg
         units_g = sm_units(sm_count, cg)
@@ -3198,7 +3547,9 @@ def cake_dense_gemm_det_train_projection_plan(
         if not exact_waves(tiles_rule, units_g) and _ceil_div(
             tiles_rule, units_g
         ) > _ceil_div(tiles_default, units_g):
-            rule = {k: v for k, v in rule.items() if k != "block_n"}
+            yielded = dict(rule.get("wave_yield", {}))
+            rule = {k: v for k, v in rule.items() if k not in ("block_n", "wave_yield")}
+            rule.update(yielded)
             wave_fallback = True
     if block_n is None:
         block_n = rule.get("block_n", default_block_n(N, b_mn))
@@ -3297,6 +3648,7 @@ def cake_dense_gemm_det_train_projection_plan(
         htail = rule.get("htail", False)
     if b_swz is None:
         b_swz = rule.get("b_swz", 128)
+    rule_sk_exact = sk_exact is None
     if sk_exact is None:
         sk_exact = rule.get("sk_exact")
     rule_sk_first = sk_first is None
@@ -3372,6 +3724,20 @@ def cake_dense_gemm_det_train_projection_plan(
         if (sk_exact and sk == "auto" and sk_max_units is None)
         else None
     )
+    if (
+        exact_plan is not None
+        and rule_sk_exact
+        and units == int(rule.get("sk_exact_fit", 0))
+        and exact_plan[2] > units
+    ):
+        # Package-only exact-split fit: on the CTA pair count the rule names (``sk_exact_fit``), a rule split whose
+        # units exceed the pairs (a second partial wave of units) takes ``max(2, pairs // tail)`` parts instead - one
+        # wave of units, the rule's tail-first order and other knobs kept; the rule's split stays where the fitted one
+        # is not admitted.  A caller-forced ``sk_exact`` keeps its parts.
+        fit_parts = max(2, units // exact_plan[1])
+        fitted = sk_exact_plan(pair_tiles, k_blocks, units, fit_parts)
+        if fitted is not None:
+            sk_exact, exact_plan = fit_parts, fitted
     # Round 18 (Cake W2): synchronised stream-K - n_t main units (K steps [0, s) of every tail tile) + C collector units
     # (the leftovers [s, k_blocks) of tail tiles c, c + C, ...), two partials and one slab per tail tile; admitted when
     # the plan is (``sk_sync_plan``, host arithmetic); it disables ``sk_parts`` and ``htail`` and yields to ``sk_exact``.
@@ -3726,7 +4092,11 @@ def cake_dense_gemm_det_train_projection_plan(
         wave_fallback=wave_fallback,
     )
     check_stream_k_plan(plan, arch)
-    if _fallback and not _serves(arch, plan, _caller_knobs["epi"], _use_rules):
+    if promote is None or promote:
+        plan = _promoted_plan(plan, key, arch, forced=bool(promote))
+    if _fallback and not _serves(
+        arch, plan, _caller_knobs["epi"], _use_rules, sm_count=sm_count
+    ):
         # nearest registered plan: drop the swap first (keeps the measured rule), then the rule, then both
         for allow_swap, use_rules in ((False, True), (True, False), (False, False)):
             if (allow_swap, use_rules) == (_allow_swap, _use_rules):
@@ -3744,7 +4114,9 @@ def cake_dense_gemm_det_train_projection_plan(
                 _use_rules=use_rules,
                 **_caller_knobs,
             )
-            if _serves(arch, candidate[0], _caller_knobs["epi"], use_rules):
+            if _serves(
+                arch, candidate[0], _caller_knobs["epi"], use_rules, sm_count=sm_count
+            ):
                 return candidate
         # last resort: the nearest registered knob variant of the same layout / output kind (every knob set
         # computes the same GEMM; only the tile walk and the store path differ): the hand-ordered variants first
@@ -3792,7 +4164,9 @@ def cake_dense_gemm_det_train_projection_plan(
                     )
                 except ValueError:
                     continue  # a knob the row cannot take (e.g. epi="tma" with a transposed store)
-                if _serves(arch, candidate[0], merged.get("epi"), False):
+                if _serves(
+                    arch, candidate[0], merged.get("epi"), False, sm_count=sm_count
+                ):
                     return (
                         dataclasses.replace(candidate[0], knob_fallback=True),
                         *candidate[1:],
@@ -3800,12 +4174,19 @@ def cake_dense_gemm_det_train_projection_plan(
     return plan, a_desc, b_desc, O3
 
 
-def _serves(arch: str, plan, caller_epi: Optional[str], use_rules: bool) -> bool:
+def _serves(
+    arch: str,
+    plan,
+    caller_epi: Optional[str],
+    use_rules: bool,
+    *,
+    sm_count: Optional[int] = None,
+) -> bool:
     """Whether the registry of ``arch`` serves ``plan`` as planned (package-only, see
     ``cake_dense_gemm_det_train_projection_plan``): its program is generated, and a synchronised stream-K plan that stores its
     bf16 tiles through the TMA store (``_tma<slots>_sks``) has its epilogue named by the caller (``caller_epi``) or by
-    the row's rule (``use_rules``: the merged row rule; else the architecture default).  Those bf16 programs were
-    generated for the measured T-exact rows whose rule names ``epi="tma"``; a ragged row whose short K
+    the row's rule (``use_rules``: the merged row rule on a part of ``sm_count`` SMs; else the architecture default).
+    Those bf16 programs were generated for the measured T-exact rows whose rule names ``epi="tma"``; a ragged row whose short K
     (``K_TMA_BF16``) turns the bf16 epilogue default to the TMA store plans the same symbol unmeasured and keeps the
     registry fallback.  The fp32-output programs (``_f32_tma<slots>_sks``) take the TMA store by default at every K
     and are served as before."""
@@ -3828,11 +4209,99 @@ def _serves(arch: str, plan, caller_epi: Optional[str], use_rules: bool) -> bool
             plan.N,
             plan.K,
             plan.M,
+            sm_count=sm_count,
         )
         if use_rules
         else ARCH_RULE_DEFAULTS.get(arch, {})
     )
     return "epi" in rule
+
+
+def segment_blocks(plan) -> int:
+    """The K blocks of the longest segment one accumulator of ``plan`` sums: a whole tile's ``k_blocks`` where the plan
+    stores whole tiles (every tile without stream-K units, the full waves beside them, the half-height tail's whole-K
+    items), a stream-K unit's part of a tile (at most ``iters_per_unit``), a part of the exact split
+    (``iters_per_unit``), the main part ``[0, s)`` or a collector's part ``[s, k_blocks)`` of the synchronised split
+    (``s`` in ``iters_per_unit``)."""
+    k_blocks = int(plan.k_blocks)
+    longest = k_blocks if plan.num_full or not plan.sk_units else 0
+    if plan.sk_units:
+        part = min(int(plan.iters_per_unit), k_blocks)
+        longest = max(longest, part, k_blocks - part if plan.sk_sync else 0)
+    return longest
+
+
+def _promote_twin_refusal(arch: str, key: tuple) -> str:
+    """Why the program of instance key ``key`` (without promotion) has no promoted twin on ``arch``: the kernel's
+    refusal (:func:`promote_refusal`) or a twin this architecture's registry does not hold; ``""`` when it has one."""
+    twin = key[:-1] + (K1_PROMOTE_BLOCKS,)
+    refusal = promote_refusal(twin)
+    if refusal:
+        return refusal
+    template = instance_symbol(twin)
+    if template not in KERNELS.get(arch, {}):
+        return f"{template} is not registered for {arch}"
+    return ""
+
+
+def k1_promote_blocks(arch: str, key: tuple, segment: int) -> int:
+    """The promoted chunk of a plan of instance key ``key`` (without promotion) on ``arch`` whose longest segment
+    holds ``segment`` K blocks (:func:`segment_blocks`): :data:`K1_PROMOTE_BLOCKS` where the segment holds more than
+    :data:`K1_PROMOTE_MIN_SEGMENT` blocks (128) and the architecture registers the program's promoted twin; else ``0`` (the
+    program without promotion).  The rule reads the segment's length and the registry only; the planner keeps the rows
+    of :data:`K1_PROMOTE_EXEMPT_ROWS` without it."""
+    if int(segment) <= K1_PROMOTE_MIN_SEGMENT or _promote_twin_refusal(arch, key):
+        return 0
+    return K1_PROMOTE_BLOCKS
+
+
+def _promote_exempt(arch: str, plan) -> bool:
+    """Whether ``plan``'s row is one of :data:`K1_PROMOTE_EXEMPT_ROWS`: its exact ``(N, K, M)`` key or its ragged
+    ``(N, None, M)`` key."""
+    ident = (
+        arch,
+        plan.a_mn,
+        plan.b_mn,
+        plan.out_f32,
+        plan.transposed_out,
+        plan.L > 1,
+        plan.N,
+    )
+    return (
+        ident + (plan.K, plan.M) in K1_PROMOTE_EXEMPT_ROWS
+        or ident + (None, plan.M) in K1_PROMOTE_EXEMPT_ROWS
+    )
+
+
+def _promoted_plan(plan, key: tuple, arch: str, *, forced: bool):
+    """``plan`` (of instance key ``key``) on the promoted twin of its program where the automatic rule names it
+    (:func:`k1_promote_blocks`, not on a row of :data:`K1_PROMOTE_EXEMPT_ROWS`) or the caller forces it, else ``plan``.
+    The twin keeps the plan: only the template and ``promote_blocks`` change.  A twin whose stream-K workspace contract
+    the plan does not hold (:func:`check_stream_k_plan`) is not run.  ``forced`` raises ``ValueError`` where the program
+    has no registered twin."""
+    if forced:
+        refusal = _promote_twin_refusal(arch, key)
+        if refusal:
+            raise ValueError(
+                f"cake_dense_gemm_det_train_projection: promote=True, but {plan.template} has no promoted twin: "
+                f"{refusal}"
+            )
+    elif not k1_promote_blocks(arch, key, segment_blocks(plan)) or _promote_exempt(
+        arch, plan
+    ):
+        return plan
+    promoted = dataclasses.replace(
+        plan,
+        template=instance_symbol(key[:-1] + (K1_PROMOTE_BLOCKS,)),
+        promote_blocks=K1_PROMOTE_BLOCKS,
+    )
+    try:
+        check_stream_k_plan(promoted, arch)
+    except ValueError:
+        if forced:
+            raise
+        return plan
+    return promoted
 
 
 # Knob variants the registry fallback tries, nearest first (see ``cake_dense_gemm_det_train_projection_plan``): the plain TMA L2
@@ -3991,9 +4460,10 @@ def _template_knobs(
     row's rule) or the kernel tests' 3 parts on 128-row / 2 on 64-row tiles (``_skf`` = its tail-first order,
     ``_lw`` = the load-warp prelude form, ``_mg`` = the whole-tile tile resolve, ``_sw<n>`` = the paced output stores,
     ``_ks<P>`` = the serpentine K walk - an ``instance_key`` field the planner reads from the rule only,
+    ``_kc128`` = ``promote=True``, the promoted twin, and ``promote=False`` without the token,
     ``_w8r`` / ``_w8rs`` / ``_w8`` = the eight-warp CTA form); a single-CTA program leaves ``pro`` to
     the planner (``instance_key`` refuses a forced one).  ``None`` for a symbol outside the family or carrying a token
-    the planner never emits (``_box<rows>``, diagnostics)."""
+    the planner never emits (``_box<rows>``, a promoted chunk other than :data:`K1_PROMOTE_BLOCKS`, diagnostics)."""
     tokens = _template_tokens(template)
     if tokens is None or len(tokens) < 2:
         return None
@@ -4030,6 +4500,7 @@ def _template_knobs(
         sw=0,
         form="",
         kser=0,
+        promote=False,
     )
     for token in tokens[1:]:
         if token in ("f32", "t"):
@@ -4096,6 +4567,8 @@ def _template_knobs(
             knobs["sw"] = int(m[1])
         elif m := re.fullmatch(r"ks(\d+)", token):
             knobs["kser"] = int(m[1])
+        elif token == f"kc{K1_PROMOTE_BLOCKS}":
+            knobs["promote"] = True
         elif m := re.fullmatch(r"pro(\d+)", token):
             knobs["pro"] = int(m[1])
         elif token in W8_FORMS:
@@ -4123,7 +4596,9 @@ def _registry_variants(
 ) -> tuple[dict[str, Any], ...]:
     """The knob sets of the generated programs of ``arch`` in the layout / output class and the CTA form of
     ``template``, nearest symbol first (:func:`_template_distance`, then the name); the batch-raster programs (``_bf``
-    / ``_bg<n>``) only for a batched row (a batch of one plans no batch raster)."""
+    / ``_bg<n>``) only for a batched row (a batch of one plans no batch raster).  A promoted twin (``_kc128``) is no
+    variant: the planner reaches it from its program (:func:`k1_promote_blocks`), so the variants leave ``promote`` to
+    the caller."""
     wanted = _template_tokens(template)
     if wanted is None:
         return ()
@@ -4137,8 +4612,15 @@ def _registry_variants(
         if bool(_template_form(tokens)) != bool(_template_form(wanted)):
             continue  # the eight-warp CTA form is a class of its own (its programs fall back onto each other only)
         knobs = _template_knobs(candidate, sk_exact_parts=sk_exact_parts)
-        if knobs is None or (knobs["batch_group"] and not batched) or knobs.pop("kser"):
-            continue  # a ``_ks<P>`` program is planned from its rule only (``kser`` is not a planner keyword)
+        if (
+            knobs is None
+            or (knobs["batch_group"] and not batched)
+            or knobs.pop("kser")
+            or knobs.pop("promote")
+        ):
+            # a ``_ks<P>`` program is planned from its rule only (``kser`` is not a planner keyword), a ``_kc128`` twin
+            # from its program
+            continue
         ranked.append((_template_distance(wanted, tokens), candidate, knobs))
     ranked.sort(key=lambda item: item[:2])
     return tuple(knobs for _, _, knobs in ranked)
@@ -4837,11 +5319,12 @@ def cake_dense_gemm_det_train_projection_prepare(
     stt: Optional[bool] = None,
     pro: Optional[int] = None,
     form: Optional[str] = None,
+    promote: Optional[bool] = None,
     enable_pdl: Optional[bool] = None,
 ) -> CakeDenseGemmDetProjectionLaunch:
     """Validate one binding, plan it for the device and prepare its launch (the only
     allocations of the K1 backend: the stream-K partial slabs and the slice counters).  See the module docstring for the view contract; the keyword
-    knobs default to the Cake launcher's choices.  ``enable_pdl`` (default: the device supports it) makes every
+    knobs default to the Cake launcher's choices (``promote``: the planner's promoted chunks).  ``enable_pdl`` (default: the device supports it) makes every
     ``launch()`` a programmatic dependent launch: the program waits for the preceding kernel before its first global
     access and lets the next one launch at its entry."""
     knobs: dict[str, Any] = dict(
@@ -4878,6 +5361,7 @@ def cake_dense_gemm_det_train_projection_prepare(
         stt=stt,
         pro=pro,
         form=form,
+        promote=promote,
     )
     plan, a_desc, b_desc, O3, arch, module_name = _k1_plan(
         A, B, out, transposed_out=transposed_out, knobs=knobs

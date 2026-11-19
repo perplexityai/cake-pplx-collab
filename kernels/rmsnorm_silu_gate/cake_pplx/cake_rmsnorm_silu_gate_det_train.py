@@ -50,11 +50,19 @@ where the naive implementation's is 0.  No output has an error budget of its
 own.  The forward's CTAs each walk at most two
 blocks of 16 rows, and the backward's CTAs, past one wave, claim chunks of row
 blocks from a counter, so a CTA that becomes resident late takes only the
-blocks left.  No kernel waits for another CTA or grid.  Beside a kernel on
-another stream that holds ``k`` of the ``N`` SMs, the forward takes at most
-``N / (N - k)`` times its time alone, plus the share of one CTA's row blocks in
-the call, plus 0.02 (a CTA whose slot that kernel holds walks all of its blocks
-once it starts).
+blocks left.  A backward with ``compute_grad_weight=False`` runs a program
+built without the weight gradient: ``dx`` and ``dz`` are the bits of the
+call that computes it.  On SM100 and SM103 up to 768 rows per SM, and on
+SM107 except where the look-ahead program runs, its CTAs walk their row
+blocks with no claim, no ticket and no workspace: 128-thread CTAs over
+8-row blocks where ``grad_out``, ``x`` and ``z`` hold packed rows (head
+stride 128, token stride ``H * 128``, more than one token), 256-thread CTAs
+over 16-row blocks on other layouts; on SM100 and SM103 past that cut the
+claimed program runs on the workspace.  No kernel waits for another CTA or grid.
+Beside a kernel on another stream that holds ``k`` of the ``N`` SMs, the
+forward takes at most ``N / (N - k)`` times its time alone, plus the share of
+one CTA's row blocks in the call, plus 0.02 (a CTA whose slot that kernel
+holds walks all of its blocks once it starts).
 
 Mode and dispatch rules:
 
@@ -203,7 +211,7 @@ def cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes(
     """Bytes of the caller-owned backward workspace for ``rows`` rows
     (``T * H``) on ``device``: the weight gradient's fixed-point digit
     counters, one flag word a column, the arrival ticket and the claim counter,
-    18952 bytes whatever ``rows``.
+    18952 bytes whatever ``rows`` and ``compute_grad_weight``.
 
     Parameters
     ----------
@@ -326,7 +334,13 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         Add the gradient to ``grad_weight``'s current value exactly, before
         the rounding (needs ``grad_weight``).
     compute_grad_weight : bool
-        ``False`` skips the weight-gradient result and returns ``None`` for it.
+        ``False`` returns ``None`` for the weight gradient and runs a program
+        built without it, whose ``dx`` and ``dz`` are the bits of the call
+        that computes it.  On SM100 and SM103 up to 768 rows per SM, and on
+        SM107 except where the look-ahead program runs, that program reads and
+        writes no workspace (a ``workspace`` passed is checked and left as it
+        is); otherwise it takes the arrival ticket and claims blocks on the
+        workspace, as the call that computes the weight gradient.
     workspace : torch.Tensor, optional
         Zero-filled FP32 workspace of at least
         :func:`cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes` bytes,

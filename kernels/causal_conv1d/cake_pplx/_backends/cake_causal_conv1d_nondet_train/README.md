@@ -110,7 +110,8 @@ The forward runs two programs:
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and token count. It takes each of the rank's fragments as a
    document of its own, launches its record's full co-resident grid and takes its token chunks from zeroed counters,
-   as the single-rank forward does.
+   as the single-rank forward does. It launches without programmatic dependent launch (its `enable_pdl` launch scalar
+   is 0), in every mode.
 2. The history-row program (`kcp_fwd_halo`) runs after the exchange's wait. It writes `y` of the first
    `min(3, len)` rows of every fragment with a history row again, from the received pool, with the `kcp_fwd`
    program's instructions, the instructions of the one-launch forward (the `kcp_fwd` program with the context's
@@ -201,8 +202,25 @@ barrier.
 
 Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
-package keeps one zeroed buffer per capture and stream. When CUDA's capture
-id is not available, each captured call gets its own buffer.
+package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
+is destroyed). Only eager calls that omit `workspace=` zero these buffers, the forward's and the backward's
+separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory keeps no
+new buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
+the `_POOL_DEPTH` ready buffers, or needing more, or begun before their zero fills completed
+(`CUDAGraph.capture_begin` right after such an eager call with no synchronization; `torch.cuda.graph`
+synchronizes first), zeroes a buffer per call (a fill node each). So does every captured call when CUDA's capture id is not available. The package keeps no reference to
+such a buffer after the call. The package allocates the pre-zeroed buffers and its per-stream workspaces from a
+memory pool of its own (`torch.cuda.MemPool`, one per device), so a CUDA Graph tree's warm-up does not take them into
+the tree's private pool. Memory the package frees stays cached in that pool (a replaced per-stream buffer, a dropped
+pre-zeroed buffer) and is never returned to the caching allocator's other pools. Per device and kind (forward
+counters, backward accumulators) the live pre-zeroed buffers are at most `_POOL_DEPTH` idle ones of the pool's size
+(the largest need of an eager zeroing that succeeded), those live graphs hold, and those graphs released since the
+last refill: a released buffer returns to the package only at the next eager refill, also after
+`cake_causal_conv1d_nondet_train_kcp_graph_cache_clear()`. A kind whose refill failed (other than out of memory)
+refills no more: its idle buffers stay allocated for the life of the process, and a buffer its graphs held returns,
+once released, only at a refill of the device's other kind, which keeps it idle or drops it; a dropped buffer's
+memory stays cached in the package's pool. Without `torch.cuda.MemPool` the package keeps no pre-zeroed buffers and
+every captured call zeroes its buffer itself.
 
 ### Rank agreement
 

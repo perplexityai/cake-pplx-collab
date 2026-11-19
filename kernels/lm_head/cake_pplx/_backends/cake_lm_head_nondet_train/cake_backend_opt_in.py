@@ -134,6 +134,9 @@ from .cake_backend import (
     _dx_keys,
     _dx_slab_sum_slots,
     _dx_slab_sum_values,
+    RLAB_ZERO_STAGE,
+    _rlab_zero,
+    _with_rlab_zero,
     _resolve_dx_rule,
     _layout,
     _rule_key,
@@ -711,6 +714,7 @@ def _save_row_grad(values: dict[str, Any]) -> None:
 HOST_STAGES: dict[str, Callable[[dict[str, Any]], None]] = {
     "gather_rows": _gather_rows,
     "save_row_grad": _save_row_grad,
+    RLAB_ZERO_STAGE: _rlab_zero,
 }
 
 
@@ -1061,8 +1065,8 @@ def memory_plan(
     dx_out = live(2 * T * H) if need_dx else 0
     dw_out = live(2 * V * H)
     rowvec = (
-        live(4 * T, 4) + live(4 * R, 8)
-    )  # the O(T) vectors (16 T + 32 R bytes): labels, mask, scan, index, lse, logp, d, ...
+        live(4 * T, 4) + live(4 * R, 9)
+    )  # the O(T) vectors (16 T + 36 R bytes): labels, mask, scan, index, lse, logp, d, label residuals, ...
     xc = (
         live(2 * T * H) if x_copy and not compact else 0
     )  # the contiguous copy of X the chunk loop reads
@@ -1098,14 +1102,15 @@ def memory_plan(
 
     def block(vb: int) -> int:
         """One recompute block: the gathered rows, the block's ``dz`` and statistics, its FP32 accumulator (a
-        multi-chunk call) and the block-shifted labels (with their temporary)."""
+        multi-chunk call), the block-shifted labels (with their temporary) and the ``dz`` arm's scratch label
+        residuals (:func:`_dw_vocab_blocks`)."""
         return (
             live(2 * Cr * H)
             + live(2 * Cr * vb)
             + live(8 * Cr * -(-vb // tile))
             + (live(4 * vb * H) if n > 1 else 0)
             + live(8 * R)
-            + live(4 * R)
+            + live(4 * R, 2)
         )
 
     if entry == "loss":
@@ -1280,6 +1285,9 @@ def stage_values(
     caller's ``[T]`` operand ``t[index + "_full"]`` into ``t[index]``.
     """
     p, g = plan.problem, plan.geometry
+    if stage == RLAB_ZERO_STAGE:
+        # the host step ahead of the call's first row-gradient producer (:func:`.cake_backend._with_rlab_zero`)
+        return {"rlab": t["rlab"]}
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     values.update(
         T=int(plan.rows),
@@ -1396,7 +1404,8 @@ def stage_values(
             # the caller's ``[T]`` ``dlogp`` at ``d_in[d_off + r]`` (the operands ``row_grad`` reads)
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0))
+            # ... and stores each row's FP32 label residual at ``rlab[row0 + r]``
+            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0), rlab=t["rlab"])
     elif base in DX_BASES:
         _dx_values(stage, t, plan, index, values, dz_chunk)
     elif stage in DX_SLAB_SUM_STAGES:
@@ -1490,6 +1499,7 @@ def stage_values(
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if external else t["d"],
+            rlab=t["rlab"],  # each row's FP32 label residual, at ``rlab[row0 + r]``
             d_off=int(row0) if external else 0,
         )
     else:
@@ -1537,6 +1547,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
+    if stage == RLAB_ZERO_STAGE:
+        return stage_values(stage, t, plan, index)
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     if stage == "gather_rows":
         if isinstance(index, str):
@@ -1575,7 +1587,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         if base in (LOGPROB_DZ_STAGE, LOGPROB_LBL_STAGE):
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"])
+            values.update(lse=t["lse"], d_in=t["d_in"], rlab=t["rlab"])
     elif base in DX_BASES:
         _dx_slots(stage, t, plan, index, values)
     elif stage in DX_SLAB_SUM_STAGES:
@@ -1620,6 +1632,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if p.entry == "logprob" else t["d"],
+            rlab=t["rlab"],
         )
     else:
         return stage_values(stage, t, plan, index)
@@ -1636,6 +1649,8 @@ def _slot_values_temperature(
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
+    if stage == RLAB_ZERO_STAGE:
+        return stage_values(stage, t, plan, index)
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     if stage == "gather_rows":
         if isinstance(index, str):
@@ -1679,7 +1694,7 @@ def _slot_values_temperature(
         if base in (LOGPROB_DZ_STAGE, LOGPROB_LBL_STAGE):
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"])
+            values.update(lse=t["lse"], d_in=t["d_in"], rlab=t["rlab"])
         if tau_rows is not None:
             values.update(temperature=tau_rows)
     elif base in DX_BASES:
@@ -1728,6 +1743,7 @@ def _slot_values_temperature(
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if p.entry == "logprob" else t["d"],
+            rlab=t["rlab"],
         )
         if tau_rows is not None:
             values.update(temperature=tau_rows)
@@ -1767,7 +1783,7 @@ def forward_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 keys.append(
                     (plan.dw_acc_stage(index), index)
                 )  # a deferred last chunk runs in the backward (cast_keys)
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -1801,7 +1817,7 @@ def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 keys.append(
                     (plan.dw_acc_stage(index), index)
                 )  # a deferred last chunk runs in the backward (cast_keys)
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -2218,7 +2234,9 @@ def prepare_lm_head_loss(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2412,12 +2430,22 @@ def prepare_lm_head_loss(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -2428,6 +2456,11 @@ def prepare_lm_head_loss(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -2654,7 +2687,9 @@ def prepare_lm_head_loss_temperature(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2874,12 +2909,22 @@ def prepare_lm_head_loss_temperature(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -2890,6 +2935,11 @@ def prepare_lm_head_loss_temperature(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -3187,13 +3237,18 @@ class _Binding:
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         for key, launch in runner.launches.items():
             if keep is None or key in keep:
-                _check_slot_values(key, t, plan, [name for _, name in launch.slots])
+                _check_slot_values(
+                    key, t, plan, [name for _, name in launch.slots], formed.get(key)
+                )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
-                _check_slot_values(key, t, plan, ["src", "idx", "out"])
+                _check_slot_values(key, t, plan, ["src", "idx", "out"], formed.get(key))
         early = forward_early_keys(plan)
         split = next(
             (i for i, key in enumerate(early) if _reads_labels(key[0])), len(early)
@@ -3396,6 +3451,8 @@ class _Binding:
                     )
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
+            if plan.need_dx or plan.need_dw:
+                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -3447,6 +3504,8 @@ class _Binding:
         else:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
+        if plan.need_dx or plan.need_dw:
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -3517,7 +3576,10 @@ class _TemperatureBinding(_Binding):
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         tau = plan.problem.temperature
         slot_values = _slot_values_temperature if tau else _slot_values
         full_values = stage_values_temperature if tau else stage_values
@@ -3530,11 +3592,18 @@ class _TemperatureBinding(_Binding):
                     [name for _, name in launch.slots],
                     slot_values,
                     full_values,
+                    formed.get(key),
                 )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
                 _check_slot_values_temperature(
-                    key, t, plan, ["src", "idx", "out"], slot_values, full_values
+                    key,
+                    t,
+                    plan,
+                    ["src", "idx", "out"],
+                    slot_values,
+                    full_values,
+                    formed.get(key),
                 )
         early = forward_early_keys(plan)
         split = next(
@@ -3641,6 +3710,8 @@ class _TemperatureBinding(_Binding):
                     )
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
+            if plan.need_dx or plan.need_dw:
+                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -3694,6 +3765,8 @@ class _TemperatureBinding(_Binding):
         else:
             t["d_in"] = dlogp
         self._scratch(t, hidden)
+        if plan.need_dx or plan.need_dw:
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -3855,10 +3928,12 @@ class BindingCache:
 BINDING_CACHE = BindingCache()
 
 
-def _check_slot_values(key, t: dict[str, Any], plan: Plan, names) -> None:
-    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``."""
+def _check_slot_values(key, t: dict[str, Any], plan: Plan, names, full=None) -> None:
+    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``
+    (``full``: the host values :func:`stage_values` formed for it, when they are already at hand)."""
     fast = _slot_values(key[0], t, plan, key[1])
-    full = stage_values(key[0], t, plan, key[1])
+    if full is None:
+        full = stage_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -3873,11 +3948,14 @@ def _check_slot_values_temperature(
     names,
     slot_values=_slot_values,
     full_values=stage_values,
+    full=None,
 ) -> None:
     """:func:`_slot_values` (or the binding's ``slot_values``) binds what :func:`stage_values` (or the binding's
-    ``full_values``) binds for the host values ``names`` of launch ``key``."""
+    ``full_values``) binds for the host values ``names`` of launch ``key`` (``full``: the host values ``full_values``
+    formed for it, when they are already at hand)."""
     fast = slot_values(key[0], t, plan, key[1])
-    full = full_values(key[0], t, plan, key[1])
+    if full is None:
+        full = full_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -5166,6 +5244,8 @@ def _dw_vocab_blocks(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     dummy = _device_constants(index)["f32_dummy"]
+    # the ``dz`` arm's FP32 label residuals: a scratch of this recompute, never the call's ``rlab``
+    rlab = torch.empty((int(plan.rows),), dtype=torch.float32, device=device)
     g = (
         _unit_scale(device)
         if grad is None
@@ -5231,6 +5311,7 @@ def _dw_vocab_blocks(
                 labels=lb,
                 lse=lse_c,
                 d_in=d_c,
+                rlab=rlab,
                 rows_c=int(rows_c),
                 row0=int(row0),
                 d_off=int(row0),
@@ -5381,6 +5462,8 @@ def _dw_vocab_blocks_temperature(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     dummy = _device_constants(index)["f32_dummy"]
+    # the ``dz`` arm's FP32 label residuals: a scratch of this recompute, never the call's ``rlab``
+    rlab = torch.empty((int(plan.rows),), dtype=torch.float32, device=device)
     g = (
         _unit_scale(device)
         if grad is None
@@ -5446,6 +5529,7 @@ def _dw_vocab_blocks_temperature(
                 labels=lb,
                 lse=lse_c,
                 d_in=d_c,
+                rlab=rlab,
                 rows_c=int(rows_c),
                 row0=int(row0),
                 d_off=int(row0),

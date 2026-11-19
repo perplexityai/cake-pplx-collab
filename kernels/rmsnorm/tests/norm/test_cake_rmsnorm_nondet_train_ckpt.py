@@ -22,21 +22,24 @@ buffer (strides ``(12288, 512, 1)``) and the contiguous key view ``[T, 4, 256]``
 share one ``w[256]``, at irregular and large token counts (1 to 65536 tokens, up
 to 1.5 M rows) and at token counts whose rows fall in every backward window of
 the device's H=256 route (the window form -- single kernel or deterministic pair
--- is read from the registry per case).  Each case checks ``y`` / ``rstd`` /
-``dx`` / ``dw`` against FP64, the launched records against the window's, ``dx``
-bitwise equal to the 2-D call on a contiguous copy of the collapsed rows, a few
-repeats (``dx`` stable, ``dw`` within the budget, the workspace at rest).
+-- is read from the registry per case).  Each case judges ``y`` / ``rstd`` /
+``dx`` / ``dw`` against the naive PyTorch BF16 implementation over 32 random
+inputs (their errors against an FP64 oracle; no tolerance:
+``tests/norm/test_helpers/cake_rmsnorm_train_reference.py``), checks the
+launched records against the window's, ``dx`` bitwise equal to the 2-D call on
+a contiguous copy of the collapsed rows and a few repeats on the case's own
+input (``dx`` stable, every repeat's ``dw`` judged, the workspace at rest).
 
 Checkpointing (``torch.utils.checkpoint``, ``use_reentrant=False``): the
 replayed forward of the per-head views, H=5120 (2-D and an N-D ``[B, S, H]``
 input) and the residual H=6144 route gives the same ``y`` and input gradients
 bit for bit as the plain autograd call, with the kernel's FP32 ``dw`` (not
-bitwise reproducible) at the deterministic budget; checkpointed micro-batches
+bitwise reproducible) judged against the naive tier; checkpointed micro-batches
 sharing one weight accumulate into existing ``.grad`` tensors exactly as
 autograd adds them; and a checkpointed forward keeps nothing on the device
-beyond its outputs (measured with ``torch.cuda.memory_allocated``; the plain
-forward also keeps the FP32 ``rstd``), while the backward leaves only the
-gradients.
+beyond its outputs (counted in bytes requested from the CUDA caching
+allocator; the plain forward also keeps the FP32 ``rstd``), while the backward
+leaves only the gradients.
 
 This suite imports only this package (through ``tests.cake.test_helpers.cake_package``);
 it runs unchanged against a vendored copy with or without the deterministic
@@ -67,9 +70,6 @@ VIEWS = {"query": 24, "key": 4}
 # Irregular and large token counts of the per-head views (rows = tokens * heads).
 VIEW_TOKENS = (1, 7, 1000, 4097, 16385, 65536)
 VIEW_REPEATS = 3
-# Retained device memory beyond the outputs: the caching allocator rounds every
-# block up to 512 bytes.
-ALLOCATOR_SLACK = 2048
 
 
 def _device() -> torch.device:
@@ -157,11 +157,12 @@ def _records(hidden: int, residual: bool, w: str, rows: int, kind: str = "bwd"):
     return ref.window_records(loader, _arch(), hidden, kind, residual, w, rows)
 
 
-def _generator(*keys) -> torch.Generator:
+def _generator(*keys, draw: int = 0) -> torch.Generator:
+    """The generator of draw ``draw`` of the case keyed ``keys`` (draw 0 is the case's own input)."""
     seed = SEED
     for key in keys:
         seed = (seed * 1_000_003 + int(key)) % (2**31 - 1)
-    return torch.Generator(device=_device()).manual_seed(seed)
+    return torch.Generator(device=_device()).manual_seed(ref.draw_seed(seed, draw))
 
 
 def _randn(shape, generator, scale: float = 1.0) -> torch.Tensor:
@@ -172,10 +173,12 @@ def _randn(shape, generator, scale: float = 1.0) -> torch.Tensor:
 
 
 def _weight(hidden: int, generator, w: str) -> torch.Tensor:
+    """``1 + 0.1 randn`` drawn in BF16; an FP32 weight holds that BF16 draw (the
+    naive tier reads it exactly, ``ref.naive_weight``)."""
     weight = 1.0 + 0.1 * torch.randn(
         hidden, dtype=torch.float32, device=_device(), generator=generator
     )
-    return weight.to(W_DTYPES[w])
+    return weight.to(torch.bfloat16).to(W_DTYPES[w])
 
 
 def _view(view: str, tokens: int, generator) -> torch.Tensor:
@@ -190,61 +193,63 @@ def _view(view: str, tokens: int, generator) -> torch.Tensor:
 # --------------------------------------------------------------------------- per-head views
 
 
-def _check_view(view: str, w: str, tokens: int, key: int) -> str:
-    """One per-head case (module docstring); returns its report line."""
+def _check_view(view: str, w: str, tokens: int, key: int, record, tag: str = "") -> str:
+    """One per-head case (module docstring) over its draws, the repeats on the
+    case's own input; returns its report line."""
     heads = VIEWS[view]
     rows = tokens * heads
-    generator = _generator(tokens, heads, w == "f32", key)
-    x = _view(view, tokens, generator)
-    weight = _weight(256, generator, w)
-    g = _randn(x.shape, generator)
     eps = EPS[256]
-    start = len(_LAUNCHED)
-    y, rstd = forward(x, weight, eps)
-    fwd_records = _LAUNCHED[start:]
     label = f"view={view} w={w} tokens={tokens} rows={rows}"
-    assert y.shape == x.shape and y.is_contiguous(), label
-    assert rstd.shape == x.shape[:-1] and rstd.dtype == torch.float32, label
-    assert fwd_records == _records(256, False, w, rows, "fwd"), (label, fwd_records)
-    y_ref, rstd_ref, _n = ref.reference_forward(x, weight, eps)
-    ref.assert_bf16_close(y, y_ref, f"y {label}")
-    del y_ref
-    assert ref.rel_l2(rstd, rstd_ref) <= ref.RSTD_REL_L2, f"rstd {label}"
     expected = _records(256, False, w, rows)
     form = ref.form(loader, expected)
-    dx_ref, dw_ref = ref.reference_backward(g, x, weight, rstd)
     ws = workspace_for(rows, 256, _device())
-    dx0 = dw0 = None
-    worst = worst_tol = spread = 0.0
-    for _ in range(VIEW_REPEATS):
+    check = ref.Draws(label, prefix=tag)
+    spread = 0.0
+    for draw in range(check.draws):
+        generator = _generator(tokens, heads, w == "f32", key, draw=draw)
+        x = _view(view, tokens, generator)
+        weight = _weight(256, generator, w)
+        g = _randn(x.shape, generator)
         start = len(_LAUNCHED)
-        dx, dw = backward(g, x, weight, rstd, workspace=ws)
-        assert _LAUNCHED[start:] == expected, (label, _LAUNCHED[start:], expected)
-        assert dx.shape == x.shape and dx.is_contiguous() and dw.shape == (256,)
-        if dx0 is None:
-            dx0, dw0 = dx, dw
-            ref.assert_bf16_close(dx, dx_ref, f"dx {label}")
-        assert torch.equal(dx, dx0), f"{label}: dx changed between launches"
-        error, tol = ref.assert_dw(dw, dw_ref, g, x, rstd, f"dw {label}", form)
-        worst, worst_tol = max(worst, error), max(worst_tol, tol)
-        spread = max(spread, (dw - dw0).abs().max().item())
-        assert ref.workspace_at_rest(loader, ws), f"{label}: workspace not at rest"
-    del dx_ref
-    # the same rows as a contiguous 2-D call: the same program, the same dx bits
-    dx2, _dw2 = backward(
-        g.reshape(rows, 256),
-        x.reshape(rows, 256).contiguous(),
-        weight,
-        rstd.reshape(rows),
-    )
-    assert torch.equal(dx0.reshape(rows, 256), dx2), (
-        f"{label}: dx differs from the 2-D call"
-    )
+        y, rstd = forward(x, weight, eps)
+        fwd_records = _LAUNCHED[start:]
+        assert y.shape == x.shape and y.is_contiguous(), label
+        assert rstd.shape == x.shape[:-1] and rstd.dtype == torch.float32, label
+        assert fwd_records == _records(256, False, w, rows, "fwd"), (label, fwd_records)
+        check.forward(draw, {"y": y, "rstd": rstd}, x, weight, eps)
+        del y
+        oracle = ref.oracle_backward(g, x, weight, rstd)
+        naive = ref.naive_backward(g, x, weight, rstd, eps)
+        dx0 = dw0 = None
+        for _ in range(VIEW_REPEATS if draw == 0 else 1):
+            start = len(_LAUNCHED)
+            dx, dw = backward(g, x, weight, rstd, workspace=ws)
+            assert _LAUNCHED[start:] == expected, (label, _LAUNCHED[start:], expected)
+            assert dx.shape == x.shape and dx.is_contiguous() and dw.shape == (256,)
+            if dx0 is None:
+                dx0, dw0 = dx, dw
+                check.add(draw, {"dx": dx}, oracle, naive)
+            assert torch.equal(dx, dx0), f"{label}: dx changed between launches"
+            check.add(draw, {"dw": dw}, oracle, naive)
+            spread = max(spread, (dw - dw0).abs().max().item())
+            assert ref.workspace_at_rest(loader, ws), f"{label}: workspace not at rest"
+        del oracle, naive
+        if draw == 0:
+            # the same rows as a contiguous 2-D call: the same program, the same dx bits
+            dx2, _dw2 = backward(
+                g.reshape(rows, 256),
+                x.reshape(rows, 256).contiguous(),
+                weight,
+                rstd.reshape(rows),
+            )
+            assert torch.equal(dx0.reshape(rows, 256), dx2), (
+                f"{label}: dx differs from the 2-D call"
+            )
+    check.check(record)
     program = loader.MODULES[expected[0]]["library"].rsplit("_", 1)[1][:8]
     return (
         f"VIEWS {_arch()} view={view} w={w} tokens={tokens} rows={rows} form={form} "
-        f"program={program} repeats={VIEW_REPEATS} dw_rel_l2={worst:.3e} "
-        f"dw_worst_tol_ratio={worst_tol:.3f} dw_max_spread={spread:.3e}"
+        f"program={program} repeats={VIEW_REPEATS} draws={check.draws} dw_max_spread={spread:.3e}"
     )
 
 
@@ -252,10 +257,10 @@ def _check_view(view: str, w: str, tokens: int, key: int) -> str:
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 @pytest.mark.parametrize("view", tuple(VIEWS))
 def test_per_head_views_at_irregular_and_large_token_counts(
-    view: str, w: str, tokens: int
+    view: str, w: str, tokens: int, record_property
 ) -> None:
     _skip_unless_route(256, w=w)
-    print(_check_view(view, w, tokens, key=1))
+    print(_check_view(view, w, tokens, key=1, record=record_property))
 
 
 def _window_tokens(heads: int, w: str) -> list[int]:
@@ -274,14 +279,18 @@ def _window_tokens(heads: int, w: str) -> list[int]:
 
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 @pytest.mark.parametrize("view", tuple(VIEWS))
-def test_per_head_views_in_every_backward_window(view: str, w: str) -> None:
+def test_per_head_views_in_every_backward_window(
+    view: str, w: str, record_property
+) -> None:
     """Token counts at both ends of every H=256 backward window of the device
     (e.g. the sm_107a key view where the route switches between the
     deterministic pair and the single kernel)."""
     _skip_unless_route(256, w=w)
     forms = []
     for tokens in _window_tokens(VIEWS[view], w):
-        line = _check_view(view, w, tokens, key=2)
+        line = _check_view(
+            view, w, tokens, key=2, record=record_property, tag=f"T={tokens} "
+        )
         print(line)
         forms.append(line.split(" form=")[1].split()[0])
     assert forms, "no window token count"
@@ -301,11 +310,11 @@ def _ckpt_cases():
                 yield pytest.param(name, w, tokens, id=f"{name}-{w}-T{tokens}")
 
 
-def _ckpt_inputs(name: str, w: str, tokens: int, key: int):
+def _ckpt_inputs(name: str, w: str, tokens: int, key: int, draw: int = 0):
     """``(hidden, residual, x, u, g, g_h, weight)`` of a checkpoint case: the
     per-head views, H=5120 ``[T, H]`` and ``[4, T / 4, H]``-like N-D inputs, the
     residual H=6144 route on ``[2, ceil(T / 2), H]``."""
-    generator = _generator(tokens, key, w == "f32", sum(map(ord, name)))
+    generator = _generator(tokens, key, w == "f32", sum(map(ord, name)), draw=draw)
     if name in VIEWS:
         x = _view(name, tokens, generator)
         hidden, residual = 256, False
@@ -354,88 +363,111 @@ def _autograd(xs, weight, eps, us, gs, g_hs, checkpointed: bool):
 
 
 @pytest.mark.parametrize(("name", "w", "tokens"), list(_ckpt_cases()))
-def test_checkpoint_replays_views_and_nd_inputs(name: str, w: str, tokens: int) -> None:
+def test_checkpoint_replays_views_and_nd_inputs(
+    name: str, w: str, tokens: int, record_property
+) -> None:
     """A checkpointed micro-batch (non-reentrant) gives the plain call's ``y``,
-    ``h_new`` and input gradients bit for bit; both kernel ``dw`` are at the
-    deterministic budget (and the autograd ``dw`` is the kernel's cast to the
-    weight dtype)."""
-    hidden, residual, x, u, g, g_h, weight = _ckpt_inputs(name, w, tokens, key=3)
+    ``h_new`` and input gradients bit for bit; the input gradient and both
+    kernel ``dw`` meet the naive BF16 tier over the draws (and the autograd
+    ``dw`` is the kernel's cast to the weight dtype)."""
+    hidden, residual, *_ = _ckpt_inputs(name, w, tokens, key=3)
     _skip_unless_route(hidden, residual, w)
     eps = EPS[hidden]
-    rows = x.numel() // hidden
-    outputs = forward(x, weight, eps, residual=u)
-    normalized, rstd = (outputs[2] if residual else x), outputs[1]
-    dx_ref, dw_ref = ref.reference_backward(g, normalized, weight, rstd, g_h=g_h)
-    form = ref.form(loader, _records(hidden, residual, w, rows))
-    label = f"ckpt {name} w={w} T={tokens} rows={rows}"
-    dws = {}
-    results = {}
-    for checkpointed in (True, False):
-        wa = weight.clone().requires_grad_(True)
-        start = len(_DW_BUFFERS)
-        results[checkpointed] = _autograd(
-            [x], wa, eps, [u], [g], [g_h], checkpointed=checkpointed
-        )[0]
-        launches = len(_DW_BUFFERS) - start
-        assert launches == len(_records(hidden, residual, w, rows)), (
-            f"{label}: {launches} backward module launches"
+    check = ref.Draws(f"ckpt {name} w={w} T={tokens}")
+    spread = 0.0
+    for draw in range(check.draws):
+        hidden, residual, x, u, g, g_h, weight = _ckpt_inputs(
+            name, w, tokens, key=3, draw=draw
         )
-        dw32 = _DW_BUFFERS[-1].clone()
-        ref.assert_dw(
-            dw32, dw_ref, g, normalized, rstd, f"{label} ckpt={checkpointed}", form
+        rows = x.numel() // hidden
+        outputs = forward(x, weight, eps, residual=u)
+        normalized, rstd = (outputs[2] if residual else x), outputs[1]
+        oracle = ref.oracle_backward(g, normalized, weight, rstd, g_h)
+        naive = ref.naive_backward(g, normalized, weight, rstd, eps, g_h)
+        form = ref.form(loader, _records(hidden, residual, w, rows))
+        label = f"ckpt {name} w={w} T={tokens} rows={rows}"
+        dws = {}
+        results = {}
+        for checkpointed in (True, False):
+            wa = weight.clone().requires_grad_(True)
+            start = len(_DW_BUFFERS)
+            results[checkpointed] = _autograd(
+                [x], wa, eps, [u], [g], [g_h], checkpointed=checkpointed
+            )[0]
+            launches = len(_DW_BUFFERS) - start
+            assert launches == len(_records(hidden, residual, w, rows)), (
+                f"{label}: {launches} backward module launches"
+            )
+            dw32 = _DW_BUFFERS[-1].clone()
+            check.add(draw, {"dw": dw32}, oracle, naive)
+            assert wa.grad.dtype == weight.dtype and torch.equal(
+                wa.grad, dw32.to(weight.dtype)
+            )
+            dws[checkpointed] = dw32
+        (outs_c, dx_c, du_c), (outs_p, dx_p, du_p) = results[True], results[False]
+        assert all(torch.equal(a, b) for a, b in zip(outs_c, outs_p, strict=True)), (
+            label
         )
-        assert wa.grad.dtype == weight.dtype and torch.equal(
-            wa.grad, dw32.to(weight.dtype)
-        )
-        dws[checkpointed] = dw32
-    (outs_c, dx_c, du_c), (outs_p, dx_p, du_p) = results[True], results[False]
-    assert all(torch.equal(a, b) for a, b in zip(outs_c, outs_p, strict=True)), label
-    assert dx_c.shape == x.shape and torch.equal(dx_c, dx_p), f"{label}: dx"
-    if residual:
-        assert torch.equal(du_c, du_p) and torch.equal(du_c, dx_c), f"{label}: du"
-    ref.assert_bf16_close(dx_c, dx_ref, f"dx {label}")
+        assert dx_c.shape == x.shape and torch.equal(dx_c, dx_p), f"{label}: dx"
+        if residual:
+            assert torch.equal(du_c, du_p) and torch.equal(du_c, dx_c), f"{label}: du"
+        check.add(draw, {"dx": dx_c}, oracle, naive)
+        spread = max(spread, (dws[True] - dws[False]).abs().max().item())
+        del oracle, naive
+    check.check(record_property)
     print(
-        f"CKPT {_arch()} {name} w={w} T={tokens} rows={rows} form={form} "
-        f"y_dx_bitwise=True dw_ckpt_vs_plain_max={(dws[True] - dws[False]).abs().max().item():.3e}"
+        f"CKPT {_arch()} {name} w={w} T={tokens} form={form} draws={check.draws} "
+        f"y_dx_bitwise=True dw_ckpt_vs_plain_max={spread:.3e}"
     )
 
 
 @pytest.mark.parametrize("w", tuple(W_DTYPES))
 @pytest.mark.parametrize("name", ("query", "h5120_nd", "res_h6144_nd"))
 def test_checkpointed_micro_batches_accumulate_into_existing_grads(
-    name: str, w: str
+    name: str, w: str, record_property
 ) -> None:
     """Three checkpointed micro-batches (different inputs, one shared weight leaf
     with a preset gradient) accumulate exactly as autograd adds: ``w.grad`` is the
-    preset plus each kernel ``dw`` (cast to the weight dtype) in order, and every
-    kernel ``dw`` is at the deterministic budget against its micro-batch's FP64
-    reference."""
-    cases = [_ckpt_inputs(name, w, 1000 + 37 * i, key=5 + i) for i in range(3)]
-    hidden, residual = cases[0][0], cases[0][1]
+    preset plus each kernel ``dw`` (cast to the weight dtype) in order; every
+    micro-batch's input gradient and kernel ``dw`` meet the naive BF16 tier over
+    the draws."""
+    hidden, residual, *_ = _ckpt_inputs(name, w, 1000, key=5)
     _skip_unless_route(hidden, residual, w)
     eps = EPS[hidden]
-    weight = cases[0][6]
-    preset = (_weight(hidden, _generator(hidden, 53), w) - 1.0).to(weight.dtype)
-    wa = weight.clone().requires_grad_(True)
-    wa.grad = preset.clone()
-    expected = preset.clone()
-    for index, (_h, _r, x, u, g, g_h, _w) in enumerate(cases):
-        rows = x.numel() // hidden
-        start = len(_DW_BUFFERS)
-        (outs, dx, du) = _autograd([x], wa, eps, [u], [g], [g_h], checkpointed=True)[0]
-        assert len(_DW_BUFFERS) - start == len(_records(hidden, residual, w, rows))
-        dw32 = _DW_BUFFERS[-1].clone()
-        outputs = forward(x, weight, eps, residual=u)
-        normalized, rstd = (outputs[2] if residual else x), outputs[1]
-        dx_ref, dw_ref = ref.reference_backward(g, normalized, weight, rstd, g_h=g_h)
-        form = ref.form(loader, _records(hidden, residual, w, rows))
-        ref.assert_dw(dw32, dw_ref, g, normalized, rstd, f"micro-batch {index}", form)
-        ref.assert_bf16_close(dx, dx_ref, f"micro-batch {index} dx")
-        expected = expected + dw32.to(weight.dtype)
-        assert torch.equal(wa.grad, expected), (
-            f"{name} w={w}: w.grad after micro-batch {index}"
+    checks = [
+        ref.Draws(f"{name} w={w} micro-batch {i}", prefix=f"micro-batch {i} ")
+        for i in range(3)
+    ]
+    for draw in range(ref.DRAWS):
+        cases = [
+            _ckpt_inputs(name, w, 1000 + 37 * i, key=5 + i, draw=draw) for i in range(3)
+        ]
+        weight = cases[0][6]
+        preset = (_weight(hidden, _generator(hidden, 53, draw=draw), w) - 1.0).to(
+            weight.dtype
         )
-    print(f"CKPT_ACCUM {_arch()} {name} w={w} micro_batches={len(cases)} exact=True")
+        wa = weight.clone().requires_grad_(True)
+        wa.grad = preset.clone()
+        expected = preset.clone()
+        for index, (_h, _r, x, u, g, g_h, _w) in enumerate(cases):
+            rows = x.numel() // hidden
+            start = len(_DW_BUFFERS)
+            (outs, dx, du) = _autograd(
+                [x], wa, eps, [u], [g], [g_h], checkpointed=True
+            )[0]
+            assert len(_DW_BUFFERS) - start == len(_records(hidden, residual, w, rows))
+            dw32 = _DW_BUFFERS[-1].clone()
+            outputs = forward(x, weight, eps, residual=u)
+            normalized, rstd = (outputs[2] if residual else x), outputs[1]
+            checks[index].backward(
+                draw, {"dx": dx, "dw": dw32}, g, normalized, weight, rstd, eps, g_h=g_h
+            )
+            expected = expected + dw32.to(weight.dtype)
+            assert torch.equal(wa.grad, expected), (
+                f"{name} w={w}: w.grad after micro-batch {index}"
+            )
+    ref.check_all(record_property, checks)
+    print(f"CKPT_ACCUM {_arch()} {name} w={w} micro_batches=3 exact=True")
 
 
 def _retained_cases():
@@ -447,10 +479,10 @@ def _retained_cases():
 @pytest.mark.parametrize(("name", "w"), list(_retained_cases()))
 def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> None:
     """Device memory held after a checkpointed forward is its outputs (``y`` and,
-    with a residual, ``h_new``) to the allocator's rounding: 0 MiB beyond them
-    (no ``rstd``, no workspace, no copy of an input).  The plain forward holds
-    the outputs and the FP32 ``rstd``.  After the backward and once the outputs
-    are dropped, only the gradients remain."""
+    with a residual, ``h_new``) and not one requested byte more (no ``rstd``, no
+    workspace, no copy of an input).  The plain forward holds the outputs and
+    the FP32 ``rstd``.  After the backward and once the outputs are dropped,
+    only the gradients remain."""
     tokens = 4097
     hidden, residual, x, u, g, g_h, weight = _ckpt_inputs(name, w, tokens, key=7)
     _skip_unless_route(hidden, residual, w)
@@ -470,7 +502,7 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
             return out if ut is not None else (out,)
 
         torch.cuda.synchronize()
-        base = torch.cuda.memory_allocated()
+        base = ref.requested_bytes(_device())
         if checkpointed:
             outs = torch.utils.checkpoint.checkpoint(
                 step, xa, wa, ua, use_reentrant=False
@@ -478,14 +510,16 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
         else:
             outs = step(xa, wa, ua)
         torch.cuda.synchronize()
-        held = torch.cuda.memory_allocated() - base
+        held = ref.requested_bytes(_device()) - base
         outputs_bytes = sum(o.untyped_storage().nbytes() for o in outs)
         beyond = held - outputs_bytes
-        torch.cuda.reset_peak_memory_stats()
-        peak_base = torch.cuda.memory_allocated()
+        peak_base = ref.requested_bytes(_device())
+        torch.cuda.reset_peak_memory_stats(_device())
         torch.autograd.backward(outs, (g, g_h) if residual else (g,))
         torch.cuda.synchronize()
-        backward_peak = torch.cuda.max_memory_allocated() - peak_base
+        backward_peak = (
+            torch.cuda.memory_stats(_device())["requested_bytes.all.peak"] - peak_base
+        )
         del outs
         _DW_BUFFERS.clear()
         torch.cuda.synchronize()
@@ -496,20 +530,24 @@ def test_checkpointed_forward_retains_only_its_outputs(name: str, w: str) -> Non
                 for t in grads
             }.values()
         )
-        left = torch.cuda.memory_allocated() - base - grads_bytes
+        left = ref.requested_bytes(_device()) - base - grads_bytes
         report[checkpointed] = (held, outputs_bytes, beyond, backward_peak, left)
         label = f"{name} w={w} rows={rows} checkpointed={checkpointed}"
+        # exact counts: requested bytes are not rounded to allocator blocks
         if checkpointed:
-            assert beyond <= ALLOCATOR_SLACK, (
+            assert beyond == 0, (
                 f"{label}: a checkpointed forward holds {beyond} bytes beyond its "
                 f"outputs ({outputs_bytes} bytes)"
             )
         else:
-            assert beyond <= 4 * rows + ALLOCATOR_SLACK, (
-                f"{label}: the forward holds {beyond} bytes beyond its outputs "
-                f"(the FP32 rstd is {4 * rows})"
+            assert beyond == 4 * rows, (
+                f"{label}: the forward holds {beyond} bytes beyond its outputs, "
+                f"not the FP32 rstd's {4 * rows}"
             )
-        assert left <= ALLOCATOR_SLACK, f"{label}: {left} bytes left after the backward"
+        assert left == 0, (
+            f"{label}: {left} bytes besides the gradients ({grads_bytes} bytes) "
+            f"after the backward"
+        )
         del xa, ua, wa, grads
     mib = 1 / (1 << 20)
     (

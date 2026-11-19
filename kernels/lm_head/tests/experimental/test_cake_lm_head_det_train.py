@@ -120,7 +120,7 @@ _STAGE_VALUES = {
     | set(COMMON_SCALARS)
     | {"num_vecs"}
     | (_GEMM_VALUES if stage.startswith("gemm") else set())
-    | ({"n_slabs"} if stage == "slab_sum" else set())
+    | ({"n_slabs", "row_vecs", "lr"} if stage == "slab_sum" else set())
     | ({"num_chunks"} if stage == cake_backend.ZERO_DLOGP_PARTITION_STAGE else set())
     | ({"row_vecs", "num_rows"} if stage == "scale_cast_scatter_bf16" else set())
     | (
@@ -130,6 +130,13 @@ _STAGE_VALUES = {
     )
     for stage, tensors in STAGE_TENSORS.items()
 }
+
+
+def _with_slab_sum(stages) -> tuple:
+    """``stages`` (an entry's :func:`stages_for_entry`) with the ``slab_sum`` kernel, in launch order: the stages of a
+    plan that computes dX, whose every chunk ends its dX rows with the slab sum (the fold of the rows' FP32 label
+    residuals, after the slab adds of a K-sliced chunk under the fused dX finalize)."""
+    return tuple(s for s in cake_jit.STAGES if s in stages or s == "slab_sum")
 
 
 def _device_supported() -> bool:
@@ -1001,8 +1008,10 @@ def test_workspace_layout_and_memory_rule():
         m["temporary"]["logits"] == 4096 * V * 2
         and m["temporary"]["lse"] == T * 4
         and m["temporary"]["logp"] == T * 4
+        and m["temporary"]["rlab"] == T * 4  # the row-gradient producers' FP32 label residuals
     )
     assert m["temporary_bytes"] == sum(m["temporary"].values())
+    assert "rlab" not in memory_report(T, H, V, C, need_dx=False, need_dw=False)["temporary"]
     assert m["accumulators"] == {"dX_acc": T * H * 4, "dW_acc": V * H * 4}
     assert m["outputs"] == {"loss": 4, "logp": 0, "dX": T * H * 2, "dW": V * H * 2}
     assert m["weights"] == {"W": V * H * 2, "X": T * H * 2}
@@ -1041,6 +1050,30 @@ def test_workspace_layout_and_memory_rule():
         )
         == workspace_layout(16231, V, C, entry="logprob")["total"]
     )
+
+
+def test_logprob_runner_counts_its_label_residuals_without_a_gradient():
+    """A log-probability runner allocates the FP32 label residuals ``rlab`` also when it computes no gradient (its
+    backward keys run a row-gradient producer), so its memory report counts them, and so do the memory reports of that
+    entry; a loss call without a gradient has none."""
+    T, C = 37, 16
+    inp = _host_inputs(T)
+    lp = prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        chunk_size=C,
+        entry="logprob",
+        need_dx=False,
+        need_dw=False,
+        backend="reference",
+    )
+    assert lp.tensors["rlab"].numel() == T and lp.memory["temporary"]["rlab"] == T * 4
+    for report in (memory_report, memory_report_temperature):
+        rep = report(T, H_HOST, V_HOST, C, entry="logprob", need_dx=False, need_dw=False)
+        assert rep["temporary"]["rlab"] == T * 4, report
+        assert rep["temporary_bytes"] == sum(rep["temporary"].values()), report
+        assert "rlab" not in report(T, H_HOST, V_HOST, C, need_dx=False, need_dw=False)["temporary"], report
 
 
 def test_grid_dims_holds_no_reference_to_the_host_values():
@@ -2039,6 +2072,7 @@ def test_make_plan_selects_the_rule_variants_per_chunk():
         "row_grad",
         "gemm_dx_s_tn256",
         "gemm_dx_s_split",
+        "slab_sum",
         "gemm_dw_acc_gn",
         "gemm_dw_cast_bf16_tma",
         "scale_cast_bf16",
@@ -3310,7 +3344,7 @@ def test_stage_values_names():
     )
     plan, t = runner.plan, runner.tensors
     assert plan.chunks == ((0, 16), (16, 16), (32, 5)) and plan.chunks[-1][1] == T % C
-    assert runner.stages == stages_for_entry("loss", fuse_dw_cast=False)
+    assert runner.stages == _with_slab_sum(stages_for_entry("loss", fuse_dw_cast=False))
     assert runner.forward_order[:2] == (("gemm_logits", 0), ("row_finalize", 0))
     assert runner.backward_order == (
         ("scale_cast_bf16", "dx"),
@@ -3426,7 +3460,7 @@ def test_stage_values_names():
         backend="reference",
         fuse_dw_cast=False,
     )
-    assert lp.stages == stages_for_entry("logprob", fuse_dw_cast=False) and (
+    assert lp.stages == _with_slab_sum(stages_for_entry("logprob", fuse_dw_cast=False)) and (
         lp.dlogp is lp.tensors["d_in"]
     )
     assert lp.forward_order == tuple(
@@ -4817,7 +4851,7 @@ def test_logprob_arm_plan_keys():
     assert len(sides) == 2 and all(p > min(forks) for p in sides)
     hidden = replace(arms, hidden_count=True, hidden_stats=False)
     rk = cake_backend.recompute_keys(hidden)
-    assert rk[:2] == (("gather_rows", "d_in"), ("row_grad", 0))
+    assert rk[:3] == (("gather_rows", "d_in"), ("rlab_zero", None), ("row_grad", 0))
     assert ("gemm_logits_dz", 0) not in rk and ("gemm_logits_dz", 1) in rk
     assert "row_grad" in hidden.stages
     with pytest.raises(ValueError, match="log-probability"):
@@ -5500,9 +5534,12 @@ def test_dx_finalize_switch_is_bitwise_on_the_reference_backend(objective, entry
 
 
 def test_dx_finalize_plan_keys():
-    """A plan with ``dx_finalize`` adds a sliced dX GEMM's slabs with the ``slab_sum`` kernel (one launch key in place
-    of the host ``dx_reduce`` step, registered in the plan's stages in launch order); ``dx_cast=False`` leaves the flat
-    dX cast out of the cast keys; the reference path never slices K, so it never plans the kernel."""
+    """Every chunk's dX rows end with the ``slab_sum`` kernel, which folds the rows' FP32 label residuals: right behind
+    the dX GEMM, adding a sliced GEMM's slabs, under ``dx_finalize``; behind the host ``dx_reduce`` step of a sliced
+    GEMM without it, as the fold alone (``n_slabs`` 0, as after a one-slice GEMM).  It is registered in the plan's
+    stages in launch order whenever the plan computes dX, and the call zeroes its label residuals once, right before
+    chunk 0's row gradient.  ``dx_cast=False`` leaves the flat dX cast out of the cast keys; the reference path never
+    slices K, so its slab sums are the fold alone."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
     for finalize in (False, True):
         plan = cake_backend.make_plan(
@@ -5525,14 +5562,17 @@ def test_dx_finalize_plan_keys():
         keys = cake_backend.forward_keys(plan)
         for i in range(plan.num_chunks):
             k = plan.dx_slices_of(i)
-            reduce = ("slab_sum" if finalize else "dx_reduce", i)
-            dx = (plan.dx_stage_of(i), i)
-            if k > 1:
-                assert reduce in keys and keys.index(reduce) == keys.index(dx) + 1
-                assert ("dx_reduce" if finalize else "slab_sum", i) not in keys
+            dx, slab = (plan.dx_stage_of(i), i), ("slab_sum", i)
+            if k > 1 and not finalize:
+                reduce = ("dx_reduce", i)
+                assert keys.index(reduce) == keys.index(dx) + 1
+                assert keys.index(slab) == keys.index(reduce) + 1
             else:
-                assert ("slab_sum", i) not in keys and ("dx_reduce", i) not in keys
-        assert ("slab_sum" in plan.stages) is finalize
+                assert ("dx_reduce", i) not in keys
+                assert keys.index(slab) == keys.index(dx) + 1
+        assert keys.count(("rlab_zero", None)) == 1
+        assert keys.index(("rlab_zero", None)) + 1 == keys.index(("row_grad", 0))
+        assert "slab_sum" in plan.stages
         assert list(plan.stages) == [s for s in cake_jit.STAGES if s in plan.stages]
         assert ("scale_cast_bf16", "dx") in cake_backend.cast_keys(plan)
     uncast = cake_backend.make_plan(
@@ -5560,7 +5600,7 @@ def test_dx_finalize_plan_keys():
         inp.X, inp.W, inp.labels, dx_finalize=False, **common
     )
     assert on.plan.dx_finalize and not off.plan.dx_finalize
-    assert "slab_sum" not in on.stages and on.stages == off.stages
+    assert "slab_sum" in on.stages and on.stages == off.stages
     assert ("scale_cast_bf16", "dx") in on.backward_order
     on.step(torch.tensor(3.0))
     off.step(torch.tensor(3.0))
@@ -5587,8 +5627,19 @@ def test_dx_finalize_plan_keys():
         and dx_acc.dtype == torch.float32
         and dw.dtype == torch.bfloat16
     )
-    with pytest.raises(ValueError, match="slab_sum"):
-        stage_values("slab_sum", on.tensors, on.plan, 0)
+    # a one-slice chunk's slab sum is the fold alone: no slab (the FP32 dummy stands in), the chunk's labels and label
+    # residuals, the head and the fold switch
+    for index, (row0, rows_c) in enumerate(on.plan.chunks):
+        v = stage_values("slab_sum", on.tensors, on.plan, index)
+        assert v["n_slabs"] == 0 and v["ws_slab"] == 0 and v["ws"] is on.tensors["f32_dummy"]
+        assert v["dx"].data_ptr() == on.tensors["dx_acc"][row0:].data_ptr()
+        assert tuple(v["dx"].shape) == (rows_c, H_HOST)
+        for name in ("labels", "rlab"):
+            assert v[name].data_ptr() == on.tensors[name][row0:].data_ptr(), name
+            assert tuple(v[name].shape) == (rows_c,), name
+        assert v["W"] is on.tensors["W"] and v["V"] == V_HOST and v["lr"] == 1
+        assert v["row_vecs"] == H_HOST // on.plan.geometry.cast_vec
+        assert v["num_vecs"] == rows_c * H_HOST // on.plan.geometry.cast_vec
     # S >= 2 on the host: the reference ``slab_sum`` over a 3-slice workspace is the ``dx_reduce`` add_ chain, bitwise
     gen = torch.Generator().manual_seed(SEED)
     rows_c, rows_ws = 37, 64
@@ -5787,7 +5838,9 @@ def test_fused_dw_cast_plan_and_stage_values():
     assert plan.fuse_dw_cast and plan.dw_deferred and plan.dw_acc_needed
     assert plan.last_chunk == (32, 5) and plan.dw_cast_stage == "gemm_dw_cast_bf16"
     assert not plain.plan.dw_deferred and plain.plan.dw_cast_stage == "scale_cast_bf16"
-    assert fused.stages == stages_for_entry("loss", fuse_dw_cast=True, num_chunks=3)
+    assert fused.stages == _with_slab_sum(
+        stages_for_entry("loss", fuse_dw_cast=True, num_chunks=3)
+    )
     # the forward accumulates the chunks before the last one; the backward runs the last chunk's fused GEMM
     assert ("gemm_dw_acc", 1) in fused.forward_order and (
         "gemm_dw_acc",
@@ -5839,7 +5892,9 @@ def test_fused_dw_cast_plan_and_stage_values():
     )
     assert one.plan.dw_deferred and not one.plan.dw_acc_needed and one.dw_acc is None
     assert "dw_acc" not in one.tensors and "gemm_dw_acc" not in one.stages
-    assert one.stages == stages_for_entry("loss", fuse_dw_cast=True, num_chunks=1)
+    assert one.stages == _with_slab_sum(
+        stages_for_entry("loss", fuse_dw_cast=True, num_chunks=1)
+    )
     assert (
         "dW_acc" not in one.memory["accumulators"]
         and one.memory["saved_dz_bytes"] == 37 * V_HOST * 2
@@ -6271,8 +6326,8 @@ def test_compacted_runner_binds_the_valid_rows():
         and torch.equal(runner.row_index, idx)
     )
     assert plan.chunks == plan_chunks(T_v, C) and runner.problem.num_rows == T
-    assert runner.stages == stages_for_entry(
-        "loss", fuse_dw_cast=False
+    assert runner.stages == _with_slab_sum(
+        stages_for_entry("loss", fuse_dw_cast=False)
     )  # the host gathers are not stages of the program
     # the row operands are gathered once per step, the chunk's X rows before each chunk
     assert runner.forward_order[:3] == (
@@ -6836,6 +6891,104 @@ def test_template_only_runner_never_launches():
             launch()
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeypatch):
+    """A binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot against the host
+    values the runner was prepared with (``runner.values``: :func:`stage_values` of its tensors, which its launches
+    bind) and forms none of them again; a runner value that is not the slot's view still fails the check.  The
+    template is a reference runner of a compacted plan marked ``cake``: it binds no launch, so a stand-in launch of
+    chunk 0's row gradient joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37)
+    runner = mod.prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        objective="ce",
+        loss_div=inp.loss_div,
+        chunk_size=16,
+        backend="reference",
+        compact_rows=True,
+    )
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    grad = ("row_grad", 0)
+    assert gathers and grad in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        grad: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "d", "rlab"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+    real = mod.stage_values
+
+    def counted(stage, t, plan, index, **kw):
+        formed.append((stage, index))
+        return real(stage, t, plan, index, **kw)
+
+    monkeypatch.setattr(mod, "stage_values", counted)
+    mod._Binding.from_runner(runner)
+    assert not [key for key in formed if key == grad or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (grad, "rlab")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._Binding.from_runner(runner)
+        runner.values[key] = kept
+
+
+def test_default_module_template_only_runner_takes_the_cake_backend():
+    """The default module's ``_template_only`` runners (the eager entry points' binding build, which binds the device's
+    constant cells) take the ``cake`` backend only, with and without a temperature."""
+    inp = _host_inputs(37)
+    for prepare in (prepare_lm_head_det_loss, prepare_lm_head_det_loss_temperature):
+        with pytest.raises(ValueError, match="template-only"):
+            prepare(
+                inp.X,
+                inp.W,
+                inp.labels,
+                chunk_size=16,
+                backend="reference",
+                _template_only=True,
+            )
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_slab_sum_slots_of_a_whole_tensor_chunk_form_no_view(module):
+    """The per-call slots of a slab sum (``_slot_values``, and the opt-in module's temperature form) bind what
+    ``stage_values`` binds -- the same address, shape, strides, dtype and device -- and, where the chunk's rows are all
+    of ``dX_acc`` / ``labels`` / ``rlab`` (a one-chunk plan), those tensors themselves rather than a view of them."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    slot_forms = [mod._slot_values]
+    if mod is opt_in:
+        slot_forms.append(mod._slot_values_temperature)
+    rows_of = (("dx", "dx_acc"), ("labels", "labels"), ("rlab", "rlab"))
+    same = cake_backend._same_view
+    inp = _host_inputs(37)
+    for chunk in (64, 16):
+        runner = mod.prepare_lm_head_det_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            objective="ce",
+            loss_div=inp.loss_div,
+            chunk_size=chunk,
+            backend="reference",
+        )
+        plan, t = runner.plan, runner.tensors
+        assert plan.num_chunks == (1 if chunk == 64 else 3)
+        whole = plan.num_chunks == 1
+        for i in range(plan.num_chunks):
+            full = mod.stage_values("slab_sum", t, plan, i)
+            for slots in slot_forms:
+                v = slots("slab_sum", t, plan, i)
+                for name in STAGE_TENSORS["slab_sum"]:
+                    assert same(v[name], full[name]), (chunk, i, name)
+                for name, rows in rows_of:
+                    assert (v[name] is t[rows]) is whole, (chunk, i, name)
+
+
 _ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),
@@ -6998,7 +7151,7 @@ def test_memory_plan_fused_ip():
         acc = blocks(4 * a * H) + blocks(4 * (V - a) * H)
         logits = blocks(2 * C * V)
         bufs = logits + blocks(8 * C * -(-V // tile)) + blocks(2 * C * H)
-        rowvec = blocks(4 * T, 4) + blocks(4 * R, 8)
+        rowvec = blocks(4 * T, 4) + blocks(4 * R, 9)  # the label residuals among the row vectors
         held = dxacc + acc + logits + rowvec
         phases = (
             dxacc + acc + bufs + rowvec,
@@ -7089,7 +7242,7 @@ def test_memory_plan_partial_ip():
         keep = blocks(4 * R)
         logits = blocks(2 * C * V)
         bufs = logits + blocks(8 * C * -(-V // tile)) + blocks(2 * C * H)
-        rowvec = blocks(4 * T, 4) + blocks(4 * R, 8)
+        rowvec = blocks(4 * T, 4) + blocks(4 * R, 9)  # the label residuals among the row vectors
         x_last = blocks(2 * r_last * H)
         block = (
             blocks(2 * C * H)
@@ -7097,7 +7250,7 @@ def test_memory_plan_partial_ip():
             + blocks(8 * C * -(-vb // tile))
             + blocks(4 * vb * H)
             + blocks(8 * R)
-            + blocks(4 * R)
+            + blocks(4 * R, 2)  # the shifted labels' temporary, the dz arm's scratch label residuals
         )
         held = dxacc + lower + upper + logits + rowvec + keep
         phases = (
@@ -7136,7 +7289,7 @@ def test_memory_plan_partial_ip():
             + blocks(8 * C * -(-vb // tile))
             + blocks(4 * vb * H)
             + blocks(8 * R)
-            + blocks(4 * R)
+            + blocks(4 * R, 2)  # the shifted labels' temporary, the dz arm's scratch label residuals
         )
         lp_phases = (
             dxacc + lower + upper + bufs + keep + rowvec,
@@ -7246,7 +7399,7 @@ def test_memory_plan_counts_the_allocator_blocks():
         recompute=False,
         geometry=g,
     )
-    last = blocks(2 * T * V) + blocks(2 * V * H) + blocks(4 * T, 4) + blocks(4 * T, 8)
+    last = blocks(2 * T * V) + blocks(2 * V * H) + blocks(4 * T, 4) + blocks(4 * T, 9)
     assert mp.form == "fused" and mp.predicted_bytes == last, (mp, last)
     assert mp.budget_bytes < 2 * T * V + 2 * V * H < mp.predicted_bytes and not mp.fits
 
@@ -7893,6 +8046,40 @@ def test_device_binding_scratch_binds_constant_cells(glm_weight):
     assert (
         tuple(t["f32_dummy"].shape) == (16,) and t["f32_dummy"].dtype == torch.float32
     )
+
+
+def test_device_template_runner_binds_constant_cells(glm_weight, monkeypatch):
+    """The runner an eager call prepares only to template its remembered binding (``_template_only``) binds the
+    device's constant cells (``unit_scale`` / ``f32_dummy``), as the binding's scratch does, and never launches; a
+    runner prepared without the switch fills cells of its own."""
+    _require_program(entry="loss")
+    inp = _device_inputs(4097, W=glm_weight)
+    kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=4096, backend="cake")
+    real = cake_backend.prepare_lm_head_det_loss
+    runners = []
+
+    def recording(*args, **kwargs):
+        runners.append((real(*args, **kwargs), kwargs.get("_template_only", False)))
+        return runners[-1][0]
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", recording)
+    with _cache(True) as cache:
+        cache.clear()
+        cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
+    assert [flag for _, flag in runners] == [True]
+    runner = runners[0][0]
+    constants = cake_backend._device_constants(runner.device_index)
+    assert runner._template_only
+    cells = ("unit_scale", "f32_dummy")
+    assert all(runner.tensors[name] is constants[name] for name in cells)
+    with pytest.raises(RuntimeError, match="never launches"):
+        runner.forward()
+    own = real(inp.X, inp.W, inp.labels, **kw)
+    assert not own._template_only
+    assert not any(own.tensors[name] is constants[name] for name in cells)
+    torch.cuda.synchronize()
+    assert own.tensors["unit_scale"].tolist() == [1.0]
+    assert not bool(own.tensors["f32_dummy"].any())
 
 
 def test_device_binding_cache_hits_are_bitwise_and_pin_nothing(glm_weight):
@@ -8585,11 +8772,12 @@ def test_device_dw_cast_tma_adversarial_old_sum_is_bitwise(glm_weight):
 
 
 def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
-    """The fused dX finalize on the generated program: ``dx_finalize=False`` (host ``add_`` chain, cast, zero fill,
-    ``index_copy_``) and ``True`` (``slab_sum`` + ``scale_cast_scatter_bf16``) give bitwise the same ``loss`` / ``logp`` /
-    ``dX`` / ``dW`` on both entries, with and without ignored rows (S >= 2: the chunk loops slice their dX GEMMs; S = 1:
-    the switch is a no-op); the fused path binds the slab kernel for the sliced chunks and launches the scatter once per
-    compacted dX output; the previous path binds neither."""
+    """The fused dX finalize on the generated program: ``dx_finalize=False`` (host ``add_`` chain, the fold-only
+    ``slab_sum``, cast, zero fill, ``index_copy_``) and ``True`` (``slab_sum`` with the slab adds +
+    ``scale_cast_scatter_bf16``) give bitwise the same ``loss`` / ``logp`` / ``dX`` / ``dW`` on both entries, with and
+    without ignored rows (S >= 2: the chunk loops slice their dX GEMMs; S = 1: the switch is a no-op); both paths bind
+    the slab kernel (every chunk's dX rows end with the fold of their FP32 label residuals), the fused path launches the
+    scatter once per compacted dX output and the previous path never."""
     _require_program(entry="loss")
     _require_program(entry="logprob")
     real_bind_all = cake_backend._bind_all
@@ -8605,22 +8793,6 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
             4097, seed=SEED + 49, device=CUDA, W=glm_weight, ignore_frac=ignore
         )
         compacted = int(inp.valid.sum()) < inp.T
-        # whether this device's plan slices some dX GEMM of the 4096-row chunk loop (the plan decides from the SM count)
-        probe = prepare_lm_head_det_loss(
-            inp.X,
-            inp.W,
-            inp.labels,
-            objective="ce",
-            loss_div=inp.loss_div,
-            chunk_size=4096,
-            backend="cake",
-            compact_rows=True,
-            dx_finalize=True,
-        )
-        expect_slabs = any(
-            probe.plan.dx_slices_of(i) > 1 for i in range(probe.plan.num_chunks)
-        )
-        del probe
         out = {}
         for env in ("0", "1"):
             switch = env == "1"
@@ -8659,12 +8831,12 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
                 torch.cuda.synchronize()
             slabs = bound.count("slab_sum")
             scatters = bound.count("scale_cast_scatter_bf16")
+            # every chunk's dX rows end with the slab sum (the label residual fold; the slab adds under the switch)
+            assert slabs > 0, bound
             if env == "0":
-                assert slabs == 0 and scatters == 0, bound
+                assert scatters == 0, bound
             else:
                 assert "dx_reduce" not in bound
-                if expect_slabs:
-                    assert slabs > 0, bound
                 # one scatter per compacted dX output: entry (a) autograd, entry (b), the explicit pair
                 assert scatters == (3 if compacted else 0), bound
             out[env] = res
@@ -8714,8 +8886,12 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
     plain = prepare_lm_head_det_loss(
         inp.X, inp.W, inp.labels, dx_finalize=False, **common
     )
-    assert "slab_sum" not in plain.stages and all(
+    assert "slab_sum" in plain.stages and all(
         ("dx_reduce", i) in plain.values for i in sliced
+    )
+    # without the switch every chunk's slab sum is the fold alone, after the host adds
+    assert all(
+        plain.values[("slab_sum", i)]["n_slabs"] == 0 for i in range(plain.plan.num_chunks)
     )
     plain.forward()
     torch.cuda.synchronize()
@@ -8749,6 +8925,151 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
         "scale_cast_scatter_bf16",
         "scale_cast_bf16",
     ]  # the eager scatter kernel, then the shipped flat cast
+
+
+def _fold_emulation(v: dict, rows: int) -> tuple[torch.Tensor, torch.Tensor]:
+    """The FP32 torch form of a slab sum over the host values ``v`` of its key, from snapshots taken before it runs:
+    the slabs added to the rows in slice order (none with ``n_slabs`` 0), then, on each row whose label ``y`` lies in
+    ``[0, V)`` and whose residual ``r`` is nonzero, ``A + r * f32(W[y])`` (the product exact: the kernel's ``fma``).
+    Returns the rows and the mask of the rows it folds."""
+    want = v["dx"].clone()
+    for s in range(int(v["n_slabs"])):
+        want = want + v["ws"][s, :rows]
+    y, r = v["labels"].long(), v["rlab"].clone()
+    fold = (r != 0) & (y >= 0) & (y < int(v["V"]))
+    w = v["W"].index_select(0, torch.where(fold, y, torch.zeros_like(y))).float()
+    return torch.where(fold[:, None], want + r[:, None] * w, want), fold
+
+
+def _check_label_residual(dz: torch.Tensor, rlab: torch.Tensor, labels: torch.Tensor, V: int, case) -> None:
+    """The producers' label residual on the BF16 ``dz`` rows they stored: on every row whose label lies in ``[0, V)``,
+    ``bf16(f32(dz[j, y]) + rlab[j]) == dz[j, y]`` (the residual is what the BF16 store dropped from the label column's
+    FP32 gradient); 0 on every other row."""
+    y = labels.long()
+    valid = (y >= 0) & (y < V)
+    col = dz.gather(1, torch.where(valid, y, torch.zeros_like(y))[:, None]).squeeze(1)
+    assert torch.equal((col.float() + rlab).bfloat16()[valid], col[valid]), case
+    assert torch.all(rlab[~valid] == 0), case
+
+
+def test_device_slab_sum_folds_the_label_residual(glm_weight):
+    """The generated ``slab_sum`` against an FP32 torch emulation (:func:`_fold_emulation`), bit for bit: the prepared
+    loss runner (4097 rows at chunk 4096: a K-sliced chunk and a one-row tail) stopped right before each chunk's
+    ``slab_sum`` key, under ``dx_finalize`` (the slab adds, then the fold) and without it (the host adds, then the fold
+    alone).  At that point the chunk buffer holds the chunk's ``dz``, whose label column and ``rlab`` give back the
+    FP32 gradient (:func:`_check_label_residual`)."""
+    _require_program(entry="loss")
+    inp = make_inputs(4097, seed=SEED + 52, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    V = int(glm_weight.shape[0])
+    for finalize in (True, False):
+        runner = prepare_lm_head_det_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            objective="ce",
+            loss_div=inp.loss_div,
+            chunk_size=4096,
+            backend="cake",
+            dx_finalize=finalize,
+        )
+        plan, t, order = runner.plan, runner.tensors, runner.forward_order
+        done, folded = 0, 0
+        for i, (row0, rows_c) in enumerate(plan.chunks):
+            pos = order.index(("slab_sum", i))
+            runner._run(order[done:pos])
+            torch.cuda.synchronize()
+            v = runner.values[("slab_sum", i)]
+            want, fold = _fold_emulation(v, rows_c)
+            _check_label_residual(
+                t["logits"][:rows_c], v["rlab"], v["labels"], V, (finalize, i)
+            )
+            runner._run(order[pos : pos + 1])
+            torch.cuda.synchronize()
+            assert torch.equal(v["dx"], want), (finalize, i)
+            folded += int(fold.sum())
+            done = pos + 1
+        runner._run(order[done:])
+        torch.cuda.synchronize()
+        assert folded > 0, finalize
+
+
+def test_device_logprob_arms_store_the_same_label_residual(glm_weight):
+    """The log-probability ``dz`` arm (``logprob_dz``) and ``row_grad`` store the same BF16 ``dz`` and the same FP32
+    label residuals bit for bit (signed zeros included) on a one-chunk backward, with ignored rows (``-100`` and other
+    negative labels) and labels at and beyond the last vocabulary column; the residuals meet
+    :func:`_check_label_residual`.  The arms' (and the hidden valid-row count's) ``dX`` equality in
+    ``test_device_logprob_arms_are_bitwise`` / ``test_device_hidden_count_switch_is_bitwise`` rests on it."""
+    _require_program(entry="logprob")
+    name, _ = cake_backend.record_for(CUDA)
+    if "gemm_logits_dz" not in set(cake_backend.registered_stages(name)):
+        pytest.skip("the registered program has no log-probability dz arm")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -7, V - 1, 0, V, V + 5, 2 * V, 2**40], device=CUDA)
+    for T, ignore in ((1500, 0.05), (1500, 0.0), (3100, 0.5)):
+        inp = make_inputs(T, seed=SEED + 90 + T, device=CUDA, W=glm_weight, ignore_frac=ignore)
+        labels = inp.labels.clone()
+        labels[: edge.numel()] = edge
+        out = {}
+        for arm in (True, False):
+            lp = prepare_lm_head_det_loss(
+                inp.X,
+                inp.W,
+                labels,
+                chunk_size=4096,
+                entry="logprob",
+                backend="cake",
+                dlogp=inp.dlogp,
+                logprob_dz=arm,
+                logprob_lbl=False,
+            )
+            assert lp.plan.num_chunks == 1 and bool(lp.plan.logprob_dz) == arm
+            lp.forward()
+            lp.backward()
+            torch.cuda.synchronize()
+            rows = lp.plan.rows
+            out[arm] = (
+                lp.tensors["logits"][:rows].clone(),
+                lp.tensors["rlab"][:rows].clone(),
+                lp.tensors["labels"][:rows].clone(),
+            )
+            del lp
+        case = (T, ignore)
+        assert torch.equal(out[True][0], out[False][0]), case
+        assert torch.equal(
+            out[True][1].view(torch.int32), out[False][1].view(torch.int32)
+        ), case
+        dz, rlab, rows_labels = out[True]
+        _check_label_residual(dz, rlab, rows_labels, V, case)
+        assert bool((rlab != 0).any()), case
+
+
+def test_reference_slab_sum_folds_the_label_residual():
+    """The reference ``slab_sum``'s fold (``lr = 1``): after the slab adds (none with ``n_slabs`` 0), each row whose
+    label lies in ``[0, V)`` and whose residual is nonzero gets ``A + r * f32(W[y])``; an ignored row, a label at or
+    beyond ``V`` and a zero residual keep the row's bits (``-0.0`` included); ``lr = 0`` folds nothing."""
+    gen = torch.Generator().manual_seed(SEED + 3)
+    rows, H, V = 7, 16, 9
+    W = torch.randn(V, H, generator=gen).bfloat16()
+    ws = torch.randn(2, 8, H, generator=gen)
+    base = torch.randn(rows, H, generator=gen)
+    base[6] = -0.0
+    labels = torch.tensor([3, -100, V, 0, 8, 2, 4])
+    rlab = torch.randn(rows, generator=gen) * 2.0**-9
+    rlab[6] = 0.0
+    for n_slabs in (0, 2):
+        want = base.clone()
+        for s in range(n_slabs):
+            want = want + ws[s, :rows]
+        added = want.clone()
+        for j in (0, 3, 4, 5):
+            want[j] = added[j] + rlab[j] * W[int(labels[j])].float()
+        for lr in (1, 0):
+            dx = base.clone()
+            cake_backend.ReferenceEngine.slab_sum(
+                dict(dx=dx, ws=ws, n_slabs=n_slabs, labels=labels, rlab=rlab, W=W, V=V, lr=lr)
+            )
+            expect = want if lr else added
+            assert torch.equal(dx.view(torch.int32), expect.view(torch.int32)), (n_slabs, lr)
 
 
 def test_device_hidden_count_kernels_match_torch(glm_weight):

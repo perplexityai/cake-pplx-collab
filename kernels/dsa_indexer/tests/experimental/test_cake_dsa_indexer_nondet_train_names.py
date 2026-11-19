@@ -47,13 +47,17 @@ CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # the backend objects the module forwards to carry the module's names
 FORWARDED = (
     "cake_dsa_indexer_nondet_train_topk",
+    "cake_dsa_indexer_nondet_train_topk_with_candidates",
+    "cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size",
     "cake_dsa_indexer_nondet_train_topk_workspace_size",
 )
 # the backend-internal names of this package: the deterministic package's with the mode word swapped
 INTERNAL = (
     "DSAIndexerNondetRunner",
     "plan_dsa_indexer_nondet_topk",
+    "plan_dsa_indexer_nondet_topk_with_candidates",
     "prepare_dsa_indexer_nondet_topk",
+    "prepare_dsa_indexer_nondet_topk_with_candidates",
     "validate_dsa_indexer_nondet_inputs",
 )
 # a read of torch's deterministic-algorithms setting
@@ -189,8 +193,11 @@ def test_only_the_alert_reads_torch_mode() -> None:
     assert callers == ["DSAIndexerNondetRunner.run", "_prepare_runner"]
     for name in (
         "prepare_dsa_indexer_nondet_topk",
+        "prepare_dsa_indexer_nondet_topk_with_candidates",
         "cake_dsa_indexer_nondet_train_topk_workspace_size",
+        "cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size",
         "plan_dsa_indexer_nondet_topk",
+        "plan_dsa_indexer_nondet_topk_with_candidates",
     ):
         assert "_alert_nondeterministic(" not in inspect.getsource(
             getattr(backend, name)

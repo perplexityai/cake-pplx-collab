@@ -131,12 +131,31 @@ _ENTRIES = {
     ),
     "cake_mhc_nondet_train_prepare": ("cake_mhc_det_train_prepare", ("X", "fn", "scale", "base")),
     "cake_mhc_nondet_train_finish": ("cake_mhc_det_train_finish", ("X", "B", "handle")),
+    # the pre handoff and the standalone collapse
+    "is_cake_mhc_nondet_train_handoff_supported": ("is_cake_mhc_det_train_handoff_supported", ("device", 5120)),
+    "cake_mhc_nondet_train_handoff_forward_prepare": (
+        "cake_mhc_det_train_handoff_forward_prepare",
+        ("X", "pre_in", "fn", "scale", "base"),
+    ),
+    "cake_mhc_nondet_train_handoff_backward_finish": (
+        "cake_mhc_det_train_handoff_backward_finish",
+        ("X", "dY", "dU", "pre_in", "dpre_next", "B", "fn", "scale", "base", "stats", "grad_stats"),
+    ),
+    "cake_mhc_nondet_train_handoff_prepare": (
+        "cake_mhc_det_train_handoff_prepare",
+        ("X", "pre_in", "fn", "scale", "base"),
+    ),
+    "cake_mhc_nondet_train_collapse_forward": ("cake_mhc_det_train_collapse_forward", ("X", "pre_in")),
+    "cake_mhc_nondet_train_collapse_backward": ("cake_mhc_det_train_collapse_backward", ("X", "pre_in", "dU")),
+    "cake_mhc_nondet_train_collapse": ("cake_mhc_det_train_collapse", ("X", "pre_in")),
 }  # fmt: skip
 # The backend objects the facade resolves on first access (the backend's own objects).
 _REEXPORTS = (
     "ARCHES",
     "SUPPORTED_COMPUTE_CAPABILITIES",
+    "CakeMHCNondetCollapseFunction",
     "CakeMHCNondetFinishFunction",
+    "CakeMHCNondetHandoffPrepareFunction",
     "CakeMHCNondetPrepareFunction",
     "cake_mhc_nondet_train_reset_workspace",
     "cake_mhc_nondet_train_route_key",

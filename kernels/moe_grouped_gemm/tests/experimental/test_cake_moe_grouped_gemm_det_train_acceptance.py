@@ -21,18 +21,21 @@ limitations under the License.
 #   fp32 ``dW``, fp32 ``main_grad`` accumulate on the fused route and on the composed
 #   route) repeats bit for bit over 5 launches into a zero-byte output and 5 into a
 #   ``FILL_BYTE`` output (the accumulate: 10 from its starting ``main_grad``, with
-#   ``-0.0`` and subnormals planted), while three other streams run device-to-device
+#   ``-0.0`` planted in the empty groups), while three other streams run device-to-device
 #   copies, pinned host copies and a GEMM.  The bits must equal those of a launch with
-#   no other stream running, and the fused accumulate's those of the composed one.
+#   no other stream running, and the fused accumulate's those of the composed one; a
+#   spot block of ``Y``, ``dX`` and ``dW`` is judged against the naive BF16 tier over
+#   ``cake_naive.DRAWS`` inputs (``det._judge_spot``).
 #   Group patterns span 1 to 32 experts: highly imbalanced, empty, one-row,
 #   non-tile-aligned and < 64-row groups.
 # * ``test_changing_offsets_cycle``: one prepared launch serves changing group
 #   offsets (the plan never reads them); cycling four layouts five times under the same
 #   traffic gives, for each layout, the bits of a fresh solo launch of that layout.
-# * ``test_error_vs_fp64_per_output``: the error of every output against an fp64
-#   reference on a sample of each group, within the package's existing budgets
-#   (bf16 ``1e-2 + 1e-2 |ref|`` per element, fp32 rel-L2 ``1e-4``).  The measured
-#   errors are recorded as test properties (``max_abs``, ``max_rel``, ``rel_l2``).
+# * ``test_error_vs_fp64_per_output``: every output on a sample of each group, judged
+#   against the naive BF16 tier over ``cake_naive.DRAWS`` inputs
+#   (``tests/cake/test_helpers/cake_moe_judge.py``): its error against the fp64 oracle
+#   in the L2 and the max norm, median and largest over the draws, at most
+#   ``cake_naive.NEAR_TIE`` times the tier's; no tolerance.
 # * ``test_checkpoint_replay_equals_saved_set``: a non-reentrant checkpoint's
 #   recompute gives the bits of the saved-set step, with early stop on and off, with
 #   and without ``fuse_wgrad_accumulation``.
@@ -46,6 +49,8 @@ import torch.utils.checkpoint
 
 from tests.experimental import test_cake_moe_grouped_gemm_det_train as base
 from tests.experimental import test_cake_moe_grouped_gemm_det_train_determinism as det
+from tests.cake.test_helpers.cake_moe_judge import judge_draws, naive_sum, product
+from tests.cake.test_helpers.cake_naive import draw_seed
 from tests.cake.test_helpers.cake_package import cake_package
 
 PACKAGE = "cake_moe_grouped_gemm_det_train"
@@ -86,7 +91,6 @@ OUTPUTS = (
     ("acc_composed", torch.float32),
 )
 ACC_OPS = ("acc", "acc_composed")
-FP32_SUBNORMAL = 1e-40
 
 # Changing offsets: four layouts of one sum_m per expert count.
 LAYOUT_EXPERTS = (4, 8, 32)
@@ -117,17 +121,19 @@ def _label(*parts):
     return "_".join(str(p) for p in parts)
 
 
-def _gen(label, device):
+def _gen(label, device, draw=0):
+    """A generator seeded from ``label``: ``draw_seed`` of its crc32 for draw ``draw`` of
+    a judge (draw 0: the case's own)."""
     gen = torch.Generator(device=device)
-    gen.manual_seed(zlib.crc32(label.encode()))
+    gen.manual_seed(draw_seed(zlib.crc32(label.encode()), draw))
     return gen
 
 
-def _operands(op, sizes, n, k, device, label):
+def _operands(op, sizes, n, k, device, label, draw=0):
     """Seeded operands with the scaling of the package's tests (x and w ~ N(0,1)/sqrt(K),
     g ~ N(0,1)): (a, b, offs) for fwd (x, w), dgrad (g, w), wgrad / acc (g, x); the two
     accumulate routes of one case get the same operands."""
-    gen = _gen(label.replace("_acc_composed_", "_acc_"), device)
+    gen = _gen(label.replace("_acc_composed_", "_acc_"), device, draw)
     sum_m, e = sum(sizes), len(sizes)
     scale = 1.0 / math.sqrt(k)
 
@@ -207,19 +213,17 @@ def _require(op, dtype, device, sizes, n, k):
         pytest.skip("the weight gradient addresses dW with 32-bit element offsets")
 
 
-def _main_grad0(shape, device, label, sizes=None):
+def _main_grad0(shape, device, label, sizes=None, draw=0):
     """The starting fp32 main_grad of an accumulate case (seeded by ``label`` without its
-    route, so ``acc`` and ``acc_composed`` start alike).  With ``sizes``: every empty group
-    all ``-0.0`` but for a positive and a negative subnormal (it must end ``+0.0`` and keep
-    them), and a subnormal of each sign in every other group."""
+    route, so ``acc`` and ``acc_composed`` start alike; ``draw``: its draw of a judge).
+    With ``sizes``: every empty group all ``-0.0`` (it must end ``+0.0``).  No subnormal
+    is planted (the owner's rule: no subnormal / extreme-value tests)."""
     label = label.replace("_acc_composed_", "_acc_")
-    gen = _gen(label + "_main_grad", device)
+    gen = _gen(label + "_main_grad", device, draw)
     mg = torch.randn(shape, generator=gen, device=device, dtype=torch.float32)
     for e, (s, t) in enumerate(base._bounds(sizes) if sizes else ()):
         if t == s:
             mg[e].fill_(-0.0)
-        mg[e, 0, 1] = FP32_SUBNORMAL
-        mg[e, 1, 0] = -FP32_SUBNORMAL
     return mg
 
 
@@ -318,7 +322,7 @@ def test_five_repeats_under_copy_streams(case, monkeypatch, record_property):
     a, b, offs = _operands(op, sizes, n, k, device, label)
     out = _out(op, dtype, a, b, len(sizes))
     # The accumulate's main_grad: -0.0 in the empty groups (the contract turns it into
-    # +0.0) and subnormals in every group (kept: no flush to zero).
+    # +0.0).
     acc0 = _main_grad0(out.shape, device, label, sizes) if op in ACC_OPS else None
 
     gemm = torch.cuda.Stream(device)
@@ -330,8 +334,6 @@ def test_five_repeats_under_copy_streams(case, monkeypatch, record_property):
         _launch_into(launch, out, 0, acc0)
     torch.cuda.synchronize(device)
     ref = _bits(out).clone()
-    if op in ("fwd", "dgrad", "wgrad"):
-        det._spot_check(det.Case(label, op, n, k, tuple(sizes), dtype), a, b, out)
     _assert_empty_groups_zero(op, sizes, out, acc0)
 
     traffic = _Traffic(device)
@@ -374,6 +376,9 @@ def test_five_repeats_under_copy_streams(case, monkeypatch, record_property):
         print(
             f"FUSEDEQ {label} stages={','.join(launch.stages)} composed={','.join(composed.stages)}"
         )
+    if op in ("fwd", "dgrad", "wgrad"):
+        case = det.Case(label, op, n, k, tuple(sizes), dtype)
+        det._judge_spot(record_property, case, launch, a, b, out, device)
 
 
 # ---------------------------------------------------------------------------
@@ -481,9 +486,14 @@ def _t3_id(case):
     return _label(pattern, proj, op, "f32" if dtype == torch.float32 else "bf16")
 
 
-def _sample_ref(op, a, b, sizes, out, acc0):
-    """(got, ref64) over the sample of every non-empty group."""
-    got, ref = [], []
+def _sample(op, a, b, sizes, out, acc0):
+    """``(got, oracle, naive)`` over the sample of every non-empty group, flattened: the
+    first and last ``SAMPLE_ROWS`` rows by the first ``SAMPLE_COLS`` columns (``Y``,
+    ``dX``), the ``SAMPLE_DW`` corner of ``dW`` (an accumulate: ``acc0`` plus it).  The
+    oracle is the float64 product of the BF16 operands, the naive BF16 tier torch's BF16
+    matmul of them (``cake_moe_judge.product``; an accumulate adds it to ``acc0`` in
+    FP32 and rounds the sum to BF16 once)."""
+    got, ref, tier = [], [], []
     for e, (s, t) in enumerate(base._bounds(sizes)):
         if t == s:
             continue
@@ -493,24 +503,32 @@ def _sample_ref(op, a, b, sizes, out, acc0):
             idx = torch.tensor(rows, device=a.device)
             if op == "fwd":
                 c = min(b.shape[1], SAMPLE_COLS)
-                r64 = a[idx].double() @ b[e, :c].double().T
+                sb = b[e : e + 1, :c]
             else:
                 c = min(b.shape[2], SAMPLE_COLS)
-                r64 = a[idx].double() @ b[e][:, :c].double()
-            got.append(out[idx, :c].double())
-            ref.append(r64)
+                sb = b[e : e + 1, :, :c]
+            pair = [product(op, a[idx], sb, [len(rows)], dt) for dt in (torch.float64, torch.bfloat16)]
+            got.append(out[idx, :c])
         else:
             rn, ck = min(a.shape[1], SAMPLE_DW[0]), min(b.shape[1], SAMPLE_DW[1])
-            r64 = a[s:t, :rn].double().T @ b[s:t, :ck].double()
+            pair = [
+                product("wgrad", a[s:t, :rn], b[s:t, :ck], [t - s], dt)[0]
+                for dt in (torch.float64, torch.bfloat16)
+            ]
             if op in ACC_OPS:
-                r64 = r64 + acc0[e, :rn, :ck].double()
-            got.append(out[e, :rn, :ck].double())
-            ref.append(r64)
-    return got, ref
+                start = acc0[e, :rn, :ck]
+                pair = [start.double() + pair[0], naive_sum(start, [pair[1]])]
+            got.append(out[e, :rn, :ck])
+        ref.append(pair[0])
+        tier.append(pair[1])
+    return tuple(torch.cat([t.flatten() for t in ts]) for ts in (got, ref, tier))
 
 
 @pytest.mark.parametrize("case", T3_CASES, ids=[_t3_id(c) for c in T3_CASES])
 def test_error_vs_fp64_per_output(case, monkeypatch, record_property):
+    """Every output on the sample of each group (``_sample``) judged against the naive
+    BF16 tier over ``cake_naive.DRAWS`` inputs: each draw writes its operands (and an
+    accumulate's starting ``main_grad``) and launches the prepared call."""
     pattern, proj, op, dtype = case
     device = det._device()
     base._fresh_stream_workspaces(monkeypatch)
@@ -521,35 +539,24 @@ def test_error_vs_fp64_per_output(case, monkeypatch, record_property):
     label = _t3_id(case)
     a, b, offs = _operands(op, sizes, n, k, device, label)
     out = _out(op, dtype, a, b, len(sizes))
-    acc0 = _main_grad0(out.shape, device, label) if op in ACC_OPS else None
     launch = _prepare(op, dtype, a, b, offs, out)
     if op in ACC_OPS:
         record_property("accumulate", _assert_route(op, launch, device))
-    _launch_into(launch, out, 0, acc0)
-    torch.cuda.synchronize(device)
-    got, ref = _sample_ref(op, a, b, sizes, out, acc0)
-    got, ref = (
-        torch.cat([g.flatten() for g in got]),
-        torch.cat([r.flatten() for r in ref]),
-    )
-    assert bool(torch.isfinite(got).all()), f"{label}: non-finite sampled outputs"
-    err = (got - ref).abs()
-    max_abs = float(err.max())
-    max_rel = float((err / ref.abs().clamp_min(1e-30)).max())
-    rel_l2 = float(err.norm() / ref.norm().clamp_min(1e-30))
-    record_property("max_abs", max_abs)
-    record_property("max_rel", max_rel)
-    record_property("rel_l2", rel_l2)
-    record_property("samples", int(got.numel()))
-    print(
-        f"ERR {label} max_abs={max_abs:.4e} max_rel={max_rel:.4e} rel_l2={rel_l2:.4e} n={got.numel()}"
-    )
-    if dtype == torch.bfloat16:
-        bound = base.ATOL + base.RTOL * ref.abs()
-        bad = int((~(err <= bound)).sum())  # a NaN counts as beyond the budget
-        assert bad == 0, f"{label}: {bad} bf16 elements beyond 1e-2 + 1e-2 |ref64|"
-    else:
-        assert rel_l2 <= base.FP32_REL_L2, f"{label}: fp32 rel-L2 {rel_l2:.3e}"
+    name = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}.get(op, "main_grad") + "[sample]"
+
+    def draw(d):
+        na, nb, _ = _operands(op, sizes, n, k, device, label, d.index)
+        a.copy_(na)
+        b.copy_(nb)
+        del na, nb
+        acc0 = _main_grad0(out.shape, device, label, draw=d.index) if op in ACC_OPS else None
+        _launch_into(launch, out, 0, acc0)
+        got, ref, tier = _sample(op, a, b, sizes, out, acc0)
+        d.output(name, got, ref, tier)
+        if d.index == 0:
+            record_property("samples", int(got.numel()))
+
+    judge_draws(record_property, draw, seed=zlib.crc32(label.encode()))
 
 
 # ---------------------------------------------------------------------------

@@ -109,7 +109,9 @@ def _validate_tensor(
         raise ValueError(f"{name} must have shape {shape}, got {tuple(tensor.shape)}")
 
 
-def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int, ...]]:
+def _row_view(
+    tensor: torch.Tensor, name: str, *, copy: bool = False
+) -> tuple[torch.Tensor, tuple[int, ...]]:
     """``(the [rows, H] view of an input, its leading shape)``.
 
     A ``[T, H]`` tensor is its own view.  A tensor of more dimensions,
@@ -121,8 +123,10 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
     stride apart (a ``[T, heads, H]`` slice of a wider ``[T, heads, W]``
     buffer, strides ``(heads * W, W, 1)``, qualifies).  The view keeps that
     row stride, so the alignment rules of the kernel inputs apply to it
-    unchanged.  Any other layout raises ``ValueError`` naming the rule: the
-    kernels index rows by one stride and write contiguous outputs.
+    unchanged.  Any other layout raises ``ValueError`` naming the rule (the
+    kernels index rows by one stride and write contiguous outputs), or, with
+    ``copy`` (the backward's gradients, which autograd hands over in whatever
+    layout the consumer produced), is copied once into a contiguous tensor.
     """
 
     if not isinstance(tensor, torch.Tensor):
@@ -144,6 +148,8 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
         tensor.stride(outer) == tensor.stride(inner) * tensor.shape[inner]
         for outer, inner in zip(dims, dims[1:], strict=False)
     )
+    if not collapsible and copy:
+        return tensor.contiguous().view(rows, hidden), lead
     if not collapsible:
         raise ValueError(
             f"{name} of shape {tuple(tensor.shape)} with strides "
@@ -159,7 +165,12 @@ def _row_view(tensor: torch.Tensor, name: str) -> tuple[torch.Tensor, tuple[int,
 
 
 def _companion_view(
-    tensor: torch.Tensor, name: str, *, lead: tuple[int, ...], hidden: int
+    tensor: torch.Tensor,
+    name: str,
+    *,
+    lead: tuple[int, ...],
+    hidden: int,
+    copy: bool = False,
 ) -> torch.Tensor:
     """The ``[rows, H]`` view of an input that takes the first input's shape
     (``residual``; the backward's ``g``, ``x`` companions and ``g_residual``)."""
@@ -171,7 +182,7 @@ def _companion_view(
         raise ValueError(
             f"{name} must have shape {expected}, got {tuple(tensor.shape)}"
         )
-    return _row_view(tensor, name)[0]
+    return _row_view(tensor, name, copy=copy)[0]
 
 
 def _rows_view(
@@ -297,6 +308,42 @@ def _route_error(
     )
 
 
+def _read_ranges(
+    x: torch.Tensor,
+    residual: Optional[torch.Tensor],
+    w: torch.Tensor,
+    *,
+    rows: int,
+    hidden: int,
+) -> tuple[tuple[int, int], ...]:
+    """The byte ranges ``(first, end)`` a forward launch reads, ``end`` one past
+    the last byte: ``x`` and ``residual`` as :func:`_kernel_input` returns them
+    (``[rows, hidden]``, feature dimension contiguous, rows one ``stride(0)``
+    apart) and the contiguous ``w``.  Plain integer arithmetic on the pointers
+    and strides, so the check adds little host time to a call."""
+
+    if not hidden:
+        return ()
+    w_first = w.data_ptr()
+    ranges = [(w_first, w_first + hidden * w.element_size())]
+    if rows:
+        for tensor in (x, residual):
+            if tensor is not None:
+                first = tensor.data_ptr()
+                span = (rows - 1) * tensor.stride(0) + hidden
+                ranges.append((first, first + span * tensor.element_size()))
+    return tuple(ranges)
+
+
+def _meets(first: int, end: int, ranges: tuple[tuple[int, int], ...]) -> bool:
+    """Whether the bytes ``[first, end)`` meet one of ``ranges``."""
+
+    for other_first, other_end in ranges:
+        if first < other_end and other_first < end:
+            return True
+    return False
+
+
 def _output_buffer(
     tensor: Optional[torch.Tensor],
     name: str,
@@ -306,14 +353,17 @@ def _output_buffer(
     dtype: torch.dtype,
     alignment: int,
     lead: Optional[tuple[int, ...]] = None,
+    reads: tuple[tuple[int, int], ...] = (),
 ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
     """``(kernel buffer, the tensor returned to the caller, user buffer to copy back into or None)``.
 
     A caller-provided output of any layout is honoured: the kernel writes a
-    contiguous aligned buffer directly when the caller's tensor is one, otherwise
-    into a temporary that is copied back into the caller's view after the launch.
-    ``lead`` (an N-D call) is the leading shape the caller's buffer and the
-    returned tensor have in place of the ``shape[0]`` rows of the kernel buffer.
+    contiguous aligned buffer directly when the caller's tensor is one and its
+    bytes meet none of ``reads`` (:func:`_read_ranges` of the inputs the launch
+    reads), otherwise into a temporary that is copied back into the caller's
+    view after the launch.  ``lead`` (an N-D call) is the leading shape the
+    caller's buffer and the returned tensor have in place of the ``shape[0]``
+    rows of the kernel buffer.
     """
 
     user_shape = shape if lead is None else (*lead, *shape[1:])
@@ -321,10 +371,15 @@ def _output_buffer(
         kernel = torch.empty(shape, dtype=dtype, device=device)
         return kernel, (kernel if lead is None else kernel.view(user_shape)), None
     _validate_tensor(tensor, name, shape=user_shape, device=device, dtype=dtype)
-    if tensor.numel() == 0 or (
-        tensor.is_contiguous() and tensor.data_ptr() % alignment == 0
-    ):
+    numel = tensor.numel()
+    if numel == 0:
         return (tensor if lead is None else tensor.reshape(shape)), tensor, None
+    if tensor.is_contiguous():
+        first = tensor.data_ptr()
+        if first % alignment == 0 and not _meets(
+            first, first + numel * tensor.element_size(), reads
+        ):
+            return (tensor if lead is None else tensor.reshape(shape)), tensor, None
     return torch.empty(shape, dtype=dtype, device=device), tensor, tensor
 
 
@@ -353,7 +408,7 @@ def _workspace_record(
     its chunks on ``slots = ctas_per_sm x SMs`` persistent CTAs; a route that
     switches modules on the row count is sized by the module with the largest
     partial capacity, whose layout every pair module of the route shares.  A
-    column-task module (``claim_sum_f64``) binds no partial rows and does not
+    column-task module (``claim_sum_f32``) binds no partial rows and does not
     size them.
     """
 
@@ -386,12 +441,14 @@ def _backward_selection_rows(
 ) -> int:
     """The row count a backward call of ``rows`` tokens selects its programs by.
 
-    The routes of ``cake_windows.ACCURACY_EDGES`` switch from plain to
-    compensated ``dw`` sums at an accuracy edge measured on devices with at
-    least ``cake_windows.ACCURACY_MIN_SMS[arch]`` SMs.  A device with fewer SMs
-    gives each CTA more rows to sum at the same token count, so there such a
-    route selects its programs as if the call had the edge plus one rows: its
-    compensated programs run at every token count.  The launch keeps ``rows``.
+    The routes of ``cake_windows.ACCURACY_EDGES`` switch to other ``dw``
+    programs at an accuracy edge measured on devices with at least
+    ``cake_windows.ACCURACY_MIN_SMS[arch]`` SMs.  A device with fewer SMs gives
+    each CTA more rows to sum at the same token count, so there such a route
+    selects its programs as if the call had the edge plus one rows: its
+    programs above the edge run at every token count.  This version lists no
+    route there, so every call selects its programs by ``rows``.  The launch
+    keeps ``rows``.
     """
 
     edge = _windows.ACCURACY_EDGES.get(arch, {}).get(
@@ -418,7 +475,7 @@ def cake_rmsnorm_det_train_backward_workspace_bytes(
     (the partial's high and low part) for a module whose workspace rule
     spells ``partial_rows`` 2, among the modules a call of at most ``rows``
     tokens can launch.  A column-task module (the small token counts of a
-    route, workspace rule ``claim_sum_f64``) uses the counters alone.  The size grows with
+    route, workspace rule ``claim_sum_f32``) uses the counters alone.  The size grows with
     ``rows`` and a buffer sized for ``rows`` serves every call with at most
     that many tokens.  The counters must be zero on first use (allocate with
     ``torch.zeros`` or use :func:`cake_rmsnorm_det_train_backward_workspace`); the
@@ -506,9 +563,9 @@ def _workspace_views(
         )
     hidden = int(record["hidden"])
     begin = layout["partial_offset"]
-    if record["workspace_rule"]["kind"] == "claim_sum_f64":
+    if record["workspace_rule"]["kind"] == "claim_sum_f32":
         # A column-task kernel keeps no sums: ``partial`` binds an empty region.
-        partial = workspace[begin:begin].view(torch.float64)
+        partial = workspace[begin:begin].view(torch.float32)
     else:
         n_rows = layout["n_chunks"] * layout["partial_rows"]
         partial = workspace[begin : begin + 4 * n_rows * hidden].view(torch.float32)
@@ -565,13 +622,18 @@ def cake_rmsnorm_det_train_forward(
         Preallocated outputs: BF16 ``y`` of ``x``'s shape, FP32 reciprocal RMS of
         its leading shape (``[T]``) and (residual only) BF16 ``h_new`` of ``x``'s
         shape.  Contiguous aligned buffers are written directly; any other layout
-        receives a copy after the launch.
+        receives a copy after the launch.  A buffer that shares memory with ``x``,
+        ``residual`` or ``w`` (``out=x``, for example) also receives a copy: the
+        kernels write a temporary, which is copied into it after the launch.
+        The outputs must not share memory with one another; the call does not
+        check this.
 
     Returns
     -------
     ``(y, rstd)`` or ``(y, rstd, h_new)`` when ``residual`` is given.
     ``rstd`` is the FP32 per-row ``1 / sqrt(mean(h_new^2) + eps)`` the backward
-    needs; no other ``[T, H]`` temporary is produced.
+    needs.  No other ``[T, H]`` temporary is produced unless a preallocated
+    output takes the copy described above.
     """
 
     x, lead = _row_view(x, "x")
@@ -609,6 +671,13 @@ def cake_rmsnorm_det_train_forward(
         w_dtype=w_dtype,
     ):
         raise _route_error("fwd", hidden, has_residual, w, arch)
+    # A caller's output that shares memory with an input is written through a
+    # temporary: a forward program may read an input again after it stores an
+    # output, and every kernel takes its pointers as not aliased.
+    caller_buffers = out is not None or rstd is not None or residual_out is not None
+    reads = (
+        _read_ranges(x, residual, w, rows=rows, hidden=hidden) if caller_buffers else ()
+    )
     out, y_result, out_user = _output_buffer(
         out,
         "out",
@@ -617,6 +686,7 @@ def cake_rmsnorm_det_train_forward(
         dtype=torch.bfloat16,
         alignment=align,
         lead=nd,
+        reads=reads,
     )
     rstd, rstd_result, rstd_user = _output_buffer(
         rstd,
@@ -626,6 +696,7 @@ def cake_rmsnorm_det_train_forward(
         dtype=torch.float32,
         alignment=BACKWARD_ALIGNMENT_BYTES,
         lead=nd,
+        reads=reads,
     )
     residual_out_user = None
     results: tuple[torch.Tensor, ...] = (y_result, rstd_result)
@@ -638,6 +709,7 @@ def cake_rmsnorm_det_train_forward(
             dtype=torch.bfloat16,
             alignment=align,
             lead=nd,
+            reads=reads,
         )
         results = (y_result, rstd_result, h_new_result)
     copy_backs = [(out, out_user), (rstd, rstd_user), (residual_out, residual_out_user)]
@@ -686,12 +758,15 @@ def cake_rmsnorm_det_train_backward(
         feature dimension, 16-byte aligned storage and a row stride that is a
         multiple of 16 bytes (expanded or sliced autograd gradients included) are
         read in place; other layouts are materialized once.  An N-D gradient,
-        ``[..., H]``, takes ``x``'s shape and collapses its leading dimensions
-        into rows under the forward's rule.
+        ``[..., H]``, takes ``x``'s shape; its leading dimensions collapse into
+        rows under the forward's rule, and a layout that rule rejects (the
+        gradient of a transposed consumer of ``y``, for example) is copied once
+        into a contiguous ``[rows, H]`` tensor instead of raising ``ValueError``.
     x : torch.Tensor
         The BF16 ``[T, H]`` (or ``[..., H]``) tensor that was normalized (``x`` of
         the plain forward, ``h_new`` of the residual forward); same layout rules
-        as the forward's ``x``.
+        as ``g``, except that an N-D ``x`` whose layout the forward's rule
+        rejects raises ``ValueError`` (it is not copied).
     w : torch.Tensor
         BF16 or FP32 ``[H]`` weight (the forward's).  BF16 is read in place when
         contiguous and 16-byte aligned, FP32 when contiguous and 32-byte aligned;
@@ -708,11 +783,16 @@ def cake_rmsnorm_det_train_backward(
     workspace : torch.Tensor, optional
         Caller-owned ``uint8`` buffer from
         :func:`cake_rmsnorm_det_train_backward_workspace` sized for at least this
-        many rows; allocated when omitted.
+        many rows; allocated when omitted.  ``workspace`` must not share memory
+        with ``g``, ``x``, ``w``, ``rstd`` or ``g_residual``; the call does not
+        check this.
     dx, dw : torch.Tensor, optional
         Preallocated outputs: BF16 ``dx`` of ``x``'s shape and FP32 ``[H]``.
         Contiguous aligned buffers are written directly; any other layout
         receives a copy after the launch.
+        ``dx`` and ``dw`` must not share memory with ``g``, ``x``, ``w``,
+        ``rstd``, ``g_residual`` or ``workspace``, or with each other; the call
+        does not check this.
 
     Returns
     -------
@@ -749,7 +829,7 @@ def cake_rmsnorm_det_train_backward(
         alignment=4,
     )
     g = _kernel_input(
-        _companion_view(g, "g", lead=lead, hidden=hidden),
+        _companion_view(g, "g", lead=lead, hidden=hidden, copy=True),
         "g",
         rows=rows,
         hidden=hidden,
@@ -759,7 +839,9 @@ def cake_rmsnorm_det_train_backward(
     )
     if has_residual:
         g_residual = _kernel_input(
-            _companion_view(g_residual, "g_residual", lead=lead, hidden=hidden),
+            _companion_view(
+                g_residual, "g_residual", lead=lead, hidden=hidden, copy=True
+            ),
             "g_residual",
             rows=rows,
             hidden=hidden,

@@ -42,11 +42,20 @@ to 0.2.3 a call with an FP32 weight gradient of more than 512 rows changed
 its ``dx``, ``dz`` and weight-gradient bits (to the deterministic package's
 FP32 backward's bits in this tree), except on sm_100a and sm_103a past 64
 and up to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2
-ran it up to 256 rows per SM there).  A band runs a backward whose weight
-gradient may vary only where the band-selection measurement found the
-checkpointed training step (2 x forward + backward) about 3 % or more faster
-than with the repeatable backward (near a band's edges the gain can be
-smaller).
+ran it up to 256 rows per SM there).  Version 0.2.4 changes no bits: a call
+with ``compute_grad_weight=False`` runs a program built without the weight
+gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  Version 0.2.5
+changes no bits: in the repeatable band (sm_107a) packed rows run a
+128-thread build of the strided program without the weight gradient (8-row
+blocks: twice the CTAs of 16-row blocks at a small row count), other
+layouts the 0.2.4 256-thread one; this build and the fused band's strided
+program read packed rows at their linear offsets, and a CTA of theirs with
+one block takes no integer division before its loads.
+A band runs a
+backward whose weight gradient may vary only where the band-selection
+measurement found the checkpointed training step (2 x forward + backward)
+about 3 % or more faster than with the repeatable backward (near a band's
+edges the gain can be smaller).
 The forward computes ``rstd`` with ``rsqrt.approx`` and the SiLU gate with
 ``ex2.approx`` and ``rcp.approx`` (the deterministic forward's split gate:
 the reciprocal of a scaled ``1 + e``, a nonzero sigmoid down to where
@@ -127,6 +136,26 @@ wave claiming blocks from the workspace's claim counter) give ``dx`` and
 each CTA's FP32 column sums added into 4 FP32 replicas in the workspace with
 FP32 atomic adds, which the CTA that arrives last sums in FP32 (no FP64), so
 the sum's order, and the last bits of ``dw``, depend on scheduling.
+A call with ``compute_grad_weight=False`` takes the BF16 bands and runs, in
+its band module's place, that program built without the weight gradient
+where the architecture routes one (``cake_jit.nodw_module``; all of its
+weight-gradient work removed at build time), so ``dx`` and ``dz`` are the
+bits of the BF16 call that computes the weight gradient, at every grid: in
+a small-row band its one-cluster program without the weight gradient; on
+sm_100a and sm_103a in the fused band up to
+``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM (measured: 512 on
+sm_100a, 448 on sm_103a) the strided program, 256-thread CTAs walking
+16-row blocks with no claim, no ticket and no workspace word, past it the
+claimed program (the band's claims and ticket on its workspace), and in the
+repeatable band the claimed program; on sm_107a, which routes no claimed
+program, the strided program at every row count of the fused and the
+repeatable bands (the repeatable band's on packed rows its 128-thread
+build, CTAs walking 8-row blocks, a row to each 16 lanes as in the
+repeatable backward); a strided program reads packed rows at their linear
+offsets; where the repeatable
+band runs its long role, the long
+program without the weight gradient (or, where none is routed, the long
+role with ``weight_grad`` 0).
 
 Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
 either weight gradient, accumulated or not) to the PyTorch BF16 naive
@@ -175,10 +204,13 @@ Host design (the input layout rules are the deterministic package's):
   bytes).  Every launch of the static,
   the claimed, the row-claims, the fused and the repeatable backwards takes a
   ticket (and all but the static one claim their chunks or blocks from the
-  counter), also one with ``compute_grad_weight=False``, so it uses a
-  workspace.  The small-row backwards take none: they read no workspace,
-  and a caller workspace passed to one is checked as for any backward and
-  left as it is.  The kernel leaves all of it zero, so a workspace zeroed once serves
+  counter), and so does a claimed or long program without the weight
+  gradient (on its band program's layout), so it uses a workspace.  The
+  small-row backwards and the strided and small-row programs without the
+  weight gradient take none: they read no workspace, and a caller workspace
+  passed to one is checked as for any backward and left as it is.  The
+  workspace size does not depend on ``compute_grad_weight``.  The kernel
+  leaves all of it zero, so a workspace zeroed once serves
   every later call on its stream, of any shape, either weight-gradient
   dtype and any backward module of its architecture, and every CUDA Graph
   replay, with no host write.  A caller workspace
@@ -194,16 +226,20 @@ Host design (the input layout rules are the deterministic package's):
   other intermediate, so a non-reentrant checkpointed forward keeps nothing
   but its output.  No workspace is saved state.
 - Workspaces the package keeps: a backward without a caller workspace that
-  runs a module taking one (every module but the small-row backwards;
-  ``compute_grad_weight=False`` included: it runs the BF16 weight gradient's
-  modules) uses the zero-filled workspace of its (device, stream, backward
+  runs a module taking one (every module but the small-row backwards and the
+  strided and small-row programs without the weight gradient) uses the
+  zero-filled workspace of its (device, stream, backward
   module), allocated on first use and kept in ``_STREAM_WORKSPACES`` for later
   calls: 29192 bytes each on sm_100a and sm_103a and 36360 on sm_107a, at
   most one per backward module that takes one (the static, the fused
   ``_fused``, the repeatable ``_rep`` and ``_rep_long``, the row-claims
-  ``_rc`` and ``_rc_mid`` and the claimed ``_mid`` backwards an architecture
-  routes) for every stream that ran such a
-  backward.  Such eager calls also keep a reserve of
+  ``_rc`` and ``_rc_mid`` and the claimed ``_mid`` backwards, and the claimed
+  and long programs without the weight gradient ``_fused_nodw``,
+  ``_rep_nodw`` and ``_rep_nodw_long``, an architecture routes) for every
+  stream that ran such a backward.  A call that runs a module taking none
+  makes no workspace and uses no reserve: its unread workspace and
+  weight-gradient parameters get empty tensors made once per device.  Such
+  eager calls with a workspace also keep a reserve of
   64 zero-filled workspaces per device (in one allocation, 29440 bytes each,
   about 1.8 MiB, on sm_100a and sm_103a and 36608 bytes each, about 2.2 MiB,
   on sm_107a, filled outside any capture, at most 1024 per device), from
@@ -315,7 +351,13 @@ Host design (the input layout rules are the deterministic package's):
   (``cake_jit.backward_ctas`` 16) scheduled together on the SMs of one GPC,
   team ``q`` of the exact tiny backward's CTA ``r`` running the 8-row block
   ``r + 16 q``, CTA ``r`` of the short backward the 16-row blocks ``r``,
-  ``r + 16``, ....  No kernel is cooperative; no
+  ``r + 16``, ....  A strided program without the weight gradient
+  launches ``G = min(blocks, 4 * SMs)`` 256-thread CTAs over 16-row blocks,
+  the repeatable band's (sm_107a) on packed rows ``G = min(blocks, 8 *
+  SMs)`` 128-thread CTAs over 8-row blocks (``cake_jit.backward_ctas``), CTA
+  ``b`` running the blocks ``b``, ``b + G``, ...; a claimed or long one
+  launches its band program's grid.
+  No kernel is cooperative; no
   call synchronizes the host or the device, and every kernel runs on the
   current torch stream.
 - Beside kernels resident on other streams: a kernel
@@ -347,6 +389,7 @@ from .cake_jit import (
     backward_ctas,
     device_sm_count,
     module_for_rows,
+    nodw_module,
     workspace_bytes,
     workspace_layout,
 )
@@ -666,6 +709,41 @@ def _workspace_bytes(arch: str) -> int:
     )
 
 
+@functools.cache
+def _module_workspace_bytes(name: str) -> int:
+    """``cake_jit.workspace_bytes`` of backward module ``name`` (0 for a
+    module that takes no workspace).  Cached: the module records are
+    constant, and every backward call reads it, which would otherwise lay
+    out the module's workspace on every call."""
+
+    return workspace_bytes(name)
+
+
+@functools.cache
+def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
+    """An empty ``dtype`` tensor on CUDA device ``device_index``, made once:
+    the argument of a kernel parameter the launch does not read (the weight
+    gradient of a call without it, the workspace buffers of a program
+    without the weight gradient that takes no workspace).  The bindings
+    check only its device, dtype and contiguity."""
+
+    return torch.empty((0,), dtype=dtype, device=torch.device("cuda", device_index))
+
+
+@functools.cache
+def _no_workspace(device_index: int) -> dict[str, torch.Tensor]:
+    """Every workspace buffer (``cake_jit.WORKSPACE_BUFFERS``) as an empty
+    tensor of its dtype (``_WORKSPACE_DTYPES``, the dtypes the bindings
+    check) on CUDA device ``device_index``: the workspace parameters of a
+    launch that reads no workspace (a strided program without the weight
+    gradient).  Never modified."""
+
+    return {
+        buffer: _placeholder(device_index, dtype)
+        for buffer, dtype in _WORKSPACE_DTYPES.items()
+    }
+
+
 def cake_rmsnorm_silu_gate_nondet_train_backward_workspace_bytes(
     rows: int, device: torch.device
 ) -> int:
@@ -737,9 +815,10 @@ def cake_rmsnorm_silu_gate_nondet_train_reset_workspace(
 
 # The workspaces of calls without a caller workspace (every launch of the
 # static, the claimed, the row-claims, the fused and the repeatable backwards
-# needs one: it
-# takes the arrival ticket, and the claimed, the row-claims and the fused ones
-# claim their chunks or blocks; the small-row backwards need none): one per
+# and of the claimed and long programs without the weight gradient needs one:
+# it takes the arrival ticket, and the claimed, the row-claims and the fused
+# ones claim their chunks or blocks; the small-row backwards and the strided
+# and small-row programs without the weight gradient need none): one per
 # (device, stream, backward module), zero-filled once and kept for the process
 # (``_workspace_bytes(arch)`` bytes each, 29192 on sm_100a and sm_103a and
 # 36360 on sm_107a, one per backward module a stream ran).  Every backward
@@ -933,7 +1012,7 @@ def _workspace_views(
     (uint32, a word a column) and ``done`` (uint32: the arrival ticket and the
     claim counter), each a view of its bytes."""
 
-    flat = _check_workspace(workspace, device, workspace_bytes(name))
+    flat = _check_workspace(workspace, device, _module_workspace_bytes(name))
     views = {}
     for buffer, offset, elements in workspace_layout(name):
         dtype = _WORKSPACE_DTYPES[buffer]
@@ -1020,10 +1099,17 @@ def _backward(
     gv, dy_tok, dy_head = _kernel_view(grad_out, "grad_out", shape=shape, device=device)
     xv, x_tok, x_head = _kernel_view(x, "x", shape=shape, device=device)
     zv, z_tok, z_head = _kernel_view(z, "z", shape=shape, device=device)
-    sm_count = device_sm_count(_device_index(device))
+    index = _device_index(device)
+    sm_count = device_sm_count(index)
     role = "bwd_f32" if dw is not None and dw.dtype == torch.float32 else "bwd_bf16"
     packed = _backward_packed(heads, dy_tok, dy_head, x_tok, x_head, z_tok, z_head)
     name = module_for_rows(arch, role, rows, sm_count, packed=packed)
+    if dw is None:
+        # The band's program built without the weight gradient (the same dx
+        # and dz bits): strided up to its cut (or at every row count where
+        # the band routes no claimed one; on packed rows its 128-thread build
+        # where routed), else claimed, or the long or the one-cluster one.
+        name = nodw_module(arch, name, rows, sm_count, packed)
     ctas = backward_ctas(name, rows, sm_count)
     buffers: dict[str, Optional[torch.Tensor]] = {
         "dw_win": None,
@@ -1035,16 +1121,23 @@ def _backward(
         "done": None,
     }
     blocks_per_chunk = 0
-    if not workspace_bytes(name):
-        # A small-row backward sums the weight gradient on chip: no workspace (a
-        # caller's is checked and left as it is).
+    nbytes = _module_workspace_bytes(name)
+    if not nbytes:
+        # A small-row backward sums the weight gradient on chip, and a strided
+        # or small-row program without the weight gradient reads and writes no
+        # workspace word: no workspace and no reserve (a caller's is checked
+        # and left as it is).
         if workspace is not None:
             _check_workspace(workspace, device, _workspace_bytes(arch))
+        if dw is None:
+            # empty tensors of the binding's dtypes for the unread buffers
+            buffers = _no_workspace(index)
     else:
         # Every launch of the others, weight_grad=0 included, takes the arrival
         # ticket (and the claimed, the row-claims, the fused and the repeatable
-        # backwards claim their chunks or blocks from the claim counter), and
-        # leaves the whole workspace zero.
+        # backwards and the claimed programs without the weight gradient claim
+        # their chunks or blocks from the claim counter), and leaves the whole
+        # workspace zero.
         if _loader.MODULES[name]["grid_rule"]["kind"] == "chunks":
             blocks_per_chunk = backward_chunks(name, rows)[0]
         if workspace is not None:
@@ -1059,7 +1152,7 @@ def _backward(
         # module (the repeatable backward among them) and a launch without the
         # weight gradient repeat their bits and do not alert.
         _alert_nondeterministic(entry)
-    if workspace is None and workspace_bytes(name):
+    if workspace is None and nbytes:
         buffers.update(_stream_workspace_views(name, arch, device))
     values = {
         "dy": gv,
@@ -1069,7 +1162,7 @@ def _backward(
         "dx": dx,
         "dz": dz,
         **buffers,
-        "dw": dw if dw is not None else torch.empty((0,), dtype=w.dtype, device=device),
+        "dw": dw if dw is not None else _placeholder(index, torch.bfloat16),
         "rows": rows,
         "heads": heads,
         "dy_tok": dy_tok,
@@ -1084,7 +1177,7 @@ def _backward(
         "weight_grad": 1 if dw is not None else 0,
         "blocks_per_chunk": blocks_per_chunk,
     }
-    _loader.run_module(name, values, rows=rows, device_index=_device_index(device))
+    _loader.run_module(name, values, rows=rows, device_index=index)
     for kernel_buffer, user_buffer in ((dx, dx_user), (dz, dz_user)):
         if user_buffer is not None:
             user_buffer.copy_(kernel_buffer)
@@ -1152,10 +1245,16 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     Every other output repeats bit for bit; the modules' ``.f32x2`` FMA
     chains for a row's sums differ by module and by architecture, so the
     last bits of ``dx`` and ``dz`` can differ between bands.  Every
-    call with rows uses a workspace, also with ``compute_grad_weight=False``,
-    but one of few rows (by architecture and weight-gradient dtype): there one
-    cluster of 16 CTAs runs (summing a weight gradient on chip in a fixed
-    order) and uses none.  The arguments are those of
+    call with rows uses a workspace but one of few rows (by architecture and
+    weight-gradient dtype): there one cluster of 16 CTAs runs (summing a
+    weight gradient on chip in a fixed order) and uses none.  A call with
+    ``compute_grad_weight=False`` takes the BF16 bands and runs the band's
+    program built without the weight gradient (``cake_jit.nodw_module``):
+    ``dx`` and ``dz`` the bits of the call that computes it.  It uses no
+    workspace in the small-row bands, on sm_100a and sm_103a in the fused
+    band up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM, and on
+    sm_107a in every band short of the long program; the claimed and long
+    programs use one.  The arguments are those of
     :func:`cake_pplx.cake_rmsnorm_silu_gate_nondet_train.cake_rmsnorm_silu_gate_nondet_train_backward`;
     ``workspace`` is this package's uint8 buffer
     (:func:`cake_rmsnorm_silu_gate_nondet_train_backward_workspace`) or ``None`` (the

@@ -35,12 +35,13 @@ The non-deterministic contract: the mode in the names only (the exact package na
 interaction with PyTorch's deterministic algorithms (no alert, no fallback), the launches served by this package's
 records, the five source head pairs, strided packed QKV views, non-reentrant checkpointing and its zero retained
 bytes, gradient accumulation into a nonzero ``.grad``, changed shapes over poisoned reused workspaces, the worst case
-over repeated runs, two concurrent caller streams, cached device tables, workspaces and backward plans across streams
-and CUDA graph captures, and a resident side-stream kernel.  The tail's own contract: it serves every value-head
-group, leaves its counters zero after every launch, launches in segments, and protocol controls (stale counters must
-break ``dq`` / ``dk``: a contract break or a missed tier; with stale workspace slots every output keeps its contract,
-its verdict recorded).  The packed row: q / k / v as head views of one row that requires grad take one packed
-gradient row (a leaf or a non-leaf row, other consumers of the row, a row without a gradient, checkpoint replay).
+over repeated runs, two concurrent caller streams, cached device tables, workspaces and the recorded backward and
+forward plans across streams, threads, devices and CUDA graph captures, and a resident side-stream kernel.  The tail's
+own contract: it serves every value-head group, leaves its counters zero after every launch, launches in segments, and
+protocol controls (stale counters must break ``dq`` / ``dk``: a contract break or a missed tier; with stale workspace
+slots every output keeps its contract, its verdict recorded).  The packed row: q / k / v as head views of one row that
+requires grad take one packed gradient row (a leaf or a non-leaf row, other consumers of the row, a row without a
+gradient, checkpoint replay).
 
 The suite names its packages through the shared alias helper and imports nothing else from cake_pplx.  The tests of
 the facade ``cake_pplx.cake_gdn_nondet_train`` and of the old module path live in
@@ -58,9 +59,11 @@ import json
 import math
 import random
 import re
+import threading
 import time
 import types
 import warnings
+import weakref
 from pathlib import Path
 
 import pytest
@@ -121,6 +124,14 @@ def _manifest_or_skip() -> dict:
 @pytest.fixture(scope="module")
 def device() -> torch.device:
     return _device_or_skip()
+
+
+@pytest.fixture(autouse=True)
+def _fresh_workspace_pool(monkeypatch) -> None:
+    # every test starts on an empty workspace pool, as in a process of its own: on a pool that earlier tests filled, a
+    # new layout's first call evicts a buffer past WORKSPACE_SHAPES_PER_ROLE, which drops every recorded plan, the one
+    # its own forward just recorded too, so the next call records again instead of replaying it
+    monkeypatch.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
 
 
 def _cu(seq_lens) -> list[int]:
@@ -788,6 +799,31 @@ def test_dhu_tc_rule_on_the_campaign_rows(arch, monkeypatch) -> None:
         assert rec["select"] is selected, (row, rec)
         if row == "r01":
             assert abs(rec["T_tc"] - r01_tc) < 0.1, rec
+
+
+# The device classes of the host rules below, (architecture, SM count): B200 and B300 (x86 hosts), GB200 and GB300
+# (152-SM Grace-host boards) and R200 at 212 and 216 SMs.
+DEVICE_CLASSES = {
+    "B200": ("sm_100a", 148),
+    "GB200": ("sm_100a", 152),
+    "B300": ("sm_103a", 148),
+    "GB300": ("sm_103a", 152),
+    "R200-212": ("sm_107a", 212),
+    "R200-216": ("sm_107a", 216),
+}
+
+
+def _device_class(monkeypatch, name: str) -> tuple[str, int]:
+    """Let the host rules see the device class ``name`` of :data:`DEVICE_CLASSES` on device 0, with fresh layout
+    caches; its (architecture, SM count)."""
+    arch, sm_count = DEVICE_CLASSES[name]
+    monkeypatch.setattr(
+        cake_chain, "_device_props", lambda _index: (sm_count, 232448, 10)
+    )
+    monkeypatch.setattr(cake_backend, "device_arch", lambda _index: arch)
+    monkeypatch.setattr(cake_chain, "_META_FRONT", {})
+    monkeypatch.setattr(cake_chain, "_DHU_AUTO", {})
+    return arch, sm_count
 
 
 # The split (64, 1) adjoint plans of the campaign rows and the #7074 packs on each device, and the ones whose pass 2
@@ -4934,6 +4970,235 @@ def test_adjoint_split_one_stream_rule(monkeypatch) -> None:
     ), rec
 
 
+def test_bwd_one_wave_table_rule() -> None:
+    # the smallest L at which the table segment_bounds builds (an empty sequence one piece) puts every piece of every
+    # value head in one wave; None where no L splits a sequence.  Never shorter than the piece table's L
+    gen = torch.Generator().manual_seed(7019)
+    with_empty = 0
+    for _ in range(400):
+        num = int(torch.randint(1, 9, (), generator=gen))
+        chunks = torch.randint(0, 400, (num,), generator=gen)
+        # about a quarter of the sequences empty
+        chunks = chunks * (torch.randint(0, 4, (num,), generator=gen) > 0)
+        chunks = tuple(int(x) for x in chunks)
+        num_v_heads = int(torch.randint(1, 13, (), generator=gen))
+        sm_count = int(torch.randint(8, 200, (), generator=gen))
+        length = cake_chain.bwd_one_wave_table(chunks, num_v_heads, sm_count)
+
+        def ctas(n_len: int, chunks=chunks, num_v_heads=num_v_heads) -> int:
+            return sum(_pieces(chunks, n_len)) * num_v_heads
+
+        if len(chunks) * num_v_heads > sm_count or max(chunks) < 2:
+            assert length is None, (chunks, num_v_heads, sm_count, length)
+            continue
+        smallest = next(n for n in range(1, max(chunks) + 1) if ctas(n) <= sm_count)
+        assert length == (smallest if max(chunks) > smallest else None), (
+            chunks,
+            num_v_heads,
+            sm_count,
+        )
+        if length is None:
+            continue
+        with_empty += 0 in chunks
+        piece = cake_chain.bwd_piece_table(chunks, num_v_heads, sm_count)
+        assert piece is None or piece <= length, (chunks, num_v_heads, sm_count)
+    assert with_empty >= 20, with_empty
+    # the pair layout (172, 188 and 153 chunks) on 152 SMs; with two empty sequences 24 (25 pieces x 6 = 150 CTAs):
+    # counting only the pieces of the non-empty sequences would give 22, whose built table has 26 x 6 = 156 CTAs
+    assert cake_chain.bwd_one_wave_table((172, 188, 153), 6, 152) == 22
+    assert cake_chain.bwd_one_wave_table((172, 188, 153), 3, 152) == 11
+    assert cake_chain.bwd_one_wave_table((172, 188, 153, 0, 0), 6, 152) == 24
+    assert sum(_pieces((172, 188, 153, 0, 0), 22)) * 6 == 156
+    assert cake_chain.bwd_one_wave_table((11, 24, 4), 4, 36) == 5
+    assert cake_chain.bwd_one_wave_table((), 4, 148) is None
+    assert cake_chain.bwd_one_wave_table((2048,), 200, 148) is None
+    assert cake_chain.bwd_one_wave_table((1, 1, 0), 4, 148) is None
+
+
+# The pricing's one-wave table (one_wave_len) on the bench rows of PIECE_ROWS, by device class: where wave 1 runs on
+# the caller's stream (the group-of-three pair rows of HV 3 and 6 on the sm_103a classes and on GB200) and the pieces of
+# bwd_piece_table do not fit one wave, (that table's L, the one-wave table's L, wave 1 in series on one stream (us), the
+# one-wave route (us)); 0 on every other row (B300's h1 pieces of 11 chunks fit one wave, 144 CTAs on 148 SMs)
+ONE_WAVE_TABLE_ROWS = {
+    "GB200": {"h2": (20, 22, 200.82, 162.84), "h1": (10, 11, 155.6, 133.87)},
+    "B300": {"h2": (20, 22, 191.86, 155.96)},
+    "GB300": {"h2": (20, 22, 191.86, 155.96), "h1": (10, 11, 150.8, 130.18)},
+}
+ONE_STREAM_CLASSES = frozenset({"GB200", "B300", "GB300"})
+# The pricing's keys of the piece table on the bench rows of PIECE_ROWS by device class, as before the one-wave table:
+# (select, segment_len, split_us, serial_us); the one-wave table changes none of them
+PIECE_ROW_PRICES = {
+    "B200": {
+        "issue": (True, 158, 924.18, 4797.02), "P3": (True, 158, 924.18, 4761.32),
+        "P1": (True, 132, 788.22, 4736.51), "h8": (True, 63, 375.48, 469.85), "h4": (True, 38, 244.98, 450.18),
+        "h2": (True, 20, 157.41, 440.35), "h1": (True, 11, 136.56, 435.44), "A16": (False, 94, 534.22, 509.18),
+    },
+    "GB200": {
+        "issue": (True, 152, 850.44, 4522.85), "P3": (True, 155, 860.78, 4503.44),
+        "P1": (True, 132, 750.14, 4424.47), "h8": (True, 63, 356.21, 431.21), "h4": (True, 38, 233.16, 420.53),
+        "h2": (True, 20, 150.43, 415.18), "h1": (True, 10, 131.8, 412.51), "A16": (False, 94, 474.84, 452.59),
+    },
+    "B300": {
+        "issue": (True, 158, 832.04, 4377.18), "P3": (True, 158, 832.04, 4372.2), "P1": (True, 132, 711.36, 4242.01),
+        "h8": (True, 63, 337.44, 405.93), "h4": (True, 38, 221.64, 403.18), "h2": (True, 20, 144.42, 401.81),
+        "h1": (True, 11, 130.18, 401.13), "A16": (False, 94, 448.02, 411.42),
+    },
+    "GB300": {
+        "issue": (True, 152, 805.86, 4376.79), "P3": (True, 155, 815.62, 4371.94),
+        "P1": (True, 132, 711.36, 4241.25), "h8": (True, 63, 337.44, 405.78), "h4": (True, 38, 221.64, 403.11),
+        "h2": (True, 20, 144.42, 401.78), "h1": (True, 10, 128.4, 401.11), "A16": (False, 94, 448.02, 411.13),
+    },
+    "R200-212": {
+        "issue": (True, 113, 546.47, 3425.38), "P3": (True, 112, 542.38, 3423.64), "P1": (True, 99, 492.61, 3313.34),
+        "h8": (True, 51, 241.89, 315.88), "h4": (True, 27, 153.93, 314.92), "h2": (True, 14, 124.56, 314.44),
+        "h1": (True, 8, 134.02, 314.2), "A16": (False, 86, 373.9, 317.79),
+    },
+    "R200-216": {
+        "issue": (True, 108, 526.02, 3425.28), "P3": (True, 108, 526.02, 3423.57), "P1": (True, 95, 479.65, 3313.15),
+        "h8": (True, 47, 225.53, 315.84), "h4": (True, 26, 153.24, 314.9), "h2": (True, 14, 124.56, 314.43),
+        "h1": (True, 7, 140.13, 314.19), "A16": (False, 86, 373.9, 317.72),
+    },
+}  # fmt: skip
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_one_wave_table_on_one_stream_rows(name) -> None:
+    # the pricing prices the one-wave table where wave 1 runs on one stream over pieces that do not fit one wave, and
+    # keeps it where it prices no higher than the series (one_wave_len, ungated by the device); its other keys keep
+    # their values before the one-wave table (PIECE_ROW_PRICES)
+    arch, sm_count = DEVICE_CLASSES[name]
+    want = ONE_WAVE_TABLE_ROWS.get(name, {})
+    for row, ((seq_lens, num_v_heads), _) in PIECE_ROWS.items():
+        chunks = cake_plan.chunk_counts(seq_lens)
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        one_stream = name in ONE_STREAM_CLASSES and row in ("h1", "h2")
+        assert rec["one_stream"] is one_stream, (row, rec)
+        select, segment_len, split_us, serial_us = PIECE_ROW_PRICES[name][row]
+        assert (rec["select"], rec["segment_len"]) == (select, segment_len), (row, rec)
+        assert abs(rec["split_us"] - split_us) < 0.01, (row, rec)
+        assert abs(rec["serial_us"] - serial_us) < 0.01, (row, rec)
+        if row not in want:
+            assert (rec["one_wave_len"], rec["one_wave_us"], rec["one_stream_us"]) == (0, None, None), (row, rec)  # fmt: skip
+            continue
+        length, length1, series, wave = want[row]
+        assert rec["select"] and rec["segment_len"] == length, (row, rec)
+        assert (
+            sum(_pieces(chunks, length)) * num_v_heads
+            > sm_count
+            >= sum(_pieces(chunks, length1)) * num_v_heads
+        ), row
+        assert rec["one_wave_len"] == length1, (row, rec)
+        assert length1 == cake_chain.bwd_one_wave_table(chunks, num_v_heads, sm_count)
+        assert abs(rec["one_stream_us"] - series) < 0.01, (row, rec)
+        assert abs(rec["one_wave_us"] - wave) < 0.01, (row, rec)
+
+
+def test_one_wave_table_kept_only_where_it_prices_no_higher(monkeypatch) -> None:
+    # GB300's h2 row with a summary step of 10 us per chunk and a walk step of 0.1 us: the one-wave route (summaries of
+    # 22 chunks) prices above wave 1 in series (summaries of 20 chunks), so the pricing keeps the piece table and so
+    # does the host layout
+    _device_class(monkeypatch, "GB300")
+    chunks = cake_plan.chunk_counts(_PAIR_LAYOUT)
+    costs = {**cake_chain.ADJOINT_SPLIT_COSTS["sm_103a"], "walk": 0.1, "summary": 10.0, "serial_low": 10.0,
+             "serial_full": 10.0}  # fmt: skip
+    monkeypatch.setattr(cake_chain, "ADJOINT_SPLIT_COSTS", {"sm_103a": costs})
+    rec = cake_chain.adjoint_split_pricing(chunks, 6, 152, "sm_103a")
+    assert rec["select"] and rec["one_stream"] and rec["segment_len"] == 20, rec
+    assert abs(rec["one_stream_us"] - 255.6) < 0.01, rec
+    assert abs(rec["one_wave_us"] - 270.8) < 0.01, rec
+    assert rec["one_wave_len"] == 0, rec
+    options = cake_chain.make_options()
+    assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 20
+
+
+# _adjoint_split_length of the pair rows h2 / h1 by device class: the one-wave table on the devices of
+# ONE_WAVE_TABLE_DEVICES (GB200 and GB300), the piece table elsewhere (on B300's h2 too: its device is not in the set)
+PAIR_SPLIT_LENGTHS = {
+    "B200": {"h2": 20, "h1": 11},
+    "GB200": {"h2": 22, "h1": 11},
+    "B300": {"h2": 20, "h1": 11},
+    "GB300": {"h2": 22, "h1": 11},
+    "R200-212": {"h2": 14, "h1": 8},
+    "R200-216": {"h2": 14, "h1": 7},
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_adjoint_split_length_takes_the_one_wave_table_on_its_devices(
+    name, monkeypatch
+) -> None:
+    # the host layout's split length: the one-wave table where the pricing keeps it, on a device of
+    # ONE_WAVE_TABLE_DEVICES, its architecture's one-wave route and the stitch, and where the table built at that length
+    # fits one wave; else the pricing's piece table.  host_plans takes that table; GB200's h1 with its value-head group
+    # of three keeps its form of cake_plan.ADJOINT_FORMS (no split)
+    arch, sm_count = _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    for row, ((seq_lens, num_v_heads), _) in PIECE_ROWS.items():
+        chunks = cake_plan.chunk_counts(seq_lens)
+        got = cake_chain._adjoint_split_length(seq_lens, num_v_heads, 0, options)
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        if row in PAIR_SPLIT_LENGTHS[name]:
+            assert got == PAIR_SPLIT_LENGTHS[name][row], (row, got, rec)
+        else:
+            assert rec["one_wave_len"] == 0, (row, rec)
+            assert got == (rec["segment_len"] if rec["select"] else None), (row, got)
+        if got is not None and got != rec["segment_len"]:
+            assert sum(_pieces(chunks, got)) * num_v_heads <= sm_count, (row, got)
+        (_fwd, bwd), bwd_tc = cake_chain.host_plans(seq_lens, num_v_heads, 0, options)
+        if got is not None:
+            assert bwd == cake_chain.ScanPlan(cake_chain.SDT_CONFIG, got) and not bwd_tc, (row, bwd)  # fmt: skip
+    form = cake_chain._adjoint_split_length(_PAIR_LAYOUT, 3, 0, options, 3)
+    assert form == (None if name == "GB200" else PAIR_SPLIT_LENGTHS[name]["h1"]), form
+
+
+def test_one_wave_table_needs_its_device_and_the_one_wave_route(monkeypatch) -> None:
+    # GB300's h2 row takes the one-wave table (22 chunks) only with its device in ONE_WAVE_TABLE_DEVICES (an entry of
+    # another SM count does not serve it), its architecture in ONE_WAVE_SPLIT_ARCHS and the stitch as the composer;
+    # B300 (148 SMs) takes it once its device is listed.  With two empty sequences the one-wave table is 24 chunks, and
+    # the table host_plans builds there fits one wave (25 pieces x 6 value heads on 152 SMs); a table that would not
+    # fit one wave (a rule that counts no piece for an empty sequence) keeps the piece table
+    _device_class(monkeypatch, "GB300")
+    options = cake_chain.make_options()
+    assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 22
+    for setting, value in (
+        ("ONE_WAVE_TABLE_DEVICES", frozenset()),
+        ("ONE_WAVE_TABLE_DEVICES", frozenset({("sm_103a", 148)})),
+        ("ONE_WAVE_SPLIT_ARCHS", frozenset()),
+        ("ADJOINT_CHAIN_STAGES", ("piece_chain",)),
+    ):
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, setting, value)
+            got = cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options)
+            assert got == 20, (setting, value, got)
+    with monkeypatch.context() as m:
+        _device_class(m, "B300")
+        assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 20
+        m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset({("sm_103a", 148)}))
+        assert cake_chain._adjoint_split_length(_PAIR_LAYOUT, 6, 0, options) == 22
+    seq_lens = _PAIR_LAYOUT + (0, 0)
+    rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 6, 152, "sm_103a")  # fmt: skip
+    assert (rec["segment_len"], rec["one_stream"], rec["one_wave_len"]) == (21, True, 24), rec  # fmt: skip
+    assert abs(rec["one_stream_us"] - 198.12) < 0.01, rec
+    assert abs(rec["one_wave_us"] - 162.62) < 0.01, rec
+    assert cake_chain._adjoint_split_length(seq_lens, 6, 0, options) == 24
+    plans, bwd_tc = cake_chain.host_plans(seq_lens, 6, 0, options)
+    assert plans[1] == cake_chain.ScanPlan(cake_chain.SDT_CONFIG, 24) and not bwd_tc
+    meta = cake_chain.build_chunk_meta(seq_lens, "cpu", scan_plans=plans, lpt=True)
+    assert meta.bwd_segments.num_segments == 25, meta.bwd_segments
+    # the built-table check: a table rule that counts an empty sequence as no piece (ceil alone) gives 22 chunks on
+    # that layout, and the pricing keeps it (one-wave 155.96 us against 198.12 in series), but the table host_plans
+    # builds at 22 has 26 pieces x 6 value heads = 156 CTAs on 152 SMs (not one wave), so the host layout keeps the
+    # piece table (21 chunks)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "bwd_one_wave_table", lambda c, hv, sms: next(
+            length for length in range(1, max(c) + 1) if sum(-(-n // length) for n in c) * hv <= sms))  # fmt: skip
+        rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 6, 152, "sm_103a")  # fmt: skip
+        assert (rec["segment_len"], rec["one_wave_len"]) == (21, 22), rec
+        assert abs(rec["one_wave_us"] - 155.96) < 0.01, rec
+        assert abs(rec["one_stream_us"] - 198.12) < 0.01, rec
+        assert cake_chain._adjoint_split_length(seq_lens, 6, 0, options) == 21
+
+
 @pytest.mark.parametrize("arch", ["sm_100a", "sm_103a", "sm_107a"])
 def test_host_plans_take_the_split_or_the_serial_table(arch, monkeypatch) -> None:
     # on an architecture of ADJOINT_SPLIT_ARCHS a host layout's adjoint table is the one-wave split or a serial table,
@@ -4958,6 +5223,149 @@ def test_host_plans_take_the_split_or_the_serial_table(arch, monkeypatch) -> Non
         m.setattr(cake_chain, "ADJOINT_SPLIT_ARCHS", frozenset())
         want = cake_chain.host_plans((131071, 87531, 43385), 6, 0, pinned)
     assert cake_chain.host_plans((131071, 87531, 43385), 6, 0, pinned) == want
+
+
+# The rows of the README's speed table, (H, HV) and tokens per sequence
+SPEED_ROWS = {
+    "issue": ((2, 6), (131071, 87531, 43385)),
+    "P3": ((2, 6), (128147, 131027)),
+    "P1": ((2, 6), (126565, 32714, 33696, 15081, 22979, 10782)),
+    "64x4096": ((2, 6), (4096,) * 64),
+    "A16_32768x3": ((16, 48), (32768,) * 3),
+    "pair_h16": ((16, 48), _PAIR_LAYOUT),
+    "pair_h8": ((8, 24), _PAIR_LAYOUT),
+    "pair_h4": ((4, 12), _PAIR_LAYOUT),
+    "pair_h2": ((2, 6), _PAIR_LAYOUT),
+    "pair_h1": ((1, 3), _PAIR_LAYOUT),
+}
+# Their adjoint routes with the delivered tables (_adjoint_route): the split on two streams ("split_two_streams"; B200's
+# long rows under M-share, not told apart here) or the serial scan on dhu_tc2 for 64x4096 and the (16, 48) rows on every
+# device class, but for the pair rows of HV 6 and 3 (PAIR_ROUTES): "split_one_stream" wave 1 on the caller's stream,
+# "split_one_wave" the one-wave route, "prescan_tc" the planner's split table with its pass 2 on dhu_tc2 (GB200's form
+# of cake_plan.ADJOINT_FORMS)
+SPEED_ROUTES = {
+    "issue": "split_two_streams",
+    "P3": "split_two_streams",
+    "P1": "split_two_streams",
+    "64x4096": "serial_tc",
+    "A16_32768x3": "serial_tc",
+    "pair_h16": "serial_tc",
+    "pair_h8": "split_two_streams",
+    "pair_h4": "split_two_streams",
+}
+PAIR_ROUTES = {
+    "B200": {"pair_h2": "split_two_streams", "pair_h1": "split_one_wave"},
+    "GB200": {"pair_h2": "split_one_wave", "pair_h1": "prescan_tc"},
+    "B300": {"pair_h2": "split_one_stream", "pair_h1": "split_one_wave"},
+    "GB300": {"pair_h2": "split_one_wave", "pair_h1": "split_one_wave"},
+    "R200-212": {"pair_h2": "split_two_streams", "pair_h1": "split_one_wave"},
+    "R200-216": {"pair_h2": "split_two_streams", "pair_h1": "split_two_streams"},
+}
+# The rows the one-wave table moves: (device class, row) -> (L of the piece table, L of the one-wave table); wave 1 on
+# the caller's stream at the first, the one-wave route at the second
+ONE_WAVE_TABLE_CHANGES = {
+    ("GB200", "pair_h2"): (20, 22),
+    ("GB300", "pair_h2"): (20, 22),
+    ("GB300", "pair_h1"): (10, 11),
+}
+
+
+def _adjoint_route(seq_lens, heads, options) -> tuple:
+    """The adjoint route of a host layout on device 0 as the plan (:func:`cake_chain._chunk_meta`) and the backward
+    decide it (host work only): ``("split_two_streams" | "split_one_stream" | "split_one_wave", L)`` for the
+    one-wave split (two streams, wave 1 on the caller's stream, the one-wave route), ``("serial_tc" | "serial_reg",
+    config)`` for a serial table (a table priced for dhu_tc2, else the rule at the call) or ``("prescan" |
+    "prescan_tc", config, L)`` for a pre-scan's split table."""
+    num_heads, num_v_heads = heads
+    group = num_v_heads // num_heads
+    arch = cake_backend.device_arch(0)
+    sm_count = cake_chain._device_props(0)[0]
+    chunks = cake_plan.chunk_counts(seq_lens)
+    (_fwd, bwd), bwd_tc, _kept = cake_chain._host_plans(seq_lens, num_v_heads, 0, options, group=group)  # fmt: skip
+    length = cake_chain._adjoint_split_length(seq_lens, num_v_heads, 0, options, group)
+    if length is not None and bwd.segment_len == length:
+        if (
+            arch in cake_chain.ONE_WAVE_SPLIT_ARCHS
+            and cake_chain._adjoint_chain_stage(arch) == "stitch"
+            and sum(_pieces(chunks, length)) * num_v_heads <= sm_count
+        ):
+            return "split_one_wave", length
+        rec = cake_chain.adjoint_split_pricing(chunks, num_v_heads, sm_count, arch)
+        one_stream = rec["one_stream"]
+        return ("split_one_stream" if one_stream else "split_two_streams"), length
+    config = tuple(bwd.config)
+    if bwd.segment_len > 0 and max(chunks) > bwd.segment_len:
+        return ("prescan_tc" if bwd_tc else "prescan"), config, bwd.segment_len
+    tc = bwd_tc or cake_chain.dhu_tc_pricing(chunks, num_v_heads, 0)["select"]
+    return ("serial_tc" if tc else "serial_reg"), config
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_speed_rows_keep_their_routes(name, monkeypatch) -> None:
+    # the speed-table rows with the delivered one-wave table devices against the same rows with that set emptied: only
+    # the rows of ONE_WAVE_TABLE_CHANGES move (wave 1 on one stream over the piece table -> the one-wave route over the
+    # one-wave table); B200, B300 and R200 keep every route
+    _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    shipped = {
+        row: _adjoint_route(seq_lens, heads, options)
+        for row, (heads, seq_lens) in SPEED_ROWS.items()
+    }
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+        emptied = {
+            row: _adjoint_route(seq_lens, heads, options)
+            for row, (heads, seq_lens) in SPEED_ROWS.items()
+        }
+    routes = {**SPEED_ROUTES, **PAIR_ROUTES[name]}
+    assert {row: got[0] for row, got in shipped.items()} == routes, shipped
+    for row in ("64x4096", "A16_32768x3", "pair_h16"):
+        assert shipped[row] == ("serial_tc", (64, 1)), (row, shipped[row])
+    moved = {row for row in SPEED_ROWS if shipped[row] != emptied[row]}
+    assert moved == {row for device, row in ONE_WAVE_TABLE_CHANGES if device == name}, (
+        moved,
+        shipped,
+        emptied,
+    )
+    for row in moved:
+        length, length1 = ONE_WAVE_TABLE_CHANGES[(name, row)]
+        assert emptied[row] == ("split_one_stream", length), (row, emptied[row])
+        assert shipped[row] == ("split_one_wave", length1), (row, shipped[row])
+
+
+# The bench rows over four sequences of 4,096 tokens at HV 16 (r01_4x4096_h8, g1_4x4096_h16, g4_4x4096_h4): the piece
+# table cuts each sequence into pieces of 21, 21 and 22 chunks (192 CTAs, not one wave) and wave 1 runs on the caller's
+# stream; on GB200 and GB300 the one-wave route over pieces of 32 chunks (128 CTAs) prices below that series (whose
+# summary launch takes the last piece of 22 chunks), so those boards take it: (L of the piece table, L of the one-wave
+# table, the series (us), the one-wave route (us)).  Every other device class keeps its route.
+HV16_4X4096_ONE_WAVE = {
+    "GB200": (22, 32, 194.22, 192.84),
+    "GB300": (22, 32, 184.4, 183.06),
+}
+
+
+@pytest.mark.parametrize("name", sorted(DEVICE_CLASSES))
+def test_one_wave_table_on_the_4x4096_hv16_rows(name, monkeypatch) -> None:
+    arch, sm_count = _device_class(monkeypatch, name)
+    options = cake_chain.make_options()
+    seq_lens = (4096,) * 4
+    rec = cake_chain.adjoint_split_pricing(cake_plan.chunk_counts(seq_lens), 16, sm_count, arch)  # fmt: skip
+    for num_heads in (16, 8, 4):
+        heads = (num_heads, 16)
+        shipped = _adjoint_route(seq_lens, heads, options)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+            emptied = _adjoint_route(seq_lens, heads, options)
+        if name not in HV16_4X4096_ONE_WAVE:
+            assert shipped == emptied, (heads, shipped, emptied)
+            continue
+        length, length1, series, wave = HV16_4X4096_ONE_WAVE[name]
+        assert emptied == ("split_one_stream", length), (heads, emptied)
+        assert shipped == ("split_one_wave", length1), (heads, shipped)
+    if name in HV16_4X4096_ONE_WAVE:
+        assert (rec["segment_len"], rec["one_stream"], rec["one_wave_len"]) == (length, True, length1), rec  # fmt: skip
+        assert abs(rec["one_stream_us"] - series) < 0.01, rec
+        assert abs(rec["one_wave_us"] - wave) < 0.01, rec
 
 
 # A layout the split cuts on a device of SPLIT_SMS SMs with HV 4: sequences of 11, 24 and 4 chunks take pieces of 4
@@ -5221,6 +5629,132 @@ def test_adjoint_split_one_wave_naive_tier_verdict(
         return runs
 
     _judge_forms(record_property, 7031, seq_lens, heads, device, forms, names=names, states=states)  # fmt: skip
+
+
+# The one-wave table on a row whose wave 1 runs on the caller's stream: SPLIT_LAYOUT (11, 24 and 4 chunks) with HV 4 on
+# ONE_WAVE_TABLE_SMS SMs, the costs of _split_device (walk and summary 1 us per chunk, no stitch or fixed cost) and a
+# fork cost that no overlap repays.  The piece table (4 chunks: 3 + 6 + 1 pieces, 40 CTAs) does not fit one wave: wave
+# 1 on one stream runs the summaries (4 chunks), the last pieces' walks (4), the stitch and the other walks (4) in
+# series, 12 us; the one-wave table (5 chunks: 3 + 5 + 1 pieces, 36 CTAs) runs the summaries (5), the stitch and one
+# walk of every piece (5), 10 us.
+ONE_WAVE_TABLE_SMS = 36
+
+
+def _one_wave_table_device(monkeypatch, device, *, listed: bool = True) -> str:
+    """The small device of :func:`_split_device` (the split priced) with ONE_WAVE_TABLE_SMS SMs, wave 1 on the
+    caller's stream and the one-wave route; ``listed``: the device in ONE_WAVE_TABLE_DEVICES (else no device is)."""
+    arch = _split_device(monkeypatch, device, split=True)
+    if cake_chain._adjoint_chain_stage(arch) != "stitch":
+        pytest.skip(f"the one-wave route needs the stitch on {arch}")
+    _small_device(monkeypatch, device, ONE_WAVE_TABLE_SMS)
+    monkeypatch.setitem(cake_chain.ADJOINT_SPLIT_COSTS[arch], "fork", 1e9)
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_SPLIT_ARCHS", frozenset({arch}))
+    devices = {(arch, ONE_WAVE_TABLE_SMS)} if listed else set()
+    monkeypatch.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset(devices))
+    return arch
+
+
+def test_one_wave_table_route_on_a_one_stream_row(
+    device, monkeypatch, record_property
+) -> None:
+    # wave 1 on the caller's stream over pieces that do not fit one wave: a device of ONE_WAVE_TABLE_DEVICES takes the
+    # one-wave table and runs the one-wave route (the summaries, the stitch and one walk of every piece, all on the
+    # caller's stream); a device outside the set keeps the piece table, wave 1 on one stream, also after its layout was
+    # cached with the device in the set (the layout cache keys on the set).  Two runs of the one-wave route per draw
+    # (judged by the worst) and the serial walk on the SPLIT_SMS device of _split_device are judged with an initial
+    # state and a final-state gradient
+    seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
+    index = cake_chain._device_index(device)
+    chunks = cake_plan.chunk_counts(seq_lens)
+    main = torch.cuda.current_stream(device).cuda_stream
+    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+    options = cake_chain.make_options()
+
+    def planned():
+        meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], options,
+                                      heads[1] // heads[0])  # fmt: skip
+        return meta.bwd_split, meta.bwd_segments
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for listed in (False, True):
+            with monkeypatch.context() as m:
+                arch = _one_wave_table_device(m, device, listed=listed)
+                if j == 0:
+                    rec = cake_chain.adjoint_split_pricing(chunks, heads[1], ONE_WAVE_TABLE_SMS, arch)  # fmt: skip
+                    got = (rec["segment_len"], rec["one_stream"], rec["one_wave_len"])
+                    assert got == (4, True, 5), rec
+                    assert (rec["one_stream_us"], rec["one_wave_us"]) == (12.0, 10.0), rec  # fmt: skip
+                split, segs = planned()
+                assert split is not None and split.one_stream, split
+                if not listed:
+                    assert (segs.segment_len, segs.num_segments) == (4, 10), segs
+                    assert not split.one_wave and split.num_every == 0, split
+                    continue
+                assert (segs.segment_len, segs.num_segments) == (5, 9), segs
+                assert split.one_wave and split.num_every == 9, split
+                launches = _record_streams(m)
+                runs["one_wave_table"] = [_run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)
+                                          for _ in range(2)]  # fmt: skip
+                stages = [stage for stage, _ in launches]
+                # per run one launch of the summaries and one walk of every piece; the backward's stitch (the
+                # forward's plan may stitch too)
+                assert (
+                    stages.count("dhu_tc2_dvl32_gm") == 2
+                    and stages.count("dhu_tc2_dvl32_modes") == 2
+                ), stages
+                assert stages.count("stitch") >= 2, stages
+                assert not [
+                    s for s in stages if s.startswith(("dhu_pre", "dv_local", "dhu_r"))
+                ], stages
+                split_streams = {
+                    stream for stage, stream in launches if stage in _SPLIT_STAGES
+                }
+                assert split_streams == {main}, split_streams
+                if j == 0:
+                    # the layout cache keys on the device set: a device taken out of it plans the piece table again
+                    m.setattr(cake_chain, "ONE_WAVE_TABLE_DEVICES", frozenset())
+                    split, segs = planned()
+                    assert (segs.segment_len, segs.num_segments) == (4, 10), segs
+                    assert (
+                        split is not None and split.one_stream and not split.one_wave
+                    ), split
+        with monkeypatch.context() as m:
+            _split_device(m, device, split=False)
+            runs["serial"] = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        return runs
+
+    _judge_forms(record_property, 7041, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
+
+
+def test_planned_routes_plain_and_checkpointed_naive_tier_verdict(
+    device, monkeypatch, record_property
+) -> None:
+    # the one-wave table's route, plain and under non-reentrant activation checkpointing (the forward recomputed for
+    # the backward, one route in both passes): two runs of each per draw (judged by the worst) are judged with an
+    # initial state and a final-state gradient
+    seq_lens, heads = SPLIT_LAYOUT, SPLIT_HEADS
+    index = cake_chain._device_index(device)
+    _one_wave_table_device(monkeypatch, device)
+    cu = torch.tensor(_cu(seq_lens), dtype=torch.int64)
+    meta = cake_chain._chunk_meta(cu.to(device), cu, 1, sum(seq_lens), index, heads[1], cake_chain.make_options(),
+                                  heads[1] // heads[0])  # fmt: skip
+    split = meta.bwd_split
+    assert split is not None and split.one_wave, split
+    assert meta.bwd_segments.segment_len == 5, meta.bwd_segments
+    stages = _record_launches(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        runs = {}
+        for ckpt in (False, True):
+            stages.clear()
+            runs["ckpt" if ckpt else "plain"] = [
+                _run_rows(inputs, seq_lens, h0, dht, ckpt=ckpt) for _ in range(2)
+            ]
+            assert "dhu_tc2_dvl32_gm" in stages and "dv_local" not in stages, (ckpt, stages)  # fmt: skip
+        return runs
+
+    _judge_forms(record_property, 7061, seq_lens, heads, device, forms, names=STATE_OUTPUTS, states=True)  # fmt: skip
 
 
 def _record_gm_flags(monkeypatch) -> list[tuple[torch.Tensor, torch.Tensor]]:
@@ -7340,8 +7874,9 @@ def _clear_builder_caches(caches=TABLE_CACHES) -> None:
 
 
 def _fresh_table_caches(monkeypatch) -> None:
-    """Empty device-table caches, layout front, backward plans and tables kept by captures."""
-    for name in ("_META_FRONT", *TABLE_CACHES, "_GRAPH_TABLES", "_BWD_PLANS"):
+    """Empty device-table caches, layout front, recorded backward and forward plans and tables kept by captures."""
+    plans = ("_BWD_PLANS", "_FWD_PLANS")
+    for name in ("_META_FRONT", *TABLE_CACHES, "_GRAPH_TABLES", *plans):
         monkeypatch.setattr(cake_chain, name, {}, raising=False)
     _clear_builder_caches()
 
@@ -7394,9 +7929,9 @@ def _cached_tables(caches=TABLE_CACHES) -> list[torch.Tensor]:
 
 
 def _drop_cached_tables() -> None:
-    """Drop every reference the package keeps to a cached device table: the caches, the layout front and the backward
-    plans (a plan holds its layout's ChunkMeta)."""
-    for name in ("_META_FRONT", *TABLE_CACHES, "_BWD_PLANS"):
+    """Drop every reference the package keeps to a cached device table: the caches, the layout front and the recorded
+    backward and forward plans (a plan holds its layout's ChunkMeta, a forward plan the cached walk it reads too)."""
+    for name in ("_META_FRONT", *TABLE_CACHES, "_BWD_PLANS", "_FWD_PLANS"):
         getattr(cake_chain, name, {}).clear()
     _clear_builder_caches()
 
@@ -7895,3 +8430,1260 @@ def test_a_capture_neither_replays_nor_records_a_backward_plan(
         return {"warm": want, "eager": eager, "graph": runs}
 
     _judge_forms(record_property, 151, seq_lens, heads, device, forms)
+
+
+# --------------------------------------------------------------------------- the forward plan
+# The forward records its allocations, views, eager calls, launches, stream switches and event records and waits once
+# per call class (cake_chain.FWD_PLAN) and replays them afterwards.  The tests below hold every replay to the general
+# path's launches, stream switches, events and memory peak (FWD_PLAN off) on every route and tape mode, judge the
+# general path's calls and the planned ones each under its own name, and pin down the plan's key, its invalidation, the
+# calls it never serves (a CUDA graph capture, the device route, a host q) and the caller's stream and device after a
+# replay.
+
+
+def _counted_forward_replays(monkeypatch) -> list:
+    """The plan of every forward that replays one (:func:`cake_chain._replay_forward`), in order."""
+    replays = []
+    replay = cake_chain._replay_forward
+
+    def counted(plan, *args):
+        replays.append(plan)
+        return replay(plan, *args)
+
+    monkeypatch.setattr(cake_chain, "_replay_forward", counted)
+    return replays
+
+
+def _logged_stream_events(monkeypatch) -> list:
+    """Every stream switch and event record and wait from here on as (operation, the handle of the stream it acts on),
+    in order (a ``Stream.wait_event`` also logs the ``Event.wait`` it makes)."""
+    log = []
+    set_stream, wait_event = torch.cuda.set_stream, torch.cuda.Stream.wait_event
+    record, wait = torch.cuda.Event.record, torch.cuda.Event.wait
+
+    def handle(stream) -> int:
+        return (torch.cuda.current_stream() if stream is None else stream).cuda_stream
+
+    def logged_set_stream(stream):
+        if stream is not None:
+            log.append(("set_stream", stream.cuda_stream))
+        return set_stream(stream)
+
+    def logged_wait_event(self, event):
+        log.append(("wait_event", self.cuda_stream))
+        return wait_event(self, event)
+
+    def logged_record(self, stream=None):
+        log.append(("record", handle(stream)))
+        return record(self, stream)
+
+    def logged_wait(self, stream=None):
+        log.append(("wait", handle(stream)))
+        return wait(self, stream)
+
+    monkeypatch.setattr(torch.cuda, "set_stream", logged_set_stream)
+    monkeypatch.setattr(torch.cuda.Stream, "wait_event", logged_wait_event)
+    monkeypatch.setattr(torch.cuda.Event, "record", logged_record)
+    monkeypatch.setattr(torch.cuda.Event, "wait", logged_wait)
+    return log
+
+
+def _watched_functions() -> tuple:
+    """The torch functions a forward's recording watches (``cake_chain._WATCHED``), as they are now."""
+    return tuple(getattr(owner, name) for owner, name in cake_chain._WATCHED)
+
+
+def _package_node(o):
+    """The package's autograd node behind ``o`` (the call's ``ctx``); ``None`` where ``o`` reaches none (no grad, a
+    reentrant checkpoint)."""
+    node = o.grad_fn
+    while node is not None and not type(node).__name__.startswith("CakeGDNNondet"):
+        node = node.next_functions[0][0] if node.next_functions else None
+    return node
+
+
+def _requested_peak(run, device):
+    """``run()`` and the most bytes the caching allocator held for requests during it, above its start (requested
+    bytes: unlike block bytes, they do not depend on which cached blocks were free)."""
+    gc.collect()
+    torch.cuda.synchronize()
+    torch.cuda.reset_peak_memory_stats(device)
+    start = torch.cuda.memory_stats(device)["requested_bytes.all.current"]
+    got = run()
+    torch.cuda.synchronize()
+    return got, torch.cuda.memory_stats(device)["requested_bytes.all.peak"] - start
+
+
+# the tape modes of a call: a taped call and its backward, the forward alone under no_grad (no tape), and
+# torch.utils.checkpoint without and with reentrant autograd (a first pass without a tape and the backward's recompute
+# with one: two call classes)
+FWD_PLAN_MODES = ("taped", "no_grad", "checkpoint", "reentrant")
+
+
+def _fwd_plan_call(
+    inputs, seq_lens, mode, *, form="views", h0=None, dht=None, **pins
+) -> dict:
+    """One call under ``mode`` (:data:`FWD_PLAN_MODES`; ``seq_lens`` ``None``: an equal-length batch) with q / k / v as
+    ``"views"`` (fresh leaves), ``"packed"`` (head views of one packed leaf row) or ``"unaligned_v"`` (v 2 bytes past a
+    16-byte boundary); ``h0`` / ``dht``: an initial state and the final state's gradient (the call then returns the
+    final state).  Returns o (and the final state), the gradients where the mode runs a backward, and ``"plan_key"``:
+    the backward plan key of the call's context where o reaches it."""
+    device = inputs["q"].device
+    widths = tuple(inputs[n].shape[2] * HEAD_DIM for n in ("q", "k", "v"))
+    kwargs = {}
+    if seq_lens is not None:
+        kwargs["cu_seqlens"], kwargs["cu_seqlens_cpu"] = _cu_tensors(seq_lens, device)
+    if form == "packed":
+        row = torch.cat([inputs[n].flatten(-2) for n in ("q", "k", "v")], -1)
+        leaves = {"row": row.detach().clone().requires_grad_(True)}
+    else:
+        leaves = {
+            n: inputs[n].detach().clone().requires_grad_(True) for n in ("q", "k", "v")
+        }
+        if form == "unaligned_v":
+            leaves["v"] = _unaligned(inputs["v"], 1).requires_grad_(True)
+    for name in ("g", "beta"):
+        leaves[name] = inputs[name].detach().clone().requires_grad_(True)
+    if h0 is not None:
+        leaves["h0"] = h0.detach().clone().requires_grad_(True)
+    final = h0 is not None
+
+    def layer(*args):
+        if form == "packed":
+            views = (p.unflatten(-1, (-1, HEAD_DIM)) for p in args[0].split(widths, -1))
+            args = (*views, *args[1:])
+        q, k, v, g, beta, *state = args
+        o, last = cake_gdn_nondet(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM),
+                                  initial_state=state[0] if state else None, output_final_state=final,
+                                  use_qk_l2norm_in_kernel=True, **kwargs, **pins)  # fmt: skip
+        return (o, last) if final else o
+
+    args = tuple(leaves.values())
+    if mode == "no_grad":
+        with torch.no_grad():
+            out = layer(*args)
+    elif mode == "taped":
+        out = layer(*args)
+    else:
+        out = checkpoint(layer, *args, use_reentrant=mode == "reentrant")
+    o, last = out if final else (out, None)
+    node = _package_node(o)
+    got = {"o": o.detach(), "plan_key": None if node is None else node.plan_key}
+    if final:
+        got["final_state"] = last.detach()
+    if mode != "no_grad":
+        loss = (o.float() * inputs["do"].float()).sum()
+        if final:
+            loss = loss + (last * dht).sum()
+        loss.backward()
+        if form == "packed":
+            grads = [
+                p.unflatten(-1, (-1, HEAD_DIM))
+                for p in leaves["row"].grad.split(widths, -1)
+            ]
+        else:
+            grads = [leaves[n].grad for n in ("q", "k", "v")]
+        got.update(zip(("dq", "dk", "dv"), grads, strict=True))
+        got.update(dg=leaves["g"].grad, dbeta=leaves["beta"].grad)
+        if final:
+            got["dh0"] = leaves["h0"].grad
+    torch.cuda.synchronize()
+    return got
+
+
+def _fwd_plan_names(mode, states) -> tuple:
+    """The outputs and gradients :func:`_fwd_plan_call` returns under ``mode``, with or without the states."""
+    names = ("o", "final_state") if states else ("o",)
+    if mode != "no_grad":
+        names += GRAD_NAMES + (("dh0",) if states else ())
+    return names
+
+
+# case -> (the forward route: one of ROW_ROUTES (forced, :func:`_route_or_skip`, on the judged layouts), "m_share"
+# (:func:`_force_m_share` on FWD_SPLIT_JUDGE_CASES["g3"]), "p_form" (the prep's two sequence groups on a small device
+# view, :func:`_small_device`) or None (the device's own); the layout ((H, HV), sequence lengths; None: the route's
+# own; sequence lengths None: an equal-length batch of two 640-token sequences); beta's dtype; q / k / v
+# (:func:`_fwd_plan_call`); the pins; whether the call takes an initial state and returns the final state (in the
+# longest-first table order: the states are reordered on the way in and out)
+FWD_PLAN_CASES = {
+    "prep": ("prep", None, torch.float32, "views", {}, False),
+    "a": ("a", None, torch.float32, "views", {}, False),
+    "split_w": ("split_w", None, torch.float32, "views", {}, False),
+    # sequences of one piece beside split ones: wave 1's end states reach the segment state through an index_select
+    "split_a": ("split_a", None, torch.float32, "views", {}, False),
+    # every sequence split (40 and 20 chunks: pieces of 3 chunks at 148 and 152 SMs)
+    "split_a-every-sequence": ("split_a", ((2, 6), (2530, 1250)), torch.float32, "views", {}, False),
+    "m_share": ("m_share", None, torch.float32, "views", {}, False),
+    "p_form": ("p_form", None, torch.bfloat16, "views", STREAM_PINS, False),
+    "one-stream": ("p_form", None, torch.bfloat16, "views", {**STREAM_PINS, "streams": 1}, False),
+    "states-lpt": (None, FWD_A_CASES["g3"], torch.float32, "views", {}, True),
+    "unaligned-v": (None, FWD_A_CASES["g3"], torch.float32, "unaligned_v", {}, False),
+    "equal-length": (None, ((2, 6), None), torch.float32, "views", {}, False),
+    "packed": (None, ((2, 6), (300, 77, 640, 17)), torch.float32, "packed", {}, False),
+}  # fmt: skip
+
+
+def _fwd_plan_case(case, mode, device, monkeypatch):
+    """A :data:`FWD_PLAN_CASES` case under ``mode``, set up on the device: ``draw(s)`` makes a draw's inputs from ``s``
+    (with the states, the initial state and the final state's gradient from ``s + 1``) and their oracle,
+    ``run(inputs, h0, dht)`` makes the case's call on them; with the names the call returns and the backward plan
+    replays of one call (none without a backward, or with the final state's gradient, whose backward has no plan)."""
+    route, layout, beta_dtype, form, pins, states = FWD_PLAN_CASES[case]
+    found = layout
+    if route == "m_share":
+        _force_m_share(monkeypatch, device, FWD_SPLIT_JUDGE_MIN_PIECE)
+        found = FWD_SPLIT_JUDGE_CASES["g3"]
+    elif route == "p_form":
+        _small_device(monkeypatch, device, STREAM_CASES[(2, 4)])
+        found = ((2, 4), STREAM_LAYOUT)
+    elif route is not None:
+        found, _marker = _route_or_skip(route, device, monkeypatch)
+    heads, seq_lens = layout or found
+    if route == "split_a":
+        split = _m_share_meta(device, heads, seq_lens).fwd_split
+        assert split is not None, (case, seq_lens)
+        assert (split.first_seq is None) is (case == "split_a-every-sequence"), case
+    if route == "m_share":
+        assert _m_share_meta(device, heads, seq_lens).m_share, case
+
+    def draw(s):
+        inputs = _inputs(seq_lens or (640,), heads, beta_dtype, device, seed=s, batch=1 if seq_lens else 2)  # fmt: skip
+        h0 = dht = None
+        if states:
+            h0, dht = _states(seq_lens, heads[1], device, s + 1)
+        oracle = _oracle(inputs, seq_lens or (640, 640), initial_state=h0, dht=dht)
+        return inputs, h0, dht, oracle
+
+    def run(inputs, h0, dht):
+        return _fwd_plan_call(inputs, seq_lens, mode, form=form, h0=h0, dht=dht, **pins)
+
+    return draw, run, _fwd_plan_names(mode, states), int(mode != "no_grad" and not states)  # fmt: skip
+
+
+def _ran_fwd_plan_route(case, log) -> bool:
+    """Whether the launches ``log`` (:func:`_logged_launches`) of a :data:`FWD_PLAN_CASES` call ran its route: the
+    route's stage, or the P form's two streams (one under ``streams=1``)."""
+    route, pins = FWD_PLAN_CASES[case][0], FWD_PLAN_CASES[case][4]
+    stages = [stage for stage, _grid, _stream, _values in log]
+    if route == "p_form":
+        streams = {stream for _stage, _grid, stream, _values in log}
+        return len(streams) == pins.get("streams", 2)
+    if route == "prep":
+        return bool(_preps(stages)) and "fwd_ho_a" not in stages
+    if route is None:
+        return bool(stages)
+    marker = {"a": "fwd_ho_a", "split_a": "fwd_summary_a", "split_w": "fwd_fused"}
+    wave = "fwd_ho_a" if _split_a(FWD_SPLIT_JUDGE_MIN_PIECE) else "fwd_fused"
+    return marker.get(route, wave) in stages
+
+
+@pytest.mark.parametrize("mode", FWD_PLAN_MODES)
+@pytest.mark.parametrize("case", list(FWD_PLAN_CASES))
+def test_the_forward_plan_replays_the_general_path(
+    case, mode, device, monkeypatch, record_property
+) -> None:
+    # resolve before launch: the first eligible forward of a call class runs the general path and records it as a
+    # plan, the later ones replay it (the first draw records, every later call replays).  Each call runs over poisoned
+    # workspaces, so a step the plan missed reads NaN.  Per draw, the general path (FWD_PLAN off) and three calls with
+    # the plan make the same launches (stage, grid, stream, every value's shape, strides and dtype, every scalar), the
+    # same stream switches and event records and waits, the same peak of requested device memory and the same backward
+    # plan key, whose plan still replays; the general path and the planned calls (the worst judged) are judged.  The
+    # forwards on wy_a's A make placeholders for the state they do not keep, in both tape modes
+    draw_case, run, names, backward_steps = _fwd_plan_case(case, mode, device, monkeypatch)  # fmt: skip
+    monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+    launches = _logged_launches(monkeypatch)
+    events = _logged_stream_events(monkeypatch)
+    replays = _counted_forward_replays(monkeypatch)
+    backward_replays = _counted_replays(monkeypatch)
+    passes = 2 if mode in ("checkpoint", "reentrant") else 1
+
+    def draw(j, s):
+        inputs, h0, dht, oracle = draw_case(s)
+        if j == 0:
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "FWD_PLAN", False)
+                # the case's tables, workspaces, side stream, walk and backward plan
+                run(inputs, h0, dht)
+        replays.clear()
+        backward_replays.clear()
+        runs = []
+        # the general path, then the recording (the first draw) or a replay, then two replays
+        for fwd_plan in (False, True, True, True):
+            launches.clear()
+            events.clear()
+            # before _requested_peak's reset: the junk blocks are freed by then
+            _poison_workspaces(device)
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "FWD_PLAN", fwd_plan)
+                got, peak = _requested_peak(lambda: run(inputs, h0, dht), device)
+            runs.append((got, list(launches), list(events), peak))
+            assert fwd_plan or not (replays or (j == 0 and cake_chain._FWD_PLANS))
+        (general, general_launches, general_events, general_peak), *planned = runs
+        assert _ran_fwd_plan_route(case, general_launches), [e[0] for e in general_launches]  # fmt: skip
+        plans = list(cake_chain._FWD_PLANS.values())
+        assert len(plans) == passes and all(p.ops is not None for p in plans), plans
+        assert len(replays) == (2 if j == 0 else 3) * passes, (j, len(replays))
+        assert {id(p) for p in replays} == {id(p) for p in plans}
+        assert len(backward_replays) == 4 * backward_steps, len(backward_replays)
+        if mode == "taped":
+            assert general["plan_key"] is not None
+        for got, got_launches, got_events, peak in planned:
+            assert got_launches == general_launches
+            assert got_events == general_events
+            assert peak == general_peak, (peak, general_peak)
+            assert got["plan_key"] == general["plan_key"]
+        arms = {"general": general, "plan": [got for got, *_ in planned]}
+        return _judged(arms, oracle, names)
+
+    _judge(record_property, 7161, draw)
+
+
+# the patterns of one object passed as two inputs: none, k as q, beta as g (FP32 beta)
+FWD_PLAN_ALIASES = ("distinct", "k-is-q", "beta-is-g")
+# the inputs each pattern passes as one leaf (the first's values in both)
+FWD_PLAN_SHARED = {"distinct": (), "k-is-q": ("q", "k"), "beta-is-g": ("g", "beta")}
+
+
+def _aliased_oracle(inputs, seq_lens, alias) -> tuple[dict, dict]:
+    """:func:`_oracle` of a call that passes one leaf as the two inputs of ``alias`` (:data:`FWD_PLAN_SHARED`): the
+    first input's values in both, and the leaf's gradient (the sum of the two inputs' gradients) for each."""
+    if not FWD_PLAN_SHARED[alias]:
+        return _oracle(inputs, seq_lens)
+    first, second = FWD_PLAN_SHARED[alias]
+    ref, naive = _oracle({**inputs, second: inputs[first]}, seq_lens)
+    shared = []
+    for got in (ref, naive):
+        leaf = got["d" + first] + got["d" + second]
+        shared.append({**got, "d" + first: leaf, "d" + second: leaf})
+    return shared[0], shared[1]
+
+
+@pytest.mark.parametrize("route", ROW_ROUTES)
+def test_aliased_inputs_take_a_forward_plan_of_their_own(
+    route, device, monkeypatch, record_property
+) -> None:
+    # a call with k as q records q's slot for both inputs (so does beta as g): calls with distinct inputs, with k as q
+    # and with beta as g, of one layout on one stream, each record a plan and replay only their own, in either order (a
+    # plan of another pattern would read k for q, or g for beta).  Per draw and pattern, the general path (FWD_PLAN off)
+    # and the four planned calls (the worst judged) are judged against the oracle of the shared values
+    (heads, seq_lens), _marker = _route_or_skip(route, device, monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+
+        def run(alias):
+            leaves = {}
+            if FWD_PLAN_SHARED[alias]:
+                first = FWD_PLAN_SHARED[alias][0]
+                leaf = inputs[first].detach().clone().requires_grad_(True)
+                leaves = dict.fromkeys(FWD_PLAN_SHARED[alias], leaf)
+            return _run(inputs, seq_lens, leaves=leaves)
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            general = {alias: run(alias) for alias in FWD_PLAN_ALIASES}
+        planned: dict = {alias: [] for alias in FWD_PLAN_ALIASES}
+        for order in (FWD_PLAN_ALIASES, FWD_PLAN_ALIASES[::-1]):
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "_FWD_PLANS", {})
+                replays = _counted_forward_replays(m)
+                # each pattern records its plan, then replays it after the other two recorded theirs
+                for alias in order * 2:
+                    planned[alias].append(run(alias))
+                plans = list(cake_chain._FWD_PLANS.values())
+                assert len(plans) == 3 and all(p.ops is not None for p in plans), plans
+                assert len(replays) == 3
+                assert all(a is b for a, b in zip(replays, plans, strict=True))
+        entries = []
+        for alias in FWD_PLAN_ALIASES:
+            arms = {f"{alias}.general": general[alias], f"{alias}.plan": planned[alias]}
+            entries += _judged(arms, _aliased_oracle(inputs, seq_lens, alias), OUTPUT_NAMES)  # fmt: skip
+        return entries
+
+    _judge(record_property, 7163, draw)
+
+
+# variant -> the second call class beside the call of the default pins on (300, 77, 640, 17) at (H, HV) = (2, 4) (the
+# prep's forward: BF16 beta): other offsets of as many sequences and tokens, a pin, another caller stream, q / k / v as
+# head views of one packed row, q / k 2 bytes past a 16-byte boundary, H = 1 (only the q / k heads differ)
+FWD_PLAN_CLASSES = ("offsets", "streams", "prep", "save_state", "segment_chunks", "stream", "packed", "unaligned-qk",
+                    "heads")  # fmt: skip
+FWD_PLAN_CLASS_LAYOUT = ((300, 77, 640, 17), (2, 4))
+
+
+def _fwd_plan_classes(variant, device, seed, stream):
+    """The two calls of a :data:`FWD_PLAN_CLASSES` variant on inputs drawn from ``seed``, each ``(call, oracle)``: the
+    call of the default pins and the call of the other class (``stream``: the other caller stream)."""
+    seq_lens, heads = FWD_PLAN_CLASS_LAYOUT
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=seed)
+    oracle = _oracle(inputs, seq_lens)
+    default = (lambda: _run(inputs, seq_lens), oracle)
+    if variant == "offsets":
+        other_lens = (301, 76, 640, 17)
+        return default, (lambda: _run(inputs, other_lens), _oracle(inputs, other_lens))
+    if variant in ("streams", "prep", "save_state", "segment_chunks"):
+        pins = {"streams": 1, "prep": "plain", "save_state": False, "segment_chunks": 0}
+        return default, (lambda: _run(inputs, seq_lens, **{variant: pins[variant]}), oracle)  # fmt: skip
+    if variant == "stream":
+
+        def on_stream():
+            stream.wait_stream(torch.cuda.current_stream(device))
+            with torch.cuda.stream(stream):
+                return _run(inputs, seq_lens)
+
+        return default, (on_stream, oracle)
+    if variant == "packed":
+        return default, (lambda: _run_packed(inputs, seq_lens, heads), oracle)
+    if variant == "unaligned-qk":
+
+        def unaligned():
+            leaves = {
+                n: _unaligned(inputs[n], 1).requires_grad_(True) for n in ("q", "k")
+            }
+            return _run(inputs, seq_lens, leaves=leaves)
+
+        return default, (unaligned, oracle)
+    other = _inputs(seq_lens, (1, 4), torch.bfloat16, device, seed=seed)
+    return default, (lambda: _run(other, seq_lens), _oracle(other, seq_lens))
+
+
+@pytest.mark.parametrize("variant", FWD_PLAN_CLASSES)
+def test_each_call_class_takes_a_forward_plan_of_its_own(
+    variant, device, monkeypatch, record_property
+) -> None:
+    # a plan serves the calls of its class only: one layout (the same offsets in a new cu_seqlens_cpu tensor each call
+    # are one class), one set of pins, one caller stream, inputs of one shape, strides, dtype and 16-byte alignment, one
+    # head count.  Two classes of one layout called in turn: each records its own plan once and then replays it, never
+    # the other's.  Per draw and class, the general path (FWD_PLAN off) and the three planned calls (the worst judged)
+    # are judged
+    stream = torch.cuda.Stream(device=device)
+
+    def draw(j, s):
+        calls = _fwd_plan_classes(variant, device, s, stream)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            general = [call() for call, _oracle_of in calls]
+        planned: list[list] = [[], []]
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays = _counted_forward_replays(m)
+            for i in (0, 1, 0, 1, 1, 0):
+                planned[i].append(calls[i][0]())
+            plans = list(cake_chain._FWD_PLANS.values())
+            assert len(plans) == 2 and all(p.ops is not None for p in plans), plans
+            assert [plans.index(p) for p in replays] == [0, 1, 1, 0]
+        entries = []
+        for i, name in enumerate(("default", "other")):
+            arms = {f"{name}.general": general[i], f"{name}.plan": planned[i]}
+            entries += _judged(arms, calls[i][1], OUTPUT_NAMES)
+        return entries
+
+    _judge(record_property, 7165, draw)
+
+
+@pytest.mark.parametrize("why", ["device-route", "no-host-cache", "off"])
+def test_calls_without_a_forward_plan_keep_the_general_path(
+    why, device, monkeypatch, record_property
+) -> None:
+    # no plan for the device route (its tables are built per call) or without the host cache (fresh workspaces per
+    # call), and none with FWD_PLAN off, whatever BWD_PLAN is (the backward still records and replays its own plan):
+    # every forward runs the general path.  Three calls per draw, judged by the worst
+    seq_lens, heads = (300, 77, 640, 17), (2, 6)
+    for name in ("_FWD_PLANS", "_BWD_PLANS"):
+        monkeypatch.setattr(cake_chain, name, {})
+    replays = _counted_forward_replays(monkeypatch)
+    backward_replays = _counted_replays(monkeypatch)
+    kwargs = {"device-route": {"route": "device"}, "no-host-cache": {"host_cache": False}}.get(why, {})  # fmt: skip
+    if why == "off":
+        monkeypatch.setattr(cake_chain, "FWD_PLAN", False)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=s)
+        backward_replays.clear()
+        runs = [_run(inputs, seq_lens, **kwargs) for _ in range(3)]
+        assert not replays and not cake_chain._FWD_PLANS
+        # with FWD_PLAN off the first backward of the first draw records its plan and every later one replays it
+        want = (2 if j == 0 else 3) if why == "off" else 0
+        assert len(backward_replays) == want, (j, len(backward_replays))
+        return _judged({"": runs}, _oracle(inputs, seq_lens), OUTPUT_NAMES)
+
+    _judge(record_property, 7167, draw)
+
+
+# the module globals a test rebinds: cake_backend.device_arch (an equal function), FWD_A_ARCHS off (serial A takes the
+# prep's forward), FWD_A_SERIAL_KEEP emptied (a setting of the ChunkMeta key, not a global of the plan: the call gets a
+# new ChunkMeta, so a plan key of its own), FWD_SPLIT_A_MIN_PIECE above every piece (the A form takes the W form) and
+# VIEWS_TAKE_PREP_TMA off (packed q / k views follow the prep rule)
+FWD_PLAN_GLOBAL_CHANGES = ("device_arch", "FWD_A_ARCHS", "FWD_A_SERIAL_KEEP", "FWD_SPLIT_A_MIN_PIECE",
+                           "VIEWS_TAKE_PREP_TMA")  # fmt: skip
+
+
+@pytest.mark.parametrize("change", FWD_PLAN_GLOBAL_CHANGES)
+def test_the_forward_plan_follows_the_module_globals(
+    change, device, monkeypatch, record_property
+) -> None:
+    # a plan replays only while the module globals the forward reads and cake_backend.device_arch are the objects it
+    # was recorded with: another object in the place of one (an equal one too) sends the next call to the general
+    # path, which records the launches of the new value as a plan, and the call after it replays that plan with the
+    # general path's launches under that value.  A setting of the layout's ChunkMeta key reaches the plan through the
+    # new ChunkMeta of its value instead.  Per draw (fresh plans), the old value's recording and replay, the new value's
+    # general path (FWD_PLAN off) and its recording and replay are judged (each value's planned calls by the worst)
+    arch = cake_backend.device_arch(cake_chain._device_index(device))
+    heads, seq_lens = (2, 6), (300, 77, 640, 17)
+    target, value, packed = cake_chain, None, False
+    if change == "FWD_A_ARCHS":
+        (heads, seq_lens), _marker = _route_or_skip("a", device, monkeypatch)
+        value = ()
+    elif change == "FWD_SPLIT_A_MIN_PIECE":
+        (heads, seq_lens), _marker = _route_or_skip("split_a", device, monkeypatch)
+        stages = cake_chain.FWD_SPLIT_W_STAGES
+        if not all(cake_chain._available(stage, arch) for stage in stages):
+            pytest.skip(f"the split forward's W form is not delivered for {arch}")
+        value = types.MappingProxyType({arch: 1 << 30})
+    elif change == "VIEWS_TAKE_PREP_TMA":
+        monkeypatch.setattr(cake_chain, "FWD_A_ARCHS", ())
+        monkeypatch.setattr(cake_chain, "FWD_SPLIT_ARCHS", ())
+        value, packed = False, True
+    elif change == "FWD_A_SERIAL_KEEP":
+        value = {}  # another value of _chunk_meta's key on every architecture (the default names sm_107a)
+    else:
+        arch_of = cake_backend.device_arch
+        target, value = cake_backend, lambda index: arch_of(index)
+    replays = _counted_forward_replays(monkeypatch)
+    launches = _logged_launches(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        def run():
+            if packed:
+                return _run_packed(inputs, seq_lens, heads)
+            return _run(inputs, seq_lens)
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays.clear()
+            launches.clear()
+            old = [run()]
+            before = list(launches)
+            launches.clear()
+            old.append(run())
+            assert launches == before and len(replays) == 1
+            m.setattr(target, change, value)
+            with monkeypatch.context() as off:
+                off.setattr(cake_chain, "FWD_PLAN", False)
+                launches.clear()
+                general = run()
+                after = list(launches)
+            # the general path records the plan of the new value, then the next call replays it
+            new = []
+            for i in range(2):
+                launches.clear()
+                new.append(run())
+                assert launches == after and len(replays) == 1 + i, (change, i)
+            if change == "FWD_A_SERIAL_KEEP":
+                # the old layout's plan stays, the new ChunkMeta records its own
+                assert len(cake_chain._FWD_PLANS) == 2
+            if change in ("FWD_A_ARCHS", "FWD_SPLIT_A_MIN_PIECE"):
+                assert [e[0] for e in after] != [e[0] for e in before], change
+        return {"old": old, "new_general": general, "new": new}
+
+    _judge_forms(record_property, 7201, seq_lens, heads, device, forms, beta_dtype=torch.float32)  # fmt: skip
+
+
+# the dict-valued module globals of the forward: the cached walks, the tables kept by captures, the side streams, the
+# launches' parameter orders and the stage records' arguments, the tape words of the forwards on wy_a's A and of the
+# split forward's waves
+FWD_PLAN_DICT_GLOBALS = ("_WALKS", "_GRAPH_TABLES", "_SIDE_STREAMS", "_LAUNCH_ORDERS", "LAUNCH_ARGS", "FWD_A_TAPE",
+                         "FWD_FUSED_TAPE")  # fmt: skip
+
+
+@pytest.mark.parametrize("name", FWD_PLAN_DICT_GLOBALS)
+def test_a_rebound_dict_global_records_the_forward_plans_again(
+    name, device, monkeypatch, record_property
+) -> None:
+    # a plan compares the module globals by identity, never by value (a comparison of two walk caches by value would
+    # read their device tables): a dict global rebound to an equal copy, as a test's fresh cache or a patched table
+    # does, sends both passes of a checkpointed step (the first pass and the recompute) to the general path without a
+    # device synchronization, which records their plans again; the next step replays them.  The prep's two sequence
+    # groups on the identity walk: the plans read a side stream and a cached walk.  Per draw (fresh plans), the general
+    # path's step (FWD_PLAN off) and the four planned steps (the worst judged) are judged
+    seq_lens, heads = STREAM_LAYOUT, (2, 4)
+    _small_device(monkeypatch, device, STREAM_CASES[heads])
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    replays = _counted_forward_replays(monkeypatch)
+
+    def layer(q, k, v, g, beta):
+        o, _ = cake_gdn_nondet(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                               cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True, lpt=False,
+                               **STREAM_PINS)  # fmt: skip
+        return o
+
+    def forms(inputs, h0, dht, j):
+        def step():
+            leaves = _leaves(inputs)
+            o = checkpoint(
+                layer, *leaves.values(), use_reentrant=False, preserve_rng_state=False
+            )
+            (o.float() * inputs["do"].float()).sum().backward()
+            return _step_results(o.detach(), leaves)
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            want = step()
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays.clear()
+            # the plans of both passes, then their replays
+            runs = [step() for _ in range(2)]
+            assert len(replays) == 2
+            old = dict(cake_chain._FWD_PLANS)
+            assert len(old) == 2 and all(p.side is not None and p.walks for p in old.values())  # fmt: skip
+            m.setattr(cake_chain, name, dict(getattr(cake_chain, name)))
+            previous = torch.cuda.get_sync_debug_mode()
+            torch.cuda.set_sync_debug_mode("error")
+            try:
+                runs.append(step())
+            finally:
+                torch.cuda.set_sync_debug_mode(previous)
+            assert len(replays) == 2, f"a plan replayed after {name} was rebound"
+            assert set(cake_chain._FWD_PLANS) == set(old)
+            assert not any(cake_chain._FWD_PLANS[key] is plan for key, plan in old.items())  # fmt: skip
+            runs.append(step())
+            assert len(replays) == 4
+        torch.cuda.synchronize()
+        return {"general": want, "plan": runs}
+
+    _judge_forms(record_property, 7203, seq_lens, heads, device, forms)
+
+
+@pytest.mark.parametrize("mode", ["taped", "no_grad", "checkpoint"])
+@pytest.mark.parametrize("route", ["prep", "a"])
+def test_a_cold_table_cache_fill_still_records_the_forward_plan(
+    route, mode, device, monkeypatch, record_property
+) -> None:
+    # the first forward of a (device, segment count) builds the identity walk and records its write's event: a cache
+    # fill, which later calls do not repeat, runs outside the recording.  So the first call on cold caches records a
+    # plan (not a refusal, which would keep its class on the general path) in every tape mode, the first pass and the
+    # recompute of a checkpointed step too, and the next call replays it.  Per draw, the general path (FWD_PLAN off, on
+    # warm caches), the recording on cold caches and its replay (the worst judged) are judged
+    (heads, seq_lens), marker = _route_or_skip(route, device, monkeypatch)
+    names = _fwd_plan_names(mode, False)
+    replays = _counted_forward_replays(monkeypatch)
+    stages = _record_launches(monkeypatch)
+    passes = 2 if mode == "checkpoint" else 1
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+
+        def run():  # lpt=False: the forward scan walks the identity walk of _WALKS
+            return _fwd_plan_call(inputs, seq_lens, mode, lpt=False)
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            general = run()
+        with monkeypatch.context() as m:
+            _fresh_table_caches(m)
+            replays.clear()
+            stages.clear()
+            planned = [run()]
+            assert bool(_preps(stages)) if marker == "prep" else marker in stages, stages  # fmt: skip
+            assert cake_chain._WALKS, "the call built the identity walk"
+            plans = list(cake_chain._FWD_PLANS.values())
+            assert len(plans) == passes and not replays, plans
+            assert all(p.ops is not None and p.walks for p in plans), plans
+            planned.append(run())
+            assert len(replays) == passes
+        arms = {"general": general, "plan": planned}
+        return _judged(arms, _oracle(inputs, seq_lens), names)
+
+    _judge(record_property, 7169, draw)
+
+
+def test_the_forward_plan_follows_its_pool_and_cached_tables(
+    device, monkeypatch, record_property
+) -> None:
+    # a plan replays only on the pool's tables, the side stream and the cached walk it was recorded with: a cleared walk
+    # cache or side-stream cache, a new pool, or a workspace role evicted past WORKSPACE_SHAPES_PER_ROLE (which drops
+    # every recorded plan) sends the next call to the general path, which records again.  Per draw on a fresh pool and
+    # fresh caches, the general path (FWD_PLAN off) and the ten planned calls (the worst judged) are judged
+    seq_lens, heads = STREAM_LAYOUT, (2, 4)
+    _small_device(monkeypatch, device, STREAM_CASES[heads])
+    # the two sequence groups on the identity walk of _WALKS
+    pins = {**STREAM_PINS, "lpt": False}
+    index = cake_chain._device_index(device)
+    replays = _counted_forward_replays(monkeypatch)
+
+    def evict():
+        table = cake_chain._POOLED.table(index)
+        for rows in range(1, cake_chain.WORKSPACE_SHAPES_PER_ROLE + 2):
+            cake_chain._POOLED.take(table, "probe", (rows,), torch.uint8, device)
+        assert not cake_chain._FWD_PLANS and not cake_chain._BWD_PLANS
+
+    def forms(inputs, h0, dht, j):
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
+            for name in ("_WALKS", "_SIDE_STREAMS", "_FWD_PLANS", "_BWD_PLANS"):
+                m.setattr(cake_chain, name, {})
+            changes = (
+                lambda: cake_chain._WALKS.clear(),
+                lambda: cake_chain._SIDE_STREAMS.clear(),
+                lambda: m.setattr(cake_chain, "_POOLED", cake_chain.Workspaces()),
+                evict,
+            )
+            with monkeypatch.context() as off:
+                off.setattr(cake_chain, "FWD_PLAN", False)
+                want = _run(inputs, seq_lens, **pins)
+            replays.clear()
+            planned = [_run(inputs, seq_lens, **pins) for _ in range(2)]
+            (plan,) = cake_chain._FWD_PLANS.values()
+            assert plan.side is not None and plan.walks and len(replays) == 1
+            for i, change in enumerate(changes):
+                change()
+                # the general path records, the next call replays
+                planned.append(_run(inputs, seq_lens, **pins))
+                assert len(replays) == 1 + i, i
+                planned.append(_run(inputs, seq_lens, **pins))
+                assert len(replays) == 2 + i, i
+        return {"general": want, "plan": planned}
+
+    _judge_forms(record_property, 7191, seq_lens, heads, device, forms)
+
+
+def test_a_stream_operation_outside_the_executor_refuses_the_forward_plan(
+    device, monkeypatch, record_property
+) -> None:
+    # a recording watches torch's stream switches and event records and waits: one that a forward step makes outside
+    # the recorder (here an event a launch wrapper records) would be missing from a replay, so the call class keeps the
+    # general path.  The refusal of a call that filled a table cache is not kept (the next call records again), the next
+    # refusal is, and later calls neither record nor replay.  Every recording leaves the watched functions as it found
+    # them.  Per draw (fresh plans, the walk cache emptied), the general path (FWD_PLAN off, without the event) and the
+    # three refused calls (the worst judged) are judged
+    seq_lens, heads = (300, 77, 640), (2, 4)
+    launch = cake_backend.launch_stage
+
+    def recording_an_event(stage, grid, values, **kwargs):
+        torch.cuda.Event().record()
+        return launch(stage, grid, values, **kwargs)
+
+    def forms(inputs, h0, dht, j):
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            want = _run(inputs, seq_lens, lpt=False)
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "launch_stage", recording_an_event)
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            _drop_table_cache(m, "_WALKS")
+            replays = _counted_forward_replays(m)
+            watched = _watched_functions()
+            refused = [_run(inputs, seq_lens, lpt=False)]
+            assert cake_chain._WALKS, "the call built the identity walk"
+            assert not cake_chain._FWD_PLANS, "a refusal of a call that filled a cache is kept"  # fmt: skip
+            for _ in range(2):
+                refused.append(_run(inputs, seq_lens, lpt=False))
+                (plan,) = cake_chain._FWD_PLANS.values()
+                assert plan.ops is None
+            assert not replays
+            assert all(a is b for a, b in zip(_watched_functions(), watched, strict=True))  # fmt: skip
+        return {"general": want, "refused": refused}
+
+    _judge_forms(record_property, 7173, seq_lens, heads, device, forms)
+
+
+def test_the_forward_plan_holds_no_tensor_of_a_call(device, monkeypatch) -> None:
+    # a plan's operands are the call's slots and views of the stream's pooled workspaces, of the layout's chunk tables
+    # and of the cached walk: once a replayed call's output and gradients are dropped, its inputs, its output and its
+    # saved tensors are freed and the device memory is where it was
+    seq_lens, heads = (300, 77, 640, 17), (2, 6)
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=7185)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+    replays = _counted_forward_replays(monkeypatch)
+
+    def forward():
+        leaves = _leaves(inputs)
+        o, _ = cake_gdn_nondet(*leaves.values(), scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                               cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True)  # fmt: skip
+        return leaves, o
+
+    for _ in range(2):  # the workspaces, the tables and the plan, then a replay
+        leaves, o = forward()
+        (o.float() * inputs["do"].float()).sum().backward()
+    del leaves, o
+    assert len(replays) == 1
+    (plan,) = cake_chain._FWD_PLANS.values()
+    constants: set = set()
+    for buffers in cake_chain._POOLED.tables[plan.stream].values():
+        cake_chain._storages(list(buffers.values()), constants)
+    cake_chain._storages(plan.meta, constants)
+    cake_chain._storages([entry[0] for _key, entry in plan.walks], constants)
+    held = [
+        v
+        for op in plan.ops
+        if op[0] == cake_chain._OP_LAUNCH
+        for v in op[4]
+        if isinstance(v, torch.Tensor)
+    ]
+    held += [
+        v
+        for op in plan.ops
+        if op[0] == cake_chain._OP_CALL
+        for v in op[2]
+        if isinstance(v, torch.Tensor)
+    ]
+    assert held and all(v.untyped_storage().data_ptr() in constants for v in held)
+    fixed = [value for _name, kind, value in plan.outputs if kind == 2]
+    assert not any(isinstance(value, torch.Tensor) for value in fixed), fixed
+    gc.collect()
+    torch.cuda.synchronize()
+    before = torch.cuda.memory_allocated(device)
+    leaves, o = forward()
+    assert len(replays) == 2
+    saved = [t for t in _saved_list(o) if t is not None]
+    alive = [weakref.ref(t) for t in (*leaves.values(), o, *saved)]
+    (o.float() * inputs["do"].float()).sum().backward()
+    del leaves, o, saved
+    gc.collect()
+    torch.cuda.synchronize()
+    assert not [ref for ref in alive if ref() is not None], "a tensor outlived its call"
+    assert torch.cuda.memory_allocated(device) == before
+
+
+def test_a_capture_neither_replays_nor_records_a_forward_plan(
+    device, monkeypatch, record_property
+) -> None:
+    # a plan's launches read the pooled workspaces of its stream, a capture takes its own: the first call of a class
+    # inside a capture on stream s records no plan, eager calls on s then record and replay their own, and a later
+    # capture on s does not replay it.  The warm-up call, the eager calls on s and two replays of each graph (the worst
+    # judged) are judged
+    seq_lens, heads = (300, 77, 640), (2, 4)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    replays = _counted_forward_replays(monkeypatch)
+    warm, s = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+
+    def forms(inputs, h0, dht, j):
+        _fresh_table_caches(monkeypatch)
+        monkeypatch.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
+        replays.clear()
+        leaves = _leaves(inputs)
+        warm.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(warm):
+            # the tables, the libraries and the warm-up stream's plan
+            for _ in range(2):
+                o = _graph_step(inputs, leaves, cu_seqlens, cu_seqlens_cpu)
+            want = _step_results(o, leaves, True)
+        torch.cuda.synchronize()
+        assert len(replays) == 1 and len(cake_chain._FWD_PLANS) == 1
+        graphs, eager = [], None
+        for eager_first in (False, True):
+            if eager_first:
+                s.wait_stream(torch.cuda.current_stream(device))
+                with torch.cuda.stream(s):
+                    for _ in range(2):  # the plan of s's class, recorded and replayed
+                        o = _graph_step(inputs, leaves, cu_seqlens, cu_seqlens_cpu)
+                    eager = _step_results(o, leaves, True)
+                torch.cuda.synchronize()
+                assert len(replays) == 2 and len(cake_chain._FWD_PLANS) == 2
+            plans, count = dict(cake_chain._FWD_PLANS), len(replays)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=s):
+                o = _graph_step(inputs, leaves, cu_seqlens, cu_seqlens_cpu)
+            assert len(replays) == count, "a capture replayed a forward plan"
+            assert plans == cake_chain._FWD_PLANS, "a capture recorded a forward plan"
+            graphs.append((graph, _step_results(o, leaves)))
+        runs = []
+        for graph, got in graphs:
+            for _ in range(2):
+                graph.replay()
+                torch.cuda.synchronize()
+                runs.append({name: t.detach().clone() for name, t in got.items()})
+        return {"warm": want, "eager": eager, "graph": runs}
+
+    _judge_forms(record_property, 7187, seq_lens, heads, device, forms)
+
+
+def test_a_host_call_never_replays_the_forward_plan_of_the_device(
+    device, monkeypatch
+) -> None:
+    # a host q's call can make a device call's plan key: its index is the current device's, so it takes the device
+    # layout's ChunkMeta and stream, and its inputs have the device inputs' shapes, strides, dtypes and alignment.
+    # It runs the general path (refused at the first launch), neither replaying nor recording a plan: the device's plan
+    # stays the one plan of the key, the watched functions stay as they were, and the next device call replays it
+    monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
+    replays = _counted_forward_replays(monkeypatch)
+    q, v = (
+        torch.zeros(1, 64, h, HEAD_DIM, dtype=torch.bfloat16, device=device)
+        for h in (1, 2)
+    )
+    g, beta = torch.zeros(1, 64, 2, device=device), torch.zeros(1, 64, 2, device=device)
+    # the arguments of _entry_calls' CakeGDNNondetFunction call, on the device
+    options = cake_chain.make_options()
+    apply_args = (q, q, v, g, beta, 1.0, None, False, None, None, True, options)
+    inputs = (q, q, v, g, beta, None)
+    host = tuple(t if t is None else t.cpu() for t in inputs)
+    assert cake_chain._slot_layout(host) == cake_chain._slot_layout(inputs)
+    for _ in range(2):  # the recording, then a replay
+        cake_chain.CakeGDNNondetFunction.apply(*apply_args)
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert plan.ops is not None and len(replays) == 1 and replays[0] is plan
+    watched = _watched_functions()
+    for call in _entry_calls().values():
+        with pytest.raises(Exception):  # noqa: PT011 - the entry's operand refusal
+            call()
+    assert len(replays) == 1, "a host call replayed the device's forward plan"
+    (kept,) = cake_chain._FWD_PLANS.values()
+    assert kept is plan
+    assert all(a is b for a, b in zip(_watched_functions(), watched, strict=True))
+    o, _ = cake_chain.CakeGDNNondetFunction.apply(*apply_args)
+    torch.cuda.synchronize()
+    assert len(replays) == 2 and replays[1] is plan
+    assert bool(torch.isfinite(o).all())
+
+
+@pytest.mark.parametrize("route", ROW_ROUTES)
+@pytest.mark.parametrize("reentrant", [False, True], ids=["non-reentrant", "reentrant"])
+def test_the_forward_plan_under_activation_checkpointing(
+    reentrant, route, device, monkeypatch, record_property
+) -> None:
+    # torch.utils.checkpoint: the first pass (no tape) and the backward's recompute (the tape) are two call classes,
+    # each records its plan in the first step and replays it in every later one.  The tape words of every step are the
+    # general path's (none in the first pass, the tape in the recompute) and the checkpoint's metadata check of the
+    # recompute's saved tensors passes.  Per draw (fresh plans), the general path's step (FWD_PLAN off) and the three
+    # planned steps (the worst judged) are judged
+    (heads, seq_lens), marker = _route_or_skip(route, device, monkeypatch)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+
+    def layer(q, k, v, g, beta):
+        o, _ = cake_gdn_nondet(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                               cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True)  # fmt: skip
+        return o
+
+    # the tape word of every wave launch of the route (the prep's forward has none)
+    by_route = {"a": _tape_words, "split_a": _tape_words, "split_w": _fused_tape_words}
+    words = by_route.get(route, lambda _launches: [])
+    launches = _record_launch_values(monkeypatch)
+    replays = _counted_forward_replays(monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+
+        def step():
+            leaves = _leaves(inputs)
+            o = checkpoint(layer, *leaves.values(), use_reentrant=reentrant)
+            (o.float() * inputs["do"].float()).sum().backward()
+            torch.cuda.synchronize()
+            return _step_results(o.detach(), leaves)
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            if j == 0:
+                step()  # the tables, the workspaces and the backward plan of the layout
+            launches.clear()
+            want = step()
+        want_words = words(launches)
+        stages = [stage for stage, _values in launches]
+        assert bool(_preps(stages)) if marker == "prep" else marker in stages, stages
+        if route != "prep":
+            half = len(want_words) // 2
+            assert half and not any(want_words[:half]), want_words
+            assert all(want_words[half:]), want_words
+        counts, runs = [], []
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays.clear()
+            for _ in range(3):
+                launches.clear()
+                runs.append(step())
+                assert words(launches) == want_words
+                counts.append(len(replays))
+            plans = list(cake_chain._FWD_PLANS.values())
+            assert len(plans) == 2 and all(p.ops is not None for p in plans), plans
+            assert counts == [0, 2, 4], counts
+            assert {id(p) for p in replays} == {id(p) for p in plans}
+        arms = {"general": want, "plan": runs}
+        return _judged(arms, _oracle(inputs, seq_lens), OUTPUT_NAMES)
+
+    _judge(record_property, 7175, draw)
+
+
+def _side_stream_case(route, device, monkeypatch):
+    """The layout ``(heads, seq_lens)``, beta's dtype and the pins of a forward that forks its side stream on
+    ``device``: the split forward on wy_a's A (``split_a``) or on the WY stage's w / u (``split_w``; each skipped where
+    it is not routed), or the prep's two sequence groups on a small device view (``p_form``)."""
+    if route == "p_form":
+        _small_device(monkeypatch, device, STREAM_CASES[(2, 4)])
+        return ((2, 4), STREAM_LAYOUT), torch.bfloat16, STREAM_PINS
+    layout, _marker = _route_or_skip(route, device, monkeypatch)
+    return layout, torch.float32, {}
+
+
+def _raising_on_the_side(monkeypatch, main) -> list:
+    """Make every launch on a stream other than ``main`` raise while the returned flag (its one entry) is true."""
+    raising = [False]
+    launch = cake_backend.launch_stage
+
+    def side_raises(stage, grid, values, **kwargs):
+        if raising[0] and torch.cuda.current_stream(kwargs["device_index"]) != main:
+            raise RuntimeError(f"{stage} raised on the side stream")
+        return launch(stage, grid, values, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "launch_stage", side_raises)
+    return raising
+
+
+@pytest.mark.parametrize("route", ["split_a", "split_w", "p_form"])
+def test_a_raising_forward_joins_on_the_callers_stream(
+    route, device, monkeypatch, record_property
+) -> None:
+    # a launch that raises on the side stream: the general path, its recording and a replay of its plan each leave the
+    # caller's stream and device current after the side stream's work (the same stream switches and event records and
+    # waits, ending in the join).  The raising recording keeps no plan and leaves the watched torch functions as it
+    # found them.  Per draw (fresh plans), the output of the general path (FWD_PLAN off) and of the later calls that
+    # did not raise (a recording and two replays; the worst judged) is judged
+    (heads, seq_lens), beta_dtype, pins = _side_stream_case(route, device, monkeypatch)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    index = cake_chain._device_index(device)
+    caller = torch.cuda.Stream(device=device)
+    replays = _counted_forward_replays(monkeypatch)
+    raising = _raising_on_the_side(monkeypatch, caller)
+    events = _logged_stream_events(monkeypatch)
+    watched = _watched_functions()
+
+    def forms(inputs, h0, dht, j):
+        def forward() -> dict:
+            with torch.no_grad():
+                o, _ = cake_gdn_nondet(inputs["q"], inputs["k"], inputs["v"], inputs["g"], inputs["beta"],
+                                       scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                                       cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True, **pins)  # fmt: skip
+            return {"o": o}
+
+        def raised() -> list:
+            raising[0] = True
+            events.clear()
+            with pytest.raises(RuntimeError, match="raised on the side stream"):
+                forward()
+            raising[0] = False
+            assert torch.cuda.current_stream(device) == caller
+            assert torch.cuda.current_device() == index
+            return list(events)
+
+        caller.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(caller), monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays.clear()
+            with monkeypatch.context() as off:
+                off.setattr(cake_chain, "FWD_PLAN", False)
+                want = forward()
+                general = raised()
+            side = cake_chain._SIDE_STREAMS[(index, caller.cuda_stream)].cuda_stream
+            main = caller.cuda_stream
+            join = [("record", side), ("wait_event", main), ("wait", main)]
+            assert general[-3:] == join, general
+            assert raised() == general, "the recording's stream events"
+            assert not cake_chain._FWD_PLANS, "a raising recording kept a plan"
+            assert all(a is b for a, b in zip(_watched_functions(), watched, strict=True))  # fmt: skip
+            got = [forward() for _ in range(2)]  # the plan, then its replay
+            assert len(replays) == 1
+            assert raised() == general and len(replays) == 2
+            got.append(forward())
+            assert len(replays) == 3
+        torch.cuda.synchronize()
+        return {"general": want, "plan": got}
+
+    _judge_forms(record_property, 7177, seq_lens, heads, device, forms, beta_dtype=beta_dtype,
+                 names=("o",))  # fmt: skip
+
+
+@pytest.mark.parametrize("route", ["split_a", "split_w", "p_form"])
+def test_a_forward_plan_on_another_device_keeps_the_callers_device(
+    route, device, monkeypatch, record_property
+) -> None:
+    # inputs on a second device while the caller's current device stays the first (no torch.cuda.set_device): a stream
+    # switch makes the stream's device current, and the general path's stream context restores the caller's device
+    # after the side stream; so must the replay of a plan with a side stream, also when a launch raises there.  After
+    # every forward the caller's device is current with its current stream unchanged (a torch.empty on "cuda" lands
+    # there) and the inputs' device keeps its stream.  Per draw (fresh plans), the general path (FWD_PLAN off) and the
+    # four planned steps (a recording and three replays; the worst judged) are judged
+    if torch.cuda.device_count() < 2:
+        pytest.skip("a second CUDA device required")
+    other = torch.device("cuda", (device.index + 1) % torch.cuda.device_count())
+    if cake_backend.arch_for_capability(tuple(torch.cuda.get_device_capability(other))) is None:  # fmt: skip
+        pytest.skip(f"{other} is not an exported target")
+    (heads, seq_lens), beta_dtype, pins = _side_stream_case(route, other, monkeypatch)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, other)
+    index = cake_chain._device_index(device)
+    assert torch.cuda.current_device() == index
+    caller, main = torch.cuda.Stream(device=device), torch.cuda.current_stream(other)
+    replays = _counted_forward_replays(monkeypatch)
+    raising = _raising_on_the_side(monkeypatch, main)
+
+    def kept_the_callers_state() -> None:
+        assert torch.cuda.current_device() == index
+        assert torch.cuda.current_stream(device) == caller
+        assert torch.cuda.current_stream(other) == main
+        assert torch.empty(1, device="cuda").device == device
+
+    def forms(inputs, h0, dht, j):
+        def forward():
+            leaves = _leaves(inputs)
+            o, _ = cake_gdn_nondet(*leaves.values(), scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                                   cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True, **pins)  # fmt: skip
+            return leaves, o
+
+        def step() -> dict:
+            leaves, o = forward()
+            kept_the_callers_state()
+            (o.float() * inputs["do"].float()).sum().backward()
+            torch.cuda.synchronize(other)
+            return _step_results(o.detach(), leaves)
+
+        previous = torch.cuda.current_stream(device)
+        torch.cuda.set_stream(caller)
+        try:
+            with monkeypatch.context() as m:
+                m.setattr(cake_chain, "_FWD_PLANS", {})
+                replays.clear()
+                with monkeypatch.context() as off:
+                    off.setattr(cake_chain, "FWD_PLAN", False)
+                    want = step()  # the general path keeps the caller's state
+                got = [step() for _ in range(3)]  # the plan, then its replays
+                assert len(replays) == 2
+                raising[0] = True
+                with pytest.raises(RuntimeError, match="raised on the side stream"):
+                    forward()
+                raising[0] = False
+                kept_the_callers_state()
+                assert len(replays) == 3
+                got.append(step())
+                assert len(replays) == 4
+                plans = list(cake_chain._FWD_PLANS.values())
+                assert len(plans) == 1 and plans[0].side is not None, plans
+        finally:
+            raising[0] = False
+            torch.cuda.set_stream(previous)
+            torch.cuda.synchronize(other)
+        return {"general": want, "plan": got}
+
+    _judge_forms(record_property, 7179, seq_lens, heads, other, forms, beta_dtype=beta_dtype)  # fmt: skip
+
+
+def test_forward_plans_of_two_threads(device, monkeypatch, record_property) -> None:
+    # two threads, each on a caller stream and a layout of its own, run forward and backward steps in lock step (both
+    # record their plans at once, then replay them while the other thread records or replays): no exception, one plan
+    # per layout and stream.  Per draw (fresh plans) and layout, the general path (FWD_PLAN off, on the main thread)
+    # and the thread's four steps (the worst judged) are judged
+    problems = (((300, 77, 640), (2, 6)), ((1000, 64), (2, 4)))
+    index = cake_chain._device_index(device)
+    replays = _counted_forward_replays(monkeypatch)
+    streams = [torch.cuda.Stream(device=device) for _ in problems]
+    steps = 4
+
+    def draw(j, s):
+        data = [
+            (seq_lens, _inputs(seq_lens, heads, torch.bfloat16, device, seed=s))
+            for seq_lens, heads in problems
+        ]
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "FWD_PLAN", False)
+            want = [_run(inputs, seq_lens) for seq_lens, inputs in data]
+        results: list[list] = [[] for _ in data]
+        errors: list = []
+        barrier = threading.Barrier(len(data), timeout=600)
+
+        def worker(i) -> None:
+            try:
+                torch.cuda.set_device(device)
+                seq_lens, inputs = data[i]
+                with torch.cuda.stream(streams[i]):
+                    for _ in range(steps):
+                        barrier.wait()
+                        results[i].append(_run(inputs, seq_lens, sync=False))
+                streams[i].synchronize()
+            except Exception as error:
+                errors.append(error)
+                barrier.abort()
+
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_FWD_PLANS", {})
+            replays.clear()
+            for stream in streams:
+                stream.wait_stream(torch.cuda.current_stream(device))
+            threads = [threading.Thread(target=worker, args=(i,)) for i in range(len(data))]  # fmt: skip
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join()
+            assert not errors, errors
+            torch.cuda.synchronize()
+            plans = list(cake_chain._FWD_PLANS.values())
+            assert len(plans) == len(data) and all(p.ops is not None for p in plans), plans  # fmt: skip
+            assert {p.stream for p in plans} == {(index, st.cuda_stream) for st in streams}  # fmt: skip
+            assert len(replays) == len(data) * (steps - 1)
+        entries = []
+        for i, ((seq_lens, inputs), general, got) in enumerate(zip(data, want, results, strict=True)):  # fmt: skip
+            assert len(got) == steps
+            arms = {f"layout{i}.general": general, f"layout{i}.plan": got}
+            entries += _judged(arms, _oracle(inputs, seq_lens), OUTPUT_NAMES)
+        return entries
+
+    _judge(record_property, 7181, draw)
+
+
+def test_the_forward_and_backward_plan_flags(
+    device, monkeypatch, record_property
+) -> None:
+    # FWD_PLAN off keeps every forward on the general path whatever BWD_PLAN is.  A replayed forward carries the key of
+    # its backward plan, but whether a call takes that plan stays BWD_PLAN's decision per call: off, the replayed
+    # forward leaves ctx.plan_key and ctx.plan unset and the backward runs the general path; on again (the backward
+    # plans dropped), the backward records its plan and the next one replays it.  Per draw (fresh plans), the steps
+    # without a forward plan and the steps with one (the worst of each judged) are judged
+    seq_lens, heads = (300, 77, 640, 17), (2, 6)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    forward_replays = _counted_forward_replays(monkeypatch)
+    backward_replays = _counted_replays(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        runs: dict = {"general": [], "plan": []}
+        with monkeypatch.context() as m:
+            for name in ("_FWD_PLANS", "_BWD_PLANS"):
+                m.setattr(cake_chain, name, {})
+            forward_replays.clear()
+            backward_replays.clear()
+
+            def step(fwd_plan, bwd_plan):
+                m.setattr(cake_chain, "FWD_PLAN", fwd_plan)
+                m.setattr(cake_chain, "BWD_PLAN", bwd_plan)
+                leaves = _leaves(inputs)
+                o, _ = cake_gdn_nondet(*leaves.values(), scale=1.0 / math.sqrt(HEAD_DIM), cu_seqlens=cu_seqlens,
+                                       cu_seqlens_cpu=cu_seqlens_cpu, use_qk_l2norm_in_kernel=True)  # fmt: skip
+                node = _package_node(o)
+                keys = (node.plan_key, node.plan)
+                (o.float() * inputs["do"].float()).sum().backward()
+                torch.cuda.synchronize()
+                runs["plan" if fwd_plan else "general"].append(_step_results(o.detach(), leaves))  # fmt: skip
+                return keys
+
+            # no forward plan; the backward records its plan
+            key, plan = step(False, True)
+            assert key is not None and plan is None
+            for flags in ((False, True), (False, False)):
+                keys = step(*flags)
+                assert keys[0] == (key if flags[1] else None)
+                assert (keys[1] is not None) is flags[1]
+            assert not forward_replays and not cake_chain._FWD_PLANS
+            assert len(backward_replays) == 1
+            # the forward records its plan, then replays it; the backward replays its own
+            for i in range(2):
+                keys = step(True, True)
+                assert keys[0] == key and keys[1] is not None
+                assert len(forward_replays) == i and len(backward_replays) == 2 + i
+            # a replayed forward with BWD_PLAN off: no backward plan
+            assert step(True, False) == (None, None)
+            assert len(forward_replays) == 2 and len(backward_replays) == 3
+            cake_chain._BWD_PLANS.clear()
+            # BWD_PLAN on again: the backward records its plan, then replays it
+            for i in range(2):
+                keys = step(True, True)
+                assert keys[0] == key and (keys[1] is not None) is bool(i)
+                assert len(forward_replays) == 3 + i and len(backward_replays) == 3 + i
+        return runs
+
+    _judge_forms(record_property, 7189, seq_lens, heads, device, forms)

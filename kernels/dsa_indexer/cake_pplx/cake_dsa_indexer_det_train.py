@@ -256,7 +256,165 @@ def cake_dsa_indexer_det_train_topk_workspace_size(
     )
 
 
+@cake_api
+def cake_dsa_indexer_det_train_topk_with_candidates(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    w: torch.Tensor,
+    cu_seqlens_q: torch.Tensor,
+    cu_seqlens_k: torch.Tensor,
+    *,
+    top_k: int = 512,
+    softmax_scale: Optional[float] = None,
+    q_causal_offsets: Optional[torch.Tensor] = None,
+    ratio: int = 1,
+    max_seqlen_q: Optional[int] = None,
+    max_seqlen_k: Optional[int] = None,
+    workspace_buffer: Optional[torch.Tensor] = None,
+    indices: Optional[torch.Tensor] = None,
+    scores: Optional[torch.Tensor] = None,
+    candidate_blocks: Optional[torch.Tensor] = None,
+    return_scores: bool = True,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], torch.Tensor]:
+    r""":func:`cake_dsa_indexer_det_train_topk` that also returns each
+    query's candidate blocks, computed from the same scores as ``indices``;
+    SM100 / SM103 only (BF16 ``q`` / ``k``, ``ratio == 1``).
+
+    Block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``.  For a query
+    with ``n`` visible keys (the family's visibility rule) let ``nb = ceil(n /
+    8)`` and ``S_b`` the largest score of the visible keys of block ``b``
+    (future keys of the newest block do not count).  With ``nb <= 2048`` the
+    candidates are blocks ``0 .. nb - 1``; otherwise block ``nb - 1`` (the
+    newest, always kept) and the 2047 blocks of ``0 .. nb - 2`` with the
+    largest ``S_b``, ties broken by the larger block id (``+0.0 == -0.0``),
+    the tie rule of ``indices``.  With ``top_k <= 2047`` every id of
+    ``indices`` lies in a block of its row.
+
+    Parameters
+    ----------
+    q, k, w, cu_seqlens_q, cu_seqlens_k, softmax_scale, q_causal_offsets, max_seqlen_q
+        As :func:`cake_dsa_indexer_det_train_topk` (BF16 ``q`` and ``k``).
+    top_k : int
+        Output slots per query, ``1 <= top_k <= 2047`` (default 512).
+    ratio : int
+        Must be 1 (blocks of 8 keys).
+    max_seqlen_k : Optional[int]
+        As :func:`cake_dsa_indexer_det_train_topk`; here it also sizes the
+        workspace's block entries, so it must bound every key segment of the
+        call (a row with more blocks than the workspace holds stops the kernel
+        with a device-side trap).  ``Tkv`` when omitted.
+    workspace_buffer : Optional[torch.Tensor]
+        Scratch of at least
+        :func:`cake_dsa_indexer_det_train_topk_with_candidates_workspace_size`
+        bytes for the call's geometry and ``max_seqlen_k`` (uint8, 8-byte
+        aligned); allocated through the caching allocator when omitted.
+    indices, scores : Optional[torch.Tensor]
+        Caller-owned ``[T, top_k]`` int32 / float32 outputs; allocated when
+        omitted.
+    candidate_blocks : Optional[torch.Tensor]
+        Caller-owned ``[T, 2048]`` int32 contiguous output on the device of
+        ``q``; allocated when omitted.
+    return_scores : bool
+        ``False``: ``scores`` must be omitted and ``None`` is returned in its
+        place (the scores are still computed internally).
+
+    Returns
+    -------
+    indices, scores : torch.Tensor, Optional[torch.Tensor]
+        As :func:`cake_dsa_indexer_det_train_topk`.
+    candidate_blocks : torch.Tensor
+        int32 ``[T, 2048]`` segment-local block ids in ascending order with
+        a ``-1`` tail (all ``-1`` when ``n == 0``).
+    Identical inputs give identical ``indices``, ``scores`` and
+    ``candidate_blocks`` bits.  The call never materializes a ``[T, Tkv]`` matrix and never
+    synchronizes with the host.  Raises ``NotImplementedError`` on an
+    architecture without a registered candidate-block program (SM107).
+    """
+    if cu_seqlens_q is None or cu_seqlens_k is None:
+        raise ValueError(
+            "cake_dsa_indexer_det_train_topk_with_candidates needs cu_seqlens_q and cu_seqlens_k"
+        )
+    if not return_scores and scores is not None:
+        raise ValueError("scores given with return_scores=False")
+    indices, cake_scores, blocks = (
+        _backend().cake_dsa_indexer_det_train_topk_with_candidates(
+            q,
+            k,
+            w,
+            cu_seqlens_q,
+            cu_seqlens_k,
+            top_k=top_k,
+            softmax_scale=softmax_scale,
+            q_causal_offsets=q_causal_offsets,
+            ratio=ratio,
+            max_seqlen_q=max_seqlen_q,
+            max_seqlen_k=max_seqlen_k,
+            workspace_buffer=workspace_buffer,
+            indices=indices,
+            scores=scores,
+            candidate_blocks=candidate_blocks,
+        )
+    )
+    return indices, cake_scores if return_scores else None, blocks
+
+
+@cake_api
+def cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
+    num_queries: int,
+    num_keys: int,
+    num_segments: int,
+    *,
+    top_k: int = 512,
+    ratio: int = 1,
+    max_seqlen_k: Optional[int] = None,
+    device: Optional[torch.device] = None,
+) -> int:
+    r"""Explicit workspace bound of
+    :func:`cake_dsa_indexer_det_train_topk_with_candidates` in bytes for one
+    call geometry.
+
+    The scan's candidate buffers and work-unit tickets (the bound of the
+    dispatched candidate-block program, which runs the key ranges unsplit) plus
+    ``grid x queries_per_unit x blk_cap x 8`` bytes of block entries, where
+    ``blk_cap = ceil(W / 8) - 1`` when ``ceil(W / 8) > 2048`` and 0 otherwise,
+    ``W`` being ``max_seqlen_k`` when given, else ``num_keys``.  The ``[T,
+    2048]`` int32 ``candidate_blocks`` output is not part of the bound.  Pass
+    the call's ``max_seqlen_k``.  Raises ``NotImplementedError`` on an
+    architecture without a registered candidate-block program.
+
+    Parameters
+    ----------
+    num_queries, num_keys, num_segments : int
+        ``T``, ``Tkv`` and ``S`` of the call.
+    top_k : int
+        Output slots per query, ``1 <= top_k <= 2047`` (default 512).
+    ratio : int
+        Must be 1.
+    max_seqlen_k : Optional[int]
+        The bound on every key segment that the call will pass.
+    device : Optional[torch.device]
+        The device whose SM count and architecture select the program; the
+        current CUDA device when omitted.
+
+    Returns
+    -------
+    int
+        The workspace bound in bytes for this geometry.
+    """
+    return _backend().cake_dsa_indexer_det_train_topk_with_candidates_workspace_size(
+        num_queries,
+        num_keys,
+        num_segments,
+        top_k=top_k,
+        ratio=ratio,
+        max_seqlen_k=max_seqlen_k,
+        device=device,
+    )
+
+
 __all__ = [
     "cake_dsa_indexer_det_train_topk",
+    "cake_dsa_indexer_det_train_topk_with_candidates",
+    "cake_dsa_indexer_det_train_topk_with_candidates_workspace_size",
     "cake_dsa_indexer_det_train_topk_workspace_size",
 ]

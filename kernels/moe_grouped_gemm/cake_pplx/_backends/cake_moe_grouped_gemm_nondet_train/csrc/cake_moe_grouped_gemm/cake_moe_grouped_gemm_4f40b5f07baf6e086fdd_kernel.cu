@@ -277,7 +277,11 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
                         li_start = offs[li_prev];
                     }
                     unsigned int li_tiles = (unsigned int)((li_end - li_start + CLUSTER_M - 1) / CLUSTER_M) * grid_n_u;
-                    while (li_tiles < li_rem) {
+                    #pragma unroll 1
+                    for (unsigned int _gs = 0; _gs < (unsigned int)num_groups; _gs++) {
+                        if (li_tiles >= li_rem) {
+                            break;
+                        }
                         li_rem = li_rem - li_tiles;
                         li_g = li_g - 1;
                         li_prev = li_g - 1;
@@ -306,7 +310,11 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
                 unsigned int wide_n = total_tiles - lw_tail;
                 #pragma unroll 1
                 for (unsigned int t = cluster_u; t < wide_n; t += num_clusters_u) {
-                    while (next_cum <= t) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_1 = 0; _gs_1 < (unsigned int)num_groups; _gs_1++) {
+                        if (next_cum > t) {
+                            break;
+                        }
                         cum_tiles = next_cum;
                         cur_start = g_end;
                         cur_g = cur_g + 1;
@@ -326,13 +334,19 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
                         mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
                         tma_3d_gmem2smem_cta2(smem_a_addr + load_stage * 49152, (&A), 0, off_m, iter_k_1, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         tma_4d_gmem2smem_cta2(smem_b_addr + load_stage * 49152, (&B), 0, off_n, iter_k_1, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
-                        tma_4d_gmem2smem_cta2(smem_b_addr + load_stage * 49152 + 16384, (&B), 0, off_n + 256, iter_k_1, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
+                        tma_4d_gmem2smem_cta2(smem_b1_addr + load_stage * 49152, (&B), 0, off_n + 256, iter_k_1, (int)cur_g, ((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF));
                         asm volatile(
                             "mbarrier.arrive.expect_tx.release.cta.shared::cluster.b64 _, [%0], %1;"
                             :: "r"((tma_full_addr + (load_stage) * 8) & 0xFEFFFFFF), "r"((uint32_t)(49152)) : "memory");
                         load_stage += 1;
                         if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                     }
+                }
+                #pragma unroll
+                for (int _ = 0; _ < NUM_STAGES; _++) {
+                    mbarrier_wait(mma_done_addr + (load_stage) * 8, _phase_mma_done);
+                    load_stage += 1;
+                    if (load_stage == 4) { load_stage = 0; _phase_mma_done ^= 1; }
                 }
             }
         }
@@ -422,7 +436,11 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
                 unsigned int wide_m = total_tiles_m - lw_tail_1;
                 #pragma unroll 1
                 for (unsigned int t_m = cluster_m; t_m < wide_m; t_m += num_clusters_m) {
-                    while (next_cum_m <= t_m) {
+                    #pragma unroll 1
+                    for (unsigned int _gs_2 = 0; _gs_2 < (unsigned int)num_groups; _gs_2++) {
+                        if (next_cum_m > t_m) {
+                            break;
+                        }
                         cum_tiles_m = next_cum_m;
                         cur_start_m = g_end_m;
                         cur_g_m = cur_g_m + 1;
@@ -970,7 +988,11 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
                     li_start_1 = offs[li_prev_1];
                 }
                 unsigned int li_tiles_1 = (unsigned int)((li_end_1 - li_start_1 + CLUSTER_M - 1) / CLUSTER_M) * grid_n_e;
-                while (li_tiles_1 < li_rem_1) {
+                #pragma unroll 1
+                for (unsigned int _gs_3 = 0; _gs_3 < (unsigned int)num_groups; _gs_3++) {
+                    if (li_tiles_1 >= li_rem_1) {
+                        break;
+                    }
                     li_rem_1 = li_rem_1 - li_tiles_1;
                     li_g_1 = li_g_1 - 1;
                     li_prev_1 = li_g_1 - 1;
@@ -1360,7 +1382,11 @@ kernel_cake_moe_grouped_gemm_4f40b5f07baf6e086fdd(const __grid_constant__ CUtens
             unsigned int wide_e = total_tiles_e - lw_tail_2;
             #pragma unroll 1
             for (unsigned int t_e = cluster_e; t_e < wide_e; t_e += num_clusters_e) {
-                while (next_cum_e <= t_e) {
+                #pragma unroll 1
+                for (unsigned int _gs_4 = 0; _gs_4 < (unsigned int)num_groups; _gs_4++) {
+                    if (next_cum_e > t_e) {
+                        break;
+                    }
                     cum_tiles_e = next_cum_e;
                     cur_start_e = g_end_e;
                     cur_g_e = cur_g_e + 1;

@@ -64,6 +64,22 @@ Host design (every control is a keyword; no environment variable):
   block's rows while the previous block's row math runs: the same grid, FP32
   operations in the same order and workspace, so the same bits; other calls run
   the default module of their weight-gradient dtype (``cake_jit.ROUTES``).
+  A call with ``compute_grad_weight=False`` runs a program built without the
+  weight gradient (``cake_jit.nodw_module``; its weight-gradient work removed
+  at build time), whose ``dx`` and ``dz`` are the bits of the BF16 backward
+  that computes it, at every grid: up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM``
+  rows per SM (measured: 768 on SM100 and SM103) the strided program, which
+  takes no claim and no ticket and reads and writes no workspace word: where
+  ``grad_out``, ``x`` and ``z`` hold packed rows its 128-thread build,
+  ``min(ceil(rows / 8), 8 * SMs)`` CTAs walking their 8-row blocks (a row to
+  each 16 lanes, as in the BF16 backward; packed rows read at their linear
+  offsets), on other layouts the BF16 backward's ``min(ceil(rows / 16), 4 *
+  SMs)`` 256-thread CTAs walking their 16-row blocks; past it the claimed
+  program, the BF16 backward's claims and ticket on the workspace (SM107
+  routes none: its strided program runs every row count); and where the
+  BF16 backward runs its long module, the long program built without the
+  weight gradient (or, where none is routed, that long module with
+  ``weight_grad`` 0).
   ``dx`` and ``dz`` are FP32 formulas rounded once each, with ``rstd`` from the
   approximate FP32 reciprocal square root and the sigmoid factor ``s`` from the
   approximate FP32 base-2 exponential of the exact FP32 product of ``-z`` and
@@ -98,21 +114,27 @@ Host design (every control is a keyword; no environment variable):
 - Workspace: ``cake_jit.workspace_elements`` FP32 elements (18952 bytes): the
   digit counters (``2 * 9 * 128`` 64-bit words, read as ``uint64``), one
   32-bit flag word a column (infinite and ``NaN`` sums), and two 32-bit words,
-  the arrival ticket and the claim counter.  Every launch uses it, also one
-  with ``compute_grad_weight=False`` (its CTAs still take tickets and claim
-  blocks), and leaves all of it zero, so a workspace zeroed once serves every
+  the arrival ticket and the claim counter.  Every launch uses it, also a
+  claimed or long one with ``compute_grad_weight=False`` (its CTAs still take
+  tickets and claim blocks), but the strided program's (no workspace word:
+  a caller workspace is checked and left as it is), and leaves all of it
+  zero, so a workspace zeroed once serves every
   later call on its stream, of any shape and either weight-gradient dtype, and
-  every CUDA Graph replay, with no host write.  A caller workspace must come
+  every CUDA Graph replay, with no host write.  The size does not depend on
+  ``compute_grad_weight``.  A caller workspace must come
   from :func:`cake_rmsnorm_silu_gate_det_train_backward_workspace`
   (zero-filled), or be zeroed with
   :func:`cake_rmsnorm_silu_gate_det_train_reset_workspace` after anything else
   wrote into it (a launch that did not complete, another use of the buffer).
 - Retained state: the autograd function saves only ``x``, ``z`` and ``weight``
   through ``save_for_backward``, so a non-reentrant checkpointed forward keeps
-  nothing but its output.  A backward without a caller workspace uses the
+  nothing but its output.  A backward without a caller workspace that runs a
+  module with a workspace (every one but the strided program) uses the
   zero-filled workspace of its (device, stream), allocated on first use and
   kept in ``_STREAM_WORKSPACES`` for later calls (18952 bytes for every stream
-  that ran a backward).  Such eager calls also keep a reserve of zero-filled
+  that ran such a backward); the strided program takes none, no reserve and
+  only empty tensors for its unread workspace and weight-gradient parameters,
+  made once per device.  Such eager calls also keep a reserve of zero-filled
   workspaces per device, filled outside any capture in allocations of 64
   (about 1.2 MiB each) whenever fewer than 32 are ready, up to 1024 per
   device (about 18.75 MiB per device), from which a call during CUDA Graph capture takes
@@ -123,7 +145,9 @@ Host design (every control is a keyword; no environment variable):
   current torch stream.  No launch is cooperative or uses programmatic
   dependent launch, and no CTA waits for another CTA: beside a kernel resident
   on another stream, a backward CTA that is not resident yet starts as any of
-  the backward's CTAs exits and claims only the blocks left.
+  the backward's CTAs exits and claims only the blocks left (a CTA of the
+  strided program without the weight gradient, which claims none, runs all of
+  its own blocks once it starts).
 - Mode: the mode is part of the name (``det``).  Every entry point is
   deterministic and takes no ``deterministic`` keyword (passing one is a
   ``TypeError``); every launch gives the same bits for the same inputs on
@@ -156,6 +180,7 @@ from .cake_jit import (
     arch_for_capability,
     backward_module,
     device_sm_count,
+    nodw_module,
     workspace_elements,
 )
 
@@ -405,10 +430,15 @@ def cake_rmsnorm_silu_gate_det_train_forward(
     return y
 
 
+@functools.cache
 def _workspace_elements(arch: str) -> int:
     """FP32 elements of a workspace that serves every backward module of
     ``arch`` (both weight-gradient dtypes and their long modules, any row
-    count)."""
+    count; the claimed and long programs without the weight gradient take
+    the BF16 backward's layout, and the strided one none).  Cached: the
+    module tables are constant, and a backward call with a workspace checks
+    it against this size, which would otherwise lay out every backward
+    module's workspace on every call."""
 
     routes = ROUTES[arch]
     return max(
@@ -484,10 +514,12 @@ def cake_rmsnorm_silu_gate_det_train_reset_workspace(
 
 # The workspaces of calls without a caller workspace: one per (device, stream),
 # zero-filled once and kept for the process (18952 bytes for every stream that
-# ran a backward).  Every backward leaves its workspace zero and the calls of
-# one stream run in order, so they share it (no allocation and no fill per
-# call); every backward module (both weight-gradient dtypes and their long
-# modules) reads the same layout.  A call during CUDA Graph capture uses a
+# ran a backward with a workspace).  Every backward leaves its workspace zero
+# and the calls of one stream run in order, so they share it (no allocation
+# and no fill per call); every backward module with a workspace (both
+# weight-gradient dtypes, their long modules and the claimed and long
+# programs without the weight gradient) reads the same layout, and the
+# strided program reads none.  A call during CUDA Graph capture uses a
 # workspace of its capture instead (``_capture_workspace``), so a graph
 # replayed on another stream never shares a buffer with eager calls or other
 # graphs.
@@ -668,6 +700,16 @@ def _check_workspace(
     return workspace.view(-1)
 
 
+@functools.cache
+def _module_workspace_elements(name: str) -> int:
+    """``cake_jit.workspace_elements`` of backward module ``name`` (a module
+    with a workspace).  Cached: the module records are constant, and every
+    backward call with a workspace reads it, which would otherwise lay out
+    the module's workspace on every call."""
+
+    return workspace_elements(name)
+
+
 def _workspace_views(
     workspace: torch.Tensor, name: str, device: torch.device
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
@@ -676,13 +718,38 @@ def _workspace_views(
     two ``uint32`` words ``[0]`` the arrival ticket and ``[1]`` the claim
     counter."""
 
-    elements = workspace_elements(name)
+    elements = _module_workspace_elements(name)
     flat = _check_workspace(workspace, device, elements)
     digits = elements - HEAD_DIM - 2
     acc = flat[:digits].view(torch.uint64)
     flags = flat[digits : digits + HEAD_DIM].view(torch.uint32)
     done = flat[digits + HEAD_DIM : elements].view(torch.uint32)
     return acc, flags, done
+
+
+@functools.cache
+def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
+    """An empty ``dtype`` tensor on CUDA device ``device_index``, made once:
+    the argument of a kernel parameter the launch does not read (the weight
+    gradient of a call without it, the workspace of the strided program).
+    The bindings check only its device, dtype and contiguity."""
+
+    return torch.empty((0,), dtype=dtype, device=torch.device("cuda", device_index))
+
+
+@functools.cache
+def _no_workspace(
+    device_index: int,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``(acc, flags, done)`` of a launch that reads no workspace (the
+    strided program): empty ``uint64``, ``uint32`` and ``uint32`` tensors on
+    CUDA device ``device_index``, the dtypes the binding checks."""
+
+    return (
+        _placeholder(device_index, torch.uint64),
+        _placeholder(device_index, torch.uint32),
+        _placeholder(device_index, torch.uint32),
+    )
 
 
 def cake_rmsnorm_silu_gate_det_train_backward(
@@ -734,13 +801,19 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         Add the gradient to ``grad_weight``'s current value exactly, before
         the rounding (needs ``grad_weight``).
     compute_grad_weight : bool
-        ``False`` skips the weight-gradient result and returns ``None`` for it.
+        ``False`` returns ``None`` for the weight gradient and runs a program
+        built without it (see the module): ``dx`` and ``dz`` are the bits
+        of the call that computes it; where it runs the strided program (up to
+        the strided cut; on SM107 short of the long program) the call uses no
+        workspace.
     workspace : torch.Tensor, optional
         Zero-filled FP32 workspace of at least
         :func:`cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes` bytes,
         contiguous and 16-byte aligned, left zero by the call; the stream's
         own workspace when omitted.  A workspace of the non-deterministic
         package is refused (``ValueError``), also in a call with no rows.
+        A call that reads none (the strided program) checks it and leaves it
+        as it is.
 
     Returns
     -------
@@ -790,13 +863,14 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     xv, x_tok, x_head = _kernel_view(x, "x", shape=shape, device=device)
     zv, z_tok, z_head = _kernel_view(z, "z", shape=shape, device=device)
     index = _device_index(device)
+    sm_count = device_sm_count(index)
     role = "bwd_f32" if dw is not None and dw.dtype == torch.float32 else "bwd_bf16"
     name = backward_module(
         arch,
         role,
         rows,
         heads,
-        device_sm_count(index),
+        sm_count,
         dy_tok,
         dy_head,
         x_tok,
@@ -804,7 +878,28 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         z_tok,
         z_head,
     )
-    if workspace is None:
+    if dw is None:
+        # The program built without the weight gradient (the same dx and dz
+        # bits): strided up to its cut (or at every row count where no claimed
+        # one is routed; its 128-thread build on packed rows), else claimed,
+        # or the long one.  The packed-row test is cake_jit.backward_packed,
+        # spelled out: a call would cost this host path more than the test.
+        row = heads * HEAD_DIM
+        packed = (
+            dy_head == HEAD_DIM
+            and x_head == HEAD_DIM
+            and z_head == HEAD_DIM
+            and dy_tok == row
+            and x_tok == row
+            and z_tok == row
+        )
+        name = nodw_module(arch, name, rows, sm_count, packed)
+    if dw is None and "workspace" not in _loader.MODULES[name]:
+        # The strided program reads and writes no workspace word: no stream
+        # workspace and no reserve; a caller's was checked above and is left
+        # as it is.
+        acc, flags, done = _no_workspace(index)
+    elif workspace is None:
         acc, flags, done = _stream_workspace_views(name, arch, device)
     else:
         acc, flags, done = _workspace_views(workspace, name, device)
@@ -818,7 +913,7 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         "acc": acc,
         "flags": flags,
         "done": done,
-        "dw": dw if dw is not None else torch.empty((0,), dtype=w.dtype, device=device),
+        "dw": dw if dw is not None else _placeholder(index, torch.bfloat16),
         "rows": rows,
         "heads": heads,
         "dy_tok": dy_tok,

@@ -61,7 +61,13 @@ Contract
   masked and normalized); ``d_t = -w_t * ratio_t`` when ``ratio_t <= 2`` and
   ``0`` when ``ratio_t > 2``.  ``dz[t, v] = d_t * (1[v = y_t] - softmax(z_t)_v)``;
   ignored rows: zero loss, zero gradient, ``logp = 0``.  ``dX = dz @ W``,
-  ``dW = dz^T @ X`` chunk by chunk.
+  ``dW = dz^T @ X`` chunk by chunk.  ``dX`` also folds each row's FP32 label
+  residual ``r_t = s_t - f32(bf16(s_t))`` (``s_t`` the label column's FP32
+  gradient, ``bf16(s_t)`` the value ``dz`` holds; 0 on ignored rows, labels at
+  or beyond ``V`` and a non-finite ``bf16(s_t)``): the row-gradient producers
+  store it into ``rlab`` and the slab sum, the last FP32 write of every chunk's
+  dX rows, adds ``r_t * W[y_t]`` with one ``fma`` per element
+  (:func:`_with_rlab_zero`, :func:`_dx_keys`).
 * Entry (a) ``cake_lm_head_nondet_train_loss``: the forward produces ``dX_acc`` (FP32
   ``[T, H]``) and ``dW_acc`` (FP32 ``[V, H]``) directly per chunk (three GEMMs,
   no logits recomputation); the backward applies the incoming scalar
@@ -112,7 +118,7 @@ Contract
   sum is the only writer of those rows and never reads them, so no call fills or zeroes ``dX_acc``.  Each element is
   summed in one fixed order (a design note, no run-to-run promise; its bits need not equal the deterministic
   package's).  A chunk of one slice keeps the deterministic package's plain-store ``gemm_dx`` forms, so its ``dX``
-  rows come from that package's programs in its order.  The slice rule is selectable programmatically
+  rows come from that package's programs in its order; its slab sum is the label residual fold alone.  The slice rule is selectable programmatically
   (:func:`set_dx_slice_policy`: ``"det"``, the deterministic package's slice counts, the default; ``"measured"``,
   the measured form-aware rule; :func:`set_dx_red_min_rows`: one slice below a chunk size, default 0).
 * Fused dX finalize (``dx_finalize``, default on): a compacted call's dX output boundary writes the
@@ -175,12 +181,16 @@ Contract
   chunk-bounded buffers) when ``logp`` is returned, scattered into the same ``[T]`` output (the same per-row logits
   arithmetic as the loss path's); their ``dX`` rows are exact zeros.  A zero-weight row is treated like an ignored
   row for the gradients: a non-finite value in its ``X`` row, its logits or its ``infer_logp`` does not reach
-  ``loss`` / ``dX`` / ``dW`` (the deterministic package gives NaN there through ``0 * inf``).  Finite inputs: the
-  same mathematics; ``dW`` (and the FP32 loss sum) group their additions over different chunk rows, so their bits
-  may differ from the deterministic package's (both are judged against the naive tier).  Not applied (the plain path
-  runs): ``compact_rows=False``, ``objective="ce"``, the log-probability entry, the prepared runner
-  (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its ``"budget"`` form splits
-  the rows as here).
+  ``loss`` / ``dX`` / ``dW`` (the call without the split gives NaN in ``dX`` / ``dW`` through ``0 * inf`` when the
+  row's ``X`` or logits are not finite; its loss term is ``+-0`` either way).  Finite inputs: the same mathematics.
+  The deterministic package splits the same rows from the same floor when its memory rule (``zero_weight_plan``)
+  allows the split; else it keeps them in its chunk loop, its ``dW`` sums over every valid row, and the ``dW`` bits
+  may differ from this package's.  This package adds no loss term for a zero-weight row (the FP32 loss sum over
+  ``G``), while the deterministic package's default ``"exact"`` loss mode keeps the loss bits of the call without
+  the split, so the loss bits may differ from the deterministic package's (both are judged against the naive
+  tier).  Not applied (the plain path runs): ``compact_rows=False``, ``objective="ce"``, the log-probability entry,
+  the prepared runner (:func:`prepare_lm_head_loss`) and a caller-given ``num_valid_rows`` (the opt-in module; its
+  ``"budget"`` form splits the rows as here).
 * Non-deterministic mode (the only mode of this package; the mode is in its
   name, and no entry takes a ``deterministic`` keyword): the chunks
   run in sequential order; the dX GEMM's K-slice partials combine through the
@@ -438,18 +448,31 @@ _GEOMETRY_OPTIONAL = ("hidden", "vocab")
 # vectors ``labels`` / ``lse`` / ``logp`` / ``infer_logp`` / ``loss_weights`` /
 # ``d_in`` (indexed by ``row0 + r``), chunk-local ``d`` / ``term`` (``[C]``), the
 # ``loss_acc`` / ``loss_out`` cells, for the casts ``acc`` / ``g`` / ``out`` and,
-# for the dX slab sum, ``dx`` / ``ws`` (:func:`dx_slab_sum_operands`).
+# for the dX slab sum, ``dx`` / ``ws`` and the label residual fold's ``labels`` / ``rlab`` / ``W``
+# (:func:`dx_slab_sum_operands`).  ``rlab`` (``[T]`` FP32, indexed like ``labels``): each row's FP32 label residual,
+# which the row-gradient producers (``row_grad``, the ``dz`` arms) store and the slab sum folds into the row's
+# ``dX_acc``.
 # Scalars: the GEMM launch scalars ``GEMM_SCALARS`` (``M`` / ``m_tiles`` /
 # ``k_iters`` / ``first_chunk`` / ``ws_slab`` and the geometry ``ldc``, the K
 # slicing ``k_slices`` / ``k_slice_iters``, the raster ``group_m`` / ``group_n``:
 # :func:`gemm_scalars`), ``rows_c`` / ``row0`` / ``V`` / ``num_tiles`` / ``mode``
 # / ``loss_div`` / ``last_chunk`` / ``d_off`` of the row kernels, ``num_vecs`` of
-# the casts and the slab sum, ``ws_slab`` / ``n_slabs`` / ``row_vecs`` of the slab
+# the casts and the slab sum, ``ws_slab`` / ``n_slabs`` / ``row_vecs`` / ``lr`` of the slab
 # sum, and ``T`` / ``H`` / ``C`` for grid rules.
 STAGE_TENSORS = {
     **{stage: ("A", "B", "C", "STATS_OUT", "WS") for stage in GEMM_STAGES},
     # the log-probability arms of the logits GEMM also read the per-token rows (``d_in`` = the kernel's ``dlogp``)
-    "gemm_logits_dz": ("A", "B", "C", "STATS_OUT", "WS", "labels", "lse", "d_in"),
+    "gemm_logits_dz": (
+        "A",
+        "B",
+        "C",
+        "STATS_OUT",
+        "WS",
+        "labels",
+        "lse",
+        "d_in",
+        "rlab",
+    ),
     "gemm_logits_lbl": ("A", "B", "C", "STATS_OUT", "WS", "labels"),
     # the zero-gradient row skip's forms also read the chunk's count cell
     **{
@@ -472,6 +495,7 @@ STAGE_TENSORS = {
         "labels",
         "lse",
         "d_in",
+        "rlab",
         "CNT",
     ),
     "row_finalize": (
@@ -487,15 +511,16 @@ STAGE_TENSORS = {
         "term",
     ),
     "loss_reduce": ("term", "loss_acc", "loss_out"),
-    "row_grad": ("z", "labels", "lse", "d"),
+    "row_grad": ("z", "labels", "lse", "d", "rlab"),
     "scale_cast_bf16": ("acc", "g", "out"),
     "scale_cast_f32": ("acc", "g", "out"),
     "scale_cast_scatter_bf16": ("acc", "g", "scan", "idx_lo", "out"),
-    # the slab sum after a K-sliced dX GEMM (:data:`DX_SLAB_SUM_STAGES`); its counted form also reads the chunk's count,
+    # the slab sum after every chunk's dX GEMM (:data:`DX_SLAB_SUM_STAGES`), which also folds the rows' FP32 label
+    # residuals (their ``labels`` / ``rlab`` rows and the head ``W``); its counted form also reads the chunk's count,
     # its accumulating form reads ``dx`` too (:data:`DX_SLAB_SUM_ACC_STAGE`)
-    "dx_slab_sum": ("dx", "ws"),
-    "dx_slab_sum_dcnt": ("dx", "ws", "CNT"),
-    "dx_slab_sum_acc": ("dx", "ws"),
+    "dx_slab_sum": ("dx", "ws", "labels", "rlab", "W"),
+    "dx_slab_sum_dcnt": ("dx", "ws", "labels", "rlab", "W", "CNT"),
+    "dx_slab_sum_acc": ("dx", "ws", "labels", "rlab", "W"),
     "gather_rows_bf16": ("x", "idx_lo", "count", "out"),
     "zero_dlogp_partition": (
         "labels",
@@ -520,6 +545,7 @@ TEMPERATURE_STAGE_TENSORS = {
         "labels",
         "lse",
         "d_in",
+        "rlab",
         "temperature",
     ),
     # the counted form (the zero-gradient row skip): the twin ``gemm_logits_dz_dcnt``'s tensors plus the temperature
@@ -532,6 +558,7 @@ TEMPERATURE_STAGE_TENSORS = {
         "labels",
         "lse",
         "d_in",
+        "rlab",
         "temperature",
         "CNT",
     ),
@@ -604,8 +631,11 @@ DX_RED_SLICES_MAX = (
 # writes nothing into ``dX_acc``.  The slab sum :data:`DX_SLAB_SUM_STAGE`, launched right after it (:func:`_dx_keys`),
 # stores ``(s_0 + s_1) + ...``, summed in slice order, into the chunk's rows: it never reads them and is their only
 # writer, so the call neither fills nor zeroes ``dX_acc``, and dX is summed in one fixed order (no run-to-run
-# promise).  A launch of one slice (the
-# support path's later vocabulary blocks) adds its tile into ``C`` directly, touches no slab and has no slab sum.  The
+# promise).  With ``lr = 1`` it then folds each row's FP32 label residual ``r`` (stored by the row-gradient producers):
+# ``fma(r, f32(W[y, h]), A)`` on the row's FP32 sum ``A`` (:func:`dx_slab_sum_operands`).  A chunk of one slice keeps
+# the plain store into its rows and runs the slab sum as the fold alone (``n_slabs = 0``: it reads the stored rows).  A
+# launch of one slice of the support path's later vocabulary blocks adds its tile into ``C`` directly, touches no slab
+# and has no slab sum.  The
 # slab is one buffer per call workspace sized for the call's largest K-sliced chunk (:attr:`Plan.dx_slab_bytes`,
 # allocated with the call's first K-sliced dX launch, :func:`_dx_ordered_values`); a chunk's slab sum reads it before
 # the next chunk's dX launch writes it (both on the caller's stream).
@@ -614,7 +644,7 @@ DX_SLAB_SUM_STAGE = "dx_slab_sum"
 # into the rows ``r < min(rows_c, 256 * ceil(CNT[0] / 256))`` (the row-tile pairs the counted GEMM ran) and ``-0.0``
 # into the rows after (the skipped pairs' rows, whose upstream gradient is zero).
 DX_SLAB_SUM_DCNT_STAGE = "dx_slab_sum_dcnt"
-# The slab sums of the plan's K-sliced chunks (:meth:`Plan.dx_slab_sum_stage_of`)
+# The slab sums of the plan's chunks (:meth:`Plan.dx_slab_sum_stage_of`)
 DX_SLAB_SUM_STAGES = (DX_SLAB_SUM_STAGE, DX_SLAB_SUM_DCNT_STAGE)
 # The accumulating slab sum: ``dx + (((s_0 + s_1) + ...) + s_{S - 1})``, one add per element, for rows that already hold
 # earlier vocabulary blocks' products (the support entries' dense dX, whose first K-sliced block stores with
@@ -666,20 +696,50 @@ def dx_slab_sum_operands(
     m_tiles: int,
     ldc: int,
     cast_vec: int,
+    labels: Optional[torch.Tensor] = None,
+    rlab: Optional[torch.Tensor] = None,
+    W: Optional[torch.Tensor] = None,
+    vocab: int = 0,
 ) -> dict[str, Any]:
-    """The slab sum's operands after a launch of the ordered dX GEMM of ``k_slices > 1`` slices that wrote ``slab``
-    (:func:`dx_ordered_operands`, the same ``m_tiles`` / ``ldc``) for the FP32 rows ``dx`` (``[rows, ldc]``): ``dx``,
-    the flat slab ``ws``, the elements of one slice's slab ``ws_slab = m_tiles * 128 * ldc``, the ``num_vecs`` vectors
-    of ``cast_vec`` elements of ``dx``, the slice count ``n_slabs`` and the vectors of one row ``row_vecs`` (read by the
-    counted form only, which also takes the count cell ``CNT`` of the counted dX launch; the caller adds it)."""
-    return dict(
+    """The slab sum's operands for the FP32 rows ``dx`` (``[rows, ldc]``) after a launch of the ordered dX GEMM of
+    ``k_slices`` slices that wrote ``slab`` (:func:`dx_ordered_operands`, the same ``m_tiles`` / ``ldc``): ``dx``, the
+    flat slab ``ws``, the elements of one slice's slab ``ws_slab = m_tiles * 128 * ldc``, the ``num_vecs`` vectors of
+    ``cast_vec`` elements of ``dx``, the slice count ``n_slabs`` and the vectors of one row ``row_vecs`` (the counted
+    form also takes the count cell ``CNT`` of the counted dX launch; the caller adds it).  ``k_slices <= 1`` adds no
+    slab (``n_slabs = ws_slab = 0``, ``slab`` an unread FP32 stand-in): the launch is the fold alone over the rows the
+    plain store wrote.
+
+    The fold of the rows' FP32 label residuals (``lr = 1``) takes the rows' int64 ``labels``, their residuals ``rlab``
+    (both ``[rows]``), the contiguous BF16 head ``W`` (``[vocab, ldc]``) and ``V = vocab``: a row whose label lies in
+    ``[0, V)`` and whose residual is nonzero gets ``fma(r, f32(W[y, h]), A)``, one rounding of its sum ``A`` plus the
+    exact product.  Without ``labels`` (the support entries, whose rows hold no label residual) the launch folds
+    nothing (``lr = 0``) and unread typed views of the slab's head stand in for ``labels`` / ``rlab`` / ``W``, so the
+    binding's type checks hold; it then needs a slab (``k_slices > 1``)."""
+    k = int(k_slices)
+    values = dict(
         dx=dx,
         ws=slab,
-        ws_slab=int(m_tiles) * 128 * int(ldc),
+        ws_slab=int(m_tiles) * 128 * int(ldc) if k > 1 else 0,
         num_vecs=int(dx.shape[0]) * int(ldc) // int(cast_vec),
-        n_slabs=int(k_slices),
+        n_slabs=k if k > 1 else 0,
         row_vecs=int(ldc) // int(cast_vec),
     )
+    if labels is None:
+        if k <= 1:
+            raise ValueError(
+                "a slab sum of one slice is the label residual fold alone: pass labels, rlab, W and vocab"
+            )
+        head = slab.view(-1)[:2]
+        values.update(
+            labels=head.view(torch.int64),
+            rlab=head[:1],
+            W=head[:1].view(torch.bfloat16),
+            V=0,
+            lr=0,
+        )
+    else:
+        values.update(labels=labels, rlab=rlab, W=W, V=int(vocab), lr=1)
+    return values
 
 
 def _dx_slab(
@@ -3735,9 +3795,20 @@ def _gather_rows(values: dict[str, Any]) -> None:
     torch.index_select(values["src"], 0, values["idx"], out=values["out"])
 
 
+def _rlab_zero(values: dict[str, Any]) -> None:
+    """Zero the call's FP32 label residuals ``rlab`` ahead of its first row-gradient producer (:func:`_with_rlab_zero`):
+    a row no producer writes -- a row the zero-gradient row skip leaves out, an ignored row, a label outside the head --
+    reads 0, and the slab sum folds nothing into it."""
+    values["rlab"].zero_()
+
+
+# The host step of :func:`_rlab_zero` (key ``("rlab_zero", None)``, one per call that computes dX).
+RLAB_ZERO_STAGE = "rlab_zero"
+
 # Host-side steps of the chunk loop (torch operators over the bound tensors, no kernel of the program, no allocation).
 HOST_STAGES: dict[str, Callable[[dict[str, Any]], None]] = {
     "gather_rows": _gather_rows,
+    RLAB_ZERO_STAGE: _rlab_zero,
 }
 
 
@@ -3790,8 +3861,8 @@ def generated_program_available(
 ) -> bool:
     """True when this checkout registers a contract program for ``device`` with every stage the entry point needs --
     the base stages plus every variant the per-chunk instance rules can select for the record's geometry and
-    architecture (:func:`reachable_variants`) and, when the record serves K-sliced dX chunks, their slab sum
-    (:data:`DX_SLAB_SUM_STAGE`)."""
+    architecture (:func:`reachable_variants`) and the slab sum every chunk's dX GEMM ends with
+    (:data:`DX_SLAB_SUM_STAGE`: the slab adds of a K-sliced chunk and the fold of the rows' FP32 label residuals)."""
     arch = arch_for(device)
     if arch is None:
         return False
@@ -3807,9 +3878,8 @@ def generated_program_available(
         stages_for_entry(entry, grad_weight_dtype=torch.float32)
     )
     needed |= reachable_variants(needed, arch, dx_max_slices(stages))
-    if dx_max_slices(stages) > 1:
-        # every K-sliced dX launch is followed by its slab sum
-        needed.add(DX_SLAB_SUM_STAGE)
+    # every dX launch is followed by its slab sum (the slab adds of a K-sliced launch, the fold of the label residuals)
+    needed.add(DX_SLAB_SUM_STAGE)
     if dx_finalize_default():
         needed |= set(DX_FINALIZE_STAGES)
     if hidden_count_default() and toolchain_runs_hidden_count(arch):
@@ -4444,11 +4514,11 @@ class Plan:
             dcnt=self.dcnt,
         )
 
-    def dx_slab_sum_stage_of(self, index: int) -> Optional[str]:
+    def dx_slab_sum_stage_of(self, index: int) -> str:
         """The slab sum launched right after the dX GEMM of chunk ``index`` (:func:`dx_slab_sum_stage`: its counted form
-        after a counted reduction), or ``None`` for a chunk of one slice (the plain store has no slab)."""
-        if self.dx_slices_of(index) <= 1:
-            return None
+        after a counted reduction), the last FP32 write of the chunk's dX rows: the slab adds of a K-sliced chunk and
+        the fold of the rows' FP32 label residuals -- the fold alone after the plain store of one slice, whose
+        uncounted form selects the plain slab sum."""
         return dx_slab_sum_stage(self.dx_stage_of(index))
 
     def dw_acc_stage(self, index: int) -> str:
@@ -4546,9 +4616,7 @@ class Plan:
                 used.add(self.recompute_stage(index))
             if "gemm_dx" in base:
                 used.add(self.dx_stage_of(index))
-                slab_sum = self.dx_slab_sum_stage_of(index)
-                if slab_sum is not None:
-                    used.add(slab_sum)  # the K-sliced chunk's slab sum
+                used.add(self.dx_slab_sum_stage_of(index))  # the chunk's slab sum
             if "gemm_dw_acc" in base and not (
                 self.dw_deferred and index == self.num_chunks - 1
             ):
@@ -4666,9 +4734,7 @@ class _TemperaturePlan(Plan):
                 used.add(self.recompute_stage(index))
             if "gemm_dx" in base:
                 used.add(self.dx_stage_of(index))
-                slab_sum = self.dx_slab_sum_stage_of(index)
-                if slab_sum is not None:
-                    used.add(slab_sum)  # the K-sliced chunk's slab sum
+                used.add(self.dx_slab_sum_stage_of(index))  # the chunk's slab sum
             if "gemm_dw_acc" in base and not (
                 self.dw_deferred and index == self.num_chunks - 1
             ):
@@ -5061,7 +5127,9 @@ def memory_report(
 
     ``temporary``: the workspace regions of :func:`workspace_layout`, the
     ``O(T)`` row vectors (``lse``; ``logp`` unless it is returned; the
-    contiguous ``dlogp`` of the log-probability backward) and a contiguous copy
+    contiguous ``dlogp`` of the log-probability backward; the FP32 label
+    residuals ``rlab`` of a call with a gradient and of every log-probability
+    runner, whose backward keys run a row-gradient producer) and a contiguous copy
     of ``X`` when its leading stride forced one; ``outputs``: what the caller
     receives (``loss``, ``logp`` when requested, ``dX`` BF16, ``dW`` in
     ``grad_weight_dtype``); ``accumulators``: the FP32 ``dX_acc`` / ``dW_acc``
@@ -5149,6 +5217,10 @@ def memory_report(
         for name, (_, size) in ((k, v) for k, v in layout.items() if k != "total")
     }
     temporary["lse"] = rows * 4
+    if need_dx or need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (a log-probability runner allocates them without a
+        # gradient too: its backward keys run a producer)
+        temporary["rlab"] = rows * 4
     if dx_slab_bytes:
         temporary["dx_slab"] = int(
             dx_slab_bytes
@@ -5275,7 +5347,9 @@ def memory_report_temperature(
 
     ``temporary``: the workspace regions of :func:`workspace_layout`, the
     ``O(T)`` row vectors (``lse``; ``logp`` unless it is returned; the
-    contiguous ``dlogp`` of the log-probability backward) and a contiguous copy
+    contiguous ``dlogp`` of the log-probability backward; the FP32 label
+    residuals ``rlab`` of a call with a gradient and of every log-probability
+    runner, whose backward keys run a row-gradient producer) and a contiguous copy
     of ``X`` when its leading stride forced one; ``outputs``: what the caller
     receives (``loss``, ``logp`` when requested, ``dX`` BF16, ``dW`` in
     ``grad_weight_dtype``); ``accumulators``: the FP32 ``dX_acc`` / ``dW_acc``
@@ -5370,6 +5444,10 @@ def memory_report_temperature(
         for name, (_, size) in ((k, v) for k, v in layout.items() if k != "total")
     }
     temporary["lse"] = rows * 4
+    if need_dx or need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (a log-probability runner allocates them without a
+        # gradient too: its backward keys run a producer)
+        temporary["rlab"] = rows * 4
     if dx_slab_bytes:
         temporary["dx_slab"] = int(
             dx_slab_bytes
@@ -6046,6 +6124,9 @@ def stage_values(
     caller's ``[T]`` operand ``t[index + "_full"]`` into ``t[index]``.
     """
     p, g = plan.problem, plan.geometry
+    if stage == RLAB_ZERO_STAGE:
+        # the host step ahead of the call's first row-gradient producer (:func:`_with_rlab_zero`): no chunk
+        return {"rlab": t["rlab"]}
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     values.update(
         T=int(plan.rows),
@@ -6162,7 +6243,8 @@ def stage_values(
             # the caller's ``[T]`` ``dlogp`` at ``d_in[d_off + r]`` (the operands ``row_grad`` reads)
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0))
+            # ... and stores each row's FP32 label residual at ``rlab[row0 + r]``
+            values.update(lse=t["lse"], d_in=t["d_in"], d_off=int(row0), rlab=t["rlab"])
     elif base in DX_BASES:
         _dx_values(stage, t, plan, index, values, dz_chunk)
     elif stage in DX_SLAB_SUM_STAGES:
@@ -6257,6 +6339,7 @@ def stage_values(
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if external else t["d"],
+            rlab=t["rlab"],  # each row's FP32 label residual, at ``rlab[row0 + r]``
             d_off=int(row0) if external else 0,
         )
     else:
@@ -6333,6 +6416,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
     the plan checks, which the binding fixed when it was prepared.  Any other host stage gets :func:`stage_values`.
     :meth:`_Binding.from_runner` checks every remembered launch against :func:`stage_values` once."""
     p = plan.problem
+    if stage == RLAB_ZERO_STAGE:
+        return stage_values(stage, t, plan, index)
     values: dict[str, Any] = {name: t.get(name) for name in COMMON_TENSORS}
     if stage == "gather_rows":
         if isinstance(index, str):
@@ -6371,7 +6456,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         if base in (LOGPROB_DZ_STAGE, LOGPROB_LBL_STAGE):
             values.update(labels=t["labels"])
         if base == LOGPROB_DZ_STAGE:
-            values.update(lse=t["lse"], d_in=t["d_in"])
+            values.update(lse=t["lse"], d_in=t["d_in"], rlab=t["rlab"])
     elif base in DX_BASES:
         _dx_slots(stage, t, plan, index, values)
     elif stage in DX_SLAB_SUM_STAGES:
@@ -6411,6 +6496,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             labels=t["labels"],
             lse=t["lse"],
             d=t["d_in"] if p.entry == "logprob" else t["d"],
+            rlab=t["rlab"],
         )
     else:
         return stage_values(stage, t, plan, index)
@@ -6480,7 +6566,7 @@ def forward_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 keys.append(
                     (plan.dw_acc_stage(index), index)
                 )  # a deferred last chunk runs in the backward (cast_keys)
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -6510,7 +6596,7 @@ def _forward_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 keys.append(
                     (plan.dw_acc_stage(index), index)
                 )  # a deferred last chunk runs in the backward (cast_keys)
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def forward_early_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -6543,7 +6629,8 @@ def _reads_labels(stage: str) -> bool:
 # :data:`DX_RED_STAGE`, which stores the slices' FP32 tiles into the call's slab (:func:`_dx_ordered_values`), and
 # right after it one launch of the slab sum (:meth:`Plan.dx_slab_sum_stage_of`), which stores the tiles, summed in
 # slice order, into the chunk's rows of ``dX_acc`` (their only writer: nothing fills them first).  A chunk of one slice
-# is one launch of the deterministic package's plain-store ``gemm_dx`` forms.
+# is one launch of the deterministic package's plain-store ``gemm_dx`` forms.  The slab sum then folds the rows' FP32
+# label residuals (alone, ``n_slabs = 0``, after the plain store): it is the last FP32 write of every chunk's dX rows.
 # ---------------------------------------------------------------------------
 
 
@@ -6559,11 +6646,24 @@ def _reads_labels_temperature(stage: str) -> bool:
 
 def _dx_keys(plan: Plan, index: int) -> list:
     """The dX GEMM of chunk ``index``: one launch, the K-sliced reduction or the plain store (:meth:`Plan.dx_stage_of`),
-    and after the K-sliced reduction its slab sum (:meth:`Plan.dx_slab_sum_stage_of`)."""
-    slab_sum = plan.dx_slab_sum_stage_of(index)
-    keys = [(plan.dx_stage_of(index), index)]
-    if slab_sum is not None:
-        keys.append((slab_sum, index))
+    and right after it its slab sum (:meth:`Plan.dx_slab_sum_stage_of`): the slab adds of the K-sliced reduction and
+    the fold of the rows' FP32 label residuals (the fold alone after the plain store)."""
+    return [
+        (plan.dx_stage_of(index), index),
+        (plan.dx_slab_sum_stage_of(index), index),
+    ]
+
+
+def _with_rlab_zero(plan: Plan, keys: list) -> list:
+    """``keys`` with the host step ``("rlab_zero", None)`` (:func:`_rlab_zero`) right before the first row-gradient
+    producer (:data:`DZ_PRODUCER_STAGES`: ``row_grad``, the ``dz`` arms) when the plan computes dX: the slab sums fold
+    the call's FP32 label residuals ``rlab``, and a row no producer writes must read 0.  Before the first producer, so
+    a hidden valid-row count's queued chunk 0 keeps it among the late launches."""
+    if not plan.need_dx:
+        return keys
+    for pos, (stage, _) in enumerate(keys):
+        if stage in DZ_PRODUCER_STAGES:
+            return keys[:pos] + [(RLAB_ZERO_STAGE, None)] + keys[pos:]
     return keys
 
 
@@ -6650,20 +6750,42 @@ def _dx_slots(
         values.update(STATS_OUT=t["stats"], WS=t["f32_dummy"])
 
 
+def _chunk_rows(x: torch.Tensor, row0: int, stop: int) -> torch.Tensor:
+    """``x[row0:stop]`` as a per-call slot binds it: ``x`` itself when the rows are all of it (a one-chunk plan's),
+    which has the address, shape, strides, dtype and device of that view (:func:`_same_view`), so no view is formed."""
+    return x if row0 == 0 and stop == x.shape[0] else x[row0:stop]
+
+
 def _dx_slab_sum_operands(t: dict[str, Any], plan: Plan, index: int) -> dict[str, Any]:
     """:func:`dx_slab_sum_operands` of chunk ``index``: its rows of ``dX_acc`` and the call's slab (:func:`_dx_slab`) at
-    the ``m_tiles`` / ``ldc`` of the chunk's dX launch, plus the chunk's count cell ``CNT`` after a counted reduction
-    -- the cell that launch reads."""
+    the ``m_tiles`` / ``ldc`` of the chunk's dX launch (one slice: no slab, the FP32 dummy stands in), the fold's
+    operands (the rows' ``labels`` / ``rlab``, the head ``W``), plus the chunk's count cell ``CNT`` after a counted
+    reduction -- the cell that launch reads."""
     p, g = plan.problem, plan.geometry
     row0, rows_c = plan.chunks[index]
+    stop = row0 + rows_c
     k = plan.dx_slices_of(index)
     dx_stage = plan.dx_stage_of(index)
-    scalars = _gemm_scalars(dx_stage, g, p.hidden, p.vocab, rows_c, k, None, None, 1, 0)
-    m_tiles, ldc = scalars["m_tiles"], scalars["ldc"]
-    dx = t["dx_acc"][row0 : row0 + rows_c]
-    slab = _dx_slab(t, plan, dx_slab_bytes(k, m_tiles, ldc), dx.device)
+    dx = t["dx_acc"][row0:stop]
+    if k > 1:
+        scalars = _gemm_scalars(
+            dx_stage, g, p.hidden, p.vocab, rows_c, k, None, None, 1, 0
+        )
+        m_tiles, ldc = scalars["m_tiles"], scalars["ldc"]
+        slab = _dx_slab(t, plan, dx_slab_bytes(k, m_tiles, ldc), dx.device)
+    else:
+        m_tiles, ldc, slab = 0, int(p.hidden), t["f32_dummy"]
     values = dx_slab_sum_operands(
-        dx, slab, k_slices=k, m_tiles=m_tiles, ldc=ldc, cast_vec=g.cast_vec
+        dx,
+        slab,
+        k_slices=k,
+        m_tiles=m_tiles,
+        ldc=ldc,
+        cast_vec=g.cast_vec,
+        labels=t["labels"][row0:stop],
+        rlab=t["rlab"][row0:stop],
+        W=t["W"],
+        vocab=p.vocab,
     )
     if dx_slab_sum_stage(dx_stage) == DX_SLAB_SUM_DCNT_STAGE:
         values.update(CNT=t["dcnt"][index : index + 1])
@@ -6675,7 +6797,7 @@ def _dx_slab_sum_values(
 ) -> None:
     """:func:`stage_values` of the slab sum ``stage`` of chunk ``index`` (:meth:`Plan.dx_slab_sum_stage_of`), added to
     ``values`` in place: the chunk's rows of ``dX_acc`` (``dx``), the call's slab the chunk's K-sliced dX launch wrote
-    (``ws``) and its scalars (:func:`_dx_slab_sum_operands`)."""
+    (``ws``; the FP32 dummy after one slice), the fold's operands and the scalars (:func:`_dx_slab_sum_operands`)."""
     want = plan.dx_slab_sum_stage_of(index)
     if stage != want:
         raise ValueError(
@@ -6689,9 +6811,31 @@ def _dx_slab_sum_slots(
     stage: str, t: dict[str, Any], plan: Plan, index: int, values: dict[str, Any]
 ) -> None:
     """:func:`_slot_values` of the slab sum ``stage`` of chunk ``index`` (the per-call tensor views of a remembered
-    launch: ``dx``, ``ws`` and, counted, ``CNT``), added to ``values`` in place."""
-    operands = _dx_slab_sum_operands(t, plan, index)
-    values.update({name: operands[name] for name in STAGE_TENSORS[stage]})
+    launch: ``dx``, ``ws``, the fold's ``labels`` / ``rlab`` / ``W`` and, counted, ``CNT``), added to ``values`` in
+    place: the tensors of :func:`_dx_slab_sum_operands`, without its scalars and checks (the binding fixed them when
+    it was prepared; the slab is the call's, at the chunk's ``m_tiles`` / ``ldc``), the rows of a chunk that covers a
+    whole tensor being that tensor (:func:`_chunk_rows`)."""
+    row0, rows_c = plan.chunks[index]
+    stop = row0 + rows_c
+    k = plan.dx_slices_of(index)
+    dx_acc = t["dx_acc"]
+    if k > 1:
+        g = plan.geometry
+        need = dx_slab_bytes(
+            k, g.row_tiles(rows_c, g.dx_cluster_ctas), plan.problem.hidden
+        )
+        ws = _dx_slab(t, plan, need, dx_acc.device)
+    else:
+        ws = t["f32_dummy"]
+    values.update(
+        dx=_chunk_rows(dx_acc, row0, stop),
+        ws=ws,
+        labels=_chunk_rows(t["labels"], row0, stop),
+        rlab=_chunk_rows(t["rlab"], row0, stop),
+        W=t["W"],
+    )
+    if "CNT" in STAGE_TENSORS[stage]:
+        values.update(CNT=t["dcnt"][index : index + 1])
 
 
 def recompute_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -6732,7 +6876,7 @@ def recompute_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 )  # the scale is 1 here: the GEMM writes the final BF16 dW
             else:
                 keys.append((plan.dw_acc_stage(index), index))
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def _recompute_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -6767,7 +6911,7 @@ def _recompute_keys_temperature(plan: Plan) -> tuple[tuple[str, Any], ...]:
                 )  # the scale is 1 here: the GEMM writes the final BF16 dW
             else:
                 keys.append((plan.dw_acc_stage(index), index))
-    return tuple(keys)
+    return tuple(_with_rlab_zero(plan, keys))
 
 
 def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -6801,6 +6945,41 @@ def _mm_fp32(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
         except (TypeError, RuntimeError):
             pass
     return torch.mm(a.float(), b.float())
+
+
+def _store_label_residual(
+    values: dict[str, Any],
+    dz: torch.Tensor,
+    index: torch.Tensor,
+    labels: torch.Tensor,
+    valid: torch.Tensor,
+) -> None:
+    """The row-gradient producers' label residual (reference): for each row of the chunk whose label lies in
+    ``[0, V)``, ``r = s - f32(bf16(s))`` of the label column's FP32 gradient ``s`` (gathered at the clamped label
+    ``index``), 0 where ``bf16(s)`` is not finite, into ``rlab[row0 + r]``; 0 on every other row (the kernels leave
+    those rows to the call's zero fill).  Nothing without an ``rlab`` operand."""
+    rlab = values.get("rlab")
+    if rlab is None:
+        return
+    row0, rows_c = ReferenceEngine._rows(values)
+    s = dz.gather(1, index[:, None]).squeeze(1)
+    hi = s.bfloat16().float()
+    keep = valid & (labels < int(values["V"])) & torch.isfinite(hi)
+    rlab[row0 : row0 + rows_c] = torch.where(keep, s - hi, torch.zeros_like(s))
+
+
+def _fold_label_residual(values: dict[str, Any], dx: torch.Tensor) -> None:
+    """The slab sum's fold (reference): with ``lr`` nonzero, ``dx[j] + r_j * f32(W[y_j])`` (the product exact but
+    where it is subnormal, one FP32 add per element) on each row ``j`` whose label ``y_j`` lies in ``[0, V)`` and whose
+    residual ``r_j = rlab[j]`` is nonzero -- the kernel's ``fma`` -- every other row keeping its bits."""
+    if not int(values.get("lr", 0)):
+        return
+    rows = dx.shape[0]
+    y = values["labels"][:rows].long()
+    r = values["rlab"][:rows]
+    fold = (r != 0) & (y >= 0) & (y < int(values["V"]))
+    w = values["W"].index_select(0, torch.where(fold, y, torch.zeros_like(y))).float()
+    dx.copy_(torch.where(fold[:, None], dx + r[:, None] * w, dx))
 
 
 class ReferenceEngine:
@@ -6971,6 +7150,7 @@ class ReferenceEngine:
         onehot.scatter_(1, index[:, None], 1.0)
         dz = d[:, None] * (onehot - p)
         dz[~valid] = 0.0
+        _store_label_residual(values, dz, index, labels, valid)
         z.copy_(dz)  # the BF16 dlogits boundary
 
     @staticmethod
@@ -6999,7 +7179,8 @@ class ReferenceEngine:
     @staticmethod
     def dx_slab_sum(values: dict[str, Any]) -> None:
         # the slab sum: the K-sliced dX GEMM's slabs (slab ``s`` at ``s * ws_slab`` of the flat ``ws``) summed in
-        # slice order, the sum stored into the chunk's rows
+        # slice order, the sum stored into the chunk's rows (none with ``n_slabs`` 0: the rows keep the plain store's
+        # values), then the fold of the rows' FP32 label residuals
         dx, ws = values["dx"], values["ws"]
         rows, cols = int(dx.shape[0]), int(dx.shape[1])
         pitch = int(values["ws_slab"])
@@ -7007,7 +7188,9 @@ class ReferenceEngine:
         for s in range(int(values["n_slabs"])):
             part = ws[s * pitch : s * pitch + rows * cols].view(rows, cols)
             total = part if total is None else total + part
-        dx.copy_(total)
+        if total is not None:
+            dx.copy_(total)
+        _fold_label_residual(values, dx)
 
     # the counted form stores every row here: the reference reduction computes every row of the chunk (the rows past
     # the count, whose upstream gradient is zero, hold zeros where the kernel stores ``-0.0``)
@@ -7423,6 +7606,7 @@ def prepare_lm_head_loss(
     dcnt: Optional[torch.Tensor] = None,
     _skip_forms: bool = False,
     kept_fold: bool = False,
+    _template_only: bool = False,
 ) -> LmHeadLossRunner:
     """Validate one binding and prepare its launches.
 
@@ -7495,9 +7679,17 @@ def prepare_lm_head_loss(
     plan then runs the ``_dcnt`` forms (:attr:`Plan.dcnt`) where the record
     registers every one it needs, and the shipped forms otherwise (the same
     outputs: every row computed).
+
+    ``_template_only`` (private; the eager entry points, ``cake`` backend): the
+    runner only templates a remembered binding (:meth:`_Binding.from_runner`),
+    which launches with per-call buffers and the device's constant cells
+    (:func:`_device_constants`); it binds those cells too, rather than filling
+    cells of its own.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
+    if _template_only and backend != "cake":
+        raise ValueError("a template-only runner templates a cake-backend binding")
     if entry != "logprob" and (logprob_dz or logprob_lbl or logprob_keep):
         raise ValueError(
             "logprob_dz / logprob_lbl / logprob_keep select logits GEMM arms of the log-probability entry"
@@ -7678,12 +7870,22 @@ def prepare_lm_head_loss(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _loss_acc(_carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`_device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -7694,6 +7896,11 @@ def prepare_lm_head_loss(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; the ``rlab_zero`` step of a call that computes dX zeroes them, :func:`_with_rlab_zero`)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -7841,6 +8048,7 @@ def prepare_lm_head_loss_temperature(
     temperature: Optional[torch.Tensor] = None,
     dcnt: Optional[torch.Tensor] = None,
     _skip_forms: bool = False,
+    _template_only: bool = False,
 ) -> LmHeadLossRunner:
     """Validate one binding and prepare its launches.
 
@@ -7911,9 +8119,14 @@ def prepare_lm_head_loss_temperature(
     :func:`make_plan_temperature` whose forms the record registers: the counted ``dz`` temperature form
     (:func:`zero_dlogp_temperature_dz_counted`), else the mixed plan (the uncounted ``dz`` temperature form), each
     with the counted dX / dW forms, and the shipped forms otherwise.
+
+    ``_template_only`` (private): a template runner that binds the device's constant cells, as in
+    :func:`prepare_lm_head_loss`.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
+    if _template_only and backend != "cake":
+        raise ValueError("a template-only runner templates a cake-backend binding")
     if entry != "logprob" and (logprob_dz or logprob_lbl):
         raise ValueError(
             "logprob_dz / logprob_lbl select logits GEMM arms of the log-probability entry"
@@ -8133,12 +8346,22 @@ def prepare_lm_head_loss_temperature(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _loss_acc(_carve(flat, layout, "loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`_device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -8149,6 +8372,11 @@ def prepare_lm_head_loss_temperature(
     t["lse"] = output(lse, "lse", (rows_loop,), torch.float32)
     t["logp"] = output(logp, "logp", (rows_loop,), torch.float32)
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
+    if plan.need_dx or plan.need_dw or entry == "logprob":
+        # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
+        # workspace; the ``rlab_zero`` step of a call that computes dX zeroes them, :func:`_with_rlab_zero`)
+        # (a log-probability runner's backward keys run a producer even without a gradient)
+        t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
         if infer_logp is not None:
             if (
@@ -8671,13 +8899,18 @@ class _Binding:
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         for key, launch in runner.launches.items():
             if keep is None or key in keep:
-                _check_slot_values(key, t, plan, [name for _, name in launch.slots])
+                _check_slot_values(
+                    key, t, plan, [name for _, name in launch.slots], formed.get(key)
+                )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
-                _check_slot_values(key, t, plan, ["src", "idx", "out"])
+                _check_slot_values(key, t, plan, ["src", "idx", "out"], formed.get(key))
         early = forward_early_keys(plan)
         split = next(
             (i for i, key in enumerate(early) if _reads_labels(key[0])), len(early)
@@ -8913,6 +9146,8 @@ class _Binding:
                     )
                 else:
                     t["infer_logp"], t["loss_weights"] = infer_logp, loss_weights
+            if plan.need_dx or plan.need_dw:
+                t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
             if plan.need_dx:
                 t["dx_acc"] = torch.empty(
                     (T, H), dtype=torch.float32, device=self.device
@@ -8966,6 +9201,9 @@ class _Binding:
                 )
             t["dcnt"] = dcnt
         self._scratch(t, hidden, backward=True)
+        if plan.need_dx or plan.need_dw:
+            # the producers' label residuals: written by the recompute, ahead of the gradient buffers
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
 
         def gradient_buffers() -> None:
             if plan.need_dx:
@@ -9046,7 +9284,10 @@ class _TemperatureBinding(_Binding):
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         tau = plan.problem.temperature
         slot_values = _slot_values_temperature if tau else _slot_values
         full_values = stage_values_temperature if tau else stage_values
@@ -9059,11 +9300,18 @@ class _TemperatureBinding(_Binding):
                     [name for _, name in launch.slots],
                     slot_values,
                     full_values,
+                    formed.get(key),
                 )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
                 _check_slot_values_temperature(
-                    key, t, plan, ["src", "idx", "out"], slot_values, full_values
+                    key,
+                    t,
+                    plan,
+                    ["src", "idx", "out"],
+                    slot_values,
+                    full_values,
+                    formed.get(key),
                 )
         early = forward_early_keys(plan)
         split = next(
@@ -9403,6 +9651,8 @@ class _KeptBinding(_Binding):
             t["x_c"] = torch.empty((rows, H), dtype=torch.bfloat16, device=self.device)
         self._scratch(t, chunk_buffers=False, backward=True)
         t["logits_keep"] = logits
+        if plan.need_dx or plan.need_dw:
+            t["rlab"] = torch.empty((T,), dtype=torch.float32, device=self.device)
         if plan.need_dx:
             t["dx_acc"] = torch.empty((T, H), dtype=torch.float32, device=self.device)
             if plan.dx_cast:
@@ -9434,10 +9684,12 @@ class _KeptBinding(_Binding):
         return dx, t.get("dw_out")
 
 
-def _check_slot_values(key, t: dict[str, Any], plan: Plan, names) -> None:
-    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``."""
+def _check_slot_values(key, t: dict[str, Any], plan: Plan, names, full=None) -> None:
+    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``
+    (``full``: the host values :func:`stage_values` formed for it, when they are already at hand)."""
     fast = _slot_values(key[0], t, plan, key[1])
-    full = stage_values(key[0], t, plan, key[1])
+    if full is None:
+        full = stage_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -9452,11 +9704,14 @@ def _check_slot_values_temperature(
     names,
     slot_values=_slot_values,
     full_values=stage_values,
+    full=None,
 ) -> None:
     """:func:`_slot_values` (or the binding's ``slot_values``) binds what :func:`stage_values` (or the binding's
-    ``full_values``) binds for the host values ``names`` of launch ``key``."""
+    ``full_values``) binds for the host values ``names`` of launch ``key`` (``full``: the host values ``full_values``
+    formed for it, when they are already at hand)."""
     fast = slot_values(key[0], t, plan, key[1])
-    full = full_values(key[0], t, plan, key[1])
+    if full is None:
+        full = full_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -10153,6 +10408,7 @@ def forward_loss(
         dx_finalize=fused_dx,
         dw_stream=stream_mode,
         dx_rule=rule,
+        _template_only=backend == "cake",
         **common,
     )
     _alert_unordered_dx(runner.plan, "forward_loss", "loss")
@@ -10827,6 +11083,7 @@ def _forward_logprob_rows(
         compact_rows=False if row_index is None else row_index,
         gemm_tuning=tuning,
         logprob_lbl=lbl,
+        _template_only=hc is not None and backend == "cake",
     )
     if hc is not None:
         # the hidden valid-row count: chunk 0's logits already sit in the prologue's buffers, so the first call launches
@@ -11128,6 +11385,7 @@ def backward_logprob(
         # the skip's private forms (the cast at the last live chunk): the counts come from zero_dlogp_partition (zeros
         # form a suffix) and the gradient buffers are this call's own
         _skip_forms=skip,
+        _template_only=hc is not None and backend == "cake",
     )
     _alert_unordered_dx(runner.plan, "backward_logprob", "logprob")
     order_rows(runner.plan)
@@ -11414,7 +11672,8 @@ def _backward_logprob_vm(
         DX_RED_STAGE, tile_n=v.dx_tile_n, stages=v.dx_stages, split=split, dcnt=skip
     )
     dw_stage = stage_variant("gemm_dw_cast_bf16", dcnt=skip)
-    for stage in (dx_store, dx_add, dw_stage, dz_stage):
+    folds = (DX_SLAB_SUM_STAGE,) if need_dx else ()  # the label residual fold after the last block
+    for stage in (dx_store, dx_add, dw_stage, dz_stage) + folds:
         if stage not in registered:
             raise NotImplementedError(
                 f"the registered program {module_name!r} lacks the stage {stage!r} (vocabulary-major backward)"
@@ -11433,6 +11692,9 @@ def _backward_logprob_vm(
     )
     if dx_acc is not None and skip:
         dx_acc.fill_(-0.0)  # the exact additive identity: every block adds into it
+    # the rows' FP32 label residuals: the block holding a row's label stores it (the shifted label of every other block
+    # lies outside it), a row no block stores keeps 0; read by the fold after the last block
+    rlab = torch.zeros((rows,), dtype=torch.float32, device=device)
     dw_out = torch.empty((V, H), dtype=torch.bfloat16, device=device)
     cnt = None if counts is None else counts[0:1]
     side_on = need_dx and dw_side_stream(len(blocks), stream_mode)
@@ -11487,6 +11749,7 @@ def _backward_logprob_vm(
             labels=lb,
             lse=lse,
             d_in=d_c,
+            rlab=rlab,
             rows_c=rows,
             row0=0,
             d_off=0,
@@ -11576,11 +11839,34 @@ def _backward_logprob_vm(
         else:
             launch(dw_stage, values)
         del values, dz, Wb
+    if dx_acc is not None:
+        # the fold of the rows' FP32 label residuals, once over every row after the last block's dX add: the slab sum
+        # with no slab (``n_slabs = 0``) over the unshifted labels and the full head
+        values = base_values()
+        values.update(
+            T=rows,
+            H=H,
+            loss_div=1.0,
+            **dx_slab_sum_operands(
+                dx_acc,
+                dummy,
+                k_slices=1,
+                m_tiles=0,
+                ldc=H,
+                cast_vec=int(geometry.cast_vec),
+                labels=labels_c,
+                rlab=rlab,
+                W=W,
+                vocab=V,
+            ),
+        )
+        launch(DX_SLAB_SUM_STAGE, values)
+        del values
     if side_on:
         main.wait_stream(side)
     # the block phase's buffers go before the dX output phase (the main stream has waited for the side stream's last
     # read of dz): that phase holds the dX accumulator, dW and the dX output only (memory_plan's second phase)
-    del dz_buf, stats, lb_all, x_rows, d_c, labels_c, tau_c
+    del dz_buf, stats, lb_all, x_rows, d_c, labels_c, tau_c, rlab
     if dx_acc is None:
         return None, dw_out
     if row_index is None:
@@ -11752,6 +12038,7 @@ def forward_logprob_temperature(
         gemm_tuning=tuning,
         logprob_lbl=lbl,
         temperature=tau_rows,
+        _template_only=hc is not None and backend == "cake",
     )
     if hc is not None:
         # the hidden valid-row count: chunk 0's logits already sit in the prologue's buffers, so the first call launches
@@ -12132,6 +12419,7 @@ def backward_logprob_temperature(
         # the skip's private forms (the cast at the last live chunk): the counts come from zero_dlogp_partition (zeros
         # form a suffix) and the gradient buffers are this call's own
         _skip_forms=skip,
+        _template_only=hc is not None and backend == "cake",
     )
     _alert_unordered_dx(runner.plan, "backward_logprob_temperature", "logprob")
     order_rows(runner.plan)
@@ -12274,6 +12562,7 @@ def forward_logprob_keep(
             logprob_lbl=False,
             logprob_keep=True,
             kept_fold=fold,
+            _template_only=backend == "cake",
         )
         # the kept views are bound per call: every call launches through the templated binding
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner, hc))
@@ -12433,6 +12722,7 @@ def backward_logprob_keep(
             dx_rule=rule,
             logprob_keep=True,
             kept_fold=fold,
+            _template_only=backend == "cake",
         )
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner))
         del runner
