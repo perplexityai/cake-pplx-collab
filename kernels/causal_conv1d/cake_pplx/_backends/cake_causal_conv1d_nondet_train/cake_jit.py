@@ -3511,6 +3511,547 @@ MODULES: dict[str, dict[str, Any]] = {
             "work": "uint32",
         },
     },
+    # Route ``bwd``, sm_100a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_e057357c655024d4ff1d`` (its row-group body and build keywords: one CTA of 384
+    # threads per SM, the single channel tile of the row, 5 token sub-tiles per CTA) with ``swizzled=True``: the
+    # swizzled flush and the batched finish.  ``dx`` and every per-thread and per-CTA FP32 step are the det
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``,
+    # takes a ticket on the tile's ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and
+    # ``work``.  No reduce program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to
+    # 608 at S = 40960 to 98303; ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_82e874f30406be2334b6": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 384,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_82e874f30406be2334b6",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_82e874f30406be2334b6",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 197632,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_82e874f30406be2334b6",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd``, sm_100a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_e057357c655024d4ff1d`` (its row-group body and build keywords: one CTA of 384
+    # threads per SM, the single channel tile of the row, 5 token sub-tiles per CTA) with the rows flush and the
+    # plain finish.  ``dx`` and every per-thread and per-CTA FP32 step are the det program's; only the cross-CTA
+    # reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``, takes a ticket on the tile's
+    # ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and ``work``.  No reduce
+    # program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to 608 from S = 98304;
+    # ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_1ec222b2d908a7d6ea21": {
+        "arches": [
+            "sm_100a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 384,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_100a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_1ec222b2d908a7d6ea21",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_1ec222b2d908a7d6ea21",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 197632,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_1ec222b2d908a7d6ea21",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd``, sm_103a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_baca4c969c783d07d81f`` (its row-group body and build keywords: one CTA of 384
+    # threads per SM, the single channel tile of the row, 5 token sub-tiles per CTA) with ``swizzled=True``: the
+    # swizzled flush and the batched finish.  ``dx`` and every per-thread and per-CTA FP32 step are the det
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``,
+    # takes a ticket on the tile's ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and
+    # ``work``.  No reduce program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to
+    # 608 at S = 20480 to 31291; ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_77692909592ff14be82f": {
+        "arches": [
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 384,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_77692909592ff14be82f",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_77692909592ff14be82f",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 197632,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_77692909592ff14be82f",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd``, sm_103a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_baca4c969c783d07d81f`` (its row-group body and build keywords: one CTA of 384
+    # threads per SM, the single channel tile of the row, 5 token sub-tiles per CTA) with the rows flush and the
+    # plain finish.  ``dx`` and every per-thread and per-CTA FP32 step are the det program's; only the cross-CTA
+    # reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``, takes a ticket on the tile's
+    # ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and ``work``.  No reduce
+    # program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to 608 from S = 31292;
+    # ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_ccd45ec8667831b67344": {
+        "arches": [
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 384,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_103a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_ccd45ec8667831b67344",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_ccd45ec8667831b67344",
+        "launch": {
+            "block": (384, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 197632,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_ccd45ec8667831b67344",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd``, sm_107a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_5ca7515dd2118dd96241`` (its row-group body and build keywords: one CTA of 256
+    # threads per SM, the single channel tile of the row, 3 token sub-tiles per CTA) with ``swizzled=True``: the
+    # swizzled flush and the batched finish.  ``dx`` and every per-thread and per-CTA FP32 step are the det
+    # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``,
+    # takes a ticket on the tile's ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and
+    # ``work``.  No reduce program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to
+    # 680 at S = 32768 to 131071; ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_175b82ccd2309f434dfb": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 256,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_175b82ccd2309f434dfb",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_175b82ccd2309f434dfb",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 132096,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_175b82ccd2309f434dfb",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
+    # Route ``bwd``, sm_107a only: the SM-wide build of the det program
+    # ``cake_causal_conv1d_det_train_5ca7515dd2118dd96241`` (its row-group body and build keywords: one CTA of 256
+    # threads per SM, the single channel tile of the row, 3 token sub-tiles per CTA) with ``swizzled=True,
+    # acc_slots=2``: the swizzled flush and the batched finish over two accumulator copies (``slots`` 2; the CTAs
+    # spread their adds over both).  ``dx`` and every per-thread and per-CTA FP32 step are the det program's; only
+    # the cross-CTA reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``, takes a ticket
+    # on the tile's ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and ``work``.  No
+    # reduce program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to 680 from S =
+    # 131072; ``select_rule`` kind ``rows``).
+    "cake_causal_conv1d_train_3293c0e34e70413fb4af": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "w"],
+            ["buffer", "cu"],
+            ["buffer", "dy"],
+            ["buffer", "dx"],
+            ["buffer", "dw_acc"],
+            ["buffer", "work"],
+            ["buffer", "dw"],
+            ["parameter", "S"],
+            ["parameter", "C"],
+            ["parameter", "num_docs"],
+            ["parameter", "search_steps"],
+            ["parameter", "ct_vec"],
+            ["parameter", "n_sub"],
+            ["parameter", "n_ch_tiles"],
+            ["buffer", "x_map"],
+            ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "cooperative": False,
+            "ctas_per_sm": 1,
+            "geometry": {
+                "threads": 256,
+                "vec": 8,
+            },
+            "grid_mult": {
+                "sm_107a": 1,
+            },
+            "kind": "occupancy",
+        },
+        "kernel": "cake_causal_conv1d_train_3293c0e34e70413fb4af",
+        "kernel_symbol": "kernel_cake_causal_conv1d_train_3293c0e34e70413fb4af",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 132096,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_causal_conv1d_train_3293c0e34e70413fb4af",
+        "logical": {
+            "C": "C",
+            "S": "S",
+            "ct_vec": "ct_vec",
+            "cu": "cu",
+            "dw": "dw",
+            "dw_acc": "acc",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
+            "n_ch_tiles": "n_ch_tiles",
+            "n_sub": "n_sub",
+            "num_docs": "num_docs",
+            "search_steps": "search_steps",
+            "w": "w",
+            "work": "work",
+            "x": "x",
+            "x_map": "x",
+        },
+        "role": "bwd",
+        "select_rule": {
+            "kind": "rows",
+        },
+        "workspace_rule": {
+            "acc": "float32",
+            "slots": 2,
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        },
+    },
     # Route ``bwd_dt_bf16_taps``: the ``bwd_dt`` record ``cake_causal_conv1d_train_32c5625f33586925f154`` with
     # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
     # ``cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94``; the same body, plan, grid, workspace and selection
@@ -4158,6 +4699,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_ea326ebe0f84d8cf2adb",
             "cake_causal_conv1d_train_461d358d7090642c65de",
             "cake_causal_conv1d_train_e8e950fb254d3376db52",
+            "cake_causal_conv1d_train_82e874f30406be2334b6",
+            "cake_causal_conv1d_train_1ec222b2d908a7d6ea21",
         ],
         "bwd_bias": [
             "cake_causal_conv1d_train_befc06774f6fee7c36ce",
@@ -4207,6 +4750,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_461d358d7090642c65de",
             "cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab",
             "cake_causal_conv1d_train_e8e950fb254d3376db52",
+            "cake_causal_conv1d_train_77692909592ff14be82f",
+            "cake_causal_conv1d_train_ccd45ec8667831b67344",
         ],
         "bwd_bias": [
             "cake_causal_conv1d_train_befc06774f6fee7c36ce",
@@ -4259,6 +4804,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_causal_conv1d_train_5ed71ee5908c07376183",
             "cake_causal_conv1d_train_06cfd917a14c30ce8ebc",
             "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
+            "cake_causal_conv1d_train_175b82ccd2309f434dfb",
+            "cake_causal_conv1d_train_3293c0e34e70413fb4af",
         ],
         "bwd_bias": [
             "cake_causal_conv1d_train_17d30c46fe34f0266e26",

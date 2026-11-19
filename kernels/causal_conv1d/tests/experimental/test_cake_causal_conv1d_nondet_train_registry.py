@@ -17,8 +17,9 @@ The single-rank registry (``cake_jit``) of the non-deterministic causal convolut
 deterministic package's: the forward records are the deterministic forward programs (only their names and the
 per-call programmatic dependent launch scalar differ), every backward route keeps the deterministic route's programs
 and selection (but where a channel-band program takes the lowest channel counts of its twin, the program of the route
-it shares a body with, and at the rows of ``FALLBACK_ROWS``, where the route's fallback runs), every program but the
-opt-in pair routes' takes the per-call PDL scalar (its kernels wait for the preceding grid before touching global
+it shares a body with, at the rows of ``FALLBACK_ROWS``, where the route's fallback runs, and at the rows of
+``SM_WIDE_ROWS``, where a program of the ``rows`` selection kind runs: a build of a deterministic SM-wide program, one
+CTA per SM), every program but the opt-in pair routes' takes the per-call PDL scalar (its kernels wait for the preceding grid before touching global
 memory; the host's policy tables, and the backward rows of ``PDL_OFF_ROWS`` that launch without it, which the
 backward entry finds by passing its route, ``C`` and ``S``), each backward program is ONE
 ordinary launch (no reduce program) that owns an ``accumulators`` workspace (one FP32 word per sum and accumulator
@@ -77,7 +78,11 @@ CHANNELS = (
     512,
     520,
     576,
+    608,
+    616,
     640,
+    680,
+    688,
     704,
     760,
     768,
@@ -97,18 +102,28 @@ CHANNELS = (
     8192,
 )
 # 262143 / 262144: both sides of the sm_107a token-floored backward program's floor; S_max and S_max + 1 of every
-# ``FALLBACK_ROWS`` key (:data:`FALLBACK_ROWS_OF_RECORD`).
+# ``FALLBACK_ROWS`` key (:data:`FALLBACK_ROWS_OF_RECORD`); both sides of every bound of the ``SM_WIDE_ROWS``
+# segments (:data:`SM_WIDE_ROWS_OF_RECORD`).
 TOKENS = (
     1,
     1000,
+    20479,
+    20480,
+    31291,
     31292,
     31293,
+    32767,
+    32768,
+    40959,
+    40960,
     62585,
     62586,
     65536,
+    98303,
     98304,
     125170,
     125171,
+    131071,
     131072,
     131073,
     147456,
@@ -121,15 +136,18 @@ TOKENS = (
 # The rows where a backward route runs its fallback program in place of the program its selection rules pick:
 # arch -> (route, C_lo, C_hi) -> (S_min, S_max), every multiple of 8 from C_lo to C_hi.  On sm_100a and sm_103a the
 # ``bwd`` route's C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at
-# which no backward, training-step or checkpointed-step row was slower than the program the thresholds pick.
+# which no backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520
+# to 608 up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).
 FALLBACK_ROWS_OF_RECORD = {
     "sm_100a": {
-        ("bwd", 520, 760): (1, 131072),
+        ("bwd", 520, 608): (1, 40959),
+        ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
     },
     "sm_103a": {
-        ("bwd", 520, 760): (1, 31292),
+        ("bwd", 520, 608): (1, 20479),
+        ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
     },
@@ -145,10 +163,57 @@ FALLBACK_REPLACES_OF_RECORD = {
         }
     ),
 }
+# The rows where route ``bwd`` runs an SM-wide program (one CTA per SM for the whole launch): arch -> (route, C_lo,
+# C_hi) -> ((S_lo, S_hi, program), ...), every multiple of 8 from C_lo to C_hi, the segments contiguous up to
+# ``INT32_MAX``.  On each architecture the first segment's program runs from the measured token count from which it
+# beat the program the rules or ``FALLBACK_ROWS`` pick there, and the second from the token count at which the other
+# variant ran faster.
+SM_WIDE_ROWS_OF_RECORD = {
+    "sm_100a": {
+        ("bwd", 520, 608): (
+            (40960, 98303, "cake_causal_conv1d_train_82e874f30406be2334b6"),
+            (98304, 2147483647, "cake_causal_conv1d_train_1ec222b2d908a7d6ea21"),
+        ),
+    },
+    "sm_103a": {
+        ("bwd", 520, 608): (
+            (20480, 31291, "cake_causal_conv1d_train_77692909592ff14be82f"),
+            (31292, 2147483647, "cake_causal_conv1d_train_ccd45ec8667831b67344"),
+        ),
+    },
+    "sm_107a": {
+        ("bwd", 520, 680): (
+            (32768, 131071, "cake_causal_conv1d_train_175b82ccd2309f434dfb"),
+            (131072, 2147483647, "cake_causal_conv1d_train_3293c0e34e70413fb4af"),
+        ),
+    },
+}
+# The SM-wide programs (the records of selection-rule kind ``rows``) and the deterministic SM-wide program each is a
+# build of (the same body and build keywords, one CTA per SM; the reduction of this package): program -> det twin.
+SM_WIDE_COPIES = {
+    "cake_causal_conv1d_train_82e874f30406be2334b6": "cake_causal_conv1d_det_train_e057357c655024d4ff1d",
+    "cake_causal_conv1d_train_1ec222b2d908a7d6ea21": "cake_causal_conv1d_det_train_e057357c655024d4ff1d",
+    "cake_causal_conv1d_train_77692909592ff14be82f": "cake_causal_conv1d_det_train_baca4c969c783d07d81f",
+    "cake_causal_conv1d_train_ccd45ec8667831b67344": "cake_causal_conv1d_det_train_baca4c969c783d07d81f",
+    "cake_causal_conv1d_train_175b82ccd2309f434dfb": "cake_causal_conv1d_det_train_5ca7515dd2118dd96241",
+    "cake_causal_conv1d_train_3293c0e34e70413fb4af": "cake_causal_conv1d_det_train_5ca7515dd2118dd96241",
+}
+# The FP32 accumulator copies of each SM-wide program: two for sm_107a's program from 131072 tokens, one otherwise.
+SM_WIDE_SLOTS = {name: 2 if name == "cake_causal_conv1d_train_3293c0e34e70413fb4af" else 1 for name in SM_WIDE_COPIES}
+# The programs whose rows the SM-wide programs take inside :data:`SM_WIDE_ROWS_OF_RECORD`: the ``bwd`` program the
+# channel thresholds pick at C 520 to 608 (sm_107a: 520 to 680), named by program; on sm_107a this package's own copy
+# of the deterministic channel-band program (:data:`OWN_COPIES`).
+SM_WIDE_REPLACES_OF_RECORD = {
+    "sm_100a": frozenset({"cake_causal_conv1d_train_461d358d7090642c65de"}),
+    "sm_103a": frozenset({"cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab"}),
+    "sm_107a": frozenset({"cake_causal_conv1d_train_e5d6d187103ab6e0cbbb"}),
+}
 # The deterministic package's programs this package does not have: the row-group backward program of route ``bwd``
 # on sm_107a (264 <= C < 512) and the SM-wide row-group programs of route ``bwd`` on sm_100a, sm_103a and sm_107a
 # (channel bands of 264 <= C < 512, from a token floor), and the copy of route ``bwd``'s fallback program on sm_107a
 # (the channel band of 520 <= C < 1024).  Every other record pairs with this package's at the same route position.
+# This package's SM-wide programs (:data:`SM_WIDE_COPIES`) are builds of the three SM-wide programs under another
+# selection (the rows of ``SM_WIDE_ROWS`` only), listed after their route's other programs.
 # This package carries its own channel-band copy of its route's fallback for the last of them (:data:`OWN_COPIES`).
 DET_ONLY = frozenset(
     {
@@ -190,8 +255,8 @@ def _args(record: dict) -> set[str]:
 # ``"runtime"``): its binding takes ``enable_pdl`` (0 or 1) as its last host parameter, before the grid.
 PDL_FIELDS = ("launch", "arg_plan", "logical")
 PDL_ARG = ["launch", "enable_pdl"]
-# The single-rank programs that take the scalar: every record but the opt-in pair routes' (9 forward, 30 backward).
-RUNTIME_PDL_PROGRAMS = 39
+# The single-rank programs that take the scalar: every record but the opt-in pair routes' (9 forward, 36 backward).
+RUNTIME_PDL_PROGRAMS = 45
 
 
 def _pdl_program_of(det: dict) -> dict:
@@ -247,14 +312,14 @@ def _channels(registry, name: str, arch: str) -> int | None:
     split into several channel bands runs here from the first of them."""
 
     rule = registry.select_rule(registry.MODULES[name])
-    value = None if rule is None else rule["channels"].get(arch)
+    value = None if rule is None or rule["kind"] == "rows" else rule["channels"].get(arch)
     return value[0] if isinstance(value, list) else value
 
 
 def _bands():
     """``(arch, kind, band name, twin name, det twin name)`` of every channel-band program: a program a route lists
     after the deterministic route's programs (but this package's copies of deterministic programs,
-    :data:`OWN_COPIES`).  Its twin is the program of the route whose channel threshold on ``arch`` is no longer the
+    :data:`OWN_COPIES`, and its SM-wide programs, :data:`SM_WIDE_COPIES`).  Its twin is the program of the route whose channel threshold on ``arch`` is no longer the
     deterministic one: the band program owns the twin's lowest channel counts there, from the deterministic threshold
     up to the twin's new one."""
 
@@ -267,7 +332,7 @@ def _bands():
                 if _channels(cake_jit, name, arch) != _channels(det_jit, det_name, arch)
             ]
             for band in new[len(det) :]:
-                if band in OWN_COPIES.values():
+                if band in OWN_COPIES.values() or band in SM_WIDE_COPIES:
                     continue
                 (twin,) = [
                     pair
@@ -756,13 +821,17 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     records but those this package copies (:data:`OWN_COPIES`), and its copy where that is one of them.  At a row
     of :data:`FALLBACK_ROWS_OF_RECORD` this package selects its route's fallback (the program at the deterministic
     route's first position), where the deterministic package selects the program at the position of one of
-    :data:`FALLBACK_REPLACES_OF_RECORD`."""
+    :data:`FALLBACK_REPLACES_OF_RECORD`.  At a segment of :data:`SM_WIDE_ROWS_OF_RECORD` this package selects the
+    segment's SM-wide program, where the deterministic package (without its det-only records) selects the program
+    at the position of one of :data:`SM_WIDE_REPLACES_OF_RECORD` or its copy, and plans the scalars of the SM-wide
+    program's deterministic twin (:data:`SM_WIDE_COPIES`)."""
 
     twin_of = {
         band: twin for band_arch, _, band, twin, _ in _bands() if band_arch == arch
     }
     det_only_hits = set()
     replaced = set()
+    sm_wide_replaced = set()
     for kind in cake_jit.KINDS:
         new, det = cake_jit.ROUTES[arch][kind], _det_route(arch, kind)
         for C in CHANNELS:
@@ -780,7 +849,21 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
                         m.setitem(det_jit.ROUTES[arch], kind, copied)
                         (det_name,) = det_jit.selected_modules(arch, kind, C=C, S=S)
                 bounds = cake_jit.fallback_row_range(arch, kind, C)
-                if bounds is not None and bounds[0] <= S <= bounds[1]:
+                segment = [
+                    program
+                    for (route, c_lo, c_hi), segments in SM_WIDE_ROWS_OF_RECORD.get(arch, {}).items()
+                    if route == kind and c_lo <= C <= c_hi and C % 8 == 0
+                    for s_lo, s_hi, program in segments
+                    if s_lo <= S <= s_hi
+                ]
+                if segment:
+                    # The segment's SM-wide program, in place of the program at the deterministic pick's position.
+                    assert [name] == segment, (arch, kind, C, S, name)
+                    taken = OWN_COPIES.get(det_name) or new[det.index(det_name)]
+                    assert taken in SM_WIDE_REPLACES_OF_RECORD[arch], (arch, kind, C, S, taken)
+                    sm_wide_replaced.add(taken)
+                    det_name = SM_WIDE_COPIES[name]
+                elif bounds is not None and bounds[0] <= S <= bounds[1]:
                     # The route's fallback, in place of the program at the deterministic pick's position.
                     assert name == new[0] and cake_jit.select_rule(cake_jit.MODULES[name]) is None, (
                         arch, kind, C, S, name
@@ -811,6 +894,7 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     }
     assert det_only_hits == det_only_routed, arch
     assert replaced == FALLBACK_REPLACES_OF_RECORD.get(arch, frozenset()), arch
+    assert sm_wide_replaced == SM_WIDE_REPLACES_OF_RECORD[arch], arch
 
 
 # The FP32 accumulator slots each backward route keeps (one FP32 word per sum and slot): the fp32g routes spread a
@@ -944,7 +1028,9 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
     at the largest tile count it may launch with (its split, or its route's ``TILE_OVERRIDES`` or ``NARROW_TILES``
     row), so one zeroed buffer serves whichever program, plan and route a call selects; the capacity owner is an
     fp32g bias program (4 bytes x 16 copies x 5 taps per channel, 320).  A narrow row's three tickets fit the
-    16-byte alignment of the single tile's, so its size is the split's."""
+    16-byte alignment of the single tile's, so its size is the split's.  The SM-wide programs (another build
+    geometry: one channel tile at 384 or 256 threads) own the workspace too but never bound its size (16 or 32 bytes
+    per channel and one ticket), and the capacity owner stays a program of the fallbacks' geometry."""
 
     owner = cake_jit.workspace_record(arch)
     assert (
@@ -957,6 +1043,11 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
         len(cake_jit.route_modules(arch, kind))
         for kind in cake_jit.backward_kinds(arch)
     )
+    assert owner["grid_rule"]["geometry"] == cake_jit.workspace_geometry(arch) == {"threads": 128, "vec": 8}
+    sm_wide = [record for record in owners if record["kernel"] in SM_WIDE_COPIES]
+    assert {record["kernel"] for record in sm_wide} == {
+        name for name, det in SM_WIDE_COPIES.items() if arch in det_jit.MODULES[det]["arches"]
+    }
     overridden = {C for _, C in cake_jit.TILE_OVERRIDES.get(arch, {})}
     narrow = {
         C for _, c_lo, c_hi in cake_jit.NARROW_TILES.get(arch, {}) for C in (c_lo, c_hi)
@@ -968,6 +1059,12 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
             for record in owners
         ]
         assert nbytes == max(layout["total_bytes"] for layout in layouts), (arch, C)
+        for record in sm_wide:
+            if C // 8 <= record["grid_rule"]["geometry"]["threads"] and C not in overridden:
+                assert _owner_tiles(record, arch, C) == 1, (arch, C, record["kernel"])
+            layout = cake_jit.accumulator_layout(record, C, _owner_tiles(record, arch, C))
+            assert layout["acc_bytes"] == 16 * SM_WIDE_SLOTS[record["kernel"]] * C, (arch, C)
+            assert layout["total_bytes"] < nbytes, (arch, C, record["kernel"])
         if C not in overridden:
             per_channel = 4 * cake_jit.accumulator_words_per_channel(owner)
             assert nbytes == _align16(_align16(per_channel * C) + 4 * cake_jit.channel_split(
@@ -1287,6 +1384,189 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                 if picked is None and s_lo > 0:
                     assert planned.names != (fallback,), (kind, C, s_lo)
     assert bool(inside_calls) is bool(rows), arch
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The rows where route ``bwd`` runs an SM-wide program (``SM_WIDE_ROWS``).
+
+
+@pytest.mark.cpu_only
+def test_sm_wide_rows_are_the_literal_rows() -> None:
+    """``SM_WIDE_ROWS`` is the literal :data:`SM_WIDE_ROWS_OF_RECORD`.  Every key names an exported architecture,
+    its ``bwd`` route and a closed range of channel counts (multiples of 8) on which the route's rules plan one
+    channel tile at 128 threads (no ``TILE_OVERRIDES`` row); its segments ascend, are contiguous and end at
+    ``INT32_MAX``; each names a program of the route of selection-rule kind ``rows`` that ships for the architecture
+    only, every such program of the route is named by exactly one segment, and no ``(C, S)`` of a segment lies in a
+    ``FALLBACK_ROWS`` range."""
+
+    assert cake_jit.SM_WIDE_ROWS == SM_WIDE_ROWS_OF_RECORD
+    for arch in ARCHES:
+        rows = cake_jit.SM_WIDE_ROWS.get(arch, {})
+        assert rows, arch
+        named = []
+        for (route, c_lo, c_hi), segments in rows.items():
+            label = (arch, route, c_lo, c_hi)
+            assert route == "bwd" and route in cake_jit.backward_kinds(arch), label
+            assert 0 < c_lo <= c_hi and c_lo % 8 == 0 and c_hi % 8 == 0, label
+            assert segments and segments[-1][1] == cake_jit.INT32_MAX, label
+            assert all(type(bound) is int for s_lo, s_hi, _ in segments for bound in (s_lo, s_hi)), label
+            assert 1 <= segments[0][0], label
+            for (_, hi, _), (lo, _, _) in itertools.pairwise(segments):
+                assert lo == hi + 1, label
+            for s_lo, s_hi, name in segments:
+                assert s_lo <= s_hi and name in cake_jit.route_modules(arch, route), label
+                assert cake_jit.MODULES[name]["arches"] == [arch], (label, name)
+                assert cake_jit.select_rule(cake_jit.MODULES[name]) == {"kind": "rows"}, (label, name)
+                named.append(name)
+            for C in range(c_lo, c_hi + 1, 8):
+                assert (route, C) not in cake_jit.TILE_OVERRIDES.get(arch, {}), (label, C)
+                assert cake_jit.channel_split(C, geometry={"threads": 128, "vec": 8}, role="bwd")[2] == 1, (label, C)
+                bounds = cake_jit.fallback_row_range(arch, route, C)
+                assert bounds is None or bounds[1] < segments[0][0], (label, C, bounds)
+                assert cake_jit.sm_wide_segments(arch, route, C) == segments, (label, C)
+            for C in (c_lo - 8, c_hi + 8, c_lo + 4):
+                assert cake_jit.sm_wide_segments(arch, route, C) is None, (label, C)
+        rows_programs = [
+            name
+            for kind in cake_jit.backward_kinds(arch)
+            for name in cake_jit.route_modules(arch, kind)
+            if (cake_jit.select_rule(cake_jit.MODULES[name]) or {}).get("kind") == "rows"
+        ]
+        assert sorted(named) == sorted(rows_programs) == sorted(set(named)), arch
+
+
+@pytest.mark.cpu_only
+def test_sm_wide_programs_are_rows_records_of_their_det_twins() -> None:
+    """Each SM-wide program (:data:`SM_WIDE_COPIES`) is a ``bwd`` record of one architecture with the selection rule
+    ``{"kind": "rows"}``, listed after its route's other programs: the deterministic SM-wide program's build geometry,
+    one CTA per SM, block, cluster and architecture; an ordinary occupancy launch with the per-call PDL scalar; the
+    arguments and logical names of its route's fallback (the one-launch backward with ``dw_acc`` / ``work``); an
+    ``accumulators`` workspace of :data:`SM_WIDE_SLOTS` copies of four FP32 taps.  No channel threshold or token
+    floor admits it (``_ranked_candidates`` never returns it and it is no fallback), and the KCP registry has
+    none.  The comment above each record names its deterministic twin."""
+
+    assert len(SM_WIDE_COPIES) == 6 and set(SM_WIDE_COPIES.values()) <= DET_ONLY
+    source = Path(cake_jit.__file__).read_text()
+    by_arch: dict[str, list[str]] = {}
+    for name, det_name in SM_WIDE_COPIES.items():
+        record, det = cake_jit.MODULES[name], det_jit.MODULES[det_name]
+        (arch,) = det["arches"]
+        by_arch.setdefault(arch, []).append(name)
+        label = (arch, name)
+        at = source.index(f'    "{name}": {{\n')
+        assert f"``{det_name}``" in source[source.rindex("\n    },\n", 0, at) : at], label
+        assert record["arches"] == [arch] and record["role"] == "bwd", label
+        assert record["library"] == record["kernel"] == name and record["kernel_symbol"] == f"kernel_{name}", label
+        assert cake_jit.select_rule(record) == {"kind": "rows"}, label
+        assert det_jit.select_rule(det)["kind"] == "channels_tokens_at_least", label
+        grid, det_grid = record["grid_rule"], det["grid_rule"]
+        assert grid["kind"] == "occupancy" and grid["cooperative"] is False, label
+        assert grid["geometry"] == det_grid["geometry"], label
+        assert grid["geometry"] == {"threads": 384 if arch != "sm_107a" else 256, "vec": 8}, label
+        assert grid["ctas_per_sm"] == det_grid["ctas_per_sm"] == 1, label
+        assert grid["grid_mult"] == {arch: 1}, label
+        launch = record["launch"]
+        assert launch["block"] == det["launch"]["block"] == (grid["geometry"]["threads"], 1, 1), label
+        assert launch["cluster"] == det["launch"]["cluster"] and launch["cooperative"] is False, label
+        assert launch["use_pdl"] == "runtime", label
+        fallback = cake_jit.MODULES[_route_fallback(arch, "bwd")]
+        assert record["arg_plan"] == fallback["arg_plan"] and record["logical"] == fallback["logical"], label
+        assert record["ffi_entry"] == fallback["ffi_entry"], label
+        assert record["workspace_rule"] == {
+            "acc": "float32",
+            "slots": SM_WIDE_SLOTS[name],
+            "kind": "accumulators",
+            "taps": 4,
+            "work": "uint32",
+        }, label
+        assert cake_jit.record_route(record, arch) == "bwd", label
+        for C in (*CHANNELS, *range(520, 1024, 8)):
+            candidates, chosen_fallback = cake_jit._ranked_candidates(arch, "bwd", C)
+            assert name not in candidates and name != chosen_fallback, (label, C)
+            for S in (None, 1, cake_jit.INT32_MAX):
+                assert cake_jit._admits(cake_jit.select_rule(record), arch=arch, C=C, S=S) is False, (label, C, S)
+    for arch, names in by_arch.items():
+        route = cake_jit.route_modules(arch, "bwd")
+        assert list(route[-len(names) :]) == names, arch
+        assert not set(names) & {n for k in cake_jit.KINDS if k != "bwd" for n in cake_jit.ROUTES[arch].get(k, ())}
+    assert set(by_arch) == set(ARCHES)
+    for name, record in kcp_jit.MODULES.items():
+        assert (kcp_jit.select_rule(record) or {}).get("kind") != "rows", name
+        assert name not in SM_WIDE_COPIES, name
+
+
+@pytest.mark.cpu_only
+def test_rows_rule_kind() -> None:
+    """A selection rule of kind ``rows`` has no channel threshold or token floor (``_threshold`` and ``_tokens`` are
+    ``None``, ``_admits`` is ``False`` for every call); an unknown kind is still a ``ValueError`` that lists it."""
+
+    assert cake_jit.ROWS_KIND == "rows" and cake_jit.ROWS_KIND not in cake_jit.SELECT_KINDS
+    rule = {"kind": "rows"}
+    for arch in ARCHES:
+        assert cake_jit._threshold(rule, arch=arch) is None
+        assert cake_jit._tokens(rule, arch=arch) is None
+        assert cake_jit._admits(rule, arch=arch, C=576, S=None) is False
+    with pytest.raises(ValueError, match="rows"):
+        cake_jit._threshold({"kind": "rowz"}, arch="sm_100a")
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_sm_wide_module_refuses_registry_errors(arch, monkeypatch) -> None:
+    """``sm_wide_module`` names the segment's program inside a segment and ``None`` outside every segment; ``S`` of
+    ``None`` under a key is a ``ValueError``; a segment naming a program of another route, or a record whose rule is
+    not of kind ``rows``, is a ``RuntimeError``."""
+
+    ((route, c_lo, c_hi), segments), *_ = SM_WIDE_ROWS_OF_RECORD[arch].items()
+    for s_lo, s_hi, name in segments:
+        assert cake_jit.sm_wide_module(arch, route, c_lo, s_lo) == name
+        assert cake_jit.sm_wide_module(arch, route, c_hi, s_hi) == name
+    assert cake_jit.sm_wide_module(arch, route, c_lo, segments[0][0] - 1) is None
+    assert cake_jit.sm_wide_module(arch, route, c_hi + 8, segments[0][0]) is None
+    assert cake_jit.sm_wide_module(arch, "bwd_dt", c_lo, segments[0][0]) is None
+    with pytest.raises(ValueError, match="needs S"):
+        cake_jit.sm_wide_module(arch, route, c_lo, None)
+    other = _route_fallback(arch, "bwd_dt")
+    monkeypatch.setitem(
+        cake_jit.SM_WIDE_ROWS, arch, {(route, c_lo, c_hi): ((segments[0][0], cake_jit.INT32_MAX, other),)}
+    )
+    with pytest.raises(RuntimeError, match="rows"):
+        cake_jit.sm_wide_module(arch, route, c_lo, segments[0][0])
+    fallback = _route_fallback(arch, route)
+    monkeypatch.setitem(
+        cake_jit.SM_WIDE_ROWS, arch, {(route, c_lo, c_hi): ((segments[0][0], cake_jit.INT32_MAX, fallback),)}
+    )
+    with pytest.raises(RuntimeError, match="rows"):
+        cake_jit.selected_modules(arch, route, C=c_lo, S=segments[0][0])
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_row_sides_are_the_selection_edges(arch) -> None:
+    """``row_sides`` cuts the token axis of every backward route and ``C`` at the bounds of the route's
+    ``SM_WIDE_ROWS`` segments and ``FALLBACK_ROWS`` range covering ``C`` (from 0, the last side to
+    ``sys.maxsize``), and the selection holds one program on every side outside the rules' token floors: the program
+    at both ends of a side is the one at its first token count."""
+
+    for kind in cake_jit.backward_kinds(arch):
+        for C in sorted({*CHANNELS, 520, 528, 600, 608, 616, 672, 680, 688}):
+            cuts = {0}
+            for (route, c_lo, c_hi), segments in SM_WIDE_ROWS_OF_RECORD.get(arch, {}).items():
+                if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
+                    cuts |= {bound for s_lo, s_hi, _ in segments for bound in (s_lo, s_hi + 1)}
+            for (route, c_lo, c_hi), (s_min, s_max) in FALLBACK_ROWS_OF_RECORD.get(arch, {}).items():
+                if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
+                    cuts |= {s_min, s_max + 1}
+            ordered = sorted(cuts)
+            expected = tuple(zip(ordered, [*(cut - 1 for cut in ordered[1:]), sys.maxsize]))
+            sides = cake_jit.row_sides(arch, kind, C)
+            assert sides == expected, (kind, C, sides)
+            if cake_jit.tokens_select(arch, kind, C):
+                continue
+            for s_lo, s_hi in sides:
+                ends = {s_lo, min(s_hi, cake_jit.INT32_MAX + 1)}
+                picks = {cake_jit.selected_modules(arch, kind, C=C, S=S) for S in ends}
+                assert len(picks) == 1, (kind, C, s_lo, s_hi, picks)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -2223,7 +2503,9 @@ def _row_planned(arch: str, kind: str, S: int, C: int, num_docs: int, gm: int, p
 def _sweep_row_plans(arch: str) -> int:
     """Every route of ``arch`` x the sweep's channel counts, token counts (in each order of the sweep, the row
     planned by the order's first call), document counts, backward grid multiples and (on ``fwd_bias``) both tap
-    dtypes: the row plan equals the per-call plan, errors included.  Returns the number of calls checked."""
+    dtypes: the row plan equals the per-call plan, errors included; an SM-wide program plans its one channel tile of
+    every channel vector, ``threads // cv`` token sub-tiles (5 at 384 threads, 3 at 256).  Returns the number of
+    calls checked."""
 
     channels, tokens = _plan_sweep_channels(), _plan_sweep_tokens()
     orders = [tokens]
@@ -2245,6 +2527,11 @@ def _sweep_row_plans(arch: str) -> int:
                                 want = _per_call(arch, kind, S, C, num_docs, gm, policy, bf16)
                                 got = _row_planned(arch, kind, S, C, num_docs, gm, policy, bf16)
                                 assert got == want, (arch, kind, C, S, num_docs, gm, bf16)
+                                if isinstance(want[0], tuple) and want[0][0] in SM_WIDE_COPIES:
+                                    threads = cake_jit.MODULES[want[0][0]]["grid_rule"]["geometry"]["threads"]
+                                    split = (want[1]["ct_vec"], want[1]["n_sub"], want[1]["n_ch_tiles"])
+                                    assert split == (C // 8, threads // (C // 8), 1), (arch, kind, C, S, split)
+                                    assert split[1] == (5 if threads == 384 else 3), (arch, kind, C, S, split)
                                 checked += 1
         assert len(pkg._ROW_PLANS) <= pkg._ROW_PLANS_MAX
     return checked
