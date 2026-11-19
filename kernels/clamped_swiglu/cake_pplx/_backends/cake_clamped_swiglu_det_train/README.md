@@ -83,7 +83,7 @@ large-R program of a stage runs the small-R one at every `R`.
 | `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
 | `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
 
-From 0.1.3 the `bwd` windows route weighted backward calls only: an unweighted backward runs the `bwd_unweighted`
+From 0.1.5 the `bwd` windows route weighted backward calls only: an unweighted backward runs the `bwd_unweighted`
 program at every `R`.  The unweighted backward measurements below are 0.1.2's, when an unweighted backward ran the `bwd`
 programs.
 

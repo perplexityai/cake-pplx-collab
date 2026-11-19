@@ -1237,9 +1237,9 @@ def _bits_inputs(data: str, layout: str, rows: int, limit: float, *, seed: int, 
 
 
 def _bwd_with_weight_flag_0(t: types.SimpleNamespace, name: str, device) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(d_gate, d_up)`` of the ``bwd`` program ``name`` itself (no route) launched as 0.1.2 launched an unweighted
-    backward: the weight flag 0, the device's cached one-element weight, and a weight gradient it writes and nobody
-    reads."""
+    """``(d_gate, d_up)`` of the ``bwd`` program ``name`` itself (no route) launched as 0.1.4 and earlier launched an
+    unweighted backward: the weight flag 0, the device's cached one-element weight, and a weight gradient it writes and
+    nobody reads."""
     merged = t.second is None
     if merged:
         d_first = torch.empty(t.R, 2 * WIDTH, dtype=torch.bfloat16, device=device)
@@ -1279,10 +1279,10 @@ def _gradients(d_first: torch.Tensor, d_up) -> tuple[torch.Tensor, torch.Tensor]
 def test_the_unweighted_backward_stores_the_bits_of_bwd(data, layout, device, programs_run) -> None:
     """An unweighted backward runs ``bwd_unweighted``, and its ``d_gate`` and ``d_up`` are, bit for bit (BF16 compared
     as int16, so NaN payloads and signed zeros count), those of the small-R and of the large-R ``bwd`` program each
-    launched itself with the weight flag 0 (0.1.2's unweighted backward), and those of a weighted backward with weights
-    of 1: every data kind, NaN and infinities, a gate of -88 in one third of a row only, limits 10, 7.3 and 1.5, 1 to 5
-    rows (a partial last CTA of tasks), 129 and 4097 rows, and at and one row above each edge of the device's ``bwd``
-    windows."""
+    launched itself with the weight flag 0 (the unweighted backward of 0.1.4 and earlier), and those of a weighted
+    backward with weights of 1: every data kind, NaN and infinities, a gate of -88 in one third of a row only, limits
+    10, 7.3 and 1.5, 1 to 5 rows (a partial last CTA of tasks), 129 and 4097 rows, and at and one row above each edge of
+    the device's ``bwd`` windows."""
     arch = pkg.device_arch(device.index)
     unweighted = cake_jit.PROGRAM_OF["bwd_unweighted"][arch]
     bwd_programs = list(dict.fromkeys(_program("bwd", device.index, program) for program in PROGRAMS))
