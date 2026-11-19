@@ -2261,8 +2261,9 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and 8192 -> 128, on
 # 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below); since version 0.3.9
 # the 152-SM sm_103a part runs it in raster groups of 2 on 8192 -> 128 at T 16231 - 16384.  Version 0.3.10 runs it in
-# small raster groups over token ranges of the 148-SM parts (below): on 148-SM sm_103a parts also on 8192 -> 128, and
-# on 148-SM sm_100a parts on 8192 -> 128 instead of its two keys here (T 16231 and 16384, raster groups of 16).
+# small raster groups over token ranges of the 148-SM parts (below): on 148-SM sm_103a parts also on 8192 -> 128; on
+# 148-SM sm_100a parts on 8192 -> 128 instead of its two keys here (T 16231 and 16384, raster groups of 16) and on
+# 5120 -> 128 and 6144 -> 128 at T 16384 - 32768, beyond the token counts of their keys here.
 # fmt: off
 _SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
 ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
@@ -2370,7 +2371,8 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * B300: 8192 -> 128 in groups of 2 at T 8192 - 32768, 1.027 to 1.052 times faster than the plan before
 #     (``kn_n256_f32_tma2_pd2_pro15``); the indexer_hw input gradient 6144 -> 32 in groups of 4 at T 8192 alone, 1.015
 #     to 1.018 times faster than the same program in groups of 16 (at T 16231 - 32768 the groups missed the bar).
-#     5120 -> 128 met it at no measured T;
+#     5120 -> 128 keeps its plan: at T 8192 both groups met the bar, but the plan before was more than 1% off a second
+#     copy of itself in one of the four node and mode pairs, and at T 16231 - 32768 they missed it;
 #   * B200: 8192 -> 128 in groups of 2 at T 8192 - 32768 (instead of its part rules of groups of 16 at T 16231 and
 #     16384 and ``kn_n256_f32_tma2_pd2_pro15`` elsewhere), 1.038 to 1.078 times faster; 5120 -> 128 and the indexer_k
 #     input gradient 6144 -> 128 in groups of 2 at T 16384 - 32768 (plans before ``kn_n256_f32_tma2_pd2_pro15`` and

@@ -15939,7 +15939,9 @@ RASTER_0310_RANGES = {
 #: The token counts version 0.3.10 measured on its rows (two nodes of each part, against the plan of version 0.3.9):
 #: inside a range a raster group met the bar there with the bits of the plan before; outside, the row keeps its plan.
 RASTER_0310_MEASURED = (8192, 16231, 16384, 32768)
-#: The measured rows of each part (5120 -> 128 on the 148-SM sm_103a part met the bar at no measured token count).
+#: The measured rows of each part (5120 -> 128 on the 148-SM sm_103a part has no range: at T 8192 the plan before was
+#: more than 1% off a second copy of itself in one node and mode pair, and at the other token counts the groups missed
+#: the bar).
 RASTER_0310_ROWS = {
     ("sm_103a", 148): ((8192, 128), (6144, 32), (5120, 128)),
     ("sm_100a", 148): ((8192, 128), (5120, 128), (6144, 128), (6144, 32)),
