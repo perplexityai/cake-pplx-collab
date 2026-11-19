@@ -47,8 +47,9 @@ math, on one GPU, single rank.
 * accuracy gate (before any timing): every computing arm, Cake's included, on draws of the row's pack (``--draws``
   plain draws, close pairs ``C[t1] = C[t0] (1 + 2^-12)`` and ``(1 + 2^-16)``, gate extremes) and once per layout on
   small edge packs: the feature request's acceptance criteria against a float64 oracle (``out`` within one BF16
-  value of the float64 result rounded once, ``dC`` and ``dZ`` within relative L2 ``1e-6``, finite, tail gradient
-  rows +0.0) and a second call bitwise equal to the first.  The speed comparison takes only eligible baselines: those
+  value of the float64 result rounded once, or within one BF16 ulp of ``max(|C[t0, d]|, |C[t1, d]|)`` of the float64
+  result, ``dC`` and ``dZ`` within relative L2 ``1e-6``, finite, tail gradient rows +0.0) and a second call bitwise
+  equal to the first.  The speed comparison takes only eligible baselines: those
   that meet the criteria, or that are finite, zero on tail rows, repeatable and no farther from the oracle than Cake
   on every draw (the rule used is recorded per arm); an ineligible baseline is not timed unless
   ``--time-ineligible``.  ``cake_aa`` shares ``cake``'s verdict; a Cake arm that misses the criteria is still timed

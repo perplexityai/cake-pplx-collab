@@ -40,14 +40,16 @@ one ``[T, 1024]`` gradient, the ``contiguous`` layout ``dC`` and ``dZ``.  Pair `
 
 Accuracy gate (:func:`gate`): the feature request's acceptance criteria against a float64 oracle of its reference
 (pairs from the host's list of document lengths, so the oracle shares no index arithmetic with any arm): every ``out``
-element within one BF16 value of the float64 result rounded once to BF16, ``dC`` and ``dZ`` each within a relative L2
-error of ``1e-6``, every output finite, the gradient rows of tail tokens +0.0 and a second call bitwise equal to the
-first; on draws of the row's pack (plain, close pairs ``C[t1] = C[t0] (1 + 2^-12)`` and ``(1 + 2^-16)``, gate
-extremes) and on small edge packs (:data:`EDGE_PACKS`: empty documents, single tokens, odd lengths, no pair at all).
-An arm is eligible for the speed comparison (:func:`eligibility`) when it meets these criteria on every draw, or when
-on every draw it is finite, zero on tail rows, bitwise repeatable and no farther from the oracle than the Cake arm on
-the same draw (the ``out`` criterion can fail for any FP32 evaluation where ``p0 C[t0] + p1 C[t1]`` cancels; the rule
-used is recorded).
+element within one BF16 value of the float64 result rounded once to BF16 or, beyond that, with an absolute error of at
+most one BF16 ulp of ``max(|C[t0, d]|, |C[t1, d]|)`` (the second case, for near-cancelling pairs; :func:`classify_out`),
+``dC`` and ``dZ`` each within a relative L2 error of ``1e-6``, every output finite, the gradient rows of tail
+tokens +0.0 and a second call bitwise equal to the first; on draws of the row's pack (plain, close pairs
+``C[t1] = C[t0] (1 + 2^-12)`` and ``(1 + 2^-16)``, gate extremes) and on small edge packs (:data:`EDGE_PACKS`: empty
+documents, single tokens, odd lengths, no pair at all).  An arm is eligible for the speed comparison
+(:func:`eligibility`) when it meets these criteria on every draw, or when on every draw it is finite, zero on tail
+rows, bitwise repeatable and no farther from the oracle than the Cake arm on the same draw (:func:`no_worse`: no more
+``out`` elements outside both cases than Cake, ``dC`` and ``dZ`` errors within the bound or Cake's; the rule used is
+recorded).
 """
 
 from __future__ import annotations
@@ -541,6 +543,33 @@ def bf16_ulp_distance(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     return (ordered(a) - ordered(b)).abs()
 
 
+def bf16_ulp(m: torch.Tensor) -> torch.Tensor:
+    """The BF16 ulp of FP64 ``m >= 0``: ``2^(clamp(e, min=-125) - 8)`` with ``(_, e) = frexp(m)``, the quantum rule of
+    :func:`bf16_rounded_once` (``2^-133`` for every ``m`` below ``2^-125``), and ``2^-133`` for ``m == 0``."""
+    _, exponent = torch.frexp(m)
+    two = torch.tensor(2.0, dtype=torch.float64, device=m.device)
+    quantum = torch.pow(two, (exponent.clamp(min=-125) - 8).to(torch.float64))
+    return torch.where(m == 0, torch.pow(two, -133.0), quantum)
+
+
+def classify_out(
+    out: torch.Tensor, y: torch.Tensor, c0: torch.Tensor, c1: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The feature request's ``out`` criterion per element (module docstring): ``(distance, second, outside)``.
+
+    ``out`` is BF16, ``y`` the unrounded FP64 result, ``c0`` and ``c1`` the pair's stored ``C[t0, d]`` and
+    ``C[t1, d]`` in FP64, all of one shape.  ``distance`` is the number of BF16 values from ``out`` to ``y`` rounded
+    once to BF16 (the first case: at most :data:`OUT_ULPS`).  ``second`` marks the elements beyond that distance whose
+    absolute error ``|out - y|`` is at most :func:`bf16_ulp` of ``max(|c0|, |c1|)``; ``outside`` the elements beyond
+    that distance that exceed it, which fail the criterion.  The family's acceptance tests
+    (``tests/experimental/test_cake_gated_kv_compression_det_train_acceptance.py``) keep an identical copy of this
+    function and of :func:`bf16_ulp`: the tests do not import the benchmark."""
+    distance = bf16_ulp_distance(out, bf16_rounded_once(y))
+    within = (out.double() - y).abs() <= bf16_ulp(torch.maximum(c0.abs(), c1.abs()))
+    beyond = distance > OUT_ULPS
+    return distance, beyond & within, beyond & ~within
+
+
 def rel_l2(got: torch.Tensor, want: torch.Tensor) -> float:
     """``||got - want|| / ||want||`` in float64 (the denominator at least 1e-300)."""
     want = want.double()
@@ -569,7 +598,10 @@ def run(layer: Callable[..., torch.Tensor], x: types.SimpleNamespace) -> tuple[t
 
 
 def measure(x: types.SimpleNamespace, got: Sequence[torch.Tensor], want: dict[str, torch.Tensor]) -> dict:
-    """The acceptance measures of one call (module docstring)."""
+    """The acceptance measures of one call (module docstring).  On ``out`` (:func:`classify_out`): ``out_max_ulps``,
+    the largest distance in BF16 values from the float64 result rounded once to BF16; ``out_elements_off``, the elements
+    that differ from that rounded result (distance above 0); ``out_second_case``, the elements beyond one BF16 value
+    within one BF16 ulp of ``max(|C[t0, d]|, |C[t1, d]|)``; ``out_outside``, the elements that meet neither case."""
     out, dc, dz = got
     found: dict = {
         "shapes": out.shape == (x.G, WIDTH)
@@ -582,11 +614,15 @@ def measure(x: types.SimpleNamespace, got: Sequence[torch.Tensor], want: dict[st
     if not found["shapes"]:
         found["got"] = [[list(t.shape), str(t.dtype)] for t in got]
         return found
-    ulps = bf16_ulp_distance(out, bf16_rounded_once(want["out"]))
+    c = x.c.double()
+    t0 = torch.tensor(pair_starts(x.lengths), dtype=torch.long, device=c.device)
+    ulps, second, outside = classify_out(out, want["out"], c[t0], c[t0 + 1])
     tails = torch.tensor(tail_rows(x.lengths), dtype=torch.long, device=dc.device)
     found.update(
         out_max_ulps=int(ulps.max()) if ulps.numel() else 0,
         out_elements_off=int((ulps > 0).sum()),
+        out_second_case=int(second.sum()),
+        out_outside=int(outside.sum()),
         dc_rel_l2=rel_l2(dc, want["dc"]),
         dz_rel_l2=rel_l2(dz, want["dz"]),
         finite=bool(torch.isfinite(out).all() and torch.isfinite(dc).all() and torch.isfinite(dz).all()),
@@ -599,7 +635,7 @@ def measure(x: types.SimpleNamespace, got: Sequence[torch.Tensor], want: dict[st
 def passes(m: dict) -> bool:
     return bool(
         m.get("shapes")
-        and m["out_max_ulps"] <= OUT_ULPS
+        and m["out_outside"] == 0
         and m["dc_rel_l2"] <= GRAD_REL_L2
         and m["dz_rel_l2"] <= GRAD_REL_L2
         and m["finite"]
@@ -652,14 +688,15 @@ def gate(
 
 def no_worse(m: dict, reference: Optional[dict]) -> bool:
     """``m`` is finite, zero on tail rows, bitwise repeatable and at most as far from the oracle as ``reference``
-    (the Cake arm's measures of the same draw) wherever ``reference`` itself misses a bound."""
+    (the Cake arm's measures of the same draw): no more ``out`` elements outside both cases of the criterion than
+    ``reference``, and ``dC`` and ``dZ`` within the bound or within ``reference``'s error where it misses the bound."""
     if reference is None or "error" in m or "error" in reference or not m.get("shapes") or not reference.get("shapes"):
         return False
     return bool(
         m["finite"]
         and m["tail_nonzero_words"] == 0
         and m.get("repeat_bitwise")
-        and m["out_max_ulps"] <= max(OUT_ULPS, reference["out_max_ulps"])
+        and m["out_outside"] <= reference["out_outside"]
         and m["dc_rel_l2"] <= max(GRAD_REL_L2, reference["dc_rel_l2"])
         and m["dz_rel_l2"] <= max(GRAD_REL_L2, reference["dz_rel_l2"])
     )
