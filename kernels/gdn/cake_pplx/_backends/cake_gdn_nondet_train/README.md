@@ -144,11 +144,12 @@ reference at most 1.005 times those of PyTorch on the same BF16 inputs with
 the same operations in BF16, and its max-norm error at most 1.005 times
 PyTorch's on at least half of the draws).  It misses by the median: on the 32
 draws from seed 23031 the median of its L2 errors is 1.0175 times the tier's
-on GB300 and on GB200, which give the same bits there.  GB200 has run this
-route since 0.2.2, so 0.2.2 has the same miss on GB200.  Over 160 draws (five
-seeds), the split forward on `fwd_ho_a` and the `wy_tc2` form (0.2.2's route
-on GB300) give the same `dg` error per draw (geometric mean of the per-draw
-ratio 1.0007, 95 % interval 0.9966-1.0047), and each misses the tier on about
+on GB300 and on GB200, which give the same bits there.  GB200 runs this route
+in 0.2.2 too, so 0.2.2 has the same miss on GB200 (earlier versions were not
+measured).  Over 160 draws (five seeds), the split forward on `fwd_ho_a` and
+the `wy_tc2` form (0.2.2's route on GB300) show no systematic difference in
+the `dg` error per draw (geometric mean of the per-draw ratio 1.0007, 95 %
+interval 0.9966-1.0047), and each misses the tier on about
 half of the sets of 32 draws (48.9 % and 47.9 % of 20,000 random sets of the
 160 draws; at the five seeds `fwd_ho_a` misses on one, the `wy_tc2` form on
 two).  Its largest L2 error and its max-norm error meet the tier at each of
@@ -666,8 +667,10 @@ form takes 0.84-0.85 of the `wy_tc2` form's time per forward, 0.95 per
 forward + backward and 0.91 per checkpointed step in a CUDA graph (CUPTI,
 cold L2, six fresh processes per form in ABBA order, the three gate regimes),
 but 1.009-1.044 per eager checkpointed step under FLA's initialization and
-`logsigmoid(N(0, 1))` (12 readings of six runs), because each of its forwards
-launches once more (19 launches per checkpointed step instead of 17).
+`logsigmoid(N(0, 1))` (12 readings of six runs; 1.00-1.01 under the log-spaced
+decays); each of its forwards also launches once more (19 launches per
+checkpointed step instead of 17), and the eager step's idle time within its
+span rises by 0.17-0.21 ms.
 
 ## Plan pins (keyword-only)
 
