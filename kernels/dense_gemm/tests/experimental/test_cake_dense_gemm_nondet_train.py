@@ -16337,7 +16337,9 @@ def _det_start_0312_ranges(part):
 
 def _det_tables_0311(m):
     """Put the deterministic package's ranges of version 0.3.11 back (``m``: a monkeypatch context; applying it again in
-    a nested context is a no-op): no BF16 input-gradient key on its parts of ``DET_START_0312_PARTS``."""
+    a nested context is a no-op): no BF16 input-gradient key on its parts of ``DET_START_0312_PARTS`` (after its ranges
+    of version 0.3.12, :func:`_det_tables_0312`)."""
+    _det_tables_0312(m)
     for part in DET_START_0312_PARTS:
         table = det_backend.ROW_RULE_RANGES_BY_SM.get(part)
         if table is None:
@@ -16471,6 +16473,7 @@ def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
     (``_det_tables_0311``), field for field, also inside a range: the entry's form is a caller-forced form, so the
     deterministic planner reads the row's rule without its part tables there.  Elsewhere the call binds the
     deterministic plan: inside a range the range form's program, outside the plan of version 0.3.11."""
+    _det_tables_0312(monkeypatch)  # the ranges of version 0.3.12: version 0.3.13 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     for name in (
@@ -16546,7 +16549,8 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
     ``sm_103a`` parts also the raster ranges of version 0.3.9 (``DET_DGRAD_RASTER_039``), on 148-SM parts those of
     version 0.3.10 (``DET_DGRAD_RASTER_0310``; the 148-SM ``sm_100a`` part has no other range), on 152-SM ``sm_100a``
     parts those of version 0.3.11 (``DET_DGRAD_RASTER_0311``); its FP32 ranges alone (the BF16 start-path ranges of
-    version 0.3.12: ``test_gpu_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12``).  Another part skips."""
+    version 0.3.12: ``test_gpu_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12``; their raster cells of version
+    0.3.13: ``test_gpu_k1_rows_follow_the_deterministic_raster_cells_of_0_3_13``).  Another part skips."""
     device, arch, sms = _part_or_skip()
     ranges = (
         {
@@ -16617,16 +16621,17 @@ def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
     assert ran
 
 
-def test_gpu_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(record_property):
+def test_gpu_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch, record_property):
     """On a part of ``DET_START_0312_PARTS``: the BF16 input gradient of each start-path range row of version 0.3.12 of
     the deterministic package at both ends of each of the part's ranges of the row and at 16172, 16231 and 16384 tokens
     inside them, through this package's entry point.  Each meets the naive BF16 tier against FP64 over the draws, the
     first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs; where no table of this package holds the row
-    and token count (``_k1_dgrad_bf16_table``) it binds the deterministic plan, the range form's program.  Another
-    part skips."""
+    and token count (``_k1_dgrad_bf16_table``) it binds the deterministic plan, the range form's program.  The ranges
+    are those of version 0.3.12 (``_det_tables_0312``).  Another part skips."""
     device, arch, sms = _part_or_skip()
     if (arch, sms) not in DET_START_0312_PARTS:
         pytest.skip(f"no start-path range of version 0.3.12 of the deterministic package on {arch} with {sms} SMs")
+    _det_tables_0312(monkeypatch)  # the ranges of version 0.3.12: version 0.3.13 is checked below
     prefix = det_backend._TEMPLATE_PREFIX
     ran = followed = 0
     for (K, N), bands in sorted(_det_start_0312_ranges((arch, sms)).items()):
@@ -16656,6 +16661,139 @@ def test_gpu_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(record_prop
                 ran += 1
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     print(f"DET_START_0312 {arch} sm_count={sms}: {ran} rows ran, {followed} on the deterministic start-path plan")
+    assert ran and followed
+
+
+#: The raster cells version 0.3.13 of the deterministic package added on 152-SM parts, ``(arch, SM count, K, N, T) ->
+#: raster group`` of the BF16 input gradient ``out[T, K] = G[T, N] @ W[N, K]``: there its plan runs
+#: ``kn_n256_tma1_w8relf`` (the rule of its start-path ranges of version 0.3.12) in raster groups of that many row
+#: tiles, each a range of one token count; its other start-path ranges are as in version 0.3.12.
+DET_START_RASTER_0313 = {
+    ("sm_103a", 152, 4096, 32, 16172): 32,
+    ("sm_103a", 152, 4096, 32, 32768): 32,
+    ("sm_103a", 152, 5120, 64, 16172): 32,
+    ("sm_100a", 152, 5120, 32, 32768): 2,
+}
+
+
+def _det_tables_0312(m):
+    """Put the deterministic package's ranges of version 0.3.12 back (``m``: a monkeypatch context; applying it again in
+    a nested context is a no-op): ``kn_n256_tma1_w8relf`` in the default raster group on ``4096 -> 32`` at 16172 to
+    16384 tokens on 152-SM ``sm_103a`` parts and on ``5120 -> 32`` at 16172 to 32768 tokens on 152-SM ``sm_100a`` parts,
+    and no ``5120 -> 64`` range on 152-SM ``sm_103a`` parts."""
+    rule = det_backend._W8RELF_DGRAD_BF16
+    for part, K, N, bands in (
+        (("sm_103a", 152), 4096, 32, ((16172, 16384),)),
+        (("sm_103a", 152), 5120, 64, ()),
+        (("sm_100a", 152), 5120, 32, ((16172, 32768),)),
+    ):
+        table = det_backend.ROW_RULE_RANGES_BY_SM.get(part)
+        if table is None:
+            continue
+        key = (part[0], False, True, False, False, False, K, N, None)
+        if bands:
+            m.setitem(table, key, tuple((lo, hi, dict(rule)) for lo, hi in bands))
+        else:
+            m.delitem(table, key, raising=False)
+
+
+def test_k1_rows_follow_the_deterministic_raster_cells_of_0_3_13(monkeypatch):
+    """The raster cells version 0.3.13 of the deterministic package added (``DET_START_RASTER_0313``), as this package
+    runs them.  At each cell and one token count below and above it: where a table of this package holds the row and
+    token count (``_k1_dgrad_bf16_table``: the nvjet programs of ``4096 -> 32`` and ``5120 -> 64`` at 16172 tokens on
+    152-SM ``sm_103a`` parts) the call binds the plan it bound with the ranges of version 0.3.12 (``_det_tables_0312``),
+    field for field: the entry's form is a caller-forced form, so the deterministic planner reads the row's rule
+    without its part tables there, raster group included.  Elsewhere the call binds the deterministic plan: at a cell
+    (``4096 -> 32`` on 152-SM ``sm_103a`` parts and ``5120 -> 32`` on 152-SM ``sm_100a`` parts at 32768 tokens)
+    ``kn_n256_tma1_w8relf`` in the cell's raster group, next to it the plan of version 0.3.12."""
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+
+    def bound_plan(G, W, out):
+        cake_backend._K1_DET_CACHE.clear()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+        )
+        ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert key[2][0] == ("dgrad",) and entry.k1 is not None
+        return entry.plan
+
+    held, followed = set(), set()
+    checked = 0
+    for (arch, sms, K, N, T), group in sorted(DET_START_RASTER_0313.items()):
+        bands = det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)][(arch, False, True, False, False, False, K, N, None)]
+        assert (T, T, {**det_backend._W8RELF_DGRAD_BF16, "group_m": group}) in bands, (arch, sms, K, N, T)
+        W = torch.empty(N, K, dtype=bf16)
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            for t in (T - 1, T, T + 1):
+                what = (arch, sms, K, N, t)
+                G = torch.empty(t, N, dtype=bf16)
+                out = torch.empty(t, K, dtype=bf16)
+                bound = bound_plan(G, W, out)
+                with monkeypatch.context() as before_tables:
+                    _det_tables_0312(before_tables)
+                    before = bound_plan(G, W, out)
+                table = _k1_dgrad_bf16_table(arch, sms, K, N, t)
+                if t != T or table is not None:
+                    assert bound == before, (what, table, bound.template, before.template)
+                    if t == T:
+                        held.add(what)
+                else:
+                    det = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+                    assert bound == det, (what, bound.template, det.template)
+                    assert bound.template == prefix + "kn_n256_tma1_w8relf", (what, bound.template)
+                    assert bound.group_m == group, (what, bound.group_m)
+                    assert (before.template, before.group_m) != (bound.template, bound.group_m), what
+                    followed.add(what)
+                checked += 1
+    assert held == {("sm_103a", 152, 4096, 32, 16172), ("sm_103a", 152, 5120, 64, 16172)}, held
+    assert followed == {("sm_103a", 152, 4096, 32, 32768), ("sm_100a", 152, 5120, 32, 32768)}, followed
+    assert checked == 3 * len(DET_START_RASTER_0313)
+
+
+def test_gpu_k1_rows_follow_the_deterministic_raster_cells_of_0_3_13(record_property):
+    """On a 152-SM ``sm_103a`` or ``sm_100a`` part: the BF16 input gradient of each raster cell of version 0.3.13 of the
+    deterministic package on the part (``DET_START_RASTER_0313``), through this package's entry point.  Each meets the
+    naive BF16 tier against FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs;
+    where no table of this package holds the row and token count (``_k1_dgrad_bf16_table``) it binds the deterministic
+    plan, ``kn_n256_tma1_w8relf`` in the cell's raster group.  Another part skips."""
+    device, arch, sms = _part_or_skip()
+    cells = {(K, N, T): group for (a, s, K, N, T), group in DET_START_RASTER_0313.items() if (a, s) == (arch, sms)}
+    if not cells:
+        pytest.skip(f"no raster cell of version 0.3.13 of the deterministic package on {arch} with {sms} SMs")
+    prefix = det_backend._TEMPLATE_PREFIX
+    ran = followed = 0
+    for (K, N, T), group in sorted(cells.items()):
+        what = f"dgrad {K} {N} {T} bf16"
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_bf16_raster",
+            SEED + 185,
+            device,
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.bfloat16,
+        )
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None, what
+        if _k1_dgrad_bf16_table(arch, sms, K, N, T) is None:
+            assert (entry.plan.template, entry.plan.group_m) == (prefix + "kn_n256_tma1_w8relf", group), (
+                what,
+                entry.plan.template,
+                entry.plan.group_m,
+            )
+            followed += 1
+        ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"DET_START_RASTER_0313 {arch} sm_count={sms}: {ran} rows ran, {followed} on the deterministic plan")
     assert ran and followed
 
 

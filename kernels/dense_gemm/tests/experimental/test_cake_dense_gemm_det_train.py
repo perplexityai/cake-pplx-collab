@@ -16832,7 +16832,9 @@ def _start_0312_form(arch, sm_count, d_in, d_out, T):
 
 def _tables_0311(m):
     """Put the part ranges of version 0.3.11 back (``m``: a monkeypatch context; applying it again in a nested context is
-    a no-op): no BF16 input-gradient key in the 148- and 152-SM sm_100a and sm_103a parts."""
+    a no-op): no BF16 input-gradient key in the 148- and 152-SM sm_100a and sm_103a parts (after the part ranges of
+    version 0.3.12, ``_tables_0312``, which drop the BF16 key version 0.3.13 added)."""
+    _tables_0312(m)
     for part, rows in START_0312_RANGES.items():
         table = cake_backend.ROW_RULE_RANGES_BY_SM.get(part)
         if table is None:
@@ -16849,6 +16851,7 @@ def test_start_0312_tables(monkeypatch):
     of the row lies inside one (a part rule would shadow the range).  The exact ``ROW_RULES`` keys of the rows inside a
     range are the two sm_100a 4096 -> 48 keys at T 16231 and 16384 (the GB T-exact rules): the range wins on the 148-
     and 152-SM parts, every other sm_100a part keeps them."""
+    _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     ranges_now = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
     rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
     with monkeypatch.context() as m:
@@ -16901,6 +16904,7 @@ def test_start_0312_ranges_plan_their_form(monkeypatch, part, row):
     than the range's (the ten-warp ``""``, ``w8r`` or the other start-path form) plans as with the tables of version
     0.3.11 with that form, or is refused as there: the range's rule yields to the row's rule without the part
     tables."""
+    _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     arch, sm = part
     d_in, d_out = row
     key = _bf16_dgrad_key(arch, d_in, d_out)
@@ -16957,6 +16961,7 @@ def test_start_0312_ranges_plan_their_form(monkeypatch, part, row):
 def test_start_0312_kept_cells_plan_as_in_0_3_11(monkeypatch):
     """The measured rows of version 0.3.12 at their measured token counts outside every range of that version plan as in
     version 0.3.11 on their part (``START_0312_KEPT``), not the program of a start-path form."""
+    _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     kept = []
     for arch, sm in START_0312_RANGES:
         for d_in, d_out in START_0312_ROWS:
@@ -16983,6 +16988,7 @@ def test_routing_0312_changes_exactly_the_start_plans(monkeypatch):
     ``START_0312_RANGES`` at ``_START_0312_SWEEP_TOKENS`` on every class of ``ROUTING_038_CLASSES``: a plan changes
     exactly at the BF16 input gradients of ``START_0312_RANGES`` inside their ranges on their part, to the range form's
     program.  Every other plan is the plan of version 0.3.11."""
+    _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     rows = {(d_in, d_out) for table in START_0312_RANGES.values() for d_in, d_out in table}
     sweep = _merged_sweep(
         ROUTING_038_SWEEP, tuple(("dgrad", d_in, d_out, "bf16", _START_0312_SWEEP_TOKENS) for d_in, d_out in sorted(rows))
@@ -17044,7 +17050,329 @@ def test_start_0312_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, r
     BF16 tier over the draws, it returns the same bits on three more launches into NaN, its plan differs from the plan of
     version 0.3.11 (``_tables_0311``) on the device, and its output equals that plan's bit for bit.  Another device
     skips."""
+    _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0311, "version 0.3.12", plan_changes=True)
+
+
+# ---------------------------------------------------------------------------
+# The raster groups of version 0.3.13 (ROW_RULE_RANGES_BY_SM of the 152-SM sm_103a and sm_100a parts): the start-path
+# program runs in raster groups of 32 on the GB300 BF16 input gradients 4096 -> 32 at T 16172 and 32768 and
+# 5120 -> 64 at T 16172, and of 2 on the GB200 5120 -> 32 at T 32768, each a range of one token count, with the bits of
+# the plan before
+# ---------------------------------------------------------------------------
+
+#: The cells of version 0.3.13: ``(arch, SM count, d_in, d_out, T) -> group_m`` of the BF16 input gradient, each a
+#: range of one token count whose rule is the start-path rule of version 0.3.12 in raster groups of ``group_m`` row
+#: tiles (:func:`_raster_0313_rule`).
+RASTER_0313_CELLS = {
+    ("sm_103a", 152, 4096, 32, 16172): 32,
+    ("sm_103a", 152, 4096, 32, 32768): 32,
+    ("sm_103a", 152, 5120, 64, 16172): 32,
+    ("sm_100a", 152, 5120, 32, 32768): 2,
+}
+#: The rows version 0.3.13 measured on each part, ``(d_in, d_out)`` (GB300: groups of 32 and 64; GB200: 2 and 4).
+RASTER_0313_ROWS = {
+    ("sm_103a", 152): ((4096, 32), (5120, 64)),
+    ("sm_100a", 152): ((4096, 32), (5120, 32), (6144, 32)),
+}
+#: The token counts version 0.3.13 measured on its rows (two nodes per part, against the plan of version 0.3.12): at a
+#: cell a raster group met the bar with the bits of the plan before; at the others no group met it.
+RASTER_0313_MEASURED = (16172, 16231, 16384, 32768)
+#: The measured cells that keep the plan of version 0.3.12, ``(arch, SM count, d_in, d_out, T)``.
+RASTER_0313_KEPT = (
+    ("sm_100a", 152, 4096, 32, 16172),
+    ("sm_100a", 152, 4096, 32, 16231),
+    ("sm_100a", 152, 4096, 32, 16384),
+    ("sm_100a", 152, 4096, 32, 32768),
+    ("sm_100a", 152, 5120, 32, 16172),
+    ("sm_100a", 152, 5120, 32, 16231),
+    ("sm_100a", 152, 5120, 32, 16384),
+    ("sm_100a", 152, 6144, 32, 16172),
+    ("sm_100a", 152, 6144, 32, 16231),
+    ("sm_100a", 152, 6144, 32, 16384),
+    ("sm_100a", 152, 6144, 32, 32768),
+    ("sm_103a", 152, 4096, 32, 16231),
+    ("sm_103a", 152, 4096, 32, 16384),
+    ("sm_103a", 152, 5120, 64, 16231),
+    ("sm_103a", 152, 5120, 64, 16384),
+    ("sm_103a", 152, 5120, 64, 32768),
+)
+#: The cells whose plan of version 0.3.12 is already the start-path program (a range of version 0.3.12, in the default
+#: raster group of 16): there the cell changes the raster group alone.  At the other two (GB300 4096 -> 32 at T 32768,
+#: a kept cell of version 0.3.12, and GB300 5120 -> 64 at T 16172, a row without a range of version 0.3.12 on that
+#: part) it replaces the plan of version 0.3.11, another program.
+RASTER_0313_SAME_PROGRAM = {
+    ("sm_103a", 152, 4096, 32, 16172),
+    ("sm_100a", 152, 5120, 32, 32768),
+}
+#: The start-path form of the cells.
+_RASTER_0313_FORM = "w8relf"
+
+
+def _raster_0313_group(arch, sm_count, d_in, d_out, T):
+    """The raster group of the cell of version 0.3.13 of the BF16 input gradient ``d_in -> d_out`` at ``T`` tokens on an
+    ``arch`` part of ``sm_count`` SMs, else ``None``."""
+    return RASTER_0313_CELLS.get((arch, sm_count, d_in, d_out, T))
+
+
+def _raster_0313_rule(group):
+    """The rule of a cell of version 0.3.13: the start-path rule of version 0.3.12 in raster groups of ``group``."""
+    return {**_start_0312_rule(_RASTER_0313_FORM), "group_m": group}
+
+
+def _raster_0313_keys():
+    """The ``ROW_RULE_RANGES_BY_SM`` keys of the cells of version 0.3.13, ``(arch, SM count) -> {BF16 input-gradient
+    key}``."""
+    keys = {}
+    for arch, sm, d_in, d_out, _T in RASTER_0313_CELLS:
+        keys.setdefault((arch, sm), set()).add(_bf16_dgrad_key(arch, d_in, d_out))
+    return keys
+
+
+def _tables_0312(m):
+    """Put the part ranges of version 0.3.12 back (``m``: a monkeypatch context; applying it again in a nested context is
+    a no-op): each BF16 input-gradient key of ``RASTER_0313_CELLS`` with its ranges of ``START_0312_RANGES``, or, where
+    that version had none (5120 -> 64 on the 152-SM sm_103a part), no key."""
+    for part, keys in _raster_0313_keys().items():
+        table = cake_backend.ROW_RULE_RANGES_BY_SM.get(part)
+        if table is None:
+            continue
+        for key in keys:
+            bands = START_0312_RANGES[part].get(key[6:8])
+            if bands is None:
+                m.delitem(table, key, raising=False)
+            else:
+                m.setitem(table, key, tuple((lo, hi, _start_0312_rule(form)) for lo, hi, form in bands))
+
+
+def _token_cover(bands):
+    """The token counts the inclusive ranges ``bands`` (``(lo, hi, ...)``) hold, as a set."""
+    return {T for lo, hi, *_ in bands for T in range(lo, hi + 1)}
+
+
+def test_raster_0313_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.12 (``_tables_0312``) in the BF16 input-gradient keys of the
+    rows of ``RASTER_0313_CELLS`` alone: 4096 -> 32 and 5120 -> 64 (new) on the 152-SM sm_103a part, 5120 -> 32 on the
+    152-SM sm_100a part; every other key and part is as it was and ``ROW_RULES_BY_SM`` is unchanged.  Each cell is a
+    range of one measured token count with the start-path rule of version 0.3.12 in the cell's raster group; the other
+    ranges of a changed key carry that rule without ``group_m`` and hold exactly the token counts of its ranges of
+    version 0.3.12 but the cells.  The ranges of a key are sorted and disjoint, and no part rule, no token tier and no
+    exact ``ROW_RULES`` key of a changed row lies inside one of its ranges."""
+    ranges_now = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_0312(m)
+        ranges_0312 = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+        rules_0312 = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    assert rules_now == rules_0312
+    assert set(ranges_now) == set(ranges_0312)
+    keys = _raster_0313_keys()
+    new_key = _bf16_dgrad_key("sm_103a", 5120, 64)
+    assert keys == {
+        ("sm_103a", 152): {_bf16_dgrad_key("sm_103a", 4096, 32), new_key},
+        ("sm_100a", 152): {_bf16_dgrad_key("sm_100a", 5120, 32)},
+    }
+    for p in ranges_now:
+        now, was = ranges_now[p], ranges_0312[p]
+        changed = {key for key in set(now) | set(was) if now.get(key) != was.get(key)}
+        assert changed == keys.get(p, set()), p
+        assert set(now) - set(was) == ({new_key} if p == ("sm_103a", 152) else set()), p
+        assert not set(was) - set(now), p
+    plain = _start_0312_rule(_RASTER_0313_FORM)
+    for part, part_keys in keys.items():
+        for key in part_keys:
+            row = key[6:8]
+            assert row in RASTER_0313_ROWS[part], (part, key)
+            cells = {T: g for (a, s, *r, T), g in RASTER_0313_CELLS.items() if (a, s) == part and tuple(r) == row}
+            held, before = ranges_now[part][key], ranges_0312[part].get(key, ())
+            assert all(lo <= hi for lo, hi, _ in held) and all(a[1] < b[0] for a, b in zip(held, held[1:])), key
+            assert all(rule == plain for _, _, rule in before), key
+            assert [band for band in held if "group_m" in band[2]] == [
+                (T, T, _raster_0313_rule(cells[T])) for T in sorted(cells)
+            ], key
+            assert all(T in RASTER_0313_MEASURED for T in cells), key
+            rest = [band for band in held if "group_m" not in band[2]]
+            assert all(rule == plain for _, _, rule in rest), key
+            assert _token_cover(rest) == _token_cover(before) - set(cells), key
+            assert key not in cake_backend.ROW_RULE_MIN_T, key
+            assert not [exact for exact in rules_now.get(part, {}) if exact[:8] == key[:8]], key
+            assert not [
+                exact
+                for exact in ROW_RULES
+                if exact[:8] == key[:8] and exact[8] is not None and any(lo <= exact[8] <= hi for lo, hi, _ in held)
+            ], key
+
+
+_RASTER_0313_CASES = tuple(sorted(RASTER_0313_CELLS))
+
+
+@pytest.mark.parametrize(
+    "cell", _RASTER_0313_CASES, ids=[f"{a}-{s}-{d}x{o}-T{t}" for a, s, d, o, t in _RASTER_0313_CASES]
+)
+def test_raster_0313_cells_plan_their_group(monkeypatch, cell):
+    """At each cell of version 0.3.13 the part's plan is the plan of the cell's rule as an exact ``ROW_RULES`` key at
+    that token count without the part tables: the start-path program ``kn_n256_tma1_w8relf`` with no fallback flag,
+    whole tiles (no stream-K unit, no promoted chunk), in the cell's raster group, and in every other field the plan of
+    the start-path rule of version 0.3.12 (the default raster group of 16).  With the tables of version 0.3.12
+    (``_tables_0312``) the part plans that plan at ``RASTER_0313_SAME_PROGRAM`` and another program at the other cells.
+    One token count below and above the cell and at the row's other measured token counts outside every cell the plan
+    is the plan of version 0.3.12, at every checked token count every other class of ``_DGRAD_PART_CLASSES`` plans the
+    row as in version 0.3.12, and at the cell a caller that forces another form than the cell's (the ten-warp ``""``,
+    ``w8r`` or ``w8rel``) plans as with the tables of version 0.3.12, or is refused as there: the cell's rule yields to
+    the row's rule without the part tables, raster group included."""
+    arch, sm, d_in, d_out, T = cell
+    group = RASTER_0313_CELLS[cell]
+    key = _bf16_dgrad_key(arch, d_in, d_out)
+
+    def plan_at(a, s, t, **knobs):
+        return _rows_plan("dgrad", a, s, d_in, d_out, t, **knobs)
+
+    def plan_0312(a, s, t, **knobs):
+        with monkeypatch.context() as m:
+            _tables_0312(m)
+            return plan_at(a, s, t, **knobs)
+
+    def outcome(plan, *args, **knobs):
+        try:
+            return plan(*args, **knobs)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    def plan_exact(rule):
+        # ``rule`` as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), rule)
+            return plan_at(arch, sm, T)
+
+    plan, before = plan_at(arch, sm, T), plan_0312(arch, sm, T)
+    where = (cell, plan.template, before.template)
+    assert plan == plan_exact(_raster_0313_rule(group)), where
+    assert plan.template == START_0312_PROGRAMS[_RASTER_0313_FORM], where
+    assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+    assert plan.sk_units == 0 and plan.promote_blocks == 0, where
+    assert plan.group_m == group, where
+    start = plan_exact(_start_0312_rule(_RASTER_0313_FORM))
+    assert start.template == plan.template and start.group_m == 16, (where, start.template, start.group_m)
+    assert plan == dataclasses.replace(start, group_m=group), where
+    same = cell in RASTER_0313_SAME_PROGRAM
+    assert (_start_0312_form(arch, sm, d_in, d_out, T) == _RASTER_0313_FORM) == same, where
+    if same:
+        assert before == start, where
+    else:
+        assert before.template != plan.template, where
+    for forced in ("", "w8r", *(f for f in START_0312_PROGRAMS if f != _RASTER_0313_FORM)):
+        got = outcome(plan_at, arch, sm, T, form=forced)
+        assert got == outcome(plan_0312, arch, sm, T, form=forced), (where, forced)
+    others = sorted(
+        t for t in {T - 1, T + 1, *RASTER_0313_MEASURED} if _raster_0313_group(arch, sm, d_in, d_out, t) is None
+    )
+    for t in others:
+        assert plan_at(arch, sm, t) == plan_0312(arch, sm, t), (cell, t)
+    for t in (T, *others):
+        for a, s in _DGRAD_PART_CLASSES:
+            if (a, s) != (arch, sm):
+                assert plan_at(a, s, t) == plan_0312(a, s, t), (cell, a, s, t)
+
+
+def test_raster_0313_kept_cells_plan_as_in_0_3_12(monkeypatch):
+    """The measured rows of version 0.3.13 at their measured token counts outside its cells plan as in version 0.3.12 on
+    their part (``RASTER_0313_KEPT``): inside a start-path range of version 0.3.12 its program in the default raster
+    group of 16, elsewhere (GB300 5120 -> 64) the plan of version 0.3.11, another program."""
+    kept = []
+    for (arch, sm), rows in RASTER_0313_ROWS.items():
+        for d_in, d_out in rows:
+            for T in RASTER_0313_MEASURED:
+                if _raster_0313_group(arch, sm, d_in, d_out, T) is not None:
+                    continue
+                where = (arch, sm, d_in, d_out, T)
+                plan = _rows_plan("dgrad", arch, sm, d_in, d_out, T)
+                with monkeypatch.context() as m:
+                    _tables_0312(m)
+                    before = _rows_plan("dgrad", arch, sm, d_in, d_out, T)
+                assert plan == before, where
+                start = _start_0312_form(arch, sm, d_in, d_out, T) == _RASTER_0313_FORM
+                assert (plan.template == START_0312_PROGRAMS[_RASTER_0313_FORM]) == start, (where, plan.template)
+                if start:
+                    assert plan.group_m == 16, (where, plan.group_m)
+                kept.append(where)
+    assert sorted(kept) == sorted(RASTER_0313_KEPT)
+
+
+def test_routing_0313_changes_exactly_the_raster_cells(monkeypatch):
+    """Byte for byte against the tables of version 0.3.12 (``_tables_0312``), over ``ROUTING_038_SWEEP`` and the rows of
+    ``START_0312_RANGES`` and ``RASTER_0313_ROWS`` at ``_START_0312_SWEEP_TOKENS`` on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly at the cells of ``RASTER_0313_CELLS`` on their part, to the
+    start-path program in the cell's raster group.  Every other plan is the plan of version 0.3.12."""
+    rows = {(d_in, d_out) for table in START_0312_RANGES.values() for d_in, d_out in table}
+    rows |= {row for table in RASTER_0313_ROWS.values() for row in table}
+    sweep = _merged_sweep(
+        ROUTING_038_SWEEP, tuple(("dgrad", d_in, d_out, "bf16", _START_0312_SWEEP_TOKENS) for d_in, d_out in sorted(rows))
+    )
+    changed = []
+    for op, d_in, d_out, out_dtype, token_counts in sweep:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_0312(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                group = (
+                    _raster_0313_group(arch, sm_count, d_in, d_out, T)
+                    if (op, out_dtype) == ("dgrad", "bf16")
+                    else None
+                )
+                if group is None:
+                    assert _plan_signature(plan) == _plan_signature(before), (where, plan.template, before.template)
+                    continue
+                assert plan.template == START_0312_PROGRAMS[_RASTER_0313_FORM], (where, plan.template)
+                assert plan.group_m == group, (where, plan.group_m)
+                assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+                changed.append((arch, sm_count, d_in, d_out, T))
+    assert sorted(changed) == sorted(RASTER_0313_CELLS)
+
+
+def _raster_0313_gpu_cases():
+    """The GPU cases of the cells of version 0.3.13, each on its part alone; the output keeps the bits of the plan of
+    version 0.3.12."""
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "bf16",
+            {(arch, sm): START_0312_PROGRAMS[_RASTER_0313_FORM]},
+            scoped=True,
+            same_bits=True,
+        )
+        for arch, sm, d_in, d_out, T in sorted(RASTER_0313_CELLS)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _raster_0313_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-bf16",
+)
+def test_raster_0313_cells_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each cell of version 0.3.13 runs its default plan on its part, the start-path program in the cell's raster group:
+    its output is judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on
+    three more launches into NaN, its plan differs from the plan of version 0.3.12 (``_tables_0312``) on the device
+    (another program, or at ``RASTER_0313_SAME_PROGRAM`` the same program in another raster group), and its output
+    equals that plan's bit for bit.  Another device skips."""
+    ((arch, sm_count),) = case.programs
+    _run_routing_gpu_case(
+        case,
+        monkeypatch,
+        record_property,
+        _tables_0312,
+        "version 0.3.13",
+        plan_changes=True,
+        raster=(arch, sm_count, case.d_in, case.d_out, case.T) in RASTER_0313_SAME_PROGRAM,
+    )
 
 
 # The determinism contract of the package: a prepared launch rerun over the same operands gives the same bits.
