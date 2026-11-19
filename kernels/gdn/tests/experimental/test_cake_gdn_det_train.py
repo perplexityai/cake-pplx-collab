@@ -101,6 +101,7 @@ own package.
 from __future__ import annotations
 
 import ast
+import collections
 import contextlib
 import dataclasses
 import gc
@@ -182,7 +183,7 @@ def _fresh_workspace_pool(monkeypatch) -> None:
     monkeypatch.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
     monkeypatch.setattr(cake_chain, "_FWD_PLANS", {})
     monkeypatch.setattr(cake_chain, "_PLAN_KEYS", {})
-    monkeypatch.setattr(cake_chain, "_FWD_SEEN", {})
+    monkeypatch.setattr(cake_chain, "_FWD_SEEN", collections.OrderedDict())
     monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", False)
     monkeypatch.setattr(cake_chain, "_FWD_CREDIT", _full_record_credit())
 
@@ -6910,7 +6911,7 @@ def test_the_record_gate_schedule(monkeypatch) -> None:
     entry[2] = cake_chain._REFUSED
     assert gate(layout, True) is None
     # first in, first out at the limit
-    monkeypatch.setattr(cake_chain, "_FWD_SEEN", {})
+    monkeypatch.setattr(cake_chain, "_FWD_SEEN", collections.OrderedDict())
     monkeypatch.setattr(cake_chain, "_FWD_SEEN_LIMIT", 3)
     layouts = [_StandInLayout() for _ in range(4)]
     for each in layouts:
@@ -6931,7 +6932,7 @@ def test_the_record_gate_schedule(monkeypatch) -> None:
     # in ten whose plan is no longer ready) replays, any other entry records if the credit holds a recording and is
     # left unplanned if not.  The credit is, after every call, the one its additions (capped) and spends give, and
     # the bound holds, in the credit's units
-    monkeypatch.setattr(cake_chain, "_FWD_SEEN", {})
+    monkeypatch.setattr(cake_chain, "_FWD_SEEN", collections.OrderedDict())
     monkeypatch.setattr(cake_chain, "_FWD_CREDIT", full)
     rng = random.Random(0)
     calls = replays = recordings = 0
@@ -6956,6 +6957,118 @@ def test_the_record_gate_schedule(monkeypatch) -> None:
         assert cake_chain._FWD_CREDIT == credit
         assert recordings * 4 * 8 <= 2 * 4 * 8 + replays * 8 + calls * 4
     assert recordings > 2 and replays and calls
+
+
+class _CountedSeen(collections.OrderedDict):
+    """The record gate's entries, counting the dict operations the gate makes on them (``ops``)."""
+
+    def __init__(self):
+        super().__init__()
+        self.ops = collections.Counter()
+
+    def get(self, key, default=None):
+        self.ops["get"] += 1
+        return super().get(key, default)
+
+    def __setitem__(self, key, value):
+        self.ops["set"] += 1
+        super().__setitem__(key, value)
+
+    def pop(self, key, *default):
+        self.ops["pop"] += 1
+        return super().pop(key, *default)
+
+    def popitem(self, last=True):
+        self.ops["popitem"] += 1
+        return super().popitem(last=last)
+
+    def __iter__(self):
+        self.ops["iter"] += 1
+        return super().__iter__()
+
+
+class _CountedKeys(dict):
+    """The plan keys per ChunkMeta, counting the gate's probes (``probes``)."""
+
+    probes = 0
+
+    def __contains__(self, key):
+        self.probes += 1
+        return super().__contains__(key)
+
+
+class _CountedLock:
+    """The plan cache's lock, counting the times it is taken (``taken``)."""
+
+    def __init__(self):
+        self.lock, self.taken = threading.Lock(), 0
+
+    def __enter__(self):
+        self.taken += 1
+        return self.lock.__enter__()
+
+    def __exit__(self, *exc):
+        return self.lock.__exit__(*exc)
+
+    def acquire(self, *args, **kwargs):
+        self.taken += 1
+        return self.lock.acquire(*args, **kwargs)
+
+    def release(self):
+        self.lock.release()
+
+
+def test_a_first_sighting_makes_its_entry_only(monkeypatch) -> None:
+    # a fresh layout (the first forward of a layout in a tape mode) costs the record gate one probe and one insert of
+    # its entries: no lock, no plan key and, while no plan is kept, no probe of the plans.  Once the entries are full it
+    # lets the oldest go with one more operation (no walk of the entries); the id of a layout that died costs one
+    # removal instead, and its entry is the newest.  A later forward of the layout costs one probe
+    full = _set_record_gate(monkeypatch, repeat=2, payback=4, budget=2, trickle=8)
+    seen, keys, lock = _CountedSeen(), _CountedKeys(), _CountedLock()
+    monkeypatch.setattr(cake_chain, "_FWD_SEEN", seen)
+    monkeypatch.setattr(cake_chain, "_PLAN_KEYS", keys)
+    monkeypatch.setattr(cake_chain, "_PLANS_LOCK", lock)
+    monkeypatch.setattr(cake_chain, "_FWD_SEEN_LIMIT", 3)
+    layouts = [_StandInLayout() for _ in range(5)]
+    for each in layouts[:3]:
+        assert cake_chain._fwd_gate(each, True) is None
+    assert seen.ops == {"get": 3, "set": 3} and keys.probes == 0, (
+        seen.ops,
+        keys.probes,
+    )
+    # full: the oldest entry goes
+    seen.ops.clear()
+    assert cake_chain._fwd_gate(layouts[3], True) is None
+    assert seen.ops == {"get": 1, "set": 1, "popitem": 1}, seen.ops
+    assert list(seen) == [(id(each), True) for each in layouts[1:4]]
+    # with a plan kept (on another layout): one probe of the plans too
+    keys[id(layouts[0])] = {"key": None}
+    seen.ops.clear()
+    assert cake_chain._fwd_gate(layouts[4], True) is None
+    assert seen.ops == {"get": 1, "set": 1, "popitem": 1} and keys.probes == 1
+    assert seen[(id(layouts[4]), True)][1:] == [1, cake_chain._UNPLANNED]
+    # a later forward: one probe
+    seen.ops.clear()
+    entry = cake_chain._fwd_gate(layouts[4], True)
+    assert entry is not None and entry[1:] == [2, cake_chain._UNPLANNED]
+    assert seen.ops == {"get": 1} and keys.probes == 1, seen.ops
+    # the id of a layout that died: its entry goes, the new one is the newest and the layout's first forward
+    old = seen[(id(layouts[2]), True)]
+    gone = _StandInLayout()
+    old[0] = weakref.ref(gone)
+    del gone
+    gc.collect()
+    seen.ops.clear()
+    assert cake_chain._fwd_gate(layouts[2], True) is None
+    assert seen.ops == {"get": 1, "pop": 1, "set": 1}, seen.ops
+    assert list(seen)[-1] == (id(layouts[2]), True) and len(seen) == 3
+    new = seen[(id(layouts[2]), True)]
+    assert (
+        new is not old
+        and new[0]() is layouts[2]
+        and new[1:] == [1, cake_chain._UNPLANNED]
+    )
+    assert lock.taken == 0 and cake_chain._FWD_CREDIT == full
 
 
 def test_a_layout_leaving_the_cache_drops_its_plans(monkeypatch) -> None:
@@ -8905,9 +9018,10 @@ def test_the_record_gate_records_a_layouts_second_forward(
 @pytest.mark.parametrize("mode", ["taped", "checkpoint"])
 def test_a_layout_used_once_never_builds_a_plan_key(mode, device, monkeypatch) -> None:
     # under the record gate a call of a new layout every time (as a new varlen pack every step) runs the general path
-    # and builds no plan key: nothing records or replays, no plan is kept and the record credit stays full.  The calls
-    # that never plan (the device route, host_cache off, FWD_PLAN off) leave the gate's entries as they are.  Every
-    # call has the bits of its layout's general path (FWD_PLAN off)
+    # and builds no plan key: nothing records or replays, no plan is kept and the record credit stays full; such a call
+    # goes from the gate's entry straight to the general path (no planned forward) and takes no lock.  The calls that
+    # never plan (the device route, host_cache off, FWD_PLAN off) leave the gate's entries as they are.  Every call has
+    # the bits of its layout's general path (FWD_PLAN off)
     heads = (2, 6)
     layouts = [(300 + i, 77, 640 - i, 17) for i in range(12)]
     inputs = _inputs(layouts[0], heads, torch.bfloat16, device, seed=7213)
@@ -8916,12 +9030,17 @@ def test_a_layout_used_once_never_builds_a_plan_key(mode, device, monkeypatch) -
     monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
     recordings, keys = _counted_plan_steps(monkeypatch)
     replays = _counted_forward_replays(monkeypatch)
+    planned, planned_forward = [], cake_chain._planned_forward
+    monkeypatch.setattr(cake_chain, "_planned_forward", lambda *args: planned.append(args) or planned_forward(*args))  # fmt: skip
+    lock = _CountedLock()
+    monkeypatch.setattr(cake_chain, "_PLANS_LOCK", lock)
     for seq_lens in layouts:
         with monkeypatch.context() as m:
             m.setattr(cake_chain, "FWD_PLAN", False)
             general = _fwd_plan_call(inputs, seq_lens, mode)
         _assert_bitwise(_fwd_plan_call(inputs, seq_lens, mode), general, names)
     assert not (recordings or keys or replays or cake_chain._FWD_PLANS)
+    assert not planned and lock.taken == 0, (len(planned), lock.taken)
     assert cake_chain._FWD_CREDIT == _full_record_credit()
     seen = {key: entry[1:] for key, entry in cake_chain._FWD_SEEN.items()}
     assert len(seen) == passes * len(layouts)

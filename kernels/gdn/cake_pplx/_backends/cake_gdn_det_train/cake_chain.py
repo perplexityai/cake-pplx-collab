@@ -127,6 +127,7 @@ import struct
 import threading
 import warnings
 import weakref
+from collections import OrderedDict
 from collections.abc import Mapping
 from contextlib import contextmanager, nullcontext
 from contextvars import ContextVar
@@ -3702,8 +3703,10 @@ FWD_PLAN_PAYBACK = 32
 FWD_PLAN_BUDGET = 4
 FWD_PLAN_TRICKLE = 4096
 # (id(meta), tape) -> [weakref(meta), its forwards so far (at most FWD_PLAN_REPEAT), its state]; the oldest entry
-# leaves first at _FWD_SEEN_LIMIT entries (two tape modes per cached layout)
-_FWD_SEEN: dict = {}
+# leaves first at _FWD_SEEN_LIMIT entries (two tape modes per cached layout).  A first sighting puts its entry in and
+# lets the oldest go with one call each (OrderedDict.popitem), so it takes no lock: threads that sight layouts at once
+# can let one entry more go, or count one forward of a layout twice
+_FWD_SEEN: OrderedDict = OrderedDict()
 _FWD_SEEN_LIMIT = 512
 # a layout and tape mode with no plan yet, with one, and whose key cannot be planned
 _UNPLANNED, _PLANNED, _REFUSED = range(3)
@@ -3934,25 +3937,31 @@ def _drop_meta_plans(meta: ChunkMeta) -> None:
 def _fwd_gate(meta: ChunkMeta, tape: bool):
     """The record gate's entry of the call's layout and tape mode when the call builds its plan key (to replay or to
     record), else ``None``: an early forward of the layout in that mode, a layout and mode whose key cannot be planned,
-    or no plan yet and less credit than one recording.  Each call adds its share to the credit."""
+    or no plan yet and less credit than one recording.  Each call adds its share to the credit.  A first sighting of a
+    layout and mode (a fresh layout) makes its entry and nothing else: one probe and one insert of :data:`_FWD_SEEN`
+    (and one eviction once it is full), no lock and no plan key."""
     global _FWD_CREDIT
     full = FWD_PLAN_BUDGET * FWD_PLAN_PAYBACK * FWD_PLAN_TRICKLE
     credit = _FWD_CREDIT + FWD_PLAN_PAYBACK
     _FWD_CREDIT = credit = credit if credit < full else full
     key = (id(meta), tape)
     seen = _FWD_SEEN.get(key)
-    # a new layout, or the id of one that died; a layout whose entry left with a plan kept on it starts planned (its
-    # next forward builds its key once: a replay, or a recording as an unplanned one would make, else unplanned)
-    if seen is None or seen[0]() is not meta:
-        first = _PLANNED if id(meta) in _PLAN_KEYS else _UNPLANNED
-        seen = [weakref.ref(meta), 0, first]
-        with _PLANS_LOCK:
+    if seen is not None and seen[0]() is meta:
+        if seen[1] < FWD_PLAN_REPEAT:
+            seen[1] += 1
+            if seen[1] < FWD_PLAN_REPEAT:
+                return None
+    else:
+        # a new layout, or the id of one that died (its entry goes): the newest entry, this forward its first.  A layout
+        # whose entry left with a plan kept on it starts planned (its next forward builds its key once: a replay, or a
+        # recording as an unplanned one would make, else unplanned)
+        if seen is not None:
             _FWD_SEEN.pop(key, None)
-            if len(_FWD_SEEN) >= _FWD_SEEN_LIMIT:
-                del _FWD_SEEN[next(iter(_FWD_SEEN))]
-            _FWD_SEEN[key] = seen
-    if seen[1] < FWD_PLAN_REPEAT:
-        seen[1] += 1
+        elif len(_FWD_SEEN) >= _FWD_SEEN_LIMIT:
+            _FWD_SEEN.popitem(last=False)
+        first = _PLANNED if _PLAN_KEYS and id(meta) in _PLAN_KEYS else _UNPLANNED
+        count = 1 if FWD_PLAN_REPEAT > 0 else 0
+        seen = _FWD_SEEN[key] = [weakref.ref(meta), count, first]
         if seen[1] < FWD_PLAN_REPEAT:
             return None
     state = seen[2]
