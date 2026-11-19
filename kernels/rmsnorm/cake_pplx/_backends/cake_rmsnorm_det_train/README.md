@@ -66,6 +66,20 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 64] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (64, 128] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (128, inf) | 89fa3e96 | column task | - | - |
+| `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
+| `bwd_w32_h1024` | (1, 12288] | 744d7429 | column task | - | - |
+| `bwd_w32_h1024` | (12288, 16384] | 8f2a1c5e | column task | - | - |
+| `bwd_w32_h1024` | (16384, inf) | 744d7429 | column task | - | - |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 8192] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (8192, inf) | 1175c254 | column task | - | - |
 | `bwd_h1536` | (0, 1] | f6233ff8 | column task | - | - |
 | `bwd_h1536` | (1, 768] | 4176a24f | column task | - | - |
 | `bwd_h1536` | (768, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 9b727c2c (tree) |
@@ -137,6 +151,18 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 64] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (64, 128] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (128, inf) | 89fa3e96 | column task | - | - |
+| `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
+| `bwd_w32_h1024` | (1, inf) | 744d7429 | column task | - | - |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 8192] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (8192, inf) | 1175c254 | column task | - | - |
 | `bwd_h1536` | (0, 1] | e254714a | column task | - | - |
 | `bwd_h1536` | (1, 31] | 4aef8d1f | column task | - | - |
 | `bwd_h1536` | (31, 214] | 4aef8d1f | column task | - | - |
@@ -206,6 +232,15 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 8] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (8, inf) | 89fa3e96 | column task | - | - |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 8192] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (8192, inf) | 1175c254 | column task | - | - |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |

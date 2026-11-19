@@ -54,7 +54,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 - **Backward:** one fused pass computes `dx = BF16(r * g * w - x * r^3 * mean(g * w * x))` and the FP32 `dw = sum_t g * x * r`.
 - **Optional residual-add fusion:** computes `h_new = BF16(h + u)`, normalizes `h_new`, and returns one `dx` that is the gradient of both `h` and `u`.
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` (B200, B300/GB300, R200), with no family fallback. The hidden size `H` must be 256, 512, 1536, 2048, 4096, 5120 or 6144 on every architecture. Residual-fused routes exist only for `H = 6144`. FP32-weight routes exist for all seven plain hidden sizes.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a` (B200, B300/GB300, R200), with no family fallback. The hidden size `H` must be 128, 256, 512, 1024, 1280, 1536, 2048, 4096, 5120 or 6144 on every architecture. Residual-fused routes exist only for `H = 6144`. FP32-weight routes exist for all ten plain hidden sizes.
 
 ### `cake_pplx.cake_rmsnorm_det_train`
 
@@ -80,7 +80,7 @@ Other public names:
 
 The forward runs the det forward programs and is bitwise reproducible.
 
-Each backward token-count window runs one form, and `dx` is bitwise reproducible in every form. Two forms sum `dw` in scheduling order, so their `dw` is not guaranteed bitwise reproducible: the single kernel adds per-CTA `dw` sums into replicated FP32 column sums and stores their sum as `dw`, and the part-row single kernel writes one FP32 row per CTA, which helper CTAs fold. Every other window runs a fixed-order form: the one-cluster kernel, which reads no workspace, at small token counts (up to a top of T 2 to 16, or 64 rows at H = 256), a column-task program (its CTAs sum whole `dw` columns over every row) or the deterministic pair. Their `dw` is bitwise reproducible for a given token count on devices with the same SM count. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
+Each backward token-count window runs one form, and `dx` is bitwise reproducible in every form. Two forms sum `dw` in scheduling order, so their `dw` is not guaranteed bitwise reproducible: the single kernel adds per-CTA `dw` sums into replicated FP32 column sums and stores their sum as `dw`, and the part-row single kernel writes one FP32 row per CTA, which helper CTAs fold. Every other window runs a fixed-order form: the one-cluster kernel, which reads no workspace, at small token counts (up to a top of T 2 to 16, or 64 rows at H = 256; the `H = 128` routes and the `H = 1280` routes other than the FP32-weight one on `sm_107a` run none), a column-task program (its CTAs sum whole `dw` columns over every row) or the deterministic pair. Their `dw` is bitwise reproducible for a given token count on devices with the same SM count. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
