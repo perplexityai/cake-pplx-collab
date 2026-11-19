@@ -20,10 +20,10 @@ Every record of ``MODULES`` is one exported program: a CUDA device translation
 unit plus a tvm-ffi binding, compiled once per architecture it is delivered
 for.  A record is keyed by its program name
 ``cake_clamped_swiglu_det_train_<20 hex>`` and carries the host plan: the
-``role`` it runs in, the ``stage`` it serves (``fwd`` or ``bwd``, its role
-without the ``_large`` suffix), the architectures it is delivered for, the
-``run`` entry and, in a large-R role, ``rows_per_sm_windows``; ``library`` is
-its key.  The derived leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are
+``role`` it runs in, the ``stage`` it serves (``fwd``, ``bwd`` or
+``bwd_unweighted``, its role without the ``_large`` suffix), the
+architectures it is delivered for, the ``run`` entry and, in a large-R role,
+``rows_per_sm_windows``; ``library`` is its key.  The derived leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are
 written by the exporter from the rendered binding.  ``MODULES`` is a literal
 table (the exporter and the manifest checker read it with
 ``ast.literal_eval``).  Every launch is a plain stream-ordered launch: nothing
@@ -40,13 +40,19 @@ The stages:
   ``d_weight = sum over c of dh * a`` from the unweighted activation ``a``,
   one fixed-order FP32 sum per row (each lane's two FMA chains over its even
   and odd columns in load order, added, then XOR shuffles across the lanes).
+  The host runs it for a weighted call.
+- ``bwd_unweighted``: ``d_gate`` and ``d_up`` of an unweighted call (``w``
+  1), and nothing else: no weight, no weight flag, no ``d_weight``.  It
+  stores the bits ``bwd`` stores with ``weighted`` 0 (``dh * 1`` is ``dh``).
 
 Each stage has two roles (``ROLES``).  The stage's own role (``fwd``,
-``bwd``) is its small-R program, one on every architecture.  Its large-R role
-(``fwd_large``, ``bwd_large``) has at most one program on each architecture;
-the record's ``rows_per_sm_windows`` gives, per architecture, the windows of
-rows per SM in which it runs: ``[lo, hi]`` lists, ascending, each ``hi`` below
-the next ``lo``, only the last ``hi`` None (no upper bound).  A launch of
+``bwd``, ``bwd_unweighted``) is its small-R program, one on every
+architecture.  Its large-R role (``fwd_large``, ``bwd_large``,
+``bwd_unweighted_large``) has at most one program on each architecture
+(``bwd_unweighted_large`` has none); the record's ``rows_per_sm_windows``
+gives, per architecture, the windows of rows per SM in which it runs:
+``[lo, hi]`` lists, ascending, each ``hi`` below the next ``lo``, only the
+last ``hi`` None (no upper bound).  A launch of
 ``rows`` rows on a device of ``sm_count`` SMs runs the large-R program when
 ``lo * sm_count <= rows <= hi * sm_count`` for one of its windows (both bounds
 included) and the small-R program otherwise (:func:`route`); an architecture
@@ -60,13 +66,14 @@ The host finds a program through ``PROGRAM_OF`` (role -> architecture ->
 program name, derived from the records) and never spells a program name:
 retuning a kernel renames its program (the record's key and ``library``) and
 leaves the host code as it is.  The host's own facts of each stage's programs
-are ``BUILD_OF``: the lanes that own a row and the rows of a thread (with the
-launch block's threads, the rows one CTA owns) and the load width (the stride
-and alignment rule of every BF16 tensor).  Both kernels take the row count,
-the limit, the weight flag and every BF16 row stride (in elements) as launch
+are ``BUILD_OF``: the lanes that own a task, the tasks of a thread and the
+tasks of a row (with the launch block's threads, the share of rows one CTA
+owns) and the load width (the stride and alignment rule of every BF16
+tensor).  Every kernel takes the row count, the limit, every BF16 row stride
+(in elements) and, in ``fwd`` and ``bwd``, the weight flag as launch
 arguments, so one library per program and architecture serves every row
-count routed to it and both layouts.  The host
-launches nothing for ``rows == 0``.
+count routed to it and both layouts.  The host launches nothing for
+``rows == 0``.
 """
 
 from __future__ import annotations
@@ -224,11 +231,13 @@ PROGRAM_OF: dict[str, dict[str, str]] = _programs()
 # I: the intermediate width of the expert (the gate, up, h and gradient columns).
 WIDTH = 2304
 
-# Stage -> the build keywords of its programs that the host relies on, the same for every program of the stage (one
-# lane layout, so the programs store the same bits).  ``lanes`` lanes own a row and a thread owns ``rows_per_thread``
-# rows, so a CTA of ``threads`` threads (the launch block) owns ``threads / lanes * rows_per_thread`` consecutive rows;
-# ``width_bits`` is the load width.  A program built with other values of these keywords is another program (another
-# name): change this table with the ``MODULES`` keys.
+# Stage -> the build facts of its programs that the host relies on, the same for every program of the stage (one
+# lane layout, so the programs store the same bits).  ``lanes`` lanes own a task and a thread owns ``rows_per_thread``
+# tasks, so a CTA of ``threads`` threads (the launch block) owns ``threads / lanes * rows_per_thread`` consecutive
+# tasks.  A row is ``tasks_per_row`` consecutive tasks (1 when absent: a task is a row; ``bwd_unweighted``: 3, a task
+# is one run of 768 columns of a row), so the grid is ``ceil(rows * tasks_per_row / (threads / lanes *
+# rows_per_thread))`` CTAs (:func:`grid`).  ``width_bits`` is the load width.  A program built with other values of
+# these facts is another program (another name): change this table with the ``MODULES`` keys.
 BUILD_OF: dict[str, dict[str, int]] = {
     "fwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
     "bwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
@@ -241,8 +250,10 @@ BUILD_OF: dict[str, dict[str, int]] = {
 VECTOR_ELEMENTS = max(build["width_bits"] for build in BUILD_OF.values()) // 16
 ALIGNMENT_BYTES = 2 * VECTOR_ELEMENTS
 
-# ``rows`` is a 32-bit kernel parameter, and the kernels round it up to whole blocks of rows in 32 bits: fewer rows
-# than this.
+# ``rows`` is a 32-bit kernel parameter, and the ``fwd`` and ``bwd`` kernels round it up to whole blocks of rows in 32
+# bits: fewer rows than this.  The ``bwd_unweighted`` kernel counts its ``rows * 3`` tasks and their blocks in 64 bits
+# (``rows * 3`` passes ``2**31 - 1`` from 715,827,883 rows), and its grid, ``ceil(rows * 3 / 4)`` CTAs, stays below
+# ``2**31 - 1`` for every row count below this.
 MAX_ROWS = 2**31 - 256
 
 
@@ -275,25 +286,28 @@ def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, s
     return edges, small, large
 
 
-def rows_per_cta(name: str) -> int:
-    """The rows one CTA of program ``name`` owns: ``threads / lanes * rows_per_thread`` (``BUILD_OF`` of its stage,
-    the threads of its launch block)."""
+def cta_tasks(name: str) -> tuple[int, int]:
+    """``(per_cta, per_row)`` of program ``name``: one CTA owns ``per_cta = threads / lanes * rows_per_thread``
+    consecutive tasks and a row is ``per_row`` tasks (``BUILD_OF`` of its stage, ``tasks_per_row`` 1 when absent; the
+    threads of its launch block), so one CTA owns ``per_cta / per_row`` rows."""
     record = MODULES[name]
     build = BUILD_OF[record["stage"]]
     threads = int(record["launch"]["block"][0])
     per_cta = threads // build["lanes"] * build["rows_per_thread"]
-    if per_cta < 1 or threads % build["lanes"] != 0:
+    per_row = build.get("tasks_per_row", 1)
+    if per_cta < 1 or threads % build["lanes"] != 0 or per_row < 1:
         raise RuntimeError(
-            f"{name}: a launch block of {threads} threads does not hold whole rows of {build['lanes']} "
+            f"{name}: a launch block of {threads} threads does not hold whole tasks of {build['lanes']} "
             "lanes (the registry's launch leaves are written by the exporter)"
         )
-    return per_cta
+    return per_cta, per_row
 
 
 def grid(name: str, rows: int) -> tuple[int, int, int]:
-    """The launch grid of program ``name`` for ``rows >= 1`` rows: one CTA per block of :func:`rows_per_cta` rows on
-    the x axis (the kernels stride over the blocks from ``blockIdx.x``, so any row count fits one axis)."""
+    """The launch grid of program ``name`` for ``rows >= 1`` rows: one CTA per block of ``per_cta`` of the
+    ``rows * per_row`` tasks (:func:`cta_tasks`), ``ceil(rows * per_row / per_cta)`` CTAs on the x axis (the kernels
+    stride over the blocks from ``blockIdx.x``, so any row count fits one axis)."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
-    per_cta = rows_per_cta(name)
-    return (-(-rows // per_cta), 1, 1)
+    per_cta, per_row = cta_tasks(name)
+    return (-(-rows * per_row // per_cta), 1, 1)

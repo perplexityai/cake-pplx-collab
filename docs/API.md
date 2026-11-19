@@ -1748,7 +1748,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 - `gate`, `up`: BF16 `[R, 2304]` each, or one `[R, 4608]` tensor with the gate in columns `[0, 2304)` and the up in `[2304, 4608)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
 - `weight`: FP32 `[R]`, `>= 0` (not checked), zeros allowed; `None` for an unweighted (shared) expert, `w = 1`.
 - `dh`: BF16 `[R, 2304]`.
-- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has a small-`R` and a large-`R` program, chosen by the rows per SM of the device; both give the same bits.
+- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per program and architecture serves every call, with no recompilation. The forward and the weighted backward each have a small-`R` and a large-`R` program, chosen by the rows per SM of the device; both give the same bits. The unweighted backward has one program at every `R`, with the bits of the weighted backward's programs at `w = 1`; it takes no weight and writes no weight gradient.
 - `R` is any count from 0 to `2**31 - 257`. Every operand is on one CUDA device.
 - Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
 
@@ -1793,8 +1793,8 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 **Caveats.**
 
 - The intermediate width is 2304 only.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
-- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output (also the weight gradient an unweighted backward drops) and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates no weight gradient. An unweighted forward passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
 - A program's library builds at its first launch, and the row count picks the program. Before capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
