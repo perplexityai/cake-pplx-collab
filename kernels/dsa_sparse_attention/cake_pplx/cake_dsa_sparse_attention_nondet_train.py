@@ -303,8 +303,9 @@ def cake_dsa_sparse_attention_nondet(
         passes on ``sm_103a``); ``sm_107a`` runs a fixed 2 passes with a
         131,072-key floor; a count above 4 runs one pass; otherwise a single
         pass runs.  A row of more than one segment (``num_segments > 1``)
-        runs one pass.  ``1`` forces the single pass; a larger value forces
-        that many passes (``<= S``).  The passes carry dQ through
+        runs one pass unless ``key_passes`` overrides.  ``key_passes=1``
+        forces the single pass; a larger value forces that many passes
+        (``<= S``).  The passes carry dQ through
         an FP32 partial in the workspace (``T * 147,456`` B plus ``T * (4 *
         topk + 4)`` B, ~608 MiB at ``T = 4096``, top-k 2048); dQ is still
         written once per row and the dK/dV accumulation is unchanged.
@@ -363,11 +364,11 @@ def cake_dsa_sparse_attention_nondet(
         host: no device synchronization).  ``1`` (default) is a one-document
         row and keeps the key-range-pass policy above.  A count above 1 plans
         the backward as :func:`cake_dsa_sparse_attention_nondet_varlen` plans
-        it for the same rows: one pass, since whole-row key ranges would leave
-        most passes empty for every token, and on ``sm_107a`` the
-        ``dkv_direct`` rule's ``K_eff`` with this count.  The count selects the
-        plan only; every value gives a valid result.  ``bool``, a tensor or a
-        value below 1 raises ``ValueError``.
+        it for the same rows: one pass unless ``key_passes`` overrides, since
+        whole-row key ranges would leave most passes empty for every token,
+        and on ``sm_107a`` the ``dkv_direct`` rule's ``K_eff`` with this
+        count.  The count selects the plan only; every value gives a valid
+        result.  ``bool``, a tensor or a value below 1 raises ``ValueError``.
 
     Returns
     -------

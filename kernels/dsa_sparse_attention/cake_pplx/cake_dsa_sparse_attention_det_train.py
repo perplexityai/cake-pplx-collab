@@ -67,7 +67,8 @@ asks; the NoPE policy keeps one pass unless ``key_passes`` asks for more).
 Every backward accumulates in one form, and its dK / dV do not depend on the
 pass count.  The flat rope entry and the rope step backward take
 ``num_segments``, the packed segment count of the key row (default 1): a
-count above 1 plans one pass, as the packed entry does for the same rows.
+count above 1 plans one pass unless ``key_passes`` overrides, as the packed
+entry does for the same rows.
 
 Usage::
 
@@ -317,8 +318,8 @@ def cake_dsa_sparse_attention_det(
         non-deterministic package: ``len(cu_seqlens_k) - 1`` when ``indices``
         hold the global rows of a packed batch (a Python ``int``, read on the
         host).  ``1`` (default) keeps the key-pass policy of a one-document
-        row; a count above 1 plans one pass, as
-        :func:`cake_dsa_sparse_attention_det_varlen` does for the same rows.
+        row; a count above 1 plans one pass unless ``key_passes`` overrides,
+        as :func:`cake_dsa_sparse_attention_det_varlen` does for the same rows.
         dK / dV do not depend on it; dQ is summed through an FP32 partial
         between passes, so its bits follow the plan.  ``bool``, a tensor or a
         value below 1 raises ``ValueError``.
