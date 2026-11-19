@@ -64,8 +64,9 @@ KCP_PLAN = {
 
 # GB300: the architecture and SM count of the rule's envelope
 ARCH, SM = "sm_103a", 152
-# three documents of 16384 tokens at 4 heads: a short pack whose token-aware
-# plan is the uniform table of 15 segments per document (the occupancy plan: 38)
+# a pack of 16384 tokens in three documents at 4 heads (16384x3:4): a short
+# pack whose token-aware plan is the uniform table of 15 segments per document
+# (the occupancy plan: 38)
 DOCS3_LENGTHS, DOCS3_HEADS = (4096, 8192, 4096), 4
 # the issue's pack (four documents at 4 heads): a pack whose occupancy plan
 # saves the segment states, so both rules give that plan
@@ -358,11 +359,12 @@ def test_the_measured_rows_take_their_plans(name) -> None:
 
 @pytest.mark.parametrize("name", PACKAGES, ids=PACKAGE_IDS)
 def test_the_records_follow_the_plan_count(name) -> None:
-    """Three documents of 16384 tokens at 4 heads on GB300: the forward's
-    segment carry is the record its rule selects at the plan's walk CTA count,
-    as on the measured arms.  The token-aware plan's 45 segments are 180 walk
-    CTAs, below three waves of 152 SMs: ``seg_carry``; the occupancy plan's 114
-    segments are 456, three waves: the overlap carry ``seg_carry_ov``."""
+    """A pack of 16384 tokens in three documents at 4 heads on GB300: the
+    forward's segment carry is the record its rule selects at the plan's walk
+    CTA count, as on the measured arms.  The token-aware plan's 45 segments are
+    180 walk CTAs, below three waves of 152 SMs: ``seg_carry``; the occupancy
+    plan's 114 segments are 456, three waves: the overlap carry
+    ``seg_carry_ov``."""
     backend = BACKEND[name]
     S, N, H = sum(DOCS3_LENGTHS), len(DOCS3_LENGTHS), DOCS3_HEADS
     tokens = backend.plan(S, N, H, SM, ARCH)
@@ -553,11 +555,11 @@ def test_the_memory_of_the_measured_rows_never_grows(name) -> None:
 
 @pytest.mark.parametrize("name", PACKAGES, ids=PACKAGE_IDS)
 def test_document_groups_keep_the_whole_pack_plan(name) -> None:
-    """Three documents of 16384 tokens at 4 heads on GB300: the token-aware plan
-    is the uniform table of 15 segments per document, which the batched arena
-    option serves.  Every document group plans its documents with the whole
-    pack's 15 segments and records (``Plan.batch_plan``), not with the rule on
-    the group's own tokens, so the groups run the whole pack's plan; the
+    """A pack of 16384 tokens in three documents at 4 heads on GB300: the
+    token-aware plan is the uniform table of 15 segments per document, which the
+    batched arena option serves.  Every document group plans its documents with
+    the whole pack's 15 segments and records (``Plan.batch_plan``), not with the
+    rule on the group's own tokens, so the groups run the whole pack's plan; the
     option's arena bound (``Plan.batch_bound``) holds for every group, and the
     byte queries and the memory report size the same plan."""
     backend, Arena = BACKEND[name], ARENA[name]
