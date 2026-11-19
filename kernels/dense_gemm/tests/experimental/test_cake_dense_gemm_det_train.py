@@ -7620,6 +7620,7 @@ def test_measured_shape_rules_plan_their_programs(arch, monkeypatch):
     input-gradient rows of sm_103a at T 16231 / 16384, and the 15 of sm_100a, all but 8192 -> 128 at both T and
     5120 -> 128 at T 16231: test_dgrad_f32_part_ranges_plan_the_measured_rule) plan the range's program; the check of
     the shapes tranche runs without the sm_100a and sm_103a part ranges."""
+    _tables_039(monkeypatch)  # the part tables of version 0.3.9 (version 0.3.10: test_raster_0310_tables)
     rows = [row for row in MEASURED_SHAPE_ROWS if row[0][0] == arch]
     assert rows
     registered = _registered(arch)
@@ -13303,7 +13304,9 @@ def _without_dgrad_parts(m):
 def _pre_038_tables(m):
     """Put the part tables of version 0.3.7 in place (``m``: a monkeypatch context): no sm_100a or sm_103a part ranges,
     and the 212-SM sm_107a FP32 ranges at their bounds of versions 0.3.5 - 0.3.7 (``SM107A_212_F32_BOUNDS_037``), each
-    with the rule of the current range that holds it (the BF16 ranges of version 0.3.7 as they are)."""
+    with the rule of the current range that holds it (the BF16 ranges of version 0.3.7 as they are), and the 148-SM
+    sm_100a part rules of version 0.3.9 (``_tables_039``)."""
+    _tables_039(m)
     _without_dgrad_parts(m)
     current = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
     table = dict(current)
@@ -13550,6 +13553,7 @@ def test_sm100a_148_fp32_dgrad_part_rules(monkeypatch):
     without the sm_100a and sm_103a part ranges of version 0.3.8, which give the 148-SM sm_103a part (all but
     5120 -> 128 and 8192 -> 128) and the 152-SM sm_100a part (all but 8192 -> 128) the same program on these rows over
     token ranges: test_dgrad_f32_part_range_tables)."""
+    _tables_039(monkeypatch)  # the part tables of version 0.3.9 (version 0.3.10: test_raster_0310_tables)
     table = cake_backend.ROW_RULES_BY_SM
     assert set(table) == {("sm_100a", 148)}
     expected = {
@@ -13644,7 +13648,8 @@ def test_sm100a_5120_wgrad_long_token_rule():
 
 def test_sm107a_212_f32_range_table():
     """``ROW_RULE_RANGES_BY_SM`` holds the 212-SM sm_107a part and, since version 0.3.8, the 148- and 152-SM sm_103a
-    parts and the 152-SM sm_100a part (``DGRAD_F32_PART_RANGES``, test_dgrad_f32_part_range_tables).  The 212-SM
+    parts and the 152-SM sm_100a part (``DGRAD_F32_PART_RANGES``, test_dgrad_f32_part_range_tables), and since
+    version 0.3.10 the 148-SM sm_100a part (``RASTER_0310_RANGES``, test_raster_0310_tables).  The 212-SM
     part's FP32 ranges are ``SM107A_212_F32_RANGES``, its BF16 ranges the K-major rows of version 0.3.7
     (``K_MAJOR_RANGES_212``, test_k_major_tier_and_range_tables).  The FP32 ranges: ragged keys in the orientation the
     rows plan (the weight gradients direct: no ``ROW_RULES`` key swaps them), sorted disjoint inclusive ranges, rules
@@ -13655,7 +13660,13 @@ def test_sm107a_212_f32_range_table():
     ``_measured_row_rule`` reads a range with the part's SM count alone: the range's rule at its ends and middle, the
     row's ``ROW_RULES`` entry one token count outside, on the 208- and 216-SM parts and without an SM count."""
     table = cake_backend.ROW_RULE_RANGES_BY_SM
-    assert set(table) == {("sm_107a", 212), ("sm_103a", 148), ("sm_103a", 152), ("sm_100a", 152)}
+    assert set(table) == {
+        ("sm_107a", 212),
+        ("sm_103a", 148),
+        ("sm_103a", 152),
+        ("sm_100a", 152),
+        ("sm_100a", 148),
+    }
     assert {key: ranges for key, ranges in table[("sm_107a", 212)].items() if key[3]} == {
         key: tuple((lo, hi, rule) for lo, hi, rule, _program, _form in value[3])
         for key, value in SM107A_212_F32_RANGES.items()
@@ -15709,7 +15720,8 @@ def _raster_039_band(sm_count, d_in, d_out, T):
 
 def _tables_038(m):
     """Put the 152-SM sm_103a ranges of version 0.3.8 back (``m``: a monkeypatch context): 8192 -> 128 in raster groups
-    of 16 at T 16172 - 16384 and no 6144 -> 32 range."""
+    of 16 at T 16172 - 16384 and no 6144 -> 32 range; and the 148-SM tables of version 0.3.9 (``_tables_039``)."""
+    _tables_039(m)
     part = cake_backend.ROW_RULE_RANGES_BY_SM[_RASTER_039_PART]
     m.setitem(
         part,
@@ -15726,6 +15738,7 @@ def test_raster_039_tables(monkeypatch):
     T 16172 - 16230, the raster group of 2 at T 16231 - 16384.  The ends of each raster range are measured token counts,
     every measured token count lies inside it and every kept one outside; no token tier and no exact ``ROW_RULES`` key
     of the rows on sm_103a or sm_100a lies inside a raster range."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
     part = cake_backend.ROW_RULE_RANGES_BY_SM[_RASTER_039_PART]
     c1 = _dgrad_part_rule(8192, 128)
     assert RASTER_039_RULES[(8192, 128)] == {**c1, "group_m": 2}
@@ -15782,6 +15795,7 @@ def test_raster_039_ranges_plan_the_group_of_2(monkeypatch, row):
     selects: the same tiles, the same sums.  One token count outside each end and at the kept token counts the plan is
     the plan of version 0.3.8, and at every checked token count every other class of ``_DGRAD_PART_CLASSES`` plans the
     row as in version 0.3.8."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
     d_in, d_out = row
     lo, hi = RASTER_039_RANGES[row]
     key = _dgrad_part_key("sm_103a", d_in, d_out)
@@ -15834,6 +15848,7 @@ def test_routing_039_changes_exactly_the_raster_plans(monkeypatch):
     ``ROUTING_038_CLASSES``: a plan changes exactly at the FP32 input gradients of ``RASTER_039_RANGES`` inside their
     ranges on 152-SM sm_103a parts, and only in its raster group (2; the L2 hints may follow the group): the same
     program.  Every other plan is the plan of version 0.3.8."""
+    _tables_039(monkeypatch)  # the 148-SM tables of version 0.3.9: version 0.3.10 is checked below
     changed = 0
     for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
         for T in token_counts:
@@ -15900,6 +15915,289 @@ def test_raster_039_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, r
         "version 0.3.9",
         plan_changes=True,
         raster=True,
+    )
+
+
+# ---------------------------------------------------------------------------
+# The raster groups of version 0.3.10 (ROW_RULE_RANGES_BY_SM[("sm_103a", 148)] and [("sm_100a", 148)]): on 148-SM
+# sm_103a (B300) and sm_100a (B200) parts FP32 input gradients run the single-CTA program in raster groups of 2 or 4
+# row tiles; on the 148-SM sm_100a part 8192 -> 128 moves from its two part rules (T 16231 and 16384) to a token range
+# ---------------------------------------------------------------------------
+
+#: The raster ranges of version 0.3.10: ``(arch, SM count) -> {(d_in, d_out): ((lo, hi, group_m), ...)}`` of the FP32
+#: input gradient; each range's rule is the 148-SM sm_100a part rule (``_dgrad_part_rule(8192, 128)``) in raster groups
+#: of ``group_m`` row tiles.
+RASTER_0310_RANGES = {
+    ("sm_103a", 148): {(8192, 128): ((8192, 32768, 2),), (6144, 32): ((8192, 8192, 4),)},
+    ("sm_100a", 148): {
+        (8192, 128): ((8192, 32768, 2),),
+        (5120, 128): ((16384, 32768, 2),),
+        (6144, 128): ((16384, 32768, 2),),
+        (6144, 32): ((16231, 16231, 4), (32768, 32768, 2)),
+    },
+}
+#: The token counts version 0.3.10 measured on its rows (two nodes of each part, against the plan of version 0.3.9):
+#: inside a range a raster group met the bar there with the bits of the plan before; outside, the row keeps its plan.
+RASTER_0310_MEASURED = (8192, 16231, 16384, 32768)
+#: The measured rows of each part (5120 -> 128 on the 148-SM sm_103a part has no range: at T 8192 the plan before was
+#: more than 1% off a second copy of itself in one node and mode pair, and at the other token counts the groups missed
+#: the bar).
+RASTER_0310_ROWS = {
+    ("sm_103a", 148): ((8192, 128), (6144, 32), (5120, 128)),
+    ("sm_100a", 148): ((8192, 128), (5120, 128), (6144, 128), (6144, 32)),
+}
+#: The two part rules of version 0.3.9 that the 148-SM sm_100a range of 8192 -> 128 replaces.
+_PART_RULES_039_8192 = tuple(("sm_100a", False, True, True, False, False, 8192, 128, T) for T in (16231, 16384))
+
+
+def _raster_0310_group(arch, sm_count, d_in, d_out, T):
+    """The raster group of the range of version 0.3.10 that holds the FP32 input gradient ``d_in -> d_out`` at ``T``
+    tokens on an ``arch`` part of ``sm_count`` SMs, else ``None``."""
+    for lo, hi, group in RASTER_0310_RANGES.get((arch, sm_count), {}).get((d_in, d_out), ()):
+        if lo <= T <= hi:
+            return group
+    return None
+
+
+def _raster_0310_rule(group):
+    """The rule of a range of version 0.3.10: the 148-SM sm_100a part rule in raster groups of ``group``."""
+    return {**_dgrad_part_rule(8192, 128), "group_m": group}
+
+
+def _tables_039(m):
+    """Put the 148-SM tables of version 0.3.9 back (``m``: a monkeypatch context; applying it again in a nested context
+    is a no-op): no 148-SM sm_100a part ranges, no 8192 -> 128 or 6144 -> 32 range on the 148-SM sm_103a part, and the
+    148-SM sm_100a part rules of 8192 -> 128 at T 16231 and 16384 (the default raster group)."""
+    m.delitem(cake_backend.ROW_RULE_RANGES_BY_SM, ("sm_100a", 148), raising=False)
+    b300 = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_103a", 148)]
+    for row in ((8192, 128), (6144, 32)):
+        m.delitem(b300, _dgrad_part_key("sm_103a", *row), raising=False)
+    for key in _PART_RULES_039_8192:
+        m.setitem(cake_backend.ROW_RULES_BY_SM[("sm_100a", 148)], key, _dgrad_part_rule(8192, 128))
+
+
+def test_raster_0310_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` and ``ROW_RULES_BY_SM`` differ from version 0.3.9 (``_tables_039``) in the rows of
+    ``RASTER_0310_RANGES`` alone: the 148-SM sm_103a part gets the 8192 -> 128 and 6144 -> 32 ranges (its other keys as
+    they were), a new 148-SM sm_100a part holds the ranges of its four rows, and the 148-SM sm_100a part rules lose the
+    two 8192 -> 128 keys (T 16231 and 16384) that its range now covers; every other part is as it was.  Each range's
+    rule is the 148-SM sm_100a part rule in its raster group, the ranges of a key are sorted and disjoint, their ends
+    are measured token counts, and no part rule and no token tier of a row lies inside one of its ranges (a part rule
+    would shadow the range)."""
+    ranges_now = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_039(m)
+        ranges_039 = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+        rules_039 = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
+    expected = {
+        part: {
+            _dgrad_part_key(part[0], *row): tuple((lo, hi, _raster_0310_rule(group)) for lo, hi, group in bands)
+            for row, bands in rows.items()
+        }
+        for part, rows in RASTER_0310_RANGES.items()
+    }
+    b300, b200 = ("sm_103a", 148), ("sm_100a", 148)
+    assert b200 not in ranges_039 and set(ranges_now) == set(ranges_039) | {b200}
+    assert ranges_now[b200] == expected[b200]
+    assert not set(expected[b300]) & set(ranges_039[b300])
+    assert ranges_now[b300] == {**ranges_039[b300], **expected[b300]}
+    for part, table in ranges_039.items():
+        if part != b300:
+            assert ranges_now[part] == table, part
+    assert set(rules_now) == set(rules_039) == {b200}
+    assert set(rules_039[b200]) - set(rules_now[b200]) == set(_PART_RULES_039_8192)
+    assert {k: v for k, v in rules_039[b200].items() if k not in _PART_RULES_039_8192} == rules_now[b200]
+    assert all(rules_039[b200][key] == _dgrad_part_rule(8192, 128) for key in _PART_RULES_039_8192)
+    for part, rows in RASTER_0310_RANGES.items():
+        for row, bands in rows.items():
+            key = _dgrad_part_key(part[0], *row)
+            assert all(lo <= hi for lo, hi, _ in bands) and all(a[1] < b[0] for a, b in zip(bands, bands[1:])), row
+            assert all(lo in RASTER_0310_MEASURED and hi in RASTER_0310_MEASURED for lo, hi, _ in bands), row
+            for a in ("sm_100a", "sm_103a"):
+                assert (a,) + key[1:] not in cake_backend.ROW_RULE_MIN_T, (part, row, a)
+            assert not [
+                k
+                for k in rules_now.get(part, {})
+                if k[:8] == key[:8] and any(lo <= k[8] <= hi for lo, hi, _ in bands)
+            ], (part, row)
+
+
+_RASTER_0310_CASES = tuple((part, row) for part, rows in sorted(RASTER_0310_RANGES.items()) for row in sorted(rows))
+#: The measured token counts inside the ranges of version 0.3.10 whose plan of version 0.3.9 is already the single-CTA
+#: program (in another raster group), ``(arch, sm_count, d_in, d_out, T)``: there the range changes only the raster
+#: group; at the other measured token counts inside the ranges it replaces another program.
+RASTER_0310_SAME_PROGRAM = {
+    ("sm_103a", 148, 6144, 32, 8192),
+    ("sm_100a", 148, 8192, 128, 16231),
+    ("sm_100a", 148, 8192, 128, 16384),
+    ("sm_100a", 148, 6144, 32, 16231),
+    ("sm_100a", 148, 6144, 32, 32768),
+}
+
+
+@pytest.mark.parametrize(
+    "part,row", _RASTER_0310_CASES, ids=[f"{a}-{s}-{r[0]}x{r[1]}" for (a, s), r in _RASTER_0310_CASES]
+)
+def test_raster_0310_ranges_plan_their_group(monkeypatch, part, row):
+    """At the ends and the middle of each raster range of version 0.3.10 and at its measured token counts, the part's
+    plan is the plan of the range's rule as an exact ``ROW_RULES`` key at that token count without the part tables:
+    the single-CTA program ``SM100A_148_DGRAD_F32_PROGRAM`` with no fallback flag, whole tiles (no stream-K unit, no
+    promoted chunk), in the range's raster group, where the tables of version 0.3.9 (``_tables_039``) plan another
+    program or another group (the same K order: the bits of the plan before, checked on the GPU).  One token count
+    outside each end and at the measured token counts outside every range the plan is the plan of version 0.3.9, and
+    at every checked token count every class of ``_DGRAD_PART_CLASSES`` without a range of the row there plans the row
+    as in version 0.3.9."""
+    arch, sm = part
+    d_in, d_out = row
+    key = _dgrad_part_key(arch, d_in, d_out)
+    bands = RASTER_0310_RANGES[part][row]
+
+    def plan_at(a, s, T):
+        return _rows_plan("dgrad", a, s, d_in, d_out, T, "f32")
+
+    def plan_039(a, s, T):
+        with monkeypatch.context() as m:
+            _tables_039(m)
+            return plan_at(a, s, T)
+
+    def plan_exact(T, group):
+        # the range's rule as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), _raster_0310_rule(group))
+            return plan_at(arch, sm, T)
+
+    inside = sorted(
+        {T for lo, hi, _ in bands for T in (lo, (lo + hi) // 2, hi)}
+        | {T for T in RASTER_0310_MEASURED if _raster_0310_group(arch, sm, d_in, d_out, T) is not None}
+    )
+    for T in inside:
+        group = _raster_0310_group(arch, sm, d_in, d_out, T)
+        plan, before = plan_at(arch, sm, T), plan_039(arch, sm, T)
+        where = (part, row, T, plan.template, before.template)
+        assert plan == plan_exact(T, group), where
+        assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+        assert not (
+            plan.rule_fallback
+            or plan.knob_fallback
+            or plan.swap_fallback
+            or plan.wave_fallback
+        ), where
+        assert plan.sk_units == 0 and plan.promote_blocks == 0, where
+        assert plan.group_m == group, where
+        assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+        if T in RASTER_0310_MEASURED:
+            same = (arch, sm, d_in, d_out, T) in RASTER_0310_SAME_PROGRAM
+            assert (before.template == plan.template) == same, where
+    outside = sorted(
+        ({T for lo, hi, _ in bands for T in (lo - 1, hi + 1)} | set(RASTER_0310_MEASURED)) - set(inside)
+    )
+    for T in outside:
+        assert _raster_0310_group(arch, sm, d_in, d_out, T) is None, (part, row, T)
+        assert plan_at(arch, sm, T) == plan_039(arch, sm, T), (part, row, T)
+    for T in (*inside, *outside):
+        for a, s in _DGRAD_PART_CLASSES:
+            if (a, s) != part and _raster_0310_group(a, s, d_in, d_out, T) is None:
+                assert plan_at(a, s, T) == plan_039(a, s, T), (part, row, a, s, T)
+
+
+def test_raster_0310_kept_rows_plan_as_in_0_3_9(monkeypatch):
+    """The measured rows of version 0.3.10 at their measured token counts outside every range (5120 -> 128 on the
+    148-SM sm_103a part at all four) plan as in version 0.3.9 on their part."""
+    kept = 0
+    for (arch, sm), rows in RASTER_0310_ROWS.items():
+        for d_in, d_out in rows:
+            for T in RASTER_0310_MEASURED:
+                if _raster_0310_group(arch, sm, d_in, d_out, T) is not None:
+                    continue
+                plan = _rows_plan("dgrad", arch, sm, d_in, d_out, T, "f32")
+                with monkeypatch.context() as m:
+                    _tables_039(m)
+                    before = _rows_plan("dgrad", arch, sm, d_in, d_out, T, "f32")
+                assert plan == before, (arch, sm, d_in, d_out, T)
+                kept += 1
+    # B300: 6144 -> 32 at 16231, 16384 and 32768, 5120 -> 128 at all four; B200: 5120 -> 128 and 6144 -> 128 at 8192
+    # and 16231, 6144 -> 32 at 8192 and 16384
+    assert kept == (3 + 4) + (2 + 2 + 2)
+
+
+def test_routing_0310_changes_exactly_the_raster_plans(monkeypatch):
+    """Byte for byte against the tables of version 0.3.9 (``_tables_039``), over ``ROUTING_038_SWEEP`` (it holds the
+    rows of ``RASTER_0310_RANGES`` at the token counts around and inside the ranges) on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly at the FP32 input gradients of ``RASTER_0310_RANGES`` inside their
+    ranges on their part, to the single-CTA program in the range's raster group.  Every other plan is the plan of
+    version 0.3.9."""
+    changed = 0
+    for op, d_in, d_out, out_dtype, token_counts in ROUTING_038_SWEEP:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_039(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                group = (
+                    _raster_0310_group(arch, sm_count, d_in, d_out, T)
+                    if (op, out_dtype) == ("dgrad", "f32")
+                    else None
+                )
+                if group is None:
+                    assert _plan_signature(plan) == _plan_signature(before), (where, plan.template, before.template)
+                    continue
+                changed += 1
+                assert plan.template == SM100A_148_DGRAD_F32_PROGRAM and plan.cta1, where
+                assert plan.group_m == group, (where, plan.group_m)
+                assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+    # the sweep's token counts of these rows (_DGRAD_PART_SWEEP_TOKENS): 15 from 8192 to 32768.  B300: 8192 -> 128 at
+    # those 15, 6144 -> 32 at 8192; B200: 8192 -> 128 at those 15, 5120 -> 128 and 6144 -> 128 at 16384, 16385, 20480
+    # and 32768, 6144 -> 32 at 16231 and 32768
+    assert changed == (15 + 1) + (15 + 4 + 4 + 2)
+
+
+def _raster_0310_gpu_cases():
+    """The GPU cases of the raster ranges of version 0.3.10: each row at each token count measured inside its ranges,
+    on its part alone; the output keeps the bits of the plan of version 0.3.9."""
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "f32",
+            {part: SM100A_148_DGRAD_F32_PROGRAM},
+            scoped=True,
+            same_bits=True,
+        )
+        for part, rows in sorted(RASTER_0310_RANGES.items())
+        for (d_in, d_out) in sorted(rows)
+        for T in RASTER_0310_MEASURED
+        if _raster_0310_group(*part, d_in, d_out, T) is not None
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _raster_0310_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-f32",
+)
+def test_raster_0310_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each row of the raster ranges of version 0.3.10 at each token count measured inside its ranges runs its default
+    plan on its part (148-SM sm_103a or sm_100a), the single-CTA program in the range's raster group: its output is
+    judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on three more
+    launches into NaN, its plan differs from the plan of version 0.3.9 (``_tables_039``) on the device (another
+    program, or at ``RASTER_0310_SAME_PROGRAM`` the same program in another raster group), and its output equals that
+    plan's bit for bit.  Another device skips."""
+    ((arch, sm_count),) = case.programs
+    _run_routing_gpu_case(
+        case,
+        monkeypatch,
+        record_property,
+        _tables_039,
+        "version 0.3.10",
+        plan_changes=True,
+        raster=(arch, sm_count, case.d_in, case.d_out, case.T) in RASTER_0310_SAME_PROGRAM,
     )
 
 
