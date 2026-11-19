@@ -35,8 +35,9 @@ The autograd entries and the explicit forward take ``dot_sum``, how the
 forward sums ``P``.  The default, ``"compensated"``, is a compensated FP32 dot
 product: each product split with an FMA, each running sum with an error-free
 two-sum, the error words added once at the end.  ``"fp32"`` (opt-in) sums
-``P`` in one FP32 word: the forward takes about 6% less time (GB300,
-``T = 16384``: 0.313 ms against 0.333 ms) and, where the products nearly
+``P`` in one FP32 word: the forward takes about 5-10% less time, depending
+on the GPU (``T = 16384``, FP32 weights: 0.313 ms against 0.329 ms on
+GB300, 0.197 ms against 0.218 ms on VR200) and, where the products nearly
 cancel, rounds more output elements away from the correctly rounded result
 (17802 of the 8.19 million output elements of 25 near-cancelling draws,
 against 117; an FP32 evaluation of the formula: 21917).  The backward is the
