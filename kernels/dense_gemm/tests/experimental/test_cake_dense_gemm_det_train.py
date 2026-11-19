@@ -14234,9 +14234,9 @@ def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
 
 # ---------------------------------------------------------------------------
 # The K-major rows of version 0.3.7: the BF16 forward and input-gradient rows with K > 8192 at small token counts plan
-# a three- or four-way K split of the tail tiles, or the 128-row program without the row's rule, below a token floor
-# (ROW_RULE_MIN_T, every part of sm_100a and sm_103a) and in token ranges of the 212-SM sm_107a part
-# (ROW_RULE_RANGES_BY_SM)
+# a split of the tail's K steps into three or four units per tail tile, or the 128-row program without the row's
+# rule, below a token floor (ROW_RULE_MIN_T, every part of sm_100a and sm_103a) and in token ranges of the 212-SM
+# sm_107a part (ROW_RULE_RANGES_BY_SM)
 # ---------------------------------------------------------------------------
 
 #: The token tiers of version 0.3.7 (cake_backend.ROW_RULE_MIN_T): ragged key -> ((bound, rule), ...).  sm_103a reads
@@ -14550,11 +14550,12 @@ def test_k_major_bands_plan_the_measured_rule(monkeypatch, key):
     """At every measured token count of each band of the K-major entry ``key`` and at the band's ends, on every device
     class the entry plans (``_k_major_classes``): the plan equals the plan of the band's rule as an exact ``ROW_RULES``
     key at that token count without the entry (the form the rule was measured in), with no fallback flag, the band's
-    program and the band's tail policy (``_k_major_tail``: the rule's three- or four-way split of the tail tiles, else
-    the two-way split of a single partial wave or whole tiles); on a measured class the measured longest segment; at a
-    cell of ``K_MAJOR_MISSED_CELLS`` a longest segment of at most 128 K blocks where the plan without the entry held
-    more.  At the floor of a tier key and one token count outside each range the plan is the plan without the entry
-    (the row's ``ROW_RULES`` entry); the 208-, 216- and 224-SM sm_107a parts plan the row as without the entry."""
+    program and the band's tail policy (``_k_major_tail``: the rule's split of the tail's K steps into three or four
+    units per tail tile, else the two-way split of a single partial wave or whole tiles); on a measured class the
+    measured longest segment; at a cell of ``K_MAJOR_MISSED_CELLS`` a longest segment of at most 128 K blocks where
+    the plan without the entry held more.  At the floor of a tier key and one token count outside each range the plan
+    is the plan without the entry (the row's ``ROW_RULES`` entry); the 208-, 216- and 224-SM sm_107a parts plan the
+    row as without the entry."""
     op, d_in, d_out = _k_major_row(key)
     measured, bands = K_MAJOR_BAND_PLANS[key]
     ranged = key in K_MAJOR_RANGES_212
@@ -14606,7 +14607,9 @@ def test_k_major_bands_plan_the_measured_rule(monkeypatch, key):
                 assert fields_of_plan == fields, (where, form)
                 parts = rule.get("sk_parts")
                 if parts:
-                    # every tile is a tail tile there, split into ``parts`` units of ceil(k_blocks / parts) K blocks
+                    # every tile is a tail tile there; the tail's K steps form ``parts`` units per tile of
+                    # ceil(k_blocks / parts) K blocks each, laid in one line over the tail (with K 17408 a unit
+                    # runs on into the next tile: a tile sums three or four partials)
                     assert form == f"parts:{parts}", where
                     assert fields_of_plan == (
                         0,
@@ -14757,21 +14760,22 @@ def _judge_k_major(record_property, name, launch, op, X, W, G, out, seed):
 
 def _k_major_gpu_cases(arch, sm_count):
     """The cases of ``test_gpu_k_major_rows_meet_the_naive_tier`` on a part of ``arch`` with ``sm_count`` SMs,
-    ``(op, d_in, d_out, T, seeds)``: the cells of ``K_MAJOR_MISSED_CELLS`` of the class, and on ``SEED`` the lowest
-    and the highest measured token count of each K-major band that plans a row on the class."""
-    cases = list(K_MAJOR_MISSED_CELLS.get((arch, sm_count), ()))
-    seen = {case[:4] for case in cases}
+    ``(op, d_in, d_out, T, seeds)``: the cells of ``K_MAJOR_MISSED_CELLS`` of the class on the seeds they missed on,
+    and on ``SEED`` the lowest and the highest measured token count of each K-major band that plans a row on the class
+    (a band end that is also a missed cell is judged on its missed seeds and on ``SEED``)."""
+    cases = {case[:4]: case[4] for case in K_MAJOR_MISSED_CELLS.get((arch, sm_count), ())}
     for key, (_measured, bands) in K_MAJOR_BAND_PLANS.items():
         op, d_in, d_out = _k_major_row(key)
         for _lo, _hi, _program, segments in bands:
             tokens = sorted(_k_major_segments(segments))
             for T in (tokens[0], tokens[-1]):
                 band = _k_major_band(arch, sm_count, op, d_in, d_out, T)
-                if band is None or band[0] != key or (op, d_in, d_out, T) in seen:
+                if band is None or band[0] != key:
                     continue
-                seen.add((op, d_in, d_out, T))
-                cases.append((op, d_in, d_out, T, (SEED,)))
-    return cases
+                seeds = cases.get((op, d_in, d_out, T), ())
+                if SEED not in seeds:
+                    cases[(op, d_in, d_out, T)] = (*seeds, SEED)
+    return [(*cell, seeds) for cell, seeds in cases.items()]
 
 
 def test_gpu_k_major_rows_meet_the_naive_tier(record_property):

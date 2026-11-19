@@ -17752,12 +17752,15 @@ def _k_major_no_table_row(arch, sms, op, d_in, d_out, T):
         assert not any((d_in, d_out, T, "bf16") in rows for rows in rules.values())
 
 
-def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7():
+def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7(monkeypatch):
     """The K-major rows of the deterministic package's version 0.3.7 (its ``ROW_RULE_MIN_T`` tiers on sm_100a and
-    sm_103a and the BF16 ranges of its 212-SM ``sm_107a`` ``ROW_RULE_RANGES_BY_SM``), as this package plans them: the
+    sm_103a and the BF16 ranges of its 212-SM ``sm_107a`` ``ROW_RULE_RANGES_BY_SM``), as this package runs them: the
     BF16 keys of that range table are the four K-major rows of the 212-SM part, and at each cell of
-    ``K_MAJOR_MISSED_CELLS`` on its class the row has no row of this package's tables, so the forward or input gradient
-    plans the deterministic plan, field for field, whose longest segment holds at most 128 K blocks."""
+    ``K_MAJOR_MISSED_CELLS`` on its class (CPU views, the class's device facts, nothing launched:
+    :func:`_cpu_k1_launches`) the call's layout routes to the deterministic programs, the row has no row of this
+    package's tables and the entry point resolves no knobs, so the forward or input-gradient entry point binds the
+    deterministic package's plan of the row on the class, field for field, whose longest segment holds at most 128 K
+    blocks."""
     bf16 = torch.bfloat16
     ranged = {
         key for key in det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)] if not key[3]
@@ -17781,23 +17784,40 @@ def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7():
     }
     for (arch, sms), cells in K_MAJOR_MISSED_CELLS.items():
         l2 = K1_DGRAD_PARTS.get((arch, sms), GB_L2_BYTES)
-        for op, d_in, d_out, T, _seeds in cells:
-            what = (arch, sms, op, d_in, d_out, T)
-            assert (op, d_in, d_out) in K_MAJOR_ROWS, what
-            _k_major_no_table_row(arch, sms, op, d_in, d_out, T)
-            W = torch.empty(d_out, d_in, dtype=bf16)
-            A, B = _k_major_views(
-                op, torch.empty(T, d_in, dtype=bf16), W, torch.empty(T, d_out, dtype=bf16)
-            )
-            out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=bf16)
-            plan = cake_backend.cake_dense_gemm_nondet_train_projection_plan(
-                A, B, out, sm_count=sms, l2_bytes=l2, arch=arch
-            )[0]
-            det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
-                A, B, out, sm_count=sms, l2_bytes=l2, arch=arch
-            )[0]
-            assert plan == det_plan, (what, plan.template, det_plan.template)
-            assert det_backend.segment_blocks(plan) <= 128, (what, plan.template)
+        with monkeypatch.context() as m:
+            _cpu_k1_launches(m, arch)
+            m.setattr(cake_backend, "_k1_index", lambda *views: 0)
+            facts = det_backend.DeviceFacts(index=0, arch=arch, sm_count=sms, l2_bytes=l2)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            for op, d_in, d_out, T, _seeds in cells:
+                what = (arch, sms, op, d_in, d_out, T)
+                assert (op, d_in, d_out) in K_MAJOR_ROWS, what
+                _k_major_no_table_row(arch, sms, op, d_in, d_out, T)
+                X = torch.empty(T, d_in, dtype=bf16)
+                W = torch.empty(d_out, d_in, dtype=bf16)
+                G = torch.empty(T, d_out, dtype=bf16)
+                A, B = _k_major_views(op, X, W, G)
+                out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=bf16)
+                assert cake_backend._route(cake_backend._k1_layout(A, B)) == "det", what
+                if op == "fwd":
+                    assert cake_backend._k1_forward_knobs_of(X, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_forward, X, W, out
+                    )
+                else:
+                    assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_dgrad, G, W, out
+                    )
+                cake_backend._K1_DET_CACHE.clear()
+                assert call() is out, what
+                ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+                assert key[2][0] == (op,) and entry.k1 is not None, what
+                det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+                    A, B, out, sm_count=sms, l2_bytes=l2, arch=arch
+                )[0]
+                assert entry.plan == det_plan, (what, entry.plan.template, det_plan.template)
+                assert det_backend.segment_blocks(entry.plan) <= 128, (what, entry.plan.template)
 
 
 def _k_major_operands(T, d_in, d_out, seed, device):
@@ -17869,8 +17889,11 @@ def test_gpu_k_major_rows_meet_the_naive_tier(record_property):
                 failures.append(f"{where} seed {seed}: {error}"[:2000])
         ((_, entry),) = cake_backend._K1_DET_CACHE.items()
         assert entry.k1 is not None, where
-        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(A, B, out)[0]
-        assert entry.plan.template == det_plan.template, (where, entry.plan.template)
+        facts = det_backend.device_facts(device)
+        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=facts.sm_count, l2_bytes=facts.l2_bytes, arch=arch
+        )[0]
+        assert entry.plan == det_plan, (where, entry.plan.template, det_plan.template)
         assert det_backend.segment_blocks(entry.plan) <= 128, (where, entry.plan.template)
         out.fill_(float("nan"))
         launch()

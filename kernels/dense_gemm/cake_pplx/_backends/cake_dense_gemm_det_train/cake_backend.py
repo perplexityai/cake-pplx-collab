@@ -2130,23 +2130,29 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # Version 0.3.7 adds tiers to the ragged BF16 forward (both operands K-major) and input-gradient keys with K > 8192 of
 # sm_100a and to the four such keys of sm_103a; sm_103a reads the sm_100a tiers through ``RULE_PARENT`` on the rows it
 # has no rule of its own for (the o_proj and dense_down forwards, the q_b and dense_gate_up input gradients).  At small
-# token counts the rules of these rows (256-row tiles with the half-height tail wave) sum a tile's whole K, 192 to 272 K
-# blocks, in one FP32 accumulator, and that plan missed the naive BF16 tier on some cells (a cell: a row at one token
-# count on one seed of 32 draws; errors up to 1.0089 times the tier's, the tests allow 1.005): 49 of the 840 cells
-# judged on B200 (sm_100a, 148 SMs), 47 of 840 on B300 (sm_103a, 148 SMs) and 35 of 840 on GB300 (sm_103a, 152 SMs), all
-# at T 1 - 513.  Up to T 256 a tier splits the K of every tail tile three ways (four ways up to T 512 on the q_b input
-# gradient): segments of 64 to 91 K blocks.  Above that, and on the o_proj forward from T 1, it plans the 128-row
-# program without the row's rule (whole tiles, or the two-way K split of a single partial wave), with the column-grouped
-# raster of the row's rule on the two forwards whose rule carries it.  Wherever the plan before missed the tier, the
-# tier's plan holds segments of at most 128 K blocks.  Every tier plan met the tier on every judged seed and ran faster
-# than the row's rule at every measured T of its band; the ratios below are the row's rule's time over the tier plan's
-# (geometric mean of eager launches and CUDA graph replays, cold L2).  A key's floor (its last bound) is the first
-# measured T at which the tier plan was no longer faster than the row's rule on every measured part.  The sm_100a keys
-# of the 12288 -> 4096 and 17408 -> 5120 forwards and the 4096 -> 12288 and 5120 -> 17408 input gradients were timed on
-# B200 alone and the sm_103a keys of these rows on B300 and GB300; both keys of a row take the same bounds, the lowest
-# over the three parts.  GB200 (sm_100a, 152 SMs) and 160-SM sm_103a parts are not measured; they take the tiers of
-# their architecture.  The tier plans that split K sum in another order than the plans before them; every tier plan
-# gives the same bits on every run.
+# token counts the rules of these rows (256-row tiles with the half-height tail wave) sum a tile's whole K, 192 to
+# 272 K blocks, in one FP32 accumulator, and that plan missed the naive BF16 tier on some cells (a cell: a row at one
+# token count on one seed of 32 draws; errors up to 1.0089 times the tier's, the tests allow 1.005): 49 of the 840 cells
+# at T 1 - 2049 (8 rows x 21 token counts x 5 seeds) on B200 (sm_100a, 148 SMs), 47 of 840 on B300 (sm_103a, 148 SMs)
+# and 35 of 840 on GB300 (sm_103a, 152 SMs), all at T 1 - 513; later passes judged that plan at more token counts and
+# found no other miss.  That plan met the tier on every judged cell of the 12288 -> 4096 and dense_down forwards and of
+# the 4096 -> 12288 input gradient, and on each other row above the token counts listed with its key: there the tiers
+# are taken for speed alone, in another summation order.  Up to T 256 a tier splits the tail's K steps into three units
+# per tail tile (four up to T 512 on the q_b input gradient): with K 12288 or 16384 each tail tile sums three (four)
+# partials of 64 K blocks; with K 17408 the units, of 91 K blocks, are laid in one line over the tail's K steps, so a
+# tile of 272 K blocks sums three or four partials of 1 to 91 K blocks.  Above that, and on the o_proj forward from T 1,
+# it plans the 128-row program without the row's rule (whole tiles, or the two-way K split of a single partial wave),
+# with the column-grouped raster of the row's rule on the two forwards whose rule carries it.  Wherever the plan before
+# missed the tier, the tier's plan holds segments of at most 128 K blocks.  Every tier plan met the tier on every judged
+# seed and ran faster than the row's rule at every measured T of its band; the ratios below are the row's rule's time
+# over the tier plan's (geometric mean of eager launches and CUDA graph replays, cold L2).  A key's floor (its last
+# bound) is one above the highest measured T of its band: at the next measured T (769, 1024, 1536 or 3072) the tier plan
+# was no longer faster than the row's rule on every measured part, and the unmeasured T from the floor up to that T keep
+# the row's rule.  The sm_100a keys of the 12288 -> 4096 and 17408 -> 5120 forwards and the 4096 -> 12288 and
+# 5120 -> 17408 input gradients were timed on B200 alone and the sm_103a keys of these rows on B300 and GB300; both keys
+# of a row take the same bounds, the lowest over the three parts.  GB200 (sm_100a, 152 SMs) and 160-SM sm_103a parts are
+# not measured; they take the tiers of their architecture.  The tier plans that split K sum in another order than the
+# plans before them; every tier plan gives the same bits on every run.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # q_b 2048 x 16384 input gradient: slower at 11, flat at 3, faster at 1 of the 15 measured T 1 - 1025; faster at
@@ -2183,10 +2189,10 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # 1.66 to 1.68 times faster up to T 512 (a two-way K split of the single partial wave, 96-block segments) and 1.22
     # to 1.25 from T 513 (whole tiles)
     ('sm_100a', False, False, False, False, False, 4096, 12288, None): ((257, {"pro": 7, "sk_parts": 3}), (1025, {"cgrp": True, "pro": 7, "group_m": 8})),
-    # 17408 -> 5120 forward, on B200: a three-way K split of the tail tiles up to T 256 (91-block segments), 1.57 to
-    # 1.87 times faster; up to T 768 whole tiles of the 128-row program with the rule's column-grouped raster
-    # (8-column-tile groups), 1.24 to 1.25 times faster up to T 512 and 1.79 at T 640 and 768.  The plan before missed
-    # the tier at T 33, 64, 97 and 192
+    # 17408 -> 5120 forward, on B200: up to T 256 the tail's K steps split into three units per tail tile of 91 K blocks
+    # each (laid in one line over the tail: a tile sums three or four partials), 1.57 to 1.87 times faster; up to T 768
+    # whole tiles of the 128-row program with the rule's column-grouped raster (8-column-tile groups), 1.24 to 1.25
+    # times faster up to T 512 and 1.79 at T 640 and 768.  The plan before missed the tier at T 33, 64, 97 and 192
     ('sm_100a', False, False, False, False, False, 5120, 17408, None): ((257, {"pro": 7, "sk_parts": 3}), (769, {"cgrp": True, "pro": 7, "group_m": 8})),
     # o_proj 16384 -> 6144 forward, also sm_103a: the 128-row program with no rule up to T 768: a two-way K split of the
     # single partial wave up to T 256 (128-block segments), 1.60 to 1.81 times faster; whole tiles from T 257, 1.23 to
@@ -2207,9 +2213,10 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # to 1.93 times faster; the 128-row program with no rule up to T 1024, 1.59 to 1.63 up to T 512 (a two-way K split
     # of the single partial wave, 96-block segments) and 1.16 to 1.18 from T 513 (whole tiles)
     ('sm_100a', False, True, False, False, False, 4096, 12288, None): ((257, {"pro": 7, "sk_parts": 3}), (1025, {"pro": 7})),
-    # 5120 -> 17408 input gradient, on B200: a three-way K split of the tail tiles up to T 256 (91-block segments), 1.50
-    # to 1.84 times faster; whole tiles of the 128-row program with no rule up to T 768, 1.19 to 1.21 up to T 512 and
-    # 1.81 to 1.82 at T 640 and 768.  The plan before missed the tier at T 1, 16, 64, 97, 128, 129 and 192
+    # 5120 -> 17408 input gradient, on B200: up to T 256 the tail's K steps split into three units per tail tile of
+    # 91 K blocks each (laid in one line over the tail: a tile sums three or four partials), 1.50 to 1.84 times faster;
+    # whole tiles of the 128-row program with no rule up to T 768, 1.19 to 1.21 up to T 512 and 1.81 to 1.82 at T 640
+    # and 768.  The plan before missed the tier at T 1, 16, 64, 97, 128, 129 and 192
     ('sm_100a', False, True, False, False, False, 5120, 17408, None): ((257, {"pro": 7, "sk_parts": 3}), (769, {"pro": 7})),
     # dense_gate_up 6144 -> 12288 input gradient, also sm_103a: a three-way K split of the tail tiles up to T 256
     # (64-block segments), 1.55 to 1.75 times faster; whole tiles of the 128-row program with no rule up to T 768, 1.20
@@ -2221,19 +2228,21 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # groups), 1.59 to 1.65 up to T 512 (a two-way K split of the single partial wave, 96-block segments) and 1.24 to
     # 1.31 from T 513 (whole tiles)
     ('sm_103a', False, False, False, False, False, 4096, 12288, None): ((257, {"pro": 7, "sk_parts": 3}), (1025, {"cgrp": True, "pro": 7, "group_m": 16})),
-    # 17408 -> 5120 forward, on B300 and GB300: a three-way K split of the tail tiles up to T 256 (91-block segments),
-    # 1.55 to 1.76 times faster; up to T 768 whole tiles of the 128-row program with the rule's column-grouped raster
-    # (8-column-tile groups), 1.25 to 1.29 up to T 512 and 1.78 to 1.86 at T 640 and 768.  The plan before missed the
-    # tier at T 33, 64, 97 and 192 on B300, at T 1, 33, 64, 128 and 129 on GB300
+    # 17408 -> 5120 forward, on B300 and GB300: up to T 256 the tail's K steps split into three units per tail tile of
+    # 91 K blocks each (laid in one line over the tail: a tile sums three or four partials), 1.55 to 1.76 times faster;
+    # up to T 768 whole tiles of the 128-row program with the rule's column-grouped raster (8-column-tile groups), 1.25
+    # to 1.29 up to T 512 and 1.78 to 1.86 at T 640 and 768.  The plan before missed the tier at T 33, 64, 97 and 192 on
+    # B300, at T 1, 33, 64, 128 and 129 on GB300
     ('sm_103a', False, False, False, False, False, 5120, 17408, None): ((257, {"pro": 7, "sk_parts": 3}), (769, {"cgrp": True, "pro": 7, "group_m": 8})),
     # 4096 -> 12288 input gradient, on B300 and GB300: a three-way K split of the tail tiles up to T 256 (64-block
     # segments), 1.72 to 1.91 times faster; the 128-row program with no rule up to T 1024, 1.55 to 1.63 up to T 512 (a
     # two-way K split of the single partial wave, 96-block segments) and 1.18 to 1.26 from T 513 (whole tiles)
     ('sm_103a', False, True, False, False, False, 4096, 12288, None): ((257, {"pro": 7, "sk_parts": 3}), (1025, {"pro": 7})),
-    # 5120 -> 17408 input gradient, on B300 and GB300: a three-way K split of the tail tiles up to T 256 (91-block
-    # segments), 1.49 to 1.73 times faster; whole tiles of the 128-row program with no rule up to T 768, 1.21 to 1.25 up
-    # to T 512 and 1.78 to 1.86 at T 640 and 768.  The plan before missed the tier at T 1, 16, 64, 97, 128, 129 and 192
-    # on B300, at T 1 and 16 on GB300
+    # 5120 -> 17408 input gradient, on B300 and GB300: up to T 256 the tail's K steps split into three units per tail
+    # tile of 91 K blocks each (laid in one line over the tail: a tile sums three or four partials), 1.49 to 1.73 times
+    # faster; whole tiles of the 128-row program with no rule up to T 768, 1.21 to 1.25 up to T 512 and 1.78 to 1.86 at
+    # T 640 and 768.  The plan before missed the tier at T 1, 16, 64, 97, 128, 129 and 192 on B300, at T 1 and 16 on
+    # GB300
     ('sm_103a', False, True, False, False, False, 5120, 17408, None): ((257, {"pro": 7, "sk_parts": 3}), (769, {"pro": 7})),
 }
 # fmt: on
@@ -2280,8 +2289,8 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # replaces the row's rule on that part, as an exact ``ROW_RULES`` key at that T would (``row_rule`` still merges
 # ``ARCH_RULE_DEFAULTS`` under it).  The architecture's other parts, its child architectures (``RULE_PARENT``) and
 # every other token count keep the row's ``ROW_RULES`` entry and its ``ROW_RULE_MIN_T`` tiers, and the weight-gradient
-# orientation reads ``ROW_RULES`` alone.  The 212-SM sm_107a entries serve every 212-SM part of the architecture.  Its
-# FP32 rows were measured on two VR200 nodes against the plan the row had without them, at T 4096, 8192, 16172, 16231
+# orientation reads ``ROW_RULES`` alone.  The 212-SM sm_107a entries serve every 212-SM part of the architecture.  The
+# FP32 entries were measured on two VR200 nodes against the plan the row had without them, at T 4096, 8192, 16172, 16231
 # and 16384, in eager launches and CUDA graph replays.  Each range runs from the lowest to the highest measured T at
 # which the rule was faster on both nodes in both modes (the plan has the same form at the T between), within the
 # naive BF16 tier and with the same bits run to run:
@@ -2300,10 +2309,11 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
-# in one FP32 accumulator there and missed the tier on 4 of the 560 cells judged (a row at one token count on one seed):
-# the o_proj forward at T 16 and 33 and the 4096 -> 12288 input gradient at T 1 and 64, errors up to 1.0058 times the
-# tier's (the tests allow 1.005).  Every range rule met the tier on every judged seed and gives the same bits on every
-# run; a range plan that splits K where the plan before did not, or in more parts, sums in another order:
+# in one FP32 accumulator there and missed the tier on 4 of the 560 cells of the first pass at T 1 - 3072 (a cell: a row
+# at one token count on one seed; later passes found no other miss): the o_proj forward at T 16 and 33 and the
+# 4096 -> 12288 input gradient at T 1 and 64, errors up to 1.0058 times the tier's (the tests allow 1.005).  Every range
+# rule met the tier on every judged seed and gives the same bits on every run; a range plan that splits K where the plan
+# before did not, or in more parts, sums in another order:
 #   * the o_proj 16384 -> 6144 forward: a four-way K split of the tail tiles at T 1 - 256 (64-block segments), 1.81 to
 #     2.25 times faster; at T 257 - 1024 the 128-row program with the column-grouped raster of the row's rule
 #     (8-column-tile groups), 1.59 to 1.67 times faster up to T 512 (a two-way K split of the single partial wave,
@@ -2311,7 +2321,8 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * the 17408 -> 5120 forward and the 5120 -> 17408 input gradient (rows without a ``ROW_RULES`` entry on sm_107a; the
 #     range key is the ragged key all the same): a four-way K split of the tail tiles at T 2 - 256 (68-block segments),
 #     1.08 to 1.13 and 1.14 to 1.21 times faster at the measured T 16 - 256; at T 1 the split was slower (0.94 and 0.97
-#     times as fast), so the rows keep their plan there;
+#     times as fast), so the rows keep their plan there.  The plan before met the tier on every judged cell of these two
+#     rows: their ranges are taken for speed alone;
 #   * the 4096 -> 12288 input gradient: a four-way K split of the tail tiles at T 1 - 256 (48-block segments), 1.05 to
 #     1.17 times faster from T 16 and 0.89 times as fast at T 1, where the plan before missed the tier.
 # The 208-, 216- and 224-SM sm_107a parts are not measured and plan these rows as before.
