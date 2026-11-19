@@ -351,7 +351,7 @@ is the source of truth and is regenerated whenever `ROW_RULES` resolve a new
 instance).  `build.json` ships the builds of the architectures `cake_jit.KERNELS`
 lists (`sm_100a`, `sm_103a` and `sm_107a`); the eight-warp form ships for
 `sm_100a` and `sm_103a` (`_w8r`, `_w8rs`, the two batched `_w8rs` programs and the start-path `_w8rel` / `_w8relf`,
-which no rule names yet; `sm_100a` also the knob-free `_w8`); every program the measured
+which the token ranges of version 0.3.12 name; `sm_100a` also the knob-free `_w8`); every program the measured
 `sm_100a` / `sm_103a` rules name is registered, so the registry fallback only
 serves a caller that forces a template no export generated.  An entry point raises
 `NotImplementedError` naming the missing instance for a template that no
