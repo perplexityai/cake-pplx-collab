@@ -2415,6 +2415,25 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * the indexer_k input gradient 6144 -> 128 in groups of 2 at T 16231 - 16384, 1.017 to 1.024 times faster than
 #     ``kn_n128_f32_tma1_pro7``.  At T 16172 its range of version 0.3.8 runs the group of 2 already; at T 32768 the
 #     groups missed the bar (medians 1.012 to 1.016, not every node and mode pair a win) and the row keeps its plan.
+# Version 0.3.12 runs the start-path eight-warp programs on the BF16 input gradients 4096 -> 32 / 48 / 64 / 128,
+# 5120 -> 32 / 48 / 64 / 128, 8192 -> 128, indexer_hw 6144 -> 32 and indexer_k 6144 -> 128 on 148- and 152-SM sm_100a
+# and sm_103a parts: ``kn_n256_tma1_w8relf`` (``_W8RELF_DGRAD_BF16``), on GB200 5120 -> 48 at T 32768
+# ``kn_n256_tma1_w8rel`` (``_W8REL_DGRAD_BF16``).  They were measured at T 16172, 16231, 16384 and 32768 on two nodes of
+# each part (B200, GB200, B300 and GB300) against the plan of version 0.3.11 with the paired rounds and the bar of
+# version 0.3.10 (of two forms that met the bar the one with the higher lowest node and mode median, ``w8relf`` within
+# 0.005); the outputs were equal to that plan's bit for bit at every measured T on both nodes.  A range runs from one
+# measured T to another and holds no measured T that missed the bar; its plans were 1.021 to 1.091 times faster than
+# the plan before on B200, 1.020 to 1.095 on GB200, 1.017 to 1.094 on B300 and 1.015 to 1.077 on GB300 (the lowest and
+# highest node and mode medians).  On sm_100a a range replaces the GB T-exact rule of 4096 -> 48 (``_tma1_w8r``) at
+# T 16231 on both parts and at T 16384 on 148 SMs.  A range's rule holds for its form: a caller that forces another
+# form (the ten-warp program included) plans with the row's rule without the part tables, as in version 0.3.11.
+# Neither form met the bar at these, which keep their plan:
+#   * B200: 4096 -> 64 at T 16172 and 16231 (medians 1.048 to 1.077, but a paired win in one or two of the four node
+#     and mode pairs), and 5120 -> 128, 8192 -> 128 and indexer_k at T 32768 (0.999 to 1.018);
+#   * GB200: 4096 -> 48 and 5120 -> 128 at T 16384 (1.019 to 1.061, a paired win in three of the four pairs);
+#   * B300: 4096 -> 48, 8192 -> 128 and indexer_k at T 32768 (1.000 to 1.013);
+#   * GB300: 5120 -> 64 and 8192 -> 128 at every measured T (0.995 to 1.026), and 4096 -> 32 and indexer_k at T 32768
+#     (1.001 to 1.017).
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2442,6 +2461,8 @@ _SM107A_212_F32_V8 = {"epi": 'reg', "f32_v8": True, "pro": 15}
 _SM107A_212_F32_V8_SK2 = {"epi": 'reg', "f32_v8": True, "sk_parts": 2, "pro": 15}
 _SM107A_212_F32_M256_HT = {"cta_rows": 256, "htail": True}
 _SM107A_212_F32_M256_SK3 = {"cta_rows": 256, "sk_parts": 3}
+_W8REL_DGRAD_BF16 = {"form": 'w8rel', "epi": 'tma', "slots": 1, "sk": False}
+_W8RELF_DGRAD_BF16 = {"form": 'w8relf', "epi": 'tma', "slots": 1, "sk": False}
 ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, dict], ...]]] = {
     ("sm_107a", 212): {
         ('sm_107a', True, True, True, False, False, 12288, None, 4096): ((4096, 16384, _SM107A_212_F32_SKS),),
@@ -2473,6 +2494,22 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
         ('sm_103a', False, True, True, False, False, 8192, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
         ('sm_103a', False, True, True, False, False, 6144, 32, None): ((8192, 8192, {**_SM100A_148_DGRAD_F32, "group_m": 4}),),
+        **{
+            ('sm_103a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 32, 16172, 32768),
+                (4096, 48, 16172, 16384),
+                (4096, 64, 16172, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 64, 16172, 32768),
+                (5120, 128, 16172, 32768),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+                (8192, 128, 16172, 16384),
+            )
+        },
     },
     ("sm_103a", 152): {
         **{
@@ -2494,6 +2531,20 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ),
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((16172, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
         ('sm_103a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {"block_n": 128, "slots": 2, "stages": 4, "cta1": True, "group_m": 2}),),
+        **{
+            ('sm_103a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 32, 16172, 16384),
+                (4096, 48, 16172, 32768),
+                (4096, 64, 16172, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 128, 16172, 32768),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+            )
+        },
     },
     ("sm_100a", 152): {
         **{
@@ -2522,6 +2573,31 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             (16231, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
         ),
         ('sm_100a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        **{
+            ('sm_100a', False, True, False, False, False, N, K, None): ((16172, 32768, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K in (
+                (4096, 32),
+                (4096, 64),
+                (4096, 128),
+                (5120, 32),
+                (5120, 64),
+                (6144, 32),
+                (6144, 128),
+                (8192, 128),
+            )
+        },
+        ('sm_100a', False, True, False, False, False, 4096, 48, None): (
+            (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
+        ),
+        ('sm_100a', False, True, False, False, False, 5120, 48, None): (
+            (16172, 16384, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8REL_DGRAD_BF16)),
+        ),
+        ('sm_100a', False, True, False, False, False, 5120, 128, None): (
+            (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
+        ),
     },
     ("sm_100a", 148): {
         ('sm_100a', False, True, True, False, False, 8192, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
@@ -2531,6 +2607,22 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             (16231, 16231, {**_SM100A_148_DGRAD_F32, "group_m": 4}),
             (32768, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
         ),
+        **{
+            ('sm_100a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 32, 16172, 32768),
+                (4096, 48, 16172, 32768),
+                (4096, 64, 16384, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 64, 16172, 32768),
+                (5120, 128, 16172, 16384),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+                (8192, 128, 16172, 16384),
+            )
+        },
     },
 }
 # fmt: on
@@ -3629,7 +3721,13 @@ def cake_dense_gemm_det_train_projection_plan(
     and of 4 on 6144 -> 32 at T 16231 (the same bits, measured faster on two B300 and two B200 nodes).  Since version
     0.3.11 the 152-SM sm_100a ranges also run it in raster groups of 2 on the indexer_hw input gradient 6144 -> 32 at
     T 16172 - 32768, on 8192 -> 128 at T 16231 - 32768, on 5120 -> 128 at T 16231 and on 6144 -> 128 at
-    T 16231 - 16384, and of 4 on 8192 -> 128 at T 16172 (the same bits, measured faster on two GB200 nodes)."""
+    T 16231 - 16384, and of 4 on 8192 -> 128 at T 16172 (the same bits, measured faster on two GB200 nodes).  Since
+    version 0.3.12 the 148- and 152-SM sm_100a and sm_103a ranges also plan the BF16 input gradients
+    4096 -> 32 / 48 / 64 / 128, 5120 -> 32 / 48 / 64 / 128, 8192 -> 128 and 6144 -> 32 / 128 with the start-path
+    eight-warp program ``kn_n256_tma1_w8relf`` (on 152-SM sm_100a parts 5120 -> 48 at T 32768 with
+    ``kn_n256_tma1_w8rel``), at T 16172 - 32768 or narrower per row and part (the same bits, measured faster on two
+    nodes of each part); a caller that forces another ``form`` there plans with the row's rule without the part
+    tables."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
@@ -3783,6 +3881,19 @@ def cake_dense_gemm_det_train_projection_plan(
         if _use_rules
         else dict(ARCH_RULE_DEFAULTS.get(arch, {}))
     )
+    if (
+        _use_rules
+        and form is not None
+        and str(form or "") != rule.get("form", str(form or ""))
+    ):
+        # package-only: a part rule or token range that names a CTA form (the start-path ranges of version 0.3.12)
+        # holds for that form alone; a caller that forces another form (``""``, the ten-warp program, included) plans
+        # with the row's rule without the part tables, the rule its knobs were chosen against
+        outside = row_rule(
+            arch, a_mn, b_mn, out.dtype == torch.float32, transposed_out, L > 1, N, K, M
+        )
+        if outside.get("form") != rule["form"]:
+            rule = outside
     if cta_rows is None:
         cta_rows = rule.get("cta_rows", default_cta_rows(M, N, K))
     elif int(cta_rows) != rule.get("cta_rows", default_cta_rows(M, N, K)):
