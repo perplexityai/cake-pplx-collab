@@ -11213,7 +11213,8 @@ def segment_route(
     on its envelope (an architecture and SM count of ``sm_counts_by_arch``, a
     head count of ``heads``, the segmented route): a pack too short to save the
     segment states takes ``P_u < P_old`` segments per document, in the table
-    form of the occupancy rule; elsewhere the occupancy rule stays.  So
+    form of the occupancy rule (a negative count raises ``ValueError`` there);
+    elsewhere the occupancy rule stays and ``num_tokens`` is not read.  So
     ``num_segments`` never exceeds the occupancy rule's, and neither the route
     nor the table form changes.  A pure function of the scalars.
     """
@@ -11223,14 +11224,14 @@ def segment_route(
             f"segment_plan: num_seqs={num_seqs}, num_heads={num_heads}, "
             f"sm_count={sm_count} must all be >= 1"
         )
-    if num_tokens is not None and int(num_tokens) < 0:
-        raise ValueError(f"segment_plan: num_tokens={num_tokens} must be >= 0")
     route, p_old, nseg_old = _occupancy_segments(n, h, sm, arch)
     few = n * h <= int(SEGMENTS["prop_max_chains"])
     occupancy = (route, p_old, nseg_old, int(route == "seg" and few))
     if num_tokens is None or route != "seg" or not _token_rule_serves(h, sm, arch):
         return occupancy
     s = int(num_tokens)
+    if s < 0:
+        raise ValueError(f"segment_plan: num_tokens={num_tokens} must be >= 0")
     # P_ns or more segments per document save no state (the backend's size rule)
     p_ns = s // (int(TOKEN_SEGMENTS["save_min_tokens_per_seg"]) * n) + 1
     p_u = max(

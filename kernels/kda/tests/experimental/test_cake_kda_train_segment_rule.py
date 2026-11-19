@@ -296,6 +296,16 @@ def test_the_rule_constants() -> None:
             backend.memory_report(S, N, H, **q)
         with pytest.raises(ValueError, match="num_tokens"):
             jit.segment_route(N, H, SM, ARCH, num_tokens=-1)
+        # outside the envelope the token count is not read: the calls are the
+        # occupancy rule's, a negative count included
+        assert jit.segment_route(
+            N, H, 148, "sm_100a", num_tokens=-1
+        ) == jit.segment_route(N, H, 148, "sm_100a")
+        assert backend.tables_bytes(
+            -64, 1, H, sm_count=148, arch="sm_100a"
+        ) == backend.tables_bytes(
+            -64, 1, H, sm_count=148, arch="sm_100a", segment_rule="occupancy"
+        )
         with pytest.raises(ValueError, match="must all be >= 1"):
             jit.segment_route(0, H, SM, ARCH, num_tokens=S)
     assert JIT[PACKAGES[0]].TOKEN_SEGMENTS == JIT[PACKAGES[1]].TOKEN_SEGMENTS
