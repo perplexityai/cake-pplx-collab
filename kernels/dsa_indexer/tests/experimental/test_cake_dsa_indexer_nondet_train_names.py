@@ -47,16 +47,21 @@ CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 # the backend objects the module forwards to carry the module's names
 FORWARDED = (
     "cake_dsa_indexer_nondet_train_topk",
+    "cake_dsa_indexer_nondet_train_topk_in_candidates",
+    "cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size",
     "cake_dsa_indexer_nondet_train_topk_with_candidates",
     "cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size",
     "cake_dsa_indexer_nondet_train_topk_workspace_size",
 )
 # the backend-internal names of this package: the deterministic package's with the mode word swapped
 INTERNAL = (
+    "DSAIndexerNondetCandidateRunner",
     "DSAIndexerNondetRunner",
     "plan_dsa_indexer_nondet_topk",
+    "plan_dsa_indexer_nondet_topk_in_candidates",
     "plan_dsa_indexer_nondet_topk_with_candidates",
     "prepare_dsa_indexer_nondet_topk",
+    "prepare_dsa_indexer_nondet_topk_in_candidates",
     "prepare_dsa_indexer_nondet_topk_with_candidates",
     "validate_dsa_indexer_nondet_inputs",
 )
@@ -177,8 +182,9 @@ def _defined_functions(module) -> list[tuple[str, object]]:
 
 def test_only_the_alert_reads_torch_mode() -> None:
     """The facade never reads torch's deterministic mode; the backend reads it only in ``_alert_nondeterministic``,
-    which only the runner preparation (the eager entry's alert, once per call) and ``DSAIndexerNondetRunner.run``
-    (every run of a prepared runner) call: preparing a runner and the workspace bound never alert."""
+    which only the runner preparations (the eager entries' alert, once per call) and the ``run`` methods of
+    ``DSAIndexerNondetRunner`` and ``DSAIndexerNondetCandidateRunner`` (every run of a prepared runner) call:
+    preparing a runner, the plans and the workspace bounds never alert."""
     assert not MODE_READ.search(inspect.getsource(facade))
     backend = _backend()
     functions = _defined_functions(backend)
@@ -190,13 +196,21 @@ def test_only_the_alert_reads_torch_mode() -> None:
         if "_alert_nondeterministic(" in inspect.getsource(fn)
         and n != "_alert_nondeterministic"
     ]
-    assert callers == ["DSAIndexerNondetRunner.run", "_prepare_runner"]
+    assert callers == [
+        "DSAIndexerNondetCandidateRunner.run",
+        "DSAIndexerNondetRunner.run",
+        "_prepare_cand_runner",
+        "_prepare_runner",
+    ]
     for name in (
         "prepare_dsa_indexer_nondet_topk",
+        "prepare_dsa_indexer_nondet_topk_in_candidates",
         "prepare_dsa_indexer_nondet_topk_with_candidates",
+        "cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size",
         "cake_dsa_indexer_nondet_train_topk_workspace_size",
         "cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size",
         "plan_dsa_indexer_nondet_topk",
+        "plan_dsa_indexer_nondet_topk_in_candidates",
         "plan_dsa_indexer_nondet_topk_with_candidates",
     ):
         assert "_alert_nondeterministic(" not in inspect.getsource(

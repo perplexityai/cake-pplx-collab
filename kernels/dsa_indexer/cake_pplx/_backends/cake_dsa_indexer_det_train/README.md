@@ -294,6 +294,39 @@ kernel with a device-side trap.
 bound; the `[T, 2048]` output is not part of it.  `sm_107a` registers no
 `scan_blocks` program, and the call raises `NotImplementedError` there.
 
+## Candidate-restricted top-k
+
+`cake_dsa_indexer_det_train_topk_in_candidates` (BF16, `ratio = 1`,
+`1 <= top_k <= 2048`, default 512; `sm_100a` and `sm_103a`) takes
+`candidate_blocks`, int32 `[T, W]` with `W <= 2048` (the `candidate_blocks`
+output of `cake_dsa_indexer_det_train_topk_with_candidates` fits as is), and
+returns `(indices, scores)`.  For query row `t` with `n` visible keys the pool
+`P_t` is the keys `j < n` whose block `j // 8` appears in its row (any order;
+`-1` and ids at or past the visible blocks name no key; the non-negative ids
+of a row distinct).  The row selects the top `min(top_k, |P_t|)` keys of
+`P_t` by score descending, then key id descending (`+0.0 == -0.0`), scored by
+the plain call's formula, rows in ascending id order with a `-1` tail: the program's
+unordered rows are sorted by the CUB finalize of the plain call (`finalize:t<threads>`
+over the policy's key bits of `Tkv`).
+
+The call runs the `cand` program (role `cand`, key `cand`): persistent CTAs,
+one per SM, draw units of four queries from a self-resetting 16-byte ticket
+word; for each unit query the CTA lists its valid blocks, scores only the keys
+of those blocks (8 keys per block through a block tensor map over the raw key
+rows) and keeps a candidate buffer of `cand_cap` entries per query that it
+settles every `check_period` steps.  The work of a row is bounded by its
+candidate keys (at most `8 W`), never by its visible prefix.  `k` keeps the
+family's rule: a row-strided view (row stride a multiple of 8 elements) is
+read in place, by the block tensor map and by the copy of the newest partial
+block alike.  The workspace is `grid x 4 x cand_cap x 8`
+bytes of candidate buffers (`cand_cap = max(4096, 4 top_k)`), `grid x 64 KiB`
+of block lists and the ticket word;
+`cake_dsa_indexer_det_train_topk_in_candidates_workspace_size` reports it,
+and it depends on the grid and `top_k` only.  A backend-owned workspace has its
+ticket word zeroed once at prepare, a caller-owned one before every run.  A
+call with `W == 0` launches nothing and returns all `-1` / `-inf`.  `sm_107a`
+registers no `cand` program, and the call raises `NotImplementedError` there.
+
 ## Host dispatch
 
 One call runs two or three kernels: the persistent **scan** (scoring, exact
@@ -449,6 +482,20 @@ the plain call's bits, the caller-owned workspace and outputs, the argument
 checks and the absence of host synchronization.  The benchmark's
 `--rows candidates` times the call next to the plain call at the request's
 shapes.
+
+The candidate-restricted call has its own suite,
+`tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with the
+FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
+host-only registry, the plan and its workspace bound at the request's shapes,
+argument checks and the `sm_107a` refusal; on the GPU, the exact sets against
+the oracle on MXFP4-grid inputs (six cases, six kinds of candidate rows, two
+packed layouts), the unrestricted sets from the source layer's own candidate
+blocks and from every visible block, keys outside the pool that never count,
+sampled rows at the request's shapes, the Gaussian rule with the scores judged
+against the naive tier, bitwise repetition, the caller-owned workspace and
+outputs, the argument checks and the absence of host synchronization.  The
+benchmark's `cake_in` arm on `--rows candidates` times the call next to the
+plain call.
 
 Tests: `tests/experimental/test_cake_dsa_indexer_det_train.py` (the backend suite, which
 imports the package only through `tests/cake/test_helpers/cake_package.py`),

@@ -2466,8 +2466,137 @@ def select_cb_program(
     )
 
 
+# ---------------------------------------------------------------------------
+# Candidate-restricted top-k (the ``cand`` program)
+# ---------------------------------------------------------------------------
+
+# A ``cand`` program ranks, per query, only the visible keys of the 8-key blocks its row of ``candidate_blocks`` names
+# (any order, ``-1`` anywhere, at most ``CAND_WIDTH_MAX`` slots), so its work per row is bounded by its candidate
+# keys.  Persistent CTAs (one per SM) draw units of ``CAND_UNIT_Q`` queries from a self-resetting 16-byte ticket word;
+# each CTA keeps a double-buffered list of each unit query's valid blocks (``CAND_LIST_BYTES``) and a candidate buffer
+# of ``cand_cap`` packed entries per unit query, compacted every ``check_period`` steps.  The bound depends on the
+# grid and ``top_k`` only, never on ``T``, ``Tkv``, the segments or the candidate content.
+CAND_ROLE = "cand"
+CAND_KEY = "cand"
+CAND_WIDTH_MAX = 2048
+CAND_MAX_TOP_K = 2048
+CAND_UNIT_Q = 4
+CAND_LIST_BYTES = 2 * CAND_UNIT_Q * CAND_WIDTH_MAX * 4
+CAND_TICKET_BYTES = 16
+CAND_CAP_FLOOR = 4096
+
+
+def cand_capacity(top_k: int) -> int:
+    """Candidate entries per unit query of a ``cand`` launch: ``max(CAND_CAP_FLOOR, 4 top_k)``."""
+    return max(CAND_CAP_FLOOR, 4 * int(top_k))
+
+
+def cand_check_period(cand_cap: int, top_k: int) -> int:
+    """Steps between two settles of a ``cand`` launch: ``max(1, min(32, (cand_cap - top_k) // 128, cand_cap // 256))``
+    (the program needs ``cand_cap >= top_k + 128 check_period``)."""
+    return max(1, min(32, (int(cand_cap) - int(top_k)) // 128, int(cand_cap) // 256))
+
+
+@dataclass(frozen=True)
+class CandidateTopKChoice:
+    """Everything the host decides for one candidate-restricted call from host-known integers: the ``cand`` program
+    on ``grid_ctas`` persistent CTAs with ``cand_cap`` entries per unit query and its ``check_period``; the workspace
+    ``[candidate buffers: grid x 4 x cand_cap x 8 B][block lists: grid x CAND_LIST_BYTES][ticket word: 16 B]``.
+    The deterministic package then sorts each row by id with the CUB finalize ``finalize_key``
+    (``key_bits`` key bits)."""
+
+    num_queries: int
+    num_keys: int
+    num_segments: int
+    top_k: int
+    cand_width: int
+    grid_ctas: int
+    cand_cap: int
+    check_period: int
+    cand_bytes: int
+    lists_at: int
+    lists_bytes: int
+    ticket_at: int
+    workspace_bytes: int
+    cand_key: str = CAND_KEY
+    finalize_key: str = ""
+    key_bits: int = 0
+
+    @property
+    def keys(self) -> tuple:
+        return (self.cand_key, self.finalize_key)
+
+    def as_dict(self) -> dict:
+        return asdict(self)
+
+
+def select_cand_program(
+    *,
+    num_queries: int,
+    num_keys: int,
+    num_segments: int,
+    top_k: int,
+    grid: int,
+    program_keys: Collection[str],
+    cand_width: int = CAND_WIDTH_MAX,
+    cand_cap: Optional[int] = None,
+    check_period: Optional[int] = None,
+    policy: DispatchPolicy,
+    finalize_threads: Optional[int] = None,
+) -> CandidateTopKChoice:
+    """The host plan of one candidate-restricted call (see :class:`CandidateTopKChoice`): ``cand_cap`` defaults to
+    ``cand_capacity(top_k)`` and ``check_period`` to ``cand_check_period``; an explicit pair must keep
+    ``cand_cap >= top_k + 128 check_period``.  The finalize that sorts the rows is ``policy``'s for ``top_k``
+    (``finalize_threads`` overrides its thread count) over ``num_keys`` key bits.  Raises ``NotImplementedError`` when ``program_keys`` registers
+    no ``cand`` program."""
+    if CAND_KEY not in program_keys:
+        raise NotImplementedError(
+            "no candidate-restricted top-k program (key 'cand') is registered for this architecture"
+        )
+    k = int(top_k)
+    cap = cand_capacity(k) if cand_cap is None else int(cand_cap)
+    period = cand_check_period(cap, k) if check_period is None else int(check_period)
+    if period < 1 or cap < k + 128 * period:
+        raise ValueError(
+            f"cand_cap {cap} must hold top_k + 128 x check_period = {k} + 128 x {period} entries"
+        )
+    grid_ctas = int(grid)
+    cand_bytes = grid_ctas * CAND_UNIT_Q * cap * 8
+    lists_bytes = grid_ctas * CAND_LIST_BYTES
+    ticket_at = cand_bytes + lists_bytes
+    return CandidateTopKChoice(
+        num_queries=int(num_queries),
+        num_keys=int(num_keys),
+        num_segments=int(num_segments),
+        top_k=k,
+        cand_width=int(cand_width),
+        grid_ctas=grid_ctas,
+        cand_cap=cap,
+        check_period=period,
+        cand_bytes=cand_bytes,
+        lists_at=cand_bytes,
+        lists_bytes=lists_bytes,
+        ticket_at=ticket_at,
+        workspace_bytes=ticket_at + CAND_TICKET_BYTES,
+        finalize_key=finalize_key(
+            policy.finalize_threads_for(k)
+            if finalize_threads is None
+            else int(finalize_threads)
+        ),
+        key_bits=policy.finalize_key_bits_for(num_keys),
+    )
+
+
 __all__ = [
     "BF16",
+    "CAND_CAP_FLOOR",
+    "CAND_KEY",
+    "CAND_LIST_BYTES",
+    "CAND_MAX_TOP_K",
+    "CAND_ROLE",
+    "CAND_TICKET_BYTES",
+    "CAND_UNIT_Q",
+    "CAND_WIDTH_MAX",
     "CB_BLOCK",
     "CB_ENTRY_BYTES",
     "CB_KIND_FALLBACK",
@@ -2487,9 +2616,12 @@ __all__ = [
     "SAMPLE_SHIFT_PERMILLE_BOUNDS",
     "UNITS",
     "CandidateBlocksChoice",
+    "CandidateTopKChoice",
     "DispatchPolicy",
     "ProgramChoice",
     "ScanKeyFields",
+    "cand_capacity",
+    "cand_check_period",
     "cb_block_cap",
     "cb_scan_programs",
     "fallback_knobs",
@@ -2504,6 +2636,7 @@ __all__ = [
     "scan_key",
     "scan_key_fields",
     "scan_key_form",
+    "select_cand_program",
     "select_cb_program",
     "select_fp8_program",
     "select_program",
