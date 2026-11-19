@@ -84,9 +84,15 @@ keyword.
   ignored row, a label at or beyond `V` and a row the zero-gradient skip
   leaves out hold 0 there: `row_grad` stores +0 on such a row of its chunk,
   and a call that computes `dX` with a `dz` arm among its producers (which
-  store only the rows whose label lies in the head) zeroes `rlab` once before
-  the first of them.  Every chunk's `dX` rows end with the `slab_sum` kernel,
-  which folds it:
+  store only the rows whose label lies in the head) starts from a zeroed
+  `rlab`: a prepared runner (and a binding of the opt-in forms) zeroes it with
+  a host step before the first producer, a remembered binding of the default
+  entries allocates it zero-filled, and a log-probability autograd graph
+  allocates one `rlab` behind its forward's launches (zero-filled for a `dz`
+  recompute) that every backward of the graph binds while the plan is not
+  counted and its chunks tile the rows (the `dz` arms store the same rows on
+  each backward of one graph).  Every chunk's `dX` rows end with the
+  `slab_sum` kernel, which folds it:
   `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
   (after the slab adds of a K-sliced GEMM), one rounding of the exact
   product.  `dX_acc` is then `dz @ W + r * W[y]` in FP32, and the output cast
@@ -98,7 +104,14 @@ keyword.
   to 8193, the loss and log-probability entries) `loss`, `logp`, `lse` and
   `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The
   candidate-support entries fold nothing.  The call holds `rlab` beside `lse`
-  (4 bytes a row of the chunk loop).
+  (4 bytes a row of the chunk loop).  A compacted plan under the fused dX
+  finalize whose `dX` goes through the scatter cast (the autograd loss
+  entries and the log-probability backward, kept logits included; not a
+  temperature plan) launches no fold-alone `slab_sum` on its longest run of
+  adjacent one-slice chunks (`cake_backend.cast_fold_rows`): it hands those
+  rows' labels, `rlab` and `W` to `scale_cast_scatter_bf16`, which applies
+  the same `fma` and predicate before its scale.  The loss entry then holds
+  them from the forward through the backward.
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every
@@ -1190,13 +1203,24 @@ gather and logits GEMM ran before the count was known, see
   whose label lies in `[0, V)` and whose residual is nonzero (`W` contiguous,
   its row read in `row_vecs` 8-element vectors; `lr = 0` turns the fold off).
   Every chunk of a call that computes `dX` runs it as the last FP32 write of
-  its rows; after a one-slice GEMM or the host's adds it is the fold alone
-  (`n_slabs = 0`, `ws` unread).
+  its rows, except the chunks whose fold the scatter cast makes (FP32 label
+  residual, above); after a one-slice GEMM or the host's adds it is the fold
+  alone (`n_slabs = 0`, `ws` unread).  A thread walks its vectors one trip
+  ahead (it loads the next trip's label and residual during the current
+  trip).  It launches with programmatic dependent launch behind the dX GEMM
+  or `dx_reduce`, which launch without it: before its `griddepcontrol.wait`
+  it reads only its first vector's label, residual and head row, whose
+  writers run before the dX GEMM; every read of `dX_acc` and the slabs
+  follows the wait.
 * `scale_cast_scatter_bf16`: the dX output boundary of a compacted call with
   the fused dX finalize -- `out[r] = bf16(g * acc[scan[r] - 1])` when
   `row_index[scan[r] - 1] == r`, exact zeros otherwise, one CTA per output row
   per iteration, every element written once (launched by `finalize_dx`, not
-  by the chunk loop).
+  by the chunk loop).  Its fold operands (`labels`, `rlab`, `W`, `V`,
+  `fold_lo`, `fold_hi`): a compact row `j` in `[fold_lo, fold_hi)` whose
+  label lies in `[0, V)` and whose residual is nonzero is cast as
+  `bf16(g * fma(rlab[j], f32(W[y_j, h]), acc))`, the bits of the fold-alone
+  `slab_sum` and the cast; an empty range reads none of them.
 * `gather_rows_bf16`: chunk 0's row gather of the hidden valid-row count
   (the eager entry points) -- `out[r] = X[idx[r]]` for `r < min(count,
   num_rows)` with the count read from device memory, exact zeros after; one

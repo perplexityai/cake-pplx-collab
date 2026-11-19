@@ -722,13 +722,20 @@ stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
 * A chunk the slice rule leaves at one K slice stores its `dX_acc` rows
   directly (the same arithmetic as the deterministic package), and the slab
   sum `dx_slab_sum` follows it as the fold alone (`n_slabs = 0`: it reads the
-  stored rows and folds their FP32 label residuals).
+  stored rows and folds their FP32 label residuals), except on the chunks
+  whose fold the scatter cast makes: as in the deterministic package, a
+  compacted plan under the fused dX finalize whose `dX` goes through
+  `scale_cast_scatter_bf16` hands the longest run of adjacent one-slice
+  chunks (`cake_backend.cast_fold_rows`) to the cast, which folds those rows
+  with the same `fma` and predicate before its scale.
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
   GEMM's work items store every slice's FP32 partial tile, slice 0 included,
   into the slice's own rows of the call's slab (TMA tensor stores).  The slab
-  sum, launched with programmatic dependent launch, adds the `S` tiles of
+  sum, launched with programmatic dependent launch (before its
+  `griddepcontrol.wait` a thread reads only its first vector's label and
+  residual; it walks its vectors one trip ahead), adds the `S` tiles of
   each element in slice order (`((s_0 + s_1) + ...)`, IEEE round-to-nearest
   without flushing subnormals) and stores the sum into the chunk's `dX_acc`
   rows.  It never reads those rows and is their only writer, so no call
