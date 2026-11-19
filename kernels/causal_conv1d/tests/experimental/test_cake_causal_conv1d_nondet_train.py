@@ -576,6 +576,23 @@ def _sm_wide_cases() -> tuple:
     return tuple((int(s_lo), _sm_wide_mid(c_lo, c_hi), "perf") for s_lo, _, _ in segments)
 
 
+# The segment indices of the default backward route's ``SM_WIDE_ROWS`` keys, over every architecture (a test of one
+# segment index runs that segment of the device's key).
+SM_WIDE_SEGMENTS = tuple(
+    range(
+        max(
+            (
+                len(segments)
+                for rows in loader.SM_WIDE_ROWS.values()
+                for (route, _, _), segments in rows.items()
+                if route == "bwd"
+            ),
+            default=0,
+        )
+    )
+)
+
+
 def _record_programs(monkeypatch) -> list:
     """From now on, every launch of the package appends ``(module name, S, C)`` (the launch's plan scalars) to the
     returned list."""
@@ -3793,16 +3810,23 @@ def test_sm_wide_row_two_streams(monkeypatch) -> None:
         assert _backward_programs(seen) == {_expected_backward_program(S, C)}, (S, C, set(seen))
 
 
+@pytest.mark.parametrize("segment", SM_WIDE_SEGMENTS, ids=[f"seg{index}" for index in SM_WIDE_SEGMENTS])
 @pytest.mark.parametrize("mode", PDL_MODES)
 @pytest.mark.parametrize("check", ("producer", "reader", "chain"))
-def test_sm_wide_row_pdl(check, mode, monkeypatch, record_property) -> None:
+def test_sm_wide_row_pdl(check, mode, segment, monkeypatch, record_property) -> None:
     """The three PDL tests (``producer``, ``reader``, ``chain``) on the default backward route at the first token
-    count of the device's first ``SM_WIDE_ROWS`` segment: the backward launches the segment's program, eagerly and
-    inside captures with the policy forced on and with the shipped graph policy, every output judged against the
-    naive tier."""
+    count of every segment of the device's ``SM_WIDE_ROWS`` key (one test per segment index): the backward launches
+    the segment's program, eagerly and inside captures with the policy forced on and with the shipped graph policy,
+    every output judged against the naive tier."""
 
-    case = _sm_wide_cases()[0]
+    arch = _arch()
+    cases = _sm_wide_cases()
+    if segment >= len(cases):
+        pytest.skip(f"{arch}: its SM_WIDE_ROWS key of route bwd has {len(cases)} segments")
+    case = cases[segment]
     S, C, _ = case
+    _, _, segments = _sm_wide_key(arch)
+    assert loader.sm_wide_module(arch, "bwd", C, S) == segments[segment][2], (arch, segment, S, C)
     seen = _record_programs(monkeypatch)
     if check == "producer":
         _pdl_producer("bwd", mode, case, monkeypatch, record_property)
@@ -3917,6 +3941,9 @@ def _hold_one_sm(stream: torch.cuda.Stream) -> None:
 
 # The row of the shared-memory side-kernel test: an SM-wide row of every architecture (its last segment).
 SIDE_KERNEL_CASE = (261393, 576, "perf")
+# The SM-wide backward beside the side kernel takes at most this many times its time alone (the CTA left without a
+# free SM makes at most a second wave).
+SIDE_KERNEL_BUSY_BOUND = 2.0
 
 
 def test_backward_finishes_beside_a_kernel_holding_one_sms_shared_memory(monkeypatch, record_property) -> None:
@@ -3924,8 +3951,9 @@ def test_backward_finishes_beside_a_kernel_holding_one_sms_shared_memory(monkeyp
     leaves one CTA of the one-CTA-per-SM program at :data:`SIDE_KERNEL_CASE` without a free SM until another CTA ends:
     the backward still finishes while the side kernel runs (it waits for no SM the side kernel holds), on the SM-wide
     program and on the program the rules pick there (``SM_WIDE_ROWS`` emptied).  The time beside the side kernel over
-    the time alone (medians of 7 after 3 warm-ups, CUDA events on the current stream) of both is recorded; the outputs
-    of backward calls launched beside it are judged against the naive tier."""
+    the time alone (medians of 7 after 3 warm-ups, CUDA events on the current stream) of both is recorded, and the
+    SM-wide program's is at most :data:`SIDE_KERNEL_BUSY_BOUND`; the outputs of backward calls launched beside it are
+    judged against the naive tier."""
 
     _require_route("bwd")
     device = _device()
@@ -3980,6 +4008,11 @@ def test_backward_finishes_beside_a_kernel_holding_one_sms_shared_memory(monkeyp
                 assert backward_ms < side_ms, (
                     f"{tag} {name}: the backward ({backward_ms:.3f} ms) waited for the kernel holding one SM's shared "
                     f"memory ({side_ms:.3f} ms)"
+                )
+            if program is not None:
+                assert busy <= SIDE_KERNEL_BUSY_BOUND * alone, (
+                    f"{arch} {name}: beside the kernel holding one SM's shared memory the SM-wide backward took "
+                    f"{busy / alone:.3f} times its time alone (bound {SIDE_KERNEL_BUSY_BOUND})"
                 )
     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
 
