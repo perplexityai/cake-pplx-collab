@@ -9293,7 +9293,8 @@ def test_device_logprob_graph_rlab(glm_weight):
     every backward of a retained graph binds that tensor (no allocation, no zero fill, no ``rlab_zero`` host step in
     the remembered sequences) with +0 on every row without a label column in the head.  dX / dW of four backwards (two
     ``dlogp`` draws) equal those of the same backwards whose bindings allocate their own ``rlab`` (``node.rlab =
-    None``) bit for bit -- the default form (one chunk and two, compacted and not) and the kept form; a held tensor
+    None``) bit for bit -- the default form (one chunk and two, compacted and not), the kept form and the opt-in
+    module's automatic form (its one-chunk kept logits); a held tensor
     with NaN on its rows with a label column is bound and every such row is stored again; one that is not clean is
     not bound."""
     _require_program(entry="logprob")
@@ -9301,6 +9302,7 @@ def test_device_logprob_graph_rlab(glm_weight):
     edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
     default = cake_backend.cake_lm_head_det_train_logprob
     keep = cake_backend.cake_lm_head_det_train_logprob_keep
+    auto = opt_in.cake_lm_head_det_train_logprob  # the automatic memory form: here its one-chunk kept logits
     # (entry, T, chunk_size, compact): T = 1500 stays below the zero-gradient row skip's floor; 768-row chunks: two
     cases = (
         (default, 1500, 4096, True),
@@ -9309,6 +9311,7 @@ def test_device_logprob_graph_rlab(glm_weight):
         (default, 1500, 768, False),
         (keep, 256, 4096, True),
         (keep, 256, 4096, False),
+        (auto, 1500, 4096, True),
     )
 
     def same(a, b):

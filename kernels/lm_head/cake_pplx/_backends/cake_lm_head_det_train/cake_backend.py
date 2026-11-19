@@ -12506,7 +12506,7 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
             dw_stream=ctx.dw_stream,
             gemm_tuning=ctx.gemm_tuning,
             row_index=row_index,
-            _rlab=ctx.rlab,
+            _rlab=getattr(ctx, "rlab", None),
         )
         if ctx.kept and (need_dx or need_dw):
             ctx.kept = False  # spent: row_grad overwrites them with dz

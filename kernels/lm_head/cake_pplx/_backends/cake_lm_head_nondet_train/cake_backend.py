@@ -14358,7 +14358,7 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
             logprob_dz=ctx.logprob_dz,
             row_index=row_index,
             _problem=ctx.problem,
-            _rlab=ctx.rlab,
+            _rlab=getattr(ctx, "rlab", None),
         )
         return (dx, dw) + (None,) * 11
 
@@ -14548,7 +14548,7 @@ class CakeLMHeadNondetLogprobTemperatureFunction(torch.autograd.Function):
             temperature=tau if tau_rows is not None else None,
             temperature_rows=tau_rows,
             _problem=ctx.problem,
-            _rlab=ctx.rlab,
+            _rlab=getattr(ctx, "rlab", None),
         )
         return (dx, dw) + (None,) * 13
 
@@ -14670,7 +14670,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
             dw_stream=ctx.dw_stream,
             gemm_tuning=ctx.gemm_tuning,
             row_index=row_index,
-            _rlab=ctx.rlab,
+            _rlab=getattr(ctx, "rlab", None),
         )
         if ctx.kept and (need_dx or need_dw):
             ctx.kept = False  # spent: row_grad overwrites them with dz
