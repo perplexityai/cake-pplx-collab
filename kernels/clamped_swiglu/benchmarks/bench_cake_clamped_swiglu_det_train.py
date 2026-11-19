@@ -64,12 +64,13 @@ outputs):
 
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
-of every row to ``-88`` (BF16): every group of columns that Cake's kernels vote over holds one, so Cake runs its exact
-sigmoid path everywhere.  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor and one ``[R, 2I]`` gradient) and
-``split`` (two ``[R, I]`` tensors and gradients).  Every arm allocates its outputs inside the timed call; compilation,
-graph and plan building happen before timing.  Each arm's outputs are compared with Cake's: the largest absolute
-difference, the share of elements whose values differ (``values_differ``, with ``+0 == -0`` and ``NaN == NaN``), the
-share that differ only in the sign of a zero (``zero_sign_only``), and the share whose bits differ (``bits_differ``).
+of every row to ``-88`` (BF16): every group of columns that Cake's kernels vote over holds one, so every warp of
+Cake's kernels takes its deep-gate sigmoid (``sigmoid_scaled``).  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor
+and one ``[R, 2I]`` gradient) and ``split`` (two ``[R, I]`` tensors and gradients).  Every arm allocates its outputs
+inside the timed call; compilation, graph and plan building happen before timing.  Each arm's outputs are compared
+with Cake's: the largest absolute difference, the share of elements whose values differ (``values_differ``, with
+``+0 == -0`` and ``NaN == NaN``), the share that differ only in the sign of a zero (``zero_sign_only``), and the
+share whose bits differ (``bits_differ``).
 
 Stages: ``fwd`` (one forward), ``bwd`` (one backward from ``gate``, ``up``, ``weight`` and ``dh``), ``fwd+bwd`` (the
 two in sequence), and ``ckpt`` (an autograd step under ``torch.utils.checkpoint(..., use_reentrant=False,
@@ -1395,7 +1396,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument(
         "--deep-gate",
         action="store_true",
-        help="gates at columns 0, 768 and 1536 of every row are -88 (Cake's exact sigmoid path everywhere)",
+        help="gates at columns 0, 768 and 1536 of every row are -88 (every warp takes Cake's deep-gate sigmoid)",
     )
     parser.add_argument(
         "--cudnn-runtime-compiled",
