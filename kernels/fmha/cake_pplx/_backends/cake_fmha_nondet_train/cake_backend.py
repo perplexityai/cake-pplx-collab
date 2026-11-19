@@ -681,10 +681,11 @@ def cake_fmha_nondet_train_backward(
             done = run(q, k, v, out, lse, dout, dq, dk, dv, scale, scale_log2)
         except MemoryError:
             # The environment allocator failed, before any launch (tvm-ffi raises the builtin MemoryError): the
-            # workspace is allocated here instead, so a lasting shortage raises torch.OutOfMemoryError.  Such a call
+            # workspace is allocated here instead, so a lasting shortage raises torch.OutOfMemoryError, as 0.1.3 did
+            # (the failing allocation and its message can differ: 0.1.4 allocates dq, dk and dv first).  Such a call
             # reports two out-of-memory events to the caching allocator (``num_ooms`` of torch.cuda.memory_stats()
             # and the registered OOM observers), the environment allocator's and this one, where 0.1.3 reported
-            # one; the error it raises is the one 0.1.3 raised.
+            # one.
             done = False
         if done:
             return dq, dk, dv

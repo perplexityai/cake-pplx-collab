@@ -37,8 +37,8 @@ backward, which composes the three stages, judged for every variant at four head
 and five heads; each variant launches the kernels of the three records ``RECORD_OF`` names for it, in order and no
 other (observed on the device), its inputs left unchanged; the same records, and ``dq``, ``dk`` and ``dv`` within the
 tier, when the host sequence's ``run`` returns ``False`` (the workspace from Python) and without a host sequence (the
-stage launchers).  The tests that observe kernels skip where ``torch.profiler`` records no kernel of a plain torch
-operation on the device (a CUPTI that does not support it).
+stage launchers).  Where ``torch.profiler`` records no kernel of a plain torch operation on the device (a CUPTI that
+does not support it), the tests that observe kernels run every other check, then skip the observation.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -534,20 +534,28 @@ def _kernels(call, trace: Path) -> tuple[object, list[str]]:
     return result, [event["name"] for event in kernels]
 
 
-def _launched(call, device: torch.device, trace: Path) -> tuple[object, list[tuple[str, str]]]:
+def _launched(call, device: torch.device, trace: Path) -> tuple[object, list[tuple[str, str]] | None]:
     """``(result, launched)``: ``call()``'s result and the CUDA kernels it ran, in launch order, observed on the device
     (``torch.profiler``; the trace is written to ``trace``), each as ``(stage, record)`` of the registry record whose
     kernel it is, or ``("no record", name)``.
 
-    Positive control first: a plain torch operation on ``device``, profiled the same way.  Only when the profiler
-    records no kernel of it (a CUPTI that does not support the device) does the test skip; otherwise the caller's
-    assertion on ``launched`` stands as written."""
+    Positive control first: a plain torch operation on ``device``, profiled the same way.  When the profiler records
+    no kernel of it (a CUPTI that does not support the device), ``call()`` runs without the profiler and ``launched``
+    is ``None``: the test runs its other checks, then :func:`_assert_launched` skips the observation."""
     _, control = _kernels(lambda: torch.ones(1024, device=device).mul_(2), trace.with_name("control-" + trace.name))
     if not control:
-        pytest.skip("torch.profiler records no CUDA kernel on this device (CUPTI); install a CUPTI that supports it")
+        return call(), None
     record_of = {rec["kernel_symbol"]: (rec["stage"], name) for name, rec in cake_jit.MODULES.items()}
     result, names = _kernels(call, trace)
     return result, [record_of.get(name, ("no record", name)) for name in names]
+
+
+def _assert_launched(launched: list[tuple[str, str]] | None, D: int, causal: bool) -> None:
+    """The kernels observed are those of the variant's three records, in order, and no other.  Called after every
+    other check of the test: when the profiler observed nothing (``None``), only this observation skips."""
+    if launched is None:
+        pytest.skip("torch.profiler records no CUDA kernel on this device (CUPTI); install a CUPTI that supports it")
+    assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
 
 
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
@@ -563,10 +571,10 @@ def test_the_backward_launches_the_records_of_its_variant(D, causal, device, tmp
         return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
 
     (dq, dk, dv), launched = _launched(call, device, tmp_path / "trace.json")
-    assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
     assert_backward_contract("routed", x, {"dq": dq, "dk": dk, "dv": dv})
     for name, old, new in zip(("q", "k", "v", "out", "lse", "dout"), before, inputs, strict=True):
         assert torch.equal(old, new), f"the backward wrote its input {name}"
+    _assert_launched(launched, D, causal)
 
 
 # The backward's paths besides the host sequence's ``run``: ``run`` returns False (no tvm-ffi environment allocator, or
@@ -601,7 +609,6 @@ def test_the_backward_without_run_launches_the_same_records(
         return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
 
     (dq_path, dk_path, dv_path), launched = _launched(call, device, tmp_path / "trace.json")
-    assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
     assert calls == ([] if replacement is None else [11])
     assert_backward_contract(path, x, {"dq": dq_path, "dk": dk_path, "dv": dv_path})
 
@@ -613,3 +620,4 @@ def test_the_backward_without_run_launches_the_same_records(
         return judged_backward(y, {path: dict(zip(("dq", "dk", "dv"), got, strict=True))})
 
     judge_draws(record_property, draw)
+    _assert_launched(launched, D, causal)

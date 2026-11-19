@@ -119,8 +119,19 @@ records kernels only with a CUPTI that supports the device.  On `sm_107a`,
 CUPTI 13.0.85 (the one torch 2.14.1+cu130 installs) records no kernel
 (`CUPTI_ERROR_INVALID_DEVICE`); CUPTI 13.5.25 records them.  Each of
 these tests first profiles a plain torch operation on the device.  When the
-profiler records no kernel for it, the test skips with the reason
+profiler records no kernel for it, the test runs its other checks without
+the profiler, then skips the kernel observation with the reason
 `torch.profiler records no CUDA kernel on this device (CUPTI); install a
-CUPTI that supports it`.  To run these tests on `sm_107a`, install
-`nvidia-cuda-cupti==13.5.25` and load its `libcupti.so.13` before torch
-starts (for example with `LD_PRELOAD`).
+CUPTI that supports it`.
+
+To observe the kernels on `sm_107a`, install CUPTI 13.5.25 into a separate
+directory and preload it:
+
+```bash
+pip install --target DIR nvidia-cuda-cupti==13.5.25
+LD_PRELOAD=DIR/nvidia/cu13/lib/libcupti.so.13 \
+  python -m pytest -p no:cacheprovider tests/experimental/test_cake_fmha_nondet_train.py
+```
+
+Installing it into the torch environment instead replaces the CUPTI that
+torch pins.
