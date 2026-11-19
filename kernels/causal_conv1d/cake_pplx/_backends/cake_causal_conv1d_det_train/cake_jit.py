@@ -5022,27 +5022,27 @@ NARROW_TILE_WIDTHS: dict[str, dict[int, int]] = {
 NARROW_WIDTH_FLOORS: dict[str, dict[str, dict[int, int]]] = {
     "fwd": {
         "sm_100a": {
-            65: 16384,
+            65: 20480,
             66: 24576,
-            68: 16384,
+            68: 20480,
             69: 16384,
             70: 24576,
             72: 32768,
             80: 24576,
         },
         "sm_103a": {
-            65: 16384,
+            65: 20480,
             66: 24576,
-            68: 16384,
+            68: 20480,
             69: 16384,
             70: 24576,
             72: 32768,
             80: 24576,
         },
         "sm_107a": {
-            65: 24576,
+            65: 31292,
             66: 24576,
-            68: 20480,
+            68: 24576,
             69: 24576,
             70: 24576,
             72: 40960,
@@ -5065,38 +5065,45 @@ NARROW_WIDTH_FLOORS: dict[str, dict[str, dict[int, int]]] = {
 # and CUDA Graph replay), with at least one faster cell: paired probes of
 # the narrower tiles against one tile (same GPU, 7 rotated groups, a 15-group
 # repeat of every slower row, ``y`` and ``dx`` bit for bit) at S = 12288 to
-# 250340.  On GB200 (sm_100a) and GB300 (sm_103a) C = 528 and 560 were slower
-# at 16384 (20480 untimed) and C = 520 and 544 at 12288; on VR200 (sm_107a) C =
-# 520, 528, 544, 552 and 560 were slower at 16384, C = 568 at 12288, and C =
-# 520 gained nothing at 20480.  At S = 250340 x 520 the forward under CUDA
-# Graph replay ran 127.17 -> 98.69 us on GB200.  B200 (148 SMs) takes GB200's
-# floors.
+# 250340, and a timing of the nondet package's 0.2.3 release against this
+# release (same GPU, the same forward plans) at S = 12288 to 500680.  On
+# GB200 (sm_100a) and GB300 (sm_103a), whose cells are pooled, the probes
+# found C = 528 and 560 slower at 16384 (20480 untimed) and C = 520 and 544
+# at 12288; the release timing then put the 0.2.3 / new time ratio of the
+# forward with FP32 taps and an FP32 bias at 0.9684 / 0.9743 (eager / graph)
+# at C = 520 and 0.9801 / 0.9754 at C = 544, both at 16384 on GB200, which
+# moved those two floors to 20480.  On VR200 (sm_107a) the probes found C =
+# 520, 528, 544, 552 and 560 slower at 16384 and C = 568 at 12288; the
+# release timing put that ratio at 0.9876 / 0.9732 at C = 520, S = 24576 and
+# 0.9862 / 0.9775 at C = 544, S = 20480, which moved those floors to 31292
+# and 24576.  At S = 250340 x 520 the forward under CUDA Graph replay ran
+# 127.17 -> 98.69 us on GB200.  B200 (148 SMs) takes GB200's floors.
 # C = 776 (97 vectors) was slower at S = 131072-250340 and keeps one tile.
 NARROW_ROW_FLOORS: dict[str, dict[str, dict[int, int]]] = {
     "fwd": {
         "sm_100a": {
-            65: 16384,
+            65: 20480,
             66: 24576,
             67: 16384,
-            68: 16384,
+            68: 20480,
             69: 16384,
             70: 24576,
             71: 12288,
         },
         "sm_103a": {
-            65: 16384,
+            65: 20480,
             66: 24576,
             67: 16384,
-            68: 16384,
+            68: 20480,
             69: 16384,
             70: 24576,
             71: 12288,
         },
         "sm_107a": {
-            65: 24576,
+            65: 31292,
             66: 24576,
             67: 16384,
-            68: 20480,
+            68: 24576,
             69: 24576,
             70: 24576,
             71: 16384,
