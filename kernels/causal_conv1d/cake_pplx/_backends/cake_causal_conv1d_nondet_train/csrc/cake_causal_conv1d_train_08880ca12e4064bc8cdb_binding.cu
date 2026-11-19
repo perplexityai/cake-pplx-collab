@@ -59,7 +59,7 @@ int64_t CMod(int64_t a, int64_t b) {
   return b == -1 ? 0 : a % b;
 }
 
-void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, TensorView a_b, TensorView a_work, int64_t a_S, int64_t a_C, int64_t a_num_docs, int64_t a_search_steps, int64_t a_ct_vec, int64_t a_n_sub, int64_t a_n_ch_tiles, int64_t a_flags, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, TensorView a_b, TensorView a_work, int64_t a_S, int64_t a_C, int64_t a_num_docs, int64_t a_search_steps, int64_t a_ct_vec, int64_t a_n_sub, int64_t a_n_ch_tiles, int64_t a_flags, int64_t a_enable_pdl, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_x.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_x, "x");
@@ -125,6 +125,8 @@ void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, Tensor
       << KERNEL_NAME << ": requires (CMod(C, 8) == 0)";
   TVM_FFI_CHECK((CheckedMul(CheckedMul(CheckedSub(a_n_ch_tiles, 1LL), a_ct_vec), 8LL) < a_C), ValueError)
       << KERNEL_NAME << ": requires ((((n_ch_tiles - 1) * ct_vec) * 8) < C)";
+  TVM_FFI_CHECK(a_enable_pdl == 0LL || a_enable_pdl == 1LL, ValueError)
+      << KERNEL_NAME << ": 'enable_pdl' = " << a_enable_pdl << " is not 0 or 1";
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
@@ -150,6 +152,15 @@ void Run(TensorView a_x, TensorView a_w, TensorView a_cu, TensorView a_y, Tensor
   config.blockDim = dim3(128, 1, 1);
   config.dynamicSmemBytes = 46208;
   config.stream = stream;
+  cudaLaunchAttribute attrs[1] = {};
+  int n = 0;
+  if (a_enable_pdl) {
+    attrs[n].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+    attrs[n].val.programmaticStreamSerializationAllowed = 1;
+    ++n;
+  }
+  config.attrs = attrs;
+  config.numAttrs = n;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_causal_conv1d_train_08880ca12e4064bc8cdb), kernel_args),
             "cudaLaunchKernelExC");
 }

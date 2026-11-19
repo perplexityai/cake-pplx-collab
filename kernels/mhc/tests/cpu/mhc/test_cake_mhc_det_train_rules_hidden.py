@@ -42,6 +42,17 @@ from tests.cake.test_helpers.cake_package import cake_package
 loader = cake_package("cake.cake_mhc_det_train", "cake_jit")
 
 NEW_HIDDEN_SIZES = (5120, 7168)
+# The records of the pre-handoff routes (``HANDOFF_KINDS``): the standard records with the handoff operands, checked
+# against their base records by ``test_cake_mhc_train_handoff_rules.py``; the tables below hold the standard
+# contract's records and routes.
+HANDOFF_RECORDS = frozenset(
+    name
+    for routes in loader.ROUTES.values()
+    for key, names in routes.items()
+    if key.rsplit("_h", 1)[0] in loader.HANDOFF_KINDS
+    for name in names
+    if not any(name in other for k, other in routes.items() if k.rsplit("_h", 1)[0] in loader.KINDS)
+)
 BOARDS = (("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 208), ("sm_107a", 216))
 SM_COUNTS = (148, 152, 208, 216)
 RULES_COLUMNS = (
@@ -871,9 +882,9 @@ def test_records_and_routes_of_the_new_hidden_sizes() -> None:
     modules = {
         name: record
         for name, record in loader.MODULES.items()
-        if record["hidden"] in NEW_HIDDEN_SIZES
+        if record["hidden"] in NEW_HIDDEN_SIZES and name not in HANDOFF_RECORDS
     }
-    assert set(modules) == set(NEW_H_LAUNCH_FACTS) == set(NEW_H_RECORD_ARCHES)
+    assert HANDOFF_RECORDS and set(modules) == set(NEW_H_LAUNCH_FACTS) == set(NEW_H_RECORD_ARCHES)
     for name, record in modules.items():
         hidden = record["hidden"]
         suffix = f"__h{hidden}"
@@ -899,7 +910,11 @@ def test_records_and_routes_of_the_new_hidden_sizes() -> None:
         assert (rule["kind"] if rule else "program") == want, name
     # the routes of the two sizes on every architecture
     for arch in loader.ARCHES:
-        keys = [key for key in loader.ROUTES[arch] if not key.endswith("_h4096")]
+        keys = [
+            key
+            for key in loader.ROUTES[arch]
+            if not key.endswith("_h4096") and key.rsplit("_h", 1)[0] in loader.KINDS
+        ]
         assert {key: loader.ROUTES[arch][key] for key in keys} == NEW_H_ROUTES[arch]
         assert loader.supported_hidden_sizes(arch) == (4096, *NEW_HIDDEN_SIZES)
         for hidden in NEW_HIDDEN_SIZES:

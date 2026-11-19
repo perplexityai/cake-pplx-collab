@@ -533,6 +533,7 @@ kernel_cake_causal_conv1d_det_train_f5497330bfd286211643(__nv_bfloat16* __restri
         if (tid == 0) {
             cells[(int)((unsigned int)kn % 4)] = pend;
         }
+        asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
         __syncthreads();
         int qn_1 = cells[(int)((unsigned int)kn % 4)];
         if (qn_1 < nch) {

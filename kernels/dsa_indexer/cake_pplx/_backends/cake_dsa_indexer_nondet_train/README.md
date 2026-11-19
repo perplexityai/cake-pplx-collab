@@ -293,6 +293,40 @@ and `+-inf` scores, are not specified.  The reference ranks NaN lowest for its
 own bookkeeping only.  The kernels' loop bounds and barriers do not depend on
 score comparisons, so any bit pattern terminates.
 
+## Candidate blocks
+
+`cake_dsa_indexer_nondet_train_topk_with_candidates` (BF16, `ratio = 1`,
+`1 <= top_k <= 2047`, default 512; `sm_100a` and `sm_103a`) returns
+`(indices, scores, candidate_blocks)`.  `indices` and `scores` hold the sets
+of `cake_dsa_indexer_nondet_train_topk` with the same `top_k`.
+`candidate_blocks` is int32 `[T, 2048]`: block `b` holds the segment-local
+keys `8 b .. 8 b + 7`, a row with `n` visible keys sees `nb = ceil(n / 8)`
+blocks (the newest, `nb - 1`, may be partial; its future keys do not count),
+and a block's score is the largest score of its visible keys.  With
+`nb <= 2048` the row holds `0 .. nb - 1`; otherwise block `nb - 1` and the
+2047 blocks of `0 .. nb - 2` with the largest scores, ties broken by the
+larger block id (`+0.0 == -0.0`).  A row holds its set with `-1` in the other
+slots, in no specified order (all `-1` when `n == 0`), and every id of
+`indices` lies in a block of its row.  Under
+`torch.use_deterministic_algorithms(True)` the call raises as the plain call
+does.
+
+The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
+`scan_blocks:<narrow|l6>:u1:s0:f<fit>`): the deterministic package's
+candidate-block scan program under this package's prefix.  Only the unsplit,
+unpaired narrow and l6 units carry it, so the host maps the decided kind to
+one of them (a wide unit or a CTA pair to its unpaired unit, a key-range
+split to narrow) with `n_split = 1`.  The block entries follow the scan's
+candidate buffers and ticket tail in the workspace: `blk_cap = ceil(W / 8) -
+1` entries of 8 bytes per query slot of the grid when `ceil(W / 8) > 2048`,
+else none, `W` being `max_seqlen_k` when given, else `Tkv`.  With candidate
+blocks `max_seqlen_k` therefore bounds every key segment of the call: a row
+with more older blocks than `blk_cap` stops the kernel with a device-side
+trap.  `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size`
+reports the bound; the `[T, 2048]` output is not part of it.  `sm_107a`
+registers no `scan_blocks` program, and the call raises
+`NotImplementedError` there.
+
 ## Host dispatch
 
 One call runs one kernel or two:
@@ -502,7 +536,7 @@ host-shim namespace and the launch constants share one binding.  Each
 
 ## Tests and benchmark
 
-There are five test files:
+There are six test files:
 
 * `tests/experimental/test_cake_dsa_indexer_nondet_train.py`: the backend
   suite;
@@ -513,7 +547,9 @@ There are five test files:
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_api.py`: the
   `cake_pplx.cake_dsa_indexer_nondet_train` entry points;
 * `tests/experimental/test_cake_dsa_indexer_nondet_train_names.py`: the
-  naming rules.
+  naming rules;
+* `tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`: the
+  candidate-block call (below).
 
 They share the reference in
 `tests/experimental/test_helpers/cake_dsa_indexer_reference.py` and the
@@ -559,6 +595,19 @@ The comparison file checks that the registry keys, policy records and host
 plans of BF16 and FP8 calls are the deterministic package's, on the host, and
 those of BF16 calls at the device's grid.  It does not compare the outputs of
 the two packages.
+
+The candidate-block call has its own suite,
+`tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`, with the
+FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
+host-only registry, plans at the request's shapes, argument checks and the
+`sm_107a` refusal; on the GPU, the exact sets of `indices` and
+`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
+packed layouts), sampled rows at the request's shapes, the Gaussian rule with
+the scores judged against the naive tier, containment, the repetition of the
+sets and the plain call's sets, the caller-owned workspace and outputs, the
+argument checks, the absence of host synchronization and the
+deterministic-algorithms guard.  The benchmark's `--rows candidates` times
+the call next to the plain call at the request's shapes.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
 package against the deterministic package on the same rows, in the BF16 form

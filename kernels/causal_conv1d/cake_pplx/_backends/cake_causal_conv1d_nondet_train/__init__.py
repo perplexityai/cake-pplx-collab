@@ -26,9 +26,11 @@ the :mod:`.kcp` module here).
 Numerical contract against the deterministic package: the forward runs this
 package's copies of the det forward programs, so ``y`` is the det ``y`` bit
 for bit.  The backward is ONE ordinary launch of a program built from the det
-backward body of the same route and channel rule: every per-thread and
-per-CTA FP32 step is the det program's and ``dx`` is the det ``dx`` bit for
-bit; only the cross-CTA reduction of ``dweight`` / ``dbias`` differs.  Each
+backward body of the same route and channel rule, or, at the rows of
+``cake_jit.FALLBACK_ROWS``, from the route's fallback body: every per-thread
+and per-CTA FP32 step is that det program's and ``dx`` is that det program's
+``dx`` bit for bit; only the cross-CTA reduction of ``dweight`` / ``dbias``
+differs.  Each
 CTA adds its CTA row into an accumulator with unordered global reductions in
 plain FP32 words, as the det reduce program sums on every route (the
 ``bwd_fp32g`` and ``bwd_bias_fp32g`` routes, the
@@ -79,14 +81,45 @@ Host design (the knobs are keywords; no environment variable):
   when omitted the package keeps one zeroed buffer per (device, current
   stream), grown as needed and never zeroed again.  Inside a CUDA Graph
   capture with a nonzero CUDA capture id (``cudaStreamGetCaptureInfo``) an
-  omitted workspace is a zeroed buffer of that capture and stream: the
-  capture's first backward call on the stream zeroes it (one fill node) and
-  its later calls on that stream reuse it; a call that needs more bytes
-  zeroes a larger one (another fill node) that replaces it.  No eager call
-  and no other capture shares it.  The buffer stays alive after its graph is
-  freed, until a later capture on that stream replaces it.  When the capture
-  id is 0 (also when ``cuda.bindings`` is not importable), every captured
-  backward call allocates and zeroes a buffer of its own.
+  omitted workspace is a buffer of that capture and stream that the package
+  zeroed before the capture, on an eager call, and saw complete: the graph
+  records no fill node for it, and the capture's later calls on that stream
+  reuse it (a call that needs more bytes takes a larger one).  No eager call
+  and no other capture shares it.  The graph holds a reference to the buffer
+  (a CUDA user object); after the graph and its instantiations are destroyed
+  and their launches have completed, the buffer, zero again, returns to the
+  package at its next refill (below).  The replays of one graph must not
+  overlap (they share the graph's buffers, as they share its other memory).
+  Only eager calls that omit ``workspace=`` zero these buffers, the forward's
+  and the backward's separately: per device and kind up to ``_POOL_DEPTH``
+  buffers of the largest need of such a call so far, refilled by the next such
+  call after a capture took one or when a call needs more.  A captured call
+  finds none ready when no such eager call of its kind ran before the capture,
+  when the captures since the last one took them all, when it needs more than
+  that eager need, or when their zero fills have not completed yet (a
+  ``CUDAGraph.capture_begin`` right after such an eager call, with no
+  synchronization; ``torch.cuda.graph`` synchronizes first); it then zeroes a
+  buffer of its own (one fill node per
+  call; so does every captured call when the capture id is 0, also when
+  ``cuda.bindings`` is not importable), which the package keeps no reference
+  to after the call.  Inside a capture the forward's omitted workspace (int32
+  counters) follows the same rules with buffers of its own kind.  The package
+  allocates the per-stream buffers and the pre-zeroed ones from a memory pool
+  of its own per device (``torch.cuda.MemPool``; without it the package keeps
+  no pre-zeroed buffers), so a CUDA Graph tree's warm-up does not take them
+  into the tree's private pool.  Memory the package frees stays cached in that
+  pool (a replaced per-stream buffer, a pool buffer it drops) and is never
+  returned to the caching allocator's other pools, so the pool keeps the
+  largest footprint these buffers reached at once.  Per device and kind the
+  live pre-zeroed buffers are at most ``_POOL_DEPTH`` idle ones of the largest
+  eager need, those live graphs hold, and those that graphs released since the
+  device's last refill.  A kind turned off (a refill that failed other than
+  out of memory, or a device without its memory pool) refills and hands out
+  no more: its idle buffers stay allocated for the life of the process, and a
+  buffer its graphs held returns, once released, only at a refill of the
+  device's other kind (while that kind still refills), which keeps it idle
+  (when fewer than ``_POOL_DEPTH`` are idle and it holds the kind's last pool
+  size) or drops it into the package's memory pool.
   Its size depends on ``C`` (and the route), not on ``S``.  Two backward
   launches that may run at once (two streams, two graphs replayed
   concurrently) need two buffers: never share one between them.
@@ -110,12 +143,21 @@ Host design (the knobs are keywords; no environment variable):
   (its route, ``S`` and the architecture: ``cake_jit.channel_split``) from
   the row's token floor (``cake_jit.forward_narrow_min_s``: the
   architecture's ``FORWARD_NARROW_MIN_S`` floor, or the
-  ``FORWARD_NARROW_ROW_MIN_S`` floor of the rows from a channel-vector
-  count upward: 20480 for C = 712 to 768 on sm_103a), so C = 576 to 768 run
-  the det forward's narrow tiles from that floor; below it (and on an
-  architecture without one) they keep 0.2.0's single tile.  The forward
-  workspace (int32 token-chunk counters) follows the det package's rules
-  and size, which cover every plan.
+  ``FORWARD_NARROW_ROW_MIN_S`` floor of a route's rows from a channel-vector
+  count upward: 20480 for the ``fwd_bias`` route at C = 712 to 768 on
+  sm_103a), so C = 576 to 768 run the det forward's narrow tiles from that
+  floor; below it (and on an architecture without one) they keep 0.2.0's
+  single tile.  The forward workspace (int32 token-chunk counters) follows
+  the det package's rules and size, which cover every plan.
+- Programmatic dependent launch: a program whose record's
+  ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
+  backward program but those of the pair routes) takes the ``enable_pdl``
+  launch scalar, ``cake_jit.pdl_enabled`` of the architecture and the mode:
+  ``PDL_EAGER`` outside a CUDA Graph capture, ``PDL_GRAPH`` inside one.
+  With 1 the launch may begin while the stream's preceding kernel finishes;
+  every program waits for that kernel (``griddepcontrol.wait``) before it
+  reads or writes global memory, so the outputs do not depend on it.  The
+  KCP forward launches its single-rank program with 0.
 - Host plan: the first call of a row (architecture, route, ``C``, device,
   ``bwd_grid_mult``) selects its program, splits ``C`` into channel tiles,
   reads the row's ``TILE_OVERRIDES`` or ``NARROW_TILES`` entry (the forward:
@@ -123,13 +165,22 @@ Host design (the knobs are keywords; no environment variable):
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
   ``launch_grid`` trims it by ``S``), so they launch the values a per-call
-  plan gives.  A row whose program selection reads ``S`` plans every call.
-  :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
+  plan gives.  A row a ``cake_jit.FALLBACK_ROWS`` key covers is planned for
+  both sides of the key's token range at its first call (the route's
+  fallback program inside, the rules' program outside); a later call picks
+  its side with one compare of ``S``.  A row whose program selection reads
+  ``S`` through a token floor of the selection rules plans every call (on
+  that side).  :func:`cake_causal_conv1d_nondet_train_plan_cache_clear`
+  drops the rows.
 """
 
 from __future__ import annotations
 
+import contextlib
+import ctypes
 import functools
+import sys
+import threading
 import warnings
 import weakref
 from typing import Callable, Optional
@@ -156,6 +207,7 @@ from .cake_jit import (
     forward_route,
     forward_workspace_words,
     launch_grid,
+    pdl_enabled,
     plan,
     route_applies,
     run_module,
@@ -186,16 +238,83 @@ _FORWARD_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
 # counters zero, so the stream's buffer serves every later backward call on it.
 _BACKWARD_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
 # The backward workspaces of the calls that pass none inside a CUDA Graph capture:
-# (device index, capture stream handle) -> (CUDA capture id, zeroed uint8 buffer).
-# The capture's first such call on the stream zeroes the buffer (a fill node);
-# every launch leaves it zero and the stream orders the launches, so the later
-# calls of the same capture and stream reuse it.  A call that needs more bytes
-# zeroes a larger buffer (another fill node) that replaces the entry.  Another
-# capture (another id) replaces the entry with its own buffer; until then the
-# entry keeps the buffer alive, also after its graph is freed.  A call whose
-# capture id is 0 (no ``cuda.bindings``) adds no entry: it zeroes a buffer of
-# its own.
+# (device index, capture stream handle) -> (CUDA capture id, pre-zeroed uint8 buffer).
+# The capture's first such call on the stream takes a pre-zeroed buffer of the
+# package (``_ZEROED_POOL``: no fill node); every launch leaves it zero and the
+# stream orders the launches, so the later calls of the same capture and
+# stream reuse it.  A call that needs more bytes takes a larger one that
+# replaces the entry; another capture (another id) replaces the entry with its
+# own.  An entry is dropped when its buffer returns to the package.  A captured
+# call that finds no pre-zeroed buffer ready, or whose capture id is 0 (no
+# ``cuda.bindings``), zeroes a buffer of its own (a fill node) and adds no entry:
+# that buffer is memory of the capture's pool, and the package keeps no
+# reference to it after the call.
 _CAPTURE_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {}
+# The forward's twin of ``_CAPTURE_WORKSPACES`` (int32 token-chunk counters): only
+# pre-zeroed buffers enter it; a captured forward call that zeroes a buffer of its
+# own (a fill node) keeps it to itself.
+_CAPTURE_FORWARD_WORKSPACES: dict[tuple[int, int], tuple[int, torch.Tensor]] = {}
+# The pre-zeroed capture buffers.  An eager call that omits ``workspace=`` keeps, per
+# (device index, kind) -- kind ``"fwd"`` (int32 counter words) or ``"bwd"`` (uint8
+# accumulator and counter bytes) -- up to ``_POOL_DEPTH`` idle zeroed buffers of
+# ``_POOL_SIZE`` elements (``_ZEROED_POOL``), the size set by the device's last
+# refill of that kind that did not run out of memory (a turned-off kind's idle
+# buffers keep their earlier size).  Each idle buffer carries (``_PoolBuffer``) a
+# slot of a pinned host flag array that a device-to-host copy, queued on the eager
+# call's stream behind the buffer's zero fill, sets to 1, and a CUDA user object,
+# made on the eager call (outside any capture), whose destructor posts the buffer's
+# POSIX semaphore.  A capture call takes an idle buffer whose flag reads 1 (a host load:
+# its zero fill has completed) and moves the user object's reference into the graph
+# being captured (``cudaGraphRetainUserObject``, the only CUDA call besides
+# ``cudaStreamGetCaptureInfo`` a capture makes here): the graph and each of its
+# instantiations then hold it (``_GRAPH_HELD``) until they are destroyed and their
+# launches have completed, when CUDA posts the semaphore; a later eager call
+# (``_pool_refill``) returns it, zero again (every launch leaves its bytes zero),
+# to the pool with a new user object, or frees it.  Pool buffers come from the
+# package's own memory pool (``_mem_pool``, a ``torch.cuda.MemPool`` per device) on
+# the eager call's stream, never from a capture; idle buffers take at most
+# ``_POOL_DEPTH`` x ``_POOL_SIZE`` elements per (device, kind); a taken buffer lives as
+# long as the graphs that hold it and then until the device's next refill returns it.
+# Without ``torch.cuda.MemPool`` or ``cuda.bindings`` the device has no pool: every
+# captured call zeroes a buffer of its own (a fill node).  A failure that turns a
+# kind off (``_pool_off``) frees nothing itself: the kind's idle buffers and the user
+# objects, semaphores and flag slots of an interrupted refill stay allocated for the
+# life of the process.  The buffers its graphs hold then wait, once released, in
+# ``_GRAPH_HELD`` (or in ``uo.released``, where a refill on another device moves the
+# released buffers of every other device) until a refill of the device's other kind
+# takes them (``_pool_drain`` returns the released buffers of every kind of its
+# device): it keeps each one idle in the dead kind's pool (at most ``_POOL_DEPTH``,
+# at least the kind's ``_POOL_SIZE``, which the failed refill already raised) or
+# drops it; with no such refill (the other kind off too, or the device without its
+# memory pool) they stay.  A dropped buffer's memory stays cached in the package's
+# memory pool.  ``_POOL_READY[kind][device index]`` is the need up to which an eager
+# call does not refill: the pool's size after a refill that succeeded, 0 (or absent:
+# the next eager call refills) once a capture took a buffer or found none, the call's
+# need after a refill that ran out of memory (that refill keeps no new buffer and
+# keeps the pool's size, but its drain has already run) and ``sys.maxsize`` once
+# ``_pool_off`` turned the kind off: the one lookup of an eager call while the pool
+# needs nothing.  ``_POOL_LOCK`` (a plain ``threading.Lock``: not reentrant) guards
+# the take (``_pool_take``), the refill and its drain (``_pool_refill``), every entry
+# into the package's memory pool (the refill's and ``_package_zeros``': two threads
+# never route their allocations to one pool at once) and the writes and drops of the
+# ``_CAPTURE_*WORKSPACES`` entries.  Nothing that runs under it may call a function
+# that takes it (``_pool_take``, ``_pool_refill``, ``_package_zeros``,
+# ``_capture_buffer``): the thread would wait for itself.
+_POOL_DEPTH = 4
+# torch's out-of-memory error: a refill that meets it keeps no new buffer, frees no
+# idle buffer and keeps the pool's size.
+_OUT_OF_MEMORY = getattr(torch, "OutOfMemoryError", None) or getattr(torch.cuda, "OutOfMemoryError", MemoryError)
+_POOL_DTYPES: dict[str, torch.dtype] = {"fwd": torch.int32, "bwd": torch.uint8}
+_ZEROED_POOL: dict[tuple[int, str], list] = {}
+_POOL_SIZE: dict[tuple[int, str], int] = {}
+_POOL_READY: dict[str, dict[int, int]] = {"fwd": {}, "bwd": {}}
+_GRAPH_HELD: list = []
+_POOL_LOCK = threading.Lock()
+# The captured calls (with no ``workspace=``) that zeroed a buffer of their own, each one fill node in its graph:
+# (device index, kind) -> count, kind ``"fwd"`` or ``"bwd"``; whatever the reason (capture id 0 or no
+# ``cuda.bindings``, a user-object error, no ready pre-zeroed buffer, none large enough).  A key is absent until its
+# first such call; eager calls never change it.
+_CAPTURE_FILL_FALLBACKS: dict[tuple[int, str], int] = {}
 # The byte layout of a backward launch per accumulator rule, C and channel tile count (a pure function of them),
 # computed once: it is on the host path of every backward call before its launch.
 _LAYOUTS: dict[tuple, dict] = {}
@@ -213,7 +332,10 @@ _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # layout})``.  Selecting the route's program, splitting C into channel tiles, looking up the TILE_OVERRIDES /
 # NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host time in front of every
 # launch; with the row's plan a call only compares ``S`` with the row's token ranges (``cake_jit.row_launch``).  A row
-# whose program selection reads ``S`` (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then
+# whose program selection reads ``S`` through a token floor (``cake_jit.tokens_select``) holds ``None`` and plans every
+# call.  A row a ``cake_jit.FALLBACK_ROWS`` key covers holds both sides of the key's token range, ``(plan inside, its
+# dict, S_min, S_max, plan outside, its dict)`` (``cake_jit.plan_row``'s ``inside`` True / False): a call takes the
+# first pair when ``S_min <= S <= S_max``, else the last.  At most ``_ROW_PLANS_MAX`` rows (then
 # emptied); :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry
 # tables, the SM count or the architecture a device reports, which the rows were planned from).
 _ROW_PLANS: dict[tuple, tuple[Optional[_loader.RowPlan], dict]] = {}
@@ -670,20 +792,40 @@ def _call_plan(
     selects, the first one's record, the :data:`cake_jit.PLAN_SCALARS` and the grid :func:`_launch` plans (same
     values, same errors), from the call's ``_ROW_PLANS`` row; ``per_tiles`` is the row's dict for the host values
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
-    ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error."""
+    ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error.  A row a
+    :data:`cake_jit.FALLBACK_ROWS` key covers is planned for both sides of the key's token range by its first call;
+    the call's side is one compare of ``S`` with the range."""
 
     key = (arch, kind, C, device_index, bwd_grid_mult)
     hit = _ROW_PLANS.get(key)
     if hit is None:
         # A missing route or a registry error raises as in a per-call plan.
         _route(arch, kind, needs=_route_needs(policy), C=C, S=S)
-        row = _loader.plan_row(
-            arch, kind, C, device_index=device_index, bwd_grid_mult=bwd_grid_mult
-        )
+        bounds = _loader.fallback_row_range(arch, kind, C)
+        if bounds is None:
+            row = _loader.plan_row(
+                arch, kind, C, device_index=device_index, bwd_grid_mult=bwd_grid_mult
+            )
+            hit = (row, {})
+        else:
+            inside, outside = (
+                _loader.plan_row(
+                    arch,
+                    kind,
+                    C,
+                    device_index=device_index,
+                    bwd_grid_mult=bwd_grid_mult,
+                    inside=side,
+                )
+                for side in (True, False)
+            )
+            hit = (inside, {}, int(bounds[0]), int(bounds[1]), outside, {})
         if len(_ROW_PLANS) >= _ROW_PLANS_MAX:
             _ROW_PLANS.clear()
-        hit = _ROW_PLANS[key] = (row, {})
-    row, per_tiles = hit
+        _ROW_PLANS[key] = hit
+    row, per_tiles = hit[0], hit[1]
+    if len(hit) > 2 and not hit[2] <= S <= hit[3]:
+        row, per_tiles = hit[4], hit[5]
     if row is None:
         names = _route(arch, kind, needs=_route_needs(policy), C=C, S=S)
         record = _loader.MODULES[names[0]]
@@ -713,9 +855,10 @@ def _call_plan(
 def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
-    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, the forward's
-    ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its
-    ``sm_count`` or ``device_arch``."""
+    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``, the
+    forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim
+    tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
+    ``PDL_GRAPH``) is read by every call, not planned."""
 
     n = len(_ROW_PLANS)
     _ROW_PLANS.clear()
@@ -825,36 +968,380 @@ def _current_stream_handle(device_index: int) -> int:
     return int(torch.cuda.current_stream(device_index).cuda_stream)
 
 
-def _capture_id(stream: int) -> int:
-    """CUDA's id of the capture the raw stream ``stream`` takes part in; 0 when it is not capturing or when the CUDA
-    Python bindings are not importable (then every captured backward call zeroes a buffer of its own).  Two captures
-    have distinct ids even on the same stream."""
+def _capture_info(stream: int) -> tuple[int, object]:
+    """``(capture id, graph)`` of the CUDA Graph capture the raw stream ``stream`` takes part in: CUDA's id of the
+    capture (two captures have distinct ids even on the same stream) and the ``cudaGraph_t`` being captured, both
+    read by one ``cudaStreamGetCaptureInfo``; ``(0, None)`` when the stream is not capturing or when the CUDA Python
+    bindings are not importable (then every captured backward call zeroes a buffer of its own).  The graph is
+    ``None`` unless the result's fourth item is a ``cudaGraph_t`` (the layout ``(error, status, id, graph, ...)``);
+    without it a capture takes no pre-zeroed buffer."""
 
     try:
         from cuda.bindings import runtime as cudart
     except ImportError:
-        return 0
+        return 0, None
     info = cudart.cudaStreamGetCaptureInfo(stream)
     if info[0] != cudart.cudaError_t.cudaSuccess:
-        return 0
+        return 0, None
     if info[1] != cudart.cudaStreamCaptureStatus.cudaStreamCaptureStatusActive:
-        return 0
-    return int(info[2])
+        return 0, None
+    graph = info[3] if len(info) > 3 and isinstance(info[3], cudart.cudaGraph_t) else None
+    return int(info[2]), graph
+
+
+class _PoolBuffer:
+    """One pre-zeroed capture buffer: the zeroed ``tensor`` of ``kind`` on device ``device_index``, the address of
+    its pinned readiness flag (``flag``: 1 once its zero fill completed, ``0`` while it is in a graph), the POSIX
+    semaphore ``sem`` its user object's destructor posts and the user object ``obj`` (our reference while idle)."""
+
+    __slots__ = ("tensor", "kind", "device_index", "flag", "sem", "obj")
+
+    def __init__(self, tensor: torch.Tensor, kind: str, device_index: int, flag: int, sem: int, obj: object):
+        self.tensor, self.kind, self.device_index = tensor, kind, device_index
+        self.flag, self.sem, self.obj = flag, sem, obj
+
+
+class _UserObjects:
+    """The CUDA user-object calls of the pre-zeroed capture buffers (``cuda.bindings`` runtime API) and their
+    destructor: libc's ``sem_post`` on the buffer's POSIX semaphore.  CUDA runs a destructor on an internal thread,
+    after the graph that held the object and its instantiations are destroyed and their launches have completed;
+    it must not call CUDA or block, which ``sem_post`` (async-signal-safe) does not.  ``sem_post`` has the type
+    ``int (sem_t *)`` and CUDA calls it as ``void (*)(void *)``: on the LP64 Linux ABIs (x86-64, AArch64) the pointer
+    is passed in the first integer register and the ``int`` result is ignored.  The semaphores live in host memory
+    from libc's ``malloc`` that is never freed (a destructor may post one at any time, also after the interpreter
+    has torn this module down); a semaphore is handed out again only after ``sem_trywait`` consumed its post."""
+
+    SEM_BYTES = 64  # at least sizeof(sem_t) (32 on 64-bit glibc), one per 64-byte line
+    SEM_CHUNK = 256
+
+    def __init__(self) -> None:
+        from cuda.bindings import runtime as cudart
+
+        libc = ctypes.CDLL(None, use_errno=True)
+        libc.sem_init.argtypes = [ctypes.c_void_p, ctypes.c_int, ctypes.c_uint]
+        libc.sem_init.restype = ctypes.c_int
+        libc.sem_trywait.argtypes = [ctypes.c_void_p]
+        libc.sem_trywait.restype = ctypes.c_int
+        libc.malloc.argtypes = [ctypes.c_size_t]
+        libc.malloc.restype = ctypes.c_void_p
+        self.cudart = cudart
+        self.libc = libc
+        self.sem_post = ctypes.cast(libc.sem_post, ctypes.c_void_p).value
+        self.success = cudart.cudaError_t.cudaSuccess
+        self.create_flags = int(cudart.cudaUserObjectFlags.cudaUserObjectNoDestructorSync)
+        self.move = int(cudart.cudaUserObjectRetainFlags.cudaGraphUserObjectMove)
+        self.free_sems: list[int] = []
+        self.retired: list[int] = []  # semaphores of released idle objects, until their post is consumed
+        self.flags: list[torch.Tensor] = []  # pinned int32 readiness flags, never freed
+        self.free_flags: list[tuple[torch.Tensor, int, int]] = []
+        self.pending_flags: list[tuple[torch.Tensor, int, int]] = []  # returned before their copy was seen
+        self.released: list[_PoolBuffer] = []  # held buffers their graphs released, for their device's refill
+
+    def semaphore(self) -> int:
+        if not self.free_sems:
+            chunk = self.libc.malloc(self.SEM_BYTES * (self.SEM_CHUNK + 1))  # never freed
+            if not chunk:
+                raise MemoryError("malloc of the semaphores failed")
+            base = (chunk + self.SEM_BYTES - 1) // self.SEM_BYTES * self.SEM_BYTES
+            self.free_sems.extend(base + self.SEM_BYTES * i for i in range(self.SEM_CHUNK))
+        sem = self.free_sems.pop()
+        if self.libc.sem_init(sem, 0, 0) != 0:
+            self.free_sems.append(sem)
+            raise OSError(ctypes.get_errno(), "sem_init")
+        return sem
+
+    def posted(self, sem: int) -> bool:
+        return self.libc.sem_trywait(sem) == 0
+
+    def create(self, sem: int) -> object:
+        """A user object (one reference, ours) whose destructor posts ``sem``; outside any capture."""
+
+        res = self.cudart.cudaUserObjectCreate(sem, self.sem_post, 1, self.create_flags)
+        if res[0] != self.success:
+            raise RuntimeError(f"cudaUserObjectCreate: {res[0]}")
+        return res[1]
+
+    def retain(self, graph: object, obj: object) -> bool:
+        """Move our reference of ``obj`` into ``graph`` (the graph being captured); False when CUDA refuses."""
+
+        try:
+            res = self.cudart.cudaGraphRetainUserObject(graph, obj, 1, self.move)
+        except Exception:
+            return False
+        return (res[0] if isinstance(res, tuple) else res) == self.success
+
+    def release(self, obj: object, sem: int) -> None:
+        """Drop our reference of an idle ``obj``; its semaphore returns once the destructor posted it."""
+
+        self.cudart.cudaUserObjectRelease(obj, 1)
+        self.retired.append(sem)
+
+    def flag(self) -> tuple[torch.Tensor, int, int]:
+        """A free readiness flag: ``(pinned tensor, index, address)``."""
+
+        if not self.free_flags:
+            flags = torch.zeros(64, dtype=torch.int32, pin_memory=True)
+            self.flags.append(flags)
+            base = flags.data_ptr()
+            self.free_flags.extend((flags, i, base + 4 * i) for i in range(64))
+        return self.free_flags.pop()
+
+    def free_flag(self, flag: tuple[torch.Tensor, int, int]) -> None:
+        """Return a flag; one whose device-to-host copy has not been seen yet (it reads 0) waits in
+        ``pending_flags``, so that a late copy never marks another buffer ready."""
+
+        if ctypes.c_int32.from_address(flag[2]).value == 1:
+            self.free_flags.append(flag)
+        else:
+            self.pending_flags.append(flag)
+
+
+# The package's own memory pool per device index (``torch.cuda.MemPool``), made on first use, or ``None`` on a torch
+# without ``torch.cuda.MemPool`` / ``torch.cuda.use_mem_pool`` or when making it failed.  The package allocates its
+# pre-zeroed capture buffers and its per-(device, stream) workspaces inside ``torch.cuda.use_mem_pool`` of it, so they
+# never land in another pool the calling thread's allocations are routed to (a CUDA Graph tree's warm-up routes the
+# thread's allocations to the tree's private pool, which must hold only the graph's own tensors).  Its memory is not
+# shared with the caching allocator's other pools: freed blocks stay cached in it for the package's later
+# allocations.
+_MEM_POOLS: dict[int, object] = {}
+
+
+def _mem_pool(device_index: int) -> object:
+    pool = _MEM_POOLS.get(device_index, False)
+    if pool is False:
+        make = getattr(torch.cuda, "MemPool", None)
+        pool = None
+        if make is not None and hasattr(torch.cuda, "use_mem_pool"):
+            try:
+                with torch.cuda.device(device_index):
+                    pool = make()
+            except Exception:
+                pool = None
+        _MEM_POOLS[device_index] = pool
+    return pool
+
+
+def _package_zeros(numel: int, dtype: torch.dtype, device: torch.device, device_index: int) -> torch.Tensor:
+    """A zeroed tensor of the package's own memory pool on the device (:func:`_mem_pool`), or of the caching
+    allocator's current pool where the package has none.  Only a failure to enter the pool (an unusable
+    ``torch.cuda.use_mem_pool``) takes the device off it; an allocation error (an out-of-memory error) propagates.
+    Holds ``_POOL_LOCK`` (never taken by a caller of this function)."""
+
+    # under _POOL_LOCK, as the refill: two threads never route their allocations to one pool at once
+    with _POOL_LOCK:
+        pool = _mem_pool(device_index)
+        if pool is not None:
+            with contextlib.ExitStack() as stack:
+                try:
+                    stack.enter_context(torch.cuda.use_mem_pool(pool, device=device))
+                except Exception:  # the API is unusable here: the device leaves its pool for good
+                    _MEM_POOLS[device_index] = None
+                else:
+                    # an allocation error (an OOM) propagates and the device keeps its pool
+                    return torch.zeros(numel, dtype=dtype, device=device)
+    return torch.zeros(numel, dtype=dtype, device=device)
+
+
+# ``None`` until the first refill probes the user-object calls; then a ``_UserObjects``, or ``False`` when they are
+# unavailable (no ``cuda.bindings``, no libc semaphores, a CUDA error), and the captures zero buffers of their own.
+_USER_OBJECTS: object = None
+
+
+def _user_objects() -> object:
+    global _USER_OBJECTS
+    if _USER_OBJECTS is None:
+        try:
+            _USER_OBJECTS = _UserObjects()
+        except Exception:
+            _USER_OBJECTS = False
+    return _USER_OBJECTS
+
+
+def _flag_ready(buf: _PoolBuffer) -> bool:
+    return buf.flag != 0 and ctypes.c_int32.from_address(buf.flag[2]).value == 1
+
+
+def _pool_off(kind: str, device_index: int) -> None:
+    """No pre-zeroed buffers of ``kind`` on the device: its eager calls never refill again and its captures take
+    none.  Its idle buffers (at most ``_POOL_DEPTH``) stay allocated; a buffer its graphs hold returns, once
+    released, only at a refill of the device's other kind, which keeps it idle or drops it (the pool comment above
+    ``_POOL_DEPTH``); a dropped buffer's memory stays cached in the package's memory pool."""
+
+    _POOL_READY[kind][device_index] = sys.maxsize
+
+
+def _drop_capture_entries(tensor: torch.Tensor) -> None:
+    """Drop the ``_CAPTURE_*WORKSPACES`` entries naming ``tensor`` (its graph released it)."""
+
+    for table in (_CAPTURE_WORKSPACES, _CAPTURE_FORWARD_WORKSPACES):
+        for key in [k for k, (_, t) in list(table.items()) if t is tensor]:
+            table.pop(key, None)
+
+
+def _pool_drain(uo: _UserObjects, device_index: int) -> list[_PoolBuffer]:
+    """The buffers of device ``device_index`` whose graphs released them (their semaphore was posted), removed from
+    ``_GRAPH_HELD`` (those of other devices wait in ``uo.released`` for their device's refill); the semaphores of
+    released idle objects and the pending flags whose copy completed are returned.  Host calls only."""
+
+    held = []
+    for buf in _GRAPH_HELD:
+        (uo.released if uo.posted(buf.sem) else held).append(buf)
+    _GRAPH_HELD[:] = held
+    mine = [buf for buf in uo.released if buf.device_index == device_index]
+    uo.released[:] = [buf for buf in uo.released if buf.device_index != device_index]
+    retired = []
+    for sem in uo.retired:
+        (uo.free_sems if uo.posted(sem) else retired).append(sem)
+    uo.retired[:] = retired
+    pending, uo.pending_flags[:] = list(uo.pending_flags), []
+    for flag in pending:
+        uo.free_flag(flag)
+    return mine
+
+
+def _pool_refill(device_index: int, kind: str, need: int, device: torch.device) -> None:
+    """On an eager call that omits its workspace and needs ``need`` elements of ``kind`` beyond
+    ``_POOL_READY[kind][device_index]``: return the buffers released by their graphs (to the pool, with a new user
+    object, or freed), raise the device's pool size to ``need``, free idle buffers below it and zero new buffers on
+    the current stream until the pool holds ``_POOL_DEPTH``; each new buffer's flag is set by a device-to-host copy,
+    queued behind its zero fill, of a 1 this refill writes on the same stream.  An out-of-memory error keeps no new
+    buffer, frees no idle buffer and keeps the pool's size (the drain before it has already returned or dropped the
+    released buffers) and sets ``_POOL_READY[kind][device_index]`` to ``need`` (the next refill comes at a larger
+    need or after the next take); any other failure leaves the device without pre-zeroed buffers of ``kind``."""
+
+    uo = _user_objects()
+    if not uo:
+        _pool_off(kind, device_index)
+        return
+    with _POOL_LOCK:
+        mem_pool = _mem_pool(device_index)
+        if mem_pool is None:
+            _pool_off(kind, device_index)
+            return
+        key = (device_index, kind)
+        old_size = _POOL_SIZE.get(key, 0)
+        size = max(old_size, int(need))
+        _POOL_SIZE[key] = size
+        try:
+            with torch.cuda.device(device_index):
+                for buf in _pool_drain(uo, device_index):
+                    _drop_capture_entries(buf.tensor)
+                    bkey = (buf.device_index, buf.kind)
+                    pool = _ZEROED_POOL.setdefault(bkey, [])
+                    if len(pool) < _POOL_DEPTH and buf.tensor.numel() >= _POOL_SIZE.get(bkey, 0):
+                        # its graphs' launches have completed and left it zero: ready at once
+                        buf.obj = uo.create(buf.sem)
+                        buf.flag = uo.flag()
+                        ctypes.c_int32.from_address(buf.flag[2]).value = 1
+                        pool.append(buf)
+                    else:
+                        uo.free_sems.append(buf.sem)
+                pool = _ZEROED_POOL.setdefault(key, [])
+                keep = [b for b in pool if b.tensor.numel() >= size]
+                fresh: list[_PoolBuffer] = []
+                if len(keep) < _POOL_DEPTH:
+                    try:
+                        with torch.cuda.use_mem_pool(mem_pool, device=device):
+                            # the flags' source, written on this stream before the copies that read it
+                            one = torch.ones(1, dtype=torch.int32, device=device)
+                            tensors = [
+                                torch.zeros(size, dtype=_POOL_DTYPES[kind], device=device)
+                                for _ in range(_POOL_DEPTH - len(keep))
+                            ]
+                    except _OUT_OF_MEMORY:
+                        _POOL_SIZE[key] = old_size
+                        _POOL_READY[kind][device_index] = int(need)
+                        return
+                    for tensor in tensors:
+                        flag = uo.flag()
+                        ctypes.c_int32.from_address(flag[2]).value = 0
+                        flag[0][flag[1] : flag[1] + 1].copy_(one, non_blocking=True)
+                        sem = uo.semaphore()
+                        fresh.append(_PoolBuffer(tensor, kind, device_index, flag, sem, uo.create(sem)))
+                for buf in pool:
+                    if buf not in keep:
+                        uo.release(buf.obj, buf.sem)
+                        uo.free_flag(buf.flag)
+                pool[:] = keep + fresh
+        except Exception:
+            _pool_off(kind, device_index)
+            return
+        _POOL_READY[kind][device_index] = size
+
+
+def _pool_take(device_index: int, kind: str, need: int, graph: object) -> Optional[torch.Tensor]:
+    """Inside a capture of ``graph``: an idle pre-zeroed buffer of ``kind`` with at least ``need`` elements whose
+    zero fill has completed (its flag reads 1), its user object's reference moved into ``graph``; ``None`` when the
+    device has none (or CUDA refuses the retain).  Either way the next eager call refills the pool.  Makes no CUDA
+    call but ``cudaGraphRetainUserObject``."""
+
+    uo = _USER_OBJECTS
+    if not uo or graph is None:
+        return None
+    with _POOL_LOCK:
+        if _POOL_READY[kind].get(device_index) == sys.maxsize:
+            return None  # the device has no pool (``_pool_off``)
+        _POOL_READY[kind][device_index] = 0
+        # buffers released meanwhile wait in _GRAPH_HELD for the next eager refill (it makes their new user objects)
+        for buf in _ZEROED_POOL.get((device_index, kind), ()):
+            if buf.tensor.numel() >= need and _flag_ready(buf):
+                if not uo.retain(graph, buf.obj):
+                    return None
+                _ZEROED_POOL[(device_index, kind)].remove(buf)
+                uo.free_flags.append(buf.flag)  # it read 1: its copy is done
+                buf.flag, buf.obj = 0, None
+                _GRAPH_HELD.append(buf)
+                return buf.tensor
+    return None
+
+
+def _capture_buffer(
+    table: dict, device_index: int, kind: str, need: int, device: torch.device
+) -> torch.Tensor:
+    """The zeroed buffer of ``need`` elements of ``kind`` of a captured call that omits its workspace: the
+    capture's pre-zeroed buffer of the stream (``table``) when it holds one large enough, else a pre-zeroed buffer
+    of the package (``_pool_take``, kept in ``table``), else a buffer this call zeroes itself (a fill node, counted
+    in ``_CAPTURE_FILL_FALLBACKS``).  No table keeps that last one: it comes from the capture's memory pool, and a
+    reference kept after the call would outlive the capture (a CUDA Graph tree's pool, which its graphs share, must
+    hold only the tensors the tree tracks); the graph's fill node zeroes it on every replay."""
+
+    stream = _current_stream_handle(device_index)
+    capture, graph = _capture_info(stream)
+    held = table.get((device_index, stream))
+    if capture and held is not None and held[0] == capture and held[1].numel() >= need:
+        return held[1]
+    ws = _pool_take(device_index, kind, need, graph) if capture else None
+    if ws is None:
+        key = (device_index, kind)
+        _CAPTURE_FILL_FALLBACKS[key] = _CAPTURE_FILL_FALLBACKS.get(key, 0) + 1
+        return torch.zeros(need, dtype=_POOL_DTYPES[kind], device=device)
+    with _POOL_LOCK:  # _drop_capture_entries reads the tables under it
+        table[(device_index, stream)] = (capture, ws)
+    return ws
 
 
 def _forward_work(
-    workspace: object, words: int, *, device: torch.device, device_index: int
+    workspace: object,
+    words: int,
+    *,
+    device: torch.device,
+    device_index: int,
+    capturing: Optional[bool] = None,
 ) -> Optional[torch.Tensor]:
     """The ``work`` counters of one forward launch needing ``words`` int32 words.
 
     A caller-owned ``workspace`` (1-D int32, contiguous, on ``device``, at least
     ``words`` words, zero before its first launch) is used as is.  Without one:
-    inside a CUDA Graph capture a fresh zeroed buffer (its zeroing is captured
-    with the launch, so the graph shares no counters with eager calls or other
-    graphs); else the zeroed buffer this module keeps for the device and the
-    current stream, replaced by a larger zeroed one when it is too small (the
-    stream-ordered allocator frees the old one after the launches queued on
-    the stream).  ``None`` when the program takes no counters.
+    inside a CUDA Graph capture the capture's pre-zeroed buffer of the stream,
+    else a fresh zeroed buffer (its zeroing is captured with the launch); the
+    graph shares no counters with eager calls or other graphs
+    (:func:`_capture_buffer`).  Else the zeroed buffer this module keeps for the
+    device and the current stream, replaced by a larger zeroed one when it is
+    too small (the stream-ordered allocator frees the old one after the
+    launches queued on the stream); such an eager call also keeps the device's
+    pre-zeroed capture buffers (:func:`_pool_refill`).  ``capturing`` is
+    ``torch.cuda.is_current_stream_capturing()`` when the caller read it.
+    ``None`` when the program takes no counters.
     """
 
     if workspace is not None:
@@ -872,12 +1359,16 @@ def _forward_work(
         return ws
     if words == 0:
         return None
-    if torch.cuda.is_current_stream_capturing():
-        return torch.zeros(words, dtype=torch.int32, device=device)
+    if capturing is None:
+        capturing = torch.cuda.is_current_stream_capturing()
+    if capturing:
+        return _capture_buffer(_CAPTURE_FORWARD_WORKSPACES, device_index, "fwd", words, device)
+    if words > _POOL_READY["fwd"].get(device_index, 0):
+        _pool_refill(device_index, "fwd", words, device)
     key = (device_index, _current_stream_handle(device_index))
     held = _FORWARD_WORKSPACES.get(key)
     if held is None or held.numel() < words:
-        held = torch.zeros(words, dtype=torch.int32, device=device)
+        held = _package_zeros(words, torch.int32, device, device_index)
         _FORWARD_WORKSPACES[key] = held
     return held
 
@@ -980,6 +1471,7 @@ def _backward_accumulators(
     device: torch.device,
     device_index: int,
     entry: str,
+    capturing: Optional[bool] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """The ``(acc, work)`` views of one backward launch with the byte ``layout`` of
     :func:`cake_jit.accumulator_layout` (shared by the single-rank and the KCP backward).
@@ -988,23 +1480,30 @@ def _backward_accumulators(
     ``device``, at least ``layout["total_bytes"]`` bytes, ZERO before its first
     launch: allocate it with :func:`cake_causal_conv1d_nondet_train_backward_workspace`)
     is used as is.  Without one: inside a CUDA Graph capture with a nonzero
-    capture id the zeroed buffer of that capture and stream
-    (``_CAPTURE_WORKSPACES``: zeroed by the capture's first backward call on
-    the stream, so the graph shares no accumulators with eager calls or other
-    graphs, and reused by its later calls on the stream; a larger zeroed one,
-    another fill node, replaces it when it is too small); inside a capture with
-    capture id 0, a fresh zeroed buffer per call; else the zeroed buffer this
-    module keeps for the device and the current stream, replaced by a larger
-    zeroed one when it is too small.
+    capture id the pre-zeroed buffer of that capture and stream
+    (``_CAPTURE_WORKSPACES``, :func:`_capture_buffer`: a buffer the package
+    zeroed before the capture; the graph shares no accumulators with eager
+    calls or other graphs, and the capture's later calls on the stream reuse
+    it; a larger one replaces it when it is too small), or, when the package
+    has none ready, a fresh zeroed buffer of this call (a fill node), as inside
+    a capture with capture id 0; else the zeroed buffer this module keeps for
+    the device and the current
+    stream, replaced by a larger zeroed one when it is too small (such an eager
+    call also keeps the device's pre-zeroed capture buffers,
+    :func:`_pool_refill`).
     Every launch leaves the bytes it uses zero, so a zeroed buffer stays zero
     whatever ``C`` or route the next call has.  ``acc`` is a ``float32`` view
     (the rule's dtype) of ``layout["acc_elems"]`` words at offset 0, ``work`` a
     ``uint32`` view of ``layout["work_words"]`` counters at
     ``layout["work_offset"]``; both are built once per workspace and layout
     (``_ACCUMULATOR_VIEWS``), except for the buffers of a capture.
+    ``capturing`` is ``torch.cuda.is_current_stream_capturing()`` when the
+    caller read it.
     """
 
     nbytes = int(layout["total_bytes"])
+    if workspace is None and capturing is None:
+        capturing = torch.cuda.is_current_stream_capturing()
     if workspace is not None:
         ws = _require_tensor(workspace, "workspace")
         if ws.ndim != 1:
@@ -1021,22 +1520,9 @@ def _backward_accumulators(
                 f"workspace holds {ws.numel()} bytes; {entry} needs at least {nbytes}; allocate "
                 "cake_causal_conv1d_nondet_train_backward_workspace(S, C, device) (a zeroed buffer)"
             )
-    elif torch.cuda.is_current_stream_capturing():
+    elif capturing:
         # the buffer of this capture and stream: plain views, not cached per layout
-        stream = _current_stream_handle(device_index)
-        capture = _capture_id(stream)
-        held = _CAPTURE_WORKSPACES.get((device_index, stream))
-        if (
-            capture
-            and held is not None
-            and held[0] == capture
-            and held[1].numel() >= nbytes
-        ):
-            ws = held[1]
-        else:
-            ws = torch.zeros(nbytes, dtype=torch.uint8, device=device)
-            if capture:
-                _CAPTURE_WORKSPACES[(device_index, stream)] = (capture, ws)
+        ws = _capture_buffer(_CAPTURE_WORKSPACES, device_index, "bwd", nbytes, device)
         work_offset = int(layout["work_offset"])
         acc = ws[: int(layout["acc_bytes"])].view(_TORCH_DTYPES[layout["acc_dtype"]])
         work = ws[work_offset : work_offset + 4 * int(layout["work_words"])].view(
@@ -1044,10 +1530,12 @@ def _backward_accumulators(
         )
         return acc, work
     else:
+        if nbytes > _POOL_READY["bwd"].get(device_index, 0):
+            _pool_refill(device_index, "bwd", nbytes, device)
         key = (device_index, _current_stream_handle(device_index))
         ws = _BACKWARD_WORKSPACES.get(key)
         if ws is None or ws.numel() < nbytes:
-            ws = torch.zeros(nbytes, dtype=torch.uint8, device=device)
+            ws = _package_zeros(nbytes, torch.uint8, device, device_index)
             _BACKWARD_WORKSPACES[key] = ws
     return _accumulator_views(ws, layout)
 
@@ -1092,7 +1580,10 @@ def cake_causal_conv1d_nondet_train_forward(
         it zero, so one buffer serves every later call of one stream).  Two
         launches that may run at once need two buffers.  When omitted the
         package uses a zeroed buffer it keeps per (device, current stream), or
-        a fresh zeroed one inside a CUDA Graph capture.
+        inside a CUDA Graph capture one buffer per capture and stream that an
+        earlier eager forward call without ``workspace=`` zeroed (no fill node;
+        the graph holds it until the graph is destroyed), or, when none is
+        ready, a fresh zeroed one per call (one fill node each).
 
     Returns
     -------
@@ -1117,6 +1608,7 @@ def cake_causal_conv1d_nondet_train_forward(
     names, _, scalars, grid, per_tiles = _call_plan(
         arch, kind, S, C, num_docs, device_index=device_index
     )
+    capturing = torch.cuda.is_current_stream_capturing()
     values: dict[str, object] = {
         "x": x_flat,
         "w": w,
@@ -1124,6 +1616,7 @@ def cake_causal_conv1d_nondet_train_forward(
         "y": y.view(S, C),
         **scalars,
         "flags": _flags(w, b=b),
+        "enable_pdl": pdl_enabled(arch, capturing=capturing),
     }
     if b is not None:
         values["b"] = b
@@ -1133,7 +1626,9 @@ def cake_causal_conv1d_nondet_train_forward(
         words = per_tiles[n_ch_tiles] = max(
             counter_words(_loader.MODULES[name], n_ch_tiles) for name in names
         )
-    work = _forward_work(workspace, words, device=device, device_index=device_index)
+    work = _forward_work(
+        workspace, words, device=device, device_index=device_index, capturing=capturing
+    )
     if work is not None:
         values["work"] = work
     for name in names:
@@ -1190,11 +1685,16 @@ def cake_causal_conv1d_nondet_train_backward(
         accumulators and ticket counters; every launch leaves it zero, so one
         buffer serves every later call of one stream; never share one between
         two launches that may run at once).  When omitted the package uses a zeroed buffer it keeps per
-        (device, current stream), or inside a CUDA Graph capture one zeroed
-        buffer per capture and stream, shared by the capture's backward calls
-        on that stream (one fill node, and another for a larger buffer when a
-        call needs more bytes).  With capture id 0 (also without
-        ``cuda.bindings``) each captured call zeroes a buffer of its own.
+        (device, current stream), or inside a CUDA Graph capture one buffer per
+        capture and stream, shared by the capture's backward calls on that
+        stream, that an earlier eager backward call without ``workspace=``
+        zeroed (no fill node; the graph holds it until the graph is destroyed
+        and its launches have completed), or, when none is ready (no such
+        eager call before the capture, all taken by earlier captures, too
+        small, or their zero fill not complete yet: a
+        ``CUDAGraph.capture_begin`` right after that eager call with no
+        synchronization), a fresh zeroed one per call (one fill node each), as
+        with capture id 0 (also without ``cuda.bindings``).
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
         (FP32 or BF16 each; the parameter's dtype when omitted), contiguous.
@@ -1300,12 +1800,14 @@ def cake_causal_conv1d_nondet_train_backward(
     layout = per_tiles.get(n_ch_tiles)
     if layout is None:
         layout = per_tiles[n_ch_tiles] = _accumulator_layout(record, C, n_ch_tiles)
+    capturing = torch.cuda.is_current_stream_capturing()
     acc, work = _backward_accumulators(
         workspace,
         layout,
         device=device,
         device_index=device_index,
         entry="cake_causal_conv1d_nondet_train_backward",
+        capturing=capturing,
     )
     values: dict[str, object] = {
         "x": x_flat,
@@ -1318,6 +1820,7 @@ def cake_causal_conv1d_nondet_train_backward(
         "work": work,
         **scalars,
         "flags": _flags(w, dw_out, b, db_out),
+        "enable_pdl": pdl_enabled(arch, capturing=capturing),
     }
     if b is not None:
         values["b"] = b
