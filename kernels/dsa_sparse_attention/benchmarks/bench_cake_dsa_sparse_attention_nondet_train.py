@@ -94,7 +94,9 @@ holes, softmax scale ``512 ** -0.5`` and a sink vector of ordinary heads plus a 
 head.  Arms: ``cake_nope_sink`` (the flat entry through autograd: ``dq`` and ``dsink`` from one ``autograd.grad``,
 the fp32 ``dkv_acc`` zero-filled inside the timed backward) and ``cudnn_fe_nope_sink`` (the cuDNN frontend's sparse
 attention with ``attn_sink``, the external baseline where its contract applies).  The frontend's contract differs:
-its ``lse`` excludes the sink (``logaddexp`` gives the Cake ``lse`` inside the timed forward), it takes compact rows
+its ``lse`` excludes the sink and is ``+inf`` on a row without a valid slot (the Cake ``lse`` there is ``-inf``
+without a sink and the sink with one); inside the timed forward that ``+inf`` becomes ``-inf`` and ``logaddexp``
+with the sink then gives the Cake ``lse`` on every row; it takes compact rows
 (valid slots first with ``topk_length``, compacted outside the timed region), its ``dkv`` is BF16 (upcast-added into
 the fp32 accumulator inside the timed backward), and it has no destination map.  Each arm runs with the sink and
 without it (``sink=None``; the frontend: no ``attn_sink`` in the forward, a ``-inf`` sink in the backward) and
@@ -2583,7 +2585,9 @@ class ArmCudnnFeNopeSink:
     ``DSA.sparse_attention_backward_wrapper(..., attn_sink, ...)``, which returns ``d_sink`` -- the external baseline
     where its contract applies, with the row's sink (``variant="sink"``) or none (no ``attn_sink`` in the forward, a
     ``-inf`` sink in the backward, its required argument).  Its contract differs from the Cake entry's: the frontend's
-    ``lse`` excludes the sink (``logaddexp(lse, sink)``, the Cake ``lse``, runs inside the timed forward); it takes
+    ``lse`` excludes the sink and is ``+inf`` on a row without a valid slot (the Cake ``lse`` there is ``-inf`` without
+    a sink and the sink with one), so inside the timed forward that ``+inf`` becomes ``-inf`` and, with a sink,
+    ``logaddexp(lse, sink)`` then gives the Cake ``lse`` (the backward takes the frontend's own ``lse``); it takes
     compact rows (valid slots first, ``-1`` after them, with ``topk_length``), built from the row by the stable
     compaction outside the timed region (the same key sets); its ``dkv`` is BF16, upcast-added into a fresh fp32
     accumulator inside the timed backward; and it has no destination map.  A strided ``dout`` is copied to a
@@ -2621,9 +2625,9 @@ class ArmCudnnFeNopeSink:
             sink=self.sink is not None,
             kv_index_rank3=self.rank3,
             rows="stable compaction (valid slots first, -1 after) with topk_length, outside the timed region",
-            lse="logaddexp(frontend lse, sink) inside the timed forward"
+            lse="frontend lse, +inf (no valid slot) to -inf, logaddexp(., sink), inside the timed forward"
             if self.sink is not None
-            else "frontend lse",
+            else "frontend lse, +inf (no valid slot) to -inf, inside the timed forward",
             dkv="bf16, upcast-added into a fresh fp32 accumulator inside the timed backward",
             dkv_dst_map="none",
         )
@@ -2657,9 +2661,10 @@ class ArmCudnnFeNopeSink:
 
     def forward(self):
         res = self._call_fwd()
-        lse = res["lse"]
+        # the Cake lse: the frontend's is +inf on a row without a valid slot, the Cake lse -inf
+        lse = res["lse"].masked_fill(torch.isposinf(res["lse"]), float("-inf"))
         if self.sink is not None:
-            # the Cake lse: the frontend's excludes the sink
+            # the frontend's lse excludes the sink
             lse = _lse_with_sink(lse, self.sink)
         return dict(out=res["out"], lse=lse, fe_lse=res["lse"])
 
