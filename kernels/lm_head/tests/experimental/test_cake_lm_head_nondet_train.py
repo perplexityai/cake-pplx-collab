@@ -12877,6 +12877,159 @@ def _assert_same_bits(a, b, keys=("loss", "logp", "dX", "dW")):
             assert torch.equal(_bits(x), _bits(y)), key
 
 
+@pytest.mark.parametrize("chunk", [4096, 1024])
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_loss_binding_binds_no_cast_launch(
+    glm_weight, monkeypatch, module, chunk
+):
+    """A loss forward that misses the binding cache prepares a template-only runner that binds no backward launch
+    (``_runner_backward_keys``): the binding it remembers -- on the host-count path and, where it runs, on the hidden
+    valid-row count's (``chunk`` 1024: four chunks) -- holds the forward's launches only, and the step's loss, logp, dX
+    and dW (the eager dX finalize and weight-gradient cast) are bitwise those of the same step whose runner binds the
+    output casts as before."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _device_inputs(4097, W=glm_weight)
+    kw = dict(loss_div=inp.loss_div, chunk_size=chunk, backend="cake")
+    bound = []
+    real_bind, real_keys = mod._bind_all, mod._runner_backward_keys
+
+    def recording(record, module_name, keys, *args, **kwargs):
+        bound.extend(keys)
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_bind_all", recording)
+
+    def step():
+        cache = cake_backend.BindingCache()
+        monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+        bound.clear()
+        fr = mod.forward_loss(inp.X, inp.W, inp.labels, **kw)
+        forward_bound = list(bound)
+        [binding] = [b for k, b in cache._bindings.items() if k[:2] == ("fwd", "loss")]
+        dx, dw = fr.backward(None)
+        torch.cuda.synchronize()
+        return binding, forward_bound, dict(loss=fr.loss, logp=fr.logp, dX=dx, dW=dw)
+
+    binding, forward_bound, new = step()
+    cast = mod.cast_keys(binding.plan)
+    kernels = [key for key in cast if key[0] not in mod.HOST_STAGES]
+    assert kernels, cast
+    assert binding.backward_order == ()
+    assert set(binding.launches) <= set(binding.forward_order) | {("row_grad", 0)}
+    assert not set(kernels) & set(forward_bound)
+    # the same step with the output casts bound as before (every runner binds its backward keys)
+    monkeypatch.setattr(
+        mod,
+        "_runner_backward_keys",
+        lambda plan, template_only=False: real_keys(plan, False),
+    )
+    old_binding, old_bound, old = step()
+    assert old_binding.plan == binding.plan
+    assert old_binding.backward_order == cast and set(kernels) <= set(old_bound)
+    assert all(key in old_binding.launches for key in kernels)
+    _assert_same_bits(new, old)
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_scatter_fold_form_serves_every_valid_row_count(monkeypatch, module):
+    """The compact dX scatter cast with a label residual fold binds one eager form for an output of ``num_rows`` rows,
+    whatever the call's valid-row count and fold rows: ``[fold_lo, fold_hi)`` are per-call slots of the form
+    (``EAGER_CALL_SCALARS``), so each later call slots its tensors and its rows into the remembered launch -- the
+    entry, grid and argument list, element for element, of a fresh binding of the call's own values, and the bits of a
+    call with the binding cache disabled.  A call without a fold (none given, or an empty range) binds the other form
+    (``V`` 0) once."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    stage = "scale_cast_scatter_bf16"
+    calls, binds = [], []
+    real_eager, real_bind = mod._eager_launch, mod._bind_all
+
+    def eager(record, module_name, name, values, device, geometry):
+        launch, arguments = real_eager(
+            record, module_name, name, values, device, geometry
+        )
+        calls.append(
+            (
+                record,
+                module_name,
+                name,
+                dict(values),
+                device,
+                geometry,
+                launch,
+                arguments,
+            )
+        )
+        return launch, arguments
+
+    def bind(record, module_name, keys, *args, **kwargs):
+        binds.append(tuple(key[0] for key in keys))
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_eager_launch", eager)
+    monkeypatch.setattr(mod, "_bind_all", bind)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    T, V, H = 256, 512, DEFAULT_H
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 83)
+    W = (0.05 * torch.randn(V, H, generator=gen)).to(torch.bfloat16).to(CUDA)
+    g = torch.tensor(0.75, device=CUDA)
+    cases = []
+    for T_v, lo, hi in (
+        (243, 0, 243),
+        (15, 0, 15),
+        (30, 7, 30),
+        (100, 36, 100),
+        (243, 0, 243),
+        (30, 0, 0),
+    ):
+        valid = torch.zeros(T, dtype=torch.bool)
+        valid[torch.randperm(T, generator=gen)[:T_v]] = True
+        acc = torch.randn(T_v, H, generator=gen).to(CUDA)
+        labels = torch.randint(0, V, (T_v,), generator=gen).to(CUDA)
+        rlab = (1e-3 * torch.randn(T_v, generator=gen)).to(CUDA)
+        fold = dict(labels=labels, rlab=rlab, W=W, lo=lo, hi=hi) if hi > lo else None
+        cases.append(
+            (
+                acc,
+                valid.nonzero().squeeze(1).to(CUDA),
+                torch.cumsum(valid.to(CUDA), 0, dtype=torch.int32),
+                fold,
+            )
+        )
+    got = [
+        mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake", fold=fold)
+        for acc, idx, scan, fold in cases
+    ]
+    torch.cuda.synchronize()
+    # the fold form at the first call, the form without a fold at the last; every other call slots into a remembered one
+    assert binds == [(stage,), (stage,)]
+    assert len(cache._eager) == 2 and len(calls) == len(cases)
+    assert not any(
+        isinstance(a, torch.Tensor)
+        for _, launch in cache._eager.values()
+        for a in launch.arguments
+    )
+    for record, module_name, name, values, device, geometry, launch, arguments in calls:
+        key = (name, "eager")
+        bound = real_bind(record, module_name, (key,), {key: values}, device, geometry)
+        fresh = bound[key]
+        assert fresh.entry is launch.entry and fresh.grid == launch.grid
+        assert len(arguments) == len(fresh.arguments)
+        for a, b in zip(arguments, fresh.arguments, strict=True):
+            assert (
+                a is b if isinstance(b, torch.Tensor) else (type(a), a) == (type(b), b)
+            )
+    off = cake_backend.BindingCache()
+    off.configure(enabled=False)
+    monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    for out, (acc, idx, scan, fold) in zip(got, cases, strict=True):
+        want = mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake", fold=fold)
+        assert torch.equal(_bits(out), _bits(want))
+    torch.cuda.synchronize()
+
+
 def _assert_fixed_order_bits(a, b, case=None, keys=("logp", "dX", "dW")):
     """Two calls of the same problem on this package with different options: ``logp`` / ``dW`` (and ``loss``) have the
     same bits; ``dX`` -- whose K-sliced reduction of a chunk of more than one slice sums its slices in slice order, so
@@ -17751,3 +17904,208 @@ def test_cast_fold_plan_keys():
         hi=plan.rows,
     )
     assert cake_backend.cast_fold_operands(plan_of(cast_fold=False), t) is None
+
+
+def test_cast_fold_range_is_formed_once_per_plan(monkeypatch):
+    """``make_plan(cast_fold=True)`` builds the plan the cast fold runs (the plan of ``replace(plan, cast_fold=True)``,
+    no second plan) and :func:`cake_backend.cast_fold_rows` forms its range once per plan (:attr:`Plan.cast_fold_range`):
+    the key sequences, the fold operands and every later read take the kept range, the same rows as before; a plan
+    without the fold forms none."""
+    g = cake_backend.Geometry.from_record(
+        {"geometry": {"hidden": 6144, "vocab": 154880}}
+    )
+    formed = []
+    real = cake_backend._cast_fold_range
+
+    def counted(plan):
+        formed.append(plan)
+        return real(plan)
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", counted)
+    # the opt-in module builds no cast-fold plan (its make_plan has no ``cast_fold``; its loss path keeps every slab
+    # sum), so the main module's plans carry the check
+    for module in (cake_backend,):
+        for valid, slices in (
+            (4000, None),
+            (4000, (1, 2, 1, 1)),
+            (16, None),
+            (16, (2,)),
+        ):
+            kw = dict(
+                need_dx=True,
+                need_dw=True,
+                geometry=g,
+                num_sms=148,
+                valid_rows=valid,
+                fuse_dw_cast=True,
+                arch="sm_100a",
+                dx_finalize=True,
+            )
+            if module is cake_backend:
+                kw["tail_fold"] = False
+            problem = _problem(4096 if valid > 16 else 16, 6144, 154880, 1024)
+            plain = module.make_plan(problem, **kw)
+            plan = module.make_plan(problem, cast_fold=True, **kw)
+            assert plan == dataclasses.replace(plain, cast_fold=True)
+            assert type(plan) is type(plain)
+            if slices is not None:
+                plan = dataclasses.replace(plan, dx_slices=slices)
+            want = real(plan)
+            formed.clear()
+            keys = module.forward_keys(plan)
+            rows = [cake_backend.cast_fold_rows(plan) for _ in range(3)]
+            t = dict(labels=object(), rlab=object(), W=object())
+            fold = cake_backend.cast_fold_operands(plan, t)
+            assert formed == [plan] and all(r == want for r in rows), module
+            lo, hi = want
+            assert (fold is None) == (hi <= lo)
+            assert fold is None or (fold["lo"], fold["hi"]) == want
+            folded = [
+                i
+                for i, (row0, rows_c) in enumerate(plan.chunks)
+                if hi > lo and lo <= row0 and row0 + rows_c <= hi
+            ]
+            assert [i for s, i in keys if s in cake_backend.DX_SLAB_SUM_STAGES] == [
+                i for i in range(plan.num_chunks) if i not in folded
+            ]
+            formed.clear()
+            assert cake_backend.cast_fold_rows(plain) == (0, 0) and formed == []
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_template_loss_runner_binds_no_backward_keys(module):
+    """The backward keys a runner binds (``_runner_backward_keys``): a template-only runner of the loss entry -- the
+    eager entry points' binding build, whose remembered binding serves the loss forward only (the loss backward
+    finalizes through the eager casts) -- binds none; every other runner binds the log-probability backward and the
+    output casts as before."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    g = cake_backend.Geometry.from_record(
+        {"geometry": {"hidden": 6144, "vocab": 154880}}
+    )
+    forms = [
+        (entry, fuse, valid, cast)
+        for entry in ("loss", "logprob")
+        for fuse in (True, False)
+        for valid in (None, 4000)
+        for cast in (True, False)
+    ]
+    for entry, fuse, valid, cast in forms:
+        plan = mod.make_plan(
+            _problem(4096, 6144, 154880, 1024, entry=entry),
+            need_dx=True,
+            need_dw=True,
+            geometry=g,
+            num_sms=148,
+            valid_rows=valid,
+            fuse_dw_cast=fuse,
+            arch="sm_100a",
+            dx_finalize=True,
+            dx_cast=cast,
+        )
+        full = (
+            cake_backend.recompute_keys(plan) if entry == "logprob" else ()
+        ) + mod.cast_keys(plan)
+        assert full and mod._runner_backward_keys(plan) == full
+        assert mod._runner_backward_keys(plan, False) == full
+        assert mod._runner_backward_keys(plan, True) == (
+            () if entry == "loss" else full
+        )
+
+
+def test_template_only_loss_runner_never_launches():
+    """The default module's template-only runner (``prepare_lm_head_loss(_template_only=True)``, which binds no backward
+    launch of the loss entry) refuses to launch; a runner prepared without the switch is not template-only."""
+    inp = _host_inputs(37)
+    runner = cake_backend.prepare_lm_head_loss(
+        inp.X, inp.W, inp.labels, loss_div=1.0, chunk_size=16, backend="reference"
+    )
+    assert runner._template_only is False
+    runner._template_only = True
+    for launch in (runner.forward, runner.backward, runner.step):
+        with pytest.raises(RuntimeError, match="never launches"):
+            launch()
+
+
+def test_eager_form_slots_the_fold_rows(monkeypatch):
+    """The scatter cast's eager form (``_eager_form``) is keyed by every host value but the tensors and its fold rows
+    ``[fold_lo, fold_hi)`` (``EAGER_CALL_SCALARS``), so a call with another valid-row count and fold range finds the
+    remembered form; ``V`` (the fold's head rows, 0 without a fold), the output rows and the row width still key it.
+    The remembered launch (``_eager_template``) holds no tensor and leaves the fold rows to each call: slotting a call's
+    values gives the argument list a fresh binding of those values gives, element for element."""
+    stage = "scale_cast_scatter_bf16"
+    assert cake_backend.EAGER_CALL_SCALARS[stage] == ("fold_lo", "fold_hi")
+    name = next(n for n, record in cake_jit.MODULES.items() if stage in record)
+    physical = cake_jit.MODULES[name][stage]
+    entries = SimpleNamespace(
+        **{physical["ffi_entry"]: lambda *args: None},
+        **(
+            {physical["tma_prepare_entry"]: lambda *args: None}
+            if physical.get("tma_prepare_entry")
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        cake_backend, "load_cake_lm_head_loss_module", lambda *args: entries
+    )
+    H, V, T = 6144, 512, 256
+
+    def values_of(T_v, lo, hi, *, v=V, rows=T, width=H // 8):
+        values = {n: None for n in cake_backend.COMMON_TENSORS}
+        values.update({n: 0 for n in cake_backend.COMMON_SCALARS})
+        values.update(
+            acc=torch.zeros(T_v, H),
+            g=torch.ones(1),
+            scan=torch.zeros(rows, dtype=torch.int32),
+            idx_lo=torch.zeros(2 * T_v, dtype=torch.int32),
+            out=torch.zeros(rows, H, dtype=torch.bfloat16),
+            row_vecs=width,
+            num_rows=rows,
+            loss_div=1.0,
+            labels=torch.zeros(T_v, dtype=torch.int64),
+            rlab=torch.zeros(T_v),
+            W=torch.zeros(v, H, dtype=torch.bfloat16),
+            V=v,
+            fold_lo=lo,
+            fold_hi=hi,
+        )
+        return values
+
+    bind = cake_backend.bind_stage
+    first = values_of(243, 0, 243)
+    form = cake_backend._eager_form(name, stage, "cuda:0", first)
+    launch = cake_backend._eager_template(bind(name, stage, first, (1, 1, 1)))
+    assert not any(isinstance(a, torch.Tensor) for a in launch.arguments)
+    plan = [n for _, n in physical["arg_plan"]]
+    slotted = {n for _, n in launch.slots}
+    assert {"fold_lo", "fold_hi"} <= slotted and all(
+        launch.arguments[plan.index(n)] is None for n in ("fold_lo", "fold_hi")
+    )
+    for T_v, lo, hi in ((15, 0, 15), (30, 7, 30), (100, 36, 100), (243, 0, 243)):
+        values = values_of(T_v, lo, hi)
+        assert cake_backend._eager_form(name, stage, "cuda:0", values) == form
+        got = launch.arguments_for(values)
+        want = list(bind(name, stage, values, (1, 1, 1)).arguments)
+        assert len(got) == len(want)
+        for a, b in zip(got, want, strict=True):
+            assert (
+                a is b if isinstance(b, torch.Tensor) else (type(a), a) == (type(b), b)
+            )
+        assert got[plan.index("fold_lo")] == lo and got[plan.index("fold_hi")] == hi
+    for other in (
+        values_of(30, 0, 0, v=0),
+        values_of(30, 0, 30, rows=T + 1),
+        values_of(30, 0, 30, width=H // 8 + 1),
+    ):
+        assert cake_backend._eager_form(name, stage, "cuda:0", other) != form
+    # every other eager stage keys all of its scalar values, as before
+    cast = {
+        "acc": torch.zeros(1),
+        "g": torch.ones(1),
+        "out": torch.zeros(1),
+        "num_vecs": 4,
+    }
+    assert cake_backend._eager_form(name, "scale_cast_bf16", "cuda:0", cast) != (
+        cake_backend._eager_form(
+            name, "scale_cast_bf16", "cuda:0", dict(cast, num_vecs=5)
+        )
+    )

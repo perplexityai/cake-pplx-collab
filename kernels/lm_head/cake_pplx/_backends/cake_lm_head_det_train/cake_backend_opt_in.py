@@ -835,6 +835,7 @@ def make_plan(
     dx_slices_cap: Optional[int] = None,
     dw_split: Optional[int] = None,
     dw_split_end: Optional[int] = None,
+    cast_fold: bool = False,
 ) -> Plan:
     """The chunk schedule; ``dx_max_slices`` > 1 (K-sliced dX stages registered) picks each chunk's slice count
     (``dx_resident`` = the device's co-resident dX clusters, :func:`cluster_resident`); ``valid_rows`` (compaction)
@@ -857,7 +858,8 @@ def make_plan(
     the chunk loop's FP32 accumulator splits at that vocabulary row (:attr:`Plan.dw_split`, the budget form
     ``"fused_ip"``); ``dw_split_end`` (with ``dw_split``; a multiple of :func:`dw_block_step` in ``[dw_split, V]``,
     default ``V``) ends its upper part there (:attr:`Plan.dw_split_end`, the budget form ``"partial_ip"``; the loss
-    entry with ``keep_row_grad``)."""
+    entry with ``keep_row_grad``).  ``cast_fold``: the compact dX cast folds the label residuals of the one-slice
+    chunks (:attr:`Plan.cast_fold`, :func:`.cake_backend.cast_fold_rows`)."""
     if (logprob_dz or logprob_lbl) and problem.entry != "logprob":
         raise ValueError("the logits GEMM arms belong to the log-probability entry")
     if keep_row_grad and problem.entry != "loss":
@@ -1012,6 +1014,7 @@ def make_plan(
         keep_row_grad=bool(keep_row_grad),
         dw_split=dw_split,
         dw_split_end=dw_split_end,
+        cast_fold=bool(cast_fold),
     )
 
 
@@ -2298,6 +2301,24 @@ def _with_split_keys(plan: Plan, keys: tuple) -> tuple[tuple[str, Any], ...]:
     return tuple(out)
 
 
+def _runner_backward_keys(
+    plan: Plan, template_only: bool = False
+) -> tuple[tuple[str, Any], ...]:
+    """The backward launch keys a runner of ``plan`` binds (``backward_order``): the log-probability backward
+    (:func:`.cake_backend.recompute_keys` through :func:`_with_split_keys`) and the output casts (:func:`cast_keys`).
+    A template-only runner of the loss entry (``_template_only``, the eager entry points' binding build) binds none: it
+    never launches, and its remembered binding (:meth:`_Binding.from_runner`) serves the loss forward only -- the loss
+    backward finalizes the forward's accumulators through the eager casts (:func:`finalize_dx`, :func:`dw_cast`,
+    :func:`_dw_cast_split`), never through a binding."""
+    if template_only and plan.problem.entry == "loss":
+        return ()
+    return (
+        _with_split_keys(plan, recompute_keys(plan))
+        if plan.problem.entry == "logprob"
+        else ()
+    ) + cast_keys(plan)
+
+
 class _SplitDw(NamedTuple):
     """The weight-gradient state a log-probability backward with a split accumulator (:attr:`Plan.dw_split`) leaves
     to its caller: ``acc`` = ``[lower, upper]`` (the FP32 sums of the vocabulary rows ``[0, dw_split)`` and
@@ -2577,9 +2598,10 @@ def _eager_launch(
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
-    remembered there per form -- the record, the stage, the device and every non-tensor host value, which fix the grid
-    and the scalar arguments -- and a later call of the same form slots its tensors into it: the same entry, grid and
-    arguments as a fresh binding."""
+    remembered there per form (:func:`.cake_backend._eager_form`) -- the record, the stage, the device and every host
+    value that is neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a
+    later call of the same form slots its tensors and per-call scalars into it (:func:`.cake_backend._eager_template`):
+    the same entry, grid and arguments as a fresh binding."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -2587,24 +2609,13 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = (
-        module_name,
-        stage,
-        str(device),
-        tuple(
-            sorted(
-                (name, isinstance(value, torch.Tensor))
-                + ((None,) if isinstance(value, torch.Tensor) else (value,))
-                for name, value in values.items()
-            )
-        ),
-    )
+    form = _main._eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
-        cache.eager_remember(form, record, launch.templated())
+        cache.eager_remember(form, record, _main._eager_template(launch))
         return launch, list(launch.arguments)
     return launch, launch.arguments_for(values)
 
@@ -2833,16 +2844,16 @@ def prepare_lm_head_det_loss(
         dx_slices_cap=None if dx_slices_cap is None else int(dx_slices_cap),
         dw_split=dw_split,
         dw_split_end=dw_split_end,
+        # the compact dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`;
+        # a plan of :func:`make_plan` has no temperature forms); the caller passes the fold operands to
+        # :func:`finalize_dx` (:func:`.cake_backend.cast_fold_operands`)
+        cast_fold=bool(cast_fold and backend == "cake"),
     )
     missing = [s for s in plan.stages if s not in stages]
     if missing:
         raise NotImplementedError(
             f"the registered program {module_name!r} lacks the stages {missing} (registered: {stages})"
         )
-    if cast_fold and backend == "cake" and not plan.temperature:
-        # the compact dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`);
-        # the caller passes the fold operands to :func:`finalize_dx` (:func:`.cake_backend.cast_fold_operands`)
-        plan = replace(plan, cast_fold=True)
     T, H, V, C = problem.num_rows, problem.hidden, problem.vocab, problem.chunk
     rows_loop = (
         plan.rows
@@ -3032,9 +3043,7 @@ def prepare_lm_head_det_loss(
         )
 
     fwd = forward_keys(plan)
-    bwd = (
-        _with_split_keys(plan, recompute_keys(plan)) if entry == "logprob" else ()
-    ) + cast_keys(plan)
+    bwd = _runner_backward_keys(plan, _template_only)
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -3752,11 +3761,7 @@ class _Binding:
                 hidden_stats=hidden.stats,
             )
             forward_order = forward_keys(plan)
-            backward_order = (
-                _with_split_keys(plan, recompute_keys(plan))
-                if p.entry == "logprob"
-                else ()
-            ) + cast_keys(plan)
+            backward_order = _runner_backward_keys(plan, runner._template_only)
             memory = _hidden_count_memory(
                 memory,
                 num_rows=p.num_rows,

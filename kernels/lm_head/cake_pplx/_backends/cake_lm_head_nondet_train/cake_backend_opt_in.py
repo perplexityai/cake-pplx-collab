@@ -1840,6 +1840,21 @@ def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
     return tuple(keys)
 
 
+def _runner_backward_keys(
+    plan: Plan, template_only: bool = False
+) -> tuple[tuple[str, Any], ...]:
+    """The backward launch keys a runner of ``plan`` binds (``backward_order``): the log-probability backward
+    (:func:`.cake_backend.recompute_keys`) and the output casts (:func:`cast_keys`).  A template-only runner of the
+    loss entry (``_template_only``, the eager entry points' binding build) binds none: it never launches, and its
+    remembered binding (:meth:`_Binding.from_runner`) serves the loss forward only -- the loss backward finalizes the
+    forward's accumulators through the eager casts (:func:`finalize_dx`, :func:`dw_cast`), never through a binding."""
+    if template_only and plan.problem.entry == "loss":
+        return ()
+    return (
+        recompute_keys(plan) if plan.problem.entry == "logprob" else ()
+    ) + cast_keys(plan)
+
+
 @dataclass
 class LmHeadLossRunner:
     """The prepared launches of one tensor binding.
@@ -2102,9 +2117,10 @@ def _eager_launch(
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
-    remembered there per form -- the record, the stage, the device and every non-tensor host value, which fix the grid
-    and the scalar arguments -- and a later call of the same form slots its tensors into it: the same entry, grid and
-    arguments as a fresh binding."""
+    remembered there per form (:func:`.cake_backend._eager_form`) -- the record, the stage, the device and every host
+    value that is neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a
+    later call of the same form slots its tensors and per-call scalars into it (:func:`.cake_backend._eager_template`):
+    the same entry, grid and arguments as a fresh binding."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -2112,24 +2128,13 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = (
-        module_name,
-        stage,
-        str(device),
-        tuple(
-            sorted(
-                (name, isinstance(value, torch.Tensor))
-                + ((None,) if isinstance(value, torch.Tensor) else (value,))
-                for name, value in values.items()
-            )
-        ),
-    )
+    form = _main._eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
-        cache.eager_remember(form, record, launch.templated())
+        cache.eager_remember(form, record, _main._eager_template(launch))
         return launch, list(launch.arguments)
     return launch, launch.arguments_for(values)
 
@@ -2522,7 +2527,7 @@ def prepare_lm_head_loss(
         )
 
     fwd = forward_keys(plan)
-    bwd = (recompute_keys(plan) if entry == "logprob" else ()) + cast_keys(plan)
+    bwd = _runner_backward_keys(plan, _template_only)
     # a ``dz``-arm plan also binds chunk 0's ``row_grad``: the hidden valid-row count's backward recomputes chunk 0 in
     # the device-count form, which stores ``z`` (:meth:`_Binding.from_runner`); the runner itself never launches it
     spare = (("row_grad", 0),) if plan.logprob_dz else ()
@@ -3225,9 +3230,7 @@ class _Binding:
                 hidden_stats=hidden.stats,
             )
             forward_order = forward_keys(plan)
-            backward_order = (
-                recompute_keys(plan) if p.entry == "logprob" else ()
-            ) + cast_keys(plan)
+            backward_order = _runner_backward_keys(plan, runner._template_only)
             memory = _hidden_count_memory(
                 memory,
                 num_rows=p.num_rows,
