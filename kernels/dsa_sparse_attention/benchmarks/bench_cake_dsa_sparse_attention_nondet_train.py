@@ -95,8 +95,9 @@ head.  Arms: ``cake_nope_sink`` (the flat entry through autograd: ``dq`` and ``d
 the fp32 ``dkv_acc`` zero-filled inside the timed backward) and ``cudnn_fe_nope_sink`` (the cuDNN frontend's sparse
 attention with ``attn_sink``, the external baseline where its contract applies).  The frontend's contract differs:
 its ``lse`` excludes the sink and is ``+inf`` on a row without a valid slot (the Cake ``lse`` there is ``-inf``
-without a sink and the sink with one); inside the timed forward that ``+inf`` becomes ``-inf`` and ``logaddexp``
-with the sink then gives the Cake ``lse`` on every row; it takes compact rows
+without a sink and the sink with one); inside the timed forward that ``+inf`` becomes ``-inf`` (the Cake ``lse``
+without a sink) and, with a sink, ``logaddexp`` with the sink then gives the Cake ``lse`` on every row; it takes
+compact rows
 (valid slots first with ``topk_length``, compacted outside the timed region), its ``dkv`` is BF16 (upcast-added into
 the fp32 accumulator inside the timed backward), and it has no destination map.  Each arm runs with the sink and
 without it (``sink=None``; the frontend: no ``attn_sink`` in the forward, a ``-inf`` sink in the backward) and
@@ -2525,8 +2526,10 @@ class ArmCakeNopeSink:
             raise RuntimeError("skipped: nope stems not installed")
         stage = getattr(cake_jit, "NOPE_SINK_FORWARD_STAGE", None)
         arch = cake_backend.arch_for(device)
+        # the stage that serves the sink forward on this architecture (its scanner-warp build on sm_107a)
+        served = stage and cake_jit.stage_for(stage, arch, program)
         if variant == "sink" and (
-            stage is None or arch not in cake_jit.stage_arches(stage, program)
+            served is None or arch not in cake_jit.stage_arches(served, program)
         ):
             raise RuntimeError(f"skipped: no sink build for {arch}")
         self.fn = cake_dsa_sparse_attention_nondet_nope

@@ -12,11 +12,11 @@ for its own helpers).  SM100 (B200 / GB200) is the acceptance architecture of
 the native kernels and
 SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
 the acceptance architecture of the packed / strided-layout extension.  On
-`sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan` and
-`nope_fwd_scan` ship for `sm_107a` only, and `fwd` / `nope_fwd` ship for
-`sm_100a` and `sm_103a`, as do the NoPE trainable-sink stages `nope_fwd_sink` /
-`nope_bwd_dsink` (see "Trainable per-head sink"); the other stages compile from
-the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
+`sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan`,
+`nope_fwd_scan` and `nope_fwd_scan_sink` ship for `sm_107a` only, and `fwd` /
+`nope_fwd` / `nope_fwd_sink` ship for `sm_100a` and `sm_103a`; the other stages,
+the NoPE sink-gradient stage `nope_bwd_dsink` included (see "Trainable per-head
+sink"), compile from the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
 in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
 or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
 `nope_bwd_delta`, `nope_bwd_dsink` and `index_prep`, which need 12.8.  The feature does not
@@ -133,11 +133,12 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   rows; a row whose every slot ends up `-1` gives `out = 0`, `lse = -inf` and
   zero gradients.  The segment count `len(cu_seqlens_k) - 1` is passed on as
   `num_segments`: the backward's whole-row key-range passes apply to
-  one-segment rows only (see "Key-range passes").  The flat rope entry and
-  the rope step backward take the count as the keyword `num_segments` (a Python
-  `int`, default 1): a caller that passes the global rows of a packed batch
-  passes `len(cu_seqlens_k) - 1` and gets the varlen entry's plan for the
-  same rows.
+  one-segment rows only (see "Key-range passes"), and on `sm_107a` the
+  direct-accumulation rule reads it (see "Direct accumulation from the main
+  stage").  The flat entries and the step backwards of both forms take the
+  count as the keyword `num_segments` (a Python `int`, default 1): a caller
+  that passes the global rows of a packed batch passes `len(cu_seqlens_k) - 1`
+  and gets the varlen entry's plan for the same rows.
 * Forward: `out [T, 64, 512]` BF16 and (with `return_lse=True`) the natural-log
   `lse [T, 64]` FP32 over the valid keys; fully masked rows give `out = 0` and
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
@@ -557,8 +558,10 @@ inside its own segment, so the policy applies to one-segment rows only
 flat rope entry's keyword -- plans one pass unless `key_passes` overrides).
 Since the policy reads only whether the
 row has more than one segment, the backward binding keys hold that class, not
-the count: a training step with a new document count reuses the backward
-binding of the last one.  The passes add
+the count, and on `sm_107a`, whose `dkv_direct` rule reads the count, also the
+rule's decision (see "Direct accumulation from the main stage"): a training
+step with a new document count reuses the backward binding of the last one
+unless that decision changes.  The passes add
 `min(T, 4224) * (147,456 + 4 * topk + 4)` B to the workspace (`dq_partial`,
 `key_scratch`, `pass_counts`; 608 MiB at `T = 4096`, top-k 2048;
 `dsa_train_workspace_size` includes them).  dQ is
@@ -593,12 +596,13 @@ from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
 
 out = cake_dsa_sparse_attention_nondet_nope(
     q, kv, indices, topk_length=None, softmax_scale=None,
-    return_lse=False, dkv_acc=None, dkv_dst_map=None)
+    return_lse=False, dkv_acc=None, dkv_dst_map=None, num_segments=1,
+    sink=None)
 out = cake_dsa_sparse_attention_nondet_nope_varlen(
     q, kv, gather_kv_indices, cu_seqlens_q, cu_seqlens_k,
     max_seqlen_q=None, max_seqlen_k=None, causal=False,
     topk_length=None, softmax_scale=None, return_lse=False,
-    dkv_acc=None, dkv_dst_map=None, check_cu_seqlens=True)
+    dkv_acc=None, dkv_dst_map=None, check_cu_seqlens=True, sink=None)
 ```
 
 * `q [T, 64, 512]` BF16 (contiguous or a strided token / head view, consumed in
@@ -640,8 +644,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   valid slot + 1 by default, bitwise `offset_gather_kv_indices`; `compact=True`
   the compacted rows and counts, with an optional `topk_length` cut),
   `prepare_dsa_nope_train` / `DSANopeTrainRunner`, `dsa_nope_train_workspace_size`,
-  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (12 forward inputs,
-  gradients for `q` and `kv` only).  The binding cache is shared; the NoPE keys are
+  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (13 forward inputs,
+  `sink` last and optional; gradients for `q`, `kv` and a `sink`).  The binding cache is shared; the NoPE keys are
   tagged (`"nope_fwd"` / `"nope_bwd"`, and `"nope_bwd_prediction"` for the
   autograd backward's predictions) and never collide with the rope keys.
 * `dkv` semantics.  Fresh (no `dkv_acc`): `backward_nope` returns a new natural
@@ -792,12 +796,15 @@ whether the record registers the stages a call needs for the device; the NoPE
 GPU tests additionally skip while `build.json` lacks a registered NoPE library
 (the export delivers the libraries).
 
-### Trainable per-head sink (NoPE, `sm_100a` / `sm_103a`)
+### Trainable per-head sink (NoPE)
 
-The flat NoPE entries -- `cake_dsa_sparse_attention_nondet_nope` and the step
-pair `cake_dsa_sparse_attention_nondet_train_nope_forward` / `_backward` (and,
-in this backend, `forward_nope`, `backward_nope` and `prepare_dsa_nope_train`)
--- take an optional `sink`: FP32 `[64]`, contiguous, on the device of `q`.
+The NoPE entries -- the flat `cake_dsa_sparse_attention_nondet_nope` and step
+pair `cake_dsa_sparse_attention_nondet_train_nope_forward` / `_backward`, the
+packed `cake_dsa_sparse_attention_nondet_nope_varlen` and step pair
+`cake_dsa_sparse_attention_nondet_train_nope_varlen_forward` / `_backward`
+(and, in this backend, `forward_nope`, `backward_nope`, `forward_nope_varlen`
+and `prepare_dsa_nope_train`) -- take an optional `sink`: FP32 `[64]`,
+contiguous, on the device of `q`.
 Per row `t` and head `h`, over the valid slots `j`:
 
 ```text
@@ -810,7 +817,10 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
 
 * Forward: the stage `nope_fwd_sink` (the forward's sink build: the forward's
   arguments plus `sink`, its grid and launch geometry) runs in place of
-  `nope_fwd`.  It folds the sink into the final normalisation of the FP32
+  `nope_fwd`; on `sm_107a` `stage_for` resolves it to `nope_fwd_scan_sink`,
+  the sink build of the scanner-warp forward.  The packed entries run the
+  same stage over the packed rows on every route (in-kernel index conversion
+  or index preparation); a zero-length query segment adds no row.  It folds the sink into the final normalisation of the FP32
   softmax and rounds `out` and the residual `o_lo` once from that sum (not a
   rescaled sink-free output).  `lse` includes the sink.  A row without a valid
   slot gives `out = o_lo = 0` and `lse = sink[h]` (`-inf` for a `-inf` head);
@@ -827,14 +837,19 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   (64) tokens, writes one FP32 partial per (chunk, head) to the workspace
   (`dsink_partial`, `ceil(T / 64) x 64` FP32); the CTA that completes the
   grid (`dsink_ticket`: a 32-bit completion counter, zero-filled by the host
-  before every backward) sums the partials in chunk order, so `dsink` depends
-  on `T` only, not on the SM count or the grid.  A row without a valid slot (`delta = 0`) and a `-inf`
+  before every backward) sums the partials in one fixed order -- four
+  lane-strided sums over the chunks (chunks `r, r + 4, ...`), folded in lane
+  order -- so `dsink` depends on `T` only, not on the SM count or the grid.  A row without a valid slot (`delta = 0`) and a `-inf`
   head contribute exactly 0.  FP32 throughout.
-* Returns: the step backward returns `(dq, dkv, dsink)` when it is given the
-  `sink` its forward ran with (`(dq, dkv)` without one, as before); the
-  autograd entry returns `dsink` as the gradient of `sink` (its thirteenth
-  input); the prepared runner's `backward()` returns `(dq, dkv, dsink)`.
-  `lse` stays non-differentiable.
+* Returns: the step backwards return `(dq, dkv, dsink)` when they are given
+  the `sink` their forward ran with (`(dq, dkv)` without one, as before), and
+  `(dq, None, dsink)` with a tensor `dkv_acc`; the packed step backward sums
+  `dsink` over all packed rows of the call.  The autograd entries return
+  `dsink` as the gradient of `sink` (the flat entry's thirteenth input, the
+  packed Function's sixteenth); the prepared runner's `backward()` returns
+  `(dq, dkv, dsink)`.  `lse` stays non-differentiable.  A call without query
+  rows (`T = 0`) launches nothing on every architecture and gives a zero
+  `dsink`.
 * Checks: metadata only (dtype, shape, contiguity, the device of the other
   tensors), no value check and no device synchronization; `+inf` and NaN
   values are not supported.  The binding keys end with the sink's geometry, so
@@ -847,10 +862,8 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   (`dsa_nope_train_workspace_size(..., sink=True)`, the regions
   `dsink_partial` / `dsink_ticket` of `workspace_layout_nope`); `dsink [64]`
   is an output.
-* Not supported yet (`NotImplementedError`): a sink on `sm_107a` (no
-  scanner-warp sink build ships), a sink on the packed (varlen) NoPE entries
-  (their per-document forward has no sink build), and a sink in the
-  deterministic package.
+* The deterministic package takes the same `sink` on its NoPE entries, with
+  the same stages and the same `dsink` order.
 
 ## Layout of this package
 
@@ -864,18 +877,18 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   entry `<library>_<arch>` that `load_cake_dsa_train_module(stage, arch,
   program)` loads through `cake_build`.  Stages of the two programs that
   share a kernel name the same library stem.  A stage entry may narrow the
-  record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan`:
-  `sm_107a`; `fwd` / `nope_fwd` and the sink stages `nope_fwd_sink` /
-  `nope_bwd_dsink`: `sm_100a`, `sm_103a`); `SCAN_STAGES` and
+  record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan` /
+  `nope_fwd_scan_sink`: `sm_107a`; `fwd` / `nope_fwd` / `nope_fwd_sink`:
+  `sm_100a`, `sm_103a`); `SCAN_STAGES` and
   `stage_for` resolve a forward on `sm_107a` to its scanner-warp stage, and
   `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`, written by the export): one entry per `<library>_<arch>`
-  (eighteen libraries over fourteen kernel sources, four of them compiled a
-  second time with `-DDKV_NATURAL=1`; sixteen on `sm_100a` and `sm_103a` and
-  fourteen on `sm_107a`: the scanner-warp forwards on `sm_107a` only, and `fwd`
-  / `nope_fwd` and the two NoPE sink stages on `sm_100a` and `sm_103a`) with
+  (nineteen libraries over fifteen kernel sources, four of them compiled a
+  second time with `-DDKV_NATURAL=1`; sixteen on each architecture: the three
+  scanner-warp forwards on `sm_107a` only, and `fwd` / `nope_fwd` /
+  `nope_fwd_sink` on `sm_100a` and `sm_103a`) with
   its translation
   units, digests, nvcc flags (`--use_fast_math` per stage, plus the natural
   variants' specialization defines), closure digest and `aot/<name>.so`
@@ -914,10 +927,11 @@ backward preprocess, backward main (single-pass and key-range-pass form with
 its compaction, each with its natural-layout direct-accumulation variant) and
 cast stages plus the key-range-pass and direct-accumulation policies, exported
 from the kernel snapshot named in the pull request, and the NoPE program's
-record with its twelve stages (the forward and, on `sm_107a`, its scanner-warp
-build `nope_fwd_scan`; the delta, compaction and cast kernels shared with
-the rope program; the trainable-sink stages `nope_fwd_sink` and
-`nope_bwd_dsink` on `sm_100a` / `sm_103a`) and its own key-range-pass and
+record with its thirteen stages (the forward and, on `sm_107a`, its
+scanner-warp build `nope_fwd_scan`; the delta, compaction and cast kernels
+shared with the rope program; the trainable-sink stages `nope_fwd_sink` (on
+`sm_107a` its scanner-warp build `nope_fwd_scan_sink`) and `nope_bwd_dsink`)
+and its own key-range-pass and
 direct-accumulation policies (see "NoPE (zero-rope) program").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
