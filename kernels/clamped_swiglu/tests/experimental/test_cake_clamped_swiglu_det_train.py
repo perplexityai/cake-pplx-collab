@@ -58,12 +58,14 @@ PyTorch's NaN fill when its kernel launches) and with the current device switche
 operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
 under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a saved-tensors hook as
 rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have
-the steps' bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit
-outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call
-give the launches of the full checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to
-1, as its ignored weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the
-L2 error against the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16
-rounding of each output, and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
+the steps' bits and raise when differentiated; inputs the kernels can read are read in place (a merged input and its
+gradient passed as both halves' tensors with the up's column offset 2304, no view), others copied once; every binding
+refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
+refused, before any copy, allocation or launch; the one-pass checks of the common call give the launches of the full
+checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to 1, as its ignored weight,
+also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against the
+FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output,
+and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -142,9 +144,10 @@ LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
 BUILDS = {"fwd": LANE_LAYOUT, "bwd": LANE_LAYOUT, "bwd_unweighted": {**LANE_LAYOUT, "tasks_per_row": 3}}
 # The program a forced launch runs: the small-R or the large-R program of its stage (:func:`_force`).
 PROGRAMS = ("small", "large")
-# The kernel parameters of each stage, in launch order (the kernels' signatures).
+# The parameters of each stage's programs, in launch order: the kernel parameters (the kernels' signatures), then the
+# column offsets of ``up`` (and ``d_up``) that the bindings add to those pointers.
 PARAMETERS = {
-    "fwd": ("gate", "up", "w", "h", "rows", "gate_stride", "up_stride", "h_stride", "limit", "weighted"),
+    "fwd": ("gate", "up", "w", "h", "rows", "gate_stride", "up_stride", "h_stride", "limit", "weighted", "up_col"),
     "bwd": (
         "gate",
         "up",
@@ -161,6 +164,8 @@ PARAMETERS = {
         "d_up_stride",
         "limit",
         "weighted",
+        "up_col",
+        "d_up_col",
     ),
     "bwd_unweighted": (
         "gate",
@@ -175,6 +180,8 @@ PARAMETERS = {
         "d_gate_stride",
         "d_up_stride",
         "limit",
+        "up_col",
+        "d_up_col",
     ),
 }
 BUFFERS = {"gate", "up", "w", "h", "dh", "d_gate", "d_up", "d_weight"}
@@ -537,7 +544,7 @@ def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
 
 def test_argument_plans_are_the_kernel_parameters() -> None:
     """Each record takes its kernel's parameters in order (tensors as buffers, scalars as parameters), then the
-    grid; the host names every one of them."""
+    column offsets of ``up`` (and ``d_up``) as parameters, then the grid; the host names every one of them."""
     for name, record in cake_jit.MODULES.items():
         assert pkg.parameters(name) == PARAMETERS[record["stage"]], name
         for kind, key in record["arg_plan"]:
@@ -583,10 +590,10 @@ UNWEIGHTED_GRIDS = {
 
 def test_the_unweighted_backward_program_and_its_grid(host_device) -> None:
     """``bwd_unweighted`` has one record, on all three architectures, with no windows and no large-R program, and takes
-    the 12 kernel parameters of :data:`PARAMETERS` (no weight, weight flag or weight gradient), in the order the entry
-    points pass them.  Its grid and the grid of every launch through ``run_module`` and the launcher, on every
-    architecture and SM count, is ``ceil(3 R / 4)`` CTAs (:data:`UNWEIGHTED_GRIDS`): below ``2**31 - 1`` at the most
-    rows, where ``3 R`` is past 32 bits."""
+    the 12 kernel parameters and the 2 column offsets of :data:`PARAMETERS` (no weight, weight flag or weight
+    gradient), in the order the entry points pass them.  Its grid and the grid of every launch through ``run_module``
+    and the launcher, on every architecture and SM count, is ``ceil(3 R / 4)`` CTAs (:data:`UNWEIGHTED_GRIDS`): below
+    ``2**31 - 1`` at the most rows, where ``3 R`` is past 32 bits."""
     names = [name for name, record in cake_jit.MODULES.items() if record["stage"] == "bwd_unweighted"]
     assert len(names) == 1, names
     (name,) = names
@@ -1263,6 +1270,8 @@ def _bwd_with_weight_flag_0(t: types.SimpleNamespace, name: str, device) -> tupl
         "d_up_stride": d_up.stride(0),
         "limit": t.L,
         "weighted": 0,
+        "up_col": 0,
+        "d_up_col": 0,
     }
     entry = pkg._entry(name, pkg.device_arch(device.index))
     entry(*(values[key] for key in pkg.parameters(name)), *cake_jit.grid(name, t.R))
@@ -1309,9 +1318,10 @@ def test_the_unweighted_backward_stores_the_bits_of_bwd(data, layout, device, pr
 
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_an_unweighted_backward_allocates_no_weight_gradient(layout, device, launches) -> None:
-    """An unweighted backward launches ``bwd_unweighted`` with its 12 kernel parameters (no weight, weight flag or
-    weight gradient) and allocates only its new gradients: none with preallocated gradients, one new merged gradient or
-    two new split ones, with the same bits.  A weighted backward allocates its weight gradient as well."""
+    """An unweighted backward launches ``bwd_unweighted`` with its 12 kernel parameters and 2 column offsets (no
+    weight, weight flag or weight gradient) and allocates only its new gradients: none with preallocated gradients, one
+    new merged gradient or two new split ones, with the same bits.  A weighted backward allocates its weight gradient as
+    well."""
     t = make_inputs(Case(129, layout, "none"), seed=47, device=device)
     merged = t.second is None
     d_first = torch.empty(t.R, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
@@ -1793,18 +1803,25 @@ def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device
 
 
 def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -> None:
-    """The halves of a merged input and row slices of wider buffers reach the kernels as views of the caller's memory
-    (their row strides); rows the kernels cannot read are copied once to contiguous rows; a single row's stride is
-    passed as 0."""
+    """A merged input reaches the kernels as the caller's tensor itself, passed as both the gate and the up with the
+    up's column offset 2304 (the binding moves the up's pointer, so no view is made), and its new gradient as both
+    ``d_gate`` and ``d_up`` with the same offset; row slices of wider buffers reach them as views of the caller's memory
+    (their row strides, column offsets 0); rows the kernels cannot read are copied once to contiguous rows; a single
+    row's stride is passed as 0."""
     m = make_inputs(Case(33, "merged"), seed=2, device=device)
     forward(m.first, None, m.weight, limit=L)
     _, rows, values = launches[-1]
     assert rows == 33
-    assert values["gate"].data_ptr() == m.gate_up.data_ptr()
-    assert values["up"].data_ptr() == m.gate_up.data_ptr() + 2 * WIDTH
+    assert values["gate"] is m.gate_up and values["up"] is m.gate_up and values["up_col"] == WIDTH
     assert values["gate_stride"] == values["up_stride"] == 2 * WIDTH
     assert values["w"] is m.weight and values["weighted"] == 1
     assert values["limit"] == L and values["h_stride"] == WIDTH
+    for weight in (m.weight, None):
+        d_gate_up = backward(m.dh, m.first, None, weight, limit=L)[0]
+        _, _, values = launches[-1]
+        assert values["gate"] is m.gate_up and values["up"] is m.gate_up and values["up_col"] == WIDTH
+        assert values["d_gate"] is d_gate_up and values["d_up"] is d_gate_up and values["d_up_col"] == WIDTH
+        assert values["d_gate_stride"] == values["d_up_stride"] == 2 * WIDTH
 
     s = make_inputs(Case(33, "strided"), seed=2, device=device)
     backward(s.dh, s.gate, s.up, s.weight, limit=L)
@@ -1812,6 +1829,7 @@ def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -
     for name, tensor in (("gate", s.gate), ("up", s.up), ("dh", s.dh)):
         assert values[name].data_ptr() == tensor.data_ptr(), name
         assert values[f"{name}_stride"] == tensor.stride(0), name
+    assert values["up_col"] == values["d_up_col"] == 0
 
     c = make_inputs(Case(33, "copied", "none", L=7.3), seed=2, device=device)
     backward(c.dh, c.gate, c.up, None, limit=7.3)
@@ -1821,12 +1839,77 @@ def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -
         assert values[name].is_contiguous() and values[f"{name}_stride"] == WIDTH, name
     assert tuple(values) == PARAMETERS["bwd_unweighted"]  # no weight, weight flag or weight gradient
     assert values["limit"] == fp32(7.3)
+    assert values["up_col"] == values["d_up_col"] == 0
 
     one = make_inputs(Case(1, "merged"), seed=2, device=device)
     backward(one.dh, one.first, None, one.weight, limit=L)
     _, _, values = launches[-1]
     for name in ("gate", "up", "dh", "d_gate", "d_up"):
         assert values[f"{name}_stride"] == 0, name
+    assert values["up_col"] == values["d_up_col"] == WIDTH
+
+
+def test_the_bindings_refuse_column_offsets_outside_the_row(device) -> None:
+    """Every program's binding takes the column offset of ``up`` (and of ``d_up``) that keeps the 2304 columns inside
+    a row of the 2-D tensor and the moved address 16-byte aligned: the merged call's 2304 on a ``[R, 4608]`` tensor and
+    0 on a ``[R, 2304]`` one run; a negative offset, one that is not a multiple of 8 and one past ``size(1) - 2304``
+    raise ``ValueError`` naming the offset, and nothing is written."""
+    R = 33
+    arch = pkg.device_arch(device.index)
+    m = make_inputs(Case(R, "merged"), seed=4, device=device)
+    s = make_inputs(Case(R, "split"), seed=4, device=device)
+
+    def values(t: types.SimpleNamespace) -> dict:
+        merged = t.second is None
+        gate, up, col = (t.gate_up, t.gate_up, WIDTH) if merged else (t.gate, t.up, 0)
+        d_gate = torch.zeros(R, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
+        d_up = d_gate if merged else torch.zeros(R, WIDTH, dtype=torch.bfloat16, device=device)
+        h = torch.zeros(R, WIDTH, dtype=torch.bfloat16, device=device)
+        return {
+            "gate": gate,
+            "up": up,
+            "w": t.weight,
+            "h": h,
+            "dh": t.dh,
+            "d_gate": d_gate,
+            "d_up": d_up,
+            "d_weight": torch.zeros(R, dtype=torch.float32, device=device),
+            "rows": R,
+            "gate_stride": gate.stride(0),
+            "up_stride": up.stride(0),
+            "h_stride": h.stride(0),
+            "dh_stride": t.dh.stride(0),
+            "d_gate_stride": d_gate.stride(0),
+            "d_up_stride": d_up.stride(0),
+            "limit": t.L,
+            "weighted": 1,
+            "up_col": col,
+            "d_up_col": col,
+        }
+
+    checked = 0
+    for t in (m, s):
+        base = values(t)
+        past = base["up_col"] + 8
+        for stage in STAGES:
+            for name in dict.fromkeys(_program(stage, device.index, program) for program in PROGRAMS):
+                entry, keys, grid = pkg._entry(name, arch), pkg.parameters(name), cake_jit.grid(name, R)
+                entry(*(base[key] for key in keys), *grid)  # the offsets the entry points pass
+                torch.cuda.synchronize(device)
+                for key in ("up_col", "d_up_col"):
+                    if key not in keys:
+                        continue
+                    for bad in (-8, 4, past):
+                        refused = values(t)
+                        refused[key] = bad
+                        with pytest.raises(ValueError, match=f"'{key}' = {bad} must be"):
+                            entry(*(refused[k] for k in keys), *grid)
+                        for out in ("h", "d_gate", "d_up", "d_weight"):
+                            assert int(torch.count_nonzero(refused[out])) == 0, (name, key, bad, out)
+                        checked += 1
+    # two layouts, three refused values, and per layout at least the up_col of fwd and both offsets of bwd and
+    # bwd_unweighted
+    assert checked >= 2 * 3 * (1 + 2 + 2), checked
 
 
 def _launch_facts(launched: list, caller: set[int]) -> list:
