@@ -144,6 +144,29 @@ def test_supported_query_without_a_device() -> None:
     assert is_cake_clamped_swiglu_det_train_supported("cpu") is False
 
 
+@pytest.mark.parametrize("name", ENTRY_NAMES[:3])
+def test_facade_refuses_what_the_backend_refuses(name: str) -> None:
+    """Without a device: each facade entry (which runs the backend's step or autograd class directly) raises the
+    backend entry's exception, type and message, for CPU operands and for an operand that is not a tensor."""
+    dh = torch.zeros(4, I, dtype=torch.bfloat16)
+    calls = {
+        "cake_clamped_swiglu_det": lambda module, x: module.cake_clamped_swiglu_det(x, limit=L),
+        "cake_clamped_swiglu_det_train_forward": lambda module, x: module.cake_clamped_swiglu_det_train_forward(
+            x, limit=L
+        ),
+        "cake_clamped_swiglu_det_train_backward": lambda module, x: module.cake_clamped_swiglu_det_train_backward(
+            dh, x, limit=L
+        ),
+    }
+    for operand in (torch.zeros(4, 2 * I, dtype=torch.bfloat16), [1.0]):
+        raised = []
+        for module in (facade, backend):
+            with pytest.raises((TypeError, ValueError)) as info:
+                calls[name](module, operand)
+            raised.append((type(info.value), str(info.value)))
+        assert raised[0] == raised[1], (name, raised)
+
+
 def test_the_facade_reads_no_environment_variable() -> None:
     tree = ast.parse(Path(facade.__file__).read_text())
     uses = [

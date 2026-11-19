@@ -600,13 +600,25 @@ kernel_cake_engram_gate_train_1857a748ab0245abafbe(__nv_bfloat16* __restrict__ x
                         _vdst_18[_blk] = _vptr_18[_blk];
                     }
                 }
+#if __CUDA_ARCH__ == 1070
+                int tw_keep = 1;
+#else
                 int tk_keep_0 = 1;
+#endif
                 if ((unsigned long long)mask != 0ull) {
+#if __CUDA_ARCH__ == 1070
+                    tw_keep = (int)*reinterpret_cast<uint8_t*>(mask + pn_tok);
+#else
                     if (!mask[pn_tok]) {
                         tk_keep_0 = 0;
                     }
+#endif
                 }
+#if __CUDA_ARCH__ == 1070
+                keep_n = tw_keep;
+#else
                 keep_n = tk_keep_0;
+#endif
             }
             int xl_slot = xk % 2;
             int xl_row = xl_slot * 100 + warp * 12;
@@ -827,13 +839,25 @@ kernel_cake_engram_gate_train_1857a748ab0245abafbe(__nv_bfloat16* __restrict__ x
                         _vdst_43[_blk] = _vptr_43[_blk];
                     }
                 }
+#if __CUDA_ARCH__ == 1070
+                int tw_keep_1 = 1;
+#else
                 int tk_keep_1 = 1;
+#endif
                 if ((unsigned long long)mask != 0ull) {
+#if __CUDA_ARCH__ == 1070
+                    tw_keep_1 = (int)*reinterpret_cast<uint8_t*>(mask + pn_tok_1);
+#else
                     if (!mask[pn_tok_1]) {
                         tk_keep_1 = 0;
                     }
+#endif
                 }
+#if __CUDA_ARCH__ == 1070
+                keep_n = tw_keep_1;
+#else
                 keep_n = tk_keep_1;
+#endif
             }
             #pragma unroll
             for (int s_22 = 0; s_22 < 4; s_22++) {

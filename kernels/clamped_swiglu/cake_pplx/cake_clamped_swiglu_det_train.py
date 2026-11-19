@@ -122,7 +122,9 @@ from ._cake_pplx_api_clamped_swiglu import cake_api
 # The entry points are real ``def``s here (public-API tooling reads the
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
-# imported on first use.
+# imported on first use.  The steps and the autograd entry call the backend's
+# own step functions and autograd class, which the backend functions of the
+# same names call: the same work, one Python call fewer per call.
 
 
 @functools.cache
@@ -218,7 +220,7 @@ def cake_clamped_swiglu_det_train_forward(
     and passed to every call avoids the fill of ``h``.
     """
 
-    return _backend().cake_clamped_swiglu_det_train_forward(gate_up_or_gate, up, weight, limit=limit, out=out)
+    return _backend()._forward(gate_up_or_gate, up, weight, limit, out)[0]
 
 
 @cake_api
@@ -288,15 +290,8 @@ def cake_clamped_swiglu_det_train_backward(
     launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
-    return _backend().cake_clamped_swiglu_det_train_backward(
-        grad_out,
-        gate_up_or_gate,
-        up,
-        weight,
-        limit=limit,
-        grad_gate_up_or_gate=grad_gate_up_or_gate,
-        grad_up=grad_up,
-        grad_weight=grad_weight,
+    return _backend()._backward(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight
     )
 
 
@@ -334,7 +329,7 @@ def cake_clamped_swiglu_det(
     backward: differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
-    return _backend().cake_clamped_swiglu_det(gate_up_or_gate, up, weight, limit=limit)
+    return _backend().CakeClampedSwiGLUDetFunction.apply(gate_up_or_gate, up, weight, limit)
 
 
 def __getattr__(name: str) -> Any:

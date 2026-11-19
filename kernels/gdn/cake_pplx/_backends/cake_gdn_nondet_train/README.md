@@ -111,9 +111,11 @@ state (forward only, one seed per case), the split forward's rel-L2 error is
 On GB200 and GB300 this version runs some of the 66 cases on other routes
 than the build measured here, with other bits: the backward of the `(2, 6)`
 pair on GB200 and GB300 and of the `(1, 3)` pair on GB300 on the longer pieces
-of `bwd_one_wave_table` (see Chain).  The largest-ratio columns and the ratio
-figures below were measured on the earlier routes; the pack columns keep their
-routes.
+of `bwd_one_wave_table` (see Chain).  On GB300 this version also runs the
+split forward on `fwd_ho_a` where its pieces are 63 to 95 chunks long, which
+the build measured here ran on `wy_tc2` (see Chain), with other bits in the
+cases that cut such pieces.  The largest-ratio columns and the ratio figures
+below were measured on the earlier routes; the pack columns keep their routes.
 
 On B200 every ratio is at most 1.069.  On GB300, GB200 and R200 every ratio is
 at most 1.1 but one: the ratio of the worst `dg` element on the small `(1, 3)`
@@ -132,6 +134,26 @@ seeds 0-24.  It follows the input draw as the 1.188 does: B200 gives 1.130 on
 the aarch64-drawn inputs, and B200, GB300 and R200 give 1.060 on the
 x86_64-drawn ones.  Over 100 seeds on GB300 it is 1.011 (bootstrap 95 %
 interval 0.93-1.10).
+
+On the `(8, 24)` pair under FLA's initialization (FP32
+`beta = sigmoid(N(0, 1))`, an initial state of `0.1 N(0, 1)` and a final-state
+gradient, the split forward on 63-chunk pieces), `dg` can miss the BF16 naive
+tier, the bar of the tests (`kernels/gdn/tests/cake_naive.py`: over 32 random
+draws, the median and the largest of an output's L2 error against an FP64
+reference at most 1.005 times those of PyTorch on the same BF16 inputs with
+the same operations in BF16, and its max-norm error at most 1.005 times
+PyTorch's on at least half of the draws).  It misses by the median: on the 32
+draws from seed 23031 the median of its L2 errors is 1.0175 times the tier's
+on GB300 and on GB200, which give the same bits there.  GB200 runs this route
+in 0.2.2 too, so 0.2.2 has the same miss on GB200 (earlier versions were not
+measured).  Over 160 draws (five seeds), the split forward on `fwd_ho_a` and
+the `wy_tc2` form (0.2.2's route on GB300) show no systematic difference in
+the `dg` error per draw (geometric mean of the per-draw ratio 1.0007, 95 %
+interval 0.9966-1.0047), and each misses the tier on about
+half of the sets of 32 draws (48.9 % and 47.9 % of 20,000 random sets of the
+160 draws; at the five seeds `fwd_ho_a` misses on one, the `wy_tc2` form on
+two).  Its largest L2 error and its max-norm error meet the tier at each of
+the five seeds, and so does every other output.  B200 was not measured.
 
 ## Mode rules
 
@@ -266,12 +288,13 @@ call that neither of the two takes runs the third, the prep forward (below).
   sequence from its initial state beside the affine maps `[B | M]` of the
   middle pieces (on a side stream; `streams=1` keeps one stream), the stitch
   gives every piece its start state, and wave 2 runs every other piece.  On
-  `sm_100a`, and on `sm_103a` for pieces of at least 96 chunks
+  `sm_100a`, and on `sm_103a` for pieces of at least 63 chunks
   (`FWD_SPLIT_A_MIN_PIECE`), the waves run `fwd_ho_a` and the maps
   `fwd_summary_a`, which form `u` and `w` in the CTA; on shorter `sm_103a`
-  pieces `wy_tc2` forms `w` and `u` from `A`, and the waves run `fwd_fused` and
-  the maps `fwd_summary`.  Where the backward splits its adjoint walk on the
-  same pieces and the device has a cost entry that prices it
+  pieces (48 to 62 chunks, not measured) `wy_tc2` forms `w` and `u` from `A`,
+  and the waves run `fwd_fused` and the maps `fwd_summary`.  Where the
+  backward splits its adjoint walk on the same pieces and the device has a
+  cost entry that prices it
   (`cake_plan.M_SHARE_COSTS`: B200) at a priced saving of at least
   `cake_plan.M_SHARE_MIN_SAVING` (15 us), the taped forward also keeps the middle
   pieces' maps for the backward's first wave (M-share, `M_SHARE_ARCHS`; see
@@ -287,10 +310,9 @@ call that neither of the two takes runs the third, the prep forward (below).
   split one and its sequences x `HV` CTAs fill at least 0.65 of the SMs; this
   route then runs it.
 
-On the shapes of the speed table below, `sm_100a` (B200, GB200) runs the
-split forward on `fwd_ho_a` on the three `(2, 6)` packs and the `(8, 24)`
-pair, and `sm_103a` (GB300) on the packs, with the `wy_tc2` form on the
-`(8, 24)` pair (pieces of 63 chunks); on all four GPUs the 64 x 4,096-token
+On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
+(GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
+the `(8, 24)` pair (63-chunk pieces); on all four GPUs the 64 x 4,096-token
 pack and the `(16, 48)` pair run the serial A form.  The pairs `(4, 12)`,
 `(2, 6)` and `(1, 3)`, whose pieces are shorter than 48 chunks, every other
 timed shape on R200, and every call outside the two routes above run the prep
@@ -592,8 +614,10 @@ four GPUs of one node), PyTorch 2.14.1 on its CUDA 13.0 runtime inside a CUDA
 bound to the GPU-local Grace socket).  B200, GB200 and GB300 ran a build with
 this version's kernels, routes and bits, except the backward of the `(2, 6)`
 pair on GB200 and GB300 and of the `(1, 3)` pair on GB300, which this version
-runs on the longer pieces of `bwd_one_wave_table` (see Chain), with other
-bits; R200 ran an earlier build whose
+runs on the longer pieces of `bwd_one_wave_table` (see Chain), and the split
+forward of the `(8, 24)` pair on GB300, which this version runs on `fwd_ho_a`
+instead of the `wy_tc2` form (see Chain), with other bits; R200 ran an
+earlier build whose
 routes and plans on these rows, and bits under two of the three gate regimes,
 are this version's.  The deterministic
 package is that of revision `18c327b4` (on R200 `c8a4d8a2`, with the
@@ -635,6 +659,18 @@ backward measure 1.101 and 1.150.  The checkpointed rows below 1 on R200
 forward (1.002-1.005) and its backward alone is below 1 on two of them; there
 the checkpointed step's extra cost over the forward and the forward + backward
 is 0.05-0.06 ms larger in this package than in the deterministic package.
+
+On GB300 this version runs the split forward's pieces of 63 to 95 chunks on
+`fwd_ho_a`, where 0.2.2 ran the `wy_tc2` form, as did the build of the table
+(see Chain).  On the 63-chunk pieces of the `(8, 24)` pair, the `fwd_ho_a`
+form takes 0.84-0.85 of the `wy_tc2` form's time per forward, 0.95 per
+forward + backward and 0.91 per checkpointed step in a CUDA graph (CUPTI,
+cold L2, six fresh processes per form in ABBA order, the three gate regimes),
+but 1.009-1.044 per eager checkpointed step under FLA's initialization and
+`logsigmoid(N(0, 1))` (12 readings of six runs; 1.00-1.01 under the log-spaced
+decays); each of its forwards also launches once more (19 launches per
+checkpointed step instead of 17), and the eager step's idle time within its
+span rises by 0.17-0.21 ms.
 
 ## Plan pins (keyword-only)
 

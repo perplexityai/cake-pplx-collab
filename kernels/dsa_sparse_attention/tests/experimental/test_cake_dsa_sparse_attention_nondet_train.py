@@ -292,6 +292,29 @@ def test_key_pass_policy_per_target_rules():
     assert policy.token_chunks(32768, 2048)[-1] == (29568, 3200)
 
 
+def test_packed_rows_plan_one_pass_with_their_segment_count():
+    """The registered record's policy on the packed rows of the benchmark (32,768 queries over 262,144 keys, top-k
+    2048, as 2 .. 32 equal documents or the eight skewed ones) and on a one-chunk packed row (4,096 queries over
+    131,072 keys in 8 documents): with their segment count every architecture plans one pass, the count the varlen
+    entry and a packed caller of the flat entry pass; as one segment the row keeps the policy's passes."""
+    record = cake_jit.record()
+    arches = (None, "sm_100a", "sm_103a", "sm_107a")
+
+    def passes(T, S, **kw):
+        return tuple(
+            plan_key_passes(record, _ALL_STAGES, T, S, 2048, arch=a, **kw)
+            for a in arches
+        )
+
+    assert passes(32768, 262144) == (1, 1, 3, 2)
+    assert passes(4096, 131072) == (3, 3, 3, 2)
+    for segments in (2, 4, 8, 16, 32):
+        assert passes(32768, 262144, num_segments=segments) == (1,) * 4, segments
+    assert passes(4096, 131072, num_segments=8) == (1,) * 4
+    # an explicit count still overrides the policy on a packed row
+    assert passes(32768, 262144, num_segments=8, key_passes=2) == (2,) * 4
+
+
 def test_workspace_layout_token_chunk():
     T, S, topk = 8448, 131072, 2048
     whole = workspace_layout(T, S, topk, key_passes=3)
