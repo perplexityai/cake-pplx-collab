@@ -481,7 +481,7 @@ RECUT_FP32_ROUTES: dict[
     ("sm_107a", 5120, "fwd", False): ((49152, None),),
     # the backward windows where the BF16 route runs a pipelined program that has no FP32-weight build: the
     # FP32-weight route keeps the programs of its earlier windows there, each with the dw reduce of its window
-    ("sm_100a", 2048, "bwd", False): ((768, 16384), (16384, 58880)),
+    ("sm_100a", 2048, "bwd", False): ((768, 1024), (1024, 16384), (16384, 58880)),
     ("sm_100a", 6144, "bwd", False): ((384, 4096),),
     # the backward window where the BF16 route runs a faster program whose FP32-weight twin is not: the FP32-weight
     # route keeps the twin it ran (SM107 H = 4096 over (24064, 50176])

@@ -82,7 +82,8 @@ first eight hex digits of the program name.
 | `bwd_h2048` | (58880, inf) | ceeef043 | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
 | `bwd_w32_h2048` | (0, 1] | d22b3e8c | column task | - | - |
 | `bwd_w32_h2048` | (1, 768] | 9030dbeb | column task | - | - |
-| `bwd_w32_h2048` | (768, 16384] | b187e598 | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
+| `bwd_w32_h2048` | (768, 1024] | 07f9f2fb | plain | tail_div 12, max_halving 5 | 880768a0 (tree) |
+| `bwd_w32_h2048` | (1024, 16384] | b187e598 | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
 | `bwd_w32_h2048` | (16384, 58880] | 7e6a0b63 | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
 | `bwd_w32_h2048` | (58880, inf) | 7e6a0b63 | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
 | `bwd_h256` | (0, 87] | 6959ea32 | column task | - | - |

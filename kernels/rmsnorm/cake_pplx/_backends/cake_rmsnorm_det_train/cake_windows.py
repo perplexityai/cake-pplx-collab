@@ -61,7 +61,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
         "bwd_w32_h2048": (
             (0, 1, "cake_rmsnorm_det_train_d22b3e8ce96e49997448"),
             (1, 768, "cake_rmsnorm_det_train_9030dbeb948761ec2258"),
-            (768, 16384, "cake_rmsnorm_det_train_b187e5989302def22b2d"),
+            (768, 1024, "cake_rmsnorm_det_train_07f9f2fbea7163639c27"),
+            (1024, 16384, "cake_rmsnorm_det_train_b187e5989302def22b2d"),
             (16384, 58880, "cake_rmsnorm_det_train_7e6a0b631aea3edf51f9"),
             (58880, None, "cake_rmsnorm_det_train_7e6a0b631aea3edf51f9"),
         ),
@@ -740,6 +741,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
         "bwd_w32_h2048": (
             (1, "unmeasured"),
             (768, "unmeasured"),
+            (1024, "unmeasured"),
             (16384, "same"),
             (58880, "unmeasured"),
         ),
@@ -1393,7 +1395,8 @@ its own windows.
   ? (1024, 2047] c73074cf ? (2047, 22528] cc26e316 ? (22528, 58880] ceeef043 ?
   (58880, inf) ceeef043
 * ``sm_100a`` ``bwd_w32_h2048``: (0, 1] d22b3e8c ? (1, 768] 9030dbeb ?
-  (768, 16384] b187e598 = (16384, 58880] 7e6a0b63 ? (58880, inf) 7e6a0b63
+  (768, 1024] 07f9f2fb ? (1024, 16384] b187e598 = (16384, 58880] 7e6a0b63 ?
+  (58880, inf) 7e6a0b63
 * ``sm_100a`` ``bwd_h256``: (0, 87] 6959ea32 ? (87, 2048] a385ae16 =
   (2048, 5120] af005462 = (5120, 12288] a385ae16 = (12288, 40960] af005462 =
   (40960, 80896] a385ae16 = (80896, 1572864] a385ae16 = (1572864, inf) a385ae16
