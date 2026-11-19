@@ -3627,6 +3627,7 @@ def forward_binding_key(
     dx_finalize=False,
     hidden_count=False,
     logprob_lbl=False,
+    cast_fold=False,
 ) -> tuple:
     """Cache key of a forward binding: ``(data_ptr, shape, stride, dtype)`` of every
     input plus every option that shapes the argument plans; ``valid_rows`` is the
@@ -3636,7 +3637,9 @@ def forward_binding_key(
     ``dx_finalize`` the resolved dX finalize form (the slab reduction's launches differ);
     ``hidden_count`` whether chunk 0's gather and logits GEMM ran before the plan
     (the remembered sequence starts at chunk 0's row kernels); ``logprob_lbl``
-    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`).
+    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`);
+    ``cast_fold`` whether the compact dX cast folds the label residuals of the plan's
+    one-slice chunks (:func:`.cake_backend.cast_fold_rows`; the autograd loss entry).
     A budget form of :func:`memory_plan` appends its plan options ``(dw_rows, keep_row_grad)``, the forms
     ``"fused_ip"`` / ``"partial_ip"`` ``("dw_split", dw_split, dw_split_end, keep_row_grad)``."""
     return (
@@ -3659,6 +3662,7 @@ def forward_binding_key(
         bool(dx_finalize),
         bool(hidden_count),
         bool(logprob_lbl),
+        bool(cast_fold),
     )
 
 
@@ -5393,6 +5397,7 @@ def forward_loss(
             gemm_tuning=tuning,
             dx_finalize=fused_dx,
             hidden_count=hc is not None,
+            cast_fold=cast_fold,
             **common,
         )
         if options is not None and "dw_split" in options:
@@ -5407,8 +5412,6 @@ def forward_loss(
             key += (options["dw_rows"], True)  # a recompute form's plan options
         if dx_cap is not None:
             key += ("dx_slices_cap", int(dx_cap))  # the split's capped dX slice counts
-        if cast_fold:
-            key += (("cast_fold", True),)
         binding = cache.lookup(key)
     # the pass arena below (the loop's FP32 weight-gradient accumulator, allocated ahead of the logp-only pass)
     with_arena = bool(zero_arena and zero_first and backend == "cake")

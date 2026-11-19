@@ -8689,6 +8689,7 @@ def forward_binding_key(
     hidden_count=False,
     logprob_lbl=False,
     dx_rule=None,
+    cast_fold=False,
 ) -> tuple:
     """Cache key of a forward binding: ``(data_ptr, shape, stride, dtype)`` of every
     input plus every option that shapes the argument plans; ``valid_rows`` is the
@@ -8698,7 +8699,9 @@ def forward_binding_key(
     ``dx_finalize`` the resolved dX finalize form;
     ``hidden_count`` whether chunk 0's gather and logits GEMM ran before the plan
     (the remembered sequence starts at chunk 0's row kernels); ``logprob_lbl``
-    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`).
+    the resolved log-probability forward's logits form (:func:`logprob_lbl_default`);
+    ``cast_fold`` whether the compact dX cast folds the label residuals of the plan's
+    one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).
     The key ends with the dX slice rule's settings ``dx_rule`` (``(policy,
     red_min_rows)``; ``None`` = :func:`dx_slice_rule`), which shape the plan's dX
     forms: an entry call reads them once and plans its binding with the same pair."""
@@ -8722,6 +8725,7 @@ def forward_binding_key(
         bool(dx_finalize),
         bool(hidden_count),
         bool(logprob_lbl),
+        bool(cast_fold),
         _rule_key(dx_rule),
     )
 
@@ -8744,11 +8748,13 @@ def logprob_backward_binding_key(
     logprob_dz=False,
     dx_rule=None,
     zero_dlogp=False,
+    cast_fold=False,
 ) -> tuple:
     """Cache key of a log-probability backward binding (as :func:`forward_binding_key`, the dX slice rule's settings
-    ``dx_rule`` included); ``logprob_dz`` the resolved recompute form (:func:`logprob_dz_default`), ``zero_dlogp``
-    whether the call is eligible for the zero-gradient row skip (:func:`zero_dlogp_partition`; the remembered plan
-    tells whether it runs its counted forms).  ``lse`` (the
+    ``dx_rule`` included and last); ``logprob_dz`` the resolved recompute form (:func:`logprob_dz_default`),
+    ``zero_dlogp`` whether the call is eligible for the zero-gradient row skip (:func:`zero_dlogp_partition`; the
+    remembered plan tells whether it runs its counted forms), ``cast_fold`` whether the compact dX cast folds the
+    label residuals of the plan's one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).  ``lse`` (the
     forward's statistic) and ``dlogp`` enter by layout only (:func:`_layout`): the binding slots both per call and
     no plan reads their addresses, so a backward whose ``lse`` / ``dlogp`` the caching allocator placed elsewhere --
     each forward allocates a fresh ``lse`` -- runs from the remembered binding instead of binding again."""
@@ -8770,6 +8776,7 @@ def logprob_backward_binding_key(
         bool(hidden_count),
         bool(logprob_dz),
         bool(zero_dlogp),
+        bool(cast_fold),
         _rule_key(dx_rule),
     )
 
@@ -10578,8 +10585,9 @@ def forward_loss(
             dx_finalize=fused_dx,
             hidden_count=hc is not None,
             dx_rule=rule,
+            cast_fold=cast_fold,
             **common,
-        ) + ((("cast_fold", True),) if cast_fold else ())
+        )
         binding = cache.lookup(key)
         if binding is not None:
             _alert_unordered_dx(binding.plan, "forward_loss", "loss")
@@ -11653,7 +11661,8 @@ def backward_logprob(
             logprob_dz=dz_arm,
             dx_rule=rule,
             zero_dlogp=skip,
-        ) + ((("cast_fold", True),) if cast_fold else ())
+            cast_fold=cast_fold,
+        )
         binding = cache.lookup(key)
         if binding is not None:
             _alert_unordered_dx(binding.plan, "backward_logprob", "logprob")

@@ -3774,6 +3774,22 @@ def test_binding_keys_cover_pointer_shape_stride_dtype_and_options():
         need_dw=True,
         valid_rows=4,
     )
+    # the label residual fold in the compact dX cast (:func:`cast_fold_rows`): the log-probability backward's key and
+    # the opt-in loss forward's key carry it (a kept backward's key still ends with ``"keep"``)
+    assert bwd != logprob_backward_binding_key(
+        X,
+        W,
+        labels,
+        lse,
+        dlogp,
+        chunk_size=4096,
+        need_dx=True,
+        need_dw=True,
+        cast_fold=True,
+    )
+    assert opt_in.forward_binding_key(
+        X, W, labels, **common
+    ) != opt_in.forward_binding_key(X, W, labels, cast_fold=True, **common)
 
 
 def test_binding_cache_is_lru_and_bounded():

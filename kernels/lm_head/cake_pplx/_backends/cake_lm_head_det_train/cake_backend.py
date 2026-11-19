@@ -7952,14 +7952,17 @@ def logprob_backward_binding_key(
     hidden_count=False,
     logprob_dz=False,
     zero_dlogp=False,
+    cast_fold=False,
 ) -> tuple:
     """Cache key of a log-probability backward binding (as :func:`forward_binding_key`); ``logprob_dz`` the resolved
     recompute form (:func:`logprob_dz_default`), ``zero_dlogp`` whether the call is eligible for the zero-gradient row
     skip (:func:`_zero_dlogp_skip`; the remembered plan tells whether it runs its counted forms, so a remembered
-    binding replays the plan the call took).  ``lse`` and ``dlogp`` are keyed by layout alone (:func:`_layout`):
-    the forward's statistic and the incoming gradient are fresh tensors on every step, so their addresses would make
-    every step whose allocations moved a miss (a new runner, its allocations and validation), while the remembered
-    launches re-bind both per call."""
+    binding replays the plan the call took), ``cast_fold`` whether the compact dX cast folds the label residuals of
+    the plan's one-slice chunks (:attr:`Plan.cast_fold`, :func:`cast_fold_rows`).  ``lse`` and ``dlogp`` are keyed by
+    layout alone (:func:`_layout`): the forward's statistic and the incoming gradient are fresh tensors on every step,
+    so their addresses would make every step whose allocations moved a miss (a new runner, its allocations and
+    validation), while the remembered launches re-bind both per call.  The kept form
+    (:func:`backward_logprob_keep`) appends ``"keep"``: its key ends with it."""
     return (
         "bwd",
         "logprob",
@@ -7978,6 +7981,7 @@ def logprob_backward_binding_key(
         bool(hidden_count),
         bool(logprob_dz),
         bool(zero_dlogp),
+        bool(cast_fold),
     )
 
 
@@ -10689,7 +10693,8 @@ def backward_logprob(
             hidden_count=hc is not None,
             logprob_dz=dz_arm,
             zero_dlogp=skip,
-        ) + ((("cast_fold", True),) if cast_fold else ())
+            cast_fold=cast_fold,
+        )
         binding = cache.lookup(key)
         if binding is not None:
             # the key of an eligible call remembers the plan it took (counted, or the one without the counts)
@@ -11500,26 +11505,23 @@ def backward_logprob_keep(
     key = None
     binding: Optional[_KeptBinding] = None
     if cache.enabled:
-        key = (
-            logprob_backward_binding_key(
-                X,
-                W,
-                labels,
-                lse,
-                dlogp,
-                chunk_size=chunk_size,
-                need_dx=need_dx,
-                need_dw=need_dw,
-                valid_rows=None if row_index is None else rows,
-                fuse_dw_cast=fuse,
-                gemm_tuning=tuning,
-                dx_finalize=fused_dx,
-                hidden_count=False,
-                logprob_dz=False,
-            )
-            + ("keep",)
-            + ((("cast_fold", True),) if cast_fold else ())
-        )
+        key = logprob_backward_binding_key(
+            X,
+            W,
+            labels,
+            lse,
+            dlogp,
+            chunk_size=chunk_size,
+            need_dx=need_dx,
+            need_dw=need_dw,
+            valid_rows=None if row_index is None else rows,
+            fuse_dw_cast=fuse,
+            gemm_tuning=tuning,
+            dx_finalize=fused_dx,
+            hidden_count=False,
+            logprob_dz=False,
+            cast_fold=cast_fold,
+        ) + ("keep",)
         found = cache.lookup(key)  # a kept key binds a kept binding only
         if isinstance(found, _KeptBinding):
             binding = found

@@ -2632,6 +2632,17 @@ def test_binding_keys_cover_the_options_of_the_plan():
                 inp.X, inp.W, inp.labels, lse, dlogp, **dict(bwd, **{name: value})
             )
             assert other != k0, (module.__name__, name)
+        if module is cake_backend:
+            # the label residual fold in the compact dX cast (:func:`cast_fold_rows`): in the key, which still ends
+            # with the slice rule's settings
+            fold_fwd = module.forward_binding_key(
+                inp.X, inp.W, inp.labels, cast_fold=True, **base
+            )
+            fold_bwd = module.logprob_backward_binding_key(
+                inp.X, inp.W, inp.labels, lse, dlogp, cast_fold=True, **bwd
+            )
+            assert fold_fwd != key and fold_fwd[-1] == key[-1] == ("det", 0)
+            assert fold_bwd != k0 and fold_bwd[-1] == k0[-1] == ("det", 0)
 
 
 def test_package_reads_no_environment_variable():
