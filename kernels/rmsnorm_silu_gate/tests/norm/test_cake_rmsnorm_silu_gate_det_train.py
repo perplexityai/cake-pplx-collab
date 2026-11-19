@@ -43,8 +43,9 @@ give the same ``dx``, ``dz`` and weight-gradient bits on the same inputs and
 grid.  A backward with ``compute_grad_weight=False`` runs the program
 ``nodw_module`` names (strided up to ``NODW_STRIDED_ROWS_PER_SM`` rows per
 SM: on packed rows (a single token of head stride 128 among them where
-``PACKED_SMALL_ROWS_PER_SM`` has a cut) its build of packed rows only up to
-that cut and its 128-thread build past it, on other layouts the
+``PACKED_SMALL_ROWS_PER_SM`` has a cut, on an architecture without a strided
+cut only up to that cut) its build of packed rows only up to that cut and its
+128-thread build past it, on other layouts the
 128-thread build up to ``NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM and the
 256-thread one past it; claimed past the strided cut, strided at every row
 count where no claimed program is routed, the long one where packed rows run
