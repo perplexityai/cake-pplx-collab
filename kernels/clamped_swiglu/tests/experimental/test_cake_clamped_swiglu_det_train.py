@@ -112,7 +112,7 @@ SM_COUNTS = (148, 152, 212)
 # bound), and the lane layout every program keeps: literal copies, so a record that drifts from them fails here, and
 # the route tests expect these windows.
 WINDOWS = {
-    "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[384, None]], "sm_107a": [[384, None]]},
+    "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[208, None]], "sm_107a": [[384, None]]},
     "bwd_large": {
         "sm_100a": [[12, 21], [32, 41], [48, None]],
         "sm_103a": [[12, 21], [32, 41], [48, None]],

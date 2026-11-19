@@ -120,7 +120,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
-        "rows_per_sm_windows": {"sm_100a": [[112, None]], "sm_103a": [[384, None]]},
+        "rows_per_sm_windows": {"sm_100a": [[112, None]], "sm_103a": [[208, None]]},
         "role": "fwd_large",
         "stage": "fwd",
     },

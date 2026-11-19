@@ -78,7 +78,7 @@ of a stage runs the small-R one at every `R`.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
-| `fwd` large-R | from 112 rows per SM | from 384 | from 384 |
+| `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
 | `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
 
 Outside its windows, the small-R program measures at least as fast as the large-R one on that architecture (weighted and
@@ -93,6 +93,10 @@ and 40 rows per SM, the large-R program's last wave holds a few CTAs and costs l
 a forward the large-R one turns faster between 35 and 36, so that window starts at 35.  From 48 rows per SM on, the
 small-R backward alone measures 0.92 to 1.05 times the large-R one's time (by GPU, input and timer), and up to 1.5 %
 slower right after a forward over the same rows (the checkpointed step, unweighted), so the large-R program runs there.
+In the forward, the small-R program measures faster with a merged input up to 384 rows per SM on GB300, but with a split
+input it is no longer faster from 224 on (small/large up to 1.008 at 384), so on `sm_103a` the forward window starts at
+208.  On `sm_100a` the small-R forward stays faster in both layouts up to 112 rows per SM, and on `sm_107a` the two
+forward programs measure within 0.5 % of each other at 384, so those windows start at 112 and 384.
 
 Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
 of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
