@@ -141,7 +141,7 @@ warp is contiguous.  The programs differ in their schedule:
 
 More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`,
 from the launch block and `cake_jit.BUILD_OF`).  A row past `R` loads the last row and stores nothing.  The programs of
-a stage compute each element with the same FP32 operations (the deep-gate sigmoid gives the bits of the fast one wherever
+a stage compute each element with the same FP32 operations (the deep-gate sigmoid gives the fast one's bits wherever
 the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's
 columns in load order with the same lanes.  So both programs store the same bits for every input: the route changes no
 output bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The
