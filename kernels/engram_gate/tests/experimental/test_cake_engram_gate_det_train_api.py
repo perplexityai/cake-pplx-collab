@@ -35,7 +35,9 @@ bits; the explicit backward writes caller views into one ``dkv``; a masked token
 gradient through the gate; ``T = 0`` and ``T = 1`` work; every documented ``ValueError``; the
 ``torch.use_deterministic_algorithms`` behaviour; with the default choice, the launches run on the current stream
 without synchronizing, a call captured in a CUDA graph replays, ``torch.utils.checkpoint(use_reentrant=False)`` gives
-the gradients of plain autograd and the retained state and the workspace are reported; a device outside the
+the gradients of plain autograd and the retained state and the workspace are reported; CUPTI counts the GPU activities
+of a forward and a backward call (no weight cast, product or copy in the backward); the autograd entry's BF16
+weight gradients are the explicit backward's FP32 ones rounded by ``.to(torch.bfloat16)``; a device outside the
 architectures is a ``RuntimeError``.  The issue's accuracy bound judges both choices
 (``test_cake_engram_gate_acceptance.py``).
 Every output is bitwise reproducible run to run.
@@ -339,6 +341,75 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
         launched.clear()
         _autograd(ns, packed=packed)
         assert launched == ["fwd_dot2", "bwd_dot2", "dw_reduce"], "the default is the compensated sum"
+
+
+def _gpu_activities(call) -> Optional[list[str]]:
+    """The names of the GPU activities (kernels, memsets, copies) ``call`` runs, as CUPTI reports them through
+    ``torch.profiler``; None when the profiler sees no GPU activity at all (its CUPTI does not serve the device)."""
+    from torch.autograd import DeviceType
+    from torch.profiler import ProfilerActivity, profile
+
+    torch.cuda.synchronize()
+    with profile(activities=[ProfilerActivity.CPU, ProfilerActivity.CUDA]) as prof:
+        call()
+        torch.cuda.synchronize()
+    names = [event.name for event in prof.events() if event.device_type == DeviceType.CUDA]
+    return names or None
+
+
+# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward launches
+# ``bwd_dot2`` and ``dw_reduce``.
+LAUNCHES = {"forward": 1, "backward": 2}
+
+
+@pytest.mark.parametrize("weights", ("fp32", "bf16", "mixed"))
+@pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
+def test_launches_per_call(packed, weights) -> None:
+    """CUPTI's count of the GPU activities of one forward and one backward call (autograd and explicit), for every
+    pair of weight dtypes, with no cast, product or copy of a weight and no cast of a weight gradient: the forward runs
+    ``fwd`` alone and the backward 2."""
+    device = _device_or_skip()
+    layout = "kv" if packed else "contiguous"
+    ns = make_inputs(129, seed=61, device=device, weights=weights, mask="some", layout=layout)
+    x, key, value, kv, qw, kw = _leaves(ns)
+    if packed:
+        fn = functools.partial(api.cake_engram_gate_det_kv, x, kv, qw, kw, ns.token_mask)
+    else:
+        fn = functools.partial(api.cake_engram_gate_det, x, key, value, qw, kw, ns.token_mask)
+    fn().backward(ns.dout)  # loads the programs
+    x.grad = qw.grad = kw.grad = None
+    if packed:
+        kv.grad = None
+    else:
+        key.grad = value.grad = None
+    holder = {}
+    forward = _gpu_activities(lambda: holder.setdefault("out", fn()))
+    if forward is None:
+        pytest.skip("torch.profiler's CUPTI sees no GPU activity on this device")
+    backward = _gpu_activities(lambda: holder["out"].backward(ns.dout))
+    assert (len(forward), len(backward)) == (LAUNCHES["forward"], LAUNCHES["backward"]), (forward, backward)
+    assert qw.grad.dtype == qw.dtype and kw.grad.dtype == kw.dtype
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+    explicit = _gpu_activities(lambda: api.cake_engram_gate_det_train_backward(ns.dout, *args))
+    assert len(explicit) == LAUNCHES["backward"], explicit
+    explicit_fwd = _gpu_activities(lambda: api.cake_engram_gate_det_train_forward(*args))
+    assert len(explicit_fwd) == LAUNCHES["forward"], explicit_fwd
+
+
+@pytest.mark.parametrize("weights", ("bf16", "mixed"))
+@pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
+def test_bf16_weight_gradients_are_the_rounded_fp32_gradients(packed, weights) -> None:
+    """The autograd entry's weight gradients in a BF16 parameter's dtype hold the bits of the explicit backward's FP32
+    weight gradients rounded by ``.to(torch.bfloat16)``; an FP32 parameter's gradient is the FP32 one."""
+    device = _device_or_skip()
+    layout = "kv" if packed else "contiguous"
+    ns = make_inputs(1031, seed=67, device=device, weights=weights, mask="some", layout=layout)
+    got = _autograd(ns, packed=packed)
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+    *_, dq, dk = api.cake_engram_gate_det_train_backward(ns.dout, *args)
+    for name, grad, fp32, param in (("dq", got["dq"], dq, ns.q_weight), ("dk", got["dk"], dk, ns.k_weight)):
+        assert grad.dtype == param.dtype, name
+        assert _same_bits(grad, fp32.to(param.dtype)), name
 
 
 @pytest.mark.parametrize("packed", (False, True), ids=("split", "packed"))
@@ -755,8 +826,8 @@ def test_checkpoint_gives_the_plain_gradients(packed) -> None:
 def test_retained_state_and_workspace_are_reported(T, record_property) -> None:
     """The memory one training step keeps and allocates beside its operands: after the forward the autograd graph
     holds the output and nothing else (the saved set is the inputs); the backward's peak beyond its gradients is at
-    most :func:`cake_engram_gate_det_train_workspace_bytes` plus the two FP32 weight gradients autograd casts to
-    the parameters' BF16."""
+    most :func:`cake_engram_gate_det_train_workspace_bytes` (the kernels read the BF16 weights in place and write
+    the BF16 weight gradients themselves)."""
     device = _device_or_skip()
     ns = make_inputs(T, seed=43, device=device, weights="bf16", mask="some", layout="kv")
     x, key, value, kv, qw, kw = _leaves(ns)
@@ -779,9 +850,8 @@ def test_retained_state_and_workspace_are_reported(T, record_property) -> None:
     record_property("workspace_bytes", workspace)
     print(f"T={T} retained_beyond_out={retained} backward_peak_beyond_grads={peak} workspace_bytes={workspace}")
     assert retained <= 0, retained
-    # Autograd also holds the two FP32 weight gradients before their cast to the BF16 parameters' dtype; the caching
-    # allocator rounds each block up to 512 bytes.
-    assert peak <= workspace + 2 * STREAMS * HIDDEN * 4 + 16 * 512, (peak, workspace)
+    # The caching allocator rounds each block up to 512 bytes.
+    assert peak <= workspace + 16 * 512, (peak, workspace)
 
 
 def test_operands_on_another_device(record_property) -> None:
