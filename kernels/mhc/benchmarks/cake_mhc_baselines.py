@@ -43,7 +43,8 @@ The non-Cake arms (each ``available()`` says why it cannot run on a device or so
   default / ``"max-autotune-no-cudagraphs"``, ``fullgraph=True``, ``dynamic=False``, TF32 off).  The compiled code
   varies from compile to compile; with ``compile_trials > 1`` each trial compiles a fresh copy of the function with
   the inductor caches disabled and the fastest trial (by the median of one group of training steps) is the one timed
-  (every trial's time is recorded);
+  (every trial's time is recorded), separately for each function the run times (the standard function, the pre
+  handoff, the collapse);
 * ``liger``: Liger Kernel's mHC autograd functions (``liger_kernel.ops.mhc``: the coefficient function with
   ``allow_fp32=True``, the pre-mix and the post / residual mix).  Liger's residual mix is ``out_o = sum_i h_res[o, i]
   x_i``, so it is given ``C`` transposed; its mapping matrix is a ``[4H, 24]`` parameter (Liger's layout) and the
@@ -80,11 +81,11 @@ The pre handoff (operations ``hfwd``, ``hbwd``, ``hckpt``; hidden 5120, ``rms_ep
 ``hc_eps`` 1e-6) is one sublayer of DeepSeek-V4.1-Flash: the coefficients of ``X`` as above, the collapse with the
 incoming ``pre_in`` (``U = BF16(sum_i pre_in_i X_i)``) and ``pre`` handed on as ``pre_next``; its backward from
 ``dY``, ``dU`` and ``dpre_next`` (the gradient of ``pre_next``) adds ``dpre_in = sum_d dU_d X_id``
-(:func:`reference_handoff`); ``hcfwd`` is the last sublayer's handoff forward followed by the final collapse of its
-``Y`` with its ``pre_next`` (the sequence where the collapse's launch can overlap its predecessor).  The standalone
-collapse (``cfwd``, ``cbwd``) is ``U = BF16(sum_i pre_in_i X_i)`` and its
-VJP ``(dX, dpre_in)`` (:func:`reference_collapse`).  :func:`make_inputs` draws ``pre_in`` (``sigmoid(N(0, 1)) +
-1e-6``) and ``dpre_next`` (``sqrt(H) N(0, 1)``) after the standard inputs, which keep their values.  The autograd arms
+(:func:`reference` with ``kind="handoff"``); ``hcfwd`` is the last sublayer's handoff forward followed by the final
+collapse of its ``Y`` with its ``pre_next`` (the sequence where the collapse's launch can overlap its predecessor).
+The standalone collapse (``cfwd``, ``cbwd``) is ``U = BF16(sum_i pre_in_i X_i)`` and its VJP ``(dX, dpre_in)``
+(:func:`reference` with ``kind="collapse"``).  :func:`make_inputs` draws ``pre_in`` (``sigmoid(N(0, 1)) + 1e-6``)
+and ``dpre_next`` (``sqrt(H) N(0, 1)``) after the standard inputs, which keep their values.  The autograd arms
 run the handoff as the same Python function with ``pre_in`` (``eager_fp32``, ``compile_*``) and Liger as its
 coefficient function, its pre-mix applied to ``pre_in`` and its post / residual mix (the coefficient function's
 ``h_pre`` handed on); the TileKernels arms have no handoff.  Each handoff operation compares with
@@ -103,6 +104,7 @@ import importlib.util
 import os
 import statistics
 import types
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -552,8 +554,9 @@ class Arm:
                 "determinism_declared": self.determinism, "composite": self.composite, "label": self.label(),
                 "ops": list(self.ops)}
 
-    def prepare_shape(self, i: dict, timer=None) -> dict:
-        """Per-shape setup before the check and the timing (e.g. compile trials); returns what to record."""
+    def prepare_shape(self, i: dict, timer=None, kinds: Sequence[str] = ("standard",)) -> dict:
+        """Per-shape setup before the check and the timing of the function ``kinds`` (:func:`op_kind`) the run times
+        (e.g. compile trials); returns what to record."""
         return {}
 
     def run_once(self, i: dict) -> dict:
@@ -784,7 +787,8 @@ def _fresh_function(fn: Callable, tag: str) -> Callable:
 
 
 class Compiled(AutogradArm):
-    """``torch.compile`` of :func:`_fp32_mhc`; ``trials`` fresh compiles per shape, the fastest one timed."""
+    """``torch.compile`` of :func:`_fp32_mhc` (and of the handoff and collapse functions); ``trials`` fresh compiles
+    per shape and function kind, the fastest one timed."""
 
     determinism = "not declared: the generated Triton kernels may split reductions (measured by the benchmarks)"
 
@@ -840,41 +844,73 @@ class Compiled(AutogradArm):
             self._fn_collapse = self._compile(_fp32_collapse)
         return self._fn_collapse(X, pre_in)
 
-    def prepare_shape(self, i: dict, timer=None) -> dict:
-        """Compile for this shape; with several trials, time one group of training steps (forward + backward) of each
-        fresh compile and keep the fastest.  The handoff and collapse functions compile on their first call (one
-        trial)."""
+    def _trial_step(self, kind: str, fn: Callable, i: dict) -> Callable[[], None]:
+        """One training step (forward + backward) of a compiled function of ``kind``, as the timed operations run it."""
+        if kind == "collapse":
+            X = i["X"].detach().requires_grad_(True)
+            pre_in = i["pre_in"].detach().requires_grad_(True)
+
+            def collapse_step() -> None:
+                X.grad = pre_in.grad = None
+                fn(X, pre_in).backward(i["dU"])
+
+            return collapse_step
+        leaves = self.leaves(i)
+        if kind == "handoff":
+            pre_in = i["pre_in"].detach().requires_grad_(True)
+
+            def handoff_step() -> None:
+                for t in (*leaves, pre_in):
+                    t.grad = None
+                U, Y, pre_next = fn(*leaves, pre_in, i["iters"])
+                torch.autograd.backward([U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]])
+
+            return handoff_step
+
+        def step() -> None:
+            for t in leaves:
+                t.grad = None
+            U, Y = fn(*leaves, i["iters"])
+            torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
+
+        return step
+
+    def prepare_shape(self, i: dict, timer=None, kinds: Sequence[str] = ("standard",)) -> dict:
+        """Compile for this shape.  With several trials, each function kind the run times (``kinds``: the standard
+        function, the pre handoff, the collapse) is compiled ``trials`` times afresh; one group of training steps
+        (forward + backward) of each compile is timed and the fastest is kept.  The record holds, per kind, every
+        trial's time and the chosen trial (``trial_step_active_us`` / ``chosen_trial`` for the standard function,
+        ``..._handoff`` / ``..._collapse`` for the others).  With one trial each function compiles on its first call."""
         self._fn = self._fn_handoff = self._fn_collapse = None
         if self.trials == 1 or timer is None:
             self._fn = self._compile()
             return {"compile_trials": 1}
         import torch._inductor.config as inductor_config
 
+        sources = {"standard": _fp32_mhc, "handoff": _fp32_mhc_handoff, "collapse": _fp32_collapse}
+        record: dict = {"compile_trials": self.trials}
         saved = inductor_config.force_disable_caches
         inductor_config.force_disable_caches = True
-        trials = []
         try:
-            for _ in range(self.trials):
-                fn = self._compile()
-                leaves = self.leaves(i)
-
-                def step(fn=fn, leaves=leaves) -> None:
-                    for t in leaves:
-                        t.grad = None
-                    U, Y = fn(*leaves, i["iters"])
-                    torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
-
-                for _ in range(3):
-                    step()
-                torch.cuda.synchronize()
-                samples = timer.times(step, timer.default_calls)
-                trials.append((statistics.median(s["active_us"] for s in samples), fn))
-                del leaves
+            for kind in dict.fromkeys(kinds):
+                trials = []
+                for _ in range(self.trials):
+                    fn = self._compile(sources[kind])
+                    step = self._trial_step(kind, fn, i)
+                    for _ in range(3):
+                        step()
+                    torch.cuda.synchronize()
+                    samples = timer.times(step, timer.default_calls)
+                    trials.append((statistics.median(s["active_us"] for s in samples), fn))
+                    del step
+                best = min(range(len(trials)), key=lambda k: trials[k][0])
+                suffix = "" if kind == "standard" else f"_{kind}"
+                setattr(self, f"_fn{suffix}", trials[best][1])
+                record[f"trial_step_active_us{suffix}"] = [t for t, _ in trials]
+                record[f"chosen_trial{suffix}"] = best
         finally:
             inductor_config.force_disable_caches = saved
-        best = min(range(len(trials)), key=lambda k: trials[k][0])
-        self._fn = trials[best][1]
-        return {"compile_trials": self.trials, "trial_step_active_us": [t for t, _ in trials], "chosen_trial": best}
+        return record
 
 
 class Liger(AutogradArm):

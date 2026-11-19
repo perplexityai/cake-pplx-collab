@@ -681,7 +681,7 @@ def cake_mhc_det_train_handoff_forward_prepare(
     ----------
     X : torch.Tensor
         BF16 ``[T, 4, H]`` contiguous residual streams; ``H = 5120`` on SM100 /
-        SM103 (another size raises ``ValueError``).
+        SM103 / SM107 (another size raises ``ValueError``).
     pre_in : torch.Tensor
         FP32 ``[T, 4]`` contiguous ``pre`` of the previous sublayer (a one-hot
         ``[1, 0, 0, 0]`` row per token for the first sublayer).
@@ -869,7 +869,8 @@ def cake_mhc_det_train_collapse_forward(
     Parameters
     ----------
     X : torch.Tensor
-        BF16 ``[T, 4, H]`` contiguous streams (``H = 5120`` on SM100 / SM103).
+        BF16 ``[T, 4, H]`` contiguous streams (``H = 5120`` on SM100 / SM103 /
+        SM107).
     pre_in : torch.Tensor
         FP32 ``[T, 4]`` contiguous weights (the last sublayer's ``pre_next``).
     out : torch.Tensor, optional

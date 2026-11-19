@@ -99,13 +99,14 @@ DPRE_IN_REFERENCE_DEVICE = "cpu"
 DPRE_IN_MAX_FROM_T = 257
 #: The chain-level bound: in each norm, the median over the draws of a chain output's error against the FP64 chain is
 #: at most this times the median of the naive BF16 chain's error.  The naive BF16 chain carries the same BF16 rounding
-#: between sublayers, so 1.0 is the naive tier itself with no widening.  Derived from measurement on GB300 (152 SMs),
-#: both backends: 8 seed sets of 32 draws (set 0 = the test's seed) over every chain configuration of these tests
-#: (two sublayers at T 7 / 65 / 129 / 257 / 2049 with and without saved statistics and checkpointing, four
-#: sublayers in two checkpoint regions at T 129 / 2049), every chain output in l2 and max, 2656 ratios per backend.
-#: The largest ratio was 0.914 (det, dscale2 l2, four sublayers at T 2049; the largest of any other det output 0.846)
-#: and 0.850 (nondet, dscale3 max).  A smaller factor would rest on the one largest set of one GPU; the wrong forms
-#: exceed 1.0 by 43 x to 193 x (l2), so the bound does not cost the check its power.
+#: between sublayers, so 1.0 is the naive tier itself with no widening.  Measured with these kernels on B200, GB300 and
+#: VR200, both backends: 8 seed sets of 32 draws (set 0 = the test's seed) over every chain configuration of these
+#: tests (two sublayers at T 7 / 65 / 129 / 257 / 2049 with and without saved statistics and checkpointing, four
+#: sublayers in two checkpoint regions at T 129 / 2049), every chain output in l2 and max, 2656 ratios per backend and
+#: GPU.  The largest ratio was 0.932 (B200 nondet, dscale2 max, four sublayers at T 2049); per GPU det / nondet: B200
+#: 0.841 / 0.932, GB300 0.910 / 0.850, VR200 0.882 / 0.843.  A factor fitted to one GPU would fail another (GB300's
+#: largest, 0.910, is below B200's 0.932); the wrong forms exceed 1.0 by 42 x to 198 x (l2), so the bound does not cost
+#: the check its power.
 CHAIN_MEDIAN_FACTOR = 1.0
 #: How far each wrong form must exceed the chain-level bound: its median error over the bound, in the l2 norm, on the
 #: output the wrong form moves (:data:`WRONG_FORM_OUTPUT`).

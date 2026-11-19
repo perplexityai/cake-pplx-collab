@@ -66,8 +66,8 @@ The pre handoff (hidden 5120 only, ``rms_eps`` 1e-20, ``hc_eps`` 1e-6; not in th
   ``collapse_forward`` / ``collapse_backward``, no workspace).
 
 Each handoff kind (the sublayer, the collapse) has its own oracle check per row and its own naive-tier judge per
-hidden size (``cake_mhc_baselines.reference_handoff`` / ``reference_collapse``); the comparisons of these operations
-are ``compile_max_autotune`` and ``liger``.
+hidden size (``cake_mhc_baselines.reference(i, dtype, kind="handoff" | "collapse")``); the comparisons of these
+operations are ``compile_max_autotune`` and ``liger``.
 
 Comparisons.  The non-Cake arm of each comparison is fixed (``cake_mhc_baselines.COMPARISONS``): ``fwd-A``
 ``tk_cublas``, ``fwd-B`` ``tk_deepgemm``, ``bwd`` / ``ckpt`` ``compile_max_autotune`` and the ``bwd-liger`` /
@@ -795,6 +795,10 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
                  "iters": args.sinkhorn_iters, "arms": {}, "ops": {}}
     t0 = time.time()
     i = base.make_inputs(tokens, hidden, seed=row["seed"], device=device, iters=args.sinkhorn_iters)
+    # The kinds of function the requested operations time (the standard function, the pre handoff, the collapse):
+    # each kind has its own compile trials, its own oracle check, and an arm that breaks one kind's contract is not
+    # timed on that kind.
+    kinds = list(dict.fromkeys(base.op_kind(op) for op in args.ops))
     live = []
     for arm in arms:
         ok, note = arm.available(device, hidden)
@@ -803,15 +807,12 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
             print(f"H={hidden} T={tokens} {arm.name}: unsupported: {note}", flush=True)
             continue
         try:
-            rec["prepare"] = arm.prepare_shape(i, timer)
+            rec["prepare"] = arm.prepare_shape(i, timer, kinds=kinds)
         except Exception as exc:  # noqa: BLE001
             rec["error"] = "prepare: " + _err(exc, f"{arm.name} prepare H={hidden} T={tokens}")
             _free()
             continue
         live.append(arm)
-    # The kinds of function the requested operations time (the standard function, the pre handoff, the collapse):
-    # each kind has its own oracle check, and an arm that breaks one kind's contract is not timed on that kind.
-    kinds = list(dict.fromkeys(base.op_kind(op) for op in args.ops))
     runnable = {kind: [a for a in live if any(a.supports(op, device, hidden)[0] for op in args.ops
                                               if base.op_kind(op) == kind)] for kind in kinds}
     failed_kind: dict = {kind: set() for kind in kinds}
@@ -822,9 +823,10 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
                 try:
                     outputs[arm.name] = arm.run_kind(i, kind)
                 except Exception as exc:  # noqa: BLE001
-                    key = "error" if kind == "standard" else f"error_{kind}"
+                    # per kind (``error_standard`` / ``error_handoff`` / ``error_collapse``): a failed check run of
+                    # one kind leaves the other kinds' cells; ``error`` is the arm's prepare failure (every kind)
                     where = f"{arm.name} {kind} check H={hidden} T={tokens}"
-                    row["arms"][arm.name][key] = "check run: " + _err(exc, where)
+                    row["arms"][arm.name][f"error_{kind}"] = "check run: " + _err(exc, where)
                     failed_kind[kind].add(arm.name)
                     _free()
             if not outputs:
@@ -893,8 +895,8 @@ def comparisons(arms: list, row: dict, res: dict, op: str, hidden: int, eligible
             cell["status"] = "unsupported: " + ((rec or {}).get("note") or "not available")
         elif op in (rec.get("unsupported_ops") or {}):
             cell["status"] = "unsupported: " + rec["unsupported_ops"][op]
-        elif rec.get("error") or rec.get(f"error{suffix}"):
-            cell["status"] = "error: " + (rec.get("error") or rec.get(f"error{suffix}"))
+        elif rec.get("error") or rec.get(f"error_{kind}"):
+            cell["status"] = "error: " + (rec.get("error") or rec.get(f"error_{kind}"))
         elif any(isinstance(v, dict) and v.get("contract") for v in (rec.get(f"check{suffix}") or {}).values()):
             cell["status"] = "different contract: the arm breaks the contract on this row's inputs"
         elif "active_us" not in r:
