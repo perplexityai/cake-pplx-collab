@@ -72,7 +72,7 @@ CTAS_PER_SM = {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4}
 
 # The most looked-up rows a call launches the small program (record ``lookup_small``) for; above it the main program
 # (record ``lookup``).
-SMALL_MAX_POSITIONS = 24
+SMALL_MAX_POSITIONS = 256
 
 MODULES: dict[str, dict[str, Any]] = {
     "lookup": {
