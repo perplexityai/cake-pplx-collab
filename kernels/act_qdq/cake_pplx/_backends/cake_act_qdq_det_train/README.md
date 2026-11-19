@@ -70,8 +70,9 @@ grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_
 of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per tile once the tiles pass 2.5
 waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many CTAs, at most one per tile; the SM
 count is read once per device.  The small program is the same kernel with 256-thread CTAs that take 2 vectors per thread
-on every architecture (tiles of 512 vectors, 8 CTAs per SM, 4 on `sm_107a`).  Its sizes fill about one wave, where the
-time is mostly the start of the CTAs, and a 256-thread CTA starts four times the threads of a 64-thread one.  Both
+on every architecture (tiles of 512 vectors, 8 CTAs per SM, 4 on `sm_107a`).  Its sizes fill at most about one wave,
+where each CTA start costs time (the GPU starts about 1,850 CTAs per microsecond) and its larger tiles need fewer CTAs:
+at 524,288 vectors on `sm_100a` and `sm_103a` the main program launches 4,096 CTAs and the small one 1,024.  Both
 programs give the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
 kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own program, so build
 every library of the architecture before a CUDA graph capture: call `build_and_load()` on each spec of

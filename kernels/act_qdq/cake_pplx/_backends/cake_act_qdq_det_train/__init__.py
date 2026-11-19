@@ -38,9 +38,9 @@ Host design (every switch is a keyword; no environment variable):
   (64-thread CTAs, tiles of 128 vectors, 256 on sm_107a).  The grid is the
   ``tiles`` rule of ``cake_jit.launch_grid``: one CTA per tile once the tiles
   pass 2.5 waves of resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the
-  small program), else the resident CTAs walk the tiles.  It does not read device
-  memory on the host and does not synchronize.  A call with no elements
-  launches nothing.
+  small program), else the resident CTAs, at most one per tile, walk the
+  tiles.  It does not read device memory on the host and does not
+  synchronize.  A call with no elements launches nothing.
 - Every output repeats bit for bit for identical inputs: each group is
   quantized by its own threads, and nothing is summed (``README.md``).
 """

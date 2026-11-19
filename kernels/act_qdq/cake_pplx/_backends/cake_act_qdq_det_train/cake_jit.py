@@ -49,10 +49,10 @@ tile (:func:`launch_grid`).  A small program is the same kernel with CTAs of
 256 threads, two vectors each (tiles of 512 vectors, 8 CTAs per SM, 4 on
 SM107).  A call runs the small record of its route when ``n_vecs`` lies in
 the record's ``vectors`` range for the call's kind, where the problem fills
-about one wave and the larger CTAs start sooner: out of place 65,537 to
-524,288 on SM100 and SM103 and 1 to 262,144 on SM107, in place 1 to 262,144
-on SM107 only (in place on SM100 and SM103 the small program measured no
-faster).  Every other call runs the main record (:func:`selected_module`).
+at most about one wave and the larger tiles need fewer CTAs: out of place
+65,537 to 524,288 on SM100 and SM103 and 1 to 262,144 on SM107, in place 1 to
+262,144 on SM107 only (in place on SM100 and SM103 the small program measured
+no faster).  Every other call runs the main record (:func:`selected_module`).
 Both give the same bytes.  ``n_vecs`` is a run-time scalar, so a library
 serves every shape; a call builds or loads only its own program's library on
 first use.  Build every library of the architecture (:func:`specs_for_arch`)

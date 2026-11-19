@@ -297,11 +297,19 @@ def test_every_program_runs_on_any_grid() -> None:
 @gpu
 @pytest.mark.parametrize("inplace", (False, True), ids=CALLS)
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool) -> None:
+def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool, monkeypatch) -> None:
     """Inputs of width 32 just inside and just outside the small program's range for the call's kind (the
-    out-of-place range where the kind has none): the call runs the program its route names for that size and kind,
-    and each program of the route, launched directly in the same kind, gives the rule's bits too."""
+    out-of-place range where the kind has none): the call launches the program its route names for that size and
+    kind (also with an ``out`` buffer: a view of ``x``'s bytes is in place, another tensor is not), and each program
+    of the route, launched directly in the same kind, gives the rule's bits too."""
     arch = _arch()
+    run_module, launched = loader.run_module, []
+
+    def spy(name, values, **kwargs):
+        launched.append(name)
+        return run_module(name, values, **kwargs)
+
+    monkeypatch.setattr(loader, "run_module", spy)
     span = SMALL_VECTORS[arch][CALLS[inplace]]
     low, high = span or SMALL_VECTORS[arch]["out_of_place"]
     first, last = -(-low // 4) * 4, high // 4 * 4  # a width-32 row is 4 vectors
@@ -316,8 +324,17 @@ def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool) ->
             kind = loader.route_name(fmt, scale_out=scale_out)
             chosen = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=inplace)
             assert chosen == kind + ("_small" if small else ""), (arch, n_vecs, inplace, chosen)
+            launched.clear()
             y, s = _call(x0, fmt, inplace=inplace, return_scales=scale_out)
+            assert launched == [chosen], (arch, n_vecs, inplace, launched)
             _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} call ({chosen})", want, y, s)
+            x = x0.clone()
+            out = x.view(x.shape) if inplace else torch.empty_like(x)
+            launched.clear()
+            result = forward(x, format=fmt, out=out, return_scales=scale_out)
+            y, s = result if scale_out else (result, None)
+            assert launched == [chosen], (arch, n_vecs, inplace, "out", launched)
+            _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} out= call ({chosen})", want, y, s)
             for name in loader.ROUTES[arch][kind]:
                 x = x0.clone() if inplace else x0
                 y = x if inplace else torch.full_like(x0, float("nan"))
