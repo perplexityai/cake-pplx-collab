@@ -51,7 +51,7 @@ MODULE = "cake_clamped_swiglu_det_train"
 FACADE = f"cake_pplx.{MODULE}"
 BACKEND = f"cake_pplx._backends.{MODULE}"
 AUTOGRAD = "CakeClampedSwiGLUDetFunction"
-# The facade's functions (its own ``cake_api`` defs), each calling the backend function of the same name.
+# The facade's functions (its own ``cake_api`` defs), each running what the backend function of the same name runs.
 FACADE_FUNCTIONS = {
     "cake_clamped_swiglu_det",
     f"{MODULE}_forward",

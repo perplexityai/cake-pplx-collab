@@ -6831,8 +6831,9 @@ def test_fwd_split_route_rule(monkeypatch) -> None:
 
 
 # the split rows whose split forward keeps the waves on the WY stage's w / u, per architecture (FWD_SPLIT_A_MIN_PIECE):
-# on sm_103a the pair row of HV 24 (63-chunk pieces); every other split row runs on wy_a's A
-FWD_SPLIT_W_FORM_ROWS = {"sm_103a": frozenset({"pair_hv24"})}
+# none.  On sm_103a the pair row of HV 24 cuts 63-chunk pieces at 148 and 152 SMs, the shortest pieces on wy_a's A
+# there; every split row runs on wy_a's A
+FWD_SPLIT_W_FORM_ROWS: dict[str, frozenset[str]] = {}
 
 
 @pytest.mark.parametrize("sm_count", [148, 152])
@@ -6853,6 +6854,19 @@ def test_fwd_split_shape_class(row, sm_count, monkeypatch) -> None:
         if got is not None:
             a_form = row not in FWD_SPLIT_W_FORM_ROWS.get(arch, frozenset())
             assert cake_chain._fwd_split_a(arch, got) is a_form, (arch, got)
+
+
+def test_fwd_split_a_min_piece(monkeypatch) -> None:
+    # the shortest piece of the split forward on wy_a's A: on sm_103a 63 chunks (the measured pair row of HV 24), so
+    # the split's pieces of 48-62 chunks, none of them measured, keep the waves on the WY stage's w / u; on sm_100a
+    # every split forward runs on A
+    monkeypatch.setattr(cake_chain, "_available", lambda _stage, _arch: True)
+    assert dict(cake_chain.FWD_SPLIT_A_MIN_PIECE) == {"sm_103a": 63}
+    lengths = (cake_plan.FORWARD_SPLIT_MIN_PIECE["sm_103a"], 62, 63, 96)
+    got = [cake_chain._fwd_split_a("sm_103a", n) for n in lengths]
+    assert got == [False, False, True, True], got
+    lengths = (cake_plan.FORWARD_SPLIT_MIN_PIECE["sm_100a"], 62, 63)
+    assert all(cake_chain._fwd_split_a("sm_100a", n) for n in lengths)
 
 
 @pytest.mark.usefixtures("fwd_split_test_class")
