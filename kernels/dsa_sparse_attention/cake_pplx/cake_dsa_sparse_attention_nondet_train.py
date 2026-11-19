@@ -541,8 +541,8 @@ def cake_dsa_sparse_attention_nondet_nope(
         used: the absorbed queries of this form carry their own scale).
     sink : Optional[torch.Tensor]
         FP32 ``[64]`` trainable per-head attention sink, contiguous, on the
-        device of ``q``; ``None`` (default) runs without a sink, with today's
-        results.  Head ``h`` adds ``exp(sink[h])`` -- not scaled by
+        device of ``q``; ``None`` (default) runs without a sink, with
+        unchanged results.  Head ``h`` adds ``exp(sink[h])`` -- not scaled by
         ``softmax_scale`` -- to the softmax denominator of every row and
         contributes no value: ``lse = log(sum_j exp(s_j) + exp(sink[h]))``,
         ``O = sum_j exp(s_j - lse) kv_j``, computed in FP32 and rounded once
@@ -553,8 +553,11 @@ def cake_dsa_sparse_attention_nondet_nope(
         lse[t]) * delta[t]`` in FP32, summed over all rows of the call
         (``delta = <dout, O>``), in a fixed order that does not depend on the
         SM count.  Only the metadata is checked (no device synchronization):
-        ``+inf`` and NaN values are not supported.  SM100 / SM103 only
-        (``NotImplementedError`` on SM107).
+        ``+inf`` and NaN values are not supported.  SM100 / SM103 only: on
+        SM107 a call with query rows raises ``NotImplementedError``.  A call
+        without query rows (``T = 0``) launches nothing on any architecture,
+        SM107 included: it checks the sink's metadata and device, returns
+        empty outputs and gives a zero ``dsink``.
     return_lse : bool
         Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows), plus the
@@ -991,8 +994,9 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
     ``RuntimeError`` before its first backward kernel (with ``warn_only=True``
     a ``UserWarning``, then it runs). ``sink``: the sink the step forward ran
     with; the call then also returns ``dsink``, FP32 ``[64]``, ``-sum_t
-    exp(sink - lse[t]) * delta[t]`` summed over all rows of the call. With
-    ``sink=None`` the return is ``(dq, dkv)`` as before.
+    exp(sink - lse[t]) * delta[t]`` summed over all rows of the call:
+    ``(dq, dkv, dsink)``, or ``(dq, None, dsink)`` with a tensor ``dkv_acc``.
+    With ``sink=None`` the return is ``(dq, dkv)`` or ``(dq, None)``.
     """
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
