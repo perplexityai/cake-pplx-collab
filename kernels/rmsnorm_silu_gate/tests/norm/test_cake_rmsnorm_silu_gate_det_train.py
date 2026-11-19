@@ -1362,6 +1362,15 @@ def _routes_without(arch, *roles):
     return {r: name for r, name in loader.ROUTES[arch].items() if r not in roles}
 
 
+def _patch_routes(patch, arch, table):
+    """``ROUTES[arch]`` set to ``table`` for the ``patch`` context, with the
+    plans :func:`nodw_module` reads for ``arch`` (``_NODW_PLANS``, read once
+    at import) read again from it."""
+    patch.setitem(loader.ROUTES, arch, table)
+    plans = {name: loader._nodw_plan(arch, name) for name in loader.MODULES}
+    patch.setitem(loader._NODW_PLANS, arch, plans)
+
+
 def _strided_tokens(arch, sms, role, H=48, T=257):
     """Tokens of ``H`` heads, in ``role``'s layout (``STRIDED_LAYOUTS``), whose
     rows a call without the weight gradient runs on ``role``'s strided
@@ -1675,7 +1684,7 @@ def test_program_of_packed_rows_only_gives_the_bits_of_the_strided_builds(
         table = _routes_without(arch, *drop)
         assert _strided_role(arch, rows, sms, packed, table) == want, drop
         with pytest.MonkeyPatch.context() as patch:
-            patch.setitem(loader.ROUTES, arch, table)
+            _patch_routes(patch, arch, table)
             launches.clear()
             got = [
                 backward(dy, x, z, w, EPS, compute_grad_weight=False)
@@ -1858,7 +1867,7 @@ def test_programs_without_the_weight_gradient_at_forced_grids(
     with pytest.MonkeyPatch.context() as patch:
         if program == "claimed":
             table = _routes_without(arch, NODW_STRIDED, *NODW_128)
-            patch.setitem(loader.ROUTES, arch, table)
+            _patch_routes(patch, arch, table)
             want = routes[NODW_CLAIMED]
         else:
             want = routes[role]
@@ -1894,7 +1903,7 @@ def test_long_rows_without_the_weight_gradient(launches):
         (_routes_without(arch, NODW_LONG), long),
     ):
         with pytest.MonkeyPatch.context() as patch:
-            patch.setitem(loader.ROUTES, arch, table)
+            _patch_routes(patch, arch, table)
             launches.clear()
             dx, dz, dw = backward(
                 dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws
@@ -3168,6 +3177,16 @@ NODW_DROPS = (
 )
 
 
+def test_the_backward_plans_are_those_of_the_tables():
+    # nodw_module reads the plans built once at import (_NODW_PLANS): they are
+    # the plans the routes and the three cut tables give, for every routed
+    # architecture and module
+    assert loader._NODW_PLANS == {
+        arch: {name: loader._nodw_plan(arch, name) for name in loader.MODULES}
+        for arch in loader.ROUTES
+    }
+
+
 @pytest.mark.parametrize("sm_count", GRID_SM_COUNTS)
 def test_nodw_module_and_the_strided_grid(sm_count):
     """``nodw_module`` and the strided programs' grids (host only), with each
@@ -3210,7 +3229,7 @@ def test_nodw_module_and_the_strided_grid(sm_count):
             claimed = table.get(NODW_CLAIMED)
             strided = table.get(NODW_STRIDED)
             with pytest.MonkeyPatch.context() as patch:
-                patch.setitem(loader.ROUTES, arch, table)
+                _patch_routes(patch, arch, table)
                 for packed in (False, True):
                     for rows in rows_list:
                         role = None
