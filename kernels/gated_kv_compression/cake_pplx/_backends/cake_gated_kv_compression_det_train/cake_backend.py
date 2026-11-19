@@ -17,11 +17,11 @@ Checks, launches and autograd nodes of the Cake ratio-2 gated KV compression
 (width 512; SM100 / SM103 / SM107).
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
-one record per program (``pair_table``, ``pair_table_small``, ``fwd`` and
-``fwd_unfused`` on SM100 / SM103, ``fwd_sm_107a`` and ``fwd_unfused_sm_107a``
-on SM107, ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107; the
-``build.json`` entries are
-``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
+one record per role and program (``pair_table``, ``pair_table_small``, ``fwd``
+and ``fwd_unfused`` on SM100 / SM103, ``fwd_sm_107a`` and
+``fwd_unfused_sm_107a`` on SM107, ``bwd`` and ``bwd_small`` on SM100 / SM103,
+``bwd_sm_107a`` on SM107, the program of ``bwd_small``; the ``build.json``
+entries are ``<library>_<arch>``), :func:`.cake_jit.launch_grid` the grids and
 :func:`.cake_jit.run_module` the launch of a role: the record serving it on
 the device's architecture (:func:`.cake_jit.role_record`).  :mod:`.cake_build` serves a
 library from a prebuilt ``aot/`` file when a builder compiled it and otherwise
@@ -34,9 +34,11 @@ which builds the pair table (the exclusive prefix of the pair counts, int32
 ``[S + 1]``) itself and writes it to ``cu_pairs``; a forward of more documents
 runs a pair table, then ``fwd_unfused``, the same forward without the table
 build, which reads that table (:func:`launch_fwd`).  A backward call runs a
-pair table (unless the caller passes the table as ``pair_offsets``) and
-``bwd`` (the ``dC`` / ``dZ`` rows of every pair's two tokens and the zero rows
-of the odd-length documents' tail tokens).  The pair table is
+pair table (unless the caller passes the table as ``pair_offsets``) and the
+backward (the ``dC`` / ``dZ`` rows of every pair's two tokens and the zero
+rows of the odd-length documents' tail tokens): ``bwd_small`` for at most
+:func:`.cake_jit.bwd_small_docs` documents (on SM100 / SM103), ``bwd`` for
+more (:func:`launch_bwd`); both write the same bytes.  The pair table is
 ``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents and
 ``pair_table`` for more (:func:`launch_pair_table`); both write the same
 bytes.  A call looks up the operands' device index, its architecture and the
@@ -389,14 +391,17 @@ def launch_bwd(
     z_ld: int,
     dc_ld: int,
     dz_ld: int,
+    role: str | None = None,
     device_index: int | None = None,
     arch: str | None = None,
 ) -> None:
-    """Launch the ``bwd`` role (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107): every ``dc`` and ``dz``
-    row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16),
-    ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``, ``G >= 1``), on ``G + S`` virtual rows.
-    ``device_index`` and ``arch``: the index of the operands' device and its architecture when the caller has them;
-    ``None`` looks them up."""
+    """Launch the backward: every ``dc`` and ``dz`` row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below
+    ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16), ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``,
+    ``G >= 1``), on ``G + S`` virtual rows.  For ``S <= cake_jit.bwd_small_docs(arch)`` the ``bwd_small`` role
+    (record ``bwd_small`` on SM100 / SM103; the bound is 0 on SM107, where no record serves it), for more the ``bwd``
+    role (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107): the same bytes.  ``role`` (``bwd`` or
+    ``bwd_small``), ``device_index`` and ``arch``: the role the caller chose by that rule, the index of the operands'
+    device and its architecture when the caller has them; ``None`` looks them up."""
     S, G = int(cu_seqlens.numel()) - 1, int(dout.shape[0])
     values = {
         "dout": dout,
@@ -415,7 +420,11 @@ def launch_bwd(
     }
     if device_index is None:
         device_index = dout.device.index
-    cake_jit.run_module("bwd", values, rows=G + S, device_index=device_index, arch=arch)
+    if role is None:
+        if arch is None:
+            arch = cake_jit.device_arch(device_index)
+        role = "bwd_small" if S <= cake_jit.bwd_small_docs(arch) else "bwd"
+    cake_jit.run_module(role, values, rows=G + S, device_index=device_index, arch=arch)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -535,6 +544,9 @@ def cake_gated_kv_compression_det_train_backward(
         dc.zero_()
         dz.zero_()
         return dc, dz
+    # The device, its architecture and the role are looked up once here and passed to the launches: a backward of at
+    # most bwd_small_docs documents runs bwd_small, of more bwd, with the table given or launched here.
+    role = "bwd_small" if S <= cake_jit.bwd_small_docs(arch) else "bwd"
     cu_pairs = pair_offsets
     if cu_pairs is None:
         cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
@@ -551,6 +563,7 @@ def cake_gated_kv_compression_det_train_backward(
         z_ld=z_ld,
         dc_ld=dc_ld,
         dz_ld=dz_ld,
+        role=role,
         device_index=index,
         arch=arch,
     )
@@ -599,9 +612,10 @@ def _halves(cz: Any) -> tuple[torch.Tensor, torch.Tensor]:
 class CakeGatedKvCompressionDetFunction(torch.autograd.Function):
     """Autograd node of :func:`cake_gated_kv_compression_det`: forward
     :func:`cake_gated_kv_compression_det_train_forward`, backward :func:`cake_gated_kv_compression_det_train_backward`
-    (one launch writes ``dC`` and ``dZ``).  The node saves ``c``, ``z``, ``cu_seqlens`` and its forward's pair table
-    (int32 ``[S + 1]``) only: no activation and no probability, and the backward reuses the table (no pair-table
-    launch).  Under ``torch.utils.checkpoint(..., use_reentrant=False)`` the recompute gives the same bits."""
+    (one launch writes ``dC`` and ``dZ``: ``bwd_small`` or ``bwd`` by the explicit backward's rule).  The node saves
+    ``c``, ``z``, ``cu_seqlens`` and its forward's pair table (int32 ``[S + 1]``) only: no activation and no
+    probability, and the backward reuses the table (no pair-table launch).  Under
+    ``torch.utils.checkpoint(..., use_reentrant=False)`` the recompute gives the same bits."""
 
     @staticmethod
     def forward(  # type: ignore[override]

@@ -228,7 +228,7 @@ def test_capabilities_map_to_the_three_architectures(monkeypatch):
     for role in jit.ROLES:
         for arch in ARCHES:
             serving = [name for name, rec in jit.MODULES.items() if rec["role"] == role and arch in rec["arches"]]
-            assert len(serving) == 1, (role, arch, serving)
+            assert len(serving) == (1 if arch in jit.ROLE_ARCHES.get(role, ARCHES) else 0), (role, arch, serving)
     assert {arch for rec in jit.MODULES.values() for arch in rec["arches"]} == set(ARCHES)
     monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 7))
     jit.device_arch.cache_clear()
@@ -250,7 +250,9 @@ def test_capabilities_map_to_the_three_architectures(monkeypatch):
 def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; every library stem is a
     ``cake_gated_kv_compression_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the
-    registry's library names are the stems of ``build.json``."""
+    registry's library names are the stems of ``build.json``.  Each record names its own program, but ``bwd_small``
+    and ``bwd_sm_107a``, one program on disjoint architectures, and no library is built twice for one
+    architecture."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_gated_kv_compression_det_train"
@@ -265,7 +267,8 @@ def test_package_identity_and_build_identity():
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    assert len(stems) == len(jit.MODULES) - 1 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    assert jit.MODULES["bwd_small"]["library"] == jit.MODULES["bwd_sm_107a"]["library"]
 
 
 # The forward record of each architecture and the width of its C / Z loads: 128-bit (4 FP32 channels a lane, 128 lanes

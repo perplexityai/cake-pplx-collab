@@ -93,10 +93,12 @@ cake_jit = cake_package(PACKAGE_KEY, "cake_jit")
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd")
+ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small")
+# The architectures of a role not served on all three: the small backward on sm_100a / sm_103a only.
+ROLE_ARCHES = {"bwd_small": ("sm_100a", "sm_103a")}
 # Record -> (its role, the architectures it serves, the lanes of a 512-wide row): both forwards ship 128-bit lanes
 # (4 FP32 channels) on sm_100a / sm_103a and 256-bit lanes (8 channels) on sm_107a; the backward 256-bit lanes, with
-# the two-level search on sm_100a / sm_103a and the one-level search on sm_107a.
+# the two-level search on sm_100a / sm_103a and the one-level search on sm_107a and in the small backward.
 RECORDS = {
     "pair_table": ("pair_table", ARCHES, None),
     "pair_table_small": ("pair_table_small", ARCHES, None),
@@ -106,12 +108,20 @@ RECORDS = {
     "fwd_unfused_sm_107a": ("fwd_unfused", ("sm_107a",), 64),
     "bwd": ("bwd", ("sm_100a", "sm_103a"), 64),
     "bwd_sm_107a": ("bwd", ("sm_107a",), 64),
+    "bwd_small": ("bwd_small", ("sm_100a", "sm_103a"), 64),
 }
 # The most documents a pair-table launch runs ``pair_table_small`` for (the rendered ``small_docs``).
 SMALL_DOCS = 512
 # The most documents a forward launch runs ``fwd`` for, which builds the pair table itself (the rendered ``fuse_docs``);
 # a forward of more runs ``fwd_unfused``.
 FUSE_DOCS = 256
+# The most documents a backward launch runs ``bwd_small`` for on sm_100a / sm_103a (the rendered ``bwd_small_docs``); a
+# backward of more runs ``bwd``.  On sm_107a no record serves ``bwd_small``: the bound is 0 there.
+BWD_SMALL_DOCS = 26
+# Backward packs on either side of that bound and of the forward's fused bound: 1, 16, 26, 27, 256 and 257 documents.
+BWD_BOUND_DOCS = (1, 16, BWD_SMALL_DOCS, BWD_SMALL_DOCS + 1, FUSE_DOCS, FUSE_DOCS + 1)
+# The 0.1.0 one-level backward program, which ``bwd_small`` ships on sm_100a / sm_103a and ``bwd_sm_107a`` on sm_107a.
+ONE_LEVEL_LIBRARY = "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf"
 # The 0.1.0 forward programs, which ``fwd_unfused`` ships under their 0.1.0 names.
 UNFUSED_LIBRARIES = {
     "fwd_unfused": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
@@ -139,6 +149,7 @@ PARAMETERS = {
         "dz_ld",
     },
 }
+PARAMETERS["bwd_small"] = PARAMETERS["bwd"]
 LAUNCHER_KEYWORDS = {
     "launch_pair_table": ("cu_seqlens", "cu_pairs"),
     "launch_fwd": ("c", "z", "cu_seqlens", "cu_pairs", "out", "c_ld", "z_ld"),
@@ -148,7 +159,7 @@ LAUNCHER_KEYWORDS = {
 LAUNCHER_OPTIONS = {
     "launch_pair_table": ("device_index", "arch"),
     "launch_fwd": ("role", "device_index", "arch"),
-    "launch_bwd": ("device_index", "arch"),
+    "launch_bwd": ("role", "device_index", "arch"),
 }
 LAYOUTS = ("contiguous", "halves")
 
@@ -228,6 +239,7 @@ def _grad_buffers(x, layout: str) -> tuple[torch.Tensor, torch.Tensor]:
 
 def test_registry_records_are_well_formed() -> None:
     assert tuple(cake_jit.ROLES) == ROLES
+    assert dict(cake_jit.ROLE_ARCHES) == ROLE_ARCHES
     assert tuple(cake_jit.ARCHES) == ARCHES
     assert cake_jit.WIDTH == WIDTH and cake_jit.CZ_WIDTH == 2 * WIDTH
     assert cake_jit.LIBRARY_PREFIX == "cake_gated_kv_compression_det_train"
@@ -252,10 +264,35 @@ def test_registry_records_are_well_formed() -> None:
         libraries.add(rec["library"])
     for name in ("pair_table", "pair_table_small"):
         assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "one_cta", name
-    for name in ("fwd", "fwd_sm_107a", "fwd_unfused", "fwd_unfused_sm_107a", "bwd", "bwd_sm_107a"):
+    for name in ("fwd", "fwd_sm_107a", "fwd_unfused", "fwd_unfused_sm_107a", "bwd", "bwd_sm_107a", "bwd_small"):
         assert cake_jit.MODULES[name]["grid_rule"]["kind"] == "rows", name
     if rendered:
-        assert len(libraries) == len(cake_jit.MODULES)
+        # one program a record, but bwd_small, the program of bwd_sm_107a on the other architectures
+        assert len(libraries) == len(cake_jit.MODULES) - 1
+        assert cake_jit.MODULES["bwd_small"]["library"] == cake_jit.MODULES["bwd_sm_107a"]["library"]
+
+
+def test_the_small_backward_serves_at_most_26_documents_on_sm_100a_and_sm_103a() -> None:
+    """``bwd_small`` carries ``bwd_small_docs`` (the rendered bound: 26), and :func:`cake_jit.bwd_small_docs` reads it
+    on sm_100a and sm_103a; on sm_107a, where no record serves the role, the bound is 0, so every backward there runs
+    ``bwd``.  No other record carries the leaf.  ``bwd_small`` is the 0.1.0 one-level backward program, the program of
+    ``bwd_sm_107a``, with the arguments, grid rule and launch of ``bwd`` and ``bwd_sm_107a``."""
+    for name, rec in cake_jit.MODULES.items():
+        assert rec.get("bwd_small_docs") == (BWD_SMALL_DOCS if name == "bwd_small" else None), name
+    assert {arch: cake_jit.bwd_small_docs(arch) for arch in ARCHES} == {
+        "sm_100a": BWD_SMALL_DOCS,
+        "sm_103a": BWD_SMALL_DOCS,
+        "sm_107a": 0,
+    }
+    small, one_level, two_level = (cake_jit.MODULES[name] for name in ("bwd_small", "bwd_sm_107a", "bwd"))
+    assert small["arches"] == two_level["arches"] == ["sm_100a", "sm_103a"]
+    assert small["grid_rule"] == one_level["grid_rule"] == two_level["grid_rule"]
+    assert small["arg_plan"] == one_level["arg_plan"] == two_level["arg_plan"]
+    if (PACKAGE_DIR / "build.json").is_file():
+        assert small["library"] == one_level["library"] == ONE_LEVEL_LIBRARY
+        assert small["kernel_symbol"] == one_level["kernel_symbol"] == f"kernel_{ONE_LEVEL_LIBRARY}"
+        assert small["launch"] == one_level["launch"]
+        assert small["library"] != two_level["library"]
 
 
 def test_the_forward_records_build_the_table_of_up_to_256_documents() -> None:
@@ -295,15 +332,21 @@ def test_the_small_pair_table_serves_at_most_512_documents() -> None:
 
 
 def test_each_role_has_one_record_per_architecture() -> None:
-    """Every role is served on every architecture by exactly one record: the forward by ``fwd`` (128-bit lanes) on
-    sm_100a and sm_103a and by ``fwd_sm_107a`` (256-bit lanes) on sm_107a, and the same for ``fwd_unfused`` /
-    ``fwd_unfused_sm_107a``, the backward by ``bwd`` (two-level search)
-    on sm_100a and sm_103a and by ``bwd_sm_107a`` (one-level search) on sm_107a; no record serves another
+    """Every role is served on every architecture of its ``ROLE_ARCHES`` (all three for the others) by exactly one
+    record: the forward by ``fwd`` (128-bit lanes) on sm_100a and sm_103a and by ``fwd_sm_107a`` (256-bit lanes) on
+    sm_107a, and the same for ``fwd_unfused`` / ``fwd_unfused_sm_107a``, the backward by ``bwd`` (two-level search)
+    on sm_100a and sm_103a and by ``bwd_sm_107a`` (one-level search) on sm_107a, and the small backward by
+    ``bwd_small`` (one-level search) on sm_100a and sm_103a and by none on sm_107a; no record serves another
     architecture."""
     for role in ROLES:
         for arch in ARCHES:
             serving = [name for name, rec in cake_jit.MODULES.items() if rec["role"] == role and arch in rec["arches"]]
-            assert serving == [cake_jit.role_record(role, arch)], (role, arch, serving)
+            if arch in ROLE_ARCHES.get(role, ARCHES):
+                assert serving == [cake_jit.role_record(role, arch)], (role, arch, serving)
+            else:
+                assert serving == [], (role, arch, serving)
+                with pytest.raises(KeyError):
+                    cake_jit.role_record(role, arch)
     assert [cake_jit.role_record("fwd", arch) for arch in ARCHES] == ["fwd", "fwd", "fwd_sm_107a"]
     assert [cake_jit.role_record("fwd_unfused", arch) for arch in ARCHES] == [
         "fwd_unfused",
@@ -311,6 +354,7 @@ def test_each_role_has_one_record_per_architecture() -> None:
         "fwd_unfused_sm_107a",
     ]
     assert [cake_jit.role_record("bwd", arch) for arch in ARCHES] == ["bwd", "bwd", "bwd_sm_107a"]
+    assert [cake_jit.role_record("bwd_small", arch) for arch in ARCHES[:2]] == ["bwd_small", "bwd_small"]
     assert {cake_jit.role_record(role, arch) for role in ("pair_table", "pair_table_small") for arch in ARCHES} == {
         "pair_table",
         "pair_table_small",
@@ -352,7 +396,7 @@ def test_grids_cover_every_row() -> None:
         assert cake_jit.launch_grid(name, 1) == (1, 1, 1)
         assert cake_jit.launch_grid(name, 10**6) == (1, 1, 1)
     rng = random.Random(7091)
-    for name in ("fwd", "fwd_sm_107a", "fwd_unfused", "fwd_unfused_sm_107a", "bwd", "bwd_sm_107a"):
+    for name in ("fwd", "fwd_sm_107a", "fwd_unfused", "fwd_unfused_sm_107a", "bwd", "bwd_sm_107a", "bwd_small"):
         per = cake_jit.rows_per_cta(name)
         assert per >= 1
         for rows in [1, 2, per - 1, per, per + 1, *[rng.randint(1, 1 << 22) for _ in range(200)]]:
@@ -365,7 +409,8 @@ def test_grids_cover_every_row() -> None:
 
 def test_launchers_take_named_buffers() -> None:
     """Each launcher takes its buffers and strides by keyword only, with no default, and the device index, the
-    architecture (and the forward's role) a public call passes down by keyword only, each defaulting to None."""
+    architecture (and the forward's or the backward's role) a public call passes down by keyword only, each defaulting
+    to None."""
     for launcher, keywords in LAUNCHER_KEYWORDS.items():
         params = list(inspect.signature(getattr(cake_backend, launcher)).parameters.values())
         assert all(p.kind is p.KEYWORD_ONLY for p in params), launcher
@@ -378,10 +423,11 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     """Each launcher hands ``run_module`` exactly the kernel parameters of its record, with ``num_docs = S``, the
     rows of ``out`` / ``dout`` as ``G``, the strides it was given and the rows of its grid; the pair table of at most
     512 documents is the ``pair_table_small`` role, of more the ``pair_table`` role; the forward of at most 256
-    documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the pair table and
-    the forward pass the architecture they looked up to ``run_module``, and every launcher passes a device index, an
-    architecture (and a forward role) a caller gives as given, with no lookup (no device: the architecture is given
-    and the launch is a recorder)."""
+    documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the backward of at
+    most 26 documents (1, 16, 26) is the ``bwd_small`` role on sm_100a and sm_103a, of more (27, 256, 257) and on
+    sm_107a the ``bwd`` role; every launcher passes the architecture it looked up to ``run_module``, and a device index,
+    an architecture (and a forward or backward role) a caller gives as given, with no lookup (no device: the
+    architecture is given and the launch is a recorder)."""
     calls = []
     options = []
 
@@ -403,10 +449,9 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     cake_backend.launch_bwd(
         dout=out, c=c, z=z, cu_seqlens=cu, cu_pairs=table, dc=dc, dz=dz, c_ld=1024, z_ld=1024, dc_ld=512, dz_ld=512
     )
-    assert [name for name, _, _ in calls] == ["pair_table_small", "fwd", "bwd"]
-    # CPU tensors: no device index; the pair table and the forward look the architecture up to choose their role and
-    # pass it on, the backward (one role) leaves it to run_module
-    assert options == [(None, "sm_100a"), (None, "sm_100a"), (None, None)]
+    assert [name for name, _, _ in calls] == ["pair_table_small", "fwd", "bwd_small"]
+    # CPU tensors: no device index; each launcher looks the architecture up to choose its role and passes it on
+    assert options == [(None, "sm_100a")] * 3
     for name, values, rows in calls:
         assert set(values) == PARAMETERS[name], name
         assert values["num_docs"] == S and values["cu_seqlens"] is cu and values["cu_pairs"] is table, name
@@ -430,8 +475,28 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
             cake_backend.launch_fwd(c=c, z=z, cu_seqlens=bound, cu_pairs=bound, out=out, c_ld=1024, z_ld=1024)
             assert [(name, values["num_docs"], rows) for name, values, rows in calls] == [(role, docs, G)], (arch, docs)
             assert set(calls[0][1]) == PARAMETERS[role]
-    # A device index, an architecture and a forward role given by the caller reach run_module as given, and no
-    # architecture is looked up.
+        for docs in (*BWD_BOUND_DOCS, 8193):
+            role = "bwd_small" if docs <= BWD_SMALL_DOCS and arch in ROLE_ARCHES["bwd_small"] else "bwd"
+            calls.clear()
+            bound = torch.zeros(docs + 1, dtype=torch.int32)
+            cake_backend.launch_bwd(
+                dout=out,
+                c=c,
+                z=z,
+                cu_seqlens=bound,
+                cu_pairs=bound,
+                dc=dc,
+                dz=dz,
+                c_ld=1024,
+                z_ld=1024,
+                dc_ld=512,
+                dz_ld=512,
+            )
+            found = [(name, values["num_docs"], rows) for name, values, rows in calls]
+            assert found == [(role, docs, G + docs)], (arch, docs)
+            assert set(calls[0][1]) == PARAMETERS[role]
+    # A device index, an architecture and a forward or backward role given by the caller reach run_module as given,
+    # and no architecture is looked up.
     monkeypatch.setattr(cake_jit, "device_arch", lambda index: pytest.fail("looked up the architecture again"))
     for arch in ARCHES:
         calls.clear()
@@ -452,32 +517,38 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
                 device_index=3,
                 arch=arch,
             )
-        cake_backend.launch_bwd(
-            dout=out,
-            c=c,
-            z=z,
-            cu_seqlens=cu,
-            cu_pairs=table,
-            dc=dc,
-            dz=dz,
-            c_ld=1024,
-            z_ld=1024,
-            dc_ld=512,
-            dz_ld=512,
-            device_index=3,
-            arch=arch,
-        )
-        assert [name for name, _, _ in calls] == ["pair_table_small", "pair_table", "fwd", "fwd_unfused", "bwd"], arch
-        assert options == [(3, arch)] * 5, arch
+        roles = (None, "bwd", "bwd_small") if arch in ROLE_ARCHES["bwd_small"] else (None, "bwd")
+        for role in roles:
+            cake_backend.launch_bwd(
+                dout=out,
+                c=c,
+                z=z,
+                cu_seqlens=cu,
+                cu_pairs=table,
+                dc=dc,
+                dz=dz,
+                c_ld=1024,
+                z_ld=1024,
+                dc_ld=512,
+                dz_ld=512,
+                role=role,
+                device_index=3,
+                arch=arch,
+            )
+        # five documents: the backward's own choice is bwd_small on sm_100a / sm_103a and bwd on sm_107a
+        backward = ["bwd_small", "bwd", "bwd_small"] if arch in ROLE_ARCHES["bwd_small"] else ["bwd", "bwd"]
+        assert [name for name, _, _ in calls] == ["pair_table_small", "pair_table", "fwd", "fwd_unfused", *backward]
+        assert options == [(3, arch)] * (4 + len(backward)), arch
 
 
 def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -> None:
     """``run_module`` takes a role and launches the record that serves it on the device's architecture, on that
     record's grid: the forward of ``G`` rows runs ``fwd`` (two rows a CTA) on sm_100a / sm_103a and ``fwd_sm_107a``
-    (four rows a CTA) on sm_107a, the backward ``bwd`` and ``bwd_sm_107a``; the pair tables run their one record
-    everywhere, ``pair_table_small`` for 5 and 512 documents and ``pair_table`` for 513; the forward of 256 documents
-    runs ``fwd`` / ``fwd_sm_107a``, of 257, 512, 513 and 8193 ``fwd_unfused`` / ``fwd_unfused_sm_107a`` (no device:
-    the architecture is given and the binding entry is a recorder)."""
+    (four rows a CTA) on sm_107a; the pair tables run their one record everywhere, ``pair_table_small`` for 5 and 512
+    documents and ``pair_table`` for 513; the forward of 256 documents runs ``fwd`` / ``fwd_sm_107a``, of 257, 512,
+    513 and 8193 ``fwd_unfused`` / ``fwd_unfused_sm_107a``; the backward of 5 and 26 documents runs ``bwd_small`` on
+    sm_100a / sm_103a and ``bwd_sm_107a`` on sm_107a, of 27 ``bwd`` / ``bwd_sm_107a`` (no device: the architecture is
+    given and the binding entry is a recorder)."""
     if not all(rec["arg_plan"] for rec in cake_jit.MODULES.values()):
         pytest.skip("the records' argument plans are not rendered yet")
     launched = []
@@ -506,6 +577,8 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     fused_edge = torch.zeros(FUSE_DOCS + 1, dtype=torch.int32)
     fused_past = torch.zeros(FUSE_DOCS + 2, dtype=torch.int32)
     tiny = torch.zeros(8193 + 1, dtype=torch.int32)
+    small_edge = torch.zeros(BWD_SMALL_DOCS + 1, dtype=torch.int32)
+    small_past = torch.zeros(BWD_SMALL_DOCS + 2, dtype=torch.int32)
     for arch in ARCHES:
         monkeypatch.setattr(cake_jit, "device_arch", lambda index, arch=arch: arch)
         cake_backend.launch_pair_table(cu_seqlens=cu, cu_pairs=table)
@@ -514,17 +587,30 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
         cake_backend.launch_fwd(c=c, z=z, cu_seqlens=cu, cu_pairs=table, out=out, c_ld=1024, z_ld=1024)
         for bound in (fused_edge, fused_past, edge, past, tiny):
             cake_backend.launch_fwd(c=c, z=z, cu_seqlens=bound, cu_pairs=bound, out=out, c_ld=1024, z_ld=1024)
-        cake_backend.launch_bwd(
-            dout=out, c=c, z=z, cu_seqlens=cu, cu_pairs=table, dc=dc, dz=dz, c_ld=1024, z_ld=1024, dc_ld=512, dz_ld=512
-        )
+        for bound in (cu, small_edge, small_past):
+            cake_backend.launch_bwd(
+                dout=out,
+                c=c,
+                z=z,
+                cu_seqlens=bound,
+                cu_pairs=bound,
+                dc=dc,
+                dz=dz,
+                c_ld=1024,
+                z_ld=1024,
+                dc_ld=512,
+                dz_ld=512,
+            )
     expected = []
     for arch in ARCHES:
         forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
         unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
         backward = "bwd_sm_107a" if arch == "sm_107a" else "bwd"
+        small = "bwd_sm_107a" if arch == "sm_107a" else "bwd_small"
         tables = (("pair_table_small", 1), ("pair_table_small", 1), ("pair_table", 1))
         forwards = ((forward, G), (forward, G), (unfused, G), (unfused, G), (unfused, G), (unfused, G))
-        for name, rows in (*tables, *forwards, (backward, G + S)):
+        backwards = ((small, G + S), (small, G + BWD_SMALL_DOCS), (backward, G + BWD_SMALL_DOCS + 1))
+        for name, rows in (*tables, *forwards, *backwards):
             grid = cake_jit.launch_grid(name, rows)
             expected.append((name, arch, len(cake_jit.MODULES[name]["arg_plan"]), grid))
     assert launched == expected
@@ -549,9 +635,10 @@ def test_a_launch_without_a_kernel_argument_is_refused(monkeypatch) -> None:
 
 
 def test_the_first_lookup_on_an_architecture_loads_every_role(monkeypatch) -> None:
-    """The first FFI lookup on an architecture loads the library of every role there, in role order, and later lookups
-    of any record load nothing new: a pack of more than ``fuse_docs`` or ``small_docs`` documents after smaller ones
-    finds ``fwd_unfused`` and ``pair_table`` loaded (no device: ``load`` is a recorder)."""
+    """The first FFI lookup on an architecture loads the library of every role served there (``bwd_small`` on
+    sm_100a / sm_103a only), in role order, and later lookups of any record load nothing new: a pack of more than
+    ``fuse_docs``, ``small_docs`` or ``bwd_small_docs`` documents after smaller ones finds ``fwd_unfused``,
+    ``pair_table`` and ``bwd`` loaded (no device: ``load`` is a recorder)."""
     loaded = []
 
     def load(name, arch):
@@ -565,10 +652,12 @@ def test_the_first_lookup_on_an_architecture_loads_every_role(monkeypatch) -> No
         for arch in ARCHES:
             loaded.clear()
             cake_jit._entry(cake_jit.role_record("pair_table_small", arch), arch)
-            every = [(cake_jit.role_record(role, arch), arch) for role in cake_jit.ROLES]
+            served = [role for role in ROLES if arch in ROLE_ARCHES.get(role, ARCHES)]
+            assert len(served) == (5 if arch == "sm_107a" else 6), arch
+            every = [(cake_jit.role_record(role, arch), arch) for role in served]
             assert loaded[: len(every)] == every, arch
             seen = set(loaded)
-            for role in cake_jit.ROLES:
+            for role in served:
                 cake_jit._entry(cake_jit.role_record(role, arch), arch)
             assert set(loaded) == seen, arch
     finally:
@@ -796,10 +885,10 @@ def test_the_host_never_reads_device_values() -> None:
 
 
 def test_every_record_loads(device) -> None:
-    """Every record serving the device's architecture loads: one per role."""
+    """Every record serving the device's architecture loads: one per role served there."""
     arch = cake_jit.device_arch(device.index)
     assert arch in ARCHES
-    names = [cake_jit.role_record(role, arch) for role in ROLES]
+    names = [cake_jit.role_record(role, arch) for role in ROLES if arch in ROLE_ARCHES.get(role, ARCHES)]
     for name in names:
         assert callable(getattr(cake_jit.load(name, arch), cake_jit.MODULES[name]["ffi_entry"])), name
 
@@ -1089,12 +1178,14 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     """The forward of a pack of at most ``fuse_docs`` (256) documents launches ``fwd`` alone (the record of the
     device's architecture: ``fwd`` on sm_100a / sm_103a, ``fwd_sm_107a`` on sm_107a), which builds the pair table
     itself; the forward of more documents (257, 300, 512, 513, 8193) launches a pair table then ``fwd_unfused``
-    (``fwd_unfused`` on sm_100a / sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward a pair table then ``bwd``
-    (``bwd`` on sm_100a / sm_103a, ``bwd_sm_107a`` on sm_107a), or ``bwd`` alone with ``pair_offsets``; the autograd
-    entries launch no pair table in the backward.  The pair table of at most ``small_docs`` (512) documents is
-    ``pair_table_small``, of 513 ``pair_table``, in the forward and in the backward.  A call looks up the device's
-    architecture, ``fuse_docs`` and ``small_docs`` at most once each and passes the device index and the architecture
-    to its launches.  No call writes its inputs."""
+    (``fwd_unfused`` on sm_100a / sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward of those packs a pair
+    table then ``bwd`` (``bwd`` on sm_100a / sm_103a, ``bwd_sm_107a`` on sm_107a), and of a pack of at most
+    ``bwd_small_docs`` (26) documents a pair table then ``bwd_small`` on sm_100a / sm_103a (``bwd`` on sm_107a), or the
+    backward alone with ``pair_offsets``; the autograd entries launch no pair table in the backward and the same
+    backward role.  The pair table of at most ``small_docs`` (512) documents is ``pair_table_small``, of 513
+    ``pair_table``, in the forward and in the backward.  A call looks up the device's architecture, ``fuse_docs``,
+    ``small_docs`` and ``bwd_small_docs`` at most once each and passes the device index and the architecture to its
+    launches.  No call writes its inputs."""
     launched = []
     entries = []
     passed = []
@@ -1124,12 +1215,16 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     lookup_arch = counted("device_arch", cake_jit.device_arch)
     for module in (cake_jit, cake_backend):
         monkeypatch.setattr(module, "device_arch", lookup_arch)
-    for name in ("fuse_docs", "small_docs"):
+    for name in ("fuse_docs", "small_docs", "bwd_small_docs"):
         monkeypatch.setattr(cake_jit, name, counted(name, getattr(cake_jit, name)))
     forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
     unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
     backward = "bwd_sm_107a" if arch == "sm_107a" else "bwd"
+    # the backward of at most 26 documents: the bwd_small role and record on sm_100a / sm_103a, bwd on sm_107a
+    small_role = "bwd" if arch == "sm_107a" else "bwd_small"
+    small = "bwd_sm_107a" if arch == "sm_107a" else "bwd_small"
     assert cake_jit.fuse_docs(arch) == FUSE_DOCS and cake_jit.small_docs(arch) == SMALL_DOCS
+    assert cake_jit.bwd_small_docs(arch) == (0 if arch == "sm_107a" else BWD_SMALL_DOCS)
     # 256 documents: the forward's fused bound (no pair table before it)
     many = make_inputs(Pack((1, 3, 5, 7) * 64), seed=41, device=device, layout="halves")
     launched.clear()
@@ -1165,7 +1260,7 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         pkg.cake_gated_kv_compression_det_train_backward(many.dout, many.c, many.z, many.cu)
         assert launched == [table, "bwd"], many.S
         assert entries == [(table, arch), (backward, arch)], many.S
-        assert lookups == ["device_arch", "small_docs"], many.S
+        assert lookups == ["device_arch", "bwd_small_docs", "small_docs"], many.S
         assert passed == [(device.index, arch)] * 2, many.S
     launched.clear()
     entries.clear()
@@ -1174,16 +1269,22 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     pkg.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
     assert launched == ["fwd"]
     assert entries == [(forward, arch)]
+    # four documents: at most bwd_small_docs
     launched.clear()
+    entries.clear()
+    lookups.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu)
-    assert launched == ["pair_table_small", "bwd"]
+    assert launched == ["pair_table_small", small_role]
+    assert entries == [("pair_table_small", arch), (small, arch)]
+    assert lookups == ["device_arch", "bwd_small_docs", "small_docs"]
     table = pair_table_of(MIXED.lengths, device)
     launched.clear()
+    entries.clear()
     passed.clear()
     lookups.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, pair_offsets=table)
-    assert launched == ["bwd"]
-    assert lookups == ["device_arch"] and passed == [(device.index, arch)]
+    assert launched == [small_role] and entries == [(small, arch)]
+    assert lookups == ["device_arch", "bwd_small_docs"] and passed == [(device.index, arch)]
     for entry, args in (
         (pkg.cake_gated_kv_compression_det_cz, lambda cz: (cz, x.cu, x.G)),
         (pkg.cake_gated_kv_compression_det, lambda cz: (cz[:, :WIDTH], cz[:, WIDTH:], x.cu, x.G)),
@@ -1191,6 +1292,6 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         launched.clear()
         cz = x.cz.detach().clone().requires_grad_(True)
         entry(*args(cz)).backward(x.dout)
-        assert launched == ["fwd", "bwd"], entry.__name__
+        assert launched == ["fwd", small_role], entry.__name__
     for old, new in zip(before, (x.cz, x.cu, x.dout), strict=True):
         assert torch.equal(old, new), "a call wrote its input"

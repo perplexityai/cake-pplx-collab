@@ -369,8 +369,9 @@ def test_gate_gaps_of_100_and_more_and_ties_are_finite() -> None:
 def test_any_tokens_documents_and_pairs_run_without_recompiling(monkeypatch, record_property) -> None:
     """After one call, twenty packs of other ``T``, ``S`` and ``G`` (one to two thousand documents, empty and odd
     ones, ``G`` above the pair count) build and load no library: the first call (a pack of six documents) loads the
-    library of every role, both pair tables and both forwards (``fwd``, ``fwd_unfused``) among them, and these serve
-    every shape, the packs of more than 256 and 512 documents included."""
+    library of every role served on the device's architecture, both pair tables, both forwards (``fwd``,
+    ``fwd_unfused``) and both backwards on SM100 / SM103 (``bwd_small``, ``bwd``) among them, and these serve every
+    shape, the packs of more than 26, 256 and 512 documents included."""
     device = _device_or_skip()
     jit = _jit()
     _explicit(make_inputs(MIXED, seed=1, device=device), "contiguous")
