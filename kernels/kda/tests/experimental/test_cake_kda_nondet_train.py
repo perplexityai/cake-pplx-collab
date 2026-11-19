@@ -515,10 +515,11 @@ TAPE_WY_DROPPED = frozenset({"v", "beta", "u"})
 # finalize, reducing them in a fixed order (the deterministic records' rules: always, and the backward paths).
 RAW_PARAM_PAIR = {"glm_intra": "glm_intra_raw", "param_finalize": "param_finalize"}
 RAW_BWD_RULE = {"kind": "path_in", "paths": ["light", "light_states", "tape", "replay"]}
-# The registry's size: the deterministic package's 97 records, less those, plus the seven S1 records, the hand-off
-# twins, the tape WY twin, the fused gradient's raw and l2n classes and the l2n parameter finalize.
+# The registry's size: the deterministic package's 98 records (the raw class's kb-once replay prep
+# bwd_prep_g8_replay_kbonce_raw_l2n among them), less those, plus the seven S1 records, the hand-off twins, the tape
+# WY twin, the fused gradient's raw and l2n classes and the l2n parameter finalize.
 MODULE_COUNT = (
-    97
+    98
     - len(DET_RECORDS_NOT_LAUNCHED)
     + 7
     + len(TWIN_RECORDS)
@@ -654,11 +655,12 @@ def test_registry_records_are_well_formed() -> None:
     ) | set(S1_RECORDS) | TWIN_RECORDS | TAPE_WY_RECORDS | set(RAW_DQKG) | set(
         L2N_DQKG
     ) | set(L2N_PARAM)
-    assert len(cake_jit.MODULES) == MODULE_COUNT == 118
+    assert len(det_jit.MODULES) == 98
+    assert len(cake_jit.MODULES) == MODULE_COUNT == 119
     assert (
         len({r["library"] for r in cake_jit.MODULES.values()})
         == (MODULE_COUNT - 2 - len(RAW_DQKG_SHARED) - len(L2N_DQKG) - len(L2N_PARAM))
-        == 105
+        == 106
     )
     assert set(cake_jit.S1_RECORDS) == S1_RECORDS and len(cake_jit.S1_RECORDS) == 7
     assert tuple(cake_jit.PATHS) == PATHS
@@ -1493,11 +1495,18 @@ def test_the_l2n_class_is_the_deterministic_l2n_class() -> None:
         if rec["stage"] in L2N_STAGES
         and (serves(rec, "fused") or serves(rec, "fallback"))
     }
-    # the deterministic l2n records: the 7 g + 7 raw fused ones, the sm_103a forward intra and GLM intra forms, the
-    # replay prep's saved-rstd twin, the 2 capture forms, the 3 fallback programs and the 4 plain records the fused
-    # route keeps (fwd_intra / bwd_prep_g8_replay, g and raw)
+    # the deterministic l2n records: the 7 g + 7 raw fused ones and the raw class's kb-once replay prep, the sm_103a
+    # forward intra and GLM intra forms, the replay prep's saved-rstd twin, the 2 capture forms, the 3 fallback
+    # programs and the 3 plain records the fused route keeps (fwd_intra, g and raw, and the g class's
+    # bwd_prep_g8_replay; the raw class's replay prep serves the flag-off and fallback modes alone)
     det_l2n_only = {n for n in det_l2n if not serves(det_jit.MODULES[n], "off")}
-    assert len(det_l2n_only) == 22, sorted(det_l2n_only)
+    assert len(det_l2n_only) == 23, sorted(det_l2n_only)
+    assert "bwd_prep_g8_replay_kbonce_raw_l2n" in det_l2n_only
+    assert {
+        n
+        for n in det_l2n
+        if serves(det_jit.MODULES[n], "off") and serves(det_jit.MODULES[n], "fused")
+    } == {"fwd_intra", "fwd_intra_raw", "bwd_prep_g8_replay"}
     assert det_l2n <= set(cake_jit.MODULES)
     compared = 0
     for name in sorted(det_l2n):
@@ -2033,6 +2042,11 @@ PRE_L2N_RULES = {
     "fwd_intra": _PRE_L2N_FWD_INTRA,
     "bwd_prep_g8_replay": {"kind": "path_in", "paths": ["replay"]},
     "fwd_intra_raw": _PRE_L2N_FWD_INTRA,
+}
+# The raw class's replay prep serves the flag-off and fallback modes alone: its rule is its pre-l2n rule again (the
+# fused mode's rows of the segmented route up to 256 documents are the kb-once replay prep's,
+# bwd_prep_g8_replay_kbonce_raw_l2n), so it reads no l2n leaf.
+PRE_L2N_RULES_KEPT = {
     "bwd_prep_g8_replay_raw": {"kind": "path_in", "paths": ["replay"]},
 }
 
@@ -2049,6 +2063,9 @@ def test_the_l2n_leaf_keeps_every_pick_of_the_pre_l2n_rules(monkeypatch) -> None
         if "l2n_in" in _rule_kinds(record["select_rule"])
     }
     assert with_l2n == set(PRE_L2N_RULES)
+    for name, rule in PRE_L2N_RULES_KEPT.items():
+        assert cake_jit.MODULES[name]["select_rule"] == rule, name
+        assert cake_jit.MODULES[name]["l2n"] == ["off", "fallback"], name
     stages = sorted({cake_jit.MODULES[name]["stage"] for name in PRE_L2N_RULES})
     sm_counts = {
         "sm_100a": (132, 148, 152),
@@ -2107,8 +2124,8 @@ def test_the_l2n_leaf_keeps_every_pick_of_the_pre_l2n_rules(monkeypatch) -> None
     assert len(now) == len(before) > 0
     moved = [(key, before[key], now[key]) for key in now if now[key] != before[key]]
     assert moved == [], moved[:10]
-    # the grid reaches every re-copied record
-    assert set(PRE_L2N_RULES) <= set(now.values())
+    # the grid reaches every re-copied record and the raw replay prep
+    assert set(PRE_L2N_RULES) | set(PRE_L2N_RULES_KEPT) <= set(now.values())
 
 
 def test_segment_args_follow_the_proportional_rule() -> None:
@@ -4252,15 +4269,16 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
             for name, det in L2N_PARAM.items()
         )
     )
-    # 227 entries before the in-kernel Q/K L2 norm's copies, plus its 61 (19 programs x 3 architectures, the sm_103a
-    # forward intra and GLM intra forms and the replay prep's saved-rstd twin on sm_100a / sm_103a); the l2n class of
-    # the fused gradient and the l2n parameter finalize add no build (param_finalize's program ships on the three)
-    assert count == 288
+    # 227 entries before the in-kernel Q/K L2 norm's copies, plus its 64 (20 programs x 3 architectures, the raw
+    # class's kb-once replay prep among them, the sm_103a forward intra and GLM intra forms and the replay prep's
+    # saved-rstd twin on sm_100a / sm_103a); the l2n class of the fused gradient and the l2n parameter finalize add no
+    # build (param_finalize's program ships on the three)
+    assert count == 227 + 20 * 3 + 2 + 2 == 291
     assert len(train_libraries) == count
     assert len(names) == len(set(names)) == count
     assert {
         arch: sum(entry["arch"] == arch for entry in libraries) for arch in ARCHES
-    } == {"sm_100a": 95, "sm_103a": 96, "sm_107a": 97}
+    } == {"sm_100a": 96, "sm_103a": 97, "sm_107a": 98}
     for entry in libraries:
         assert entry["arch"] in ARCHES
         assert entry["entry"] == "run"
