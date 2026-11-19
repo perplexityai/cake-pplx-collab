@@ -155,7 +155,7 @@ Host design (the knobs are keywords; no environment variable):
   forward workspace (int32 token-chunk counters) follows the det package's
   rules and size, which cover every plan; at C = 520 to 568 it is larger
   than 0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for
-  those rows is refused (``ValueError``).
+  those rows is refused (``ValueError``) from the row's token floor.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
