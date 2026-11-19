@@ -1,0 +1,488 @@
+"""
+Copyright (c) 2026, NVIDIA CORPORATION.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+  http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+
+Accuracy of the single-GPU MoK kernels: every floating output against the float64 oracle, beside the naive PyTorch
+BF16 implementation, over :data:`tests.cake_naive.DRAWS` random inputs per case, and over stage 2's 128 where an output's
+max-norm wins leave it undecided (:func:`tests.cake_naive.judge_case`).
+
+The oracle and the naive implementation are defined in :mod:`tests.experimental._mok_naive`.  The cases are the fused
+BF16 training cases (three geometries, ring replay with several macrobatches, empty experts, clamped SwiGLU, FP32
+weight-gradient accumulation onto nonzero starts, 36 and 9 local experts at top-8), the fused MXFP8 training cases
+(plain and clamped, BF16 and FP32 weight gradients, 36 and 9 local experts at top-8) and the forward epilogue.
+
+An FP32 weight-gradient accumulator is judged by its increment, ``accumulator - start`` in float64 (exact for these
+values), against the oracle's weight gradient: the same error as the accumulator's against ``start`` plus the exact
+gradient.  E4M3 values the MXFP8 kernels store (the saved gate, up and activation of the resident macrobatch) are judged
+as their dequantized values against the oracle's value before quantization; ``x``'s E4M3 codes and UE8M0 scales are
+exact against the recipe.  The kernel-shaped alternatives of :data:`tests.experimental._mok_naive.ALTERNATIVE` are
+measured on the same draws and reported (``ALT`` lines), never judged.  The known accuracy gaps
+(:mod:`tests.experimental._mok_gaps`) are judged in items of their own, under a strict expected-failure marker on the
+architectures where they miss the tier: the MXFP8 score gradient of every MXFP8 case, and routed weight gradients of
+the two BF16 cases whose routed experts cross a macrobatch boundary (:data:`STRADDLE_GAPS`).
+
+Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
+"""
+
+from __future__ import annotations
+
+import pytest
+import torch
+
+from tests.cake.test_helpers.cake_package import cake_package
+from tests.cake_naive import TierJudge, judge_case
+from tests.experimental import _mok_gaps as gaps
+from tests.experimental import _mok_naive as naive
+from tests.experimental._mok_reference import (
+    mxfp8_quantize,
+    require_gpu,
+    single_rank_schedule,
+)
+
+kernels = cake_package("cake_mok_bf16", "_kernels")
+
+GEOMETRIES = ((256, 256, 768), (512, 512, 768), (512, 256, 1536))
+MXFP8_GEOMETRIES = ((512, 256, 768), (512, 512, 1536), (512, 256, 512))
+
+
+@pytest.fixture(autouse=True)
+def _exact_matmul(cuda_matmul_flags):
+    cuda_matmul_flags(allow_tf32=False, allow_bf16_reduced_precision_reduction=False)
+
+
+def _segments(s):
+    """Per expert of a single-rank schedule: its padded rows in schedule order."""
+    out, offset = [], 0
+    for expert, count in enumerate(s["count_values"]):
+        out.append(naive.Segment(expert, s["schedule"][offset : offset + count], offset))
+        offset += count
+    return out
+
+
+def _weights(experts, hidden, intermediate, options):
+    shared = [
+        torch.randn(intermediate, hidden, **options) / hidden**0.5,
+        torch.randn(intermediate, hidden, **options) / hidden**0.5,
+        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+    ]
+    routed = [
+        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+    ]
+    return shared, routed
+
+
+def _scores(tokens, topk):
+    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    return scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
+
+
+DW_NAMES = (
+    "dw_shared_gate",
+    "dw_routed_gate",
+    "dw_shared_up",
+    "dw_routed_up",
+    "dw_shared_down",
+    "dw_routed_down",
+)
+
+
+#: The index into the ``(*shared, *routed)`` FP32 accumulators of each of :data:`DW_NAMES`.
+ACCUMULATOR = (0, 3, 1, 4, 2, 5)
+
+
+def _accumulators(shared, routed):
+    """Nonzero FP32 starts of the ``(*shared, *routed)`` weight-gradient accumulators, and the accumulators."""
+    initial = [torch.randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
+    return initial, [value.clone() for value in initial]
+
+
+def _weight_outputs(result, initial):
+    """The six weight gradients of a backward result (indices 9 - 14), FP32 accumulators as their float64
+    increments over their starts."""
+    out = {}
+    for i, name in enumerate(DW_NAMES):
+        value = result[9 + i]
+        if initial is not None:
+            value = value.double() - initial[ACCUMULATOR[i]].double()
+        out[name] = value
+    return out
+
+
+def _reference_values(r, sh, dtype_cast=None):
+    """Oracle or naive values by output name from :func:`_mok_naive.routed` / :func:`_mok_naive.shared`."""
+    tokens_topk = r["y_route"].shape[0]
+    values = dict(
+        y_route=r["y_route"],
+        y_shared=sh["y"],
+        dx_route=r["dx_route"],
+        dx_shared=sh["dx"],
+        dw_shared_gate=sh["dw"][0],
+        dw_routed_gate=r["dw"][0],
+        dw_shared_up=sh["dw"][1],
+        dw_routed_up=r["dw"][1],
+        dw_shared_down=sh["dw"][2],
+        dw_routed_down=r["dw"][2],
+        d_gate_shared=sh["d_gate"],
+        d_up_shared=sh["d_up"],
+        dh_shared=sh["dh"],
+    )
+    values["d_scores"] = r["d_scores"].view(values["y_shared"].shape[0], tokens_topk // values["y_shared"].shape[0])
+    return values
+
+
+def _check(record_property, part, judged, known=()):
+    """Judge item ``part`` of a case (:func:`tests.experimental._mok_gaps.check`) from the case's shared run
+    ``judged`` = ``(judge, alternatives, failures)``; the main item also records the alternatives."""
+    judge, alt, failures = judged
+    if part == gaps.OUTPUTS:
+        for verdict in alt.verdicts().values():
+            record_property("naive_alternative", verdict)
+    gaps.check(record_property, part, list(judge.verdicts().values()), failures, known)
+
+
+def _bf16_case(
+    *,
+    swiglu_limit=None,
+    fp32_wgrad=False,
+    experts=4,
+    topk=2,
+    tokens=512,
+    geometry=GEOMETRIES[0],
+    empty=False,
+    mini=256,
+    comm=4,
+    seed=9173,
+):
+    hidden, intermediate, macro = geometry
+    clamped = swiglu_limit is not None
+    forward, backward = kernels.MoKForward(clamped), kernels.MoKBackward(clamped, fp32_wgrad)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row + slot) % (topk if empty else experts) for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    segments = _segments(s)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    alt = TierJudge()
+    naive_values = {}
+
+    def run(j, _seed):
+        x = torch.randn(tokens, hidden, **options) * 0.125
+        dy = torch.randn_like(x) * 0.125
+        shared, routed = _weights(experts, hidden, intermediate, options)
+        scores = _scores(tokens, topk)
+        combine = torch.zeros(tokens * topk, hidden, **options)
+        dx_peer = torch.zeros(tokens * topk, hidden, **options)
+        ds_peer = torch.zeros_like(scores)
+        initial = accumulators = None
+        if fp32_wgrad:
+            initial, accumulators = _accumulators(shared, routed)
+        weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+        context = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+            *schedule, topk, swiglu_limit, comm, macro, mini,
+        )  # fmt: skip
+        result = backward(
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            *weights, *context[:7], x, [x.data_ptr()], *schedule,
+            topk, swiglu_limit, comm, macro, mini,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        outputs = dict(
+            y_route=combine,
+            y_shared=context[7],
+            dx_route=dx_peer,
+            d_scores=ds_peer,
+            dx_shared=result[0],
+            d_gate_shared=result[2],
+            d_up_shared=result[4],
+            dh_shared=result[6],
+            **_weight_outputs(result, initial),
+        )
+        x_routes, dy_routes = x.repeat_interleave(topk, 0), dy.repeat_interleave(topk, 0)
+        flat = scores.flatten()
+        values = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.routed(
+                x_routes, dy_routes, flat, segments, routed, swiglu_limit, dtype,
+                macro=None if fp32_wgrad else macro,
+            )  # fmt: skip
+            sh = naive.shared(x, dy, shared, swiglu_limit, dtype)
+            values[dtype] = (r, _reference_values(r, sh))
+        oracle = values[naive.ORACLE][1]
+        r_naive, naive_values[j] = values[naive.NAIVE]
+        if not fp32_wgrad:
+            for i, name in enumerate(("dw_routed_gate", "dw_routed_up", "dw_routed_down")):
+                alt.add(name, j, outputs[name], oracle[name], {"bf16": r_naive["alt_dw"][i]})
+        alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r_naive["alt_d_scores"].view(tokens, topk)})
+        return outputs, oracle
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden, reported=(alt,))
+    return judge, alt, failures
+
+
+def _bf16(record_property, part="outputs", known=(), **kwargs):
+    require_gpu()
+    _check(record_property, part, gaps.judged(("bf16", *sorted(kwargs.items())), lambda: _bf16_case(**kwargs)), known)
+
+
+#: The fused BF16 cases ``(geometry, empty)`` whose routed experts cross a macrobatch boundary (the empty-experts
+#: layout puts all routed rows on few experts: with 768-row macrobatches their rows span two macrobatches), and their
+#: outputs judged in items of their own: the routed weight gradients (BF16 weight gradients) that miss the tier on at
+#: least one architecture (:data:`tests.experimental._mok_gaps.CAPS`), each marked where it does.
+STRADDLE_GAPS = {
+    ((256, 256, 768), True): ("dw_routed_gate", "dw_routed_up", "dw_routed_down"),
+    ((512, 512, 768), True): ("dw_routed_gate", "dw_routed_up", "dw_routed_down"),
+}
+
+
+def _fused_cases():
+    """``(geometry, empty, part)`` parameters: one item per case; a case of :data:`STRADDLE_GAPS` gets its main
+    item, then one item per known-gap output under its marker."""
+    cases = []
+    for geometry in GEOMETRIES:
+        for empty in (False, True):
+            case = "h{}-i{}-m{}-{}".format(*geometry, "empty-experts" if empty else "routed")
+            if (geometry, empty) not in STRADDLE_GAPS:
+                cases.append(pytest.param(geometry, empty, gaps.OUTPUTS, id=case))
+                continue
+            known = [(name, gaps.bf16_straddle_dw) for name in STRADDLE_GAPS[(geometry, empty)]]
+            cases += [
+                pytest.param(geometry, empty, *p.values, marks=p.marks, id=p.id)
+                for p in gaps.parts("test_fused_training_accuracy", known, case)
+            ]
+    return cases
+
+
+@pytest.mark.parametrize("geometry,empty,part", _fused_cases())
+def test_fused_training_accuracy(record_property, geometry, empty, part):
+    _bf16(record_property, part, STRADDLE_GAPS.get((geometry, empty), ()), geometry=geometry, empty=empty)
+
+
+def test_fused_training_clamped_swiglu_accuracy(record_property):
+    """A limit near the activations' standard deviation clamps a large fraction of gate and up."""
+    _bf16(record_property, swiglu_limit=0.125)
+
+
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+def test_fused_training_fp32_wgrad_accuracy(record_property, geometry):
+    _bf16(record_property, fp32_wgrad=True, geometry=geometry)
+
+
+@pytest.mark.parametrize("experts", [36, 9], ids=["local36", "local9"])
+def test_fused_training_local_experts_accuracy(record_property, experts):
+    """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
+    _bf16(record_property, swiglu_limit=0.125, experts=experts, topk=8, geometry=(512, 256, 2048))
+
+
+def _mxfp8_case(
+    *,
+    swiglu_limit,
+    geometry,
+    fp32_wgrad=False,
+    experts=4,
+    topk=2,
+    tokens=512,
+    mini=256,
+    comm=4,
+    seed=7000,
+):
+    hidden, intermediate, macro = geometry
+    clamped = swiglu_limit is not None
+    forward = kernels.MoKForwardMXFP8(clamped)
+    backward = kernels.MoKBackwardMXFP8(clamped, fp32_wgrad)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
+    s = single_rank_schedule(routes, experts)
+    segments = _segments(s)
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    actual = s["actual"]
+    resident = min(actual, macro)
+    slab_routes = s["schedule"][:actual]
+    alt = TierJudge()
+    naive_values = {}
+
+    def run(j, _seed):
+        x = torch.randn(tokens, hidden, **options)
+        dy = torch.randn(tokens, hidden, **options) * 0.125
+        shared, routed = _weights(experts, hidden, intermediate, options)
+        scores = _scores(tokens, topk)
+        q = [mxfp8_quantize(w) for w in routed]
+        fwd_w = [(qq[0], qq[1]) for qq in q]
+        bwd_w = (q[0], q[1], (q[2][2], q[2][3]))
+        combine = torch.zeros(tokens * topk, hidden, **options)
+        dx_peer = torch.zeros(tokens * topk, hidden, **options)
+        ds_peer = torch.zeros_like(scores)
+        initial = accumulators = None
+        if fp32_wgrad:
+            initial, accumulators = _accumulators(shared, routed)
+        values = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()],
+            shared[0], fwd_w[0], shared[1], fwd_w[1], shared[2], fwd_w[2],
+            *schedule, topk, swiglu_limit, comm, macro, mini,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        (x_t, x_sc_t), _, (gate_q, gate_sc), _, (up_q, up_sc), _, (h_t, h_sc_t), y_shared, _ = values
+        r = resident
+        saved = dict(
+            gate_saved=naive.dequantized((gate_q[:r], gate_sc[: r // 128])),
+            up_saved=naive.dequantized((up_q[:r], up_sc[: r // 128])),
+            hidden_saved=naive.dequantized((h_t[:, :r], h_sc_t[:, : r // 128]), transposed=True),
+        )
+        # Copies: the backward reuses the context ring for the later macrobatches, and a slice that spans the whole ring
+        # is a view of it.
+        x_codes = x_t[:, :r].clone().view(torch.uint8)
+        x_scales = x_sc_t[:, : r // 128].clone().view(torch.uint8)
+        result = backward(
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            shared[0], bwd_w[0], shared[1], bwd_w[1], shared[2], bwd_w[2],
+            *values[:7], x, [x.data_ptr()], *schedule,
+            topk, swiglu_limit, comm, macro, mini,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        outputs = dict(
+            y_route=combine,
+            y_shared=y_shared,
+            dx_route=dx_peer,
+            d_scores=ds_peer,
+            dx_shared=result[0],
+            **_weight_outputs(result, initial),
+            **saved,
+            x_codes=x_codes,
+            x_scales=x_scales,
+        )
+        # The recipe's x codes and scales of the resident macrobatch (schedule order, padding rows zero).
+        valid = slab_routes >= 0
+        source = torch.where(valid[:, None], x[slab_routes.clamp(min=0).long() // topk], torch.zeros_like(x[:1]))
+        _, _, xq_t, xs_t = mxfp8_quantize(source)
+        exact = dict(
+            x_codes=xq_t.view(torch.uint8)[:, :r],
+            x_scales=xs_t.view(hidden // 128, actual // 128, 32, 16)[:, : r // 128],
+        )
+        x_routes, dy_routes = x.repeat_interleave(topk, 0), dy.repeat_interleave(topk, 0)
+        mx = dict(forward=fwd_w, backward=bwd_w)
+        flat = scores.flatten()
+        refs = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            rr = naive.routed(
+                x_routes, dy_routes, flat, segments, routed, swiglu_limit, dtype,
+                mx=mx, macro=None if fp32_wgrad else macro,
+            )  # fmt: skip
+            sh = naive.shared(x, dy, shared, swiglu_limit, dtype)
+            v = _reference_values(rr, sh)
+            for name in ("d_gate_shared", "d_up_shared", "dh_shared"):
+                v.pop(name)
+            gate, up, hid = (naive.slab(rr["mx_rows"], n, actual)[:r] for n in ("gate", "up", "hidden"))
+            if dtype == naive.ORACLE:
+                v.update(gate_saved=gate, up_saved=up, hidden_saved=hid, **exact)
+            else:
+                v.update(
+                    gate_saved=naive.qdq(gate),
+                    up_saved=naive.qdq(up),
+                    hidden_saved=naive.qdq(hid, transposed=True),
+                )
+            refs[dtype] = (rr, v)
+        oracle = refs[naive.ORACLE][1]
+        r_naive, naive_values[j] = refs[naive.NAIVE]
+        if not fp32_wgrad:
+            for i, name in enumerate(("dw_routed_gate", "dw_routed_up", "dw_routed_down")):
+                alt.add(name, j, outputs[name], oracle[name], {"bf16": r_naive["alt_dw"][i]})
+        alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r_naive["alt_d_scores"].view(tokens, topk)})
+        return outputs, oracle
+
+    judge, failures = judge_case(
+        run,
+        lambda j, tier: naive_values.pop(j),
+        seed=seed + hidden + intermediate + macro,
+        exact=frozenset({"x_codes", "x_scales"}),
+        reported=(alt,),
+    )
+    return judge, alt, failures
+
+
+#: The known-gap outputs of every MXFP8 case.
+MXFP8_GAPS = ("d_scores",)
+
+
+def _mxfp8_cases(function, cases):
+    """``(*values, part)`` parameters of MXFP8 test ``function`` for ``cases`` (``(id, values)``): per case its main
+    item, then the score gradient in an item of its own under that item's marker (:func:`_mok_gaps.parts`)."""
+    known = [(name, gaps.mxfp8_d_scores) for name in MXFP8_GAPS]
+    return [
+        pytest.param(*values, *p.values, marks=p.marks, id=p.id)
+        for case, values in cases
+        for p in gaps.parts(function, known, case)
+    ]
+
+
+def _mxfp8(record_property, part, **kwargs):
+    require_gpu()
+    run = gaps.judged(("mxfp8", *sorted(kwargs.items())), lambda: _mxfp8_case(**kwargs))
+    _check(record_property, part, run, MXFP8_GAPS)
+
+
+#: ``(id, (geometry, swiglu_limit))`` of the plain and clamped MXFP8 cases of each geometry.
+MXFP8_CASES = [
+    ("h{}-i{}-m{}-{}".format(*geometry, name), (geometry, limit))
+    for geometry in MXFP8_GEOMETRIES
+    for limit, name in ((None, "plain"), (0.75, "clamped"))
+]
+
+
+@pytest.mark.parametrize("geometry,swiglu_limit,part", _mxfp8_cases("test_mxfp8_training_accuracy", MXFP8_CASES))
+def test_mxfp8_training_accuracy(record_property, swiglu_limit, geometry, part):
+    _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry)
+
+
+@pytest.mark.parametrize(
+    "geometry,swiglu_limit,part", _mxfp8_cases("test_mxfp8_training_fp32_wgrad_accuracy", MXFP8_CASES)
+)
+def test_mxfp8_training_fp32_wgrad_accuracy(record_property, swiglu_limit, geometry, part):
+    _mxfp8(record_property, part, swiglu_limit=swiglu_limit, geometry=geometry, fp32_wgrad=True)
+
+
+@pytest.mark.parametrize(
+    "experts,part",
+    _mxfp8_cases("test_mxfp8_training_local_experts_accuracy", [("local36", (36,)), ("local9", (9,))]),
+)
+def test_mxfp8_training_local_experts_accuracy(record_property, experts, part):
+    """288 routed experts over 8 or 32 ranks: 36 or 9 local experts, top-8, clamped."""
+    _mxfp8(record_property, part, swiglu_limit=0.75, geometry=(512, 256, 2048), experts=experts, topk=8)
+
+
+@pytest.mark.parametrize("topk", [2, 8])
+@pytest.mark.parametrize("tokens,hidden", [(512, 256), (37, 6144), (1, 1032)])
+def test_epilogue_forward_accuracy(record_property, topk, tokens, hidden):
+    """``y = shared + sum_k s_k routed_k``: FP32 accumulation from the shared row, then ascending slots."""
+    require_gpu()
+    epilogues = kernels.MoKEpilogues(topk)
+    naive_values = {}
+
+    def run(j, _seed):
+        shared = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+        routed = torch.randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+        scores = torch.rand(tokens, topk, device="cuda")
+        y = epilogues.forward(shared, routed, scores)
+        naive_values[j] = dict(y=naive.epilogue_forward(shared, routed, scores, naive.NAIVE))
+        return dict(y=y), dict(y=naive.epilogue_forward(shared, routed, scores, naive.ORACLE))
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=6100 + tokens + topk)
+    judge.record(record_property)
+    assert not failures, "\n".join(failures)

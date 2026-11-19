@@ -24,7 +24,7 @@
 #include <cstdint>
 
 // Shared memory above the 232448 B opt-in needs CUDA 13.4's oversized mode.
-#if CUDART_VERSION < 13040
+#if CUDA_VERSION < 13040
 #error "oversized shared memory requires a CUDA 13.4 or newer toolkit"
 #endif
 
@@ -200,14 +200,22 @@ void Run(TensorView a_W, TensorView a_X, TensorView a_z, TensorView a_ids, Tenso
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") exceeds CUDA's limits";
   cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(dev.device_type, dev.device_id));
+  CUfunction function = nullptr;
   {
-    // Once per thread per device: the kernel's function attributes hold per device; the tensor-map encoders need this thread's context of the device bound.
+    // Once per thread per device: the kernel's function attributes hold per device; so does its driver handle, which the launch takes; the tensor-map encoders need this thread's context of the device bound.
     static thread_local uint64_t prepared_devices = 0;
+    static thread_local CUfunction device_functions[64] = {};
     const uint64_t device_bit = dev.device_id < 64 ? uint64_t{1} << dev.device_id : uint64_t{0};
     if (device_bit == 0 || (prepared_devices & device_bit) == 0) {
       CheckCuda(cudaSetDevice(dev.device_id), "cudaSetDevice");
-      CheckCuda(cudaFuncSetAttribute(reinterpret_cast<const void*>(kernel_cake_lm_head_det_loss_0a34f817cdb30b4c8a44), cudaFuncAttributeSharedMemoryMode, cudaSharedMemoryModeAllowOversizedSharedMemory), "cudaFuncSetAttribute");
+      cudaFunction_t found = nullptr;
+      CheckCuda(cudaGetFuncBySymbol(&found, reinterpret_cast<const void*>(kernel_cake_lm_head_det_loss_0a34f817cdb30b4c8a44)), "cudaGetFuncBySymbol");
+      function = reinterpret_cast<CUfunction>(found);
+      CheckCu(cuFuncSetAttribute(function, CU_FUNC_ATTRIBUTE_SHARED_MEMORY_MODE, CU_SHARED_MEMORY_MODE_ALLOW_OVERSIZED_SHARED_MEMORY), "cuFuncSetAttribute");
+      if (device_bit != 0) device_functions[dev.device_id] = function;
       prepared_devices |= device_bit;
+    } else {
+      function = device_functions[dev.device_id];
     }
   }
   CUtensorMap v_W = EncodeTma_W(a_W);
@@ -220,18 +228,21 @@ void Run(TensorView a_W, TensorView a_X, TensorView a_z, TensorView a_ids, Tenso
   int32_t v_V = static_cast<int32_t>(a_V);
   int32_t v_H = static_cast<int32_t>(a_H);
   void* kernel_args[] = {&v_W, &v_X, &v_z, &v_ids, &v_offsets, &v_M, &v_T, &v_V, &v_H};
-  cudaLaunchConfig_t config{};
-  config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
-  config.blockDim = dim3(320, 1, 1);
-  config.dynamicSmemBytes = 269440;
-  config.stream = stream;
-  cudaLaunchAttribute attrs[1] = {};
-  attrs[0].id = cudaLaunchAttributeSharedMemoryMode;
-  attrs[0].val.sharedMemoryMode = cudaSharedMemoryModeAllowOversizedSharedMemory;
+  CUlaunchConfig config{};
+  config.gridDimX = static_cast<unsigned>(grid_x);
+  config.gridDimY = static_cast<unsigned>(grid_y);
+  config.gridDimZ = static_cast<unsigned>(grid_z);
+  config.blockDimX = 320;
+  config.blockDimY = 1;
+  config.blockDimZ = 1;
+  config.sharedMemBytes = 269440;
+  config.hStream = reinterpret_cast<CUstream>(stream);
+  CUlaunchAttribute attrs[1] = {};
+  attrs[0].id = CU_LAUNCH_ATTRIBUTE_SHARED_MEMORY_MODE;
+  attrs[0].value.sharedMemoryMode = CU_SHARED_MEMORY_MODE_ALLOW_OVERSIZED_SHARED_MEMORY;
   config.attrs = attrs;
   config.numAttrs = 1;
-  CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_lm_head_det_loss_0a34f817cdb30b4c8a44), kernel_args),
-            "cudaLaunchKernelExC");
+  CheckCu(cuLaunchKernelEx(&config, function, kernel_args, nullptr), "cuLaunchKernelEx");
 }
 
 }  // namespace cake_binding_kernel_cake_lm_head_det_loss_0a34f817cdb30b4c8a44

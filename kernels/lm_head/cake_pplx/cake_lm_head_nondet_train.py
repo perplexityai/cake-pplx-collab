@@ -24,12 +24,18 @@ fixed summation order (a design note, not a run-to-run promise), and its bits
 may differ from the deterministic module's by the rounding of that sum
 (``loss``, ``logp`` and ``dW`` keep their fixed order).  The module makes no
 run-to-run bit-equality promise for any output; the deterministic module makes
-it.  Two row skips of this backend also differ from the deterministic
-module: zero-weight policy rows and log-probability rows with a zero ``dlogp``
-leave the gradient GEMMs, so ``loss`` / ``dW`` bits may differ from the
-deterministic module's (both are judged against the naive tier; see the backend README,
-Tests), and a non-finite value in a zero-weight row does not reach ``loss`` /
-``dX`` / ``dW``.  By default a
+it.  Both modules leave zero-weight policy rows out of the gradient path and
+skip the GEMM work of log-probability rows with a zero ``dlogp``.  The
+deterministic module splits off its zero-weight rows only when its memory
+rule allows it, and it does not skip zero-``dlogp`` rows in its opt-in forms
+or in a default call whose automatic form is a budget form (this module has
+no automatic form).  This
+module adds no loss term for a zero-weight row (the deterministic module's
+default ``"exact"`` loss mode keeps the loss bits of the call without the
+split), and its zero-``dlogp`` skip starts at 1946 valid rows on ``sm_107a``
+(the deterministic module's at 4097).  So ``loss`` and ``dW`` bits may differ
+from the deterministic module's (both are judged against the naive tier; see
+the backend README, Tests).  By default a
 one-row cross-entropy loss call at ``H = 6144`` (BF16 contiguous ``W``, one
 chunk, compacted rows, no explicit ``gemm_tuning``, a registered program; the
 conditions of ``cake_backend.set_one_pass_rows``) runs the backend's one-pass
@@ -163,7 +169,7 @@ def cake_lm_head_nondet_train_loss(
     for the computation, the arguments, the switches and their
     ``CAKE_PPLX_LM_HEAD_LOSS_*`` fallbacks, ``memory_mode``,
     ``num_valid_rows`` and the outputs, except as the module docstring notes
-    (the dX reduction, the zero-weight row split and the one-pass call).
+    (the dX reduction, a call with zero-weight rows and the one-pass call).
 
     Notes
     -----

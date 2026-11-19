@@ -65,14 +65,35 @@ launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
 returns it zeroed; size depends on ``C`` and the route, not on ``S``; never
 share one between two backward launches that may run at once, e.g. on two
 streams); when omitted the package keeps one zeroed buffer per (device,
-current stream), or inside a CUDA Graph capture one zeroed buffer per capture
-and stream, shared by its backward calls on that stream: the capture records
-one fill node for it, and another for a larger buffer when a call needs more
-bytes.  That buffer stays alive after its graph is freed, until a later
-capture on that stream replaces it.  With capture id 0 (also when
-``cuda.bindings`` is not importable) each captured backward call allocates
-and zeroes a buffer of its own.  The forward workspace (zeroed int32
-token-chunk counters) has the deterministic package's size and rules.
+current stream), or inside a CUDA Graph capture one buffer per capture and
+stream, shared by its calls on that stream: a buffer the package zeroed
+before the capture, on an eager call that omitted ``workspace=``, so the
+graph records no fill node for it (the graph holds it until the graph and
+its instantiations are destroyed and their launches have completed; it
+returns to the package, zero again, at the package's next refill).  The
+replays of one graph must not overlap.  Only eager calls without
+``workspace=`` zero these buffers, the forward's and the backward's
+separately, sized to the largest need of such a call whose zeroing succeeded
+(one that runs out of memory keeps no new buffer and keeps their size).
+When none is ready (no such eager call of the kind before the capture, all
+taken by earlier captures, too small, or their zero fills not complete yet:
+a ``CUDAGraph.capture_begin`` right after such an eager call with no
+synchronization; ``torch.cuda.graph`` synchronizes first) each captured call
+zeroes a buffer of its own (one fill node per call), as every captured call
+does with capture id 0 (also when ``cuda.bindings`` is not importable).  The
+forward workspace
+(zeroed int32 token-chunk counters) has the deterministic package's size and
+rules; inside a capture the forward's omitted workspace follows the
+backward's rules with buffers of its own.  Memory these buffers free stays
+cached in the package's own memory pool (``torch.cuda.MemPool``); the package
+does not return it to torch's other pools.
+
+Programmatic dependent launch: the single-rank forward and backward programs
+(not those of the opt-in pair routes) take it per call, by architecture and
+mode (outside / inside a CUDA Graph capture; the backend's
+``cake_jit.PDL_EAGER`` / ``PDL_GRAPH``): with it a launch may begin while the
+stream's preceding kernel finishes, and every program waits for that kernel
+before it reads or writes global memory, so the outputs do not depend on it.
 
 The backward entry points and the backward workspace helpers take the
 deterministic package's opt-in ``bwd_grid_mult: int = 1`` (one of

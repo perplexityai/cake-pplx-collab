@@ -83,8 +83,6 @@ kernel_cake_rmsnorm_det_train_a385ae1681a2c078344e(__nv_bfloat16* __restrict__ g
     const int red_fold_addr = smem + 256;
     float* row_fold = reinterpret_cast<float*>(smem_raw + 2304);
     const int row_fold_addr = smem + 2304;
-    float* comp_smem = reinterpret_cast<float*>(smem_raw + 6400);
-    const int comp_smem_addr = smem + 6400;
     unsigned int* w_sm = reinterpret_cast<unsigned int*>(smem_raw + 6528);
     const int w_sm_addr = smem + 6528;
     float* part_sm = reinterpret_cast<float*>(smem_raw + 6656);
@@ -125,8 +123,7 @@ kernel_cake_rmsnorm_det_train_a385ae1681a2c078344e(__nv_bfloat16* __restrict__ g
         }
     }
     float acc[8];
-    float comp[8];
-    unsigned int compw[4];
+    float casc[8];
     if (tid == 0) {
         flags[1] = (int)nxt;
     }
@@ -215,7 +212,7 @@ kernel_cake_rmsnorm_det_train_a385ae1681a2c078344e(__nv_bfloat16* __restrict__ g
         #pragma unroll
         for (int j = 0; j < 8; j++) {
             acc[j] = 0.0f;
-            comp[j] = 0.0f;
+            casc[j] = 0.0f;
         }
         unsigned int gwA[4];
         unsigned int xwA[4];
@@ -371,7 +368,7 @@ kernel_cake_rmsnorm_det_train_a385ae1681a2c078344e(__nv_bfloat16* __restrict__ g
                 if ((it & 7) == 7) {
                     #pragma unroll
                     for (int jc = 0; jc < 8; jc++) {
-                        comp[jc] = comp[jc] + acc[jc];
+                        casc[jc] = casc[jc] + acc[jc];
                         acc[jc] = 0.0f;
                     }
                 }
@@ -380,7 +377,7 @@ kernel_cake_rmsnorm_det_train_a385ae1681a2c078344e(__nv_bfloat16* __restrict__ g
         }
         #pragma unroll
         for (int j3 = 0; j3 < 8; j3++) {
-            acc[j3] = comp[j3] + acc[j3];
+            acc[j3] = casc[j3] + acc[j3];
         }
         unsigned long long pbase = (unsigned long long)c * 256ull;
         #pragma unroll

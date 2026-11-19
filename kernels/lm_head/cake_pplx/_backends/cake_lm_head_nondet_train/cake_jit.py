@@ -113,6 +113,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
         ["grid", "grid_z"],
@@ -138,6 +139,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
         ["grid", "grid_z"],
@@ -229,6 +231,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "temperature"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
@@ -255,6 +258,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "temperature"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
@@ -344,6 +348,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "labels"],
         ["buffer", "lse"],
         ["buffer", "d"],
+        ["buffer", "rlab"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
         ["parameter", "V"],
@@ -441,6 +446,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "CNT"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
@@ -460,6 +466,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "CNT"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
@@ -479,6 +486,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "temperature"],
         ["buffer", "CNT"],
         ["grid", "grid_x"],
@@ -499,6 +507,7 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "dlogp"],
         ["parameter", "row0"],
         ["parameter", "d_off"],
+        ["buffer", "rlab"],
         ["buffer", "temperature"],
         ["buffer", "CNT"],
         ["grid", "grid_x"],
@@ -528,6 +537,12 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["parameter", "ws_slab"],
         ["parameter", "num_vecs"],
         ["parameter", "n_slabs"],
+        ["parameter", "row_vecs"],
+        ["buffer", "labels"],
+        ["buffer", "rlab"],
+        ["buffer", "W"],
+        ["parameter", "V"],
+        ["parameter", "lr"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
         ["grid", "grid_z"],
@@ -539,6 +554,11 @@ _ARG_PLANS: dict[str, list[list[str]]] = {
         ["parameter", "num_vecs"],
         ["parameter", "n_slabs"],
         ["parameter", "row_vecs"],
+        ["buffer", "labels"],
+        ["buffer", "rlab"],
+        ["buffer", "W"],
+        ["parameter", "V"],
+        ["parameter", "lr"],
         ["buffer", "CNT"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
@@ -2793,6 +2813,10 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          writes the finished loss.
 # ``row_grad``             dz_c = d_t * (1[v = y_t] - exp(z - lse_t)) in bf16,
 #                          in place over ``z_c``; ignored rows become zero.
+#                          It also stores the label column's FP32 residual
+#                          s - fp32(bf16(s)) into ``rlab[row0 + r]`` (0 where
+#                          the label is ignored or >= V), as do the ``dz``
+#                          arms of the logits GEMM.
 # ``gemm_dx``              dX_acc[rows] = fp32(dz_c @ W) (one K slice, plain
 #                          store: the deterministic package's program).
 # ``gemm_dx_red``          the same GEMM as ``k_slices`` (a launch scalar)
@@ -2803,12 +2827,17 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          slice runs ``gemm_dx``).  A one-slice launch (the
 #                          vocabulary-major backward's and the candidate-support
 #                          dense dX's later vocabulary blocks) TMA-adds its tile
-#                          into C (dX_acc) itself: no slab, no slab sum.
+#                          into C (dX_acc) itself: no slab.
 # ``dx_slab_sum``          after each ``gemm_dx_red`` launch of more than one
 #                          slice: dX_acc[rows] = ((s_0 + s_1) + ...) over the
 #                          launch's slabs in slice order (one fixed order, no
 #                          run-to-run promise); it never reads dX_acc, which no
-#                          call fills or zeroes.  Launched
+#                          call fills or zeroes.  With ``lr = 1`` it then folds
+#                          each row's FP32 label residual: fma(rlab,
+#                          fp32(W[y]), sum).  After a one-slice ``gemm_dx``
+#                          (and once after the vocabulary-major backward's
+#                          last block) it is the fold alone (``n_slabs = 0``:
+#                          it reads the stored rows).  Launched
 #                          with programmatic dependent launch (it waits on the
 #                          GEMM first).  ``dx_slab_sum_dcnt`` stores the rows
 #                          below the chunk's live-row bound and -0.0 into the

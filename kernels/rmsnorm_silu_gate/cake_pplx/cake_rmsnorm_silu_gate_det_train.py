@@ -53,10 +53,12 @@ blocks from a counter, so a CTA that becomes resident late takes only the
 blocks left.  A backward with ``compute_grad_weight=False`` runs a program
 built without the weight gradient: ``dx`` and ``dz`` are the bits of the
 call that computes it.  On SM100 and SM103 up to 768 rows per SM, and on
-SM107 except where the look-ahead program runs, its CTAs walk their 16-row
-blocks with no claim, no ticket and no workspace; on SM100 and SM103 past
-that cut the claimed program runs on the workspace.  No kernel waits for
-another CTA or grid.
+SM107 except where the look-ahead program runs, its CTAs walk their row
+blocks with no claim, no ticket and no workspace: 128-thread CTAs over
+8-row blocks where ``grad_out``, ``x`` and ``z`` hold packed rows (head
+stride 128, token stride ``H * 128``, more than one token), 256-thread CTAs
+over 16-row blocks on other layouts; on SM100 and SM103 past that cut the
+claimed program runs on the workspace.  No kernel waits for another CTA or grid.
 Beside a kernel on another stream that holds ``k`` of the ``N`` SMs, the
 forward takes at most ``N / (N - k)`` times its time alone, plus the share of
 one CTA's row blocks in the call, plus 0.02 (a CTA whose slot that kernel

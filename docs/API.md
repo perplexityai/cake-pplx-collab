@@ -1,6 +1,6 @@
 # API reference
 
-This page covers the public modules of all 20 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
+This page covers the public modules of all 21 kernel families. The content comes from the facade docstrings and the source. Signatures below leave out type annotations; the Inputs column gives types and shapes. Every family supports `sm_100a`, `sm_103a` and `sm_107a`, and some families limit shapes per architecture.
 
 ## Naming
 
@@ -11,7 +11,7 @@ This page covers the public modules of all 20 kernel families. The content comes
 | `cake_<op>_<mode>[_kcp]` | `cake_kda_det`, `cake_kda_det_kcp` | Autograd entry point |
 | `cake_<op>_<mode>_train_<step>` | `cake_kda_det_train_forward` | Explicit (non-autograd) step or helper |
 
-`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`), and gated_kv_compression has a second autograd entry, `cake_gated_kv_compression_det_cz`, for one `[T, 1024]` input. Each family section notes these exceptions.
+`<mode>` is `det` or `nondet`. The module name alone selects the mode. No entry point takes a `deterministic` keyword, and passing one raises `TypeError`. Some families do not follow these patterns: mhc's autograd entries are `cake_mhc_<mode>_train_prepare` / `_finish`, gated_act_mxfp8, act_qdq, dense_gemm and dsa_indexer have no autograd entry, fmha has only a backward step (`cake_fmha_nondet_train_backward`), and engram_lookup has only a forward step (`cake_engram_lookup_det_train_forward`) and a helper that splits a packed table (`cake_engram_lookup_det_train_split_packed`). mok has no autograd entry: its entries are `prepare_mok_bf16` (an adapter with forward, recompute and backward methods), `create_mok_bf16_workspace` and `quantize_mok_mxfp8_weights`; its backend package is `cake_mok_bf16`. gated_kv_compression has a second autograd entry, `cake_gated_kv_compression_det_cz`, for one `[T, 1024]` input. Each family section notes these exceptions.
 
 The facades load their backends (`cake_pplx._backends.*`, which are private) lazily, on the first call or attribute access. Kernels compile with `nvcc` on first use unless a prebuilt library exists. The JIT environment variables are listed in the [README](../README.md#jit-build-and-cache), and this page lists only variables that are specific to a family.
 
@@ -22,7 +22,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 
 | Family | nondet compared with det | nondet under `torch.use_deterministic_algorithms(True)` |
 |---|---|---|
-| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is reproducible and within one BF16 ulp of det. | Backward always alerts |
+| rmsnorm | `dw` is not guaranteed bitwise reproducible. `dx` is bitwise reproducible. | Backward always alerts |
 | rmsnorm_silu_gate | A BF16 `dw` in the fused band may vary in its last bits. `y` can differ from det. | Alerts only for a BF16 `dw` in the fused band |
 | causal_conv1d | `dweight` / `dbias` use unordered reductions. The nondet package makes no bit promise. | Backward raises |
 | kda | Bitwise reproducible. `dg` differs from det by FP32 rounding; everything else is bitwise det. | No alert |
@@ -40,6 +40,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gated_act_mxfp8 | Has no nondet module | — |
 | clamped_swiglu | Has no nondet module | — |
 | engram_lookup | Has no nondet module | — |
+| mok | Has no nondet module | — |
 | act_qdq | Has no nondet module | — |
 | gated_kv_compression | Has no nondet module | — |
 
@@ -62,8 +63,8 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_rmsnorm_det` | `(x, w, eps=1e-6, residual=None)` | `x` BF16 `[T, H]` or `[..., H]`; `w` BF16 or FP32 `[H]`; `residual` optional BF16 of `x`'s shape | Autograd. Returns BF16 `y`, or `(y, h_new)` with `residual`. `dw` is returned in `w.dtype`. |
-| `cake_rmsnorm_det_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | `x` BF16 `[T, H]`, or `[..., H]` with leading dims row-major contiguous with one another; `w` FP32 only on routes listed by `cake_rmsnorm_det_train_weight_dtypes`; `out`/`rstd`/`residual_out` preallocated | Returns `(y, rstd)`, or `(y, rstd, h_new)` with `residual`. `rstd` is FP32 `1/sqrt(mean(h_new^2)+eps)`. Not autograd. T == 1 is supported. T == 0 returns empty outputs without launching. |
-| `cake_rmsnorm_det_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | `g` BF16 `[T, H]`; `x` is the normalized tensor (`x`, or `h_new` in residual mode); `rstd` FP32 `[T]`; `g_residual` BF16 (residual mode); `workspace` uint8 from the factory, allocated when omitted | Returns `(dx, dw)` with FP32 `dw [H]`. The caller decides whether to cast. |
+| `cake_rmsnorm_det_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | `x` BF16 `[T, H]`, or `[..., H]` with leading dims row-major contiguous with one another; `w` FP32 only on routes listed by `cake_rmsnorm_det_train_weight_dtypes`; `out`/`rstd`/`residual_out` preallocated, must not overlap one another (not checked) | Returns `(y, rstd)`, or `(y, rstd, h_new)` with `residual`. `rstd` is FP32 `1/sqrt(mean(h_new^2)+eps)`. Not autograd. A preallocated output that is not contiguous and aligned, or that shares memory with `x`, `residual` or `w`, is written through a temporary and copied after the launch. T == 1 is supported. T == 0 returns empty outputs without launching. |
+| `cake_rmsnorm_det_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | `g` BF16 `[T, H]`; `x` is the normalized tensor (`x`, or `h_new` in residual mode); `rstd` FP32 `[T]`; `g_residual` BF16 (residual mode); `workspace` uint8 from the factory, allocated when omitted, must not overlap `g`, `x`, `w`, `rstd` or `g_residual` (not checked); `dx`/`dw` preallocated, must not overlap `g`, `x`, `w`, `rstd`, `g_residual`, `workspace` or each other (not checked) | Returns `(dx, dw)` with FP32 `dw [H]`. The caller decides whether to cast. |
 
 Other public names:
 
@@ -79,13 +80,13 @@ Other public names:
 
 The forward runs the det forward programs and is bitwise reproducible.
 
-In the backward windows that ship it, a single persistent kernel adds per-CTA `dw` sums into FP64 sums in scheduling order (or into FP32 TwoSum pairs for the pair-row kernel), so `dw` is not guaranteed bitwise reproducible. Other windows run the deterministic pair. `dx` is bitwise reproducible and within one BF16 ulp of `max(|dx|, rms(dx))` of the det `dx`. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
+Each backward token-count window runs one form, and `dx` is bitwise reproducible in every form. Two forms sum `dw` in scheduling order, so their `dw` is not guaranteed bitwise reproducible: the single kernel adds per-CTA `dw` sums into replicated FP32 column sums and stores their sum as `dw`, and the part-row single kernel writes one FP32 row per CTA, which helper CTAs fold. Every other window runs a fixed-order form: the one-cluster kernel, which reads no workspace, at small token counts (up to a top of T 2 to 16, or 64 rows at H = 256), a column-task program (its CTAs sum whole `dw` columns over every row) or the deterministic pair. Their `dw` is bitwise reproducible for a given token count on devices with the same SM count. The backward always alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py`](../kernels/rmsnorm/cake_pplx/cake_rmsnorm_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_rmsnorm_nondet` | `(x, w, eps=1e-6, residual=None)` | Same as `cake_rmsnorm_det` | Autograd. Returns `y` or `(y, h_new)`. `dw` is returned in `w.dtype`. The backward alerts and names `cake_rmsnorm_det`. |
-| `cake_rmsnorm_nondet_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | Same as the det forward | Returns `(y, rstd)` or `(y, rstd, h_new)`. Never alerts. |
-| `cake_rmsnorm_nondet_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | Same as the det backward. Use one workspace from `cake_rmsnorm_nondet_train_backward_workspace` per concurrently running backward. | Returns `(dx, dw)` with FP32 `dw`. T == 0 returns an empty `dx` and a zero `dw`. Under deterministic algorithms it raises `RuntimeError` naming `cake_rmsnorm_det_train_backward`. With `warn_only=True` it emits one `UserWarning` and runs. If `workspace` is omitted, the call allocates and zero-fills one (about 3 us fill plus about 35 us host time on B200). |
+| `cake_rmsnorm_nondet_train_forward` | `(x, w, eps, *, residual=None, out=None, rstd=None, residual_out=None)` | Same as the det forward | Returns `(y, rstd)` or `(y, rstd, h_new)`. Never alerts. Preallocated outputs follow the det forward's rules and must not overlap one another (not checked). |
+| `cake_rmsnorm_nondet_train_backward` | `(g, x, w, rstd, *, g_residual=None, workspace=None, dx=None, dw=None)` | Same as the det backward. Use one workspace from `cake_rmsnorm_nondet_train_backward_workspace` per concurrently running backward. The workspace must not overlap `g`, `x`, `w`, `rstd` or `g_residual` (not checked). `dx`/`dw` must not overlap `g`, `x`, `w`, `rstd`, `g_residual`, `workspace` or each other (not checked). | Returns `(dx, dw)` with FP32 `dw`. T == 0 returns an empty `dx` and a zero `dw`. Under deterministic algorithms it raises `RuntimeError` naming `cake_rmsnorm_det_train_backward`. With `warn_only=True` it emits one `UserWarning` and runs. If `workspace` is omitted, the call allocates and zero-fills one (about 3 us fill plus about 35 us host time on B200). |
 
 Other public names:
 
@@ -290,7 +291,8 @@ Other public names: `CakeCausalConv1dNondetKcpRecomputeHandle`. Any object with 
 - `silu_grad_preactivation` (`"bf16"` by default, or `"fp32"`): where SiLU' is evaluated. Under `"bf16"`, a call with FP32 taps evaluates it at the BF16-rounded preactivation, and a call with BF16 taps at the unrounded FP32 preactivation (routes `bwd_dt_bf16_taps` / `bwd_bias_bf16_taps`). Under `"fp32"`, every call evaluates it at the unrounded FP32 preactivation.
 - `bwd_grid_mult` (1 by default, up to 4): an opt-in finer static token partition of the backward, which helps overlap with kernels on other streams. In det, the `dweight` bits change with each value and the workspace grows. In nondet, the workspace size does not change.
 - `dweight_sum` (`"fp32"` by default, or the opt-in `"fp32_pair"`): the sum form of `dweight` / `dbias`. `"fp32_pair"` runs the FP32 (hi, lo) pair programs (single rank: with `silu_grad_preactivation="fp32"` only; nondet KCP: the overlapped backward only, so no `bwd_reserve_sms` and at most 65536 channels). det KCP has no `dweight_sum` keyword and no pair opt-in. Other combinations and other strings raise `ValueError`, and a non-string raises `TypeError` (`None` is the nondet KCP default); no call falls back to another program. The default never selects a pair program.
-- `workspace=`: when omitted, the package keeps one zeroed buffer per (device, current stream), or one per capture inside CUDA Graph capture.
+- `workspace=`: when omitted, the forward of either package keeps one zeroed counter buffer per (device, current stream), and the nondet backward keeps one zeroed accumulator buffer per (device, current stream). The det backward allocates a new partial-row buffer on every call, eager or captured; that buffer needs no zeroing. Inside a CUDA Graph capture, each det forward call zeroes a counter buffer of its own. nondet takes one pre-zeroed buffer per capture and stream for the forward and one for the backward, so the graph has no fill node for them. The package zeroes these buffers in refills on earlier eager calls that omit `workspace=`, separately for the forward and the backward, at the size of the largest call whose refill succeeded, and keeps at most 4 idle ones of each kind. A graph holds its buffer until the graph is destroyed and its launches have completed. The package takes a released buffer back only at its next refill on that device; until then the released buffer stays allocated. An eager call that omits `workspace=` refills its kind (forward or backward) when it needs a larger buffer than the kind's ready size on that device, which the latest of these events sets: a capture that asks for a buffer of that kind sets it to zero, a refill that succeeds sets it to the size of its buffers, and a refill that runs out of memory sets it to that call's need. A refill that runs out of memory keeps no new buffer and keeps the buffer size, but it has already taken back the device's released buffers, dropping each one that is smaller than its kind's buffer size (for the refill's own kind, that call's need if it is larger) or that would exceed 4 idle buffers of its kind. A refill that fails for any other reason turns that kind's pre-zeroed buffers off on that device for the rest of the process: its captured calls then zero buffers of their own. Replays of one graph must not overlap. Without a ready buffer of the needed kind and size, each captured nondet call zeroes a buffer of its own, one fill node per call, forward and backward alike. A buffer is ready once the zero fill that an earlier eager call queued has completed: a capture that begins right after that call without a device synchronize can find none ready (`torch.cuda.graph` synchronizes before it captures). Without `cuda.bindings` (no capture id), each captured nondet call zeroes a buffer of its own. nondet allocates its per-stream and pre-zeroed buffers from its own `torch.cuda.MemPool` per device; that memory stays cached in that pool and is not returned to the caching allocator's other pools.
+- Programmatic dependent launch (PDL): nondet's single-rank forward and backward programs, except the `"fp32_pair"` programs, take it per call by architecture and by mode (eager or inside a CUDA Graph capture; backend `cake_jit.PDL_EAGER` / `PDL_GRAPH`). A launch may then begin while the stream's preceding kernel finishes; each program waits for that kernel before it reads or writes global memory. The nondet KCP programs launch without it.
 - KCP: `recompute_handle` must be one per call and micro-step, created outside the outermost checkpoint region, and every rank passes one or none.
 - CUDA Graph: build every library of the architecture first (backend `cake_jit.specs_for_arch`) so that no JIT build runs inside capture.
 - `CAKE_CONV1D_FULL_PLAN_SWEEP=1` is a test-only variable. The KCP backend reads no environment variable, and its `_set_test_knobs` are private test hooks.
@@ -735,6 +737,42 @@ Other public names:
 - `cake_mhc_nondet_train_forward_workspace(...)`, `..._backward_workspace(...)`.
 - `cake_mhc_nondet_train_reset_workspace(workspace)`: required before reusing a buffer that a det backward used.
 - `cake_mhc_nondet_train_route_key`, `CakeMHCNondetPrepareFunction`, `CakeMHCNondetFinishFunction`, `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
+
+### Pre handoff and standalone collapse (det and nondet)
+
+A sublayer of [DeepSeek-V4.1-Flash](https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash) collapses its streams with the `pre` of the previous sublayer and hands its own `pre` on. Both packages have entry points for this, under their own prefix (`<mode>` is `det` or `nondet`):
+
+- Forward: `(pre_next, post, C)` are the coefficients of `X`, as above. `U = BF16(sum_i pre_in_i X_i)` uses the incoming FP32 `pre_in [T, 4]`, not `pre_next`. `pre_next` is the FP32 `pre` of the coefficient pass, bit for bit the `pre` columns of `stats`. `Y` is computed by `forward_finish` as before.
+- Backward: `dpre_next [T, 4]` FP32 is the gradient of `pre_next` from its consumer. The coefficient VJP takes `dpre_next`, not a gradient derived from `dU`. `dpre_in_i = sum_d dU_d X_id` (one FP32 sum per token and stream). `dX = BF16(dX_mix + pre_in_i dU + dX_coef)` is rounded once.
+- The first sublayer passes a one-hot `pre_in = [1, 0, 0, 0]`; its `U` is stream 0 bit for bit. The final collapse before the model head is the standalone collapse `(X, pre_in) -> U` with the VJP `(X, pre_in, dU) -> (dX, dpre_in)`.
+- Coverage: hidden 5120 on `sm_100a`, `sm_103a` and `sm_107a` (`is_cake_mhc_<mode>_train_handoff_supported(device, hidden=None)`). Other sizes and architectures raise `ValueError`. The standard entry points are unchanged.
+
+| Name | Signature | Returns / notes |
+|---|---|---|
+| `cake_mhc_<mode>_train_handoff_forward_prepare` | `(X, pre_in, fn, scale, base, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", out=None, pre_next_out=None, stats_out=None, workspace=None)` | Returns `(U, pre_next, stats)`. Not autograd. The workspace is the forward workspace of the package. `Y` comes from `forward_finish(X, B, stats)`. |
+| `cake_mhc_<mode>_train_handoff_backward_finish` | `(X, dY, dU, pre_in, dpre_next, B, fn, scale, base, stats, grad_stats, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", accumulate=False, workspace=None, dX=None, dpre_in=None, dfn=None, dscale=None, dbase=None)` | Returns `(dX, dpre_in, dfn, dscale, dbase)`. `grad_stats` comes from `backward_prepare` as before. `accumulate` and the workspace work as in `backward_finish`. |
+| `cake_mhc_<mode>_train_collapse_forward` | `(X, pre_in, *, out=None)` | Returns BF16 `U [T, H]`. No workspace and no parameters. |
+| `cake_mhc_<mode>_train_collapse_backward` | `(X, pre_in, dU, *, dX=None, dpre_in=None)` | Returns BF16 `dX = BF16(pre_in_i dU)` and FP32 `dpre_in`. |
+| `cake_mhc_<mode>_train_handoff_prepare` | `(X, pre_in, fn, scale, base, *, rms_eps=1e-5, hc_eps=1e-6, sinkhorn_iters=20, accumulation="fp32", save_stats=True, workspace=None, backward_workspace=None)` | Autograd. Returns `(U, pre_next, handle)`; pass the handle to the package's `finish`. The backward takes `dU` and `dpre_next` (zeros when `pre_next` reaches no loss) and returns `dX`, `dpre_in` (when `pre_in` requires grad) and the parameter gradients. It saves `pre_in` (the previous `pre_next`, no copy). |
+| `cake_mhc_<mode>_train_collapse` | `(X, pre_in)` | Autograd standalone collapse. Returns `U`. It saves `X` and `pre_in`. |
+
+- Use `rms_eps=1e-20` for DeepSeek-V4.1-Flash. `rms_eps` and `hc_eps` are launch arguments.
+- Under `torch.utils.checkpoint(..., use_reentrant=False)`, a `pre_next` may cross region boundaries: a region returns `(Y, pre_next)`, and the next region takes `pre_next` as `pre_in`.
+- Retained state: the handoff connection keeps what the standard connection keeps (`stats`, 256 B per token, under `save_stats=True`). `pre_next` (16 B per token) stays alive until its consumer's backward has run. The standalone collapse saves only its inputs.
+- det: the bits of every output repeat for a given token count on a given device, as in the standard det entry points. nondet makes no run-to-run bit promise.
+- The autograd classes are `CakeMHC<Mode>HandoffPrepareFunction` and `CakeMHC<Mode>CollapseFunction`.
+
+```python
+from cake_pplx.cake_mhc_nondet_train import (
+    cake_mhc_nondet_train_collapse, cake_mhc_nondet_train_finish, cake_mhc_nondet_train_handoff_prepare,
+)
+
+pre = torch.zeros(T, 4, device=dev); pre[:, 0] = 1.0           # one-hot start
+for fn, scale, base, branch in sublayers:                       # attention, then MoE, per layer
+    U, pre, handle = cake_mhc_nondet_train_handoff_prepare(X, pre, fn, scale, base, rms_eps=1e-20)
+    X = cake_mhc_nondet_train_finish(X, branch(U), handle)
+head_input = cake_mhc_nondet_train_collapse(X, pre)            # the final collapse
+```
 
 **Options and environment.**
 
@@ -1189,8 +1227,9 @@ cake_gated_kv_compression_det_train_backward(torch.randn_like(out), c, z, cu_seq
 - Score: `s[t, j] = sum_h w[t, h] * relu(softmax_scale * sum_d q[t, h, d] * k[j, d])`, in FP32, over the visible causal prefix of each packed segment.
 - Selection: the exact global top `min(top_k, visible)` keys per query row, ranked by score descending, then key id descending. det returns them in ascending id order, and nondet leaves the slot order unspecified.
 - Forward only. It returns int32 indices and FP32 scores. No autograd or backward is documented.
+- Candidate blocks (`*_topk_with_candidates`): the same call also returns, per query, up to 2048 blocks of 8 keys chosen from the same scores (below).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. The candidate-block call: `sm_100a` and `sm_103a` (`NotImplementedError` on `sm_107a`).
 
 **Inputs.**
 
@@ -1212,8 +1251,10 @@ Identical inputs give identical ids and score bits, independent of the internal 
 |---|---|---|---|
 | `cake_dsa_indexer_det_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True, k_scale=None)` | As above. `scores` must be omitted when `return_scores=False` (`ValueError`). `k_scale` is FP32 `[Tkv]`, contiguous, FP8 form only. In the FP8 form `softmax_scale` must be `None`. | Returns `(indices, scores)`. `indices` are int32 `[T, top_k]` segment-local ids, ascending and unique, with tail `-1`. `scores` are FP32, aligned with `indices`, with tail `-inf`, or `None`. Not autograd. Never materializes `[T, Tkv]`, does not sync with the host, and can be captured in a CUDA graph. |
 | `cake_dsa_indexer_det_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | Python ints. `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Workspace bound in bytes for one call geometry. It follows the scan program chosen from T, Tkv, S, `ratio`, `top_k` and the SM count; for example, 74 MiB at `top_k=2048` with 4 queries per unit on a 148-SM `sm_100a`. Raises `NotImplementedError` when no program is registered for the architecture. |
+| `cake_dsa_indexer_det_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As `cake_dsa_indexer_det_train_topk`, BF16 only, `ratio=1`, `1 <= top_k <= 2047`. `candidate_blocks`: caller-owned int32 `[T, 2048]`, contiguous. `max_seqlen_k` must bound every key segment (it sizes the block entries). | Returns `(indices, scores, candidate_blocks)`. `indices` / `scores` as `cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit. `candidate_blocks` holds ascending segment-local block ids with tail `-1`. Identical inputs give identical bits. |
+| `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | Python ints; the call's `max_seqlen_k`. | Workspace bound in bytes: the scan's candidate buffers and tickets plus `grid x queries_per_unit x blk_cap x 8` bytes of block entries (`blk_cap = ceil(W/8) - 1` when `ceil(W/8) > 2048`, else 0; `W` = `max_seqlen_k`, else `Tkv`). The `[T, 2048]` output is not part of it. |
 
-The module exports only these two functions.
+The module exports only these four functions.
 
 ### `cake_pplx.cake_dsa_indexer_nondet_train`
 
@@ -1223,6 +1264,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 |---|---|---|---|
 | `cake_dsa_indexer_nondet_train_topk` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=2048, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, return_scores=True, k_scale=None)` | As det. `k_scale` is FP32 `[Tkv]`, contiguous, FP8 form only. In the FP8 form `softmax_scale` must be `None`. | Returns `(indices, scores)`. Ids are unique within a row, with `-1` in unused slots; scores are `-inf` at the `-1` slots. Can be captured in a CUDA graph. |
 | `cake_dsa_indexer_nondet_train_topk_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=2048, ratio=1, device=None, dtype=torch.bfloat16)` | `dtype` is `torch.bfloat16` or `torch.float8_e4m3fn`. | Same bound as det for the same call and form. Never consults the deterministic-algorithms setting. |
+| `cake_dsa_indexer_nondet_train_topk_with_candidates` | `(q, k, w, cu_seqlens_q, cu_seqlens_k, *, top_k=512, softmax_scale=None, q_causal_offsets=None, ratio=1, max_seqlen_q=None, max_seqlen_k=None, workspace_buffer=None, indices=None, scores=None, candidate_blocks=None, return_scores=True)` | As det. | Returns `(indices, scores, candidate_blocks)`. Each row of `candidate_blocks` holds its block set with `-1` in the other slots, in no specified order. Raises under deterministic algorithms, as `cake_dsa_indexer_nondet_train_topk`. |
+| `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` | `(num_queries, num_keys, num_segments, *, top_k=512, ratio=1, max_seqlen_k=None, device=None)` | As det. | Same bound as det for the same call. Never consults the deterministic-algorithms setting. |
 
 **Options and environment.**
 
@@ -1230,6 +1273,8 @@ Results are sets. Each row holds its selected ids with their scores, but the slo
 - `max_seqlen_k`: does not change the selected ids (det: nor the score bits). It selects the rank-finalize variant (det) and, on equal-length packed calls, skips the longest-segment-first scan order. `max_seqlen_q` is accepted but not read.
 - `return_scores=False` returns `None` for `scores`, but the scores are still computed internally.
 - The facades read no environment variable of their own. Backend partition knobs are private.
+
+**Candidate blocks.** Block `b` holds the segment-local keys `8b .. 8b+7`. A row with `n` visible keys sees `nb = ceil(n/8)` blocks; the newest block, `nb-1`, may be partial and its future keys do not count. A block's score is the largest score of its visible keys. With `nb <= 2048` the row holds blocks `0 .. nb-1`. Otherwise it holds block `nb-1` and the 2047 blocks of `0 .. nb-2` with the largest scores, ties broken by the larger block id (`+0.0 == -0.0`), the tie rule of `indices`. A row with `n == 0` is all `-1`. With `top_k <= 2047` every id of `indices` lies in a block of its row. The call runs the unsplit narrow or six-query scan unit, so its timing can differ from the plain top-k call of the same shape.
 
 **Cross-family.** There is no runtime contract with other families. The `k` docstring mentions the `packed[:, :128]` view of a `[Tkv, 704]` tensor, the same row layout that dsa_sparse_attention describes. Neither family consumes the other's objects.
 
@@ -1683,7 +1728,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 
 - **Forward:** `g' = min(g, L)`, `u' = clamp(u, -L, L)`, `a = silu(g') * u'` in FP32, and `h = BF16(w * a)`, the only rounding.
 - **Backward:** with `s = sigmoid(g')`, `d_gate = BF16(dh * w * u' * s * (1 + g' (1 - s)) * [g <= L])`, `d_up = BF16(dh * w * silu(g') * [-L <= u <= L])` and the FP32 `d_weight = sum_c dh * a`. The masks are inclusive: the gradient passes at `g = L` and `u = ±L`. `d_weight` uses the unweighted `a` (no division by `w`), so a zero-weight row gets exactly 0 in `h`, `d_gate` and `d_up` and keeps its `d_weight`.
-- One kernel per call. The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
+- One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
 - The sigmoid uses the approximate FP32 base-2 exponential and the approximate reciprocal with one round-to-nearest Newton step (exact below the flushed reciprocal's range, subnormal results kept). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`, also for `R = 0`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
@@ -1693,8 +1738,9 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 - `gate`, `up`: BF16 `[R, 2304]` each, or one `[R, 4608]` tensor with the gate in columns `[0, 2304)` and the up in `[2304, 4608)` (pass it as the first argument with `up=None`). The kernels read every BF16 tensor through its row stride, so the halves of a merged tensor and row slices of wider tensors are read in place when the row stride is a multiple of 8 elements, the last stride is 1 and the base is 16-byte aligned. Other inputs are copied once.
 - `weight`: FP32 `[R]`, `>= 0` (not checked), zeros allowed; `None` for an unweighted (shared) expert, `w = 1`.
 - `dh`: BF16 `[R, 2304]`.
-- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per stage and architecture serves every call, with no recompilation.
+- `limit`: `L`, a finite positive Python number, rounded to FP32. It is required (no default) and is a launch argument, as are `R`, the weight flag and the strides: one library per program and architecture serves every call, with no recompilation. Each stage has a small-`R` and a large-`R` program, chosen by the rows per SM of the device; both give the same bits.
 - `R` is any count from 0 to `2**31 - 257`. Every operand is on one CUDA device.
+- Every argument is checked before an input is copied or an output allocated, so a call refused for its arguments copies, allocates and launches nothing.
 
 ### `cake_pplx.cake_clamped_swiglu_det_train`
 
@@ -1737,9 +1783,11 @@ h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, we
 **Caveats.**
 
 - The intermediate width is 2304 only.
-- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them.
-- No double backward (`create_graph`). No MXFP8 or FP4 output.
+- Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates the `R` FP32 weight-gradient values the kernel writes and drops them. An unweighted call passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
+- Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output (also the weight gradient an unweighted backward drops) and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
+- No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
+- A program's library builds at its first launch, and the row count picks the program. Before capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
 
 ---
 
@@ -1806,6 +1854,64 @@ out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))
 - The row width is 256 with 8 scales per row.
 - `row_ids` must lie in `[0, R)`; see Inputs for what an id outside that range does.
 - `weight` and `scale` need a unit column stride, a row stride that is a multiple of 8 elements and an 8-byte aligned start. A packed `[R, 264]` buffer from the caching allocator meets these rules.
+
+---
+
+## mok
+
+**Computes.** One expert-parallel MoE layer for training (Mixture of Kittens): the routed-token scheduler, the fused forward (dispatch, gate/up GEMMs, SwiGLU, down GEMM, combine), the context-only recompute and the fused backward (`dx`, router-score gradient, six expert-weight gradients).
+
+- Routed experts run in BF16, or in MXFP8 with caller-prequantized weights. The shared expert runs in BF16.
+- `swiglu_limit` (a per-call value) selects clamped SwiGLU, `silu(min(gate, L)) * clamp(up, -L, L)`.
+- With `fp32_wgrad=True`, the backward adds every weight gradient into six caller-owned FP32 accumulators.
+- Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, EP group, build and GPU model).
+
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
+
+**Distributed requirements.** The caller passes an initialized `torch.distributed` process group with its CUDA device current. All ranks share one peer-accessible NVLink domain with multicast (PyTorch symmetric memory). EP sizes: 1, 4, 8, 16, 32 and 64. EP1 uses plain tensors.
+
+### `cake_pplx.cake_mok_det_train`
+
+This family has a det module only. The backend package is `cake_pplx._backends.cake_mok_bf16`. Source: [`kernels/mok/cake_pplx/cake_mok_det_train.py`](../kernels/mok/cake_pplx/cake_mok_det_train.py).
+
+| Name | Signature | Returns / notes |
+|---|---|---|
+| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False)` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. |
+| `create_mok_bf16_workspace` | `(*, group, device, num_local_tokens, hidden_size, topk, source_capacity=None, fwd_num_comm_sms="auto", bwd_num_comm_sms="auto", minibatch_size=4096, macrobatch_size=32768, schedule_capacity_multiplier=3/16, precision="bf16", imbalance_comm_sms="auto", imbalance_threshold="auto")` | Collective. Returns `(config, workspace)`. Call it outside CUDA Graph capture. |
+| `quantize_mok_mxfp8_weights` | `(gate, up, down)` | `(forward_weights, backward_weights)` of BF16 routed weights `gate`/`up [E_local, I, H]`, `down [E_local, H, I]` in the MXFP8 recipe. PyTorch operations; requantize after every weight update. |
+
+Other public names: `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOLDS`, `IMBALANCE_THRESHOLD`, `IMBALANCE_THRESHOLDS`, `MOK_PRECISIONS`, `resolve_comm_sms`, `resolve_imbalance_comm_sms`, `resolve_imbalance_threshold` (loaded from the backend on first access).
+
+**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
+
+**Options and environment.** The options are the keywords of `prepare_mok_bf16` and `create_mok_bf16_workspace` above. The facade reads no family-specific environment variable; the JIT variables in the README apply.
+
+**Cross-family.** None.
+
+**Example.**
+
+```python
+from cake_pplx.cake_mok_det_train import (
+    create_mok_bf16_workspace,
+    prepare_mok_bf16,
+)
+
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=6144, topk=8,
+)
+backend = prepare_mok_bf16(ep_size=16, local_experts=16, topk=8)
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=16)
+y, context = backend.forward(config, workspace, schedule, x, scores, *weights)
+grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *weights)
+```
+
+**Caveats.**
+
+- This is the MoE layer only. Optimizer steps, router-network backpropagation and the all-reduce of shared-expert gradients are outside the adapter; shared-expert weight gradients stay local to each source rank.
+- All ranks must make matching collective calls. Keep workspaces and peer mappings alive while the adapter or a captured graph can use them, and use a separate workspace and adapter for concurrent executions.
+- Prepare and warm up before CUDA Graph capture. Pass the matching context and schedule to `backward`.
+- The MXFP8 forward always saves its context and rejects `save_context=False`.
+- Schedule capacity must hold every padded route; an overflow traps.
 
 ---
 
@@ -1956,7 +2062,7 @@ Other public names:
 - `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
 - `is_cake_act_qdq_det_train_supported(device)`.
 
-**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output; the grid is `min(ceil(numel/2048), 8 * SM count)` CTAs, so a new shape or row count never recompiles. The facade reads no environment variable.
+**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output in 64-thread CTAs. The grid is one CTA per tile of 128 vectors (256 on `sm_107a`) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on `sm_107a`), else the resident CTAs walk the tiles; a new shape or row count never recompiles. The facade reads no environment variable.
 
 **Cross-family.** None.
 

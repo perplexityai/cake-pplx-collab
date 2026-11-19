@@ -18,7 +18,7 @@ non-deterministic weight gradient (``cake_pplx.cake_rmsnorm_nondet_train``;
 issues #7038, #7548 item 2, #8066).
 
 The backward runs, per token-count window, one kernel whose persistent CTAs
-claim row chunks from a counter and add their per-column ``dw`` sums into FP64
+claim row chunks from a counter and add their per-column ``dw`` sums into FP32
 workspace sums (the CTA that finishes last stores ``dw``), or the deterministic
 package's pair (main kernel and dw reduce) rendered into this package.  Neither
 waits for the whole device: a CTA that becomes resident late finds the chunk
@@ -29,10 +29,13 @@ the issue's list, the median of seven event-timed calls with the side kernel
 resident is at most ``MAX_RATIO`` times the median of seven calls alone, or at
 most ``MAX_EXTRA_MS`` above it (the alone and busy calls alternate in pairs).
 ``dx`` is bitwise equal across the alone and busy calls, a fresh-workspace
-call and launch grids other than the production one; ``dw`` stays within the
-package's budget against the first call in every one of them; after every
-call the workspace is at rest: every counter and FP64 sum zero (a det pair's
-partial rows are scratch).
+call and launch grids other than the production one; every one of those
+calls' ``dx`` and ``dw`` meet the naive PyTorch BF16 tier (no tolerance: their
+errors against an FP64 oracle beside the naive's, the largest over the calls on
+the case's own input, and one untimed call on each of 31 more random inputs;
+``tests/norm/test_helpers/cake_rmsnorm_train_reference.py``); after every call
+the workspace is at rest: every counter and FP32 sum zero (a det pair's partial
+rows are scratch).
 
 Beside a kernel resident on every SM (#7548 item 2): with the side kernel's
 preferred carveout set to the maximum shared memory, the backward starts beside
@@ -66,6 +69,7 @@ import pytest
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
 pkg = cake_package("cake_rmsnorm_nondet_train")
 loader = cake_package("cake_rmsnorm_nondet_train", "cake_jit")
@@ -103,9 +107,6 @@ RUNS = 7
 MAX_RATIO = 1.5
 MAX_EXTRA_MS = 0.020
 SEED = 760
-# dw of a call against the first alone call's: both are FP32 roundings of FP64
-# sums taken in a scheduling-dependent order.
-DW_REL_L2 = 1e-6
 
 
 def _device() -> torch.device:
@@ -148,9 +149,10 @@ def _skip_unless_route(hidden: int, residual: bool) -> None:
         pytest.skip(f"hidden={hidden} has no exported residual backward on this device")
 
 
-def _inputs(rows: int, hidden: int, residual: bool):
+def _inputs(rows: int, hidden: int, residual: bool, draw: int = 0):
+    """``(x, w, g, g_h, rstd)`` of draw ``draw`` of the case (draw 0 is the case's own input)."""
     generator = torch.Generator(device=_device()).manual_seed(
-        (SEED * 1_000_003 + rows * 7 + hidden) % (2**31 - 1)
+        ref.draw_seed((SEED * 1_000_003 + rows * 7 + hidden) % (2**31 - 1), draw)
     )
     kwargs = dict(dtype=torch.float32, device=_device(), generator=generator)
     x = torch.randn(rows, hidden, **kwargs).to(torch.bfloat16)
@@ -168,15 +170,37 @@ def _backward(x, w, g, g_h, rstd, workspace):
     return backward(g, x, w, rstd, **kwargs)
 
 
-def _rel_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
-    a, b = actual.double(), reference.double()
-    den = b.norm().item()
-    return (a - b).norm().item() / den if den > 0 else (a - b).norm().item()
+def _accuracy(hidden: int, residual: bool, rows: int, inputs) -> ref.BackwardCalls:
+    """The naive BF16 tier's judge of the case's calls (``ref.BackwardCalls``)."""
+    x, w, g, g_h, rstd = inputs
+    return ref.BackwardCalls(
+        f"hidden={hidden} residual={residual} rows={rows}",
+        g,
+        x,
+        w,
+        rstd,
+        EPS[hidden],
+        g_h,
+    )
+
+
+def _further_draws(hidden: int, residual: bool, rows: int):
+    """``(draw_inputs, launch)`` of ``ref.BackwardCalls.check``: each further draw's
+    inputs and one call on a fresh workspace."""
+
+    def draw_inputs(draw):
+        x, w, g, g_h, rstd = _inputs(rows, hidden, residual, draw)
+        return g, x, w, rstd, g_h
+
+    def launch(g, x, w, rstd, g_h):
+        return _backward(x, w, g, g_h, rstd, None)
+
+    return draw_inputs, launch
 
 
 def _workspace_clean(ws: torch.Tensor, hidden: int, residual: bool = False) -> bool:
     """The workspace's documented rest state after a call (any hidden size or
-    residual flag): every counter and FP64 sum zero -- every byte before the det
+    residual flag): every counter and FP32 sum zero -- every byte before the det
     pair's partial rows (``cake_jit.PAIR_ROWS_OFFSET``), which are scratch."""
     del hidden, residual  # one layout serves every family
     torch.cuda.synchronize()
@@ -209,10 +233,11 @@ def _keeps_its_speed(alone_ms: float, busy_ms: float) -> bool:
 @pytest.mark.parametrize("rows", TOKENS)
 @pytest.mark.parametrize("hidden,residual", ROUTES, ids=lambda v: str(v))
 def test_backward_keeps_its_speed_beside_a_resident_kernel(
-    hidden: int, residual: bool, rows: int
+    hidden: int, residual: bool, rows: int, record_property
 ) -> None:
     _skip_unless_route(hidden, residual)
-    x, w, g, g_h, rstd = _inputs(rows, hidden, residual)
+    inputs = _inputs(rows, hidden, residual)
+    x, w, g, g_h, rstd = inputs
     workspace = workspace_for(rows, hidden, _device(), residual=residual)
     side = torch.cuda.Stream()
 
@@ -234,22 +259,23 @@ def test_backward_keeps_its_speed_beside_a_resident_kernel(
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} ratio={ratio:.3f} "
         f"extra_ms={extra_ms:.4f}"
     )
-    # dx is a pure function of the inputs; dw stays within its budget whatever the side kernel imposes.
-    dx_ref, dw_ref = alone[0][1]
-    assert torch.isfinite(dw_ref).all()
-    for _t, (dx, dw) in alone[1:] + busy:
+    # dx is a pure function of the inputs; every call's dx and dw meet the naive tier whatever the side
+    # kernel imposes.
+    accuracy = _accuracy(hidden, residual, rows, inputs)
+    dx_ref, _dw_ref = alone[0][1]
+    for _t, (dx, dw) in alone + busy:
         assert torch.equal(dx, dx_ref), (
             f"hidden={hidden} rows={rows}: dx differs across calls"
         )
-        assert _rel_l2(dw, dw_ref) <= DW_REL_L2, (
-            f"hidden={hidden} rows={rows}: dw rel-L2 {_rel_l2(dw, dw_ref):.3e} across calls"
-        )
+        accuracy.add(dx, dw)
+    del alone[:], busy[:]
     dx_fresh, dw_fresh = _backward(x, w, g, g_h, rstd, None)
     assert torch.equal(dx_fresh, dx_ref), "a fresh workspace changed dx"
-    assert _rel_l2(dw_fresh, dw_ref) <= DW_REL_L2, "a fresh workspace moved dw"
+    accuracy.add(dx_fresh, dw_fresh)
     assert _workspace_clean(workspace, hidden, residual), (
         "the workspace is not the kernels' state"
     )
+    accuracy.check(record_property, *_further_draws(hidden, residual, rows))
     assert _keeps_its_speed(alone_ms, busy_ms), (
         f"hidden={hidden} residual={residual} rows={rows}: backward alone {alone_ms:.4f} ms, "
         f"beside a resident one-thread kernel {busy_ms:.4f} ms: ratio {ratio:.3f} "
@@ -260,16 +286,23 @@ def test_backward_keeps_its_speed_beside_a_resident_kernel(
 @pytest.mark.parametrize("rows", (1, 3, 129, 4096, 16384))
 @pytest.mark.parametrize("hidden,residual", ROUTES, ids=lambda v: str(v))
 def test_outputs_do_not_depend_on_the_launch_grid(
-    hidden: int, residual: bool, rows: int, monkeypatch: pytest.MonkeyPatch
+    hidden: int,
+    residual: bool,
+    rows: int,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
 ) -> None:
     """The chunk table depends on ``(rows, slots, rows_per_issue)`` only: launching fewer CTAs than
-    slots (they claim more chunks each) leaves ``dx`` bitwise unchanged and ``dw`` within its budget,
-    and the CTA that finishes last still finds every other CTA counted."""
+    slots (they claim more chunks each) leaves ``dx`` bitwise unchanged, every grid's ``dx`` and ``dw``
+    meet the naive BF16 tier, and the CTA that finishes last still finds every other CTA counted."""
 
     _skip_unless_route(hidden, residual)
-    x, w, g, g_h, rstd = _inputs(rows, hidden, residual)
+    inputs = _inputs(rows, hidden, residual)
+    x, w, g, g_h, rstd = inputs
     workspace = workspace_for(rows, hidden, _device(), residual=residual)
     dx_ref, dw_ref = (t.clone() for t in _backward(x, w, g, g_h, rstd, workspace))
+    accuracy = _accuracy(hidden, residual, rows, inputs)
+    accuracy.add(dx_ref, dw_ref)
     production = loader.launch_grid
 
     def at(divisor: int):
@@ -290,13 +323,12 @@ def test_outputs_do_not_depend_on_the_launch_grid(
         assert torch.equal(dx, dx_ref), (
             f"hidden={hidden} rows={rows}: dx changed at grid / {divisor}"
         )
-        assert _rel_l2(dw, dw_ref) <= DW_REL_L2, (
-            f"hidden={hidden} rows={rows}: dw moved at grid / {divisor}"
-        )
+        accuracy.add(dx, dw)
         assert _workspace_clean(workspace, hidden, residual), (
             f"the workspace is not the kernels' state at grid / {divisor}"
         )
     monkeypatch.setattr(loader, "launch_grid", production)
+    accuracy.check(record_property, *_further_draws(hidden, residual, rows))
 
 
 # Item 2 of issue #7548: a side kernel of one 128-thread CTA per SM, each CTA
@@ -544,11 +576,12 @@ def _all_sm_medians(call, carveout: int, smem_bytes: int = 0):
     "hidden,residual", [r for r in ROUTES if not r[1]], ids=lambda v: str(v)
 )
 def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
-    hidden: int, residual: bool, rows: int
+    hidden: int, residual: bool, rows: int, record_property
 ) -> None:
     _skip_unless_route(hidden, residual)
     _skip_det_inherited_whole_sm("bwd", hidden, residual, rows)
-    x, w, g, g_h, rstd = _inputs(rows, hidden, residual)
+    inputs = _inputs(rows, hidden, residual)
+    x, w, g, g_h, rstd = inputs
     workspace = workspace_for(rows, hidden, _device(), residual=residual)
 
     def call():
@@ -559,15 +592,16 @@ def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
         f"ALL_SM hidden={hidden} rows={rows} carveout=max_shared "
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} extra_ms={busy_ms - alone_ms:.4f}"
     )
-    dx_ref, dw_ref = alone[0][1]
-    for _t, (dx, dw) in alone[1:] + busy:
+    accuracy = _accuracy(hidden, residual, rows, inputs)
+    dx_ref, _dw_ref = alone[0][1]
+    for _t, (dx, dw) in alone + busy:
         assert torch.equal(dx, dx_ref), (
             f"hidden={hidden} rows={rows}: dx differs beside the all-SM kernel"
         )
-        assert _rel_l2(dw, dw_ref) <= DW_REL_L2, (
-            f"hidden={hidden} rows={rows}: dw moved beside the all-SM kernel"
-        )
+        accuracy.add(dx, dw)
+    del alone[:], busy[:]
     assert _workspace_clean(workspace, hidden, residual)
+    accuracy.check(record_property, *_further_draws(hidden, residual, rows))
     assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
         f"hidden={hidden} rows={rows}: backward alone {alone_ms:.4f} ms, beside an all-SM "
         f"kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
@@ -607,7 +641,7 @@ def _instances() -> list[tuple[str, int, bool, str, int, int | None, int, str]]:
             )
             form = (
                 "single"
-                if rule["kind"] in ("claim_sum_f64", "claim_part_f32")
+                if rule["kind"] in ("claim_sum_f32", "claim_part_f32")
                 else "pair"
             )
             out.append((route, hidden, residual, token, above, at_most, rows, form))

@@ -4511,24 +4511,24 @@ kernel_cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c(__nv_bfloat16* __restr
                 hw_0[35] = __as_u32(__float22bfloat162_rn(mul_f32x2_noftz(wr2_0, mul_f32x2_noftz(mul_f32x2_noftz(gc_69, s_69), uc_69))));
             }
             if (row_0 < rows) {
-                long long col_9 = (long long)((run * 9 * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_9))[0] = reinterpret_cast<int4*>(hw_0)[0];
-                long long col_10 = (long long)(((run * 9 + 1) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_10))[0] = reinterpret_cast<int4*>(hw_0 + (4))[0];
-                long long col_11 = (long long)(((run * 9 + 2) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_11))[0] = reinterpret_cast<int4*>(hw_0 + (8))[0];
-                long long col_12 = (long long)(((run * 9 + 3) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_12))[0] = reinterpret_cast<int4*>(hw_0 + (12))[0];
-                long long col_13 = (long long)(((run * 9 + 4) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_13))[0] = reinterpret_cast<int4*>(hw_0 + (16))[0];
-                long long col_14 = (long long)(((run * 9 + 5) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_14))[0] = reinterpret_cast<int4*>(hw_0 + (20))[0];
-                long long col_15 = (long long)(((run * 9 + 6) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_15))[0] = reinterpret_cast<int4*>(hw_0 + (24))[0];
-                long long col_16 = (long long)(((run * 9 + 7) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_16))[0] = reinterpret_cast<int4*>(hw_0 + (28))[0];
-                long long col_17 = (long long)(((run * 9 + 8) * 32 + lane_1) * 8);
-                reinterpret_cast<int4*>(h + (hoff_0 + col_17))[0] = reinterpret_cast<int4*>(hw_0 + (32))[0];
+                long long col = (long long)((run * 9 * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col))[0] = reinterpret_cast<int4*>(hw_0)[0];
+                long long col_9 = (long long)(((run * 9 + 1) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_9))[0] = reinterpret_cast<int4*>(hw_0 + (4))[0];
+                long long col_10 = (long long)(((run * 9 + 2) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_10))[0] = reinterpret_cast<int4*>(hw_0 + (8))[0];
+                long long col_11 = (long long)(((run * 9 + 3) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_11))[0] = reinterpret_cast<int4*>(hw_0 + (12))[0];
+                long long col_12 = (long long)(((run * 9 + 4) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_12))[0] = reinterpret_cast<int4*>(hw_0 + (16))[0];
+                long long col_13 = (long long)(((run * 9 + 5) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_13))[0] = reinterpret_cast<int4*>(hw_0 + (20))[0];
+                long long col_14 = (long long)(((run * 9 + 6) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_14))[0] = reinterpret_cast<int4*>(hw_0 + (24))[0];
+                long long col_15 = (long long)(((run * 9 + 7) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_15))[0] = reinterpret_cast<int4*>(hw_0 + (28))[0];
+                long long col_16 = (long long)(((run * 9 + 8) * 32 + lane_1) * 8);
+                reinterpret_cast<int4*>(h + (hoff_0 + col_16))[0] = reinterpret_cast<int4*>(hw_0 + (32))[0];
             }
         }
     }

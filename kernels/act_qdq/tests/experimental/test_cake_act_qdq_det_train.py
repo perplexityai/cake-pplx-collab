@@ -603,11 +603,22 @@ def test_routes_select_one_program_per_format() -> None:
 @pytest.mark.cpu_only
 def test_launch_grid() -> None:
     record = loader.MODULES["mxfp8_e8m0_g32"]
-    assert loader.launch_grid(record, n_vecs=1, sm_count=148) == (1, 1, 1)
-    assert loader.launch_grid(record, n_vecs=256, sm_count=148) == (1, 1, 1)
-    assert loader.launch_grid(record, n_vecs=257, sm_count=148) == (2, 1, 1)
-    assert loader.launch_grid(record, n_vecs=8 * 148 * 256, sm_count=148) == (8 * 148, 1, 1)
-    assert loader.launch_grid(record, n_vecs=loader.MAX_VECTORS, sm_count=148) == (8 * 148, 1, 1)
+    for arch, tile, resident in (("sm_100a", 128, 32 * 148), ("sm_103a", 128, 32 * 148), ("sm_107a", 256, 16 * 148)):
+        assert loader.launch_grid(record, n_vecs=1, sm_count=148, arch=arch) == (1, 1, 1), arch
+        assert loader.launch_grid(record, n_vecs=tile, sm_count=148, arch=arch) == (1, 1, 1), arch
+        assert loader.launch_grid(record, n_vecs=tile + 1, sm_count=148, arch=arch) == (2, 1, 1), arch
+        # up to 2.5 waves the resident CTAs walk the tiles; past that, one CTA per tile
+        assert loader.launch_grid(record, n_vecs=2 * resident * tile, sm_count=148, arch=arch) == (resident, 1, 1)
+        assert loader.launch_grid(record, n_vecs=5 * resident * tile // 2, sm_count=148, arch=arch) == (resident, 1, 1)
+        past = 5 * resident * tile // 2 + 1
+        assert loader.launch_grid(record, n_vecs=past, sm_count=148, arch=arch) == (-(-past // tile), 1, 1), arch
+        assert loader.launch_grid(record, n_vecs=loader.MAX_VECTORS, sm_count=148, arch=arch) == (
+            -(-loader.MAX_VECTORS // tile),
+            1,
+            1,
+        ), arch
+    with pytest.raises(ValueError, match="no tile for sm_90a"):
+        loader.launch_grid(record, n_vecs=1, sm_count=148, arch="sm_90a")
 
 
 @pytest.mark.cpu_only
@@ -633,14 +644,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
         assert tuple(record["arches"]) == loader.ARCHES, name
         assert record["ffi_entry"] == "run", name
         assert record["grid_rule"] == {
-            "cta_vectors": 256,
-            "ctas_per_sm": 8,
-            "kind": "grid_stride",
+            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
             "vector_elements": loader.VECTOR,
         }, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
         launch = record["launch"]
-        assert tuple(launch["block"]) == (256, 1, 1), name
+        assert tuple(launch["block"]) == (64, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         assert launch["dynamic_smem_bytes"] == 0, name
