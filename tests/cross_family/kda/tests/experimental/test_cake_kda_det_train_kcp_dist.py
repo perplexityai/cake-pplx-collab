@@ -173,11 +173,12 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
     """The body of one rank over the judge's draws (all in one process group): on the first draw the KCP forward /
     backward in every form, with the package's bitwise contracts between them (each rank's flags, combined on every
     rank); on every draw the saved-mode step, whose ``out`` and gradients rank 0 gathers in the global token order
-    and judges against the FP64 reference of the unsplit batch beside the naive BF16 tier (its report carries the
-    verdicts and the failures)."""
+    and judges against the FP64 reference of the unsplit batch beside the naive BF16 tier and FLA (its report carries
+    the verdicts and the failures)."""
     from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
     from tests.experimental.test_helpers.cake_kda_naive import (
         draw_case,
+        fla_of,
         naive_of,
         oracle_with_grads,
     )
@@ -432,14 +433,15 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         if rank == 0:
             ref = oracle_with_grads(glob, SCALE, LOWER_BOUND, False)
             tier = naive_of(glob, SCALE, LOWER_BOUND, False)
+            fla = fla_of(glob, SCALE, LOWER_BOUND, False)  # FLA on one GPU over the whole batch
             for n in TENSORS:
                 actual = _to_global(part, gathered[n], cu, total).to(device)
                 if message := contract(n, actual, ref[n]):
                     failures.append(f"draw {j}: {message}")
                     if actual.shape != ref[n].shape:
                         continue
-                judge.add(n, j, actual, ref[n], {"bf16": tier[n]})
-            del ref, tier
+                judge.add(n, j, actual, ref[n], {"bf16": tier[n]}, fla=fla.value(n, actual))
+            del ref, tier, fla
     flags, spec3, events, carry_poisoned, backend = first
     flag_list = [None] * W
     spec3_list = [None] * W

@@ -83,6 +83,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 from tests.experimental.test_helpers.cake_kda_known_gaps import settle
 from tests.experimental.test_helpers.cake_kda_naive import (
     draw_case,
+    fla_of,
     judge_arms,
     naive_of,
     oracle_with_grads,
@@ -879,10 +880,11 @@ def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
 
 
 def _judge_draw(
-    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device
+    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device, fla=None
 ) -> None:
     """Draw ``j`` of every arm (``{arm: {output: tensor}}``, an output judged as ``"<arm>.<output>"``): each output
     held to its contract against the FP64 reference ``ref`` and added to ``judge`` beside the naive tier ``naive``
+    and FLA ``fla`` (``cake_kda_naive.fla_of`` of the unsplit pack)
     (an arm added again on the same draw keeps its worst launch)."""
     for arm, results in arms.items():
         for name, actual in results.items():
@@ -893,7 +895,9 @@ def _judge_draw(
                 failures.append(f"draw {j}: {message}")
                 if actual.shape != want.shape:
                     continue
-            judge.add(key, j, actual, want, {"bf16": _like(naive[name], actual)})
+            judge.add(
+                key, j, actual, want, {"bf16": _like(naive[name], actual)}, fla=fla.value(name, actual) if fla else None
+            )
 
 
 def _finish(record_property, report: dict, lengths) -> None:
@@ -963,11 +967,12 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         recs: dict = {}
         handle_runs: dict = {}
         flags: dict = {}
-        ref = naive = None
+        ref = naive = fla = None
         if rank == 0:
-            # the exact FP64 reference of the unsplit pack and the naive tier (on this rank's device)
+            # the exact FP64 reference of the unsplit pack, the naive tier and FLA (on this rank's device)
             ref = oracle_with_grads(glob, SCALE, LB, False)
             naive = naive_of(glob, SCALE, LB, False)
+            fla = fla_of(glob, SCALE, LB, False)
 
         def saved_pass(raw=g, workspace=ws, tag=None, **opts):
             out, saved = cake_kcp.cake_kda_nondet_train_kcp_forward(
@@ -1068,7 +1073,7 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
             if rank == 0:
                 got = {n: _to_global(part, gathered[n], cu, total) for n in gathered}
                 got["dA_log"], got["ddt_bias"] = red[0].cpu(), red[1].cpu()
-                _judge_draw(judge, failures, j, {arm: got}, ref, naive, device)
+                _judge_draw(judge, failures, j, {arm: got}, ref, naive, device, fla)
             return red
 
         if first:
@@ -1282,7 +1287,7 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
             **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_s, strict=True)),
         }
         del saved_s
-        _judge_draw(judge, failures, j, {"single": single}, ref, naive, device)
+        _judge_draw(judge, failures, j, {"single": single}, ref, naive, device, fla)
 
     seed = _row_seed("rows", row)
     for j in range(DRAWS):

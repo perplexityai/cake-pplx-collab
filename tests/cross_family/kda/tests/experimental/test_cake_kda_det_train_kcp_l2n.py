@@ -81,7 +81,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     make_inputs,
 )
 from tests.experimental.test_helpers.cake_kda_known_gaps import settle
-from tests.experimental.test_helpers.cake_kda_naive import naive_of, oracle_with_grads
+from tests.experimental.test_helpers.cake_kda_naive import fla_of, naive_of, oracle_with_grads
 from tests.experimental.test_helpers.cake_kda_naive_kcp import to_global
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -2827,9 +2827,9 @@ class _RowJudge:
     every rank's local results of the arm (an NCCL ``all_gather`` of the local buffers padded to the longest rank),
     puts them in the global token order on rank 0 and judges them there (``"<arm>.<output>"``) against the FP64
     reference of the row's whole operands (``cake_kda_naive.oracle_with_grads``: the normalization differentiated in
-    FP64) beside the naive BF16 tier (``cake_kda_naive.naive_of``).  The raw gate's ``dA_log`` / ``ddt_bias`` are
-    judged as the package's cross-rank sums (``sums``); a single-rank result on rank 0 is added as it is
-    (:meth:`add_global`, no collective)."""
+    FP64) beside the naive BF16 tier (``cake_kda_naive.naive_of``) and FLA on one GPU (``cake_kda_naive.fla_of``).
+    The raw gate's ``dA_log`` / ``ddt_bias`` are judged as the package's cross-rank sums (``sums``); a single-rank
+    result on rank 0 is added as it is (:meth:`add_global`, no collective)."""
 
     def __init__(self, part, cu, W: int, rank: int) -> None:
         self.part, self.cu, self.W, self.rank = part, [int(c) for c in cu], W, rank
@@ -2843,10 +2843,11 @@ class _RowJudge:
         """Start draw ``j`` on the row's whole operands (``_l2n_inputs``, the same on every rank): rank 0 computes
         their reference and tier with the in-kernel norm."""
         self.j = j
-        self.ref = self.tier = None
+        self.ref = self.tier = self.fla = None
         if self.judge is not None:
             self.ref = oracle_with_grads(inputs, SCALE, LOWER_BOUND, True)
             self.tier = naive_of(inputs, SCALE, LOWER_BOUND, True)
+            self.fla = fla_of(inputs, SCALE, LOWER_BOUND, True)
 
     def _global(self, t: torch.Tensor):
         if self.W == 1:
@@ -2891,7 +2892,9 @@ class _RowJudge:
                 self.failures.append(f"draw {self.j}: {message}")
                 if actual.shape != want.shape:
                     continue
-            self.judge.add(key, self.j, actual, want, {"bf16": naive.to(want.device)})
+            self.judge.add(
+                key, self.j, actual, want, {"bf16": naive.to(want.device)}, fla=self.fla.value(n, actual)
+            )
 
     def result(self) -> dict | None:
         """Rank 0's verdicts and failures; ``None`` on the other ranks."""

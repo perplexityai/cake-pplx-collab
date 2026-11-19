@@ -45,6 +45,8 @@ from tests.experimental.test_cake_kda_nondet_train_kcp_shared_ws import (
     NaiveJudge,
     pack_inputs,
 )
+from tests.experimental.test_helpers.cake_kda_det_train_reference import LOWER_BOUND
+from tests.experimental.test_helpers.cake_kda_naive import fla_of
 from tests.experimental.test_helpers.cake_host_sync import (
     SLEEP_MS,
     allocator_counts,
@@ -919,7 +921,9 @@ def test_gpu_fresh_context_with_conv_halo_releases_everything(
     for j in range(DRAWS):
         if j:
             o = _ops(probe, H, device, draw_seed(SEED, j))
-        ref, tier = judge.refs(_inputs(CU, o, device))
+        ins = _inputs(CU, o, device)
+        ref, tier = judge.refs(ins)
+        fla = fla_of(ins, judge.scale, LOWER_BOUND, False)
         first, refs = step(o, checkpointed=True)
         conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
         gc.collect()
@@ -928,18 +932,18 @@ def test_gpu_fresh_context_with_conv_halo_releases_everything(
             j,
             "the first step's context is retained",
         )
-        judge.add_refs(j, "", pass_arms(first[1:], "first"), ref, tier)
+        judge.add_refs(j, "", pass_arms(first[1:], "first"), ref, tier, fla)
         base = torch.cuda.memory_allocated(device)
         for i in range(3):
             res, refs = step(o, checkpointed=True)
             # mode contract: the conv halo (deterministic package) is run-to-run bitwise
             assert torch.equal(first[0], res[0]), (j, i)
-            judge.add_refs(j, "", pass_arms(res[1:], "later"), ref, tier)
+            judge.add_refs(j, "", pass_arms(res[1:], "later"), ref, tier, fla)
             del res
             conv.cake_causal_conv1d_det_train_kcp_host_cache_clear()
             gc.collect()
             torch.cuda.synchronize(device)
             assert all(r() is None for r in refs), (j, i, "a context is retained")
             assert torch.cuda.memory_allocated(device) == base, (j, i)
-        del first, ref, tier
+        del first, ref, tier, fla
     judge.settle(record_property, lengths=_lengths(CU))

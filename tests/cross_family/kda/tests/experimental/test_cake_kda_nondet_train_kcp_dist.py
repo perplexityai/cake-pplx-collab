@@ -262,8 +262,8 @@ def _gather_global(part, t: torch.Tensor, cu: list[int], total: int, W: int, ran
 class _RankJudge:
     """Rank 0's judge of one multi-GPU row over the judge's draws (``tests/cake_naive.py``): every rank calls
     :meth:`draw` and :meth:`arm` in the same order (the gathers are collectives); rank 0 forms the draw's FP64
-    reference and naive BF16 tier of the global operands and judges each arm's gathered outputs, an arm ``""`` as
-    ``<output>``, another as ``<arm>.<output>``, a list of results of one arm keeping the worst."""
+    reference, naive BF16 tier and FLA (one GPU) of the global operands and judges each arm's gathered outputs, an
+    arm ``""`` as ``<output>``, another as ``<arm>.<output>``, a list of results of one arm keeping the worst."""
 
     def __init__(self, part, cu: list[int], W: int, rank: int, scale: float) -> None:
         from tests.cake_naive import DRAWS, TierJudge
@@ -273,11 +273,12 @@ class _RankJudge:
         self.judge = TierJudge(DRAWS) if rank == 0 else None
         self.failures: list[str] = []
         self.j = 0
-        self.ref = self.tier = None
+        self.ref = self.tier = self.fla = None
 
     def draw(self, j: int, glob: dict) -> None:
-        """Start draw ``j`` of the global operands ``glob`` (rank 0: its reference and tier)."""
+        """Start draw ``j`` of the global operands ``glob`` (rank 0: its reference, tier and FLA)."""
         from tests.experimental.test_helpers.cake_kda_naive import (
+            fla_of,
             naive_of,
             oracle_with_grads,
         )
@@ -286,6 +287,7 @@ class _RankJudge:
         if self.rank == 0:
             self.ref = oracle_with_grads(glob, self.scale, LOWER_BOUND, False)
             self.tier = naive_of(glob, self.scale, LOWER_BOUND, False)
+            self.fla = fla_of(glob, self.scale, LOWER_BOUND, False)
 
     def arm(self, name: str, results) -> None:
         """Gather and judge (rank 0) one arm: a dict ``{output: local tensor}`` or a list of them."""
@@ -306,7 +308,9 @@ class _RankJudge:
                     self.failures.append(f"draw {self.j}: {message}")
                     if got.shape != want.shape:
                         continue
-                self.judge.add(key, self.j, got, want, {"bf16": self.tier[out_name]})
+                self.judge.add(
+                    key, self.j, got, want, {"bf16": self.tier[out_name]}, fla=self.fla.value(out_name, got)
+                )
 
     def report(self) -> dict:
         """Rank 0's verdicts and failures (empty on the other ranks)."""

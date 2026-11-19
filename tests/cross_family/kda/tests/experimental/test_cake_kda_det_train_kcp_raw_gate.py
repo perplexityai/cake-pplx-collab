@@ -69,6 +69,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 from tests.experimental.test_helpers.cake_kda_known_gaps import settle
 from tests.experimental.test_helpers.cake_kda_naive import (
     draw_case,
+    fla_of,
     naive_of,
     oracle_with_grads,
 )
@@ -759,10 +760,11 @@ def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
 
 
 def _judge_draw(
-    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device
+    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device, fla=None
 ) -> None:
     """Draw ``j`` of every arm (``{arm: {output: tensor}}``, an output judged as ``"<arm>.<output>"``): each output
-    held to its contract against the FP64 reference ``ref`` and added to ``judge`` beside the naive tier ``naive``."""
+    held to its contract against the FP64 reference ``ref`` and added to ``judge`` beside the naive tier ``naive``
+    and FLA ``fla`` (``cake_kda_naive.fla_of`` of the unsplit pack)."""
     for arm, results in arms.items():
         for name, actual in results.items():
             actual = actual.to(device)
@@ -772,7 +774,9 @@ def _judge_draw(
                 failures.append(f"draw {j}: {message}")
                 if actual.shape != want.shape:
                     continue
-            judge.add(key, j, actual, want, {"bf16": _like(naive[name], actual)})
+            judge.add(
+                key, j, actual, want, {"bf16": _like(naive[name], actual)}, fla=fla.value(name, actual) if fla else None
+            )
 
 
 def _finish(record_property, report: dict, lengths) -> None:
@@ -1058,11 +1062,12 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
             **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_s, strict=True)),
         }
         del saved_s
-        # the exact FP64 reference of the unsplit pack and the naive tier (on this rank's device)
+        # the exact FP64 reference of the unsplit pack, the naive tier and FLA (on this rank's device)
         ref = oracle_with_grads(glob, SCALE, LB, False)
         naive = naive_of(glob, SCALE, LB, False)
+        fla = fla_of(glob, SCALE, LB, False)
         _judge_draw(
-            judge, failures, j, {"kcp": kcp, "single": single}, ref, naive, device
+            judge, failures, j, {"kcp": kcp, "single": single}, ref, naive, device, fla
         )
 
     seed = _row_seed("rows", row)
@@ -1260,7 +1265,8 @@ def _protocol_rank(
             arms = {"kcp": {n: r[n] for n in PARAM_GRADS}, "explicit": e}
             ref = oracle_with_grads(glob, SCALE, LB, False)
             naive = naive_of(glob, SCALE, LB, False)
-            _judge_draw(judge, failures, j, arms, ref, naive, device)
+            fla = fla_of(glob, SCALE, LB, False)
+            _judge_draw(judge, failures, j, arms, ref, naive, device, fla)
         del glob, loc, r, r2, e
     repeat_by_rank = gather(bool(repeat_equal))
     rec: dict = {

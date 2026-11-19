@@ -65,6 +65,7 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
 )
 from tests.experimental.test_helpers.cake_kda_known_gaps import settle
 from tests.experimental.test_helpers.cake_kda_naive import (
+    fla_of,
     naive_of,
     oracle_with_grads,
     stored,
@@ -109,12 +110,14 @@ def _cu(lengths) -> list[int]:
 class NaiveJudge:
     """The naive-tier judge of every case of a test over the judge's draws (``tests/cake_naive.py``): each case's arms
     against the FP64 reference of the case's own operands (``cake_kda_naive.oracle_with_grads``) beside the naive BF16
-    tier (``cake_kda_naive.naive_of``), all in one ``TierJudge``.  An output of case ``c`` and arm ``a`` is judged as
-    ``"c.a.<output>"`` (empty parts left out); an arm holding a list of results is judged as repeats (the judge keeps
-    the worst).  ``dw`` (the gradient of the ones leaf ``w`` of a checkpointed ``out * w``) is judged against ``dout *
-    out`` of the reference and of the tier (that product in BF16: the PyTorch graph of the test).  Every output is held
-    to its contract on every draw; :meth:`result` gives the verdicts and the failures, :meth:`settle` records them
-    (``naive_tier``) and settles them against the owner-accepted gaps (``cake_kda_known_gaps.settle``)."""
+    tier (``cake_kda_naive.naive_of``) and FLA (``cake_kda_naive.fla_of``; none for ``dw`` and the stacks of
+    :func:`stack_refs`, judged against the tier only), all in one ``TierJudge``.  An output of case ``c`` and arm ``a``
+    is judged as ``"c.a.<output>"`` (empty parts left out); an arm holding a list of results is judged as repeats (the
+    judge keeps the worst).  ``dw`` (the gradient of the ones leaf ``w`` of a checkpointed ``out * w``) is judged
+    against ``dout * out`` of the reference and of the tier (that product in BF16: the PyTorch graph of the test).
+    Every output is held to its contract on every draw; :meth:`result` gives the verdicts and the failures,
+    :meth:`settle` records them (``naive_tier``) and settles them against the owner-accepted gaps
+    (``cake_kda_known_gaps.settle``)."""
 
     def __init__(self, scale: float | None = None) -> None:
         self.judge = TierJudge(DRAWS)
@@ -145,17 +148,17 @@ class NaiveJudge:
         """Draw ``j`` of every arm of ``case`` (``{arm: {output: tensor}}`` or ``{arm: [{output: tensor}, ...]}``)
         on the operands ``inputs``."""
         ref, tier = self.refs(inputs, l2n=l2n, lower_bound=lower_bound)
-        self.add_refs(j, case, arms, ref, tier)
+        self.add_refs(j, case, arms, ref, tier, fla_of(inputs, self.scale, lower_bound, l2n))
 
-    def add_refs(self, j: int, case: str, arms: dict, ref: dict, tier: dict) -> None:
-        """:meth:`add` with the reference and the tier given (``{output: tensor}`` each)."""
+    def add_refs(self, j: int, case: str, arms: dict, ref: dict, tier: dict, fla=None) -> None:
+        """:meth:`add` with the reference and the tier given (``{output: tensor}`` each), and FLA's when given."""
         for arm, results in arms.items():
             for res in results if isinstance(results, (list, tuple)) else (results,):
                 for name, actual in res.items():
                     key = ".".join(p for p in (case, arm, name) if p)
-                    self.add_one(j, key, actual, ref[name], tier[name])
+                    self.add_one(j, key, actual, ref[name], tier[name], fla.value(name, actual) if fla else None)
 
-    def add_one(self, j: int, key: str, actual, want, naive) -> None:
+    def add_one(self, j: int, key: str, actual, want, naive, fla=None) -> None:
         """Draw ``j`` of the output ``key``: its contract against the reference ``want``, then the judge (the
         reference and the tier read in ``actual``'s shape when they hold as many elements)."""
         if want.shape != actual.shape and want.numel() == actual.numel():
@@ -165,7 +168,7 @@ class NaiveJudge:
             self.failures.append(f"draw {j}: {message}")
             if actual.shape != want.shape:
                 return
-        self.judge.add(key, j, actual, want, {"bf16": naive.to(want.device)})
+        self.judge.add(key, j, actual, want, {"bf16": naive.to(want.device)}, fla=fla)
 
     def result(self) -> dict:
         """The verdicts and the failures (the contracts', then the judge's), in JSON form."""
@@ -209,7 +212,7 @@ class RankJudge:
         self.naive = NaiveJudge(scale) if rank == 0 else None
         self.sizes = [sum(int(f.length) for f in frs) for frs in part.fragments]
         self.j = -1
-        self.ref = self.tier = None
+        self.ref = self.tier = self.fla = None
 
     def draw(
         self,
@@ -222,11 +225,12 @@ class RankJudge:
         """Start draw ``j`` on the row's whole operands ``inputs`` (``make_inputs`` form, the same on every rank):
         rank 0 computes their reference and tier."""
         self.j = j
-        self.ref = self.tier = None
+        self.ref = self.tier = self.fla = None
         if self.naive is not None:
             self.ref, self.tier = self.naive.refs(
                 inputs, l2n=l2n, lower_bound=lower_bound
             )
+            self.fla = fla_of(inputs, self.naive.scale, lower_bound, l2n)
 
     def judged_outputs(self, res: dict, halve: bool = False) -> dict:
         """The judged outputs of one local result: the token outputs and gradients, the cross-rank parameter sums
@@ -247,7 +251,7 @@ class RankJudge:
             local = self.judged_outputs(one, halve)
             glob = {n: self._global(n, local[n]) for n in sorted(local)}
             if self.naive is not None:
-                self.naive.add_refs(self.j, "", {arm: glob}, self.ref, self.tier)
+                self.naive.add_refs(self.j, "", {arm: glob}, self.ref, self.tier, self.fla)
 
     def add_global(self, arm: str, res: dict) -> None:
         """Rank 0, no collective: judge a result already in the global token order (a single-rank run on the row's
@@ -259,6 +263,7 @@ class RankJudge:
                 {arm: {n: t.detach() for n, t in res.items()}},
                 self.ref,
                 self.tier,
+                self.fla,
             )
 
     def _global(self, name: str, t: torch.Tensor):

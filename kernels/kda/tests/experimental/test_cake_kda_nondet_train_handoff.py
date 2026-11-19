@@ -65,8 +65,10 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
     make_inputs,
 )
+from tests.experimental.test_helpers.cake_kda_fla import FlaSteps
 from tests.experimental.test_helpers.cake_kda_naive import (
     draw_case,
+    fla_of,
     flat_inputs,
     judge_arms,
     lengths_of,
@@ -498,19 +500,20 @@ def _judge_layers(record_property, draw) -> None:
     """:func:`judge_arms` for stacks of KDA layers, whose layers read different operands: ``draw(j, s)`` returns
     ``(arms, inputs)`` pairs, each ``inputs`` the operands of one layer's call (its ``v`` the previous layer's output,
     its ``dout`` the gradient that reached its output: :func:`_tapped`) and each output name of each arm in one pair
-    only; every pair is judged against the FP64 reference of its own operands beside the naive BF16 tier
+    only; every pair is judged against the FP64 reference of its own operands beside the naive BF16 tier and FLA
     (formed once per draw for each distinct set of operands).  The judge, its records and the settling against the
     owner-accepted gaps are :func:`judge_arms`'s."""
     judge = TierJudge(DRAWS)
     failures: list[str] = []
     lengths = None
+    steps = FlaSteps()
     cuda = torch.cuda.get_rng_state_all()
     state = (random.getstate(), torch.get_rng_state())
     try:
         for j in range(judge.draws):
             s = draw_seed(SEED, j)
             seed_all(s)
-            formed: list[tuple[dict, dict, dict]] = []
+            formed: list[tuple] = []
             for arms, inputs in draw(j, s):
                 flat = flat_inputs(inputs)
                 if lengths is None:
@@ -518,8 +521,8 @@ def _judge_layers(record_property, draw) -> None:
                 # operand identity (not a result): the reference and the tier of the same operands are formed once
                 found = next(
                     (
-                        (ref, tier)
-                        for seen, ref, tier in formed
+                        (ref, tier, fla)
+                        for seen, ref, tier, fla in formed
                         if all(torch.equal(seen[n], flat[n]) for n in ORACLE_OPERANDS)
                     ),
                     None,
@@ -528,9 +531,10 @@ def _judge_layers(record_property, draw) -> None:
                     found = (
                         oracle_with_grads(flat, SCALE, LOWER_BOUND, False),
                         naive_of(flat, SCALE, LOWER_BOUND, False),
+                        steps.add(fla_of(flat, SCALE, LOWER_BOUND, False)),
                     )
                     formed.append((flat, *found))
-                ref, tier = found
+                ref, tier, fla = found
                 for arm, results in arms.items():
                     for name, actual in results.items():
                         key = f"{arm}.{name}"
@@ -540,7 +544,12 @@ def _judge_layers(record_property, draw) -> None:
                             if actual.shape != want.shape:
                                 continue
                         judge.add(
-                            key, j, actual, want, {"bf16": _like(tier[name], actual)}
+                            key,
+                            j,
+                            actual,
+                            want,
+                            {"bf16": _like(tier[name], actual)},
+                            fla=fla.value(name, actual),
                         )
     finally:
         random.setstate(state[0])
@@ -548,6 +557,7 @@ def _judge_layers(record_property, draw) -> None:
         torch.cuda.set_rng_state_all(cuda)
     failures += judge.failures()
     judge.record(record_property)
+    steps.record(record_property)
     known_gaps.settle(judge.verdicts(), failures, lengths=lengths)
 
 
