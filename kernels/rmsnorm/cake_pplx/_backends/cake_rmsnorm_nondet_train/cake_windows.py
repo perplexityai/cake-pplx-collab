@@ -1044,7 +1044,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (4, 16, "cake_rmsnorm_train_c2a523de1ff578621a88"),
             (16, 320, "cake_rmsnorm_train_1207b05663ed2b4de14b"),
             (320, 1024, "cake_rmsnorm_train_7dc29629ff21625607f8"),
-            (1024, 16384, "cake_rmsnorm_train_6a428da2227972ae18ae"),
+            (1024, 12288, "cake_rmsnorm_train_88510c609fd688aab969"),
+            (12288, 16384, "cake_rmsnorm_train_6a428da2227972ae18ae"),
             (16384, 45056, "cake_rmsnorm_train_56d26996239835327501"),
             (45056, 65536, "cake_rmsnorm_train_411e270c0575d26a77f4"),
             (65536, None, "cake_rmsnorm_train_c93d0266065acad326fb"),
@@ -1065,7 +1066,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (16, 31, "cake_rmsnorm_train_518cf16a7bf8e88042ee"),
             (31, 256, "cake_rmsnorm_train_6720b4a159be2b84b325"),
             (256, 1024, "cake_rmsnorm_train_845cdcd8145ada631461"),
-            (1024, 16384, "cake_rmsnorm_train_81c3d8ab0a482e3af043"),
+            (1024, 16384, "cake_rmsnorm_train_cc26e316ae40d683a118"),
             (16384, 50176, "cake_rmsnorm_train_845cdcd8145ada631461"),
             (50176, 50688, "cake_rmsnorm_train_395fedebf0299f78a745"),
             (50688, 65536, "cake_rmsnorm_train_21ee6fc93139c5e0cd41"),
@@ -1927,6 +1928,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (16, "unmeasured"),
             (320, "same"),
             (1024, "same"),
+            (12288, "unmeasured"),
             (16384, "same"),
             (45056, "unmeasured"),
             (65536, "unmeasured"),
@@ -1945,7 +1947,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (16, "unmeasured"),
             (31, "same"),
             (256, "same"),
-            (1024, "same"),
+            (1024, "ulp"),
             (16384, "same"),
             (50176, "same"),
             (50688, "unmeasured"),
@@ -2559,7 +2561,8 @@ SMEM_WAITS: dict[str, dict[str, tuple[tuple[int, int | None, int | None], ...]]]
             (4, 16, 100),
             (16, 320, None),
             (320, 1024, None),
-            (1024, 16384, 100),
+            (1024, 12288, 100),
+            (12288, 16384, 100),
             (16384, 45056, 100),
             (45056, 65536, 100),
             (65536, None, None),
@@ -2756,9 +2759,9 @@ WHOLE_SM: dict[str, dict[str, tuple[tuple[int, int | None], ...]]] = {
     "sm_107a": {
         "fwd_h6144": ((4096, None),),
         "fwd_w32_h6144": ((4096, None),),
-        "bwd_h1536": ((1024, 65536),),
+        "bwd_h1536": ((12288, 65536),),
         "bwd_w32_h1536": ((16384, 65536),),
-        "bwd_h2048": ((256, 50176), (50688, 65536)),
+        "bwd_h2048": ((256, 1024), (16384, 50176), (50688, 65536)),
         "bwd_w32_h2048": ((256, 1024), (16384, 50176)),
         "bwd_h4096": ((1024, 24576),),
         "bwd_w32_h4096": ((1024, 65536),),
@@ -3541,7 +3544,7 @@ route not listed is unmeasured.
 * ``sm_107a`` ``bwd_h1024``: (0, 4] -, (4, 8] -, (8, 1536] -, (1536, 2048] -, (2048, 24576] -, (24576, 32768] -, (32768, inf) -
 * ``sm_107a`` ``bwd_h128``: (0, 1024] -, (1024, 2048] -, (2048, 4096] -, (4096, 12288] -, (12288, inf) -
 * ``sm_107a`` ``bwd_h1280``: (0, 1] -, (1, 128] -, (128, 512] -, (512, 8192] -, (8192, 16384] -, (16384, inf) -
-* ``sm_107a`` ``bwd_h1536``: (0, 4] >= 100, (4, 16] >= 100, (16, 320] -, (320, 1024] -, (1024, 16384] >= 100, (16384, 45056] >= 100, (45056, 65536] >= 100, (65536, inf) -
+* ``sm_107a`` ``bwd_h1536``: (0, 4] >= 100, (4, 16] >= 100, (16, 320] -, (320, 1024] -, (1024, 12288] >= 100, (12288, 16384] >= 100, (16384, 45056] >= 100, (45056, 65536] >= 100, (65536, inf) -
 * ``sm_107a`` ``bwd_h2048``: (0, 4] >= 100, (4, 16] >= 100, (16, 31] -, (31, 256] -, (256, 1024] >= 100, (1024, 16384] >= 100, (16384, 50176] >= 100, (50176, 50688] -, (50688, 65536] >= 100, (65536, inf) -
 * ``sm_107a`` ``bwd_h256``: (0, 4] >= 100, (4, 24] >= 100, (24, 64] >= 100, (64, 786432] -, (786432, inf) -
 * ``sm_107a`` ``bwd_h4096``: (0, 4] >= 100, (4, 16] >= 100, (16, 256] -, (256, 1024] >= 100, (1024, 4096] >= 100, (4096, 24064] >= 100, (24064, 24576] >= 100, (24576, 65536] >= 100, (65536, inf) >= 132
@@ -3566,9 +3569,9 @@ its carveout: the deterministic package's whole-SM programs where this package r
 them (``WHOLE_SM``: det-pair windows and forward programs; no single-kernel window).
 Beside those, leave some SMs free of the resident kernel.
 
-* ``sm_107a`` ``bwd_h1536``: (1024, 65536]
+* ``sm_107a`` ``bwd_h1536``: (12288, 65536]
 * ``sm_107a`` ``bwd_w32_h1536``: (16384, 65536]
-* ``sm_107a`` ``bwd_h2048``: (256, 50176], (50688, 65536]
+* ``sm_107a`` ``bwd_h2048``: (256, 1024], (16384, 50176], (50688, 65536]
 * ``sm_107a`` ``bwd_w32_h2048``: (256, 1024], (16384, 50176]
 * ``sm_107a`` ``bwd_h4096``: (1024, 24576]
 * ``sm_107a`` ``bwd_w32_h4096``: (1024, 65536]
@@ -3777,15 +3780,16 @@ Beside those, leave some SMs free of the resident kernel.
   (32768, inf) f6956a41
 * ``sm_107a`` ``bwd_h1536``: (0, 4] db218c92 (one cluster) ?
   (4, 16] c2a523de (one cluster) ? (16, 320] 1207b056 = (320, 1024] 7dc29629 (det pair)
-  = (1024, 16384] 6a428da2 (det pair) = (16384, 45056] 56d26996 (det pair) ?
-  (45056, 65536] 411e270c (det pair) ? (65536, inf) c93d0266
+  = (1024, 12288] 88510c60 (det pair) ? (12288, 16384] 6a428da2 (det pair) =
+  (16384, 45056] 56d26996 (det pair) ? (45056, 65536] 411e270c (det pair) ?
+  (65536, inf) c93d0266
 * ``sm_107a`` ``bwd_w32_h1536``: (0, 4] 6d3986ee (one cluster) ?
   (4, 16] 744aa774 (one cluster) ? (16, 320] 137ba532 = (320, 1024] baff9ecb (det pair)
   = (1024, 16384] 7c0dd63f = (16384, 45056] de8e07d4 (det pair) ?
   (45056, 65536] 64ffe19b (det pair) ? (65536, inf) c9dc9e43
 * ``sm_107a`` ``bwd_h2048``: (0, 4] c5f62407 (one cluster) ?
   (4, 16] a951623c (one cluster) ? (16, 31] 518cf16a = (31, 256] 6720b4a1 =
-  (256, 1024] 845cdcd8 (det pair) = (1024, 16384] 81c3d8ab (det pair) =
+  (256, 1024] 845cdcd8 (det pair) ~ (1024, 16384] cc26e316 (det pair) =
   (16384, 50176] 845cdcd8 (det pair) = (50176, 50688] 395fedeb ?
   (50688, 65536] 21ee6fc9 (det pair) ? (65536, inf) 395fedeb
 * ``sm_107a`` ``bwd_w32_h2048``: (0, 4] 0017ab41 (one cluster) ?
