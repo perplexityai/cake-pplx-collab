@@ -91,8 +91,8 @@ For each group of `G` elements, with `amax` the largest magnitude in the group:
 
 Then `u = clamp(x / s, -Q, Q)` with the exact quotient, `q` is the element format's round-to-nearest-even value of
 `u` with the sign of zero kept, and `y = bf16_rne(q * s)`.  The E4M3 scale saturates at 448.  The outputs equal this
-rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64, and the FP32 steps below
-give the rule's outputs:
+rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64, and the FP32 and BF16 steps
+below give the rule's outputs:
 
 - **E8M0 scale.**  Write `amax = m * 2^e` with `m` in [1, 2), and `Q = mq * 2^c` (`6 = 1.5 * 2^2`,
   `448 = 1.75 * 2^8`).  Then `ceil(log2(amax / Q)) = e - c + [m > mq]`, read from the IEEE fields of `amax`.
@@ -100,6 +100,8 @@ give the rule's outputs:
   `2^-22` for MXFP8.
 - **E8M0 quotient.**  `s` is a power of two, so `x * 2^-k` and the IEEE quotient `x / s` are the same correctly
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
+  A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
+  lane rounds as it would alone.
 - **E4M3 scale.**  `max(amax, 6 * 2^-9) / 6` is an IEEE round-to-nearest division, and the conversion to E4M3
   rounds to nearest even and saturates at 448.  `amax` has 8 significant bits, so `amax / 3` is either exact or a
   repeating binary fraction far from every 5-bit value: the FP32 quotient is an E4M3 rounding midpoint only when the
@@ -114,10 +116,13 @@ give the rule's outputs:
   way.  The exact quotient is at least `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so
   rounding it to FP32 first never moves it across a midpoint.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
-- **Dequantize.**  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits and `s` at most 4, so `q * s` in FP32 and
-  its BF16 rounding are exact, down to the MXFP4 subnormal `2^-127`.  Above the BF16 range the product is `±inf`, as
-  the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120` (MXFP4)
-  becomes `±inf`, although `x` is finite.
+- **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by
+  `s`.  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant
+  bits, so the BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The
+  `sm_107a` main program of `mxfp8_e8m0_g32` decodes each pair to two FP16 values instead and multiplies each by `s`
+  in FP32; that product has at most 8 significant bits, so it and its BF16 rounding are exact too.  Above the BF16
+  range the product is `±inf`, as the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8)
+  or `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.
