@@ -110,8 +110,10 @@ keyword.
   temperature plan) launches no fold-alone `slab_sum` on its longest run of
   adjacent one-slice chunks (`cake_backend.cast_fold_rows`): it hands those
   rows' labels, `rlab` and `W` to `scale_cast_scatter_bf16`, which applies
-  the same `fma` and predicate before its scale.  The loss entry then holds
-  them from the forward through the backward.
+  the same `fma` and predicate before its scale.  The autograd loss entry
+  then holds them from the forward to its backward's dX finalize; a backward
+  that frees the graph drops them there, before the weight gradient's buffers
+  exist.
 * Gradient placement (`cake_backend.set_gradient_placement(mode)`, returns the
   previous mode; `cake_backend.gradient_placement()` reads it; default
   `"auto"`; read once per call, it covers `cake_lm_head_det_train_loss` in every

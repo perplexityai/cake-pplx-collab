@@ -8281,7 +8281,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
     ``dX`` accumulator right after ``dX`` is written, before the weight gradient's buffers exist, the ``dW``
     accumulator and the row state when the backward ends -- instead of when the graph is freed; another backward
     through the same graph then raises.  Otherwise, and in a retained graph, it keeps everything until the graph is
-    freed (the backward is repeatable, the accumulators are read, never written)."""
+    freed (the backward is repeatable, the accumulators are read, never written) -- except the label residual fold's
+    operands (``dx_fold``, :func:`.cake_backend.cast_fold_operands`), which a backward that frees the graph drops right
+    after the dX finalize that reads them."""
 
     @staticmethod
     def forward(
@@ -8567,6 +8569,13 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             if not keep:
                 ctx.dx_acc = None  # released before the weight gradient's buffers exist
                 ctx.dx_fold = None
+            elif getattr(ctx, "dx_fold", None) is not None and not _keep_graph():
+                # the fold operands (the forward's compact labels and FP32 label residuals) serve the dX finalize only:
+                # a backward that frees the graph drops them here, before the weight gradient's buffers exist, so the
+                # step holds no more than the fast form, whose slab sums fold the residuals in the forward
+                ctx.dx_fold = None
+                if ctx.split is not None and ctx.split.result is not None:
+                    ctx.split.result.dx_fold = None
         dw = None
         if ctx.dw_split is not None and dz_last is not None:
             if x_last is None:
