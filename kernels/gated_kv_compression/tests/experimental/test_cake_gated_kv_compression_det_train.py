@@ -417,6 +417,34 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     assert [grid for name, _, _, grid in launched if name.startswith("fwd")] == [(5, 1, 1), (5, 1, 1), (3, 1, 1)]
 
 
+def test_the_first_lookup_on_an_architecture_loads_every_role(monkeypatch) -> None:
+    """The first FFI lookup on an architecture loads the library of every role there, in role order, and later lookups
+    of any record load nothing new: a pack of more than ``small_docs`` documents after smaller ones finds
+    ``pair_table`` loaded (no device: ``load`` is a recorder)."""
+    loaded = []
+
+    def load(name, arch):
+        loaded.append((name, arch))
+        return types.SimpleNamespace(run=lambda *args: None)
+
+    monkeypatch.setattr(cake_jit, "load", load)
+    cake_jit._entry.cache_clear()
+    cake_jit._libraries.cache_clear()
+    try:
+        for arch in ARCHES:
+            loaded.clear()
+            cake_jit._entry(cake_jit.role_record("pair_table_small", arch), arch)
+            every = [(cake_jit.role_record(role, arch), arch) for role in cake_jit.ROLES]
+            assert loaded[: len(every)] == every, arch
+            seen = set(loaded)
+            for role in cake_jit.ROLES:
+                cake_jit._entry(cake_jit.role_record(role, arch), arch)
+            assert set(loaded) == seen, arch
+    finally:
+        cake_jit._entry.cache_clear()
+        cake_jit._libraries.cache_clear()
+
+
 def test_the_overlap_rule_is_exact_for_column_halves() -> None:
     """The two column halves of one ``[T, 1024]`` buffer share no element; a view overlaps itself, a shifted window,
     a row of the other half's buffer region, and a dense alias; separate allocations never overlap."""

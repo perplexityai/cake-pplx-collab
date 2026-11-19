@@ -480,8 +480,19 @@ def _tvm_device(device_index: int) -> Any:
 
 
 @functools.cache
+def _libraries(arch: str) -> None:
+    """Load the library of every role of :data:`ROLES` on ``arch``, once per process.  The pair table of a launch
+    depends on its document count, so loading only the records a first call launched would leave ``pair_table`` to
+    load (or build) at the first pack of more than ``small_docs`` documents, possibly inside a CUDA graph capture."""
+    for role in ROLES:
+        load(role_record(role, arch), arch)
+
+
+@functools.cache
 def _entry(name: str, arch: str) -> Any:
-    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process)."""
+    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process).  The first lookup on
+    ``arch`` loads every library of that architecture (:func:`_libraries`), so later calls of any shape load none."""
+    _libraries(arch)
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
