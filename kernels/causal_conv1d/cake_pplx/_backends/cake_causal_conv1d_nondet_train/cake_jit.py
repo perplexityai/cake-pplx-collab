@@ -6187,22 +6187,27 @@ def _stream_context(device_index: int) -> Any:
 # global memory, so the results are the same either way.
 PDL_EAGER: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 PDL_GRAPH: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
-# The backward rows that launch without programmatic dependent launch, outside and inside a CUDA Graph capture,
-# whatever :data:`PDL_EAGER` and :data:`PDL_GRAPH` say: ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}`` (the form
-# of :data:`FALLBACK_ROWS`), a backward call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a
-# multiple of 8) and ``S_min <= S <= S_max`` tokens passes ``enable_pdl`` 0 (:func:`pdl_off_row_range`,
-# :func:`pdl_enabled`).  The keys of one ``(arch, route)`` are disjoint.  Measured on sm_100a (GB200) and sm_103a
-# (GB300) in the training step and the checkpointed step (on one stream, the backward right after a forward): at these
-# rows the ``bwd`` program, launched with the attribute, starts before the forward ends and then runs longer, and the
-# step is slower than when only that backward launch goes without the attribute.  ``S_max`` is
-# ``INT32_MAX``: a row runs from its measured first token count to the largest call the package takes.  Every other
-# route, row and architecture (sm_107a has no rows), and every forward launch, keep the two tables.
+# The backward rows that launch without programmatic dependent launch, outside and inside a CUDA Graph capture, whatever
+# :data:`PDL_EAGER` and :data:`PDL_GRAPH` say: ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}`` (the form of
+# :data:`FALLBACK_ROWS`), a backward call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8)
+# and ``S_min <= S <= S_max`` tokens passes ``enable_pdl`` 0 (:func:`pdl_off_row_range`, :func:`pdl_enabled`).  The keys
+# of one ``(arch, route)`` are disjoint.  Measured on sm_100a (GB200) and sm_103a (GB300) in the training step and the
+# checkpointed step (on one stream, the backward right after a forward): at large ``S`` on these channel counts the
+# ``bwd`` program, launched with the attribute, starts before the forward ends and then runs longer, so the step is
+# slower than when only that backward launch goes without the attribute.  ``S_min`` is the first measured ``S`` from
+# which the backward without the attribute is not slower than with it in the training step and the checkpointed step,
+# eager and in a CUDA Graph, at every ``C`` of the key and every larger measured ``S`` (slower: beyond the timing noise
+# band in both of two timed copies of the package); ``S_max`` is ``INT32_MAX`` (every larger call the package takes).
+# Token counts below ``S_min`` keep the two tables, also where they lie between measured points.  Every other route,
+# row and architecture (sm_107a has no rows), and every forward launch, keep the two tables.
 PDL_OFF_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
-        ("bwd", 1016, 1016): (187755, 2147483647),
+        ("bwd", 1000, 1008): (187755, 2147483647),
+        ("bwd", 1016, 1016): (155648, 2147483647),
     },
     "sm_103a": {
-        ("bwd", 1016, 1016): (131073, 2147483647),
+        ("bwd", 1000, 1008): (131073, 2147483647),
+        ("bwd", 1016, 1016): (125171, 2147483647),
     },
 }
 

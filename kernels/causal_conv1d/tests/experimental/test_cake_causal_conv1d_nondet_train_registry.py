@@ -490,12 +490,18 @@ PDL_EAGER_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 PDL_GRAPH_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 # The backward rows that launch without programmatic dependent launch in both modes, whatever the two tables say
 # (``PDL_OFF_ROWS``): arch -> (route, C_lo, C_hi) -> (S_min, S_max), every multiple of 8 from C_lo to C_hi.  On sm_100a
-# and sm_103a the ``bwd`` route at C 1016 from the first measured token count at which its launch with the attribute,
-# right after the forward, made the training step and the checkpointed step slower, up to every token count the
-# package takes.
+# and sm_103a the ``bwd`` route at its largest channel counts below 1024, each key from the first measured token count
+# from which the backward without the attribute is not slower than with it in the training step and the checkpointed
+# step, eager and graph, up to every token count the package takes.
 PDL_OFF_ROWS_OF_RECORD = {
-    "sm_100a": {("bwd", 1016, 1016): (187755, 2147483647)},
-    "sm_103a": {("bwd", 1016, 1016): (131073, 2147483647)},
+    "sm_100a": {
+        ("bwd", 1000, 1008): (187755, 2147483647),
+        ("bwd", 1016, 1016): (155648, 2147483647),
+    },
+    "sm_103a": {
+        ("bwd", 1000, 1008): (131073, 2147483647),
+        ("bwd", 1016, 1016): (125171, 2147483647),
+    },
 }
 # The program the calls of the :data:`PDL_OFF_ROWS_OF_RECORD` rows launch (the one the rows were measured with): the
 # ``bwd`` program the channel thresholds pick there on both architectures.
