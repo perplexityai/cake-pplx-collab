@@ -1530,9 +1530,9 @@ def test_steps_neither_raise_nor_warn_under_deterministic_algorithms(warn_only, 
 def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device, monkeypatch) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
     every output a step allocates holds NaN when its kernel launches (PyTorch filled it): ``h``; ``d_gate_up`` or
-    ``d_gate`` and ``d_up``; ``d_weight``, also the one an unweighted backward drops.  The common call (merged, split)
-    allocates through its first operand, any other call (copied) through ``torch.empty``; the outputs have the bits of
-    the same calls with the setting off."""
+    ``d_gate`` and ``d_up``; ``d_weight``, also the one an unweighted backward drops.  Every new output is
+    ``torch.empty`` on the operands' device, after the one-pass checks (merged, split) and after the full checks
+    (copied); the outputs have the bits of the same calls with the setting off."""
     outputs = {"fwd": ("h",), "bwd": ("d_gate", "d_up", "d_weight")}
     seen: list = []
 
