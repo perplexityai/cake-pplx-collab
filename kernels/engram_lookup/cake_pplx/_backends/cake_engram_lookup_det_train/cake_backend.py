@@ -25,13 +25,22 @@ rows the small program serves and :func:`.cake_jit.grid` the launch grid.
 builder compiled it and otherwise through the package's JIT build shim
 (``_cake_pplx_jit.py``) from the sources and flags of ``build.json``.
 
-One call launches one kernel on the current torch stream of the operands'
-device: the small program (record ``lookup_small``) for at most
-:data:`.cake_jit.SMALL_MAX_POSITIONS` looked-up rows, the main program (record
-``lookup``) above.  The two programs write the same bytes, so the choice
-changes no output bit; a call captured in a CUDA graph keeps the program its
-row count picked at capture.  For each looked-up row ``p`` with
-``r = row_ids[p]`` and each column
+A call launches one kernel on the current torch stream of the operands' device
+(the first call on a device two, below): the small program (record
+``lookup_small``) for at most :data:`.cake_jit.SMALL_MAX_POSITIONS` looked-up
+rows, the main program (record ``lookup``) above.  The two programs write the
+same bytes, so the choice changes no output bit; a call captured in a CUDA
+graph keeps the program its row count picked at capture.  The first call on a
+device launches both programs there, on its own operands: first the program
+its row count does not pick, then its own (both write the same bytes, so the
+output is the same).  Before them it looks up both libraries (a prebuilt file
+or a JIT build, once per process and architecture).  The first launch of a
+kernel on a device loads the kernel's module there (CUDA's lazy module
+loading, the default, loads it then), so after that call no call on the device
+loads a library or a module, whichever program it launches: a later call
+captured in a CUDA graph launches a kernel that is already loaded.  Make the
+first call on each device outside a CUDA graph capture.  For each looked-up
+row ``p`` with ``r = row_ids[p]`` and each column
 ``c``: ``out[p, c] = bf16(float(weight[r, c]) * float(scale[r, c // 32]))``.
 The kernel decodes the E4M3 values and the E8M0 scale to FP32, multiplies in
 FP32 without flushing subnormals and rounds the product once to BF16.  That is
@@ -229,6 +238,27 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
+# The FFI entry of each record on each device, by (record, device index): the first launch on a device fills it for
+# every record (:func:`_first_launch`), and every launch takes its entry from here.
+_ENTRIES: dict[tuple[str, int], Any] = {}
+
+
+def _first_launch(arch: str, name: str, index: int, *args: Any) -> Any:
+    """The FFI entry of record ``name`` for the first launch on device ``index``, after launching every other record
+    with the same arguments ``args`` (the programs write the same bytes, so the output does not change): the entries
+    of every record are looked up (:func:`_entry` loads each library once per process and architecture) and stored
+    for ``index``.  With the launch of ``name`` that follows, the first call on a device launches each program once
+    there, and so loads each kernel's module on the device under CUDA's lazy module loading: no later call on the
+    device, a call captured in a CUDA graph included, loads a library or a module."""
+    entries = {record: _entry(record, arch) for record in RECORDS}
+    for record, entry in entries.items():
+        if record != name:
+            entry(*args)
+    for record, entry in entries.items():
+        _ENTRIES[record, index] = entry
+    return entries[name]
+
+
 def _record_for(positions: int) -> str:
     """The record a lookup of ``positions`` rows launches: :data:`SMALL_RECORD` for at most
     ``cake_jit.SMALL_MAX_POSITIONS`` rows, :data:`RECORD` above (read at each call)."""
@@ -244,13 +274,15 @@ def _launch(
     out: torch.Tensor,
     positions: int,
     grid_x: int,
+    index: int,
 ) -> None:
     """Launch the program of record ``name`` on ``grid_x`` CTAs: ``out`` (BF16 ``[*row_ids.shape, 256]``, contiguous)
-    from the rows ``row_ids`` (int64, contiguous, ``positions`` elements) of ``weight`` and ``scale``.  The one place
-    the programs' argument list is spelled: the table operands go in as byte views of the same strides (the binding
-    reads the row strides from them), then the ids, the output, the row count and the grid.  tvm-ffi runs the call on
-    the current torch stream of the device of its first CUDA tensor argument (every operand is on that device), and
-    the binding makes that device current for the launch.
+    from the rows ``row_ids`` (int64, contiguous, ``positions`` elements) of ``weight`` and ``scale``, all on device
+    ``index``.  The one place the programs' argument list is spelled: the table operands go in as byte views of the
+    same strides (the binding reads the row strides from them), then the ids, the output, the row count and the grid.
+    tvm-ffi runs the call on the current torch stream of the device of its first CUDA tensor argument (every operand
+    is on that device), and the binding makes that device current for the launch.  The first launch on a device
+    launches the other program first, with the same arguments (:func:`_first_launch`).
 
     A one-row table goes in with its compact row strides (256 and 8) instead.  Its row stride changes no address: the
     kernel multiplies it by the row id, the only valid id is 0, and any other id traps before a row is read.  The
@@ -264,7 +296,11 @@ def _launch(
     if w.shape[0] == 1:
         w = w.as_strided((1, ROW_DIM), (ROW_DIM, 1))
         s = s.as_strided((1, GROUPS), (GROUPS, 1))
-    _entry(name, arch)(w, s, row_ids, out, positions, grid_x, 1, 1)
+    try:
+        entry = _ENTRIES[name, index]
+    except KeyError:
+        entry = _first_launch(arch, name, index, w, s, row_ids, out, positions, grid_x, 1, 1)
+    entry(w, s, row_ids, out, positions, grid_x, 1, 1)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -371,7 +407,9 @@ def cake_engram_lookup_det_train_forward(
 
     Every output element is one product rounded once, so the output repeats bit for bit.  The kernel runs on the
     current stream of the operands' device; nothing synchronizes.  At most ``cake_jit.SMALL_MAX_POSITIONS`` looked-up
-    rows launch the small program, more the main one: both write the same bytes.
+    rows launch the small program, more the main one: both write the same bytes.  The first call on a device launches
+    both programs (the module docstring), so that a CUDA graph capture after it loads nothing: make it outside a
+    capture.
     """
     try:
         accepted = _accepted(weight, scale, row_ids)
@@ -386,7 +424,7 @@ def cake_engram_lookup_det_train_forward(
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES, before the allocation
     out = torch.empty(shape, dtype=torch.bfloat16, device=row_ids.device)
     grid_x = cake_jit.grid(positions, sm_count(index), arch)[0]
-    _launch(arch, _record_for(positions), weight, scale, row_ids, out, positions, grid_x)
+    _launch(arch, _record_for(positions), weight, scale, row_ids, out, positions, grid_x, index)
     return out
 
 

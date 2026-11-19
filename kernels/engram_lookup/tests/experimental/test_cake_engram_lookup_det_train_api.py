@@ -33,11 +33,16 @@ of ``[T, 24]`` and ``[M]`` ids in both layouts (the packed one through the publi
 16-byte) boundary; the launch runs on the current stream without synchronizing (behind a sleep on a side stream,
 under ``torch.cuda.set_sync_debug_mode("error")``); a call captured in a CUDA graph replays to the eager bits and reads
 the table and ids it is replayed on, for a call of either program (the small one for at most the backend's
-``cake_jit.SMALL_MAX_POSITIONS`` looked-up rows: the replay launches the program the capture picked); under
+``cake_jit.SMALL_MAX_POSITIONS`` looked-up rows: the replay launches the program the capture picked); in a fresh
+process with CUDA's lazy module loading, the first call (eager) of one program's row count readies both programs on
+the device, and a call of the other program's row count captured right after it (no eager call of that size first,
+the default global capture mode) replays to the bits of an eager call of the same ids, which are the reference's,
+in both orders; under
 ``torch.utils.checkpoint(..., use_reentrant=False)`` the lookup runs twice (once without) and a BF16 linear layer
 after it has the same outputs and weight gradients, under ``torch.use_deterministic_algorithms(True)`` with
 ``CUBLAS_WORKSPACE_CONFIG=:4096:8``, in a fresh process; an id outside the table (``R``, ``-1``, ``2**62``; first,
-middle and tail-step positions) raises, in a fresh process, and ``R - 1`` does not, through either program; the call
+middle and tail-step positions) raises, in a fresh process after a first call of valid ids, and ``R - 1`` does not,
+through either program; the call
 allocates exactly its output (the workspace is 0 bytes); under ``torch.use_deterministic_algorithms(True)``, strict or
 ``warn_only``, no alert, no warning and the same bits (the output allocated in the mode is NaN-filled first, so every
 element is written); with two devices, operands on the device that is not current give the reference's bits there.
@@ -521,6 +526,90 @@ def test_a_call_captured_in_a_cuda_graph_replays(program, monkeypatch) -> None:
     assert_same_bits(captured, oracle(table, ids), "replayed on new bytes")
 
 
+# The first calls of a fresh process (the parent sets ``CUDA_MODULE_LOADING=LAZY``, CUDA's lazy module loading): an
+# eager call of the ``first`` ids, then a call of the ``captured`` ids captured in a CUDA graph (``torch.cuda.graph``,
+# the default global capture mode) with no eager call of that size before it, its replay after its output is filled
+# with NaN, and an eager call of the same ids after the replay.  Prints the records ``_launch`` launched, the entries
+# ready before the first call and the records ready on device 0 after it; saves the three outputs.  argv: the backend
+# module, the facade module, the input file (the packed table, the two id sets), the output file.
+FIRST_CALL_CAPTURE_SCRIPT = r"""
+import importlib, json, sys
+import torch
+
+backend = importlib.import_module(sys.argv[1])
+facade = importlib.import_module(sys.argv[2])
+inputs = torch.load(sys.argv[3])
+device = torch.device("cuda:0")
+weight, scale = facade.cake_engram_lookup_det_train_split_packed(inputs["packed"].to(device))
+first = inputs["first"].to(device)
+ids = inputs["captured"].to(device)
+torch.cuda.synchronize(device)
+launched = []
+launch = backend._launch
+
+
+def recorded(arch, name, *args):
+    launched.append(name)
+    return launch(arch, name, *args)
+
+
+backend._launch = recorded
+before = sorted(backend._ENTRIES)
+out_first = facade.cake_engram_lookup_det_train_forward(weight, scale, first)
+torch.cuda.synchronize(device)
+ready = sorted(record for record, index in backend._ENTRIES if index == 0)
+graph = torch.cuda.CUDAGraph()
+with torch.cuda.graph(graph):
+    replayed = facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
+replayed.view(torch.int16).fill_(-1)
+graph.replay()
+torch.cuda.synchronize(device)
+eager = facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
+torch.cuda.synchronize(device)
+torch.save({"first": out_first.cpu(), "replayed": replayed.cpu(), "eager": eager.cpu()}, sys.argv[4])
+print(json.dumps({"launched": launched, "before": before, "ready": ready}))
+"""
+
+
+@pytest.mark.parametrize("order", ("main-then-small", "small-then-main"))
+def test_the_first_call_readies_both_programs_for_a_capture(order, tmp_path) -> None:
+    """In a fresh process with CUDA's lazy module loading: the first call, eager, of ``[128, 24]`` ids (the main
+    program) or of ``SMALL_MAX_POSITIONS`` ids (the small one), then a call of the other size captured in a CUDA graph
+    under the default global capture mode, with no eager call of that size before it.  The first call readies both
+    programs on the device; the capture launches the program its row count picks and loads nothing; the replay writes
+    the bits of an eager call of the same ids after it, and those are the reference's, as are the first call's."""
+    device = _device_or_skip()
+    backend = _backend()
+    rows = 2048
+    large, small = (128, N_COLS), (backend.cake_jit.SMALL_MAX_POSITIONS,)
+    first_shape, captured_shape = (large, small) if order == "main-then-small" else (small, large)
+    picks = {large: backend.RECORD, small: backend.SMALL_RECORD}
+    table = _public_table(*random_bytes(rows, seed=191, nan_every=7), "packed", device)
+    first = random_ids(rows, first_shape, seed=192, device=device)
+    ids = random_ids(rows, captured_shape, seed=193, device=device)
+    inputs, outputs = tmp_path / "inputs.pt", tmp_path / "outputs.pt"
+    torch.save({"packed": table.packed.cpu(), "first": first.cpu(), "captured": ids.cpu()}, inputs)
+    result = subprocess.run(
+        [sys.executable, "-c", FIRST_CALL_CAPTURE_SCRIPT, backend.__name__, api.__name__, str(inputs), str(outputs)],
+        capture_output=True,
+        text=True,
+        timeout=900,
+        env=dict(os.environ, CUDA_MODULE_LOADING="LAZY"),
+        cwd=str(Path(__file__).resolve().parents[2]),
+    )
+    assert result.returncode == 0, result.stderr[-4000:]
+    report = json.loads(result.stdout.strip().splitlines()[-1])
+    assert report == {
+        "launched": [picks[first_shape], picks[captured_shape], picks[captured_shape]],
+        "before": [],
+        "ready": sorted(backend.RECORDS),
+    }, report
+    got = torch.load(outputs)
+    assert torch.equal(_bits(got["replayed"]), _bits(got["eager"])), order
+    assert_same_bits(got["eager"], oracle(table, ids), f"captured call {order}")
+    assert_same_bits(got["first"], oracle(table, first), f"first call {order}")
+
+
 # The checkpoint run, in a fresh process (``CUBLAS_WORKSPACE_CONFIG`` takes effect before cuBLAS starts): the lookup
 # of ``[64, 24]`` ids, concatenated to width 6144, feeds a BF16 linear layer; the step runs once plainly and once
 # under ``torch.utils.checkpoint(..., use_reentrant=False)``, each under ``torch.use_deterministic_algorithms(True)``,
@@ -609,9 +698,10 @@ def test_checkpoint_non_reentrant_repeats_the_lookup_bitwise() -> None:
     }, report
 
 
-# An id outside the table, in a fresh process (the trap leaves the process's CUDA context unusable): the lookup of
-# ``count`` ids into a 64-row table with the id at position ``at`` replaced by ``bad``, then a synchronize.  argv: the
-# facade module, the id, its position, the number of ids.
+# An id outside the table, in a fresh process (the trap leaves the process's CUDA context unusable): a first lookup of
+# ``count`` valid ids into a 64-row table (the first call on a device launches both programs), then the lookup of the
+# same ids with the id at position ``at`` replaced by ``bad``, which launches the program of ``count`` ids only, then
+# a synchronize.  argv: the facade module, the id, its position, the number of ids.
 TRAP_SCRIPT = r"""
 import importlib, json, sys
 import torch
@@ -623,6 +713,8 @@ rows = 64
 weight = torch.zeros(rows, 256, dtype=torch.uint8, device=device).view(torch.float8_e4m3fn)
 scale = torch.full((rows, 8), 127, dtype=torch.uint8, device=device).view(torch.float8_e8m0fnu)
 ids = torch.arange(count, device=device) % rows
+facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
+torch.cuda.synchronize(device)
 ids[at] = bad
 try:
     facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
@@ -644,7 +736,8 @@ def test_an_id_outside_the_table_traps(program, bad, at, raised) -> None:
     """An id outside ``[0, R)`` (a negative id included) stops the launch with a device-side trap, so the call or the
     next synchronize raises instead of returning rows read from outside the table; the last row, ``R - 1``, does
     not.  Through the main program (1001 ids; the last position sits in the tail step) and the small one
-    (``SMALL_MAX_POSITIONS`` ids)."""
+    (``SMALL_MAX_POSITIONS`` ids), each after a first call of valid ids, so that the call launches that program
+    only."""
     _device_or_skip()
     count = 1001 if program == "main" else _backend().cake_jit.SMALL_MAX_POSITIONS
     at = count - 1 if at == -1 else (int(count * at) if isinstance(at, float) else min(at, count - 1))

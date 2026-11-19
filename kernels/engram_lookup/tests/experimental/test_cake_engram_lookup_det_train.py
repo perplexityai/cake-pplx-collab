@@ -29,7 +29,9 @@ The package has two programs per architecture: the main one (record ``lookup``) 
 Without a device: the registry (the two records, each delivered for the three architectures and no other, their
 launch facts, their argument plans in the launch order of the host code, the threshold), the record a row count
 picks (the small one up to the threshold, the main one above), the launch grid, the launch's arguments (byte views
-of the table operands with their strides, then the ids, the output, the row count and the grid), the build manifest
+of the table operands with their strides, then the ids, the output, the row count and the grid), the first launch on
+a device (both records' entries looked up, the other program launched first with the same arguments; later launches
+there launch one program, the first launch on another device both again), the build manifest
 (each record's library per architecture, the recorded source digests), the standalone loader, the prebuilt
 libraries served first, no environment read outside the JIT shim, and a one-row table launched with its compact row
 strides.
@@ -274,19 +276,28 @@ def test_the_grid_covers_every_row() -> None:
                 assert gx * per_cta >= positions or gx == cap
 
 
+def _recorders(monkeypatch) -> list:
+    """The FFI entries replaced by recorders (no device): the entry of a record appends ``(record, arch, args)`` to the
+    returned list at each launch, and no launch has run on any device yet."""
+    calls = []
+    monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
+    monkeypatch.setattr(cake_backend, "_ENTRIES", {})
+    return calls
+
+
 def test_the_launch_passes_byte_views_and_the_grid(monkeypatch) -> None:
     """The launch passes ``weight`` and ``scale`` as ``uint8`` views of the same storage, shape and strides (the
     binding reads the row strides), then ``row_ids``, ``out`` and the row count as given, then the grid ``(gx, 1,
-    1)``: one argument per parameter of the argument plan, three grid values (no device: the FFI entry is a
-    recorder)."""
-    calls = []
-    monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
+    1)``: one argument per parameter of the argument plan, three grid values.  The second launch on a device, which
+    launches its own program only (no device: the FFI entries are recorders)."""
+    calls = _recorders(monkeypatch)
     buf = torch.zeros(5, PACKED_ROW_BYTES, dtype=torch.uint8)
     weight, scale = buf[:, :ROW_DIM].view(torch.float8_e4m3fn), buf[:, ROW_DIM:].view(torch.float8_e8m0fnu)
     row_ids = torch.zeros(3, N_COLS, dtype=torch.int64)
     out = torch.empty(3, N_COLS, ROW_DIM, dtype=torch.bfloat16)
-    cake_backend._launch("sm_103a", RECORD, weight, scale, row_ids, out, 72, 3)
-    [(name, arch, args)] = calls
+    for _ in range(2):
+        cake_backend._launch("sm_103a", RECORD, weight, scale, row_ids, out, 72, 3, 0)
+    [(name, arch, args)] = calls[2:]
     assert (name, arch) == (RECORD, "sm_103a")
     assert len(args) == len(cake_backend._PARAMETERS) + 3
     w, s, ids, o, positions, gx, gy, gz = args
@@ -302,18 +313,47 @@ def test_a_one_row_table_goes_in_with_compact_strides(monkeypatch) -> None:
     """A one-row table goes in as byte views of the same storage with the compact row strides 256 and 8, not its own
     (the packed 264 here): a DLPack exporter that keeps a compact view's strides may still rewrite another size-1
     stride, and the binding requires multiples of 8 (no device: the FFI entry is a recorder)."""
-    calls = []
-    monkeypatch.setattr(cake_backend, "_entry", lambda name, arch: lambda *args: calls.append(args))
+    calls = _recorders(monkeypatch)
     buf = torch.zeros(1, PACKED_ROW_BYTES, dtype=torch.uint8)
     weight, scale = buf[:, :ROW_DIM].view(torch.float8_e4m3fn), buf[:, ROW_DIM:].view(torch.float8_e8m0fnu)
     assert weight.stride() == (PACKED_ROW_BYTES, 1) and scale.stride() == (PACKED_ROW_BYTES, 1)
     ids, out = torch.zeros(4, dtype=torch.int64), torch.empty(4, ROW_DIM, dtype=torch.bfloat16)
-    cake_backend._launch("sm_100a", SMALL_RECORD, weight, scale, ids, out, 4, 1)
-    [args] = calls
-    w, s = args[:2]
-    assert w.dtype == torch.uint8 and s.dtype == torch.uint8
-    assert (w.data_ptr(), tuple(w.shape), w.stride()) == (weight.data_ptr(), (1, ROW_DIM), (ROW_DIM, 1))
-    assert (s.data_ptr(), tuple(s.shape), s.stride()) == (scale.data_ptr(), (1, NUM_GROUPS), (NUM_GROUPS, 1))
+    cake_backend._launch("sm_100a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 0)
+    assert [name for name, _, _ in calls] == [RECORD, SMALL_RECORD]  # the first launch on the device: both programs
+    for _, _, args in calls:
+        w, s = args[:2]
+        assert w.dtype == torch.uint8 and s.dtype == torch.uint8
+        assert (w.data_ptr(), tuple(w.shape), w.stride()) == (weight.data_ptr(), (1, ROW_DIM), (ROW_DIM, 1))
+        assert (s.data_ptr(), tuple(s.shape), s.stride()) == (scale.data_ptr(), (1, NUM_GROUPS), (NUM_GROUPS, 1))
+
+
+def test_the_first_launch_on_a_device_launches_both_programs(monkeypatch) -> None:
+    """The first launch on a device looks up the entries of both records and launches the program the call did not
+    pick first, with the same arguments, then the call's own (the programs write the same bytes), so the first call
+    on a device runs each kernel once there and a later call, one captured in a CUDA graph included, loads nothing.
+    Later launches on that device launch their own program only; the first launch on another device launches both
+    again (no device: the FFI entries are recorders)."""
+    calls = _recorders(monkeypatch)
+    buf = torch.zeros(5, PACKED_ROW_BYTES, dtype=torch.uint8)
+    weight, scale = buf[:, :ROW_DIM].view(torch.float8_e4m3fn), buf[:, ROW_DIM:].view(torch.float8_e8m0fnu)
+    ids, out = torch.zeros(4, dtype=torch.int64), torch.empty(4, ROW_DIM, dtype=torch.bfloat16)
+    for name, other in ((SMALL_RECORD, RECORD), (RECORD, SMALL_RECORD)):
+        calls.clear()
+        monkeypatch.setattr(cake_backend, "_ENTRIES", {})
+        cake_backend._launch("sm_107a", name, weight, scale, ids, out, 4, 1, 0)
+        assert [(record, arch) for record, arch, _ in calls] == [(other, "sm_107a"), (name, "sm_107a")]
+        (_, _, first), (_, _, own) = calls
+        assert len(own) == len(cake_backend._PARAMETERS) + 3
+        assert all(a is b for a, b in zip(first, own, strict=True))
+        assert sorted(cake_backend._ENTRIES) == sorted((record, 0) for record in RECORDS)
+    calls.clear()
+    for name in (SMALL_RECORD, RECORD, RECORD, SMALL_RECORD):
+        cake_backend._launch("sm_107a", name, weight, scale, ids, out, 4, 1, 0)
+    assert [record for record, _, _ in calls] == [SMALL_RECORD, RECORD, RECORD, SMALL_RECORD]
+    calls.clear()
+    cake_backend._launch("sm_107a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 1)
+    assert [record for record, _, _ in calls] == [RECORD, SMALL_RECORD]
+    assert sorted(cake_backend._ENTRIES) == sorted((record, index) for record in RECORDS for index in (0, 1))
 
 
 def test_the_package_exports_the_backend_entries() -> None:

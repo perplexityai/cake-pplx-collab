@@ -51,6 +51,7 @@ out_m = cake_engram_lookup_det_train_forward(w, s, ids)             # int64 [N] 
 | Retained state | None |
 | Empty `row_ids` | Empty `out`, no launch, before the device's architecture is looked up |
 | Programs | Two per architecture, each for both layouts and every `row_ids` shape: `lookup_small` for at most `SMALL_MAX_POSITIONS` looked-up rows (`cake_jit.py`), `lookup` above. Both write the same bytes. |
+| First call on a device | Loads both libraries (prebuilt or JIT-built) and launches both programs on its operands: first the one its row count does not pick, then its own. Both write the same bytes, so the output is the same. The first launch of a kernel on a device loads its module there (CUDA's lazy module loading), so no later call on the device loads a library or a module, whichever program it launches. Make this call outside a CUDA graph capture; a capture after it, in either program, loads nothing. |
 | Minimum CUDA | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` (`build.json`); an older local toolkit raises `RuntimeError` when the library is built |
 | Row ids | In `[0, R)`. An id outside (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize). |
 
@@ -60,7 +61,8 @@ A violation of the operand rules is a `ValueError` before any launch.
 
 One call launches one kernel on the current torch stream of the operands'
 device, a plain stream-ordered launch: nothing cooperative, no PDL, no shared
-memory.  The call picks one of two programs by the number of looked-up rows:
+memory.  The first call on a device launches two (both programs, see the
+contract table).  The call picks one of two programs by the number of looked-up rows:
 the small program (record `lookup_small`) for at most `SMALL_MAX_POSITIONS`
 rows, the main program (record `lookup`) above.  They compute every element
 the same way and write the same bytes, so the choice changes no output bit,
