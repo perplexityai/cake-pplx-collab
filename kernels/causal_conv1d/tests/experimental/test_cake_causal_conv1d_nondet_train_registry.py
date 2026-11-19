@@ -1800,7 +1800,7 @@ FWD_MIN_S = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
 FWD_ROW_FLOORS = {
     "sm_100a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
     "sm_103a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
-    "sm_107a": {65: 31292, 66: 24576, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
+    "sm_107a": {65: 32767, 66: 62585, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
 }
 # The tap dtypes of the forward row tables.
 FWD_TAPS = ("f32", "bf16")
@@ -1822,7 +1822,7 @@ FWD_SINGLE_TILE_ROWS = {
 FWD_FLOORS = {
     "sm_100a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
     "sm_103a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
-    "sm_107a": {65: 31292, 66: 24576, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
+    "sm_107a": {65: 32767, 66: 62585, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
 }
 # The forward workspace's channel tiles of the narrow rows: the largest tile count of the three plans (C 576: 1, 3,
 # then 4; C 528: 1, then 6), whatever the token floors.  C 520 to 568 hold more than one tile from 0.2.4 on.
@@ -2069,7 +2069,8 @@ def test_forward_narrow_token_floors() -> None:
                     S_min = _fwd_row_floor(arch, route, C // 8, bf16)
                     gap = _fwd_gap(arch, route, C // 8, bf16)
                     steps = (12287, 12288, 12960, 12961, 13312, 13313, 14336, 16383, 16384, 20479, 20480, 24575)
-                    for S in (0, 1, 4096, 8192, *steps, 24576, 31291, 31292, 1 << 20):
+                    edges = (31291, 31292, 32766, 32767, 62584, 62585)
+                    for S in (0, 1, 4096, 8192, *steps, 24576, *edges, 1 << 20):
                         got = cake_jit.channel_split(
                             C, geometry=geometry, role="fwd", route=route, S=S, arch=arch, bf16_taps=bf16
                         )
