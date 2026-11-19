@@ -16022,6 +16022,16 @@ def test_raster_0310_tables(monkeypatch):
 
 
 _RASTER_0310_CASES = tuple((part, row) for part, rows in sorted(RASTER_0310_RANGES.items()) for row in sorted(rows))
+#: The measured token counts inside the ranges of version 0.3.10 whose plan of version 0.3.9 is already the single-CTA
+#: program (in another raster group), ``(arch, sm_count, d_in, d_out, T)``: there the range changes only the raster
+#: group; at the other measured token counts inside the ranges it replaces another program.
+RASTER_0310_SAME_PROGRAM = {
+    ("sm_103a", 148, 6144, 32, 8192),
+    ("sm_100a", 148, 8192, 128, 16231),
+    ("sm_100a", 148, 8192, 128, 16384),
+    ("sm_100a", 148, 6144, 32, 16231),
+    ("sm_100a", 148, 6144, 32, 32768),
+}
 
 
 @pytest.mark.parametrize(
@@ -16076,6 +16086,9 @@ def test_raster_0310_ranges_plan_their_group(monkeypatch, part, row):
         assert plan.sk_units == 0 and plan.promote_blocks == 0, where
         assert plan.group_m == group, where
         assert (before.template, before.group_m) != (plan.template, plan.group_m), where
+        if T in RASTER_0310_MEASURED:
+            same = (arch, sm, d_in, d_out, T) in RASTER_0310_SAME_PROGRAM
+            assert (before.template == plan.template) == same, where
     outside = sorted(
         ({T for lo, hi, _ in bands for T in (lo - 1, hi + 1)} | set(RASTER_0310_MEASURED)) - set(inside)
     )
@@ -16171,8 +16184,10 @@ def test_raster_0310_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, 
     """Each row of the raster ranges of version 0.3.10 at each token count measured inside its ranges runs its default
     plan on its part (148-SM sm_103a or sm_100a), the single-CTA program in the range's raster group: its output is
     judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on three more
-    launches into NaN, its plan differs from the plan of version 0.3.9 (``_tables_039``) on the device, and its output
-    equals that plan's bit for bit.  Another device skips."""
+    launches into NaN, its plan differs from the plan of version 0.3.9 (``_tables_039``) on the device (another
+    program, or at ``RASTER_0310_SAME_PROGRAM`` the same program in another raster group), and its output equals that
+    plan's bit for bit.  Another device skips."""
+    ((arch, sm_count),) = case.programs
     _run_routing_gpu_case(
         case,
         monkeypatch,
@@ -16180,6 +16195,7 @@ def test_raster_0310_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, 
         _tables_039,
         "version 0.3.10",
         plan_changes=True,
+        raster=(arch, sm_count, case.d_in, case.d_out, case.T) in RASTER_0310_SAME_PROGRAM,
     )
 
 
