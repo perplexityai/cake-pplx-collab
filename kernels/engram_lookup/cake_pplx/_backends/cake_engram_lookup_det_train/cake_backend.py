@@ -18,14 +18,20 @@ FP8 E4M3 values with one E8M0 scale per 32 columns, gathered by row id and
 written as BF16 (SM100 / SM103 / SM107).
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
-the one program (its ``library`` stem; the ``build.json`` entries are
-``<library>_<arch>``) and :func:`.cake_jit.grid` the launch grid.
+the two programs (their ``library`` stems; the ``build.json`` entries are
+``<library>_<arch>``), :data:`.cake_jit.SMALL_MAX_POSITIONS` the most looked-up
+rows the small program serves and :func:`.cake_jit.grid` the launch grid.
 :mod:`.cake_build` serves the library from a prebuilt ``aot/`` file when a
 builder compiled it and otherwise through the package's JIT build shim
 (``_cake_pplx_jit.py``) from the sources and flags of ``build.json``.
 
 One call launches one kernel on the current torch stream of the operands'
-device.  For each looked-up row ``p`` with ``r = row_ids[p]`` and each column
+device: the small program (record ``lookup_small``) for at most
+:data:`.cake_jit.SMALL_MAX_POSITIONS` looked-up rows, the main program (record
+``lookup``) above.  The two programs write the same bytes, so the choice
+changes no output bit; a call captured in a CUDA graph keeps the program its
+row count picked at capture.  For each looked-up row ``p`` with
+``r = row_ids[p]`` and each column
 ``c``: ``out[p, c] = bf16(float(weight[r, c]) * float(scale[r, c // 32]))``.
 The kernel decodes the E4M3 values and the E8M0 scale to FP32, multiplies in
 FP32 without flushing subnormals and rounds the product once to BF16.  That is
@@ -36,7 +42,7 @@ every product is exact in FP32 unless it passes the FP32 range (then it is
 columns NaN; the byte ``0`` is 2^-127, an FP32 subnormal.  Byte offsets are
 64-bit, so tables past 2^31 bytes and outputs past 2^31 elements are served.
 
-The one program serves both table layouts and every ``row_ids`` shape: the
+Each program serves both table layouts and every ``row_ids`` shape: the
 binding reads the row strides of ``weight`` and ``scale`` from the tensors
 (two contiguous tensors, or two views into one packed ``[R, 264]`` byte
 buffer), and the number of looked-up rows is a run-time value.  Nothing here
@@ -71,7 +77,9 @@ __all__ = [
     "GROUPS",
     "PACKED_ROW_BYTES",
     "RECORD",
+    "RECORDS",
     "ROW_DIM",
+    "SMALL_RECORD",
     "arch_for_capability",
     "cake_engram_lookup_det_train_forward",
     "cake_engram_lookup_det_train_split_packed",
@@ -95,8 +103,11 @@ GROUP: int = cake_jit.GROUP
 GROUPS: int = cake_jit.GROUPS
 PACKED_ROW_BYTES: int = cake_jit.PACKED_ROW_BYTES
 
-# The registry record of the lookup (its only stage).
+# The registry records of the lookup (its only stage): the main program, and the small program a call launches for
+# at most ``cake_jit.SMALL_MAX_POSITIONS`` looked-up rows.
 RECORD = "lookup"
+SMALL_RECORD = "lookup_small"
+RECORDS = (RECORD, SMALL_RECORD)
 
 # The operand dtypes.
 _E4M3 = torch.float8_e4m3fn
@@ -112,7 +123,7 @@ _ALIGNMENT = 8
 # 2^31 - 8, which leaves room for a step of up to 8 rows.
 _MAX_POSITIONS = 2**31 - 8
 
-# The kernel parameters of the lookup program, in launch order (the registry's argument plan without the grid).
+# The kernel parameters of either lookup program, in launch order (the registry's argument plan without the grid).
 _PARAMETERS = ("w", "s", "row_ids", "out", "P")
 
 
@@ -206,20 +217,27 @@ def parameters(name: str) -> tuple[str, ...]:
 
 
 @functools.cache
-def _entry(arch: str) -> Any:
-    """The FFI entry of the lookup in its ``arch`` library (looked up once per process), after checking that the
+def _entry(name: str, arch: str) -> Any:
+    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process), after checking that the
     registry's argument plan is the one :func:`_launch` passes."""
-    names = parameters(RECORD)
+    names = parameters(name)
     if names != _PARAMETERS:
         raise RuntimeError(
-            f"the Cake Engram row lookup program takes the parameters {list(names)}; this host code passes "
+            f"the Cake Engram row lookup program {name} takes the parameters {list(names)}; this host code passes "
             f"{list(_PARAMETERS)}"
         )
-    return getattr(load(RECORD, arch), record(RECORD)["ffi_entry"])
+    return getattr(load(name, arch), record(name)["ffi_entry"])
+
+
+def _record_for(positions: int) -> str:
+    """The record a lookup of ``positions`` rows launches: :data:`SMALL_RECORD` for at most
+    ``cake_jit.SMALL_MAX_POSITIONS`` rows, :data:`RECORD` above (read at each call)."""
+    return SMALL_RECORD if positions <= cake_jit.SMALL_MAX_POSITIONS else RECORD
 
 
 def _launch(
     arch: str,
+    name: str,
     weight: torch.Tensor,
     scale: torch.Tensor,
     row_ids: torch.Tensor,
@@ -227,12 +245,12 @@ def _launch(
     positions: int,
     grid_x: int,
 ) -> None:
-    """Launch the lookup on ``grid_x`` CTAs: ``out`` (BF16 ``[*row_ids.shape, 256]``, contiguous) from the rows
-    ``row_ids`` (int64, contiguous, ``positions`` elements) of ``weight`` and ``scale``.  The one place the program's
-    argument list is spelled: the table operands go in as byte views of the same strides (the binding reads the row
-    strides from them), then the ids, the output, the row count and the grid.  tvm-ffi runs the call on the current
-    torch stream of the device of its first CUDA tensor argument (every operand is on that device), and the binding
-    makes that device current for the launch.
+    """Launch the program of record ``name`` on ``grid_x`` CTAs: ``out`` (BF16 ``[*row_ids.shape, 256]``, contiguous)
+    from the rows ``row_ids`` (int64, contiguous, ``positions`` elements) of ``weight`` and ``scale``.  The one place
+    the programs' argument list is spelled: the table operands go in as byte views of the same strides (the binding
+    reads the row strides from them), then the ids, the output, the row count and the grid.  tvm-ffi runs the call on
+    the current torch stream of the device of its first CUDA tensor argument (every operand is on that device), and
+    the binding makes that device current for the launch.
 
     A one-row table goes in with its compact row strides (256 and 8) instead.  Its row stride changes no address: the
     kernel multiplies it by the row id, the only valid id is 0, and any other id traps before a row is read.  The
@@ -246,7 +264,7 @@ def _launch(
     if w.shape[0] == 1:
         w = w.as_strided((1, ROW_DIM), (ROW_DIM, 1))
         s = s.as_strided((1, GROUPS), (GROUPS, 1))
-    _entry(arch)(w, s, row_ids, out, positions, grid_x, 1, 1)
+    _entry(name, arch)(w, s, row_ids, out, positions, grid_x, 1, 1)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -352,7 +370,8 @@ def cake_engram_lookup_det_train_forward(
     empty output and launches nothing, before the device's architecture is looked up.
 
     Every output element is one product rounded once, so the output repeats bit for bit.  The kernel runs on the
-    current stream of the operands' device; nothing synchronizes.
+    current stream of the operands' device; nothing synchronizes.  At most ``cake_jit.SMALL_MAX_POSITIONS`` looked-up
+    rows launch the small program, more the main one: both write the same bytes.
     """
     try:
         accepted = _accepted(weight, scale, row_ids)
@@ -366,7 +385,8 @@ def cake_engram_lookup_det_train_forward(
     index = row_ids.get_device()
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES, before the allocation
     out = torch.empty(shape, dtype=torch.bfloat16, device=row_ids.device)
-    _launch(arch, weight, scale, row_ids, out, positions, cake_jit.grid(positions, sm_count(index), arch)[0])
+    grid_x = cake_jit.grid(positions, sm_count(index), arch)[0]
+    _launch(arch, _record_for(positions), weight, scale, row_ids, out, positions, grid_x)
     return out
 
 

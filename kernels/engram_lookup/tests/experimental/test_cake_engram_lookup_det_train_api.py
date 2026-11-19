@@ -32,11 +32,12 @@ On SM100 / SM103 / SM107, every comparison bit for bit against the FP64 referenc
 of ``[T, 24]`` and ``[M]`` ids in both layouts (the packed one through the public views), operands on an 8-byte (not
 16-byte) boundary; the launch runs on the current stream without synchronizing (behind a sleep on a side stream,
 under ``torch.cuda.set_sync_debug_mode("error")``); a call captured in a CUDA graph replays to the eager bits and reads
-the table and ids it is replayed on; under ``torch.utils.checkpoint(..., use_reentrant=False)`` the lookup runs twice
-(once without) and a BF16 linear layer after it has the same outputs and weight gradients, under
-``torch.use_deterministic_algorithms(True)`` with ``CUBLAS_WORKSPACE_CONFIG=:4096:8``, in a fresh process; an id outside
-the table (``R``, ``-1``, ``2**62``; first, middle and tail-step positions) raises, in a fresh process, and ``R - 1``
-does not; the call
+the table and ids it is replayed on, for a call of either program (the small one for at most the backend's
+``cake_jit.SMALL_MAX_POSITIONS`` looked-up rows: the replay launches the program the capture picked); under
+``torch.utils.checkpoint(..., use_reentrant=False)`` the lookup runs twice (once without) and a BF16 linear layer
+after it has the same outputs and weight gradients, under ``torch.use_deterministic_algorithms(True)`` with
+``CUBLAS_WORKSPACE_CONFIG=:4096:8``, in a fresh process; an id outside the table (``R``, ``-1``, ``2**62``; first,
+middle and tail-step positions) raises, in a fresh process, and ``R - 1`` does not, through either program; the call
 allocates exactly its output (the workspace is 0 bytes); under ``torch.use_deterministic_algorithms(True)``, strict or
 ``warn_only``, no alert, no warning and the same bits (the output allocated in the mode is NaN-filled first, so every
 element is written); with two devices, operands on the device that is not current give the reference's bits there.
@@ -474,13 +475,26 @@ def test_runs_on_the_current_stream_without_synchronizing() -> None:
     assert torch.equal(_bits(got), _bits(want))
 
 
-def test_a_call_captured_in_a_cuda_graph_replays() -> None:
-    """A call captured in a CUDA graph: after its output is filled with NaN, the replay writes the eager bits; after
-    new table bytes and new ids are copied into the captured operands, the replay gives the lookup of those."""
+@pytest.mark.parametrize("program", ("main", "small"))
+def test_a_call_captured_in_a_cuda_graph_replays(program, monkeypatch) -> None:
+    """A call captured in a CUDA graph, of ``[128, 24]`` ids (the main program) or of ``SMALL_MAX_POSITIONS`` ids (the
+    small one): the capture launches that program; after its output is filled with NaN, the replay writes the eager
+    bits; after new table bytes and new ids are copied into the captured operands, the replay gives the lookup of
+    those."""
     device = _device_or_skip()
     rows = 2048
+    backend = _backend()
+    shape = (128, N_COLS) if program == "main" else (backend.cake_jit.SMALL_MAX_POSITIONS,)
     table = _public_table(*random_bytes(rows, seed=131, nan_every=7), "packed", device)
-    ids = random_ids(rows, (128, N_COLS), seed=132, device=device)
+    ids = random_ids(rows, shape, seed=132, device=device)
+    launched = []
+    launch = backend._launch
+
+    def recorded(arch, name, *args):
+        launched.append(name)
+        return launch(arch, name, *args)
+
+    monkeypatch.setattr(backend, "_launch", recorded)
     eager = _lookup(table, ids)  # loads the library before the capture
     stream = torch.cuda.Stream(device)
     stream.wait_stream(torch.cuda.current_stream(device))
@@ -491,6 +505,8 @@ def test_a_call_captured_in_a_cuda_graph_replays() -> None:
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         captured = _lookup(table, ids)
+    want = backend.RECORD if program == "main" else backend.SMALL_RECORD
+    assert launched == [want] * 3, launched
     _bits(captured).fill_(-1)
     graph.replay()
     torch.cuda.synchronize(device)
@@ -498,7 +514,7 @@ def test_a_call_captured_in_a_cuda_graph_replays() -> None:
     weight_bytes, scale_bytes = random_bytes(rows, seed=133)
     table.packed[:, :ROW_DIM].copy_(weight_bytes.to(device))
     table.packed[:, ROW_DIM:].copy_(scale_bytes.to(device))
-    ids.copy_(random_ids(rows, (128, N_COLS), seed=134, device=device))
+    ids.copy_(random_ids(rows, shape, seed=134, device=device))
     graph.replay()
     torch.cuda.synchronize(device)
     assert torch.equal(_bits(captured), _bits(_lookup(table, ids)))
@@ -594,19 +610,19 @@ def test_checkpoint_non_reentrant_repeats_the_lookup_bitwise() -> None:
 
 
 # An id outside the table, in a fresh process (the trap leaves the process's CUDA context unusable): the lookup of
-# 1001 ids into a 64-row table with the id at position ``at`` replaced by ``bad`` (position 1000 sits in the tail
-# step), then a synchronize.  argv: the facade module, the id, its position.
+# ``count`` ids into a 64-row table with the id at position ``at`` replaced by ``bad``, then a synchronize.  argv: the
+# facade module, the id, its position, the number of ids.
 TRAP_SCRIPT = r"""
 import importlib, json, sys
 import torch
 
 facade = importlib.import_module(sys.argv[1])
-bad, at = int(sys.argv[2]), int(sys.argv[3])
+bad, at, count = int(sys.argv[2]), int(sys.argv[3]), int(sys.argv[4])
 device = torch.device("cuda:0")
 rows = 64
 weight = torch.zeros(rows, 256, dtype=torch.uint8, device=device).view(torch.float8_e4m3fn)
 scale = torch.full((rows, 8), 127, dtype=torch.uint8, device=device).view(torch.float8_e8m0fnu)
-ids = torch.arange(1001, device=device) % rows
+ids = torch.arange(count, device=device) % rows
 ids[at] = bad
 try:
     facade.cake_engram_lookup_det_train_forward(weight, scale, ids)
@@ -620,16 +636,20 @@ else:
 
 @pytest.mark.parametrize(
     ("bad", "at", "raised"),
-    ((64, 0, True), (64, 1000, True), (-1, 500, True), (2**62, 7, True), (63, 1000, False)),
+    ((64, 0, True), (64, -1, True), (-1, 0.5, True), (2**62, 7, True), (63, -1, False)),
     ids=("R-first", "R-tail-step", "negative", "huge", "R-minus-1-in-range"),
 )
-def test_an_id_outside_the_table_traps(bad, at, raised) -> None:
+@pytest.mark.parametrize("program", ("main", "small"))
+def test_an_id_outside_the_table_traps(program, bad, at, raised) -> None:
     """An id outside ``[0, R)`` (a negative id included) stops the launch with a device-side trap, so the call or the
     next synchronize raises instead of returning rows read from outside the table; the last row, ``R - 1``, does
-    not."""
+    not.  Through the main program (1001 ids; the last position sits in the tail step) and the small one
+    (``SMALL_MAX_POSITIONS`` ids)."""
     _device_or_skip()
+    count = 1001 if program == "main" else _backend().cake_jit.SMALL_MAX_POSITIONS
+    at = count - 1 if at == -1 else (int(count * at) if isinstance(at, float) else min(at, count - 1))
     result = subprocess.run(
-        [sys.executable, "-c", TRAP_SCRIPT, api.__name__, str(bad), str(at)],
+        [sys.executable, "-c", TRAP_SCRIPT, api.__name__, str(bad), str(at), str(count)],
         capture_output=True,
         text=True,
         timeout=900,
