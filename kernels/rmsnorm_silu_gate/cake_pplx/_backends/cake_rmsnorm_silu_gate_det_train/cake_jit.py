@@ -1197,16 +1197,18 @@ NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # cut.  Measured on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster
 # than the 128-thread strided build up to this cut, slower on sm_100a at 332
 # rows per SM.  Measured on sm_107a (CUDA Graph replays, hot L2): faster at
-# every measured row count up to this cut but 96 rows per SM (the same); the
-# same from 512 to 1280, leaning slower (0.992 to 0.996), and faster at 1535
-# (1.018).  The cut is the last faster point below that band.  Cold L2:
-# every row flagged slower read the same or faster when timed again; one of
-# them read slower again on its own GPU and the same on the other three.
-# Host plan only.
+# every measured row count up to 384 rows per SM but 96 (the same); the same
+# from 512 to 1280, leaning slower (0.992 to 0.996), and faster at 1535
+# (1.018).  Cold L2: up to this cut every row flagged slower read the same
+# when timed again; past it rows from 224 to 384 rows per SM were flagged
+# slower (by up to 5.1 %), and 256 rows per SM read 1.3 to 1.9 % slower in
+# eager in six of eight timings on three GPUs, timed-again ones included
+# (one, on the first full run, read 2.4 % faster), so the cut is the last
+# measured point below them.  Host plan only.
 PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},
-    "sm_107a": {"bwd_bf16": 384},
+    "sm_107a": {"bwd_bf16": 192},
 }
 # A call without the weight gradient on rows that are not packed runs the
 # 128-thread strided build (``role + NODW + STRIDED + PACKED``: other layouts

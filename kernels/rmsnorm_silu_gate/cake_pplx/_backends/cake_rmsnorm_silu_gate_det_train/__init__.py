@@ -74,11 +74,11 @@ Host design (every control is a keyword; no environment variable):
   stride 128: its token index is 0, so its token stride never enters an
   address, and the call passes it as ``H * 128`` so that the packed-row test
   and the packed-only build's argument check hold; on SM107 only up to the
-  cut of the build of packed rows only, 384 rows per SM) its 128-thread builds,
+  cut of the build of packed rows only, 192 rows per SM) its 128-thread builds,
   ``min(ceil(rows / 8), 8 * SMs)`` CTAs walking their 8-row blocks (a row to
   each 16 lanes, as in the BF16 backward; packed rows read at their linear
   offsets), up to ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows per SM
-  (measured: 128 on SM100 and SM103, 384 on SM107) the build of packed rows
+  (measured: 128 on SM100 and SM103, 192 on SM107) the build of packed rows
   only, which takes no stride test and reduces a row's sum of squares and
   dot product across its lanes together, past it the build that reads any
   layout; on other layouts that build up to
@@ -210,11 +210,11 @@ _ALIGNMENT_BYTES = ALIGNMENT_ELEMENTS * 2
 # SM107): at every row count where a strided cut is (a claimed program past
 # it: SM100 and SM103, as in 0.2.7), else (SM107) up to that cut, where the
 # build of packed rows only runs it.  Past that cut one token would run the
-# 128-thread strided build, which for one token is the same as or faster
-# than the 256-thread program up to 1024 rows per SM but slower from 1533
-# (measured on SM107, cold L2), so there one token keeps the token stride 0
-# and the 256-thread program of 0.2.7.  Elsewhere one token keeps the token
-# stride 0 and runs the programs of other layouts.
+# 128-thread strided build, which for one token is slower than the
+# 256-thread program from 1533 rows per SM (measured on SM107, cold L2; the
+# same or faster from 384 to 1024), so past the cut one token keeps the
+# token stride 0 and the 256-thread program of 0.2.7.  Elsewhere one token
+# keeps the token stride 0 and runs the programs of other layouts.
 _ONE_TOKEN_PACKED_ROWS_PER_SM = {
     arch: (
         2**31

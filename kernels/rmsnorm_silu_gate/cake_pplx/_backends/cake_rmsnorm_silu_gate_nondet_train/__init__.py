@@ -65,7 +65,7 @@ same ``dx`` and ``dz`` bits.
 Version 0.2.8 changes nothing in this package and no bits: on sm_107a the
 deterministic package's backward without the weight gradient runs its
 128-thread strided build on rows of any layout up to 96 rows per SM, and on
-packed rows (and one token) up to 384 rows per SM a build of packed rows
+packed rows (and one token) up to 192 rows per SM a build of packed rows
 only, with the same ``dx`` and ``dz`` bits.
 A band runs a
 backward whose weight gradient may vary only where the band-selection

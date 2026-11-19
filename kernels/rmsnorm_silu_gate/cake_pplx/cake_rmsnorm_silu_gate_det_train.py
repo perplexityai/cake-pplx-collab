@@ -57,8 +57,8 @@ SM107 except where the look-ahead program runs, its CTAs walk their row
 blocks with no claim, no ticket and no workspace: 128-thread CTAs over
 8-row blocks where ``grad_out``, ``x`` and ``z`` hold packed rows (head
 stride 128 and token stride ``H * 128``; also one token of head stride 128,
-on SM107 only up to 384 rows per SM; and a build for packed rows only up to
-128 rows per SM on SM100 and SM103 and up to 384 on SM107), and on other
+on SM107 only up to 192 rows per SM; and a build for packed rows only up to
+128 rows per SM on SM100 and SM103 and up to 192 on SM107), and on other
 layouts up to 32 rows per SM on SM100 and SM103 and up to 96 on SM107,
 256-thread CTAs over 16-row blocks on other layouts past that; on SM100 and
 SM103 past the 768-row cut the claimed program runs on the workspace.  No

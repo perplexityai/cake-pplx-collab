@@ -1304,7 +1304,7 @@ STRIDED_PROGRAMS = {
 SMALL_ROWS_PER_SM = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},
-    "sm_107a": {"bwd_bf16": 384},
+    "sm_107a": {"bwd_bf16": 192},
 }
 ANY_LAYOUT_ROWS_PER_SM = {
     "sm_100a": {"bwd_bf16": 32},
@@ -3383,10 +3383,10 @@ def test_one_token_is_packed_rows_only_where_a_small_cut_is():
     (``PACKED_SMALL_ROWS_PER_SM``): sm_100a, sm_103a and sm_107a (from
     version 0.2.8; in version 0.2.7 sm_100a and sm_103a), at every row count
     where a strided cut is (sm_100a, sm_103a) and up to the cut of that
-    build where none is (sm_107a, 384 rows per SM; past it the 256-thread
+    build where none is (sm_107a, 192 rows per SM; past it the 256-thread
     program of version 0.2.7)."""
     limits = pkg._ONE_TOKEN_PACKED_ROWS_PER_SM
-    assert limits == {"sm_100a": 2**31, "sm_103a": 2**31, "sm_107a": 384}
+    assert limits == {"sm_100a": 2**31, "sm_103a": 2**31, "sm_107a": 192}
     for arch in loader.ARCHES:
         small = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
         for sm_count in GRID_SM_COUNTS:
