@@ -2072,7 +2072,9 @@ def test_device_logprob_graph_rlab(glm_weight):
     )
     for entry, T, chunk, compact in cases:
         case = (entry.__name__, T, chunk, compact)
-        inp = make_inputs(T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
+        inp = make_inputs(
+            T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05
+        )
         labels = inp.labels.clone()
         labels[: edge.numel()] = edge
         dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
@@ -2126,11 +2128,18 @@ def test_device_logprob_graph_rlab(glm_weight):
         bindings = list(cake_backend.BINDING_CACHE._bindings.values())
         assert bindings, case
         for b in bindings:
-            assert not any(k[0] == cake_backend.RLAB_ZERO_STAGE for k in b.forward_order + b.backward_order), case
+            assert not any(
+                k[0] == cake_backend.RLAB_ZERO_STAGE
+                for k in b.forward_order + b.backward_order
+            ), case
         ref = out[True] + [out[True][0], out[True][0]]
         assert len(out[False]) == len(ref), case
         for i, (got, want) in enumerate(zip(out[False], ref)):
-            assert _same_bits(got[0], want[0]) and _same_bits(got[1], want[1]), (case, i)
+            assert _same_bits(got[0], want[0]) and _same_bits(got[1], want[1]), (
+                case,
+                i,
+            )
+
 
 def _det_sliced(stage: str) -> bool:
     """A deterministic K-sliced dX stage name (``gemm_dx_s`` and its forms; ``gemm_dx_st3`` is the plain store)."""

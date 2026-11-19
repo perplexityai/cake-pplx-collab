@@ -9315,11 +9315,17 @@ def test_device_logprob_graph_rlab(glm_weight):
     )
 
     def same(a, b):
-        return a.dtype == b.dtype and a.shape == b.shape and torch.equal(_bits(a), _bits(b))
+        return (
+            a.dtype == b.dtype
+            and a.shape == b.shape
+            and torch.equal(_bits(a), _bits(b))
+        )
 
     for entry, T, chunk, compact in cases:
         case = (entry.__name__, T, chunk, compact)
-        inp = make_inputs(T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
+        inp = make_inputs(
+            T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05
+        )
         labels = inp.labels.clone()
         labels[: edge.numel()] = edge
         dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
@@ -9373,7 +9379,10 @@ def test_device_logprob_graph_rlab(glm_weight):
         bindings = list(cake_backend.BINDING_CACHE._bindings.values())
         assert bindings, case
         for b in bindings:
-            assert not any(k[0] == cake_backend.RLAB_ZERO_STAGE for k in b.forward_order + b.backward_order), case
+            assert not any(
+                k[0] == cake_backend.RLAB_ZERO_STAGE
+                for k in b.forward_order + b.backward_order
+            ), case
         ref = out[True] + [out[True][0], out[True][0]]
         assert len(out[False]) == len(ref), case
         for i, (got, want) in enumerate(zip(out[False], ref)):

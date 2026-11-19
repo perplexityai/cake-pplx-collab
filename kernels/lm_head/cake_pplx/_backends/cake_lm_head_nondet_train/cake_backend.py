@@ -11744,7 +11744,11 @@ def _logprob_graph_rlab(
     (:meth:`_Binding._call_rlab`)."""
     if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
         return None
-    rows = (int(X.shape[0]) if X.ndim else 0) if row_index is None else int(row_index.numel())
+    rows = (
+        (int(X.shape[0]) if X.ndim else 0)
+        if row_index is None
+        else int(row_index.numel())
+    )
     if rows <= 0:
         return None
     if not kept and (
