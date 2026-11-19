@@ -133,7 +133,6 @@ JIT variables):
 
 from __future__ import annotations
 
-import bisect
 import functools
 import math
 import numbers
@@ -271,14 +270,22 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[tuple[int, ...], _Plan, _Plan]:
-    """``(edges, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
-    device's architecture and SM count (``cake_jit.route``): a launch of ``rows`` rows runs the plan ``large`` when
-    ``bisect.bisect_left(edges, rows)`` is odd (``rows`` in a window of the large-R program), any other the plan
-    ``small``.  No library is loaded here: a program's library loads at its first launch."""
+def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Plan]:
+    """``(limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per stage and device
+    from the device's architecture and SM count (``cake_jit.route``).  A launch of ``rows < limit`` rows runs the plan
+    ``large`` when ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it
+    is 0; a launch of more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.
+    ``limit`` is one above the last edge of ``cake_jit.route`` (0 without a window).  The launch looks up one byte
+    instead of searching the edges: on Grace, a search per launch measured 1-3 % more host time per call.  No library
+    is loaded here: a program's library loads at its first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
     edges, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
-    return edges, (small, *_plan(small)), (large, *_plan(large))
+    limit = edges[-1] + 1 if edges else 0
+    table = bytearray(limit)
+    for below, last in zip(edges[0::2], edges[1::2]):
+        table[below + 1 : last + 1] = bytes([1]) * (last - below)
+    small, large = (small, *_plan(small)), (large, *_plan(large))
+    return limit, bytes(table), small, large, large if len(edges) % 2 else small
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
@@ -289,8 +296,8 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs."""
-    edges, small, large = _route(stage, device_index)
-    name, arguments, per_cta = large if bisect.bisect_left(edges, rows) & 1 else small
+    limit, table, small, large, tail = _route(stage, device_index)
+    name, arguments, per_cta = (large if table[rows] else small) if rows < limit else tail
     try:
         args = arguments(values)
     except KeyError:

@@ -59,7 +59,6 @@ The suite names its package once, through the shared alias helper, and imports n
 from __future__ import annotations
 
 import ast
-import bisect
 import fractions
 import hashlib
 import inspect
@@ -249,11 +248,15 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
 
 def _force(patch: pytest.MonkeyPatch, program: str) -> None:
     """Every launch runs the ``program`` (``"small"`` or ``"large"``) of its stage on its device, whatever its row
-    count: the route's edges become none (no window) or ``(0,)`` (one window from 1 row on).  An architecture without
-    a large-R program of a stage runs the small-R one either way."""
+    count: the route's limit becomes 0, so every launch runs its tail, the small-R or the large-R plan.  An
+    architecture without a large-R program of a stage runs the small-R one either way."""
     route = pkg._route
-    edges = () if program == "small" else (0,)
-    patch.setattr(pkg, "_route", lambda stage, device_index: (edges, *route(stage, device_index)[1:]))
+
+    def forced(stage: str, device_index: int) -> tuple:
+        _, _, small, large, _ = route(stage, device_index)
+        return 0, b"", small, large, large if program == "large" else small
+
+    patch.setattr(pkg, "_route", forced)
 
 
 def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bool:
@@ -263,8 +266,8 @@ def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bo
 
 def _routed(stage: str, rows: int, device_index: int) -> str:
     """The program a launch of ``stage`` for ``rows`` rows runs on device ``device_index``."""
-    edges, small, large = pkg._route(stage, device_index)
-    return (large if bisect.bisect_left(edges, rows) % 2 else small)[0]
+    limit, table, small, large, tail = pkg._route(stage, device_index)
+    return ((large if table[rows] else small) if rows < limit else tail)[0]
 
 
 def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[list[list[int | None]], str, str]:
@@ -515,13 +518,17 @@ def test_rows_route_to_the_small_or_the_large_program(stage, arch, sm_count, hos
     """A launch whose rows lie in a window of the large-R record (``lo * SMs <= rows <= hi * SMs`` for a window
     ``[lo, hi]`` of its ``rows_per_sm_windows`` on the architecture) runs the stage's large-R program, any other its
     small-R program, on that program's grid: 1 row, one row below, at and above each edge of the windows, and
-    ``MAX_ROWS - 1`` rows."""
+    ``MAX_ROWS - 1`` rows.  The package's route holds a byte per row count below one above the last edge, 1 exactly
+    in a window, and runs the large-R program above it when the last window has no upper bound."""
     windows, small, large = _expected_route(stage, arch, sm_count)
     edges = _edges(windows, sm_count)
     assert cake_jit.route(stage, arch, sm_count) == (tuple(edges), small, large)
     host_device.place(arch, sm_count)
-    got = pkg._route(stage, 0)
-    assert (got[0], got[1][0], got[2][0]) == (tuple(edges), small, large)
+    limit, table, got_small, got_large, tail = pkg._route(stage, 0)
+    assert (got_small[0], got_large[0]) == (small, large)
+    assert limit == (edges[-1] + 1 if edges else 0)
+    assert table == bytes(_in_windows(windows, sm_count, rows) for rows in range(limit))
+    assert tail[0] == (large if windows and windows[-1][1] is None else small)
     values = {key: f"<{key}>" for key in PARAMETERS[stage]}
     ran = set()
     for rows in _edge_rows(edges):
