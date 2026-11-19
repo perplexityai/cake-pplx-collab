@@ -638,7 +638,7 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
     assert launches == (["fwd"] if pack.S <= 256 else ["pair_table", "fwd"]), pack.id
     tables = [t for t in saved if t.dtype == torch.int32 and t.data_ptr() != x.cu.data_ptr()]
     assert len(tables) == 1
-    assert_bitwise(tables[0], pair_table_of(pack.lengths, device), f"{pack.id}: saved pair table")
+    assert torch.equal(tables[0], pair_table_of(pack.lengths, device)), f"{pack.id}: saved pair table"
     explicit = api.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
     assert_bitwise(explicit, out.detach(), f"{pack.id}: out")
 
