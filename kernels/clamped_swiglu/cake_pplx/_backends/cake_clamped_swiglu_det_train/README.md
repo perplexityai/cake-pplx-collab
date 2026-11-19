@@ -141,7 +141,7 @@ warp is contiguous.  The programs differ in their schedule:
 
 More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs (`cake_jit.grid`,
 from the launch block and `cake_jit.BUILD_OF`).  A row past `R` loads the last row and stores nothing.  The programs of
-a stage compute each element with the same FP32 operations (the exact sigmoid gives the bits of the fast one wherever
+a stage compute each element with the same FP32 operations (the deep-gate sigmoid gives the bits of the fast one wherever
 the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's
 columns in load order with the same lanes.  So both programs store the same bits for every input: the route changes no
 output bit.  No program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The
@@ -155,7 +155,9 @@ architecture serves every call.
 - `s = 1 / (1 + 2^(-g' log2 e))`: the approximate base-2 exponential (`ex2.approx.ftz`; `1 + 2^t` absorbs a flushed
   subnormal `2^t`) and the approximate reciprocal plus one round-to-nearest Newton step, which is the IEEE `rcp.rn` of
   every `1 <= d < 2^126`.  A warp with a clamped gate at or below -87 in a run of its loads computes that run with a
-  branch-free exact reciprocal: `RN(1 / d)` for every `d`, subnormal results kept, +0 for an infinite `d`.
+  scaled reciprocal: the Newton reciprocal of `d 2^-126`, times `2^-126` with one rounding.  That is `RN(1 / d)`
+  where the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.2 rounded it exactly, with
+  four more instructions per element), +0 for an infinite `d`.
 - `silu = g' s`, `a = silu u'`, `h = bf16(w a)`: one rounding.
 - `d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])` (one FMA for `silu (1 - s) + s`) and
   `d_up = bf16((dh w) silu [-L <= u <= L])`, each mask a factor of 1 or 0, each output rounded once.

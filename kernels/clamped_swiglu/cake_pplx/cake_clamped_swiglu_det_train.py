@@ -40,9 +40,9 @@ default: pass the model's value (``swiglu_limit``, 10.0 for
 DeepSeek-V4.1-Flash) on every call.
 
 The sigmoid uses the approximate FP32 base-2 exponential and the approximate
-reciprocal with one round-to-nearest Newton step (exact below the flushed
-reciprocal's range); every product rounds to nearest without flushing
-subnormals, and nothing is FP64.  The tests hold ``h``, ``d_gate``, ``d_up``
+reciprocal with one round-to-nearest Newton step (below the flushed
+reciprocal's range a scaled reciprocal, within one subnormal ulp); every
+product rounds to nearest without flushing subnormals, and nothing is FP64.  The tests hold ``h``, ``d_gate``, ``d_up``
 and ``d_weight`` to the PyTorch BF16 naive implementation of the same
 operation (the clamps written as selects, so autograd gives the inclusive
 masks; the FP32 weight kept FP32; the gradients from PyTorch autograd), each
