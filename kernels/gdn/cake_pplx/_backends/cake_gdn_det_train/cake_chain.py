@@ -140,6 +140,15 @@ import torch
 
 from . import cake_backend, cake_jit, cake_plan
 
+# fn(*args) with no Python frame of its own (Python 3.11+)
+try:
+    from operator import call as _call
+except ImportError:  # Python 3.10
+
+    def _call(fn, *args):
+        return fn(*args)
+
+
 __all__ = [
     "CHAIN_PLAN",
     "CHUNK",
@@ -544,9 +553,19 @@ def _tensor_index(t) -> int:
     return index if index >= 0 else torch.cuda.current_device()
 
 
+def _launch(stage, gx, gy, gz, *values):
+    """Launch ``stage`` on ``(gx, gy, gz)``; ``values`` in call-site order, the first a tensor on the device."""
+    device_index = _tensor_index(values[0])
+    order = _order(stage, cake_backend.device_arch(device_index))
+    if order is not None:
+        values = tuple(values[i] for i in order)
+    cake_backend.launch_stage(stage, (gx, gy, gz), values, device_index=device_index)
+
+
 def _prepared(stage, gx, gy, gz, *values):
-    """The launch of ``stage`` on ``(gx, gy, gz)`` resolved for :func:`_fire`: ``values`` in call-site order (the
-    first a tensor on the device) put in the record's parameter order."""
+    """The launch of ``stage`` on ``(gx, gy, gz)`` as :func:`_launch` makes it, resolved for :func:`_fire` (a forward's
+    recording keeps it): ``values`` in call-site order (the first a tensor on the device) put in the record's
+    parameter order."""
     device_index = _tensor_index(values[0])
     order = _order(stage, cake_backend.device_arch(device_index))
     if order is not None:
@@ -555,14 +574,9 @@ def _prepared(stage, gx, gy, gz, *values):
 
 
 def _fire(launch) -> None:
-    """Run one launch of :func:`_prepared`."""
+    """Run one launch of :func:`_prepared` (a forward's recording)."""
     stage, grid, values, device_index = launch
     cake_backend.launch_stage(stage, grid, values, device_index=device_index)
-
-
-def _launch(stage, gx, gy, gz, *values):
-    """Launch ``stage`` on ``(gx, gy, gz)``; ``values`` in call-site order, the first a tensor on the device."""
-    _fire(_prepared(stage, gx, gy, gz, *values))
 
 
 # --------------------------------------------------------------------------- #
@@ -2488,8 +2502,10 @@ def wy_stage(arch: str) -> str:
 
 def _wy_outputs(kn, v, total_tokens, num_v_heads, ex=None):
     ex = ex or _DIRECT
-    w = ex.empty((total_tokens, num_v_heads, HEAD_DIM), kn.dtype, kn.device)
-    u = ex.empty(v.shape, v.dtype, v.device)
+    w = ex.empty(
+        (total_tokens, num_v_heads, HEAD_DIM), dtype=kn.dtype, device=kn.device
+    )
+    u = ex.empty(v.shape, dtype=v.dtype, device=v.device)
     return w, u
 
 
@@ -2642,12 +2658,18 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
     the forward's executor (:data:`_DIRECT` when ``None``)."""
     ex = ex or _DIRECT
     device = kn.device
-    h = ex.empty((meta.num_chunks, num_v_heads, HEAD_DIM, HEAD_DIM), kn.dtype, device)
-    v_new = ex.empty(u.shape, u.dtype, device)
-    o = ex.empty(u.shape, u.dtype, device)
+    h = ex.empty(
+        (meta.num_chunks, num_v_heads, HEAD_DIM, HEAD_DIM),
+        dtype=kn.dtype,
+        device=device,
+    )
+    v_new = ex.empty(u.shape, dtype=u.dtype, device=device)
+    o = ex.empty(u.shape, dtype=u.dtype, device=device)
     if store_final_state:
         final_state = ex.empty(
-            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), torch.float32, device
+            (meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM),
+            dtype=torch.float32,
+            device=device,
         )
     else:
         final_state = workspaces.take(table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), torch.float32,
@@ -2943,7 +2965,7 @@ def _start_state(initial_state, meta: ChunkMeta, output_final_state: bool, num_v
     ex = ex or _DIRECT
     f32 = torch.float32
     if output_final_state:
-        final_state = ex.empty((meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device)  # fmt: skip
+        final_state = ex.empty((meta.num_seqs, num_v_heads, HEAD_DIM, HEAD_DIM), dtype=f32, device=device)  # fmt: skip
     else:
         final_state = workspaces.take(
             table, "f_zero_state", (0, num_v_heads, HEAD_DIM, HEAD_DIM), f32, device
@@ -2964,12 +2986,12 @@ def _launch_wy_a(q, k, g32, beta32, meta: ChunkMeta, num_heads: int, num_v_heads
     ex = ex or _DIRECT
     total_tokens = q.numel() // (num_heads * HEAD_DIM)
     device, f32, bf16 = q.device, torch.float32, q.dtype
-    qn = ex.empty(q.shape, bf16, device)
-    kn = ex.empty(k.shape, bf16, device)
-    rstd_q = ex.empty((total_tokens, num_heads), f32, device)
-    rstd_k = ex.empty((total_tokens, num_heads), f32, device)
-    g_cs = ex.empty((total_tokens, num_v_heads), f32, device)
-    A = ex.empty((total_tokens, num_v_heads, CHUNK), bf16, device)
+    qn = ex.empty(q.shape, dtype=bf16, device=device)
+    kn = ex.empty(k.shape, dtype=bf16, device=device)
+    rstd_q = ex.empty((total_tokens, num_heads), dtype=f32, device=device)
+    rstd_k = ex.empty((total_tokens, num_heads), dtype=f32, device=device)
+    g_cs = ex.empty((total_tokens, num_v_heads), dtype=f32, device=device)
+    A = ex.empty((total_tokens, num_v_heads, CHUNK), dtype=bf16, device=device)
     sm_count = _device_props(index)[0]
     ex.launch("wy_a", min(sm_count, meta.num_chunks * num_heads), 1, 1, k, k, q, g32, beta32,
               ex.view(A, torch.uint32), rstd_k, rstd_q, g_cs, ex.view(qn, torch.uint32), ex.view(kn, torch.uint32),
@@ -2982,7 +3004,9 @@ def _forward_tape_tensors(kept, state, device, *, formed=(), ex=None):
     tape keeps (``kept``) or the forward forms in memory (``formed``), ``None`` for the rest."""
     ex = ex or _DIRECT
     return {
-        name: ex.empty(shape, dtype, device) if name in kept or name in formed else None
+        name: ex.empty(shape, dtype=dtype, device=device)
+        if name in kept or name in formed
+        else None
         for name, (shape, dtype) in zip(cake_plan.STATE_NAMES, state, strict=True)
     }
 
@@ -3016,7 +3040,7 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
         q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
     )
     state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device, ex=ex)
-    o = ex.empty(v.shape, v.dtype, device)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
     workspaces = _workspaces(options)
     table = workspaces.table(index)
     # fwd_ho_a binds every tape tensor it does not write to a one-row stand-in (its tensor map encodes, nothing stores)
@@ -3336,7 +3360,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         kept, _forward_state(meta, kn, v), device, formed=("w", "u"), ex=ex
     )
     w, u = state["w"], state["u"]
-    o = ex.empty(v.shape, v.dtype, device)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
     workspaces = _workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_FUSED_TAPE[name] for name in kept if name in FWD_FUSED_TAPE)
@@ -3417,7 +3441,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
     )
     state = _forward_tape_tensors(kept, _forward_state(meta, kn, v), device, ex=ex)
-    o = ex.empty(v.shape, v.dtype, device)
+    o = ex.empty(v.shape, dtype=v.dtype, device=device)
     workspaces = _workspaces(options)
     table = workspaces.table(index)
     word = sum(FWD_A_TAPE[name] for name in kept if name in FWD_A_TAPE)
@@ -3562,18 +3586,20 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
     beta = ex.rows(torch.Tensor.contiguous, beta)
     beta_bf16 = beta.dtype == torch.bfloat16
     if beta_bf16:
-        beta32 = ex.empty((total_tokens, num_v_heads), torch.float32, device)
+        beta32 = ex.empty(
+            (total_tokens, num_v_heads), dtype=torch.float32, device=device
+        )
     else:
         beta32 = beta if beta.dtype == torch.float32 else ex.call(torch.Tensor.float, beta)  # fmt: skip
-    qn = ex.empty(q.shape, q.dtype, device)
-    kn = ex.empty(k.shape, k.dtype, device)
-    rstd_q = ex.empty((total_tokens, num_heads), torch.float32, device)
-    rstd_k = ex.empty((total_tokens, num_heads), torch.float32, device)
-    g_cs = ex.empty((total_tokens, num_v_heads), torch.float32, device)
+    qn = ex.empty(q.shape, dtype=q.dtype, device=device)
+    kn = ex.empty(k.shape, dtype=k.dtype, device=device)
+    rstd_q = ex.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
+    rstd_k = ex.empty((total_tokens, num_heads), dtype=torch.float32, device=device)
+    g_cs = ex.empty((total_tokens, num_v_heads), dtype=torch.float32, device=device)
     ex.launch(prep + ("_bf16beta" if beta_bf16 else ""), meta.num_chunks,
               num_heads if prep == "prep_tma" else num_v_heads, 1, q, k, g32, beta, beta32, qn, kn, rstd_q, rstd_k,
               g_cs, meta.chunk_start, meta.chunk_len, num_heads, num_v_heads, 1 if normalize_qk else 0)  # fmt: skip
-    A = ex.empty((total_tokens, num_v_heads, CHUNK), q.dtype, device)
+    A = ex.empty((total_tokens, num_v_heads, CHUNK), dtype=q.dtype, device=device)
     if meta.fwd_groups is None:
         w, u = _launch_wy(
             arch,
@@ -3640,8 +3666,8 @@ _OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE, _OP_DROP = range(6, 12)
 # the forward functions a plan stands for (the direct executor's steps reach some of them only through ``_DIRECT``): a
 # plan replays only while they and the module globals they read are the recorded objects (:func:`_fwd_plan_globals`)
 _FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_wy_outputs",
-                   "_launch_wy_a", "_launch_fwd_ho", "_first_wave", "_start_state", "_walk", "_prepared", "_fire",
-                   "_side_stream", "_use_table")  # fmt: skip
+                   "_launch_wy_a", "_launch_fwd_ho", "_first_wave", "_start_state", "_walk", "_launch", "_prepared",
+                   "_fire", "_side_stream", "_use_table")  # fmt: skip
 _FWD_PLAN_GLOBALS: Any = None  # their getter, made at the first call
 # the entries of the forward's result that :func:`_function_forward` reads, the ones a plan returns
 _FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w", "u", "h", "v_new", "output",
@@ -3655,29 +3681,26 @@ def _stream_key(device_index: int) -> tuple[int, int]:
 
 
 class _DirectExecutor:
-    """The forward's launches, allocations, views, eager calls, stream switches and uses of cached tables as
-    :func:`_train_forward` reaches them."""
+    """The forward's launches, allocations, views, eager calls, pooled workspaces, stream switches and uses of cached
+    tables as :func:`_train_forward` reaches them.  The steps are the functions themselves, with no Python frame of
+    their own (the general path's host cost):
+
+    - ``launch(stage, gx, gy, gz, *values)``: :func:`_launch`;
+    - ``empty(shape, dtype=..., device=...)``: ``torch.empty``;
+    - ``view(t, dtype)``: ``t`` viewed as ``dtype`` (the 32-bit words a kernel reads);
+    - ``call(fn, *args)``: ``fn(*args)``, an eager step of the forward (a cast, an index fill / select / copy);
+    - ``rows(fn, t, *args)``: ``fn(t, *args)`` for a function that returns ``t`` itself where ``t`` already has the
+      layout it makes (:func:`_aligned`, :func:`_table_rows`, :func:`_caller_rows`, ``Tensor.contiguous``), else a new
+      tensor;
+    - ``take(take, table, role, shape, dtype, device)``: ``take(table, role, shape, dtype, device)``, a workspace of
+      the pool whose :meth:`Workspaces.take` is ``take``."""
 
     __slots__ = ()
 
-    def launch(self, stage, gx, gy, gz, *values):
-        _fire(_prepared(stage, gx, gy, gz, *values))
-
-    def empty(self, shape, dtype, device):
-        return torch.empty(shape, dtype=dtype, device=device)
-
-    def view(self, t, dtype):
-        """``t`` viewed as ``dtype`` (the 32-bit words a kernel reads)."""
-        return t.view(dtype)
-
-    def call(self, fn, *args):
-        """``fn(*args)``: an eager step of the forward (a cast, an index fill / select / copy)."""
-        return fn(*args)
-
-    def rows(self, fn, t, *args):
-        """``fn(t, *args)`` for a function that returns ``t`` itself where ``t`` already has the layout it makes
-        (:func:`_aligned`, :func:`_table_rows`, :func:`_caller_rows`, ``Tensor.contiguous``), else a new tensor."""
-        return fn(t, *args)
+    launch = staticmethod(_launch)
+    empty = staticmethod(torch.empty)
+    view = staticmethod(torch.Tensor.view)
+    call = rows = take = staticmethod(_call)
 
     def fork(self, index):
         """(the caller's stream, its side stream), the side stream after the caller's work so far."""
@@ -4016,7 +4039,6 @@ _WATCH_LOCK = threading.Lock()
 # the recordings in flight, and (owner, name, original, whether the owner itself held it, the hook) of every hooked
 # attribute
 _WATCH_STATE: dict[str, Any] = {"count": 0, "saved": ()}
-_NO_WATCH = nullcontext()
 
 
 def _watch_hook(name: str, original):
@@ -4960,15 +4982,16 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
         ),
     )
     tape = _forward_tape()
-    level = cake_plan.tape_state(arch, options.save_state)
-    # a layout of the host table cache (host-built or equal-length) with host_cache: the forward's plan
-    host = options.host_cache and (cu_seqlens is None or cu_seqlens_cpu is not None)
-    # CakeGDNDetPackedFunction's forward sets row_shape
-    packed = getattr(ctx, "row_shape", None) is not None
     plan = recorder = None
-    # a host q runs the general path, which pools nothing and refuses it at the first launch (the key's layouts do not
-    # name the device: such a call must not replay a plan of device inputs)
-    if FWD_PLAN and host and q.is_cuda:
+    # a layout of the host table cache (host-built or equal-length) with host_cache: the forward's plan.  A host q runs
+    # the general path, which pools nothing and refuses it at the first launch (the key's layouts do not name the
+    # device: such a call must not replay a plan of device inputs)
+    if (
+        FWD_PLAN
+        and options.host_cache
+        and (cu_seqlens is None or cu_seqlens_cpu is not None)
+        and q.is_cuda
+    ):
         stream = _stream_key(index)
         # a CUDA graph capture (never on the default stream) runs the general path on its own workspaces
         if not (stream[1] and torch.cuda.is_current_stream_capturing()):
@@ -4979,6 +5002,9 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
             inputs = (q, k, v, g, beta, initial_state)
             alias = (None if len({id(t) for t in inputs}) == len(inputs)
                      else tuple(next(j for j, s in enumerate(inputs) if s is t) for t in inputs))  # fmt: skip
+            # CakeGDNDetPackedFunction's forward sets row_shape
+            packed = getattr(ctx, "row_shape", None) is not None
+            level = cake_plan.tape_state(arch, options.save_state)
             # (a float argument by its bits: -0.0 == 0.0, yet a replay passes the recorded one to the launches)
             fkey = (id(meta), stream, arch, options, _float_bits(options.warmup_log2), tape, packed, num_heads,
                     num_v_heads, _float_bits(scale), bool(use_qk_l2norm_in_kernel), bool(output_final_state),
@@ -4990,11 +5016,15 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
                 plan = None
     if plan is not None:
         fwd = _replay_forward(plan, inputs)
+    elif recorder is None:
+        fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
+                             output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
+                             options=options, tape=tape, ex=_DIRECT)  # fmt: skip
     else:
-        with _NO_WATCH if recorder is None else _watched(recorder):
+        with _watched(recorder):
             fwd = _train_forward(q, k, v, g, beta, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                                  output_final_state=output_final_state, normalize_qk=use_qk_l2norm_in_kernel,
-                                 options=options, tape=tape, ex=_DIRECT if recorder is None else recorder)  # fmt: skip
+                                 options=options, tape=tape, ex=recorder)  # fmt: skip
     if recorder is not None:
         recorded = recorder.plan(fwd)
         # the recorder's (weak) references to the call's tensors
@@ -5013,7 +5043,7 @@ def _function_forward(ctx, q, k, v, g, beta, scale, initial_state, output_final_
     # the level keeps (_function_backward).  A forward without a tape (a checkpoint's first pass, whose saved list is
     # dropped, or a call that records no backward) saves the state it formed anyway, which retains nothing, and
     # placeholders only for the state it did not form
-    kept = level if tape else ()
+    kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     state_tensors = [
         fwd.get(name) if not tape or name in kept else None
         for name in cake_plan.STATE_NAMES
