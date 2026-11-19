@@ -406,7 +406,8 @@ def test_two_launch_forward_programs() -> None:
     of that route takes only ``x``, ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``; none for the static
     and the direct program of the small-S rows) and the plan scalars (``kcp._fwd_main``), and launches the co-resident
     grid (no reserved SM; the direct program's capped at its token blocks), so the host can launch whichever record
-    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count."""
+    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count: at C = 576 the static program at 2000
+    tokens and the direct program at 6003 tokens on every architecture."""
 
     kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
     assert kcp.KCP_FWD_HALO == "kcp_fwd_halo" and kcp.FWD_MAIN_ROUTE == "fwd"
@@ -443,3 +444,9 @@ def test_two_launch_forward_programs() -> None:
         ):
             (name,) = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)
             assert name in names, (arch, C, S)
+        # The small-S rows of C = 576: the static program (no rule) at 2000 tokens, the direct program at 6003.
+        static = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=576, S=2000)[0]
+        assert cake_jit.select_rule(cake_jit.MODULES[static]) is None, (arch, static)
+        direct = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=576, S=6003)[0]
+        direct_rule = cake_jit.select_rule(cake_jit.MODULES[direct])
+        assert direct_rule == {"kind": cake_jit.ROWS_KIND}, (arch, direct)

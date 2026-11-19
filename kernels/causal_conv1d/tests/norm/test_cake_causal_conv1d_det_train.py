@@ -336,17 +336,21 @@ FWD_NARROW_WORKSPACE_TILES = {
 # arch's ``DIRECT_PLANS_OF_RECORD`` form; above them the dynamic program.
 FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
-        ("fwd", 576, 632): (1, 8192),
-        ("fwd", 640, 640): (24576, 24576),
-        ("fwd", 648, 696): (1, 12288),
-        ("fwd", 704, 768): (1, 16384),
-        ("fwd_bias", 576, 632): (1, 8192),
-        ("fwd_bias", 640, 640): (24576, 24576),
-        ("fwd_bias", 648, 696): (1, 12288),
-        ("fwd_bias", 704, 768): (1, 16384),
-        ("fwd_dt", 576, 576): (1, 16384),
-        ("fwd_dt", 584, 696): (1, 12288),
-        ("fwd_dt", 704, 768): (1, 16384),
+        ("fwd", 576, 576): (1, 4096),
+        ("fwd", 584, 640): (1, 8192),
+        ("fwd", 648, 704): (1, 12288),
+        ("fwd", 712, 712): (1, 12288),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 4096),
+        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 648, 696): (1, 8192),
+        ("fwd_bias", 704, 704): (1, 16384),
+        ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_dt", 576, 576): (1, 4096),
+        ("fwd_dt", 584, 640): (1, 8192),
+        ("fwd_dt", 648, 696): (1, 8192),
+        ("fwd_dt", 704, 704): (1, 12288),
+        ("fwd_dt", 712, 768): (1, 16384),
     },
     "sm_103a": {
         ("fwd", 576, 632): (1, 2048),
@@ -381,6 +385,22 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
     },
 }
 DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("fwd", 576, 576): (4097, 24576),
+        ("fwd", 584, 640): (8193, 24576),
+        ("fwd", 648, 704): (12289, 24576),
+        ("fwd", 712, 712): (12289, 20480),
+        ("fwd", 720, 768): (8193, 20480),
+        ("fwd_bias", 576, 576): (4097, 24576),
+        ("fwd_bias", 584, 632): (4097, 20480),
+        ("fwd_bias", 648, 696): (8193, 20480),
+        ("fwd_bias", 704, 704): (16385, 20480),
+        ("fwd_dt", 576, 576): (4097, 24576),
+        ("fwd_dt", 584, 640): (8193, 24576),
+        ("fwd_dt", 648, 696): (8193, 20480),
+        ("fwd_dt", 704, 704): (12289, 20480),
+        ("fwd_dt", 712, 768): (16385, 20480),
+    },
     "sm_103a": {
         ("fwd", 576, 632): (2049, 24576),
         ("fwd", 640, 696): (4097, 24576),
@@ -408,6 +428,11 @@ DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = 
 # The direct programs' channel tiles: arch -> route -> (ct_vec, n_sub), so a
 # direct row of C channels runs (ct_vec, n_sub, ceil(C / 8 / ct_vec)).
 DIRECT_PLANS_OF_RECORD: dict[str, dict[str, tuple[int, int]]] = {
+    "sm_100a": {
+        "fwd": (8, 16),
+        "fwd_dt": (8, 16),
+        "fwd_bias": (8, 16),
+    },
     "sm_103a": {
         "fwd": (8, 16),
         "fwd_dt": (16, 8),
