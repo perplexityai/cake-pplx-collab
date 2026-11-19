@@ -189,9 +189,9 @@ reaches a result.
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
   the backward recomputes it.  The backward reuses the forward's FP32 `limit` and checks the saved inputs again, since
   a saved-tensors hook or a `.data` assignment can change them after the forward.
-- Host caches, none of which changes an output bit: per device, its architecture, its SM count and one launcher per
-  stage (the route, and each program's FFI entry bound at its first launch); per process, the loaded libraries and
-  the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every call, before any
+- Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
+  and one launcher per stage (the route, and each program's FFI entry bound at its first launch); per process, the
+  loaded libraries and the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every call, before any
   allocation.
 
 ## Limitations
