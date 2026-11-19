@@ -819,7 +819,9 @@ class ArmCake:
     """The Cake kernels.
 
     Default layout: the prepared runner (``prepare_dsa_train``, direct launches
-    into caller buffers).  Trainer layout: the public varlen entry
+    into caller buffers) on the global index rows, with the row's segment count
+    (``num_segments = len(cu_seqlens_k) - 1``, what the varlen entry derives and
+    what a packed caller of the flat entry passes).  Trainer layout: the public varlen entry
     ``cake_dsa_sparse_attention_nondet_varlen(..., causal=True, dkv_acc=, dkv_dst_map=)``
     through autograd, fed the layout views as they are (head-stride-256
     ``q_rope`` slice, packed KV rows) and the caller's fp32 ``dkv_acc``
@@ -839,6 +841,7 @@ class ArmCake:
         )
         self.runner = None
         if not layout.trainer:
+            self.num_segments = int(inp.cu_seqlens_k.numel()) - 1
             self.runner = cake_backend.prepare_dsa_train(
                 inp.q_latent,
                 inp.q_rope,
@@ -849,6 +852,7 @@ class ArmCake:
                 dout=inp.dout if self.backward_available else None,
                 softmax_scale=DEFAULT_SCALE,
                 backward=self.backward_available,
+                num_segments=self.num_segments,
             )
             return
         self.q_latent = layout.q_latent.detach().requires_grad_()
@@ -878,6 +882,10 @@ class ArmCake:
                 module=self.runner.module_name,
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
+                # the backward plan: the segment count it was planned with, its key-range passes and launches
+                num_segments=self.num_segments,
+                key_passes=self.runner.key_passes,
+                backward_launches=len(self.runner.backward_order),
             )
         inp = self.inp
         module_name, _record = cake_backend.record_for(inp.q_latent.device)
@@ -2245,16 +2253,21 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
     CUPTI kernel-only medians of both.
     """
     args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+    # the row's segment count, as the varlen entry derives it (the global rows of a packed batch)
+    segments = int(inp.cu_seqlens_k.numel()) - 1
     backward_available = cake_backend.generated_program_available(
         inp.q_latent.device, backward=True
     )
-    cake_dsa_sparse_attention_nondet(*args)  # warm-up: binds the eager path once
+    cake_dsa_sparse_attention_nondet(
+        *args, num_segments=segments
+    )  # warm-up: binds the eager path once
     leaves = [t.detach().clone().requires_grad_() for t in args[:4]]
     saved = cake_backend.forward(*args)
     runner = cake_backend.prepare_dsa_train(
         *args,
         dout=inp.dout if backward_available else None,
         backward=backward_available,
+        num_segments=segments,
     )
     torch.cuda.synchronize()
 
@@ -2262,7 +2275,9 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
         return cake_backend.forward(*args)
 
     def eager_backward():
-        return cake_backend.backward(*args, saved[0], saved[2], saved[1], inp.dout)
+        return cake_backend.backward(
+            *args, saved[0], saved[2], saved[1], inp.dout, num_segments=segments
+        )
 
     def runner_forward():
         return runner.forward()
@@ -2271,7 +2286,9 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
         return runner.backward()
 
     def public_forward():
-        return cake_dsa_sparse_attention_nondet(*leaves, inp.idx_global)
+        return cake_dsa_sparse_attention_nondet(
+            *leaves, inp.idx_global, num_segments=segments
+        )
 
     graph_out = public_forward()
 
@@ -2279,7 +2296,9 @@ def measure_host_path(inp, *, calls, rounds, kernel_steps):
         return torch.autograd.grad(graph_out, leaves, inp.dout, retain_graph=True)
 
     def autograd_step():
-        out = cake_dsa_sparse_attention_nondet(*leaves, inp.idx_global)
+        out = cake_dsa_sparse_attention_nondet(
+            *leaves, inp.idx_global, num_segments=segments
+        )
         return torch.autograd.grad(out, leaves, inp.dout)
 
     entry_points = [

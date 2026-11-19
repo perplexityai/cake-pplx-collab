@@ -43,7 +43,14 @@ entry falls back to another package.
 
 The entries take the arguments of the non-deterministic entries.
 `key_passes` and `num_segments` select the key-range passes of the backward
-(see below); `dkv_direct` is accepted and validated as there and has no
+(see below): the varlen entries pass `len(cu_seqlens_k) - 1`, and the flat
+rope entry and the rope step backward take the count as the keyword
+`num_segments` (default 1; a count above 1 plans one pass unless
+`key_passes` overrides, as the varlen entry does for the same rows).  dK / dV
+do not depend on it; dQ is summed
+through an FP32 partial between passes, so its bits follow the plan, and
+every output repeats bit for bit for the same inputs, `key_passes` and
+`num_segments`.  `dkv_direct` is accepted and validated as there and has no
 effect: the accumulation into `dkv_acc` has one form.  The facade reads
 `CAKE_PPLX_DSA_CHECK_DST_MAP` and
 `CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY` (as the non-deterministic
