@@ -19,9 +19,9 @@ per-call programmatic dependent launch scalar differ), every backward route keep
 and selection (but where a channel-band program takes the lowest channel counts of its twin, the program of the route
 it shares a body with, at the rows of ``FALLBACK_ROWS``, where the route's fallback runs, and at the rows of
 ``SM_WIDE_ROWS``, where a program of the ``rows`` selection kind runs: a build of a deterministic SM-wide program, one
-CTA per SM), every program but the opt-in pair routes' takes the per-call PDL scalar (its kernels wait for the preceding grid before touching global
-memory; the host's policy tables, and the backward rows of ``PDL_OFF_ROWS`` that launch without it, which the
-backward entry finds by passing its route, ``C`` and ``S``), each backward program is ONE
+CTA per SM), every program but the opt-in pair routes' takes the per-call PDL scalar (its kernels wait for the preceding
+grid before touching global memory; the host's policy tables, and the backward rows of ``PDL_OFF_ROWS`` that launch
+without it, which the backward entry finds by passing its route, ``C`` and ``S``), each backward program is ONE
 ordinary launch (no reduce program) that owns an ``accumulators`` workspace (one FP32 word per sum and accumulator
 copy on every route, :data:`ACC_SLOTS` copies; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per
 channel tile), and the workspace byte
@@ -319,9 +319,9 @@ def _channels(registry, name: str, arch: str) -> int | None:
 def _bands():
     """``(arch, kind, band name, twin name, det twin name)`` of every channel-band program: a program a route lists
     after the deterministic route's programs (but this package's copies of deterministic programs,
-    :data:`OWN_COPIES`, and its SM-wide programs, :data:`SM_WIDE_COPIES`).  Its twin is the program of the route whose channel threshold on ``arch`` is no longer the
-    deterministic one: the band program owns the twin's lowest channel counts there, from the deterministic threshold
-    up to the twin's new one."""
+    :data:`OWN_COPIES`, and its SM-wide programs, :data:`SM_WIDE_COPIES`).  Its twin is the program of the route whose
+    channel threshold on ``arch`` is no longer the deterministic one: the band program owns the twin's lowest channel
+    counts there, from the deterministic threshold up to the twin's new one."""
 
     for arch in ARCHES:
         for kind in cake_jit.KINDS:
@@ -2614,7 +2614,9 @@ def test_row_plans_follow_a_replaced_narrow_table(
     :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache; after it, with :data:`SYNTHETIC_NARROW_TILES` in place, every key's calls at its channel ends and an
     inner channel count, on both sides of its token range and at every ``bwd_grid_mult``, plan as a per-call plan
     does (the 32-vector tiles inside the range, the side-stream and whole-rank grid trims included), on fake
-    devices of the architecture's SM counts, on the key's route and on every route that plans by its rows."""
+    devices of the architecture's SM counts, on the key's route and on every route that plans by its rows.  At a
+    row of ``SM_WIDE_ROWS`` the SM-wide program runs its own split (one channel tile, ``threads // cv`` token
+    sub-tiles): the narrow tiles are a split of 128-thread programs."""
 
     rows = SYNTHETIC_NARROW_TILES[arch]
 
@@ -2646,7 +2648,12 @@ def test_row_plans_follow_a_replaced_narrow_table(
                                 want = _per_call(arch, route, S, C, 3, gm, policy_of(route))
                                 got = planned(route, S, C, gm)
                                 assert got == want, (arch, sms, route, C, S, gm)
-                                if s_min <= S <= s_max and isinstance(got[1], dict):
+                                if isinstance(got[0], tuple) and got[0][0] in SM_WIDE_COPIES:
+                                    # an SM_WIDE_ROWS row: its SM-wide program plans its own one-tile split
+                                    threads = cake_jit.MODULES[got[0][0]]["grid_rule"]["geometry"]["threads"]
+                                    split = (got[1]["ct_vec"], got[1]["n_sub"], got[1]["n_ch_tiles"])
+                                    assert split == (C // 8, threads // (C // 8), 1), (route, C, S, gm, split)
+                                elif s_min <= S <= s_max and isinstance(got[1], dict):
                                     assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
                                 checked += 1
             pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()

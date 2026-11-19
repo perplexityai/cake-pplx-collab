@@ -18,11 +18,12 @@ deterministic KCP suite's partitions (contiguous, zigzag, per-document zigzag, r
 one-token fragments, a fragment that reads its history from three predecessor ranks), plus W = 16 rows (``-k w16``) on
 the layouts any world size partitions: contiguous, zigzag and per-document zigzag (the ragged tables are written for at
 most eight ranks), and the deterministic suite's ``F_ROWS`` (W = 2 / 4 at C = 528 and 568, the ranks' token counts on
-both sides of the forward's token floor of the channel count).  The outputs are judged by the naive judge (``tests/cake/test_helpers/cake_naive.py``): every
-rank draws the whole pack from each of 32 seeds (the same on every rank), runs the call on its tokens and judges its
-``y`` / ``dx`` rows and the sum of the ranks' ``dweight`` partials (all-gathered and added in rank order) against the
-float64 oracle of the whole pack and PyTorch's BF16 naive convolution.  No bit rule holds the package: its outputs
-are never compared bit for bit with another launch and never with the deterministic package.  Per row and rank:
+both sides of the forward's token floor of the channel count).  The outputs are judged by the naive judge
+(``tests/cake/test_helpers/cake_naive.py``): every rank draws the whole pack from each of 32 seeds (the same on every
+rank), runs the call on its tokens and judges its ``y`` / ``dx`` rows and the sum of the ranks' ``dweight`` partials
+(all-gathered and added in rank order) against the float64 oracle of the whole pack and PyTorch's BF16 naive
+convolution.  No bit rule holds the package: its outputs are never compared bit for bit with another launch and never
+with the deterministic package.  Per row and rank:
 
 - ``REPEATS`` launches of the direct pass on each draw, every launch judged;
 - checkpoints with and without a recompute handle (``use_reentrant`` False and True; 2 x forward + backward) and

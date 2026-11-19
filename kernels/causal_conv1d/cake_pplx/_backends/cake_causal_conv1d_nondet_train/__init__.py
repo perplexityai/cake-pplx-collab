@@ -876,8 +876,8 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
     ``SM_WIDE_ROWS``, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``,
     ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``, ``FORWARD_NARROW_WIDTHS`` and
-    ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
-    ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
+    ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or ``device_arch``.  The programmatic
+    dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
 
     n = len(_ROW_PLANS)
     _ROW_PLANS.clear()

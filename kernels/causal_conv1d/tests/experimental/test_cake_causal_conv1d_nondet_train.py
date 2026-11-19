@@ -60,19 +60,19 @@ naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARR
 the side-stream one-SM trim of a three-tile narrow row's grid.  The forward's narrow rows (``FORWARD_NARROW_CASES``:
 C 520 to 768 at the row's token floors on the device's architecture, the row's route and the taps' dtype,
 ``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS``, and one token below a floor or inside a single-tile range of
-``FORWARD_SINGLE_TILE_ROWS``) launch their 32-vector, width or single tiles on a caller-owned forward workspace of
-the public size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the
-call.  The backward rows of ``FALLBACK_ROWS`` (each key's channel ends and C 640 / 896 at the key's last token
-count and the next) launch the route's fallback program inside the key's token range and the rules' program above it.  The rows of
+``FORWARD_SINGLE_TILE_ROWS``) launch their 32-vector, width or single tiles on a caller-owned forward workspace of the
+public size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.  The
+backward rows of ``FALLBACK_ROWS`` (each key's channel ends and C 640 / 896 at the key's last token count and the next)
+launch the route's fallback program inside the key's token range and the rules' program above it.  The rows of
 ``SM_WIDE_ROWS`` (route ``bwd``: each key's lowest, an inner and its highest channel count on both sides of every
-segment's first token count) launch the segment's SM-wide program (one CTA per SM), judged against the naive tier, on
-a caller-owned workspace and the package's (sm_107a's program from 131072 tokens keeps two accumulator copies in the
+segment's first token count) launch the segment's SM-wide program (one CTA per SM), judged against the naive tier, on a
+caller-owned workspace and the package's (sm_107a's program from 131072 tokens keeps two accumulator copies in the
 package-sized workspace), repeated, at every ``bwd_grid_mult``, under CUDA Graph replay, on two streams, with
 programmatic dependent launch, through autograd and checkpointing, beside a kernel that holds one SM's shared memory on
 another stream, and beside the deterministic package's SM-wide program in one process.  The forward's narrow rows of
 C 520 to 568 (every one, at the row's token floor and one token below it), the ``fwd_bias`` rows with BF16 taps (their
-own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call
-one token below it.
+own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call one
+token below it.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
