@@ -117,7 +117,9 @@ streams.  The CTAs of each channel tile split its tokens among themselves at
 any grid size, so ``dx`` is computed the same way and
 ``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
-grid).
+grid).  At the rows of ``cake_jit.SM_WIDE_ROWS`` the SM-wide program holds
+one CTA per SM, so ``bwd_grid_mult`` times the SM count runs in that many
+waves of CTAs.
 
 Name map (the deterministic package -> the non-deterministic package)::
 
