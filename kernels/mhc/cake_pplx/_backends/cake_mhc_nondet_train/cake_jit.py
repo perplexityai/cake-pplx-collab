@@ -261,7 +261,13 @@ base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
 record; same grid, block and selection); ``collapse_forward_h5120`` /
 ``collapse_backward_h5120`` are one record each (``collapse_fwd__h5120``,
 ``collapse_bwd__h5120``: own library stems, no workspace; the forward takes the per-call
-PDL attribute on its own edge ``K4->C``, no band).
+PDL attribute on its own edge ``K4->C``, no band).  On sm_107a the three
+collapse records are that architecture's own forms, with the same outputs bit
+for bit: ``fwd_collapse__m2_pi_pn__h5120`` and ``collapse_fwd__m2__h5120`` take
+two sub-tokens per thread group and trip (``rows_per_cta`` 4: half the CTAs of
+the sm_100a / sm_103a records), and ``collapse_bwd__vjpwa_pfq2__h5120`` fills
+the VJP's shared-memory stage by ``cp.async`` and prefetches a later token's
+rows into L2 (the same grid and dynamic shared memory).
 """
 
 from __future__ import annotations
@@ -7994,7 +8000,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "arches": [
             "sm_100a",
             "sm_103a",
-            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -8040,11 +8045,58 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": None,
         "workspace_rule": None,
     },
+    "cake_mhc_train_fwd_collapse__m2_pi_pn__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "stats"],
+            ["buffer", "u"],
+            ["buffer", "pre_next"],
+            ["parameter", "T"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 5,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_collapse__m2_pi_pn__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_collapse__m2_pi_pn__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_fwd_collapse__m2_pi_pn__h5120",
+        "logical": {
+            "T": "rows",
+            "pre_in": "pre_in",
+            "pre_next": "pre_next",
+            "stats": "stats",
+            "u": "u",
+            "x": "x",
+        },
+        "role": "fwd_collapse",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
     "cake_mhc_train_collapse_fwd__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
-            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -8086,11 +8138,54 @@ MODULES: dict[str, dict[str, Any]] = {
         "select_rule": None,
         "workspace_rule": None,
     },
+    "cake_mhc_train_collapse_fwd__m2__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "u"],
+            ["parameter", "T"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 5,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_fwd__m2__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_fwd__m2__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_collapse_fwd__m2__h5120",
+        "logical": {
+            "T": "rows",
+            "pre_in": "pre_in",
+            "u": "u",
+            "x": "x",
+        },
+        "role": "collapse_fwd",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
     "cake_mhc_train_collapse_bwd__h5120": {
         "arches": [
             "sm_100a",
             "sm_103a",
-            "sm_107a",
         ],
         "arg_plan": [
             ["buffer", "x"],
@@ -8123,6 +8218,53 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_mhc_train_collapse_bwd__h5120",
+        "logical": {
+            "T": "rows",
+            "dpre_in": "dpre_in",
+            "du": "du",
+            "dx": "dx",
+            "pre_in": "pre_in",
+            "x": "x",
+        },
+        "role": "collapse_bwd",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "du"],
+            ["buffer", "dx"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 1,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 51456,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120",
         "logical": {
             "T": "rows",
             "dpre_in": "dpre_in",
@@ -9040,10 +9182,10 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_bwd_slab_fold__dynr__h5120",
         ],
         "collapse_backward_h5120": [
-            "cake_mhc_train_collapse_bwd__h5120",
+            "cake_mhc_train_collapse_bwd__vjpwa_pfq2__h5120",
         ],
         "collapse_forward_h5120": [
-            "cake_mhc_train_collapse_fwd__h5120",
+            "cake_mhc_train_collapse_fwd__m2__h5120",
         ],
         "fwd_prepare_handoff_h5120": [
             "cake_mhc_train_fn_split__h5120",
@@ -9057,7 +9199,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
             "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
             "cake_mhc_train_fwd_coef__rt64__h5120",
-            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+            "cake_mhc_train_fwd_collapse__m2_pi_pn__h5120",
         ],
     },
 }
