@@ -113,7 +113,7 @@ kernel_cake_act_qdq_79d268b9599a2036c54d(const __nv_bfloat16* x, __nv_bfloat16* 
 #if __CUDA_ARCH__ == 1070
         unsigned int w[16];
 #else
-        unsigned int w[8];
+        float wide[16];
 #endif
         #pragma unroll
 #if __CUDA_ARCH__ == 1070
@@ -126,11 +126,25 @@ kernel_cake_act_qdq_79d268b9599a2036c54d(const __nv_bfloat16* x, __nv_bfloat16* 
             int ci = ((i < n_vecs) ? i : last);
             {
                 const uint4* _vptr_0 = reinterpret_cast<const uint4*>(x + (long long)ci * 8ll + 0);
+#if __CUDA_ARCH__ == 1070
                 uint4* _vdst_0 = reinterpret_cast<uint4*>(&w[r * 4]);
+#else
+                uint4 _vld_0[1];
+#endif
                 #pragma unroll
                 for (int _blk = 0; _blk < 1; _blk++) {
                     asm volatile("ld.global.L2::cache_hint.v4.b32 {%0, %1, %2, %3}, [%4], %5;"
+#if __CUDA_ARCH__ == 1070
                         : "=r"(_vdst_0[_blk].x), "=r"(_vdst_0[_blk].y), "=r"(_vdst_0[_blk].z), "=r"(_vdst_0[_blk].w) : "l"((const void*)(_vptr_0 + _blk)), "l"(0x12F0000000000000ULL) : "memory");
+#else
+                        : "=r"(_vld_0[_blk].x), "=r"(_vld_0[_blk].y), "=r"(_vld_0[_blk].z), "=r"(_vld_0[_blk].w) : "l"((const void*)(_vptr_0 + _blk)), "l"(0x12F0000000000000ULL) : "memory");
+                    uint32_t* _vpairs_0 = reinterpret_cast<uint32_t*>(&_vld_0[_blk]);
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&wide[r * 8 + _blk * 8 + _pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(_vpairs_0[_pair]) << 16);
+                        (&wide[r * 8 + _blk * 8 + _pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(_vpairs_0[_pair]) & 0xffff0000u);
+                    }
+#endif
                 }
             }
         }
@@ -144,18 +158,31 @@ kernel_cake_act_qdq_79d268b9599a2036c54d(const __nv_bfloat16* x, __nv_bfloat16* 
 #endif
             float v[8];
             #pragma unroll
+#if __CUDA_ARCH__ == 1070
             for (int _pair = 0; _pair < 4; _pair++) {
                 (&v[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>((w + r_1 * 4)[_pair]) << 16);
                 (&v[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>((w + r_1 * 4)[_pair]) & 0xffff0000u);
+#else
+            for (int k = 0; k < 8; k++) {
+                v[k] = wide[r_1 * 8 + k];
+#endif
             }
             float am = fmaxf(v[0], -v[0]);
             #pragma unroll
+#if __CUDA_ARCH__ == 1070
             for (int k = 1; k < 8; k++) {
+#else
+            for (int k_1 = 1; k_1 < 8; k_1++) {
+#endif
                 float _max3_1;
                 #if defined(__CUDA_ARCH__) && (__CUDA_ARCH__ < 1000)
                 #error "Max3 requires PTX three-input max.f32 support on sm_100+"
                 #endif
+#if __CUDA_ARCH__ == 1070
                 asm volatile("max.f32 %0, %1, %2, %3;" : "=f"(_max3_1) : "f"(am), "f"(v[k]), "f"(-v[k]));
+#else
+                asm volatile("max.f32 %0, %1, %2, %3;" : "=f"(_max3_1) : "f"(am), "f"(v[k_1]), "f"(-v[k_1]));
+#endif
                 am = _max3_1;
             }
             float _shfl_xor_sync_2 = __shfl_xor_sync(0xFFFFFFFF, am, 1);
