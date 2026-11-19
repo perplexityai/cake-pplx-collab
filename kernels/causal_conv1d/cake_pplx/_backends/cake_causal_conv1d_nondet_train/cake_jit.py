@@ -5573,17 +5573,17 @@ SPLIT_ROLES = ("fwd", "bwd")
 # probes and two release timings (this package's forward against the 0.2.3
 # package's on the same GPU, and the same for the det package); GB200 and
 # GB300 cells are pooled for sm_100a and sm_103a.  The slower cells next
-# below the floors: on GB200 and GB300 C = 520, 528, 544 and 560 at 16384;
-# on the VR200 C = 568 at 12288, C = 552 and 560 at 16384, C = 544 at 20480
-# and C = 520 and 528 at 31292.  The release timings set the floors of C =
-# 520 and 544, and of C = 528 on the VR200: with FP32 taps and bias the 0.2.3
-# forward took 0.9684 / 0.9743 (C = 520) and 0.9801 / 0.9754 (C = 544) times
-# this package's time on a GB200 at 16384, and 0.9876 / 0.9732 (C = 520 at
-# 24576), 0.9690 / 0.9632 (C = 520 at 31292) and 0.9862 / 0.9775 (C = 544 at
-# 20480) times it on the VR200, eager / under CUDA Graph replay; with FP32
-# taps and no bias it took 0.9524 / 0.9549 times it at C = 528, 31292 on the
-# VR200 (slower at 24576 too).  The width floor of a row below 72 vectors is
-# its row floor.
+# below the floors: on GB200 and GB300 C = 520, 528, 544 and 560 at 16384; on
+# the VR200 C = 568 at 12288, C = 552 and 560 at 16384, C = 544 at 20480, C =
+# 528 at 31292 and C = 520 at 32767.  The release timings set the floors of C
+# = 520 and 544, and of C = 528 on the VR200: with FP32 taps and bias the
+# 0.2.3 forward took 0.9684 / 0.9743 (C = 520) and 0.9801 / 0.9754 (C = 544)
+# times this package's time on a GB200 at 16384, and 0.9876 / 0.9732 (C = 520
+# at 24576), 0.9690 / 0.9632 (C = 520 at 31292), 0.9885 / 0.9827 (C = 520 at
+# 32767) and 0.9862 / 0.9775 (C = 544 at 20480) times it on the VR200, eager
+# / under CUDA Graph replay; with FP32 taps and no bias it took 0.9524 /
+# 0.9549 times it at C = 528, 31292 on the VR200 (slower at 24576 too).  The
+# width floor of a row below 72 vectors is its row floor.
 # On sm_103a the ``fwd_bias`` rows of 89 to 96 vectors (C = 712 to 768) read
 # the dtype of the call's taps (``bf16_taps``; the ``fwd`` route's taps are
 # FP32 and the ``fwd_dt`` route's BF16): with FP32 taps they take 20480 (on a
@@ -5619,7 +5619,7 @@ FORWARD_NARROW_WIDTHS: dict[int, int] = {65: 13, 66: 11, 68: 17, 69: 23, 70: 14,
 FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
     "sm_100a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
     "sm_103a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
-    "sm_107a": {65: 32767, 66: 62585, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
+    "sm_107a": {65: 32768, 66: 62585, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
 }
 # ``{arch: {cv: S}}``: on ``arch`` the narrow forward row of ``cv`` channel
 # vectors below 72 (C = 520 to 568) plans as the deterministic forward from
@@ -5628,7 +5628,7 @@ FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
 FORWARD_NARROW_ROW_FLOORS: dict[str, dict[int, int]] = {
     "sm_100a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
     "sm_103a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
-    "sm_107a": {65: 32767, 66: 62585, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
+    "sm_107a": {65: 32768, 66: 62585, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
 }
 # The rows below this many channel vectors take :data:`FORWARD_NARROW_ROW_FLOORS`.
 FORWARD_ROW_FLOOR_VECTORS = 72
