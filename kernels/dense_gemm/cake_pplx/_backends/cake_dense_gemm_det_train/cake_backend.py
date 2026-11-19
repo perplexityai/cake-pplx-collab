@@ -3617,8 +3617,8 @@ def cake_dense_gemm_det_train_projection_plan(
     rule (the six sm_103a
     input-gradient rules that carry it, 4096 -> 48, 4096 -> 512, 4096 -> 1024, 5120 -> 512, 5120 -> 1024 and the
     kv_a 6144 -> 576, and the five sm_100a input-gradient rules, 4096 -> 512, 4096 -> 1024, 5120 -> 512,
-    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows; no rule names the start-path forms
-    ``w8rel`` / ``w8relf``) and dropped where the plan is not
+    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows; the start-path forms ``w8rel`` /
+    ``w8relf`` are named by the token ranges of version 0.3.12) and dropped where the plan is not
     whole-tile or a caller forces a pipeline,
     tile, output, epilogue, tail or raster
     knob, or where a start-path form meets the rule's batch raster (the row's program above the form runs the plan
