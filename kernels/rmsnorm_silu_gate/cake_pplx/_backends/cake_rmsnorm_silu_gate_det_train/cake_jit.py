@@ -1178,9 +1178,10 @@ GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks
 # launches the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)`` 256-thread
 # CTAs, the one of packed rows its own ``min(ceil(rows / 8), 8 * SMs)``
 # 128-thread CTAs (no claim and no ticket): measured on sm_107a, the
-# 128-thread build is the faster on packed rows and the 256-thread one on
-# other layouts once a 128-thread CTA walks two or more blocks.  Host plan
-# only: a new cut needs no new program.
+# 128-thread build is the faster on packed rows, as fast or faster on other
+# layouts up to ``NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM (below), and the
+# slower at about 128 rows per SM, where nearly every 128-thread CTA walks
+# two blocks.  Host plan only: a new cut needs no new program.
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 768},
     "sm_103a": {"bwd_bf16": 768},
@@ -1194,9 +1195,11 @@ NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # cut.  Measured on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster
 # than the 128-thread strided build up to this cut, slower on sm_100a at 332
 # rows per SM.  Measured on sm_107a (CUDA Graph replays, hot L2): faster at
-# every measured row count up to this cut but 96 rows per SM (the same), the
-# same from 512 to 1280; cold L2, no row slower again in its retime.  Host
-# plan only.
+# every measured row count up to this cut but 96 rows per SM (the same); the
+# same from 512 to 1280, leaning slower (0.992 to 0.996), and faster at 1535
+# (1.018).  The cut is the last faster point below that band.  Cold L2:
+# every row flagged slower read the same or faster when timed again (one of
+# them only on another GPU).  Host plan only.
 PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},

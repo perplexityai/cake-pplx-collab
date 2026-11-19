@@ -73,16 +73,19 @@ Host design (every control is a keyword; no environment variable):
   ``grad_out``, ``x`` and ``z`` hold packed rows (also one token of head
   stride 128: its token index is 0, so its token stride never enters an
   address, and the call passes it as ``H * 128`` so that the packed-row test
-  and the packed-only build's argument check hold) its 128-thread builds, ``min(ceil(rows / 8),
-  8 * SMs)`` CTAs walking their 8-row blocks (a row to each 16 lanes, as in
-  the BF16 backward; packed rows read at their linear offsets), up to
-  ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows per SM (measured: 128 on SM100
-  and SM103, 384 on SM107) the build of packed rows only, which takes no stride test and
-  reduces a row's sum of squares and dot product across its lanes together,
-  past it the build that reads any layout; on other layouts that build up to
+  and the packed-only build's argument check hold; on SM107 only below the
+  long program's first row count, 1536 rows per SM) its 128-thread builds,
+  ``min(ceil(rows / 8), 8 * SMs)`` CTAs walking their 8-row blocks (a row to
+  each 16 lanes, as in the BF16 backward; packed rows read at their linear
+  offsets), up to ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows per SM
+  (measured: 128 on SM100 and SM103, 384 on SM107) the build of packed rows
+  only, which takes no stride test and reduces a row's sum of squares and
+  dot product across its lanes together, past it the build that reads any
+  layout; on other layouts that build up to
   ``cake_jit.NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM (measured: 32 on SM100
-  and SM103, 96 on SM107; other layouts read at their token and head strides), past it
-  the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)`` 256-thread CTAs
+  and SM103, 96 on SM107; other layouts read at their token and head
+  strides), past it the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)``
+  256-thread CTAs
   walking their 16-row blocks; past the strided cut the claimed program, the
   BF16 backward's claims and ticket on the workspace (SM107 routes none: its
   strided program runs every row count); and where the BF16 backward runs
@@ -183,7 +186,9 @@ from .cake_jit import (
     ARCHES,
     HEAD_DIM,
     INT32_MAX,
+    LONG,
     LONG_ROLES,
+    NODW_STRIDED_ROWS_PER_SM,
     PACKED_SMALL_ROWS_PER_SM,
     ROLES,
     ROUTES,
@@ -191,6 +196,7 @@ from .cake_jit import (
     backward_module,
     current_raw_stream,
     device_sm_count,
+    min_rows_per_sm,
     nodw_module,
     workspace_elements,
 )
@@ -199,15 +205,28 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
     sorted(ARCH_BY_CAPABILITY)
 )
 _ALIGNMENT_BYTES = ALIGNMENT_ELEMENTS * 2
-# The architectures on which a backward without the weight gradient passes
-# one token of head stride 128 as packed rows (token stride ``H * 128``):
-# those with a cut of the build of packed rows only
+# A backward without the weight gradient passes one token of head stride 128
+# as packed rows (token stride ``H * 128``) below this many rows per SM, on
+# the architectures with a cut of the build of packed rows only
 # (``cake_jit.PACKED_SMALL_ROWS_PER_SM``; measured on SM100, SM103 and
-# SM107).  Elsewhere one token keeps the token stride 0 and runs the
-# programs of other layouts, as in 0.2.6.
-_ONE_TOKEN_PACKED_ARCHES = frozenset(
-    arch for arch, cuts in PACKED_SMALL_ROWS_PER_SM.items() if cuts.get("bwd_bf16")
-)
+# SM107): at every row count where a strided cut is (a claimed program past
+# it: SM100 and SM103, as in 0.2.7), else (SM107) below the long program's
+# first row count.  From that count packed rows of more tokens run the long
+# program, which one token does not take (the long module's choice keeps its
+# token stride 0), and there the 128-thread strided build is not the faster
+# one (measured on SM107 for one token: within 1.1 % at 1887 rows per SM,
+# slower at 3066), so one token runs the 256-thread program of 0.2.7.
+# Elsewhere one token keeps the token stride 0 and runs the programs of
+# other layouts.
+_ONE_TOKEN_PACKED_BELOW_ROWS_PER_SM = {
+    arch: (
+        2**31
+        if NODW_STRIDED_ROWS_PER_SM[arch].get("bwd_bf16")
+        else min_rows_per_sm(ROUTES[arch]["bwd_bf16" + LONG], arch)
+    )
+    for arch, cuts in PACKED_SMALL_ROWS_PER_SM.items()
+    if cuts.get("bwd_bf16")
+}
 
 # The workspace factories the backward's refusal of the other mode's workspace
 # names: this package's FP32 workspace and the workspace of the
@@ -1006,16 +1025,19 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         # path more than the test.
         row = heads * HEAD_DIM
         if dy_head == HEAD_DIM and x_head == HEAD_DIM and z_head == HEAD_DIM:
-            if tokens == 1 and arch in _ONE_TOKEN_PACKED_ARCHES:
+            if tokens == 1 and rows < (
+                _ONE_TOKEN_PACKED_BELOW_ROWS_PER_SM.get(arch, 0) * sm_count
+            ):
                 # One token: its token index is 0 in every row, so its token
                 # stride (0 from _kernel_view) never enters an address, and its
                 # rows of head stride 128 lie at the linear offsets of packed
                 # rows.
                 # This call alone passes them as packed rows (token stride
                 # heads * 128: the same addresses in every program), on an
-                # architecture with a cut of the build of packed rows only;
-                # the forward, the call that computes the weight gradient and
-                # the long module's choice above keep 0.
+                # architecture with a cut of the build of packed rows only and
+                # below its limit (_ONE_TOKEN_PACKED_BELOW_ROWS_PER_SM); the
+                # forward, the call that computes the weight gradient and the
+                # long module's choice above keep 0.
                 dy_tok = x_tok = z_tok = row
                 packed = True
             else:
