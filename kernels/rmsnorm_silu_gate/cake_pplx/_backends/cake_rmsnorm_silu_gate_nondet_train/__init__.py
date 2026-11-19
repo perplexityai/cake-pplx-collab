@@ -44,7 +44,14 @@ FP32 backward's bits in this tree), except on sm_100a and sm_103a past 64
 and up to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2
 ran it up to 256 rows per SM there).  Version 0.2.4 changes no bits: a call
 with ``compute_grad_weight=False`` runs a program built without the weight
-gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  A band runs a
+gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  Version 0.2.5
+changes no bits: in the repeatable band (sm_107a) packed rows run a
+128-thread build of the strided program without the weight gradient (8-row
+blocks: twice the CTAs of 16-row blocks at a small row count), other
+layouts the 0.2.4 256-thread one; this build and the fused band's strided
+program read packed rows at their linear offsets, and a CTA of theirs with
+one block takes no integer division before its loads.
+A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
 about 3 % or more faster than with the repeatable backward (near a band's
@@ -142,7 +149,11 @@ sm_100a, 448 on sm_103a) the strided program, 256-thread CTAs walking
 claimed program (the band's claims and ticket on its workspace), and in the
 repeatable band the claimed program; on sm_107a, which routes no claimed
 program, the strided program at every row count of the fused and the
-repeatable bands; where the repeatable band runs its long role, the long
+repeatable bands (the repeatable band's on packed rows its 128-thread
+build, CTAs walking 8-row blocks, a row to each 16 lanes as in the
+repeatable backward); a strided program reads packed rows at their linear
+offsets; where the repeatable
+band runs its long role, the long
 program without the weight gradient (or, where none is routed, the long
 role with ``weight_grad`` 0).
 
@@ -340,10 +351,12 @@ Host design (the input layout rules are the deterministic package's):
   (``cake_jit.backward_ctas`` 16) scheduled together on the SMs of one GPC,
   team ``q`` of the exact tiny backward's CTA ``r`` running the 8-row block
   ``r + 16 q``, CTA ``r`` of the short backward the 16-row blocks ``r``,
-  ``r + 16``, ....  A strided program without the weight gradient launches
-  ``G = min(blocks, 4 * SMs)`` 256-thread CTAs over 16-row blocks
-  (``cake_jit.backward_ctas``), CTA ``b`` running the blocks ``b``,
-  ``b + G``, ...; a claimed or long one launches its band program's grid.
+  ``r + 16``, ....  A strided program without the weight gradient
+  launches ``G = min(blocks, 4 * SMs)`` 256-thread CTAs over 16-row blocks,
+  the repeatable band's (sm_107a) on packed rows ``G = min(blocks, 8 *
+  SMs)`` 128-thread CTAs over 8-row blocks (``cake_jit.backward_ctas``), CTA
+  ``b`` running the blocks ``b``, ``b + G``, ...; a claimed or long one
+  launches its band program's grid.
   No kernel is cooperative; no
   call synchronizes the host or the device, and every kernel runs on the
   current torch stream.
@@ -1094,9 +1107,9 @@ def _backward(
     if dw is None:
         # The band's program built without the weight gradient (the same dx
         # and dz bits): strided up to its cut (or at every row count where
-        # the band routes no claimed one), else claimed, or the long or the
-        # one-cluster one.
-        name = nodw_module(arch, name, rows, sm_count)
+        # the band routes no claimed one; on packed rows its 128-thread build
+        # where routed), else claimed, or the long or the one-cluster one.
+        name = nodw_module(arch, name, rows, sm_count, packed)
     ctas = backward_ctas(name, rows, sm_count)
     buffers: dict[str, Optional[torch.Tensor]] = {
         "dw_win": None,
