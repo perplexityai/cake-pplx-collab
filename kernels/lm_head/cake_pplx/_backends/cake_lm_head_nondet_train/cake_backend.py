@@ -11922,6 +11922,44 @@ def _logprob_vm_eligible(
     return need <= set(stages)
 
 
+# the streams the graphs' label residuals are allocated on (:func:`_graph_rlab_tensor`), one per device
+_RLAB_STREAMS: dict[int, torch.cuda.Stream] = {}
+_SMALL_BLOCK_BYTES = 1 << 20  # the caching allocator's small-pool request limit
+
+
+def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:
+    """The ``[rows]`` FP32 label residuals of a log-probability autograd graph (:func:`_logprob_graph_rlab`),
+    zero-filled when ``zero``.  The graph holds them from its forward through its backwards, so a forward that runs
+    while a graph is alive would find the caching allocator's small blocks split by them and place its own buffers
+    elsewhere.  A request the small pool serves is therefore made with a per-device holding stream current: its block
+    lies in that stream's segment, never among the blocks the calls on the caller's stream reuse, and the forward's
+    buffers keep the placement they have without the held tensor.  The tensor is marked as used on the caller's
+    stream (``record_stream``), so its block is reused only after that stream's work on it, and the zero fill runs on
+    the caller's stream as before.  Same values, same launches; the holding stream runs no work.  Under a CUDA graph
+    capture, or above the small-pool limit, it is an ordinary allocation on the caller's stream."""
+    if (
+        rows * 4 > _SMALL_BLOCK_BYTES
+        or device.type != "cuda"
+        or torch.cuda.is_current_stream_capturing()
+    ):
+        return (torch.zeros if zero else torch.empty)(
+            (rows,), dtype=torch.float32, device=device
+        )
+    index = torch.cuda.current_device() if device.index is None else int(device.index)
+    stream = _RLAB_STREAMS.get(index)
+    if stream is None:
+        stream = _RLAB_STREAMS.setdefault(
+            index, torch.cuda.Stream(device=torch.device("cuda", index))
+        )
+    current = torch.cuda.current_stream(index)
+    with torch.cuda.stream(stream):
+        held = torch.empty((rows,), dtype=torch.float32, device=device)
+    held.record_stream(current)
+    if zero:
+        held.zero_()
+    return held
+
+
 def _logprob_graph_rlab(
     X: torch.Tensor,
     row_index: Optional[torch.Tensor],
@@ -11972,12 +12010,7 @@ def _logprob_graph_rlab(
     ):
         return _GraphRlab()
     zero = dz_arm and not kept
-    return _GraphRlab(
-        (torch.zeros if zero else torch.empty)(
-            (rows,), dtype=torch.float32, device=X.device
-        ),
-        zero,
-    )
+    return _GraphRlab(_graph_rlab_tensor(rows, zero, X.device), zero)
 
 
 def _backward_logprob_vm(

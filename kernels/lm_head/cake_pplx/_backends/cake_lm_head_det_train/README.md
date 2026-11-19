@@ -91,8 +91,11 @@ keyword.
   allocates one `rlab` behind its forward's launches (zero-filled for a `dz`
   recompute) that every backward of the graph binds while the plan is not
   counted and its chunks tile the rows (the `dz` arms store the same rows on
-  each backward of one graph).  Every chunk's `dX` rows end with the
-  `slab_sum` kernel, which folds it:
+  each backward of one graph).  The graph allocates that `rlab` with a
+  per-device holding stream current, so the held tensor does not split the
+  small caching-allocator blocks a forward running while the graph is alive
+  reuses (the allocator keeps one 2 MiB segment of that stream per device).
+  Every chunk's `dX` rows end with the `slab_sum` kernel, which folds it:
   `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
   (after the slab adds of a K-sliced GEMM), one rounding of the exact
   product.  `dX_acc` is then `dz @ W + r * W[y]` in FP32, and the output cast

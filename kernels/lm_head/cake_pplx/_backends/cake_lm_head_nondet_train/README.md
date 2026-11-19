@@ -730,7 +730,11 @@ stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   with the same `fma` and predicate before its scale.  The autograd loss
   entry holds those rows' labels and `rlab` from the forward to its
   backward's dX finalize; a backward that frees the graph drops them there,
-  before the weight gradient's buffers exist.
+  before the weight gradient's buffers exist.  A log-probability autograd
+  graph allocates the `rlab` its backwards bind with a per-device holding
+  stream current, as in the deterministic package, so the held tensor does
+  not split the small caching-allocator blocks a forward running while the
+  graph is alive reuses (one 2 MiB segment of that stream per device).
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
