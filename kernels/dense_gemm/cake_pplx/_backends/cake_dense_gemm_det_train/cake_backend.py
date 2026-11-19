@@ -2394,11 +2394,11 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * 8192 -> 128 in groups of 4 at T 16172 and of 2 at T 16231 - 32768, 1.037 to 1.070 times faster than
 #     ``kn_n256_f32_tma2_pd2_pro15``;
 #   * 5120 -> 128 in groups of 2 at T 16231 alone, 1.055 to 1.064 times faster than ``kn_n256_f32_tma2_pd2_pro15``.
-#     At T 16172 and 16384 (its ranges of version 0.3.8, the group of 16) the groups missed the bar (medians 1.010 to
+#     At T 16172 and 16384 (its ranges of version 0.3.8, the group of 16) the groups missed the bar (medians 1.006 to
 #     1.019), and at T 32768 too (0.983 to 1.006): these keep their plan;
 #   * the indexer_k input gradient 6144 -> 128 in groups of 2 at T 16231 - 16384, 1.017 to 1.024 times faster than
 #     ``kn_n128_f32_tma1_pro7``.  At T 16172 its range of version 0.3.8 runs the group of 2 already; at T 32768 the
-#     group missed the bar (medians 1.012 to 1.016, not every node and mode pair a win) and the row keeps its plan.
+#     groups missed the bar (medians 1.012 to 1.016, not every node and mode pair a win) and the row keeps its plan.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
