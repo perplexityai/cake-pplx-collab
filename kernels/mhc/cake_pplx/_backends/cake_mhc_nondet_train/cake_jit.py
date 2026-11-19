@@ -268,12 +268,14 @@ two sub-tokens per thread group and trip (``rows_per_cta`` 4: half the CTAs of
 the sm_100a / sm_103a records), and ``collapse_bwd__vjpwa_pfq2__h5120`` fills
 the VJP's shared-memory stage by ``cp.async`` and prefetches a later token's
 rows into L2 (the same grid and dynamic shared memory).  At hidden 5120 on
-sm_107a the token owner's ``ao22_rae7_pd1_ntr`` and ``dot_ao8_l2l`` programs run
-as their ``_iu`` records in ``bwd_finish`` and ``bwd_finish_handoff`` (the same
-outputs bit for bit: the idle lanes of the coefficient backward divide ``1.0``
-in place of ``0``, so their quotients stay off the division's slow path; the
-same selection, grid and launch facts); ``bwd_token__ao22_rae7_pd1_ntr__h5120``
-and its handoff twin ship on sm_100a / sm_103a.
+sm_107a the token owner's programs of record are ``ao22_rae7_pd1_ntr_iu`` for
+R <= 8 and ``dot_ao8_l2l_iu`` above (``H_TABLES[5120]``), the ``_iu`` forms of
+``ao22_rae7_pd1_ntr`` and ``dot_ao8_l2l`` in ``bwd_finish`` and
+``bwd_finish_handoff`` (the same outputs bit for bit: the idle lanes of the
+coefficient backward divide ``1.0`` in place of ``0``, so their quotients stay
+off the division's slow path; the grid and launch facts of the forms they
+extend); ``bwd_token__ao22_rae7_pd1_ntr__h5120`` and its handoff twin ship on
+sm_100a / sm_103a.
 """
 
 from __future__ import annotations
@@ -5598,7 +5600,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "program",
-            "program": "ao22_rae7_pd1_ntr",
+            "program": "ao22_rae7_pd1_ntr_iu",
             "rule": "bwd_token_program",
         },
         "workspace_rule": {
@@ -7627,7 +7629,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "program",
-            "program": "dot_ao8_l2l",
+            "program": "dot_ao8_l2l_iu",
             "rule": "bwd_token_program",
         },
         "workspace_rule": {
@@ -8713,7 +8715,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "program",
-            "program": "ao22_rae7_pd1_ntr",
+            "program": "ao22_rae7_pd1_ntr_iu",
             "rule": "bwd_token_program",
         },
         "workspace_rule": {
@@ -8786,7 +8788,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_token",
         "select_rule": {
             "kind": "program",
-            "program": "dot_ao8_l2l",
+            "program": "dot_ao8_l2l_iu",
             "rule": "bwd_token_program",
         },
         "workspace_rule": {
@@ -10227,15 +10229,18 @@ H_TABLES: dict[int, dict[str, Any]] = {
             "sm_103a": "round5",
             "sm_107a": "round9",
         },
+        # sm_107a: the idle-lane unit quotient forms (idle_unit, "_iu"; bitwise the forms they extend),
+        # F_A for R <= 8 and dot_ao8_l2l above: in route the time F_A_iu / l2l_iu is 1.0007-1.0130 at R 16..32 and
+        # 0.994-1.002 at R 8 (hbwd / hckpt / sbwd, CUDA graph, VR200 212 SMs, two nodes)
         "BWD_TOKEN_PROGRAM": {
             "sm_100a": "dot_ao8",
             "sm_103a": "dot_ao8",
-            "sm_107a": "dot_ao8_l2l",
+            "sm_107a": "dot_ao8_l2l_iu",
         },
         "BWD_TOKEN_REGIMES": {
             "sm_100a": (("ao22_rae7_pd1_ntr", 0, 32),),
             "sm_103a": (("ao22_rae7_pd1_ntr", 0, 32),),
-            "sm_107a": (("ao22_rae7_pd1_ntr", 0, 32),),
+            "sm_107a": (("ao22_rae7_pd1_ntr_iu", 0, 8),),
         },
         "BWD_TOKEN_BANDS": {"sm_100a": (), "sm_103a": (), "sm_107a": ()},
         "BWD_ROW_BANDS": {
