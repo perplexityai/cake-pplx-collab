@@ -365,10 +365,12 @@ def cake_dsa_sparse_attention_nondet(
         row and keeps the key-range-pass policy above.  A count above 1 plans
         the backward as :func:`cake_dsa_sparse_attention_nondet_varlen` plans
         it for the same rows: one pass unless ``key_passes`` overrides, since
-        whole-row key ranges would leave most passes empty for every token,
-        and on ``sm_107a`` the ``dkv_direct`` rule's ``K_eff`` with this
-        count.  The count selects the plan only; every value gives a valid
-        result.  ``bool``, a tensor or a value below 1 raises ``ValueError``.
+        whole-row key ranges would leave most passes empty for every token.
+        On ``sm_107a`` the ``dkv_direct`` rule above computes its ``K_eff =
+        min(K_slots, ceil(S / num_segments))`` from this count at every value,
+        1 included (one segment gives ``K_eff = min(K_slots, S)``).  The count
+        selects the plan only; every value gives a valid result.  ``bool``, a
+        tensor or a value below 1 raises ``ValueError``.
 
     Returns
     -------

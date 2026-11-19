@@ -376,7 +376,9 @@ def test_flat_entry_with_num_segments_plans_one_pass_and_repeats_bit_for_bit(
     # the row would take whole-row passes as one segment, on every architecture
     assert default_passes > 1
     assert plan(record, stages, T, S, topk, num_segments=2, arch=arch) == 1
-    # a cache of this test's own: the det cache keys on geometry alone
+    # a cache of this test's own, cleared before each call below so that the call's backward plan is its one backward
+    # entry; the det backward key holds the input geometry and the options that shape the plan, key_passes and
+    # whether num_segments > 1 among them (cake_backend.backward_binding_key)
     monkeypatch.setattr(cake_backend, "BINDING_CACHE", cake_backend._BindingCache())
     cache = cake_backend.BINDING_CACHE
 
