@@ -164,9 +164,9 @@ Host design (the knobs are keywords; no environment variable):
   tile, on the route's plan above) and the direct program in the ranges of
   ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of its channel
   tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at most one CTA per
-  token block).  Neither takes counters: a passed ``workspace`` is accepted
-  and not read, and the workspace size is unchanged.  ``y`` is the same bits
-  on every forward program and plan.
+  token block).  Neither takes counters: a passed ``workspace`` is checked
+  and not passed to the program, and the workspace size is unchanged.
+  ``y`` is the same bits on every forward program and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
@@ -1362,7 +1362,11 @@ def _forward_work(
     """The ``work`` counters of one forward launch needing ``words`` int32 words.
 
     A caller-owned ``workspace`` (1-D int32, contiguous, on ``device``, at least
-    ``words`` words, zero before its first launch) is used as is.  Without one:
+    ``words`` words, zero before its first launch) is used as is; a program
+    that takes no counters (``words`` 0: the forward's static and direct
+    programs) gets none, so such a workspace is checked and not passed on (the
+    record's argument plan binds no ``work``; the launch is the one without a
+    workspace).  Without one:
     inside a CUDA Graph capture the capture's pre-zeroed buffer of the stream,
     else a fresh zeroed buffer (its zeroing is captured with the launch); the
     graph shares no counters with eager calls or other graphs
@@ -1387,7 +1391,7 @@ def _forward_work(
                 f"workspace holds {ws.numel()} int32 words; this call needs at least "
                 f"{words}; allocate cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)"
             )
-        return ws
+        return ws if words else None
     if words == 0:
         return None
     if capturing is None:

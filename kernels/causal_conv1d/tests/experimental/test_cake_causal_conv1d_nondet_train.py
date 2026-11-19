@@ -1492,15 +1492,14 @@ def _small_s_docs(S: int):
 def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     """Every forward key of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of route ``kind`` on the device's architecture
     (:func:`_small_s_rows`: S 1000, both sides of the static / direct split and of the key's ceiling, at the key's
-    channel ends): the public forward launches the program the tables name (the static program inside a static
-    range, the direct program inside a direct range, the dynamic program above), the static and direct programs with
-    no ``work`` counters (a passed forward workspace is accepted, not read, and stays zero).  On each of the 32 draws
+    channel ends): the public forward launches the program the tables name (the static program inside a static range,
+    the direct program inside a direct range, the dynamic program above), the static and direct programs with no
+    ``work`` counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the 32 draws
     every ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's static
     program on the same inputs (one key over every token count of the key's channel counts), a launch with
-    ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured
-    after one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture
-    fallback.  A row packs the ``"perf"`` documents, or one document below the packing's minimum
-    (:func:`_small_s_docs`)."""
+    ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after
+    one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture fallback.  A row
+    packs the ``"perf"`` documents, or one document below the packing's minimum (:func:`_small_s_docs`)."""
 
     _require_route(kind)
     arch, device = _arch(), _device()

@@ -71,9 +71,10 @@ at C = 576 to 768 below the token ceilings of the backend's
 ``cake_jit.FALLBACK_ROWS`` and ``cake_jit.DIRECT_ROWS`` (by architecture,
 route, ``C`` and ``S``) the static program (a fixed token range per CTA) or
 the direct program (the next token blocks per CTA, no shared memory) runs,
-neither with ``work`` counters: a passed forward ``workspace`` is accepted
-and not read, and such a call zeroes no package buffer; every other call runs
-the dynamic program, which takes its token chunks from zeroed int32 counters.
+neither with ``work`` counters: a passed forward ``workspace`` is checked
+and not passed to the program, and such a call zeroes no package buffer;
+every other call runs the dynamic program, which takes its token chunks from
+zeroed int32 counters.
 The forward workspace size is the same in every case.
 
 The backward workspace holds zeroed accumulators and counters that every
