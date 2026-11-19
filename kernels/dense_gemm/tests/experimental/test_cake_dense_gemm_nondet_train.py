@@ -17361,8 +17361,8 @@ def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
 #: promoted chunks (that package's threshold up to version 0.3.5), per device class: (arch, SM count) ->
 #: ``((d_in, d_out, T, seeds), ...)``: a row at one token count with the seeds it missed on, one cell per seed
 #: (``LONG_SEGMENT_SEED``: the seed of that package's tests).  This package's weight gradient missed the tier with the
-#: deterministic plan's errors on 28 of the 77 B200 cells, 28 of the 61 B300 cells, 28 of the 51 GB300 cells and 58 of
-#: the 61 VR200 cells (all but 8192 -> 128).
+#: deterministic plan's errors on 28 of the 77 B200 cells, 28 of the 58 GB200 cells, 28 of the 61 B300 cells, 28 of the
+#: 51 GB300 cells and 58 of the 61 VR200 cells (all but 8192 -> 128).
 LONG_SEGMENT_SEED = 20260930
 # fmt: off
 LONG_SEGMENT_MISSED_CELLS = {
@@ -17388,8 +17388,23 @@ LONG_SEGMENT_MISSED_CELLS = {
         (6144, 128, 16384, (LONG_SEGMENT_SEED, 3)),
     ),
     ("sm_100a", 152): (
-        (5120, 128, 16231, (758,)),
-        (5120, 32, 32768, (758,)),
+        (4096, 16, 20480, (1,)), (4096, 16, 31744, (1, 3)), (4096, 16, 32768, (LONG_SEGMENT_SEED, 758)),
+        (4096, 32, 31744, (LONG_SEGMENT_SEED,)),
+        (4096, 48, 31744, (1,)), (4096, 48, 32768, (LONG_SEGMENT_SEED, 3)),
+        (4096, 64, 31744, (LONG_SEGMENT_SEED, 1, 2, 3, 758)), (4096, 64, 31745, (1, 3)),
+        (4096, 64, 32768, (LONG_SEGMENT_SEED, 1, 758)),
+        (4096, 96, 31744, (3,)), (4096, 96, 31745, (LONG_SEGMENT_SEED, 1)), (4096, 96, 32768, (2, 3, 758)),
+        (4096, 128, 31744, (LONG_SEGMENT_SEED, 3, 758)), (4096, 128, 31745, (LONG_SEGMENT_SEED, 2)),
+        (4096, 128, 32768, (1, 3)),
+        (5120, 32, 20992, (1,)), (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3, 758)), (5120, 32, 32768, (3, 758)),
+        (5120, 48, 32768, (3,)),
+        (5120, 64, 14336, (758,)), (5120, 64, 15360, (2,)), (5120, 64, 15361, (1, 3)), (5120, 64, 16172, (3,)),
+        (5120, 64, 16231, (1,)),
+        (5120, 128, 12288, (3,)), (5120, 128, 16172, (758,)), (5120, 128, 16231, (758,)), (5120, 128, 16383, (1, 2, 3)),
+        (5120, 128, 16384, (2,)),
+        (6144, 32, 15360, (1,)), (6144, 32, 16384, (3,)),
+        (6144, 128, 16172, (LONG_SEGMENT_SEED,)), (6144, 128, 16231, (LONG_SEGMENT_SEED,)),
+        (6144, 128, 16384, (LONG_SEGMENT_SEED,)),
     ),
     ("sm_103a", 148): (
         (4096, 16, 23553, (3,)), (4096, 16, 26624, (1,)), (4096, 16, 28672, (1,)), (4096, 16, 32768, (1, 758)),
