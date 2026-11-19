@@ -2234,7 +2234,9 @@ def prepare_lm_head_loss(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2428,12 +2430,22 @@ def prepare_lm_head_loss(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -2675,7 +2687,9 @@ def prepare_lm_head_loss_temperature(
     ``_template_only`` (internal; the eager entry points, ``cake`` backend): the runner only templates a remembered
     binding (:meth:`_Binding.from_runner`), which launches with per-call buffers of its own.  The workspace and the
     accumulators / casts allocated here then share one allocation of the largest of them (views of it that alias one
-    another), so building a binding costs the largest buffer rather than their sum; such a runner never launches.
+    another), so building a binding costs the largest buffer rather than their sum; it binds the device's constant
+    cells (:func:`.cake_backend._device_constants`), as the binding does, rather than filling cells of its own; such
+    a runner never launches.
     """
     if _template_only and backend != "cake":
         raise ValueError("a template-only runner templates a cake-backend binding")
@@ -2895,12 +2909,22 @@ def prepare_lm_head_loss_temperature(
     t["term"] = _carve(flat, layout, "term", torch.float32, (rows,))
     t["loss_acc"] = _carve(flat, layout, "loss_acc", torch.float32, (32,))
     t["grad_scale"] = _carve(flat, layout, "grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the plain-store GEMMs
+    if _template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`.cake_backend._device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the plain-store GEMMs
     if plan.compact:
         t["row_index"] = row_index
         t["x_c"] = _carve(
@@ -3213,13 +3237,18 @@ class _Binding:
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         for key, launch in runner.launches.items():
             if keep is None or key in keep:
-                _check_slot_values(key, t, plan, [name for _, name in launch.slots])
+                _check_slot_values(
+                    key, t, plan, [name for _, name in launch.slots], formed.get(key)
+                )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
-                _check_slot_values(key, t, plan, ["src", "idx", "out"])
+                _check_slot_values(key, t, plan, ["src", "idx", "out"], formed.get(key))
         early = forward_early_keys(plan)
         split = next(
             (i for i, key in enumerate(early) if _reads_labels(key[0])), len(early)
@@ -3547,7 +3576,10 @@ class _TemperatureBinding(_Binding):
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         tau = plan.problem.temperature
         slot_values = _slot_values_temperature if tau else _slot_values
         full_values = stage_values_temperature if tau else stage_values
@@ -3560,11 +3592,18 @@ class _TemperatureBinding(_Binding):
                     [name for _, name in launch.slots],
                     slot_values,
                     full_values,
+                    formed.get(key),
                 )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
                 _check_slot_values_temperature(
-                    key, t, plan, ["src", "idx", "out"], slot_values, full_values
+                    key,
+                    t,
+                    plan,
+                    ["src", "idx", "out"],
+                    slot_values,
+                    full_values,
+                    formed.get(key),
                 )
         early = forward_early_keys(plan)
         split = next(
@@ -3889,10 +3928,12 @@ class BindingCache:
 BINDING_CACHE = BindingCache()
 
 
-def _check_slot_values(key, t: dict[str, Any], plan: Plan, names) -> None:
-    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``."""
+def _check_slot_values(key, t: dict[str, Any], plan: Plan, names, full=None) -> None:
+    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``
+    (``full``: the host values :func:`stage_values` formed for it, when they are already at hand)."""
     fast = _slot_values(key[0], t, plan, key[1])
-    full = stage_values(key[0], t, plan, key[1])
+    if full is None:
+        full = stage_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -3907,11 +3948,14 @@ def _check_slot_values_temperature(
     names,
     slot_values=_slot_values,
     full_values=stage_values,
+    full=None,
 ) -> None:
     """:func:`_slot_values` (or the binding's ``slot_values``) binds what :func:`stage_values` (or the binding's
-    ``full_values``) binds for the host values ``names`` of launch ``key``."""
+    ``full_values``) binds for the host values ``names`` of launch ``key`` (``full``: the host values ``full_values``
+    formed for it, when they are already at hand)."""
     fast = slot_values(key[0], t, plan, key[1])
-    full = full_values(key[0], t, plan, key[1])
+    if full is None:
+        full = full_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
