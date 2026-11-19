@@ -45,7 +45,8 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
   no device allocation (``tests/experimental/test_helpers/cake_host_sync.py``), bitwise the first call;
 - per-document zigzag rows: the longest document is a chain of ``2 W`` fragments over every rank.
 
-``ROWS`` are W = 2 / 4 / 8; ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at
+``ROWS`` are W = 2 / 4 / 8; ``F_ROWS`` are W = 2 / 4 at C = 528 and 568 with the ranks' token counts on both sides of
+the forward's token floor of the channel count; ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at
 W = 64 a document of 128 fragments, and documents of one- and two-token fragments whose history comes from up to three
 predecessor ranks).  Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
 ``torch.multiprocessing`` (``pytest``: skipped when fewer than ``W`` CUDA devices are visible) and one process per Slurm
@@ -81,6 +82,17 @@ ROWS = [
     ((3000,), 8, "zigzag", 256),
     ((2048, 5, 3000, 1), 8, "zigzag_per_document", 384),
     ((6, 1, 2, 3, 4000), 8, "ragged:1,1,1,3,0,2,4000,4", 256),
+]
+# Rows of C = 528 and 568 whose ranks' token counts lie on both sides of the forward's token floor of those channel
+# counts (``cake_jit.NARROW_ROW_FLOORS["fwd"]``: C = 528 24576 on every architecture; C = 568 12288 on sm_100a /
+# sm_103a, 16384 on sm_107a), so the single-rank main program of one rank runs the narrower tiles of its floor and
+# that of another rank the single tile, at W = 2 and 4 (at W = 4 a rank exactly at C = 528's floor and one a token
+# below it, and ranks at 16384 / 12288 / 12287 tokens at C = 568).  Kept out of ``ROWS`` (other suites import it).
+F_ROWS = [
+    ((20000, 10003, 6000), 2, "ragged:26000,10003", 528),
+    ((30000, 19151, 9001), 4, "ragged:24576,24575,1,9000", 528),
+    ((9000, 11000, 6003), 2, "ragged:20000,6003", 568),
+    ((20000, 15000, 9000, 3), 4, "ragged:16384,12288,12287,3044", 568),
 ]
 # Per-document zigzag at W = 16 / 32 / 64: every document is cut into 2 W fragments, so the longest is a chain over
 # every rank (128 fragments at W = 64); the short documents give one- and two-token fragments and empty ones.  Kept
@@ -645,7 +657,7 @@ def _skip_without_allocator_counts(report: dict) -> None:
         )
 
 
-@pytest.mark.parametrize("row", ROWS + ROWS_SCALE, ids=_row_id)
+@pytest.mark.parametrize("row", ROWS + F_ROWS + ROWS_SCALE, ids=_row_id)
 def test_recompute_handle_rows(row) -> None:
     """Bitwise and per-phase collective counts of the checkpoint with / without a recompute handle, repeats per launch
     form, the direct pass judged against the naive tier and the steady-state census (module docstring)."""
