@@ -240,9 +240,10 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
-# The FFI entry of each record on each device, by (record, device index): the first launch on a device fills it for
-# every record (:func:`_first_launch`), and every launch takes its entry from here.
-_ENTRIES: dict[tuple[str, int], Any] = {}
+# The FFI entries of the records on each device, by device index and then record: the first launch on a device fills
+# them for every record (:func:`_first_launch`), and every launch takes its entry from here (two dictionary lookups,
+# no key tuple to build and hash).
+_ENTRIES: dict[int, dict[str, Any]] = {}
 
 
 def _capturing(index: int) -> bool:
@@ -269,8 +270,7 @@ def _first_launch(arch: str, name: str, index: int, *args: Any) -> Any:
     for record, entry in entries.items():
         if record != name:
             entry(*args)
-    for record, entry in entries.items():
-        _ENTRIES[record, index] = entry
+    _ENTRIES[index] = entries
     return entries[name]
 
 
@@ -312,7 +312,7 @@ def _launch(
         w = w.as_strided((1, ROW_DIM), (ROW_DIM, 1))
         s = s.as_strided((1, GROUPS), (GROUPS, 1))
     try:
-        entry = _ENTRIES[name, index]
+        entry = _ENTRIES[index][name]
     except KeyError:
         entry = _first_launch(arch, name, index, w, s, row_ids, out, positions, grid_x, 1, 1)
     entry(w, s, row_ids, out, positions, grid_x, 1, 1)

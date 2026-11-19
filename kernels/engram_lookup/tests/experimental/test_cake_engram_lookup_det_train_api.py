@@ -557,7 +557,7 @@ backend._launch = recorded
 before = sorted(backend._ENTRIES)
 out_first = facade.cake_engram_lookup_det_train_forward(weight, scale, first)
 torch.cuda.synchronize(device)
-ready = sorted(record for record, index in backend._ENTRIES if index == 0)
+ready = sorted(backend._ENTRIES.get(0, {}))
 graph = torch.cuda.CUDAGraph()
 with torch.cuda.graph(graph):
     replayed = facade.cake_engram_lookup_det_train_forward(weight, scale, ids)

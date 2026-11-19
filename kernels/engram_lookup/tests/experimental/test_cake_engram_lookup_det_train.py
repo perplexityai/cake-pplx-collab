@@ -347,7 +347,7 @@ def test_the_first_launch_on_a_device_launches_both_programs(monkeypatch) -> Non
         (_, _, first), (_, _, own) = calls
         assert len(own) == len(cake_backend._PARAMETERS) + 3
         assert all(a is b for a, b in zip(first, own, strict=True))
-        assert sorted(cake_backend._ENTRIES) == sorted((record, 0) for record in RECORDS)
+        assert {index: sorted(entries) for index, entries in cake_backend._ENTRIES.items()} == {0: sorted(RECORDS)}
     calls.clear()
     for name in (SMALL_RECORD, RECORD, RECORD, SMALL_RECORD):
         cake_backend._launch("sm_107a", name, weight, scale, ids, out, 4, 1, 0)
@@ -355,7 +355,10 @@ def test_the_first_launch_on_a_device_launches_both_programs(monkeypatch) -> Non
     calls.clear()
     cake_backend._launch("sm_107a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 1)
     assert [record for record, _, _ in calls] == [RECORD, SMALL_RECORD]
-    assert sorted(cake_backend._ENTRIES) == sorted((record, index) for record in RECORDS for index in (0, 1))
+    assert {index: sorted(entries) for index, entries in cake_backend._ENTRIES.items()} == {
+        0: sorted(RECORDS),
+        1: sorted(RECORDS),
+    }
 
 
 def test_a_first_launch_inside_a_capture_launches_its_own_program_only(monkeypatch) -> None:
@@ -377,7 +380,7 @@ def test_a_first_launch_inside_a_capture_launches_its_own_program_only(monkeypat
     capturing[0] = False
     cake_backend._launch("sm_103a", SMALL_RECORD, weight, scale, ids, out, 4, 1, 0)
     assert [record for record, _, _ in calls] == [RECORD, SMALL_RECORD]
-    assert sorted(cake_backend._ENTRIES) == sorted((record, 0) for record in RECORDS)
+    assert {index: sorted(entries) for index, entries in cake_backend._ENTRIES.items()} == {0: sorted(RECORDS)}
 
 
 def test_the_package_exports_the_backend_entries() -> None:
