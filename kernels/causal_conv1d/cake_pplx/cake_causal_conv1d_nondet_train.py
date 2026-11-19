@@ -23,7 +23,7 @@ backward of the deterministic package
 (:mod:`cake_pplx.cake_causal_conv1d_det_train`) is a main launch plus a
 fixed-order reduce launch).  At the rows of the backend's
 ``cake_jit.SM_WIDE_ROWS`` (the default backward route at C = 520 to 608 from
-S = 40960 on sm_100a and from S = 20480 on sm_103a, at C = 520 to 680 from
+S = 24576 on sm_100a and from S = 20480 on sm_103a, at C = 520 to 680 from
 S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
 the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
 busy on another stream can delay it.  This module never runs the

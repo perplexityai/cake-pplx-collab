@@ -3518,7 +3518,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # program's; only the cross-CTA reduction differs: each CTA adds its CTA row into the FP32 accumulator ``acc``,
     # takes a ticket on the tile's ``work`` counter, and the last CTA stores FP32 ``dw`` once and zeroes ``acc`` and
     # ``work``.  No reduce program, no cooperative launch.  It runs only at its rows of ``SM_WIDE_ROWS`` (C = 520 to
-    # 608 at S = 40960 to 98303; ``select_rule`` kind ``rows``).
+    # 608 at S = 24576 to 98303; ``select_rule`` kind ``rows``).
     "cake_causal_conv1d_train_82e874f30406be2334b6": {
         "arches": [
             "sm_100a",

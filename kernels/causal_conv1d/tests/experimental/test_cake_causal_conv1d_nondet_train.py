@@ -58,11 +58,12 @@ tiles, on a caller-owned workspace of the public size and on the package's, with
 naive tier and the workspace zero after the call.  The 32-vector tiles of ``NARROW_TILES`` the same way at every key of the architecture's table
 (``NARROW_CASES``: the key's channel ends and an inner channel count, at token counts inside the key's range), and
 the side-stream one-SM trim of a three-tile narrow row's grid.  The forward's narrow rows (``FORWARD_NARROW_CASES``:
-C 576 to 768 at the row's token floors on the device's architecture and the row's route, ``forward_narrow_min_s``
-and ``FORWARD_WIDTH_FLOORS``) launch their 32-vector or width tiles on a caller-owned forward workspace of the public
-size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.  The
-backward rows of ``FALLBACK_ROWS`` (each key's channel ends and C 640 / 896 at the key's last token count and the
-next) launch the route's fallback program inside the key's token range and the rules' program above it.  The rows of
+C 520 to 768 at the row's token floors on the device's architecture, the row's route and the taps' dtype,
+``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS``, and one token below a floor or inside a single-tile range of
+``FORWARD_SINGLE_TILE_ROWS``) launch their 32-vector, width or single tiles on a caller-owned forward workspace of
+the public size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the
+call.  The backward rows of ``FALLBACK_ROWS`` (each key's channel ends and C 640 / 896 at the key's last token
+count and the next) launch the route's fallback program inside the key's token range and the rules' program above it.  The rows of
 ``SM_WIDE_ROWS`` (route ``bwd``: each key's lowest, an inner and its highest channel count on both sides of every
 segment's first token count) launch the segment's SM-wide program (one CTA per SM), judged against the naive tier, on
 a caller-owned workspace and the package's (sm_107a's program from 131072 tokens keeps two accumulator copies in the
@@ -534,8 +535,11 @@ def _sm_wide_key(arch: str) -> tuple[int, int, tuple[tuple[int, int, str], ...]]
     """``(C_lo, C_hi, segments)`` of the default backward route's ``SM_WIDE_ROWS`` key on ``arch`` (one per
     architecture, asserted)."""
 
-    keys = [(int(c_lo), int(c_hi), segments) for (route, c_lo, c_hi), segments in loader.SM_WIDE_ROWS.get(arch, {}).items()
-            if route == "bwd"]  # fmt: skip
+    keys = [
+        (int(c_lo), int(c_hi), segments)
+        for (route, c_lo, c_hi), segments in loader.SM_WIDE_ROWS.get(arch, {}).items()
+        if route == "bwd"
+    ]
     assert len(keys) == 1, f"{arch}: expected one SM_WIDE_ROWS key of route bwd, got {keys}"
     return keys[0]
 
@@ -3944,7 +3948,8 @@ def test_backward_finishes_beside_a_kernel_holding_one_sms_shared_memory(monkeyp
             assert len(launched) == 1 and (program is None or launched == {program}), launched
             (name,) = launched
             tag = "sm_wide" if program is not None else "rules"
-            print(f"{tag} {name}: alone {alone:.3f} ms, beside the shared-memory kernel {busy:.3f} ms ({busy / alone:.2f}x)")
+            print(f"{tag} {name}: alone {alone:.3f} ms, beside the shared-memory kernel {busy:.3f} ms "
+                  f"({busy / alone:.2f}x)")  # fmt: skip
             record_property(f"{tag}_program", name)
             record_property(f"{tag}_alone_ms", f"{alone:.4f}")
             record_property(f"{tag}_beside_smem_kernel_ms", f"{busy:.4f}")

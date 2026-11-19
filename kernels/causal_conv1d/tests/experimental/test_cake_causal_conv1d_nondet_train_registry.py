@@ -109,13 +109,13 @@ TOKENS = (
     1000,
     20479,
     20480,
+    24575,
+    24576,
     31291,
     31292,
     31293,
     32767,
     32768,
-    40959,
-    40960,
     62585,
     62586,
     65536,
@@ -140,7 +140,7 @@ TOKENS = (
 # to 608 up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).
 FALLBACK_ROWS_OF_RECORD = {
     "sm_100a": {
-        ("bwd", 520, 608): (1, 40959),
+        ("bwd", 520, 608): (1, 24575),
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
@@ -171,7 +171,7 @@ FALLBACK_REPLACES_OF_RECORD = {
 SM_WIDE_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 520, 608): (
-            (40960, 98303, "cake_causal_conv1d_train_82e874f30406be2334b6"),
+            (24576, 98303, "cake_causal_conv1d_train_82e874f30406be2334b6"),
             (98304, 2147483647, "cake_causal_conv1d_train_1ec222b2d908a7d6ea21"),
         ),
     },
