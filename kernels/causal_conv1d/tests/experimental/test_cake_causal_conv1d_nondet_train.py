@@ -184,17 +184,35 @@ def _key_tokens(s_min: int, s_max: int) -> tuple[int, ...]:
     return tuple(sorted({s_min, min(s_min + 1, s_max)}))
 
 
+def _narrow_tokens(arch: str, route: str, C: int, s_min: int, s_max: int) -> tuple[int, ...]:
+    """The token counts of :func:`_key_tokens` at which the narrow tiles run for ``(arch, route, C)``: a token count
+    inside a segment of ``SM_WIDE_ROWS`` (where the SM-wide program runs its own one-tile split, not the narrow
+    tiles) is replaced by one token below the first segment of the key covering ``C``, when the narrow key's range
+    holds it."""
+
+    tokens = _key_tokens(s_min, s_max)
+    segments = loader.sm_wide_segments(arch, route, C)
+    if segments is None:
+        return tokens
+    kept = {S for S in tokens if loader.sm_wide_module(arch, route, C, S) is None}
+    below = segments[0][0] - 1
+    if len(kept) < len(tokens) and s_min <= below <= s_max:
+        kept.add(below)
+    return tuple(sorted(kept))
+
+
 # The rows of ``NARROW_TILES`` (rendered with the table; empty for an architecture without rows) the narrow-tile
 # test launches, per architecture (route, S, C): each key's lowest, an inner and its highest channel count at the
-# token counts of :func:`_key_tokens` (inside the delivered range; ``CASES`` stop at S = 4097), on the key's route and
-# on every route that plans by its rows (``TILE_ROUTE``).
+# token counts of :func:`_narrow_tokens` (inside the delivered range; ``CASES`` stop at S = 4097; at a channel count
+# of ``SM_WIDE_ROWS`` the token count below its first segment), on the key's route and on every route that plans by
+# its rows (``TILE_ROUTE``).
 NARROW_CASES = {
     arch: tuple(
         (route, S, C)
         for (base, c_lo, c_hi), (s_min, s_max) in sorted(rows.items())
         for route in (base, *sorted(t for t, b in loader.TILE_ROUTE.items() if b == base))
         for C in sorted({int(c_lo), (int(c_lo) + int(c_hi)) // 16 * 8, int(c_hi)})
-        for S in _key_tokens(int(s_min), int(s_max))
+        for S in _narrow_tokens(arch, route, C, int(s_min), int(s_max))
     )
     for arch, rows in loader.NARROW_TILES.items()
 }
@@ -1138,6 +1156,7 @@ def test_narrow_tile_row(own_workspace, monkeypatch, record_property) -> None:
         _require_route(kind)
         label = f"{arch} {kind} S={S} C={C}"
         assert loader.narrow_tile_row(arch, kind, C, S), label
+        assert loader.sm_wide_module(arch, kind, C, S) is None, label
         (name,) = loader.selected_modules(arch, kind, C=C, S=S)
         geometry = loader.MODULES[name]["grid_rule"]["geometry"]
         wanted = {
@@ -1558,6 +1577,9 @@ def test_workspace_views_are_built_once_per_workspace() -> None:
     device = _device()
     nbytes = pkg.cake_causal_conv1d_nondet_train_backward_workspace_bytes(S, C, device)
     workspace = pkg.cake_causal_conv1d_nondet_train_backward_workspace(S, C, device)
+    # Entries of earlier tests' workspaces that are already garbage (a failed test's traceback holds its workspace
+    # in a reference cycle) are dropped here, not by the collection at the end of this test.
+    gc.collect()
     entries = len(pkg._ACCUMULATOR_VIEWS)
 
     def calls(count, ws):
