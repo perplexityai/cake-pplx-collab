@@ -2259,7 +2259,8 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # row's rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output
 # equal to that plan's bit for bit at every measured key.  Since version 0.3.8 the 148- and 152-SM sm_103a parts and
 # the 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and
-# 8192 -> 128, on 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below).
+# 8192 -> 128, on 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below);
+# since version 0.3.9 the 152-SM sm_103a part runs it in raster groups of 2 on 8192 -> 128 at T 16231 - 16384.
 # fmt: off
 _SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
 ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
