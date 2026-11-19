@@ -24,12 +24,15 @@ the build that also stores the FP32 scale of each group, and the suffix
 ``_small`` for the route's small build.  The host plan of a record is
 ``format``, ``scale_out``, ``group`` (the elements of one scale group),
 ``arches``, ``ffi_entry``, ``grid_rule`` and, for a small record only,
-``vectors``: per architecture, the inclusive ``n_vecs`` range its route runs
-it for.  The derived leaves (``library``, ``kernel_symbol``, ``launch``
-and ``arg_plan``) are written from the rendered program each time the package
-is generated; ``library`` is the program identity (``cake_act_qdq_<20 hex>``),
-so a kernel change renames it.  ``MODULES`` and ``ROUTES`` are literal tables
-(they are read with ``ast.literal_eval``).
+``vectors``: per architecture and kind of call (``out_of_place`` or
+``in_place``), the inclusive ``n_vecs`` range its route runs it for, or
+``None`` for no size.  The derived leaves (``library``, ``kernel_symbol``,
+``launch`` and ``arg_plan``) are written from the rendered program each time
+the package is generated; ``library`` is the program identity
+(``cake_act_qdq_<20 hex>``, over the kernel's module and build options), so it
+names the same program across revisions of the kernel, and ``build.json``
+records the digests of the sources it is compiled from.  ``MODULES`` and
+``ROUTES`` are literal tables (they are read with ``ast.literal_eval``).
 
 What to compile (sources, digests, nvcc flags) is recorded once in
 ``build.json`` next to this file.  :mod:`.cake_build` serves the library
@@ -45,11 +48,14 @@ the SMs hold (32 per SM, 16 on SM107), else that many CTAs, at most one per
 tile (:func:`launch_grid`).  A small program is the same kernel with CTAs of
 256 threads, two vectors each (tiles of 512 vectors, 8 CTAs per SM, 4 on
 SM107).  A call runs the small record of its route when ``n_vecs`` lies in
-the record's ``vectors`` range (65,537 to 524,288 on SM100 and SM103, 1 to
-262,144 on SM107), where the problem fills about one wave and the larger CTAs
-start sooner, and the main record otherwise (:func:`selected_module`).  Both
-give the same bytes.  ``n_vecs`` is a run-time scalar, so a new shape
-never recompiles.  Build every library of the architecture (:func:`specs_for_arch`)
+the record's ``vectors`` range for the call's kind, where the problem fills
+about one wave and the larger CTAs start sooner: out of place 65,537 to
+524,288 on SM100 and SM103 and 1 to 262,144 on SM107, in place 1 to 262,144
+on SM107 only (in place on SM100 and SM103 the small program measured no
+faster).  Every other call runs the main record (:func:`selected_module`).
+Both give the same bytes.  ``n_vecs`` is a run-time scalar, so a library
+serves every shape; a call builds or loads only its own program's library on
+first use.  Build every library of the architecture (:func:`specs_for_arch`)
 before a CUDA graph capture, to keep the JIT out of the capture.
 """
 
@@ -238,7 +244,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_31fe4b142ec4ef695bc0",
         "scale_out": False,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
     "fp4_e4m3_g16_scales_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -263,7 +273,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_2023c9ed5353480a0770",
         "scale_out": True,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
     "mxfp4_e8m0_g32_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -288,7 +302,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_fd1904d6eabe30c83dd8",
         "scale_out": False,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
     "mxfp4_e8m0_g32_scales_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -313,7 +331,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_fcf58c212757a8738714",
         "scale_out": True,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
     "mxfp8_e8m0_g32_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -338,7 +360,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_d71450a083590e4d0ab9",
         "scale_out": False,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
     "mxfp8_e8m0_g32_scales_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -363,13 +389,17 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_act_qdq_bd4ec0bb720b07117a05",
         "scale_out": True,
-        "vectors": {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)},
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
     },
 }
 
 # Per architecture, the records of each route: its main record and its small
 # record, which a call runs for the ``n_vecs`` of the small record's
-# ``vectors`` range (:func:`selected_module`).
+# ``vectors`` range for the call's kind (:func:`selected_module`).
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
         "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
@@ -467,12 +497,17 @@ def route_modules(arch: str, kind: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def selected_module(arch: str, format: str, *, scale_out: bool, n_vecs: int) -> str:
-    """The record a call of ``format`` with ``n_vecs`` vectors runs on ``arch``.
+def selected_module(
+    arch: str, format: str, *, scale_out: bool, n_vecs: int, in_place: bool
+) -> str:
+    """The record a call of ``format`` with ``n_vecs`` vectors runs on ``arch``,
+    in place (the output is the input) or out of place.
 
     A route lists one main record and at most one small record (the record
     with ``vectors``).  The call runs the small record when ``n_vecs`` lies in
-    its inclusive ``vectors[arch]`` range, and the main record otherwise.
+    its inclusive ``vectors[arch]`` range for the call's kind
+    (``"in_place"`` or ``"out_of_place"``; ``None`` is no size), and the main
+    record otherwise.
     Every record of the route must serve the route's format, its scale output
     and ``arch``; anything else is a registry error (``RuntimeError``).
     """
@@ -497,8 +532,9 @@ def selected_module(arch: str, format: str, *, scale_out: bool, n_vecs: int) -> 
             raise RuntimeError(
                 f"the record {name} of route {kind!r} on {arch} does not serve that route"
             )
+    call = "in_place" if in_place else "out_of_place"
     for name in small:
-        span = MODULES[name]["vectors"].get(arch)
+        span = MODULES[name]["vectors"].get(arch, {}).get(call)
         if span is not None and int(span[0]) <= int(n_vecs) <= int(span[1]):
             return name
     return main[0]

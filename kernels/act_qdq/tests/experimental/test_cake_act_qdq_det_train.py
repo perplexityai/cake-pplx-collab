@@ -66,8 +66,13 @@ FORMATS = reference.FORMATS
 REPEATS = 5
 # The minimum CUDA toolkit of every library, per architecture.
 MIN_CUDA = {"sm_100a": "12.9", "sm_103a": "12.9", "sm_107a": "13.5"}
-# The inclusive n_vecs range of a route's small program, per architecture.
-SMALL_VECTORS = {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)}
+# Per architecture and kind of call, the inclusive n_vecs range of a route's small program (None: no size).
+SMALL_VECTORS = {
+    "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+    "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+    "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+}
+CALLS = ("out_of_place", "in_place")
 # The grid rules of the main and the small programs.
 MAIN_RULE = {
     "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
@@ -290,14 +295,18 @@ def test_every_program_runs_on_any_grid() -> None:
 
 
 @gpu
+@pytest.mark.parametrize("inplace", (False, True), ids=CALLS)
 @pytest.mark.parametrize("fmt", FORMATS)
-def test_calls_at_the_size_boundaries_match_the_rule(fmt: str) -> None:
-    """Inputs of width 32 just inside and just outside the small program's range: the call runs the program its
-    route names for that size, and each program of the route, launched directly, gives the rule's bits too."""
+def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool) -> None:
+    """Inputs of width 32 just inside and just outside the small program's range for the call's kind (the
+    out-of-place range where the kind has none): the call runs the program its route names for that size and kind,
+    and each program of the route, launched directly in the same kind, gives the rule's bits too."""
     arch = _arch()
-    low, high = SMALL_VECTORS[arch]
+    span = SMALL_VECTORS[arch][CALLS[inplace]]
+    low, high = span or SMALL_VECTORS[arch]["out_of_place"]
     first, last = -(-low // 4) * 4, high // 4 * 4  # a width-32 row is 4 vectors
-    cases = [(first, True), (last, True), (last + 4, False)]
+    inside = span is not None
+    cases = [(first, inside), (last, inside), (last + 4, False)]
     if first > 4:
         cases.append((first - 4, False))
     for n_vecs, small in cases:
@@ -305,19 +314,20 @@ def test_calls_at_the_size_boundaries_match_the_rule(fmt: str) -> None:
         want = reference.qdq(x0, fmt)
         for scale_out in (False, True):
             kind = loader.route_name(fmt, scale_out=scale_out)
-            chosen = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs)
-            assert chosen == kind + ("_small" if small else ""), (arch, n_vecs, chosen)
-            y, s = _call(x0, fmt, inplace=False, return_scales=scale_out)
-            _check(f"{fmt} n_vecs={n_vecs} call ({chosen})", want, y, s)
+            chosen = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=inplace)
+            assert chosen == kind + ("_small" if small else ""), (arch, n_vecs, inplace, chosen)
+            y, s = _call(x0, fmt, inplace=inplace, return_scales=scale_out)
+            _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} call ({chosen})", want, y, s)
             for name in loader.ROUTES[arch][kind]:
-                y = torch.full_like(x0, float("nan"))
-                values = {"x": x0, "y": y, "n_vecs": n_vecs}
+                x = x0.clone() if inplace else x0
+                y = x if inplace else torch.full_like(x0, float("nan"))
+                values = {"x": x, "y": y, "n_vecs": n_vecs}
                 s = None
                 if scale_out:
                     s = torch.full(_scale_shape(tuple(x0.shape), fmt), float("nan"), device="cuda")
                     values["scales"] = s
                 loader.run_module(name, values, device_index=0)
-                _check(f"{fmt} n_vecs={n_vecs} {name}", want, y, s)
+                _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} {name}", want, y, s)
 
 
 # --------------------------------------------------------------------------- outputs, buffers and repeats
@@ -636,28 +646,38 @@ def test_routes_select_a_program_by_size(monkeypatch) -> None:
     assert loader.arch_for_capability((9, 0)) is None
     assert loader.arch_for_capability((12, 0)) is None
     for arch in loader.ARCHES:
-        low, high = SMALL_VECTORS[arch]
+        spans = [span for span in SMALL_VECTORS[arch].values() if span is not None]
+        sizes = {1, loader.MAX_VECTORS} | {n for low, high in spans for n in (low - 1, low, high, high + 1)}
         chosen = set()
-        for fmt in FORMATS:
-            for scale_out in (False, True):
-                kind = loader.route_name(fmt, scale_out=scale_out)
-                for n_vecs in sorted({1, low - 1, low, high, high + 1, loader.MAX_VECTORS} - {0}):
-                    name = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs)
-                    record = loader.MODULES[name]
-                    assert record["format"] == fmt and record["scale_out"] is scale_out, name
-                    assert name == kind + ("_small" if low <= n_vecs <= high else ""), (arch, n_vecs, name)
-                    chosen.add(name)
+        for call in CALLS:
+            span = SMALL_VECTORS[arch][call]
+            for fmt in FORMATS:
+                for scale_out in (False, True):
+                    kind = loader.route_name(fmt, scale_out=scale_out)
+                    for n_vecs in sorted(sizes - {0}):
+                        name = loader.selected_module(
+                            arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=call == "in_place"
+                        )
+                        record = loader.MODULES[name]
+                        assert record["format"] == fmt and record["scale_out"] is scale_out, name
+                        small = span is not None and span[0] <= n_vecs <= span[1]
+                        assert name == kind + ("_small" if small else ""), (arch, call, n_vecs, name)
+                        chosen.add(name)
         assert chosen == set(loader.MODULES), arch
+    # in place, sm_100a runs the main program inside the out-of-place small range
+    for in_place, want in ((False, "fp4_e4m3_g16_small"), (True, "fp4_e4m3_g16")):
+        got = loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=65537, in_place=in_place)
+        assert got == want, in_place
     with pytest.raises(ValueError, match="format"):
-        loader.selected_module("sm_100a", "nvfp4", scale_out=False, n_vecs=1)
+        loader.selected_module("sm_100a", "nvfp4", scale_out=False, n_vecs=1, in_place=False)
     with pytest.raises(ValueError, match="route"):
         loader.route_modules("sm_90a", "fp4_e4m3_g16")
     monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales"])
     with pytest.raises(RuntimeError, match="one main record and at most one small record"):
-        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1)
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1, in_place=False)
     monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales_small"])
     with pytest.raises(RuntimeError, match="does not serve that route"):
-        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1)
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1, in_place=False)
 
 
 @pytest.mark.cpu_only
@@ -683,7 +703,7 @@ def test_launch_grid() -> None:
     for arch, resident in (("sm_100a", 8 * 148), ("sm_103a", 8 * 148), ("sm_107a", 4 * 148)):
         assert loader.launch_grid(small, n_vecs=512, sm_count=148, arch=arch) == (1, 1, 1), arch
         assert loader.launch_grid(small, n_vecs=513, sm_count=148, arch=arch) == (2, 1, 1), arch
-        high = SMALL_VECTORS[arch][1]
+        high = SMALL_VECTORS[arch]["out_of_place"][1]
         assert loader.launch_grid(small, n_vecs=high, sm_count=148, arch=arch) == (min(high // 512, resident), 1, 1)
 
 

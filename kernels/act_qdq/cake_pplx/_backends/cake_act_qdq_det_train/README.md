@@ -58,8 +58,10 @@ outputs of the right shapes.
 The package has twelve programs: per format, with and without the scale output, a main program and a small one.  Each
 is built for `sm_100a`, `sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json`
 lists 36 libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=...,
-n_vecs=...)`): the small program when `n_vecs` lies in its `vectors` range (65,537 to 524,288 on `sm_100a` and
-`sm_103a`, 1 to 262,144 on `sm_107a`), and the main program otherwise.
+n_vecs=..., in_place=...)`): the small program when `n_vecs` lies in its `vectors` range for the call's kind, and the
+main program otherwise.  Out of place the range is 65,537 to 524,288 on `sm_100a` and `sm_103a` and 1 to 262,144 on
+`sm_107a`; in place it is 1 to 262,144 on `sm_107a`, and `sm_100a` and `sm_103a` have none, since the small program
+measured no faster there in place.
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
@@ -73,8 +75,8 @@ time is mostly the start of the CTAs, and a 256-thread CTA starts four times the
 programs give the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
 kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own program, so build
 every library of the architecture before a CUDA graph capture: call `build_and_load()` on each spec of
-`cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output and program (size range) that the
-capture uses.
+`cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output and program (size range and kind
+of call) that the capture uses.
 
 ## Numerics
 
