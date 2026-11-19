@@ -637,16 +637,25 @@ def test_route_rows_select_every_program(arch) -> None:
     the key's ranges, which take no counters, and the dynamic programs at the others; the C = 640 row of the
     multi-entry row of ``MROWS_KEYS`` selects the static program."""
     picked = {
-        name: cake_jit.selected_modules(arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens))[0]
+        name: cake_jit.selected_modules(
+            arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens)
+        )[0]
         for name, lens, _cuts, C in ROUTE_ROWS
     }
-    assert set(picked.values()) == set(cake_jit.route_modules(arch, conv_kcp.FWD_MAIN_ROUTE)), (arch, picked)
+    assert set(picked.values()) == set(
+        cake_jit.route_modules(arch, conv_kcp.FWD_MAIN_ROUTE)
+    ), (arch, picked)
     for name, kind in (("c640-s3003", None), ("c640-s12003", cake_jit.ROWS_KIND)):
         record = cake_jit.MODULES[picked[name]]
-        assert (cake_jit.select_rule(record) or {"kind": None})["kind"] == kind, (arch, name)
+        assert (cake_jit.select_rule(record) or {"kind": None})["kind"] == kind, (
+            arch,
+            name,
+        )
         assert record["workspace_rule"] is None, (arch, name)
     for _name, lens, _cuts, Cs in MROWS_KEYS:
-        (name,) = cake_jit.selected_modules(arch, conv_kcp.FWD_MAIN_ROUTE, C=Cs[0], S=sum(lens))
+        (name,) = cake_jit.selected_modules(
+            arch, conv_kcp.FWD_MAIN_ROUTE, C=Cs[0], S=sum(lens)
+        )
         assert cake_jit.select_rule(cake_jit.MODULES[name]) is None, (arch, name)
 
 

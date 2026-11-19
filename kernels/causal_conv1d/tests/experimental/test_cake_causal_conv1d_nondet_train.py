@@ -573,25 +573,33 @@ def _forward_keys(arch: str) -> list[tuple[str, int, int, int, int, str]]:
 
     keys = [
         (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "static")
-        for (route, c_lo, c_hi), (s_lo, s_hi) in loader.FALLBACK_ROWS.get(arch, {}).items()
+        for (route, c_lo, c_hi), (s_lo, s_hi) in loader.FALLBACK_ROWS.get(
+            arch, {}
+        ).items()
         if loader.route_role(route) == "fwd"
     ]
     keys += [
         (route, int(c_lo), int(c_hi), int(s_lo), int(s_hi), "direct")
-        for (route, c_lo, c_hi), (s_lo, s_hi, _) in loader.DIRECT_ROWS.get(arch, {}).items()
+        for (route, c_lo, c_hi), (s_lo, s_hi, _) in loader.DIRECT_ROWS.get(
+            arch, {}
+        ).items()
     ]
     return sorted(keys)
 
 
 @contextlib.contextmanager
-def _forward_rules_only(arch: str, route: str | None = None, static_from: tuple[int, int] | None = None):
+def _forward_rules_only(
+    arch: str, route: str | None = None, static_from: tuple[int, int] | None = None
+):
     """Inside the block the forward keys of ``arch`` are gone (``DIRECT_ROWS`` emptied, ``FALLBACK_ROWS`` without its
     forward keys), so every forward call selects by the rules (the dynamic programs, which run every call above the
     keys); with ``route`` and ``static_from`` (``(C_lo, C_hi)``) one key over every token count puts the route's
     static program on those channel counts instead.  The host's row plans are dropped on entry and on exit."""
 
     rows = {
-        key: value for key, value in loader.FALLBACK_ROWS.get(arch, {}).items() if loader.route_role(key[0]) != "fwd"
+        key: value
+        for key, value in loader.FALLBACK_ROWS.get(arch, {}).items()
+        if loader.route_role(key[0]) != "fwd"
     }
     if route is not None:
         rows[(route, *static_from)] = (1, loader.INT32_MAX)
@@ -1466,7 +1474,9 @@ def _small_s_rows(arch: str, kind: str) -> list[tuple[int, int, int, int]]:
     return sorted(rows)
 
 
-@pytest.mark.parametrize("kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS])
+@pytest.mark.parametrize(
+    "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
+)
 def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     """Every forward key of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of route ``kind`` on the device's architecture
     (:func:`_small_s_rows`: S 1000, both sides of the static / direct split and of the key's ceiling, at the key's
@@ -1482,8 +1492,16 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     _require_route(kind)
     arch, device = _arch(), _device()
     weight_dtype, bias_dtype = FORWARD_SETTINGS[(kind, taps)]
-    assert loader.forward_route(bias=bias_dtype is not None, bf16_taps=weight_dtype == BF16) == kind
-    static, direct = _forward_program(arch, kind, "static"), _forward_program(arch, kind, "direct")
+    assert (
+        loader.forward_route(
+            bias=bias_dtype is not None, bf16_taps=weight_dtype == BF16
+        )
+        == kind
+    )
+    static, direct = (
+        _forward_program(arch, kind, "static"),
+        _forward_program(arch, kind, "direct"),
+    )
     rows = _small_s_rows(arch, kind)
     assert static is not None and rows, f"{arch} {kind}: no forward key"
     seen = []
@@ -1504,25 +1522,49 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
         label = f"{arch} {kind} taps={taps} S={S} C={C} {form} {name}"
         workspace = pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)
 
-        def call(x, w, cu, dy, b, policy, name=name, no_work=no_work, label=label, workspace=workspace, c=(c_lo, c_hi)):
+        def call(
+            x,
+            w,
+            cu,
+            dy,
+            b,
+            policy,
+            name=name,
+            no_work=no_work,
+            label=label,
+            workspace=workspace,
+            c=(c_lo, c_hi),
+        ):
             ys = []
             for repeat in range(3):
                 for own in (False, True):
                     seen.clear()
-                    ys.append(_forward(x, w, cu, bias=b, workspace=workspace if own else None))
-                    assert [n for n, _, _ in seen] == [name], f"{label} own={own}: launched {seen}"
-                    assert (seen[0][1] is None) is no_work, f"{label} own={own}: work {seen[0][1] is not None}"
-                    assert int(torch.count_nonzero(workspace)) == 0, f"{label}: the forward workspace is not zero"
+                    ys.append(
+                        _forward(x, w, cu, bias=b, workspace=workspace if own else None)
+                    )
+                    assert [n for n, _, _ in seen] == [name], (
+                        f"{label} own={own}: launched {seen}"
+                    )
+                    assert (seen[0][1] is None) is no_work, (
+                        f"{label} own={own}: work {seen[0][1] is not None}"
+                    )
+                    assert int(torch.count_nonzero(workspace)) == 0, (
+                        f"{label}: the forward workspace is not zero"
+                    )
             with _forward_rules_only(arch, kind, c):
                 seen.clear()
                 ys.append(_forward(x, w, cu, bias=b))
-                assert [n for n, _, _ in seen] == [static], f"{label}: the static run launched {seen}"
+                assert [n for n, _, _ in seen] == [static], (
+                    f"{label}: the static run launched {seen}"
+                )
             shipped = loader.PDL_EAGER[arch]
             for pdl in (False, True):
                 monkeypatch.setitem(loader.PDL_EAGER, arch, pdl)
                 seen.clear()
                 ys.append(_forward(x, w, cu, bias=b))
-                assert seen[0][2] == int(pdl), f"{label}: enable_pdl {seen[0][2]} with PDL_EAGER {pdl}"
+                assert seen[0][2] == int(pdl), (
+                    f"{label}: enable_pdl {seen[0][2]} with PDL_EAGER {pdl}"
+                )
             monkeypatch.setitem(loader.PDL_EAGER, arch, shipped)
             pair = [None, None]
             torch.cuda.synchronize(device)
@@ -1532,21 +1574,43 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
             torch.cuda.synchronize(device)
             return {"y": ys + pair}
 
-        _judge(S, C, "perf", call, weight_dtype=weight_dtype, bias_dtype=bias_dtype, key=59, label=label)
+        _judge(
+            S,
+            C,
+            "perf",
+            call,
+            weight_dtype=weight_dtype,
+            bias_dtype=bias_dtype,
+            key=59,
+            label=label,
+        )
         # CUDA Graph capture after one eager warm-up, its replays on each draw's inputs judged
         x, w, cu, _ = _inputs(S, C, "perf", key=59, weight_dtype=weight_dtype)
         b = None if bias_dtype is None else _bias_input(C, bias_dtype, key=59)
         out = torch.empty_like(x)
-        cap = _capture(lambda x=x, w=w, cu=cu, b=b, out=out: _forward(x, w, cu, bias=b, out=out), streams[0])
+        cap = _capture(
+            lambda x=x, w=w, cu=cu, b=b, out=out: _forward(x, w, cu, bias=b, out=out),
+            streams[0],
+        )
         nodes = _graph_nodes(cap["graph"])
         record_property(f"fill_nodes S={S} C={C} {form}", nodes["fill"])
         if no_work:
-            assert nodes["fill"] == 0 and cap["fallbacks"]["fwd"] == 0, (label, nodes, cap["fallbacks"])
+            assert nodes["fill"] == 0 and cap["fallbacks"]["fwd"] == 0, (
+                label,
+                nodes,
+                cap["fallbacks"],
+            )
             assert "fwd" not in cap["buffers"], (label, cap["buffers"])
 
         def replay(_draw, seed, x=x, w=w, b=b, out=out, graph=cap["graph"], S=S, C=C):
-            fx, fw, fcu, fdy = _inputs(S, C, "perf", key=59, weight_dtype=weight_dtype, seed=seed)
-            fb = None if bias_dtype is None else _bias_input(C, bias_dtype, key=59, seed=seed)
+            fx, fw, fcu, fdy = _inputs(
+                S, C, "perf", key=59, weight_dtype=weight_dtype, seed=seed
+            )
+            fb = (
+                None
+                if bias_dtype is None
+                else _bias_input(C, bias_dtype, key=59, seed=seed)
+            )
             x.copy_(fx)
             w.copy_(fw)
             if b is not None:
@@ -1558,7 +1622,9 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
 
         assert_judged(replay, seed=SEED, label=f"{label} graph")
         del cap
-    assert {"static", "dynamic"} <= forms and ("direct" in forms) is (direct is not None), (arch, kind, forms)
+    assert {"static", "dynamic"} <= forms and ("direct" in forms) is (
+        direct is not None
+    ), (arch, kind, forms)
 
 
 @pytest.mark.parametrize("kind", tuple(ROUTE_SETTINGS))
@@ -2516,7 +2582,9 @@ def test_forward_capture_at_a_floor_after_an_eager_call_below_it(fresh_pool) -> 
         del graph
 
 
-def test_forward_capture_after_an_eager_call_inside_a_forward_key(fresh_pool, record_property) -> None:
+def test_forward_capture_after_an_eager_call_inside_a_forward_key(
+    fresh_pool, record_property
+) -> None:
     """An eager forward at the last token count of the default route's first ``DIRECT_ROWS`` range (the direct
     program: no counters) refills no pre-zeroed forward buffer.  A CUDA Graph capture of the forward one token above
     the range (the dynamic program, with counters) then finds none and zeroes its own (one fill node, counted in
@@ -2527,15 +2595,25 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(fresh_pool, re
 
     _require_route("bwd")
     arch, device = _arch(), _device()
-    keys = [key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"]
+    keys = [
+        key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"
+    ]
     assert keys, f"{arch}: no DIRECT_ROWS key on route fwd"
     _, C, _, s_lo, s_hi, _ = keys[0]
-    no_work = {_forward_program(arch, "fwd", "static"), _forward_program(arch, "fwd", "direct")}
+    no_work = {
+        _forward_program(arch, "fwd", "static"),
+        _forward_program(arch, "fwd", "direct"),
+    }
     inside = _draw_inputs(s_hi, C, "perf", "bwd", key=227)
     _forward(inside[0], inside[1], inside[2])
     torch.cuda.synchronize(device)
     assert pkg._POOL_SIZE.get((device.index, "fwd"), 0) == 0, pkg._POOL_SIZE
-    steps = [(s_hi + 1, False), (s_hi, False), *(((s_lo - 1, False),) if s_lo > 1 else ()), (s_hi + 1, True)]
+    steps = [
+        (s_hi + 1, False),
+        (s_hi, False),
+        *(((s_lo - 1, False),) if s_lo > 1 else ()),
+        (s_hi + 1, True),
+    ]
     refilled = False
     for S, eager_first in steps:
         name = _expected_program(arch, "fwd", S, C)
@@ -2558,7 +2636,10 @@ def test_forward_capture_after_an_eager_call_inside_a_forward_key(fresh_pool, re
         nodes = _graph_nodes(graph)
         label = f"{arch} C={C} S={S} {name} eager_first={eager_first}"
         record_property(f"fill_nodes S={S} eager_first={eager_first}", nodes["fill"])
-        assert {kind: after[kind] - before[kind] for kind in after} == {"fwd": fills, "bwd": 0}, (label, before, after)
+        assert {kind: after[kind] - before[kind] for kind in after} == {
+            "fwd": fills,
+            "bwd": 0,
+        }, (label, before, after)
         assert nodes["fill"] == fills, (label, nodes)
         programs = [k for k in nodes["kernels"] if "cake_causal_conv1d" in k]
         assert len(programs) == 1, (label, nodes)
@@ -4330,7 +4411,9 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
     monkeypatch.setattr(det, "run_module", det_record_one)
     monkeypatch.setattr(det, "run_modules", det_record_many)
     arch = _arch()
-    direct = [key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"]
+    direct = [
+        key for key in _forward_keys(arch) if key[0] == "fwd" and key[5] == "direct"
+    ]
     assert direct, f"{arch}: no DIRECT_ROWS key on route fwd"
     _, c_lo, _, s_lo, _, _ = direct[0]
 
@@ -4346,7 +4429,15 @@ def test_det_and_nondet_packages_in_one_process(monkeypatch) -> None:
         return found
 
     for S, C, docs in (PDL_CASE, (s_lo, c_lo, "perf")):
-        _route_judge(S, C, docs, "bwd", call, key=191, label=f"det and nondet in one process S={S} C={C}")
+        _route_judge(
+            S,
+            C,
+            docs,
+            "bwd",
+            call,
+            key=191,
+            label=f"det and nondet in one process S={S} C={C}",
+        )
     _assert_pdl(seen, 1, "nondet")
     assert _forward_program(arch, "fwd", "direct") in {name for name, _ in seen}, seen
     assert det_jit.direct_module(arch, "fwd", c_lo, s_lo) in det_seen, det_seen

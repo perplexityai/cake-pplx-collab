@@ -5759,43 +5759,175 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # forward kernel generator's table; above ``S_hi`` the rules select.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
     "sm_100a": {
-        ("fwd", 576, 576): (4097, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 584, 640): (8193, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 648, 704): (12289, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 712, 712): (12289, 20480, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 720, 768): (8193, 20480, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd_bias", 576, 576): (4097, 24576, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_bias", 584, 632): (4097, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_bias", 648, 696): (8193, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_bias", 704, 704): (16385, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_dt", 576, 576): (4097, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 584, 640): (8193, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 648, 696): (8193, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 704, 704): (12289, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 712, 768): (16385, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 584, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 648, 704): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 712): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 720, 768): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 584, 632): (
+            4097,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 648, 696): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 704, 704): (
+            16385,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 584, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 696): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 704, 704): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 712, 768): (
+            16385,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
     },
     "sm_103a": {
-        ("fwd", 576, 632): (2049, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 640, 696): (4097, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 704, 704): (8193, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 712, 712): (8193, 20479, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 720, 760): (8193, 19456, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd_bias", 584, 640): (4097, 16384, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_dt", 576, 640): (8193, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 648, 704): (8193, 18432, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 712, 752): (12801, 19456, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 760, 760): (12289, 19456, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 768, 768): (12289, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd", 576, 632): (
+            2049,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 640, 696): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 704, 704): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 712): (
+            8193,
+            20479,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 720, 760): (
+            8193,
+            19456,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 584, 640): (
+            4097,
+            16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 704): (
+            8193,
+            18432,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 712, 752): (
+            12801,
+            19456,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 760, 760): (
+            12289,
+            19456,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 768, 768): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
     },
     "sm_107a": {
-        ("fwd", 576, 704): (4097, 32768, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 712, 760): (4097, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd", 768, 768): (2049, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
-        ("fwd_bias", 576, 576): (12289, 32768, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_bias", 584, 632): (16385, 24576, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
-        ("fwd_dt", 576, 640): (12289, 32768, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 648, 704): (12289, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
-        ("fwd_dt", 720, 768): (12289, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd", 576, 704): (
+            4097,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 760): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 768, 768): (
+            2049,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 576, 576): (
+            12289,
+            32768,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 584, 632): (
+            16385,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 640): (
+            12289,
+            32768,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 704): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 720, 768): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
     },
 }
 # The channel tiles of a forward call at a row of :data:`DIRECT_ROWS`, ``{arch:
@@ -5853,7 +5985,10 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
             )
         if not int(s_lo) <= int(S) <= int(s_hi):
             return None
-        if name not in route_modules(arch, kind) or (select_rule(MODULES[name]) or {}).get("kind") != ROWS_KIND:
+        if (
+            name not in route_modules(arch, kind)
+            or (select_rule(MODULES[name]) or {}).get("kind") != ROWS_KIND
+        ):
             raise RuntimeError(
                 f"the DIRECT_ROWS key ({route!r}, {c_lo}, {c_hi}) on {arch} names {name}, which is no record of the "
                 f"route with a {ROWS_KIND!r} selection rule"
@@ -5862,7 +5997,9 @@ def direct_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
     return None
 
 
-def direct_split(C: int, *, geometry: dict[str, int], route: str, arch: str) -> tuple[int, int, int]:
+def direct_split(
+    C: int, *, geometry: dict[str, int], route: str, arch: str
+) -> tuple[int, int, int]:
     """``(ct_vec, n_sub, n_ch_tiles)`` of the direct program of ``route`` on ``arch`` for ``C`` channels under a
     record's build geometry: the :data:`DIRECT_PLANS` form ``(ct_vec, n_sub)`` and ``ceil(C / vec / ct_vec)`` channel
     tiles (the last tile partial), whatever ``S`` and the taps (the deterministic package's split).  ``ValueError``
@@ -5880,7 +6017,9 @@ def direct_split(C: int, *, geometry: dict[str, int], route: str, arch: str) -> 
     ct_vec, n_sub = (int(value) for value in form)
     vec, threads = int(geometry["vec"]), int(geometry["threads"])
     if ct_vec < 1 or n_sub < 1 or ct_vec * n_sub > threads:
-        raise ValueError(f"the direct plan {form!r} of route {route!r} on {arch} does not fit {threads} threads")
+        raise ValueError(
+            f"the direct plan {form!r} of route {route!r} on {arch} does not fit {threads} threads"
+        )
     C = int(C)
     if C <= 0 or C % vec:
         raise ValueError(f"C={C} must be a positive multiple of {vec}")
