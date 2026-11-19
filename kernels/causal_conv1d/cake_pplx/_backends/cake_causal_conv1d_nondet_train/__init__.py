@@ -27,16 +27,18 @@ Numerical contract against the deterministic package: the forward runs this
 package's copies of the det forward programs, so ``y`` is the det ``y`` bit
 for bit.  The backward is ONE ordinary launch of a program built from the det
 backward body of the same route and channel rule, or, at the rows of
-``cake_jit.FALLBACK_ROWS``, from the route's fallback body: every per-thread
-and per-CTA FP32 step is that det program's and ``dx`` is that det program's
-``dx`` bit for bit; only the cross-CTA reduction of ``dweight`` / ``dbias``
-differs.  Each
+``cake_jit.FALLBACK_ROWS``, from the route's fallback body, or, at the rows
+of ``cake_jit.SM_WIDE_ROWS``, from the det SM-wide row-group body of the
+route (one CTA per SM for the whole launch): every per-thread and per-CTA
+FP32 step is that det program's and ``dx`` is that det program's ``dx`` bit
+for bit; only the cross-CTA reduction of ``dweight`` / ``dbias`` differs.  Each
 CTA adds its CTA row into an accumulator with unordered global reductions in
 plain FP32 words, as the det reduce program sums on every route (the
 ``bwd_fp32g`` and ``bwd_bias_fp32g`` routes, the
 ``silu_grad_preactivation="fp32"`` ones, spread the adds over sixteen
-copies of the accumulator, added in copy order at the end) -- and the last
-CTA of each channel tile stores the gradients and zeroes its accumulators.
+copies of the accumulator, added in copy order at the end, and the SM-wide
+program of the longest sm_107a rows over two) -- and the last CTA of each
+channel tile stores the gradients and zeroes its accumulators.
 The order of that cross-CTA sum depends on the CTAs' timing, so ``dweight`` /
 ``dbias`` are not bitwise reproducible run to run; that is the only relaxed
 property (the accumulation dtypes, plain FP32 words, and rounding boundaries
@@ -141,14 +143,19 @@ Host design (the knobs are keywords; no environment variable):
   ``dx`` keeps its bits (the partition is read from ``gridDim.x``, as above).
 - The forward plans its channel tiles by the det package's forward rule
   (its route, ``S`` and the architecture: ``cake_jit.channel_split``) from
-  the row's token floor (``cake_jit.forward_narrow_min_s``: the
-  architecture's ``FORWARD_NARROW_MIN_S`` floor, or the
-  ``FORWARD_NARROW_ROW_MIN_S`` floor of a route's rows from a channel-vector
-  count upward: 20480 for the ``fwd_bias`` route at C = 712 to 768 on
-  sm_103a), so C = 576 to 768 run the det forward's narrow tiles from that
-  floor; below it (and on an architecture without one) they keep 0.2.0's
-  single tile.  The forward workspace (int32 token-chunk counters) follows
-  the det package's rules and size, which cover every plan.
+  the row's token floor (``cake_jit.forward_narrow_min_s``: at C = 520 to
+  568 the row's ``FORWARD_NARROW_ROW_FLOORS`` floor on the architecture;
+  else the architecture's ``FORWARD_NARROW_MIN_S`` floor, or the
+  ``FORWARD_NARROW_ROW_MIN_S`` floor of a route's rows of a tap dtype from a
+  channel-vector count upward: on sm_103a for the ``fwd_bias`` route at C =
+  712 to 768 20480 with FP32 taps and 12288 with BF16 taps, which keep the
+  single tile in the ``FORWARD_SINGLE_TILE_ROWS`` token ranges), so C = 520
+  to 768 run the det forward's narrow tiles from that floor; below it (and
+  on an architecture without one) they keep 0.2.0's single tile.  The
+  forward workspace (int32 token-chunk counters) follows the det package's
+  rules and size, which cover every plan; at C = 520 to 568 it is larger
+  than 0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for
+  those rows is refused (``ValueError``).
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
@@ -164,9 +171,10 @@ Host design (the knobs are keywords; no environment variable):
   reads or writes global memory, so the outputs do not depend on it.  The
   KCP forward launches its single-rank program with 0.
 - Host plan: the first call of a row (architecture, route, ``C``, device,
-  ``bwd_grid_mult``) selects its program, splits ``C`` into channel tiles,
-  reads the row's ``TILE_OVERRIDES`` or ``NARROW_TILES`` entry (the forward:
-  its ``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS`` token floors)
+  ``bwd_grid_mult``; the forward: the taps' dtype) selects its program,
+  splits ``C`` into channel tiles, reads the row's ``TILE_OVERRIDES`` or
+  ``NARROW_TILES`` entry (the forward: its ``forward_narrow_min_s`` and
+  ``FORWARD_WIDTH_FLOORS`` token floors and its single-tile range)
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
   ``launch_grid`` trims it by ``S``), so they launch the values a per-call
@@ -334,7 +342,7 @@ _LAYOUTS: dict[tuple, dict] = {}
 # callback drops the entry when the workspace dies.
 _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # The host plan of each call row, planned by the row's first call: ``(arch, route kind, C, device index,
-# bwd_grid_mult) -> ((s_lo, s_hi, cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the
+# bwd_grid_mult, bf16_taps) -> ((s_lo, s_hi, cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the
 # backward's accumulator layout}), ...)``, one entry per side of ``cake_jit.row_sides`` (ascending token ranges from
 # 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges
 # then cut the token axis).  Selecting the route's program, splitting C into channel tiles, looking
@@ -687,6 +695,7 @@ def _launch(
     device_index: int,
     arch: str,
     bwd_grid_mult: int = 1,
+    bf16_taps: bool = False,
 ) -> tuple[dict[str, int], tuple[int, int, int]]:
     """The kernel scalars and the grid of one launch of ``record`` (the host plan of ``cake_jit``).
 
@@ -700,9 +709,9 @@ def _launch(
     channel-tile ranks; the scalars do not depend on the grid.  A record's
     plan takes the device's architecture ``arch`` and the record's route, so a
     backward row of ``cake_jit.TILE_OVERRIDES`` or ``cake_jit.NARROW_TILES``
-    and a forward narrow row (``cake_jit.channel_split``) run their narrower
-    channel tiles.  At ``bwd_grid_mult`` 1 the grid is
-    :func:`_one_sm_trim` of the row's ``launch_grid``.
+    and a forward narrow row (``cake_jit.channel_split``, of the call's taps:
+    ``bf16_taps``) run their narrower channel tiles.  At ``bwd_grid_mult`` 1
+    the grid is :func:`_one_sm_trim` of the row's ``launch_grid``.
     """
 
     scalars = plan(
@@ -713,6 +722,7 @@ def _launch(
         role=record["role"],
         arch=arch,
         route=_loader.record_route(record, arch),
+        bf16_taps=bf16_taps,
     )
     if bwd_grid_mult == 1:
         grid = _one_sm_trim(
@@ -793,17 +803,19 @@ def _call_plan(
     device_index: int,
     policy: Optional[str] = None,
     bwd_grid_mult: int = 1,
+    bf16_taps: bool = False,
 ) -> tuple[tuple[str, ...], dict, dict[str, int], tuple[int, int, int], dict]:
     """``(names, record, scalars, grid, per_tiles)`` of one call of route ``kind``: the programs :func:`_route`
     selects, the first one's record, the :data:`cake_jit.PLAN_SCALARS` and the grid :func:`_launch` plans (same
     values, same errors), from the call's ``_ROW_PLANS`` row; ``per_tiles`` is the side's dict for the host values
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
-    ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error.  A row a
+    ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error; ``bf16_taps`` (the
+    forward's taps are BF16; ``False`` for every backward call) is part of the row.  A row a
     :data:`cake_jit.SM_WIDE_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is planned for every side of
     :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of ``S`` with the sides'
     ranges."""
 
-    key = (arch, kind, C, device_index, bwd_grid_mult)
+    key = (arch, kind, C, device_index, bwd_grid_mult, bf16_taps)
     sides = _ROW_PLANS.get(key)
     if sides is None:
         # A missing route or a registry error raises as in a per-call plan.
@@ -819,6 +831,7 @@ def _call_plan(
                     device_index=device_index,
                     bwd_grid_mult=bwd_grid_mult,
                     at=s_lo,
+                    bf16_taps=bf16_taps,
                 ),
                 {},
             )
@@ -841,6 +854,7 @@ def _call_plan(
             device_index=device_index,
             arch=arch,
             bwd_grid_mult=bwd_grid_mult,
+            bf16_taps=bf16_taps,
         )
         return names, record, _scalars(scalars), grid, {}
     scalars, grid = _loader.row_launch(row, S, num_docs, device_index=device_index)
@@ -860,7 +874,8 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and
+    ``SM_WIDE_ROWS``, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``,
+    ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``, ``FORWARD_NARROW_WIDTHS`` and
     ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
     ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
 
@@ -1607,10 +1622,11 @@ def cake_causal_conv1d_nondet_train_forward(
     y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
     if S == 0:
         return y
-    kind = forward_route(bias=b is not None, bf16_taps=w.dtype == torch.bfloat16)
+    bf16_taps = w.dtype == torch.bfloat16
+    kind = forward_route(bias=b is not None, bf16_taps=bf16_taps)
     device_index = _device_index(device)
     names, _, scalars, grid, per_tiles = _call_plan(
-        arch, kind, S, C, num_docs, device_index=device_index
+        arch, kind, S, C, num_docs, device_index=device_index, bf16_taps=bf16_taps
     )
     capturing = torch.cuda.is_current_stream_capturing()
     values: dict[str, object] = {

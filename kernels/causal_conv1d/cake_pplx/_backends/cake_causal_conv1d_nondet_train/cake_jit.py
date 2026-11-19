@@ -4965,103 +4965,187 @@ def _ceil_div(numerator: int, denominator: int) -> int:
 SPLIT_ROLES = ("fwd", "bwd")
 # The forward's narrow rows: the deterministic package's forward rule over the
 # same forward programs, from a token floor of the call's architecture.  On a
-# route of :data:`FORWARD_NARROW_ROUTES` the single-tile rows at 72 <= cv <=
-# 96 (C = 576 to 768) run, from the row's token floor on the call's
+# route of :data:`FORWARD_NARROW_ROUTES` the single-tile rows at 65 <= cv <=
+# 96 (C = 520 to 768) run, from the row's token floor on the call's
 # architecture (:func:`forward_narrow_min_s`), 32-vector tiles
 # (``ct_vec`` 32, four token sub-tiles, the last tile partial) at
 # :data:`FORWARD_NARROW_THREADS` threads, or, from the width floor of
 # :data:`FORWARD_WIDTH_FLOORS` on the call's architecture, the whole tiles of
 # :data:`FORWARD_NARROW_WIDTHS` (``cv -> ct_vec``, a divisor of ``cv``): C =
-# 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  One tile of cv vectors leaves
-# 128 - cv lanes of every CTA idle over the whole token axis, which costs
-# more than the narrower tiles' extra channel tiles only on longer token
+# 520 as (13, 9, 5), 528 as (11, 11, 6), 544 as (17, 7, 4), 552 as (23, 5,
+# 3), 560 as (14, 9, 5), 576 as (18, 7, 4) and C = 640 as (40, 3, 2); C =
+# 536 and 568 run the 32-vector tiles, (32, 4, 3).  One tile of cv vectors
+# leaves 128 - cv lanes of every CTA idle over the whole token axis, which
+# costs more than the narrower tiles' extra channel tiles only on longer token
 # streams: below the row's floor, in a plan made without ``S`` or without
-# the architecture, and on an architecture :data:`FORWARD_NARROW_MIN_S`
-# (``{arch: S}``) does not list, the row keeps its single tile of cv
-# vectors (the plan of the package's 0.2.0 release); a call without a route
-# keeps it too.
+# the architecture, and on an architecture without a floor for the row, the
+# row keeps its single tile of cv vectors (the plan of the package's 0.2.0
+# release); a call without a route keeps it too.
 # From the floor the plan is the deterministic forward's (which runs the
-# 32-vector tiles below its width floor at every ``S``).  The programs are
-# unchanged and ``y`` keeps its bits in every plan.  The narrow tables are the
-# deterministic package's forward rows (``NARROW_TILE_ROUTES["fwd"]``,
-# ``NARROW_TILE_THREADS``, ``NARROW_TILE_WIDTHS["fwd"]`` and
-# ``NARROW_WIDTH_FLOORS["fwd"]``, measured there on the forward programs both
-# packages run) and are kept in sync with them and with the forward kernel
-# generator; :data:`FORWARD_NARROW_MIN_S` and :data:`FORWARD_NARROW_ROW_MIN_S`
-# are this package's own tables.  A row's floor is
-# :func:`forward_narrow_min_s`: the architecture's floor, or the floor of
-# :data:`FORWARD_NARROW_ROW_MIN_S` for the rows of its routes from a
-# channel-vector count upward; on each architecture the largest token count
-# at which a measured narrow row of a route was still slower than its single
-# tile lies below that row's floor on the route.  On sm_103a the ``fwd_bias``
-# rows of 89 to 96 vectors (C = 712 to 768) take 20480: on a GB300 at 16384 x
-# 768 the 32-vector tiles of that route under CUDA Graph replay were slower
-# than the single tile in two measurements each (FP32 taps, BF16 bias: 17.14
-# us single tile, 17.41 / 17.38 us narrow; FP32 taps, FP32 bias: 17.12 vs
-# 17.36 / 17.41 us).  The ``fwd`` and ``fwd_dt`` rows keep the
-# architecture's 12288: under CUDA Graph replay the default route ran 1.025 /
-# 1.028 times as fast at 12288 x 768 with the 32-vector tiles (14.90 us
-# single tile, 14.48 / 14.50 us narrow), and the BF16-taps calls 1.003 to
-# 1.032 times as fast at 16384 x 768.  The ``fwd_bias`` route covers both tap
-# dtypes (the plan does not see the taps' dtype), so its BF16-taps calls keep
-# the single tile from 12288 to 20479 as well.  C = 768 runs faster from 20480
-# on the default route and on every timed route at 31292.  C = 704 (88
-# vectors) keeps 12288 on every route: on the default route, the one route
-# timed at C = 704, its 32-vector tiles were not slower than the single tile
-# in either measurement at any timed token count from 12288 to 250340.  C =
-# 736 (92 vectors) was timed on the ``fwd`` and ``fwd_dt`` routes on the GB300:
-# under CUDA Graph replay the 32-vector tiles ran 1.023 / 1.023 times as fast
-# as the single tile at 12288 / 16384 x 736 on the default route (14.40 ->
-# 14.08 us, 16.54 -> 16.18 us) and 1.030 / 1.014 times as fast with BF16 taps
-# (14.05 -> 13.63 us, 16.00 -> 15.78 us).  The other channel counts from C =
-# 712 to 760 are not measured and take the floors of C = 768 on each route;
-# the ``fwd_bias`` rows of C = 712 to 760 take C = 768's 20480 without a
-# measurement at those widths.
+# 32-vector tiles of the rows from 72 vectors below their width floor at
+# every ``S``, and the rows below 72 vectors from the same row floors).  The
+# programs are unchanged and ``y`` keeps its bits in every plan.  The narrow
+# tables are the deterministic package's forward rows
+# (``NARROW_TILE_ROUTES["fwd"]``, ``NARROW_TILE_THREADS``,
+# ``NARROW_TILE_WIDTHS["fwd"]``, ``NARROW_WIDTH_FLOORS["fwd"]`` and
+# ``NARROW_ROW_FLOORS["fwd"]``, over the forward programs both packages run)
+# and are kept in sync with them and with the forward kernel generator;
+# :data:`FORWARD_NARROW_MIN_S`, :data:`FORWARD_NARROW_ROW_MIN_S`
+# and :data:`FORWARD_SINGLE_TILE_ROWS` are this package's own tables.  A
+# row's floor is :func:`forward_narrow_min_s`: for a row below 72 vectors its
+# :data:`FORWARD_NARROW_ROW_FLOORS` floor on the architecture; else the
+# architecture's floor, or the floor of :data:`FORWARD_NARROW_ROW_MIN_S` for
+# the rows of its routes and tap dtypes from a channel-vector count upward.
+# The rows below 72 vectors (C = 520 to 568): each row's floor is the smallest
+# measured token count from which no measured cell -- every forward route;
+# the forward, the training step and the checkpointed step; eager and under
+# CUDA Graph replay -- ran slower with the narrower tiles than with the single
+# tile beyond the timing noise (and at least one ran faster); untimed token
+# counts below it keep the single tile.  The slower cells next below the
+# floors: on GB200 and GB300 C = 520 and 544 at 12288 and C = 528 and 560 at
+# 16384; on the VR200 C = 568 at 12288 and C = 520, 528, 544, 552 and 560 at
+# 16384 (C = 520 at 20480 ran neither faster nor slower).  The width floor of
+# a row below 72 vectors is its row floor.
+# On sm_103a the ``fwd_bias`` rows of 89 to 96 vectors (C = 712 to 768) read
+# the dtype of the call's taps (``bf16_taps``; the ``fwd`` route's taps are
+# FP32 and the ``fwd_dt`` route's BF16): with FP32 taps they take 20480 (on a
+# GB300 at 16384 x 768 the 32-vector tiles of that route under CUDA Graph
+# replay were slower than the single tile in two measurements each: FP32
+# taps, BF16 bias 17.14 us single tile, 17.41 / 17.38 us narrow; FP32 taps,
+# FP32 bias 17.12 vs 17.36 / 17.41 us), with BF16 taps 12288 but in the
+# token ranges of :data:`FORWARD_SINGLE_TILE_ROWS`, where the single tile
+# stays: on a GB300 with BF16 taps and bias the 32-vector tiles ran 1.02 to
+# 1.10 times as fast as the single tile at 12288 and from 16384 to 20479 at
+# C = 712, 736, 760 and 768, eager and under CUDA Graph replay, but not
+# faster between them (from 13312 to 15360 at C = 712, from 13824 to 15360
+# at C = 768, at 14336 at C = 736 and 760); each range runs from the token
+# count after the last timed faster one to the one before the next.  The
+# ``fwd`` and ``fwd_dt`` rows keep the architecture's 12288: under CUDA Graph
+# replay the default route ran 1.025 / 1.028 times as fast at 12288 x 768
+# with the 32-vector tiles (14.90 us single tile, 14.48 / 14.50 us narrow),
+# and the BF16-taps calls 1.003 to 1.032 times as fast at 16384 x 768.  C =
+# 704 (88 vectors) keeps 12288 on every route: on the default route its
+# 32-vector tiles were not slower than the single tile in either measurement
+# at any timed token count from 12288 to 250340.  C = 736 (92 vectors) was
+# timed on the ``fwd`` and ``fwd_dt`` routes on the GB300: under CUDA Graph
+# replay the 32-vector tiles ran 1.023 / 1.023 times as fast as the single
+# tile at 12288 / 16384 x 736 on the default route (14.40 -> 14.08 us, 16.54
+# -> 16.18 us) and 1.030 / 1.014 times as fast with BF16 taps (14.05 -> 13.63
+# us, 16.00 -> 15.78 us).  The untimed channel counts from C = 712 to 760 take
+# the floors and gaps of their measured neighbours.
 # The backward plans its narrower rows by :data:`TILE_OVERRIDES` and
 # :data:`NARROW_TILES` instead.
 FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
 FORWARD_NARROW_THREADS = 128
-FORWARD_NARROW_WIDTHS: dict[int, int] = {72: 18, 80: 40}
+FORWARD_NARROW_WIDTHS: dict[int, int] = {65: 13, 66: 11, 68: 17, 69: 23, 70: 14, 72: 18, 80: 40}
 FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
-    "sm_100a": {72: 32768, 80: 24576},
-    "sm_103a": {72: 32768, 80: 24576},
-    "sm_107a": {72: 40960, 80: 36864},
+    "sm_100a": {65: 16384, 66: 24576, 68: 16384, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
+    "sm_103a": {65: 16384, 66: 24576, 68: 16384, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
+    "sm_107a": {65: 24576, 66: 24576, 68: 20480, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
 }
+# ``{arch: {cv: S}}``: on ``arch`` the narrow forward row of ``cv`` channel
+# vectors below 72 (C = 520 to 568) plans as the deterministic forward from
+# ``S`` tokens, on every forward route; a row of fewer than 72 vectors that
+# the architecture does not list keeps the single tile at every ``S``.
+FORWARD_NARROW_ROW_FLOORS: dict[str, dict[int, int]] = {
+    "sm_100a": {65: 16384, 66: 24576, 67: 16384, 68: 16384, 69: 16384, 70: 24576, 71: 12288},
+    "sm_103a": {65: 16384, 66: 24576, 67: 16384, 68: 16384, 69: 16384, 70: 24576, 71: 12288},
+    "sm_107a": {65: 24576, 66: 24576, 67: 16384, 68: 20480, 69: 24576, 70: 24576, 71: 16384},
+}
+# The rows below this many channel vectors take :data:`FORWARD_NARROW_ROW_FLOORS`.
+FORWARD_ROW_FLOOR_VECTORS = 72
 FORWARD_NARROW_MIN_S: dict[str, int] = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
-# ``{arch: ((cv, S, routes), ...)}``, ``cv`` non-decreasing: on ``arch`` the
-# narrow forward rows of at least ``cv`` channel vectors on a forward route of
-# ``routes`` take the token floor ``S`` instead of the architecture's
+# The tap dtypes a forward row of :data:`FORWARD_NARROW_ROW_MIN_S` and
+# :data:`FORWARD_SINGLE_TILE_ROWS` names: the ``fwd`` route's taps are FP32,
+# the ``fwd_dt`` route's BF16, and a ``fwd_bias`` call's those of its tap
+# tensor (``bf16_taps``).
+FORWARD_TAPS: tuple[str, ...] = ("f32", "bf16")
+# ``{arch: ((cv, S, routes, taps), ...)}``, ``cv`` non-decreasing: on ``arch``
+# the narrow forward rows of at least ``cv`` channel vectors (and at least 72)
+# on a forward route of ``routes`` whose taps (:func:`forward_taps`) are in
+# ``taps`` take the token floor ``S`` instead of the architecture's
 # :data:`FORWARD_NARROW_MIN_S` floor (of the entries a row reaches on its
-# route, the last wins); read through :func:`forward_narrow_min_s`.
-# ``routes`` is a non-empty tuple of :data:`FORWARD_NARROW_ROUTES` in that
-# order.  ``fwd_bias`` covers both tap dtypes: the plan does not see the taps'
-# dtype.
-FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int, tuple[str, ...]], ...]] = {
-    "sm_103a": ((89, 20480, ("fwd_bias",)),),
+# route and taps, the last wins); read through :func:`forward_narrow_min_s`.
+# ``routes`` is a non-empty tuple of :data:`FORWARD_NARROW_ROUTES` and
+# ``taps`` of :data:`FORWARD_TAPS`, each in that order.
+FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int, tuple[str, ...], tuple[str, ...]], ...]] = {
+    "sm_103a": ((89, 20480, ("fwd_bias",), ("f32",)), (89, 12288, ("fwd_bias",), ("bf16",))),
+}
+# ``{arch: ((cv_lo, cv_hi, routes, taps, S_lo, S_hi), ...)}``: on ``arch`` the
+# narrow forward rows of ``cv_lo`` to ``cv_hi`` channel vectors on a route of
+# ``routes`` whose taps are in ``taps`` keep the single tile at ``S_lo <= S <=
+# S_hi`` tokens, at or above the row's floor (the first entry a row reaches
+# wins); read through :func:`forward_single_tile_range`.  The entries of one
+# architecture and route share no ``(cv, taps)``.
+FORWARD_SINGLE_TILE_ROWS: dict[
+    str, tuple[tuple[int, int, tuple[str, ...], tuple[str, ...], int, int], ...]
+] = {
+    "sm_103a": (
+        (89, 89, ("fwd_bias",), ("bf16",), 12961, 16383),
+        (90, 95, ("fwd_bias",), ("bf16",), 12289, 16383),
+        (96, 96, ("fwd_bias",), ("bf16",), 13313, 16383),
+    ),
 }
 
 
-def forward_narrow_min_s(arch: str | None, channel_vectors: int, *, route: str) -> int | None:
+def forward_taps(route: str, *, bf16_taps: bool = False) -> str:
+    """The taps (one of :data:`FORWARD_TAPS`) of a forward call on route ``route`` (one of
+    :data:`FORWARD_NARROW_ROUTES`, a ``ValueError`` otherwise): ``"f32"`` on ``fwd``, ``"bf16"`` on ``fwd_dt``, and on
+    ``fwd_bias`` ``"bf16"`` with ``bf16_taps``, else ``"f32"``."""
+
+    if route not in FORWARD_NARROW_ROUTES:
+        raise ValueError(f"route must be one of {FORWARD_NARROW_ROUTES}, got {route!r}")
+    if route == "fwd_bias":
+        return "bf16" if bf16_taps else "f32"
+    return "bf16" if route == "fwd_dt" else "f32"
+
+
+def forward_narrow_min_s(
+    arch: str | None, channel_vectors: int, *, route: str, bf16_taps: bool = False
+) -> int | None:
     """The token floor from which the forward row of ``channel_vectors``
     vectors on route ``route`` (one of :data:`FORWARD_NARROW_ROUTES`, a
     ``ValueError`` otherwise) on ``arch`` plans as the deterministic forward:
-    the floor of the last :data:`FORWARD_NARROW_ROW_MIN_S` entry of ``arch``
-    that lists ``route`` and whose channel-vector count the row reaches, else
+    below 72 vectors (:data:`FORWARD_ROW_FLOOR_VECTORS`) the row's
+    :data:`FORWARD_NARROW_ROW_FLOORS` floor on ``arch`` (``None`` where
+    ``arch`` lists none); else the floor of the last
+    :data:`FORWARD_NARROW_ROW_MIN_S` entry of ``arch`` that lists ``route``
+    and the call's taps (:func:`forward_taps`; ``bf16_taps`` is read on
+    ``fwd_bias`` only) and whose channel-vector count the row reaches, else
     the architecture's :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the
     single tile at every ``S``) on an architecture
     :data:`FORWARD_NARROW_MIN_S` does not list.  The per-call plan
     (:func:`_forward_tiles`), the row plan (:func:`plan_row`) and the tests
     read the floor here."""
 
-    if route not in FORWARD_NARROW_ROUTES:
-        raise ValueError(f"route must be one of {FORWARD_NARROW_ROUTES}, got {route!r}")
+    taps = forward_taps(route, bf16_taps=bf16_taps)
+    cv = int(channel_vectors)
+    if cv < FORWARD_ROW_FLOOR_VECTORS:
+        floor = FORWARD_NARROW_ROW_FLOORS.get(arch, {}).get(cv)
+        return None if floor is None else int(floor)
     floor = FORWARD_NARROW_MIN_S.get(arch)
     if floor is None:
         return None
-    for cv, S, routes in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
-        if int(channel_vectors) >= int(cv) and route in routes:
+    for cv_from, S, routes, row_taps in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
+        if cv >= int(cv_from) and route in routes and taps in row_taps:
             floor = S
     return int(floor)
+
+
+def forward_single_tile_range(
+    arch: str | None, channel_vectors: int, *, route: str, bf16_taps: bool = False
+) -> tuple[int, int] | None:
+    """The ``(S_lo, S_hi)`` of the :data:`FORWARD_SINGLE_TILE_ROWS` entry of ``arch`` covering the forward row of
+    ``channel_vectors`` vectors on route ``route`` (one of :data:`FORWARD_NARROW_ROUTES`, a ``ValueError``
+    otherwise) and the call's taps (:func:`forward_taps`), ``None`` without one: inside that token range (both
+    bounds included) the row keeps its single tile."""
+
+    taps = forward_taps(route, bf16_taps=bf16_taps)
+    cv = int(channel_vectors)
+    for cv_lo, cv_hi, routes, row_taps, s_lo, s_hi in FORWARD_SINGLE_TILE_ROWS.get(arch, ()):
+        if int(cv_lo) <= cv <= int(cv_hi) and route in routes and taps in row_taps:
+            return int(s_lo), int(s_hi)
+    return None
 
 
 def channel_split(
@@ -5073,9 +5157,10 @@ def channel_split(
     route: str | None = None,
     S: int | None = None,
     arch: str | None = None,
+    bf16_taps: bool = False,
 ) -> tuple[int, int, int]:
-    """``(ct_vec, n_sub, n_ch_tiles)`` of ``C`` channels under a record's build geometry, role, route, token count
-    and architecture.
+    """``(ct_vec, n_sub, n_ch_tiles)`` of ``C`` channels under a record's build geometry, role, route, token count,
+    architecture and (on ``fwd_bias``) tap dtype.
 
     ``ct_vec`` channel vectors per channel tile (one thread each), ``n_sub =
     threads // ct_vec`` token sub-tiles per CTA and ``n_ch_tiles = ceil(C / vec
@@ -5107,20 +5192,26 @@ def channel_split(
 
     ``route`` is the launch's route (one of :data:`KINDS` of the role, a
     ``ValueError`` otherwise; the host passes its record's).  On a route of
-    :data:`FORWARD_NARROW_ROUTES` the forward's single-tile rows at C = 576 to
+    :data:`FORWARD_NARROW_ROUTES` the forward's single-tile rows at C = 520 to
     768 run 32-vector tiles, ``(32, threads // 32, ceil(cv / 32))``, when the
     call names its token count ``S`` and its architecture ``arch`` (one of
     :data:`ARCHES`, a ``ValueError`` otherwise) and ``S`` is at least the
-    row's floor on its route and ``arch`` (:func:`forward_narrow_min_s`: the
-    architecture's :data:`FORWARD_NARROW_MIN_S` floor, or a
-    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the route): C = 576, 640 and 768
-    as (32, 4, 3) instead of one tile of 72, 80 and 96 vectors.  A row of
+    row's floor on its route, ``arch`` and taps (:func:`forward_narrow_min_s`:
+    below 72 vectors the row's :data:`FORWARD_NARROW_ROW_FLOORS` floor, else
+    the architecture's :data:`FORWARD_NARROW_MIN_S` floor or a
+    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the route and taps) and outside
+    the row's :data:`FORWARD_SINGLE_TILE_ROWS` range
+    (:func:`forward_single_tile_range`): C = 536, 568, 576, 640 and 768 as
+    (32, 4, 3) instead of one tile of 67, 71, 72, 80 and 96 vectors.  A row of
     :data:`FORWARD_NARROW_WIDTHS` runs whole tiles of its width instead from
     its floor on ``arch`` in :data:`FORWARD_WIDTH_FLOORS` (and the row's
-    floor): C = 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  Without ``S``
-    or ``arch``, below the row's floor on its route and ``arch`` and on an architecture
-    :data:`FORWARD_NARROW_MIN_S` does not list, the single tile stays (the
-    0.2.0 plan); ``y`` keeps its bits in every plan.  Without a route, under
+    floor): C = 520 as (13, 9, 5), 576 as (18, 7, 4) and C = 640 as (40, 3,
+    2).  ``bf16_taps`` (the call's taps are BF16) is read on ``fwd_bias``
+    only: the ``fwd`` route's taps are FP32 and the ``fwd_dt`` route's BF16.
+    Without ``S`` or ``arch``, below the row's floor on its route, ``arch``
+    and taps, inside its single-tile range and on an architecture without a
+    floor for the row, the single tile stays (the 0.2.0 plan); ``y`` keeps
+    its bits in every plan.  Without a route, under
     ``legacy`` and for the backward role the split above stays (the
     backward's narrower rows are :func:`plan`'s :data:`TILE_OVERRIDES` and
     :data:`NARROW_TILES`).  From the row's floor on its route and ``arch`` (and on every
@@ -5138,7 +5229,7 @@ def channel_split(
         role,
         bool(legacy),
         route,
-        _forward_tiles(int(C) // vec, role, bool(legacy), route, S, arch),
+        _forward_tiles(int(C) // vec, role, bool(legacy), route, S, arch, bool(bf16_taps)),
     )
 
 
@@ -5154,23 +5245,28 @@ def _forward_tiles(
     route: str | None,
     S: int | None,
     arch: str | None,
+    bf16_taps: bool = False,
 ) -> str:
     """Which tiles of :data:`FORWARD_TILES` a narrow forward row runs: for a
     forward call on a route of :data:`FORWARD_NARROW_ROUTES` that names ``S``
-    and ``arch``, with ``S`` at least the row's floor on that route and
-    ``arch`` (:func:`forward_narrow_min_s`), ``"wide"`` when the row has a width in
-    :data:`FORWARD_NARROW_WIDTHS` and ``S`` is at least its floor on ``arch``
-    in :data:`FORWARD_WIDTH_FLOORS`, else ``"narrow"``; ``"one"`` otherwise.
-    Only the rows :func:`_forward_narrow_tile` names read it.  The memoized
-    plan takes this word, not ``S``, so its keys stay at most three per
-    row."""
+    and ``arch``, with ``S`` at least the row's floor on that route, ``arch``
+    and taps (:func:`forward_narrow_min_s`) and outside the row's single-tile
+    range (:func:`forward_single_tile_range`), ``"wide"`` when the row has a
+    width in :data:`FORWARD_NARROW_WIDTHS` and ``S`` is at least its floor on
+    ``arch`` in :data:`FORWARD_WIDTH_FLOORS`, else ``"narrow"``; ``"one"``
+    otherwise.  Only the rows :func:`_forward_narrow_tile` names read it.  The
+    memoized plan takes this word, not ``S`` or the taps, so its keys stay at
+    most three per row."""
 
     if legacy or S is None or arch is None or role != "fwd":
         return "one"
     if route not in FORWARD_NARROW_ROUTES:
         return "one"
-    min_s = forward_narrow_min_s(arch, channel_vectors, route=route)
+    min_s = forward_narrow_min_s(arch, channel_vectors, route=route, bf16_taps=bf16_taps)
     if min_s is None or int(S) < min_s:
+        return "one"
+    gap = forward_single_tile_range(arch, channel_vectors, route=route, bf16_taps=bf16_taps)
+    if gap is not None and gap[0] <= int(S) <= gap[1]:
         return "one"
     floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
     if channel_vectors in FORWARD_NARROW_WIDTHS and floor is not None and int(S) >= floor:
@@ -5260,7 +5356,7 @@ def _fallback_split(channel_vectors: int, threads: int, role: str) -> int:
 def _forward_narrow_tile(channel_vectors: int, threads: int) -> bool:
     """Whether a forward single-tile row runs narrower tiles on the routes of :data:`FORWARD_NARROW_ROUTES`."""
 
-    return threads == FORWARD_NARROW_THREADS and 72 <= channel_vectors <= 96
+    return threads == FORWARD_NARROW_THREADS and 65 <= channel_vectors <= 96
 
 
 def _lane_use(channel_vectors: int, width: int, threads: int) -> float:
@@ -5519,6 +5615,7 @@ def plan(
     legacy: bool = False,
     arch: str | None = None,
     route: str | None = None,
+    bf16_taps: bool = False,
 ) -> dict[str, int]:
     """The kernel's launch scalars for one problem under a record's build geometry and role.
 
@@ -5539,19 +5636,22 @@ def plan(
     (:func:`narrow_tile_row`, at 128 threads) by ``(32, threads // 32, ceil(C
     / vec / 32))``; without them and under ``legacy`` the split is
     :func:`channel_split`'s.  For the forward role ``route``, ``S`` and
-    ``arch`` are passed on to :func:`channel_split` (not under ``legacy``):
-    from the row's floor on the record's route and ``arch``
-    (:func:`forward_narrow_min_s`) the forward record's route runs the 32-vector tiles of its narrow rows, and
-    a row of :data:`FORWARD_NARROW_WIDTHS` its width from its token floor on
-    ``arch``, as the deterministic package's forward plans them; below that
-    floor the row keeps its single tile.
+    ``arch`` are passed on to :func:`channel_split` (not under ``legacy``),
+    with ``bf16_taps`` (the call's taps are BF16; read on ``fwd_bias`` only):
+    from the row's floor on the record's route, ``arch`` and taps
+    (:func:`forward_narrow_min_s`) the forward record's route runs the
+    32-vector tiles of its narrow rows (but inside the row's
+    :func:`forward_single_tile_range`), and a row of
+    :data:`FORWARD_NARROW_WIDTHS` its width from its token floor on ``arch``,
+    as the deterministic package's forward plans them; below that floor the
+    row keeps its single tile.  The backward ignores ``bf16_taps``.
     """
 
     S, C, num_docs = int(S), int(C), int(num_docs)
     if S < 0 or num_docs < 0:
         raise ValueError(f"S and num_docs must be non-negative, got {(S, num_docs)}")
     split = _plan_split(
-        S, C, geometry=geometry, role=role, legacy=legacy, arch=arch, route=route
+        S, C, geometry=geometry, role=role, legacy=legacy, arch=arch, route=route, bf16_taps=bf16_taps
     )
     return _plan_scalars(S, C, num_docs, split)
 
@@ -5565,13 +5665,15 @@ def _plan_split(
     legacy: bool = False,
     arch: str | None = None,
     route: str | None = None,
+    bf16_taps: bool = False,
 ) -> tuple[int, int, int]:
     """:func:`plan`'s ``(ct_vec, n_sub, n_ch_tiles)`` of one call: for a
     backward call given ``arch`` and ``route`` (not ``legacy``), the
     :data:`TILE_OVERRIDES` row's split, else the :data:`NARROW_TILES` row's,
     else :func:`channel_split`'s; for a forward call (not ``legacy``),
-    :func:`channel_split`'s of its route, ``S`` and ``arch`` (the
-    :func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS` floors)."""
+    :func:`channel_split`'s of its route, ``S``, ``arch`` and taps (the
+    :func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS` floors and
+    the :func:`forward_single_tile_range` range)."""
 
     if role == "bwd" and not legacy and arch is not None and route is not None:
         override = tile_override(arch, route, C, S)
@@ -5583,7 +5685,7 @@ def _plan_split(
                 return narrow
     if role == "fwd" and not legacy:
         return channel_split(
-            C, geometry=geometry, role=role, route=route, S=S, arch=arch
+            C, geometry=geometry, role=role, route=route, S=S, arch=arch, bf16_taps=bf16_taps
         )
     return channel_split(C, geometry=geometry, role=role, legacy=legacy)
 
@@ -5879,8 +5981,9 @@ class RowPlan(NamedTuple):
     # :data:`TILE_OVERRIDES` row, else its :data:`NARROW_TILES` row (the two tables share no ``(route, C)``; at most
     # one range), or the forward record's narrow row: its 32-vector tiles from its :func:`forward_narrow_min_s` floor
     # up to its :data:`FORWARD_WIDTH_FLOORS` floor, and from the later of the two floors the width of a
-    # :data:`FORWARD_NARROW_WIDTHS` row with no ceiling (the last range's ``S_max`` is ``sys.maxsize``: the forward
-    # rule has none, so the row's plan is the per-call plan for every ``S``); empty without one.
+    # :data:`FORWARD_NARROW_WIDTHS` row with no ceiling, but none inside its :func:`forward_single_tile_range` (the
+    # last range's ``S_max`` is ``sys.maxsize``: the forward rule has none, so the row's plan is the per-call plan
+    # for every ``S``); empty without one.
     overrides: tuple[tuple[int, int, tuple[int, int, int]], ...]
     # The launch grid, ``None`` where :func:`launch_grid` may trim it by ``S`` (planned per call).
     grid: tuple[int, int, int] | None
@@ -5894,6 +5997,7 @@ def plan_row(
     device_index: int,
     bwd_grid_mult: int = 1,
     at: int | None = None,
+    bf16_taps: bool = False,
 ) -> RowPlan | None:
     """The :class:`RowPlan` of the calls of route ``kind`` with ``C`` channels on device ``device_index`` (of
     architecture ``arch``) launching ``bwd_grid_mult`` times the untrimmed backward grid (1: the default grid), or
@@ -5905,12 +6009,14 @@ def plan_row(
     else inside the :data:`FALLBACK_ROWS` range the route's fallback program, else the program the selection rules
     pick there (or ``None`` where a token floor decides); with one side ``at`` is not read.  ``S`` enters a call's
     host plan only through those sides, a token floor of the route's selection rules, the ``[S_min, S_max]`` range
-    of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors of a narrow forward
-    row (:func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS`) and the trim of :func:`launch_grid` (an
-    ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only through :func:`search_steps`; so
-    with this row (of the call's side) :func:`row_launch` returns what :func:`plan` and :func:`launch_grid` return
-    for the call (the planning ``_launch`` does: ``plan(..., arch=, route=)`` with the record's route) without
-    selecting, splitting or sizing the grid again.  Registry errors raise as in :func:`selected_modules`.
+    of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors and single-tile range
+    of a narrow forward row (:func:`forward_narrow_min_s`, :data:`FORWARD_WIDTH_FLOORS` and
+    :func:`forward_single_tile_range`, of the call's taps: ``bf16_taps``, read on ``fwd_bias`` only) and the trim of
+    :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only through
+    :func:`search_steps`; so with this row (of the call's side and taps) :func:`row_launch` returns what
+    :func:`plan` and :func:`launch_grid` return for the call (the planning ``_launch`` does: ``plan(..., arch=,
+    route=, bf16_taps=)`` with the record's route) without selecting, splitting or sizing the grid again.  Registry
+    errors raise as in :func:`selected_modules`.
     """
 
     C = int(C)
@@ -5935,21 +6041,28 @@ def plan_row(
     geometry, role = rule["geometry"], record["role"]
     overrides: tuple[tuple[int, int, tuple[int, int, int]], ...] = ()
     if role == "fwd":
-        # The route's plan below every token floor of the row (or without one), then one range per floor, up to the
-        # next floor (the last without a ceiling), wherever its plan differs from the one below every floor.
+        # The route's plan below every token floor of the row (or without one), then one range per floor and
+        # single-tile range bound, up to the next one (the last without a ceiling), wherever its plan differs from
+        # the one below every floor.
         route = record_route(record, arch)
-        split = channel_split(C, geometry=geometry, role=role, route=route, S=0, arch=arch)
+        taps = {"bf16_taps": bool(bf16_taps)}
+        split = channel_split(C, geometry=geometry, role=role, route=route, S=0, arch=arch, **taps)
         cv = C // int(geometry["vec"])
+        gap = forward_single_tile_range(arch, cv, route=route, **taps)
         floors = sorted(
             {
                 int(S)
-                for S in (forward_narrow_min_s(arch, cv, route=route), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
+                for S in (
+                    forward_narrow_min_s(arch, cv, route=route, **taps),
+                    FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv),
+                    *(() if gap is None else (gap[0], gap[1] + 1)),
+                )
                 if S is not None
             }
         )
         ranges = []
         for floor, end in zip(floors, [*(f - 1 for f in floors[1:]), sys.maxsize]):
-            tiles = channel_split(C, geometry=geometry, role=role, route=route, S=floor, arch=arch)
+            tiles = channel_split(C, geometry=geometry, role=role, route=route, S=floor, arch=arch, **taps)
             if tiles != split:
                 ranges.append((floor, end, tiles))
         overrides = tuple(ranges)
