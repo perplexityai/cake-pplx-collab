@@ -204,7 +204,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "ffi_entry": "run",
         "fuse_docs": 256,
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -212,7 +212,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 2176,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
+        "library": "cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834",
         "role": "fwd",
     },
     "bwd": {

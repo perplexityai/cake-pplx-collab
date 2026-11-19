@@ -54,7 +54,7 @@ extern "C" __device__ float __nv_expf(float);
 extern "C" {
 
 __global__ __launch_bounds__(256) void
-kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496(float* c, float* z, int* cu_seqlens, int* cu_pairs, __nv_bfloat16* out, int num_docs, int G, long long c_ld, long long z_ld)
+kernel_cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834(float* c, float* z, int* cu_seqlens, int* cu_pairs, __nv_bfloat16* out, int num_docs, int G, long long c_ld, long long z_ld)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -194,8 +194,8 @@ kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496(float* c, float*
                 unsigned _ldv8_1_5;
                 unsigned _ldv8_1_6;
                 unsigned _ldv8_1_7;
-                asm volatile("ld.global.L1::no_allocate.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=r"(_ldv8_1_0), "=r"(_ldv8_1_1), "=r"(_ldv8_1_2), "=r"(_ldv8_1_3), "=r"(_ldv8_1_4), "=r"(_ldv8_1_5), "=r"(_ldv8_1_6), "=r"(_ldv8_1_7) : "l"((const void*)(c + at_c_0 + (0))) : "memory");
+                asm volatile("ld.global.L2::cache_hint.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8], %9;"
+                    : "=r"(_ldv8_1_0), "=r"(_ldv8_1_1), "=r"(_ldv8_1_2), "=r"(_ldv8_1_3), "=r"(_ldv8_1_4), "=r"(_ldv8_1_5), "=r"(_ldv8_1_6), "=r"(_ldv8_1_7) : "l"((const void*)(c + at_c_0 + (0))), "l"(0x12F0000000000000ULL) : "memory");
                 vals_0[0 + 0] = __uint_as_float(_ldv8_1_0);
                 vals_0[0 + 1] = __uint_as_float(_ldv8_1_1);
                 vals_0[0 + 2] = __uint_as_float(_ldv8_1_2);
@@ -214,8 +214,8 @@ kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496(float* c, float*
                 unsigned _ldv8_2_5;
                 unsigned _ldv8_2_6;
                 unsigned _ldv8_2_7;
-                asm volatile("ld.global.L1::no_allocate.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=r"(_ldv8_2_0), "=r"(_ldv8_2_1), "=r"(_ldv8_2_2), "=r"(_ldv8_2_3), "=r"(_ldv8_2_4), "=r"(_ldv8_2_5), "=r"(_ldv8_2_6), "=r"(_ldv8_2_7) : "l"((const void*)(c + (at_c_0 + c_ld) + (0))) : "memory");
+                asm volatile("ld.global.L2::cache_hint.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8], %9;"
+                    : "=r"(_ldv8_2_0), "=r"(_ldv8_2_1), "=r"(_ldv8_2_2), "=r"(_ldv8_2_3), "=r"(_ldv8_2_4), "=r"(_ldv8_2_5), "=r"(_ldv8_2_6), "=r"(_ldv8_2_7) : "l"((const void*)(c + (at_c_0 + c_ld) + (0))), "l"(0x12F0000000000000ULL) : "memory");
                 vals_0[8 + 0] = __uint_as_float(_ldv8_2_0);
                 vals_0[8 + 1] = __uint_as_float(_ldv8_2_1);
                 vals_0[8 + 2] = __uint_as_float(_ldv8_2_2);
@@ -234,8 +234,8 @@ kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496(float* c, float*
                 unsigned _ldv8_3_5;
                 unsigned _ldv8_3_6;
                 unsigned _ldv8_3_7;
-                asm volatile("ld.global.L1::no_allocate.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=r"(_ldv8_3_0), "=r"(_ldv8_3_1), "=r"(_ldv8_3_2), "=r"(_ldv8_3_3), "=r"(_ldv8_3_4), "=r"(_ldv8_3_5), "=r"(_ldv8_3_6), "=r"(_ldv8_3_7) : "l"((const void*)(z + at_z_0 + (0))) : "memory");
+                asm volatile("ld.global.L2::cache_hint.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8], %9;"
+                    : "=r"(_ldv8_3_0), "=r"(_ldv8_3_1), "=r"(_ldv8_3_2), "=r"(_ldv8_3_3), "=r"(_ldv8_3_4), "=r"(_ldv8_3_5), "=r"(_ldv8_3_6), "=r"(_ldv8_3_7) : "l"((const void*)(z + at_z_0 + (0))), "l"(0x12F0000000000000ULL) : "memory");
                 vals_0[16 + 0] = __uint_as_float(_ldv8_3_0);
                 vals_0[16 + 1] = __uint_as_float(_ldv8_3_1);
                 vals_0[16 + 2] = __uint_as_float(_ldv8_3_2);
@@ -254,8 +254,8 @@ kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496(float* c, float*
                 unsigned _ldv8_4_5;
                 unsigned _ldv8_4_6;
                 unsigned _ldv8_4_7;
-                asm volatile("ld.global.L1::no_allocate.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
-                    : "=r"(_ldv8_4_0), "=r"(_ldv8_4_1), "=r"(_ldv8_4_2), "=r"(_ldv8_4_3), "=r"(_ldv8_4_4), "=r"(_ldv8_4_5), "=r"(_ldv8_4_6), "=r"(_ldv8_4_7) : "l"((const void*)(z + (at_z_0 + z_ld) + (0))) : "memory");
+                asm volatile("ld.global.L2::cache_hint.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8], %9;"
+                    : "=r"(_ldv8_4_0), "=r"(_ldv8_4_1), "=r"(_ldv8_4_2), "=r"(_ldv8_4_3), "=r"(_ldv8_4_4), "=r"(_ldv8_4_5), "=r"(_ldv8_4_6), "=r"(_ldv8_4_7) : "l"((const void*)(z + (at_z_0 + z_ld) + (0))), "l"(0x12F0000000000000ULL) : "memory");
                 vals_0[24 + 0] = __uint_as_float(_ldv8_4_0);
                 vals_0[24 + 1] = __uint_as_float(_ldv8_4_1);
                 vals_0[24 + 2] = __uint_as_float(_ldv8_4_2);

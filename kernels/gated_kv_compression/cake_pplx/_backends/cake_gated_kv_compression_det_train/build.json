@@ -130,29 +130,6 @@
       ]
     },
     {
-      "arch": "sm_107a",
-      "closure_sha256": "385b4a5771442e47e126d56c76d94fe2b2c6e0bd537fa0565bd17840141f46de",
-      "entry": "run",
-      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
-      "min_cuda": "13.5",
-      "name": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_sm_107a",
-      "nvcc_flags": [
-        "--prec-div=true",
-        "--prec-sqrt=true",
-        "--ftz=false"
-      ],
-      "nvcc_flags_if": [],
-      "path": "aot/cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_sm_107a.so",
-      "sha256": {
-        "csrc/cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_binding.cu": "29d52e329acbe8a749869fbbf7e2fc3d2c6a2fde9f551bbcc16b8e8a0af4d3aa",
-        "csrc/cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_kernel.cu": "04b61d5e316e201207c59b46da7b069c733ecd9d722467f2d6002bc2b5f34e8f"
-      },
-      "sources": [
-        "csrc/cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_kernel.cu",
-        "csrc/cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496_binding.cu"
-      ]
-    },
-    {
       "arch": "sm_100a",
       "closure_sha256": "7746ca5640c990fbb45208c9b08c476435aad4f8752b928797db7b5d632e1a85",
       "entry": "run",
@@ -265,6 +242,29 @@
       "sources": [
         "csrc/cake_gated_kv_compression_det_train_8997a924b74a8200ddac_kernel.cu",
         "csrc/cake_gated_kv_compression_det_train_8997a924b74a8200ddac_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "79457d1e5bc9137b66acba9b9f2900e278c70b436a74de5cf4b08128ad2cba20",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_sm_107a.so",
+      "sha256": {
+        "csrc/cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_binding.cu": "ad73cd7a8bbf19e33b0488a907b7c89598a8266b88eebaffb806d97d5ce667bf",
+        "csrc/cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_kernel.cu": "a0f3e3fec9e4bf0224dfceedef2c04f01df7cb90b3513e063ff88ba1de0fd254"
+      },
+      "sources": [
+        "csrc/cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_kernel.cu",
+        "csrc/cake_gated_kv_compression_det_train_bd85ee3ae785ffc6a834_binding.cu"
       ]
     }
   ],
