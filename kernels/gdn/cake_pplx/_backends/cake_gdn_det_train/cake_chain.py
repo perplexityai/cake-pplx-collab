@@ -3746,8 +3746,9 @@ _NO_FILL = nullcontext()
 
 class _DirectExecutor:
     """The forward's launches, allocations, views, eager calls, pooled workspaces, stream switches and uses of cached
-    tables as :func:`_train_forward` reaches them.  Most steps are the functions themselves, with no Python frame of
-    their own:
+    tables as :func:`_train_forward` reaches them.  Most steps are the functions themselves, held in instance slots
+    (``ex.empty`` is then one specialized slot load, as ``torch.empty`` is one module attribute load; a class-level
+    ``staticmethod`` is a descriptor that the interpreter does not specialize), with no Python frame of their own:
 
     - ``launch(stage, gx, gy, gz, *values)``: :func:`_launch`;
     - ``empty(shape, dtype=..., device=...)``: ``torch.empty``;
@@ -3759,18 +3760,20 @@ class _DirectExecutor:
     - ``take(pool, table, role, shape, dtype, device)``: ``pool.take(table, role, shape, dtype, device)``, a workspace
       of the pool ``pool`` (:func:`_take`).
 
-    The class holds these functions from the time the module loads: rebinding ``_launch`` afterwards does not reach the
-    forward's general path (and, ``_launch`` being one of the forward's functions, sends the next call of a plan's key
-    to record again).  A wrapper of ``cake_backend.launch_stage`` sees every launch of the forward: of the general
-    path, of a recording and of a replay."""
+    :data:`_DIRECT` holds these functions from the time the module loads: rebinding ``_launch`` afterwards does not
+    reach the forward's general path (and, ``_launch`` being one of the forward's functions, sends the next call of a
+    plan's key to record again).  A wrapper of ``cake_backend.launch_stage`` sees every launch of the forward: of the
+    general path, of a recording and of a replay.  The recorders (:class:`_SlotRecorder`, :class:`_FwdRecorder`) have
+    methods of these names in place of the slots."""
 
-    __slots__ = ()
+    __slots__ = ("launch", "empty", "view", "call", "rows", "take")
 
-    launch = staticmethod(_launch)
-    empty = staticmethod(torch.empty)
-    view = staticmethod(torch.Tensor.view)
-    call = rows = staticmethod(_call)
-    take = staticmethod(_take)
+    def __init__(self):
+        self.launch = _launch
+        self.empty = torch.empty
+        self.view = torch.Tensor.view
+        self.call = self.rows = _call
+        self.take = _take
 
     def fork(self, index):
         """(the caller's stream, its side stream), the side stream after the caller's work so far."""
