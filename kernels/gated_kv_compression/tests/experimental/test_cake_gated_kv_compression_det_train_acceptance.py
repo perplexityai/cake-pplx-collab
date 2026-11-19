@@ -18,8 +18,14 @@ The acceptance criteria of the feature request (perplexityai/cake-pplx-collab#76
 the request against an FP64 evaluation of the same math on the same FP32 ``C``, ``Z`` and BF16 ``dout``; they sit
 beside the repository's naive-tier judge (``tests/cake_naive.py``), which every other suite of the family applies.
 
-* ``out`` is the FP64 result rounded once to BF16, within 1 BF16 ulp per element (:data:`OUT_ULPS`): the distance
-  in BF16 values between ``out`` and the FP64 result rounded once (round to nearest even) to BF16, on every element.
+* ``out``, in the request's words: "Each `out` element is within 1 BF16 ulp of the FP64 result rounded once to BF16,
+  or its absolute error is at most 1 BF16 ulp of `max(|C[t0,d]|, |C[t1,d]|)`. The second case covers near-cancelling
+  pairs, where the released FP32 math has the same error. Report the count of second-case elements and the worst ulp
+  distance."  :func:`classify_out` applies it per element: the first case is a distance of at most :data:`OUT_ULPS`
+  BF16 values between ``out`` and the FP64 result rounded once (round to nearest even) to BF16; the second, for a
+  larger distance, is ``|out - y| <= ulp_bf16(max(|C[t0, d]|, |C[t1, d]|))`` with ``y`` the unrounded FP64 result
+  (:func:`bf16_ulp`).  Every element of every seed meets one of the two; the test reports, per case, the elements, the
+  second-case count, the count outside both and the worst distance.
 * ``dC`` and ``dZ`` have a relative L2 error of at most 1e-6 (:data:`GRAD_REL_L2`), also when every pair has
   ``C[t1] = C[t0] (1 + 2^-12)`` and ``C[t1] = C[t0] (1 + 2^-16)``.
 * Document lengths 0, 1, 2 and 3, in the pack ``(0, 1, 3, 2, 7, 4)``: ``out`` equals the per-document result.
@@ -33,8 +39,8 @@ beside the repository's naive-tier judge (``tests/cake_naive.py``), which every 
 * Workspace and state retained for the backward are reported separately; the measured peak of a backward is the
   reported workspace (and, for the autograd backward of an expanded incoming gradient, its documented copy).
 
-Every test runs on SM100 / SM103 / SM107 and skips elsewhere.  Each measured figure is recorded with pytest's
-``record_property`` (``acceptance``).
+Every test runs on SM100 / SM103 / SM107 and skips elsewhere, except the check of :func:`classify_out` on hand-made
+values, which needs no GPU.  Each measured figure is recorded with pytest's ``record_property`` (``acceptance``).
 """
 
 from __future__ import annotations
@@ -65,7 +71,8 @@ from tests.cake.test_helpers.cake_gated_kv_compression_naive import (
     tail_rows,
 )
 
-#: The contract owner's bound on ``out``: BF16 values between ``out`` and the FP64 result rounded once to BF16.
+#: The first case of the contract owner's ``out`` criterion: BF16 values between ``out`` and the FP64 result rounded
+#: once to BF16.
 OUT_ULPS = 1
 #: The contract owner's bound on ``dC`` and ``dZ``: relative L2 error against FP64.
 GRAD_REL_L2 = 1e-6
@@ -133,23 +140,126 @@ def bf16_rounded_once(y: torch.Tensor) -> torch.Tensor:
     return (torch.round(y / quantum) * quantum).to(torch.bfloat16)
 
 
+def bf16_ulp(m: torch.Tensor) -> torch.Tensor:
+    """The BF16 ulp of FP64 ``m >= 0``: ``2^(clamp(e, min=-125) - 8)`` with ``(_, e) = frexp(m)``, the quantum rule of
+    :func:`bf16_rounded_once` (``2^-133`` for every ``m`` below ``2^-125``), and ``2^-133`` for ``m == 0``."""
+    _, exponent = torch.frexp(m)
+    two = torch.tensor(2.0, dtype=torch.float64, device=m.device)
+    quantum = torch.pow(two, (exponent.clamp(min=-125) - 8).to(torch.float64))
+    return torch.where(m == 0, torch.pow(two, -133.0), quantum)
+
+
+def classify_out(
+    out: torch.Tensor, y: torch.Tensor, c0: torch.Tensor, c1: torch.Tensor
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """The feature request's ``out`` criterion per element (module docstring): ``(distance, second, outside)``.
+
+    ``out`` is BF16, ``y`` the unrounded FP64 result, ``c0`` and ``c1`` the pair's stored ``C[t0, d]`` and
+    ``C[t1, d]`` in FP64, all of one shape.  ``distance`` is the number of BF16 values from ``out`` to ``y`` rounded
+    once to BF16 (the first case: at most :data:`OUT_ULPS`).  ``second`` marks the elements beyond that distance whose
+    absolute error ``|out - y|`` is at most :func:`bf16_ulp` of ``max(|c0|, |c1|)``; ``outside`` the elements beyond
+    that distance that exceed it, which fail the criterion.  The benchmark's gate
+    (``benchmarks/cake_gated_kv_compression_baselines.py``) keeps an identical copy of this function and of
+    :func:`bf16_ulp`: the tests do not import the benchmark."""
+    distance = bf16_ulp_distance(out, bf16_rounded_once(y))
+    within = (out.double() - y).abs() <= bf16_ulp(torch.maximum(c0.abs(), c1.abs()))
+    beyond = distance > OUT_ULPS
+    return distance, beyond & within, beyond & ~within
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Accuracy against FP64
 
 
+def test_the_out_criterion_classifies_hand_made_elements() -> None:
+    """:func:`classify_out` and :func:`bf16_ulp` on hand-made values (no GPU): an element 2 BF16 values from the
+    rounded result whose error is within the ulp of the larger input is a second-case element; one whose error exceeds
+    both bounds is outside; ``max(|c0|, |c1|) == 0`` and a subnormal one use the quantum ``2^-133``."""
+    q = 2.0**-15  # the BF16 ulp of 0.005
+    big = 2.0**-7  # the BF16 ulp of 1.0
+    small = 2.0**-18  # the BF16 ulp of 0.00095
+    tiny = 2.0**-133  # the smallest BF16 subnormal
+    rows = (
+        # (out, y, c0, c1, distance, second, outside)
+        (164 * q, 0.005, 1.0, -0.99, 0, False, False),  # BF16(0.005) itself
+        (165 * q, 0.005, 1.0, -0.99, 1, False, False),  # the next value: first case
+        (166 * q, 0.005, 1.0, -0.99, 2, True, False),  # error 6.6e-5 <= 2^-7: second case
+        (-166 * q, -0.005, -0.99, 1.0, 2, True, False),  # the same, negated and with the pair swapped
+        (252 * small, 0.00095, 0.001, 0.0009, 3, False, True),  # error 1.1e-5 > 2^-17 (ulp of 0.001): outside
+        (2 * tiny, 0.0, 0.0, 0.0, 2, False, True),  # max |C| == 0: bound 2^-133, error 2^-132
+        (tiny, 0.0, 0.0, 0.0, 1, False, False),  # max |C| == 0, one value off: first case
+        (2 * tiny, 0.0, 3 * tiny, -tiny, 2, False, True),  # subnormal max |C|: bound 2^-133, error 2^-132
+    )
+    f64 = torch.float64
+    out = torch.tensor([r[0] for r in rows], dtype=f64).to(torch.bfloat16)
+    assert torch.equal(out.double(), torch.tensor([r[0] for r in rows], dtype=f64)), "a hand-made out is not BF16"
+    y, c0, c1 = (torch.tensor([r[i] for r in rows], dtype=f64) for i in (1, 2, 3))
+    distance, second, outside = classify_out(out, y, c0, c1)
+    assert distance.tolist() == [r[4] for r in rows]
+    assert second.tolist() == [r[5] for r in rows]
+    assert outside.tolist() == [r[6] for r in rows]
+    m = torch.tensor([0.0, tiny, 3 * tiny, 2.0**-126, 2.0**-125, 0.00095, 0.001, 1.0, 1.5, 2.0], dtype=f64)
+    want = [tiny, tiny, tiny, tiny, 2.0**-132, small, 2.0**-17, big, big, 2.0**-6]
+    assert bf16_ulp(m).tolist() == want
+
+
 @pytest.mark.parametrize(("pack", "variant"), MEASURED)
-def test_out_is_the_fp64_result_rounded_once_within_one_bf16_ulp(pack, variant, record_property) -> None:
+def test_out_is_within_one_bf16_ulp_or_one_ulp_of_the_larger_input(pack, variant, request, record_property) -> None:
+    """The feature request's ``out`` criterion (:func:`classify_out`) on every element of every seed, and the report
+    it asks for, per case: the elements, the second-case count, the count outside both cases (0 to pass) and the worst
+    distance in BF16 values.  The report is also printed as one ``OUT_REPORT`` line (shown with ``pytest -s``)."""
     device = _device_or_skip()
-    worst, off = 0, 0
+    report = {"elements": 0, "second_case": 0, "outside": 0, "worst_ulps": 0}
+    worst, worst_excess = None, -float("inf")
     for seed in SEEDS:
         x = make_inputs(pack, seed=seed, device=device, layout="halves", **variant)
         out, _, _ = _autograd_cz(x)
-        want = bf16_rounded_once(forward_values(x, torch.float64)["out"])
-        distance = bf16_ulp_distance(out, want)
-        worst = max(worst, int(distance.max()) if distance.numel() else 0)
-        off += int((distance > 0).sum())
-    record_property("acceptance", {"criterion": "out ulps", "max": worst, "elements_off_by_one_or_more": off})
-    assert worst <= OUT_ULPS, f"out is {worst} BF16 values from the FP64 result rounded once (bound {OUT_ULPS})"
+        y = forward_values(x, torch.float64)["out"]
+        c = x.c.double()
+        c0, c1 = c[x.t0], c[x.t0 + 1]
+        distance, second, outside = classify_out(out, y, c0, c1)
+        report["elements"] += distance.numel()
+        report["second_case"] += int(second.sum())
+        report["outside"] += int(outside.sum())
+        report["worst_ulps"] = max(report["worst_ulps"], int(distance.max()) if distance.numel() else 0)
+        if bool(outside.any()):
+            # The outside element farthest beyond its second-case bound (a NaN error counts as the farthest).
+            error = (out.double() - y).abs()
+            bound = bf16_ulp(torch.maximum(c0.abs(), c1.abs()))
+            excess = torch.where(outside, (error / bound).nan_to_num(nan=float("inf")), -float("inf"))
+            row, col = divmod(int(excess.argmax()), WIDTH)
+            if float(excess[row, col]) > worst_excess:
+                worst_excess = float(excess[row, col])
+                worst = {
+                    "seed": seed,
+                    "row": row,
+                    "column": col,
+                    "out": float(out[row, col]),
+                    "fp64": float(y[row, col]),
+                    "c_t0": float(c0[row, col]),
+                    "c_t1": float(c1[row, col]),
+                    "ulps": int(distance[row, col]),
+                    "error": float(error[row, col]),
+                    "bound": float(bound[row, col]),
+                }
+    case = request.node.callspec.id
+    print(
+        f"OUT_REPORT case={case} elements={report['elements']} second_case={report['second_case']} "
+        f"outside={report['outside']} worst_ulps={report['worst_ulps']}"
+    )
+    record_property(
+        "acceptance",
+        {
+            "criterion": "out within 1 BF16 ulp of BF16(FP64), or |error| <= 1 BF16 ulp of max(|C[t0]|, |C[t1]|)",
+            "case": case,
+            **report,
+            "worst_outside": worst,
+        },
+    )
+    assert report["outside"] == 0, (
+        f"{report['outside']} out elements meet neither case of the criterion (second case {report['second_case']}, "
+        f"worst distance {report['worst_ulps']} BF16 values); worst element {worst}"
+    )
 
 
 @pytest.mark.parametrize(("pack", "variant"), MEASURED)
