@@ -22,8 +22,8 @@ for.  A record is keyed by its program name
 ``cake_clamped_swiglu_det_train_<20 hex>`` and carries the host plan: the
 ``role`` it runs in, the ``stage`` it serves (``fwd`` or ``bwd``, its role
 without the ``_large`` suffix), the architectures it is delivered for, the
-``run`` entry and, in a large-R role, ``min_rows_per_sm``; ``library`` is its
-key.  The derived leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are
+``run`` entry and, in a large-R role, ``rows_per_sm_windows``; ``library`` is
+its key.  The derived leaves (``kernel_symbol``, ``launch``, ``arg_plan``) are
 written by the exporter from the rendered binding.  ``MODULES`` is a literal
 table (the exporter and the manifest checker read it with
 ``ast.literal_eval``).  Every launch is a plain stream-ordered launch: nothing
@@ -44,9 +44,11 @@ The stages:
 Each stage has two roles (``ROLES``).  The stage's own role (``fwd``,
 ``bwd``) is its small-R program, one on every architecture.  Its large-R role
 (``fwd_large``, ``bwd_large``) has at most one program on each architecture;
-the record's ``min_rows_per_sm`` gives, per architecture, the rows per SM from
-which it runs.  A launch of ``rows`` rows on a device of ``sm_count`` SMs runs
-the large-R program when ``rows >= min_rows_per_sm[arch] * sm_count`` and the
+the record's ``rows_per_sm_windows`` gives, per architecture, the windows of
+rows per SM in which it runs: ``[lo, hi]`` lists, ascending, each ``hi`` below
+the next ``lo``, only the last ``hi`` None (no upper bound).  A launch of
+``rows`` rows on a device of ``sm_count`` SMs runs the large-R program when
+``lo * sm_count < rows <= hi * sm_count`` for one of its windows and the
 small-R program otherwise (:func:`route`); an architecture without a large-R
 program runs the small-R one at every row count.  The programs of a stage
 differ in their schedule only (the threads of a CTA, the runs of a lane's
@@ -117,7 +119,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
-        "min_rows_per_sm": {"sm_100a": 96, "sm_103a": 192},
+        "rows_per_sm_windows": {"sm_100a": [[112, None]], "sm_103a": [[384, None]]},
         "role": "fwd_large",
         "stage": "fwd",
     },
@@ -136,7 +138,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_8e8ba1e7a3bd840b207b",
-        "min_rows_per_sm": {"sm_107a": 384},
+        "rows_per_sm_windows": {"sm_107a": [[384, None]]},
         "role": "fwd_large",
         "stage": "fwd",
     },
@@ -174,7 +176,11 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
-        "min_rows_per_sm": {"sm_100a": 12, "sm_103a": 12, "sm_107a": 12},
+        "rows_per_sm_windows": {
+            "sm_100a": [[12, 20], [32, 40]],
+            "sm_103a": [[12, 20], [32, 40], [48, 56]],
+            "sm_107a": [[12, 20], [36, 40], [48, None]],
+        },
         "role": "bwd_large",
         "stage": "bwd",
     },
@@ -220,16 +226,32 @@ ALIGNMENT_BYTES = 2 * VECTOR_ELEMENTS
 MAX_ROWS = 2**31 - 256
 
 
-def route(stage: str, arch: str, sm_count: int) -> tuple[int, str, str]:
-    """``(cut_rows, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of fewer than
-    ``cut_rows`` rows runs the program ``small`` (the stage's role), any other the program ``large`` (its large-R
-    role).  ``cut_rows`` is the large-R program's ``min_rows_per_sm[arch]`` times ``sm_count``; without a large-R
-    program on ``arch``, ``cut_rows`` is ``MAX_ROWS`` (no launch reaches it) and ``large`` is ``small``."""
+def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, str]:
+    """``(edges, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: a launch of ``rows`` rows runs the
+    program ``large`` (the stage's large-R role) when ``lo * sm_count < rows <= hi * sm_count`` for a window
+    ``[lo, hi]`` of its record's ``rows_per_sm_windows[arch]`` (``hi`` None: no upper bound), and the program
+    ``small`` (the stage's role) otherwise.  ``edges`` are the windows' bounds times ``sm_count``, ascending
+    (``lo, hi`` of each window, an open window's ``lo`` alone): a launch runs ``large`` exactly when the count of
+    edges below ``rows``, ``bisect.bisect_left(edges, rows)``, is odd.  Without a large-R program on ``arch``,
+    ``edges`` is empty and ``large`` is ``small``."""
     small = PROGRAM_OF[stage][arch]
     large = PROGRAM_OF[stage + LARGE].get(arch)
     if large is None:
-        return MAX_ROWS, small, small
-    return int(MODULES[large]["min_rows_per_sm"][arch]) * int(sm_count), small, large
+        return (), small, small
+    windows = MODULES[large]["rows_per_sm_windows"][arch]
+    bounds = [bound for window in windows for bound in window]
+    if (
+        not windows
+        or any(len(window) != 2 for window in windows)
+        or any(bound is None for bound in bounds[:-1])
+        or any(type(bound) is not int for bound in bounds if bound is not None)
+        or bounds[0] < 0
+    ):
+        raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} are not [lo, hi] lists of integers")
+    edges = tuple(bound * int(sm_count) for bound in bounds if bound is not None)
+    if any(below >= above for below, above in zip(edges, edges[1:])):
+        raise RuntimeError(f"{large}: rows_per_sm_windows[{arch!r}] {windows!r} do not ascend without touching")
+    return edges, small, large
 
 
 def rows_per_cta(name: str) -> int:

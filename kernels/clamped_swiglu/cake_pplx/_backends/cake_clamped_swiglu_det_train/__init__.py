@@ -62,11 +62,11 @@ JIT variables):
   input or another output (not checked).
 - Launches.  One kernel per call.  Each stage has two programs
   (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
-  when ``R`` is at least its record's ``min_rows_per_sm`` of the device's
-  architecture times the device's SM count (``cake_jit.route``; the
-  architecture is read once per device and the SM count once per stage and
-  device, and an architecture without a large-R program runs the small-R one
-  at every ``R``).  Both programs of a stage give the same bits for every
+  when ``R`` lies in one of its record's windows of rows per SM on the
+  device's architecture, ``lo * SMs < R <= hi * SMs`` for a window
+  ``[lo, hi]`` (``cake_jit.route``; the architecture is read once per device
+  and the SM count once per stage and device, and an architecture without a
+  large-R program runs the small-R one at every ``R``).  Both programs of a stage give the same bits for every
   input, so the route changes no output bit.  CTAs of ``threads / lanes``
   rows (32 lanes a row; 128 threads and 4 rows, but 256 threads and 8 rows in
   the large-R forward on SM100 and SM103), one CTA per block of rows on the
@@ -133,6 +133,7 @@ JIT variables):
 
 from __future__ import annotations
 
+import bisect
 import functools
 import math
 import numbers
@@ -270,26 +271,26 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[int, _Plan, _Plan]:
-    """``(cut_rows, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
-    device's architecture and SM count (``cake_jit.route``): a launch of fewer than ``cut_rows`` rows runs the plan
-    ``small``, any other the plan ``large``.  No library is loaded here: a program's library loads at its first
-    launch."""
+def _route(stage: str, device_index: int) -> tuple[tuple[int, ...], _Plan, _Plan]:
+    """``(edges, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
+    device's architecture and SM count (``cake_jit.route``): a launch of ``rows`` rows runs the plan ``large`` when
+    ``bisect.bisect_left(edges, rows)`` is odd (``rows`` in a window of the large-R program), any other the plan
+    ``small``.  No library is loaded here: a program's library loads at its first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
-    cut_rows, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
-    return cut_rows, (small, *_plan(small)), (large, *_plan(large))
+    edges, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
+    return edges, (small, *_plan(small)), (large, *_plan(large))
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the small-R program below the cut, the
-    large-R one from it) with its kernel parameters named in ``values``, on the current torch stream of device
-    ``device_index``.
+    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
+    small-R one at every other row count) with its kernel parameters named in ``values``, on the current torch stream
+    of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs."""
-    cut_rows, small, large = _route(stage, device_index)
-    name, arguments, per_cta = small if rows < cut_rows else large
+    edges, small, large = _route(stage, device_index)
+    name, arguments, per_cta = large if bisect.bisect_left(edges, rows) & 1 else small
     try:
         args = arguments(values)
     except KeyError:
