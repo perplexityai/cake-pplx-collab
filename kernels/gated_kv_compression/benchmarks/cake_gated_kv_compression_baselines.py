@@ -687,8 +687,8 @@ def gate(
 
 
 def no_worse(m: dict, reference: Optional[dict]) -> bool:
-    """``m`` is finite, zero on tail rows, bitwise repeatable and at most as far from the oracle as ``reference``
-    (the Cake arm's measures of the same draw): no more ``out`` elements outside both cases of the criterion than
+    """``m`` is finite, zero on tail rows, bitwise repeatable and no worse than ``reference`` (the Cake arm's
+    measures of the same draw): no more ``out`` elements outside both cases of the criterion than
     ``reference``, and ``dC`` and ``dZ`` within the bound or within ``reference``'s error where it misses the bound."""
     if reference is None or "error" in m or "error" in reference or not m.get("shapes") or not reference.get("shapes"):
         return False

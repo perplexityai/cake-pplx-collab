@@ -174,7 +174,9 @@ def classify_out(
 def test_the_out_criterion_classifies_hand_made_elements() -> None:
     """:func:`classify_out` and :func:`bf16_ulp` on hand-made values (no GPU): an element 2 BF16 values from the
     rounded result whose error is within the ulp of the larger input is a second-case element; one whose error exceeds
-    both bounds is outside; ``max(|c0|, |c1|) == 0`` and a subnormal one use the quantum ``2^-133``."""
+    both bounds is outside; ``max(|c0|, |c1|) == 0`` and a subnormal one use the quantum ``2^-133``.  The bound is the
+    ulp of the larger magnitude of the two inputs (not of the larger signed value, of ``c0`` alone or of the smaller
+    magnitude), an error equal to it is inside, and the error is to the unrounded ``y``, not to BF16(``y``)."""
     q = 2.0**-15  # the BF16 ulp of 0.005
     big = 2.0**-7  # the BF16 ulp of 1.0
     small = 2.0**-18  # the BF16 ulp of 0.00095
@@ -189,6 +191,9 @@ def test_the_out_criterion_classifies_hand_made_elements() -> None:
         (2 * tiny, 0.0, 0.0, 0.0, 2, False, True),  # max |C| == 0: bound 2^-133, error 2^-132
         (tiny, 0.0, 0.0, 0.0, 1, False, False),  # max |C| == 0, one value off: first case
         (2 * tiny, 0.0, 3 * tiny, -tiny, 2, False, True),  # subnormal max |C|: bound 2^-133, error 2^-132
+        (166 * q, 0.005, 0.001, -1.0, 2, True, False),  # bound 2^-7 from |-1.0|, not 2^-17 from 0.001
+        (420 * q, 164 * q, 1.0, 0.5, 174, True, False),  # error exactly 2^-7: equal to the bound is inside
+        (420 * q, 163.6 * q, 1.0, 0.5, 174, False, True),  # error 256.4 q > 2^-7 (256 q from BF16(y)): outside
     )
     f64 = torch.float64
     out = torch.tensor([r[0] for r in rows], dtype=f64).to(torch.bfloat16)
