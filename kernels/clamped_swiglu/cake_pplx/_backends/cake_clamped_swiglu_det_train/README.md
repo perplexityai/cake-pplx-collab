@@ -119,13 +119,13 @@ to 112 rows per SM.  With merged weighted and unweighted inputs it reads small/l
 layout near 112, the release A/B reads the split forward at 111.99 rows per SM at 0.978-0.995 of 0.1.1's time with
 weighted and unweighted inputs on the graph and CUPTI timers.  So that window begins at 112 (0.1.1: 96).  On `sm_103a`
 (GB300) the small-R forward alone is faster with a merged input up to about 384 rows per SM.  With a split input, from
-224 rows per SM on, it is faster in some cases (down to 0.989) and more than 0.5 % slower in others (weighted input,
-warm L2: up to 1.008 at 384).  At 192 and 208 the split forward reads 0.988-0.997 alone and 0.997-1.001 in the forward +
-backward and checkpointed steps, so that window begins at 208 (0.1.1: 192).  On `sm_107a` the window stays at 0.1.1's
-384.  From 320 to 384 rows per SM, with weighted and unweighted inputs, the two forward programs are within about 0.5 %
-of each other (small/large 0.995-1.005; the small-R forward is up to 0.53 % slower with a merged input and cold L2).
-With the deep-gate input the small-R forward is 5.6-6.2 % faster at 384.  Below 384 the small-R forward runs, as in
-0.1.1.
+224 rows per SM on, it is faster in some cases (down to 0.989) and more than 0.5 % slower in others (weighted and
+unweighted inputs, warm L2: up to 1.008 at 384).  At 192 and 208 the split forward reads 0.988-0.997 alone and
+0.997-1.001 in the forward + backward and checkpointed steps, so that window begins at 208 (0.1.1: 192).  On `sm_107a`
+the window stays at 0.1.1's 384.  From 320 to 384 rows per SM, with weighted and unweighted inputs, the two forward
+programs are within about 0.5 % of each other (small/large 0.995-1.005; the small-R forward is up to 0.53 % slower with
+a merged input and cold L2).  With the deep-gate input the small-R forward is 5.6-6.2 % faster at 384.  Below 384 the
+small-R forward runs, as in 0.1.1.
 
 Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
 of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
