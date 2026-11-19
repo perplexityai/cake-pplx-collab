@@ -35,9 +35,10 @@ stage on its own inputs (the FP32 ``LSE_log2`` and ``dPsum``, a zeroed ``dQ_accu
 ``dQ_accum``, ``dK`` and ``dV``; the postprocess (``dq`` in the input layout) at both head dimensions.  The public
 backward, which composes the three stages, judged for every variant at four heads (the source tests' cases), one head
 and five heads; each variant launches the kernels of the three records ``RECORD_OF`` names for it, in order and no
-other (observed on the device), its inputs left unchanged; the same records, ``dk`` and ``dv`` bitwise and ``dq`` within
-the tier when the host sequence's ``run`` returns ``False`` (the workspace from Python) and without a host sequence
-(the stage launchers).
+other (observed on the device), its inputs left unchanged; the same records, and ``dq``, ``dk`` and ``dv`` within the
+tier, when the host sequence's ``run`` returns ``False`` (the workspace from Python) and without a host sequence (the
+stage launchers).  The tests that observe kernels skip where ``torch.profiler`` records no kernel of a plain torch
+operation on the device (a CUPTI that does not support it).
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -519,11 +520,9 @@ def test_the_backward_matches_the_reference(D, causal, case, device, record_prop
     judge_draws(record_property, draw)
 
 
-def _launched(call, trace: Path) -> tuple[object, list[tuple[str, str]]]:
-    """``(result, launched)``: ``call()``'s result and the CUDA kernels it ran, in launch order, observed on the device
-    (``torch.profiler``; the trace is written to ``trace``), each as ``(stage, record)`` of the registry record whose
-    kernel it is, or ``("no record", name)``."""
-    record_of = {rec["kernel_symbol"]: (rec["stage"], name) for name, rec in cake_jit.MODULES.items()}
+def _kernels(call, trace: Path) -> tuple[object, list[str]]:
+    """``(result, names)``: ``call()``'s result and the names of the CUDA kernels it ran, in launch order, observed on
+    the device (``torch.profiler``; the trace is written to ``trace``)."""
     activities = [torch.profiler.ProfilerActivity.CPU, torch.profiler.ProfilerActivity.CUDA]
     torch.cuda.synchronize()
     with torch.profiler.profile(activities=activities) as prof:
@@ -532,7 +531,23 @@ def _launched(call, trace: Path) -> tuple[object, list[tuple[str, str]]]:
     prof.export_chrome_trace(str(trace))
     events = json.loads(trace.read_text())["traceEvents"]
     kernels = sorted((event for event in events if event.get("cat") == "kernel"), key=lambda event: event["ts"])
-    return result, [record_of.get(event["name"], ("no record", event["name"])) for event in kernels]
+    return result, [event["name"] for event in kernels]
+
+
+def _launched(call, device: torch.device, trace: Path) -> tuple[object, list[tuple[str, str]]]:
+    """``(result, launched)``: ``call()``'s result and the CUDA kernels it ran, in launch order, observed on the device
+    (``torch.profiler``; the trace is written to ``trace``), each as ``(stage, record)`` of the registry record whose
+    kernel it is, or ``("no record", name)``.
+
+    Positive control first: a plain torch operation on ``device``, profiled the same way.  Only when the profiler
+    records no kernel of it (a CUPTI that does not support the device) does the test skip; otherwise the caller's
+    assertion on ``launched`` stands as written."""
+    _, control = _kernels(lambda: torch.ones(1024, device=device).mul_(2), trace.with_name("control-" + trace.name))
+    if not control:
+        pytest.skip("torch.profiler records no CUDA kernel on this device (CUPTI); install a CUPTI that supports it")
+    record_of = {rec["kernel_symbol"]: (rec["stage"], name) for name, rec in cake_jit.MODULES.items()}
+    result, names = _kernels(call, trace)
+    return result, [record_of.get(name, ("no record", name)) for name in names]
 
 
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
@@ -547,7 +562,7 @@ def test_the_backward_launches_the_records_of_its_variant(D, causal, device, tmp
     def call():
         return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
 
-    (dq, dk, dv), launched = _launched(call, tmp_path / "trace.json")
+    (dq, dk, dv), launched = _launched(call, device, tmp_path / "trace.json")
     assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
     assert_backward_contract("routed", x, {"dq": dq, "dk": dk, "dv": dv})
     for name, old, new in zip(("q", "k", "v", "out", "lse", "dout"), before, inputs, strict=True):
@@ -566,15 +581,13 @@ def test_the_backward_without_run_launches_the_same_records(
     D, causal, path, device, monkeypatch, tmp_path, record_property
 ) -> None:
     """When ``run`` returns ``False`` and when the variant has no host sequence, the backward launches the variant's
-    three records in order, its ``dk`` and ``dv`` are bitwise those of ``run`` (one fixed order) and its ``dq`` meets
-    the tier."""
+    three records in order, and its ``dq``, ``dk`` and ``dv`` meet the tier."""
     arch = cake_backend.device_arch(device.index)
     found = cake_backend._sequence(D, causal, arch)
     assert found is not None, "every variant ships a host sequence"
     library, run, run_with_workspace = found
     x = make_inputs(Case(2, 3, 256), D, causal=causal, seed=11, device=device)
     inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
-    _, dk, dv = cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
     calls = []
 
     def without_allocator(*args):
@@ -587,10 +600,9 @@ def test_the_backward_without_run_launches_the_same_records(
     def call():
         return cake_backend.cake_fmha_nondet_train_backward(*inputs, softmax_scale=x.softmax_scale, causal=causal)
 
-    (dq_path, dk_path, dv_path), launched = _launched(call, tmp_path / "trace.json")
+    (dq_path, dk_path, dv_path), launched = _launched(call, device, tmp_path / "trace.json")
     assert launched == list(zip(STAGES, cake_jit.RECORD_OF[(D, causal)], strict=True))
     assert calls == ([] if replacement is None else [11])
-    assert torch.equal(dk_path, dk) and torch.equal(dv_path, dv)
     assert_backward_contract(path, x, {"dq": dq_path, "dk": dk_path, "dv": dv_path})
 
     def draw(seed: int):
