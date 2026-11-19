@@ -82,10 +82,12 @@ channel tile (a ticket on its ``work`` counter) stores the rank-local FP32
 programs' workspaces are the package's cached backward workspace of the device
 and current stream (zero before and after every launch; inside a CUDA Graph
 capture with a nonzero capture id one zeroed buffer per capture and stream,
-shared by the capture's backward calls on that stream, with another fill node
-when a call needs a larger buffer, and kept alive after its graph is freed
-until a later capture on that stream replaces it; with capture id 0, also
-without ``cuda.bindings``, each captured call zeroes a buffer of its own).
+shared by the capture's backward calls on that stream: a buffer an earlier
+eager backward call without a workspace zeroed, held by the graph until it is
+destroyed and its launches have completed and returned to the package at its
+next eager refill; when none is ready, and with capture id 0 (also without
+``cuda.bindings``), each captured call zeroes a buffer of its own (a fill
+node); as for a single-rank call).
 
 Two-launch forward (the deterministic KCP package's forward): the forward can run as a main
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,
@@ -1347,7 +1349,9 @@ def cake_causal_conv1d_nondet_train_kcp_graph_cache_clear() -> int:
     A graph that captured a NCCL collective (the halo ``all_to_all_single`` here) must be destroyed before the process group
     it used is destroyed (``ncclCommDestroy`` waits for graph-captured work; ``torch.distributed.destroy_process_group()``
     hangs while such a graph is alive).  Call this before destroying the process group when ``graph="replay"`` (keyword or test knob) was used, and
-    whenever the operands of a key are gone for good to release its pool.  The knob and ``GRAPH_STATS`` are left as they are."""
+    whenever the operands of a key are gone for good to release its pool.  The knob and ``GRAPH_STATS`` are left as they are.
+    The pre-zeroed workspaces those graphs held return to the package at its next eager refill, not here, and their
+    memory stays in the package's own memory pool."""
     n = len(_GRAPHS)
     _GRAPHS.clear()
     return n
@@ -1566,6 +1570,8 @@ def _kcp_forward(
         counters = _forward_work(None, words, device=device, device_index=device_index)
         if counters is not None:
             values["work"] = counters
+        # the single-rank record's programmatic dependent launch scalar (records with ``use_pdl`` "runtime"): off
+        values["enable_pdl"] = 0
     else:
         (name,) = route_modules(arch, KCP_FWD)
         record = _loader.MODULES[name]
@@ -1776,6 +1782,8 @@ def _fwd_main(
     if e["sr"]:
         if counters is not None:
             values["work"] = counters
+        # the single-rank record's programmatic dependent launch scalar (records with ``use_pdl`` "runtime"): off
+        values["enable_pdl"] = 0
     elif deferred:
         values["hist"] = x_flat
         values["hist_row_off"] = _no_hist(e, device)
