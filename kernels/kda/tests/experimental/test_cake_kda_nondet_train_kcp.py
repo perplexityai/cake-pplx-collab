@@ -9169,6 +9169,10 @@ def test_gpu_default_workspace_replay_backward_resizes_each_storage_once(
                     torch.cuda.synchronize(device)
                 return res, sum("Memcpy DtoD" in e.name for e in prof.events())
 
+            # one unmeasured call of the previous form first: the first per-call workspace of a process builds the
+            # device's shared identity tile (_identity_tile: one device-to-device copy of the identity, never
+            # released or built again), so the first profiled call of a process would count that build as well
+            bwd(**DEFAULT_WS_OFF)
             want, n_new = copies(lambda: bwd(**DEFAULT_WS_OFF))
             _default_ws_reset()
             bwd()  # a new kept backward workspace
