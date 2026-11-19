@@ -3725,8 +3725,8 @@ def cake_dense_gemm_det_train_projection_plan(
     version 0.3.12 the 148- and 152-SM sm_100a and sm_103a ranges also plan the BF16 input gradients
     4096 -> 32 / 48 / 64 / 128, 5120 -> 32 / 48 / 64 / 128, 8192 -> 128 and 6144 -> 32 / 128 with the start-path
     eight-warp program ``kn_n256_tma1_w8relf`` (on 152-SM sm_100a parts 5120 -> 48 at T 32768 with
-    ``kn_n256_tma1_w8rel``), at T 16172 - 32768 or narrower per row and part (the same bits, measured faster on two
-    nodes of each part); a caller that forces another ``form`` there plans with the row's rule without the part
+    ``kn_n256_tma1_w8rel``; on 152-SM sm_103a parts all but 5120 -> 64 and 8192 -> 128), at T 16172 - 32768 or
+    narrower per row and part (the same bits, measured faster on two nodes of each part); a caller that forces another ``form`` there plans with the row's rule without the part
     tables."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,

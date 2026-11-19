@@ -7743,7 +7743,7 @@ def _own_measured_rule(arch, plan):
     return None
 
 
-def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
+def test_sm103a_inherits_the_sm100a_rules_where_it_has_none(monkeypatch):
     """sm_103a registers every sm_100a program, but its lanes measured only the shapes tranche: a row without an
     sm_103a rule plans with the sm_100a rule (the same instance-key knobs, the same program, the same weight-gradient
     orientation) and runs that program where the sm_103a registry has it - the registry decides, no template is
@@ -7752,6 +7752,9 @@ def test_sm103a_inherits_the_sm100a_rules_where_it_has_none():
     indexer_hw FP32 input gradient at T 16172 and 16231, in raster groups of 2) plans the range's rule, not the
     parent's (test_dgrad_f32_part_ranges_plan_the_measured_rule, test_raster_039_ranges_plan_the_group_of_2); the
     parent's own 152-SM ranges hold no row compared with it here."""
+    # the part ranges of version 0.3.11 (the start-path ranges of version 0.3.12, which hold the indexer BF16 input
+    # gradients on both 152-SM parts: test_start_0312_ranges_plan_their_form)
+    _tables_0311(monkeypatch)
     assert cake_backend.RULE_PARENT == {"sm_103a": "sm_100a"}
     keys = lambda arch: {k[1:] for k in ROW_RULES if k[0] == arch}  # noqa: E731
     own, inherited = keys("sm_103a"), keys("sm_100a") - keys("sm_103a")
@@ -7891,6 +7894,8 @@ def test_rule_inheritance_leaves_the_other_architectures_unchanged(monkeypatch):
             out[label] = _plan_signature(plan)
         return out
 
+    # the part ranges of version 0.3.11 (the start-path ranges of version 0.3.12: test_start_0312_ranges_plan_their_form)
+    _tables_0311(monkeypatch)
     archs = ("sm_100a", "sm_103a", "sm_107a")
     after = {arch: plans(arch) for arch in archs}
     with monkeypatch.context() as m:
