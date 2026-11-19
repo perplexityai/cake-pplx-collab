@@ -2118,7 +2118,7 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # sm_107a keys are the 212-SM tranche (measured at T 16172 - 16384); the fp32 5120 -> 5120 weight gradient
 # plans with no rule up to T 257.  Their counts are the R200 A/B of every plan the tranche changed against the plan
 # before it (212 SMs, CUPTI cold L2, 2026-11-08).  The sm_100a 5120 -> 64 / 128 bf16 weight-gradient keys floor the
-# rule's synchronised split at T 32768.  On B200 and GB200 (148 and 152 SMs) that split was 2 to 3 % slower at T 16231
+# rule's synchronised split at T 32768.  On B200 and GB200 (148 and 152 SMs) that split was 1 to 3 % slower at T 16231
 # and faster at T 32768 (1.04 to 1.06 times), 65535 and 131072.  Its margin of 16 K steps makes the main parts 264 K
 # blocks long at T 32768, so they run the promoted twin, within the naive tier there.  Under the promotion threshold of
 # versions up to 0.3.5 (256 K blocks) the same split with margin 0 (parts of 256 K blocks, no promoted chunks) missed
