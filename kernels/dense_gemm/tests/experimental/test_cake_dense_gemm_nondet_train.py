@@ -15785,7 +15785,8 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     version 0.3.5), as this package runs them on a 212-SM ``sm_107a`` part: no row of this package's tables
     (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K, deterministic-program,
     input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's program at the ends of
-    each range."""
+    each range.  The BF16 ranges of that table (the K-major rows of version 0.3.7):
+    test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7."""
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
@@ -15801,8 +15802,12 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
         (12288, 6144): "nn_n256_f32_v8_pro15",
     }
     dgrad_rows = {(16384, 6144): "kn_n256_f32_v8_ht_pro7"}
-    table = det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)]
     assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {(arch, sms)}
+    table = {
+        key: ranges
+        for key, ranges in det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)].items()
+        if key[3]
+    }
     assert {(key[6], key[8]) for key in table if key[7] is None} == set(wgrad_rows)
     assert {(key[6], key[7]) for key in table if key[8] is None} == set(dgrad_rows)
     for key, ranges in table.items():
@@ -17659,6 +17664,276 @@ def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
         assert (d_in, d_out, T) not in missed or promoted, (where, det_plan.template)
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     print(f"LONG_SEGMENT_WGRAD {arch} sm_count={sms}: {len(cases)} cases")
+    assert not failures, "\n".join(failures)
+
+
+#: The cells of ``K_MAJOR_MISSED_CELLS`` of the deterministic package's tests, restated: the BF16 forward and input
+#: gradient cells with K > 8192 that missed the naive BF16 tier on that package's plans of version 0.3.6 (a tile's 192
+#: to 272 K blocks in one FP32 accumulator), per device class: (arch, SM count) -> ``((op, d_in, d_out, T, seeds),
+#: ...)``: a row at one token count with the seeds it missed on, one cell per seed (``K_MAJOR_SEED``: the seed of that
+#: package's tests).  This package runs the deterministic plan on these rows: since that package's version 0.3.7 a plan
+#: whose longest segment holds at most 128 K blocks.
+K_MAJOR_SEED = 20260930
+# fmt: off
+K_MAJOR_MISSED_CELLS = {
+    ("sm_100a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (K_MAJOR_SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (K_MAJOR_SEED, 758)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (K_MAJOR_SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (1, 2, 758)), ("dgrad", 2048, 16384, 384, (1, 2)),
+        ("dgrad", 2048, 16384, 513, (2,)), ("dgrad", 5120, 17408, 1, (2,)),
+        ("dgrad", 5120, 17408, 16, (K_MAJOR_SEED, 1, 2)), ("dgrad", 5120, 17408, 64, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 97, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 128, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 129, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 192, (K_MAJOR_SEED,)),
+        ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_100a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 148): (
+        ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
+        ("fwd", 16384, 6144, 129, (1,)), ("fwd", 17408, 5120, 33, (K_MAJOR_SEED, 1, 758)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 1, 758)), ("fwd", 17408, 5120, 97, (3,)),
+        ("fwd", 17408, 5120, 192, (K_MAJOR_SEED, 758)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 2048, 16384, 16, (K_MAJOR_SEED, 2, 3, 758)), ("dgrad", 2048, 16384, 33, (2, 3, 758)),
+        ("dgrad", 2048, 16384, 64, (1, 2, 3)), ("dgrad", 2048, 16384, 97, (3,)), ("dgrad", 2048, 16384, 128, (3, 758)),
+        ("dgrad", 2048, 16384, 129, (1, 3, 758)), ("dgrad", 2048, 16384, 192, (2,)), ("dgrad", 2048, 16384, 256, (2,)),
+        ("dgrad", 2048, 16384, 257, (2,)), ("dgrad", 2048, 16384, 384, (1, 2)), ("dgrad", 2048, 16384, 513, (2,)),
+        ("dgrad", 5120, 17408, 1, (2,)), ("dgrad", 5120, 17408, 16, (K_MAJOR_SEED, 1, 2)),
+        ("dgrad", 5120, 17408, 64, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 97, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 128, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 129, (K_MAJOR_SEED,)),
+        ("dgrad", 5120, 17408, 192, (K_MAJOR_SEED,)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_103a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 2)), ("fwd", 17408, 5120, 128, (758,)),
+        ("fwd", 17408, 5120, 129, (758,)), ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED,)),
+        ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_107a", 212): (
+        ("fwd", 16384, 6144, 16, (K_MAJOR_SEED,)), ("fwd", 16384, 6144, 33, (1,)), ("dgrad", 4096, 12288, 1, (1,)),
+        ("dgrad", 4096, 12288, 64, (758,)),
+    ),
+}
+# fmt: on
+#: The K-major rows of the deterministic package's tables of version 0.3.7: (op, d_in, d_out).
+K_MAJOR_ROWS = (
+    ("fwd", 12288, 4096),
+    ("fwd", 12288, 6144),
+    ("fwd", 16384, 6144),
+    ("fwd", 17408, 5120),
+    ("dgrad", 2048, 16384),
+    ("dgrad", 4096, 12288),
+    ("dgrad", 5120, 17408),
+    ("dgrad", 6144, 12288),
+)
+
+
+def _k_major_views(op, X, W, G):
+    """``(A, B)`` of the forward (``X @ W.T``) or the input gradient (``G @ W``)."""
+    return (X, W.t()) if op == "fwd" else (G, W)
+
+
+def _k_major_no_table_row(arch, sms, op, d_in, d_out, T):
+    """The row at ``T`` tokens has no row of this package's forward or input-gradient tables on the part: the call
+    binds the deterministic plan."""
+    if op == "fwd":
+        assert (
+            cake_backend.k1_forward_knobs(arch=arch, sm_count=sms, K=d_in, N=d_out, T=T)
+            == ()
+        )
+        assert not any(
+            (d_in, d_out, T) in rows
+            for rows in cake_backend.K1_FORWARD_PROGRAM_RULES_BY_SM.values()
+        )
+        return
+    assert (
+        cake_backend.k1_dgrad_knobs(
+            arch=arch, sm_count=sms, K=d_in, N=d_out, T=T, out_f32=False
+        )
+        == ()
+    )
+    for rules in (
+        cake_backend.K1_DGRAD_RULES_BY_SM,
+        cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+        cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+    ):
+        assert not any((d_in, d_out, T, "bf16") in rows for rows in rules.values())
+
+
+def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7(monkeypatch):
+    """The K-major rows of the deterministic package's version 0.3.7 (its ``ROW_RULE_MIN_T`` tiers on sm_100a and
+    sm_103a and the BF16 ranges of its 212-SM ``sm_107a`` ``ROW_RULE_RANGES_BY_SM``), as this package runs them: the
+    BF16 keys of that range table are the four K-major rows of the 212-SM part, and at each cell of
+    ``K_MAJOR_MISSED_CELLS`` on its class (CPU views, the class's device facts, nothing launched:
+    :func:`_cpu_k1_launches`) the call's layout routes to the deterministic programs, the row has no row of this
+    package's tables and the entry point resolves no knobs, so the forward or input-gradient entry point binds the
+    deterministic package's plan of the row on the class, field for field, whose longest segment holds at most 128 K
+    blocks."""
+    bf16 = torch.bfloat16
+    ranged = {
+        key for key in det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)] if not key[3]
+    }
+    assert {
+        ("dgrad", key[6], key[7]) if key[2] else ("fwd", key[7], key[6]) for key in ranged
+    } == {
+        ("fwd", 16384, 6144),
+        ("fwd", 17408, 5120),
+        ("dgrad", 4096, 12288),
+        ("dgrad", 5120, 17408),
+    }
+    assert {
+        part: len([s for *_, seeds in cells for s in seeds])
+        for part, cells in K_MAJOR_MISSED_CELLS.items()
+    } == {
+        ("sm_100a", 148): 49,
+        ("sm_100a", 152): 35,
+        ("sm_103a", 148): 47,
+        ("sm_103a", 152): 35,
+        ("sm_107a", 212): 4,
+    }
+    for (arch, sms), cells in K_MAJOR_MISSED_CELLS.items():
+        l2 = K1_DGRAD_PARTS.get((arch, sms), GB_L2_BYTES)
+        with monkeypatch.context() as m:
+            _cpu_k1_launches(m, arch)
+            m.setattr(cake_backend, "_k1_index", lambda *views: 0)
+            facts = det_backend.DeviceFacts(index=0, arch=arch, sm_count=sms, l2_bytes=l2)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            for op, d_in, d_out, T, _seeds in cells:
+                what = (arch, sms, op, d_in, d_out, T)
+                assert (op, d_in, d_out) in K_MAJOR_ROWS, what
+                _k_major_no_table_row(arch, sms, op, d_in, d_out, T)
+                X = torch.empty(T, d_in, dtype=bf16)
+                W = torch.empty(d_out, d_in, dtype=bf16)
+                G = torch.empty(T, d_out, dtype=bf16)
+                A, B = _k_major_views(op, X, W, G)
+                out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=bf16)
+                assert cake_backend._route(cake_backend._k1_layout(A, B)) == "det", what
+                if op == "fwd":
+                    assert cake_backend._k1_forward_knobs_of(X, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_forward, X, W, out
+                    )
+                else:
+                    assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+                    call = functools.partial(
+                        cake_backend.cake_dense_gemm_nondet_train_projection_dgrad, G, W, out
+                    )
+                cake_backend._K1_DET_CACHE.clear()
+                assert call() is out, what
+                ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+                assert key[2][0] == (op,) and entry.k1 is not None, what
+                det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+                    A, B, out, sm_count=sms, l2_bytes=l2, arch=arch
+                )[0]
+                assert entry.plan == det_plan, (what, entry.plan.template, det_plan.template)
+                assert det_backend.segment_blocks(entry.plan) <= 128, (what, entry.plan.template)
+
+
+def _k_major_operands(T, d_in, d_out, seed, device):
+    """The BF16 operands ``X [T, d_in]``, ``W [d_out, d_in]`` and ``G [T, d_out]`` of the ``d_in -> d_out`` row at
+    ``T`` tokens from ``seed``, as the deterministic package's tests draw them: ``X``, the weight scaled by
+    ``d_in ** -0.5``, then ``G``, each standard normal, from one generator."""
+    g = torch.Generator(device=device).manual_seed(seed)
+
+    def normal(*shape, scale=1.0):
+        return (torch.randn(shape, device=device, generator=g) * scale).to(
+            torch.bfloat16
+        )
+
+    X = normal(T, d_in)
+    W = normal(d_out, d_in, scale=d_in**-0.5)
+    G = normal(T, d_out)
+    return X, W, G
+
+
+def test_gpu_k_major_rows_meet_the_naive_tier(record_property):
+    """The cells of ``K_MAJOR_MISSED_CELLS`` of the device's class through this package's forward and input-gradient
+    entries: the call binds the deterministic plan (its ``_K1_DET_CACHE`` entry), a plan whose longest segment holds at
+    most 128 K blocks; the output is judged against the FP64 oracle beside the naive BF16 tier over the draws of each
+    listed seed (each draw's operands drawn as the deterministic package's tests draw them, written in place, ``out``
+    filled with NaN) and gives the same bits on three more launches into NaN.  Every failing cell is reported.  A class
+    without such cells skips."""
+    device, arch, sms = _part_or_skip()
+    cells = K_MAJOR_MISSED_CELLS.get((arch, sms), ())
+    if not cells:
+        pytest.skip(f"no K-major cell of the deterministic package's version 0.3.7 on {arch} with {sms} SMs")
+    failures = []
+    for op, d_in, d_out, T, seeds in cells:
+        where = (arch, sms, op, d_in, d_out, T)
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        X = torch.empty(T, d_in, dtype=torch.bfloat16, device=device)
+        W = torch.empty(d_out, d_in, dtype=torch.bfloat16, device=device)
+        G = torch.empty(T, d_out, dtype=torch.bfloat16, device=device)
+        out = torch.empty(T, d_out if op == "fwd" else d_in, dtype=torch.bfloat16, device=device)
+        A, B = _k_major_views(op, X, W, G)
+        if op == "fwd":
+            launch = functools.partial(
+                cake_backend.cake_dense_gemm_nondet_train_projection_forward, X, W, out
+            )
+        else:
+            launch = functools.partial(
+                cake_backend.cake_dense_gemm_nondet_train_projection_dgrad, G, W, out
+            )
+
+        def draw(s):
+            for dst, src in zip(
+                (X, W, G), _k_major_operands(T, d_in, d_out, s, device), strict=True
+            ):
+                dst.copy_(src)
+            nan_fill([out])
+            return SimpleNamespace(A=A, B=B)
+
+        def run(_inputs):
+            launch()
+            torch.cuda.synchronize()
+            return {"out": out}
+
+        def product(v, dtype):
+            return {"out": torch.matmul(v.A.to(dtype), v.B.to(dtype))}
+
+        for seed in seeds:
+            try:
+                judge_gemm(record_property, seed=seed, draw=draw, launch=run, product=product)
+            except AssertionError as error:
+                failures.append(f"{where} seed {seed}: {error}"[:2000])
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None, where
+        facts = det_backend.device_facts(device)
+        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=facts.sm_count, l2_bytes=facts.l2_bytes, arch=arch
+        )[0]
+        assert entry.plan == det_plan, (where, entry.plan.template, det_plan.template)
+        assert det_backend.segment_blocks(entry.plan) <= 128, (where, entry.plan.template)
+        out.fill_(float("nan"))
+        launch()
+        torch.cuda.synchronize()
+        first = out.clone()
+        for _ in range(3):
+            out.fill_(float("nan"))
+            launch()
+            torch.cuda.synchronize()
+            if not torch.equal(out.view(torch.int16), first.view(torch.int16)):
+                failures.append(f"{where}: another bit pattern on a repeated launch")
+                break
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"K_MAJOR_ROWS {arch} sm_count={sms}: {len(cells)} cells")
     assert not failures, "\n".join(failures)
 
 
