@@ -98,7 +98,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # a thread (4 rows a CTA), a lane's 9 loads in 3 runs, each run's loads issued while the run before it computes.
     "cake_clamped_swiglu_det_train_d38b827f821aba65855f": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_d38b827f821aba65855f",
         "launch": {
@@ -116,7 +116,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # lane's 9 loads in one run.
     "cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c": {
         "arches": ["sm_100a", "sm_103a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_581a0b3b2e69bde65b1c",
         "launch": {
@@ -135,7 +135,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # in one run, the values of each load stored as soon as they are computed.
     "cake_clamped_swiglu_det_train_8e8ba1e7a3bd840b207b": {
         "arches": ["sm_107a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "w"], ["buffer", "h"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "h_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_8e8ba1e7a3bd840b207b",
         "launch": {
@@ -155,7 +155,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # run before it computes.
     "cake_clamped_swiglu_det_train_0f584d80b1575fdf3bc5": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_0f584d80b1575fdf3bc5",
         "launch": {
@@ -173,7 +173,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # runs, one run at a time.
     "cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "w"], ["buffer", "d_gate"], ["buffer", "d_up"], ["buffer", "d_weight"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "weighted"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_630f5af11e3ba9d58de9",
         "launch": {
@@ -196,7 +196,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # a (row, run) task (3 runs a row, 4 tasks a CTA), a lane's 3 loads of its run.
     "cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "gate"], ["buffer", "up"], ["buffer", "dh"], ["buffer", "d_gate"], ["buffer", "d_up"], ["parameter", "rows"], ["parameter", "gate_stride"], ["parameter", "up_stride"], ["parameter", "dh_stride"], ["parameter", "d_gate_stride"], ["parameter", "d_up_stride"], ["parameter", "limit"], ["parameter", "up_col"], ["parameter", "d_up_col"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb",
         "launch": {
