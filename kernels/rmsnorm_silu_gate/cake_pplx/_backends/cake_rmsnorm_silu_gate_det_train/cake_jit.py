@@ -1193,11 +1193,14 @@ NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # or role without a cut never runs it.  A cut lies at or below the strided
 # cut.  Measured on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster
 # than the 128-thread strided build up to this cut, slower on sm_100a at 332
-# rows per SM; sm_107a has no cut until it is measured.  Host plan only.
+# rows per SM.  Measured on sm_107a (CUDA Graph replays, hot L2, and cold L2):
+# faster than the 128-thread strided build from 48 to 384 rows per SM (no
+# row slower, eager the same), within 1 % of it from 512 to 1280 rows per
+# SM; the cut is the last faster point.  Host plan only.
 PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 384},
 }
 # A call without the weight gradient on rows that are not packed runs the
 # 128-thread strided build (``role + NODW + STRIDED + PACKED``: other layouts
@@ -1206,12 +1209,13 @@ PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # many rows per SM, by architecture and role, where the architecture routes
 # both; an architecture or role without a cut never runs it there.  Measured
 # on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster up to this
-# cut, where each 128-thread CTA runs one 8-row block; sm_107a has no cut
-# until it is measured.  Host plan only.
+# cut, where each 128-thread CTA runs one 8-row block.  Measured on sm_107a
+# (CUDA Graph replays, hot L2): faster up to about 22 rows per SM, the same
+# from 32 to 96, slower at 128.  Host plan only.
 NODW_ANY_LAYOUT_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 32},
     "sm_103a": {"bwd_bf16": 32},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 96},
 }
 # Elements of one normalized row.
 HEAD_DIM = 128
