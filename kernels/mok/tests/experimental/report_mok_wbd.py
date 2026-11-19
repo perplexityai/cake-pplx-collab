@@ -140,7 +140,8 @@ def _tier(p, s, dtype):
 
 
 def _kernel(p, s):
-    """The kernels' outputs by name, and the forward context."""
+    """The kernels' outputs by name, and copies of the forward context's routed gate, up and hidden of the resident
+    macrobatch taken before the backward (which rewrites those ring rows while it replays later macrobatches)."""
     forward = kernels.MoKForward(True, weight_before_down=True)
     backward = kernels.MoKBackward(True, True, weight_before_down=True)
     epilogues = kernels.MoKEpilogues(TOPK, weighted=False)
@@ -156,6 +157,9 @@ def _kernel(p, s):
         x, [x.data_ptr()], combine, [combine.data_ptr()], *weights, *schedule,
         TOPK, LIMIT, COMM, MACRO, MINI, weight_ptrs=[scores.data_ptr()],
     )  # fmt: skip
+    torch.cuda.synchronize()
+    rows = min(s["actual"], MACRO)
+    saved = tuple(context[index][:rows].clone() for index in (2, 4, 6))
     result = backward(
         dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()], scores, [scores.data_ptr()], ds_peer,
         [ds_peer.data_ptr()], *weights, *context[:7], x, [x.data_ptr()], *schedule,
@@ -166,7 +170,7 @@ def _kernel(p, s):
     torch.cuda.synchronize()
     names = ("ds_gate", "ds_up", "ds_down", "dw_gate", "dw_up", "dw_down")
     out = dict(y=y, dx=dx, d_weights=ds_peer, **dict(zip(names, accumulators, strict=True)))
-    return out, context
+    return out, saved
 
 
 def _view(actual, ref):
@@ -181,7 +185,7 @@ def report(experts, seed, emit):
     p = production_inputs(TOKENS, HIDDEN, INTERMEDIATE, experts, TOPK, LIMIT, seed=seed)
     s = single_rank_schedule(p["ids"], experts)
     case = f"case=local{experts} seed={seed} routed_rows={s['actual']} macro={MACRO}"
-    kernel, context = _kernel(p, s)
+    kernel, saved = _kernel(p, s)
     stage = stage_reference(p)
     oracle, tier = _tier(p, s, naive.ORACLE), _tier(p, s, naive.NAIVE)
     for name in OUTPUTS:
@@ -215,7 +219,7 @@ def report(experts, seed, emit):
     rows = min(s["actual"], MACRO)
     slots = s["schedule"][:rows].long()
     valid = slots >= 0
-    g, u, h = (context[i][:rows][valid].double() for i in (2, 4, 6))
+    g, u, h = (value[valid].double() for value in saved)
     w = p["weights"].flatten()[slots[valid]].double()[:, None]
     exact = w * _act(g, u)
     nearest = round_bf16(exact)

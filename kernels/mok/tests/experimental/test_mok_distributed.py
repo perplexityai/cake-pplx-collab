@@ -120,11 +120,16 @@ def test_backward_releases_launcher_scratch_before_epilogue():
 
 @pytest.mark.parametrize("world", [1], ids=["ep1"])
 def test_before_down_training(record_property, world):
-    """``router_weight_position="before_down"`` through the adapter: contract, repeatability, graph replay, recompute,
-    the context-free forward and a test-local autograd function with the saved context's bytes; judged."""
+    """``router_weight_position="before_down"`` through the adapter over changing source counts on one workspace
+    (padded and unpadded staging, no kernel load after the first count): contract, repeatability, graph replay,
+    recompute, the context-free forward, the unplanned launches and a test-local autograd function with the saved
+    context's bytes (another router weight in the workspace between its launches); every count judged."""
     if torch.cuda.is_available() and torch.cuda.device_count() >= world:
         if any(torch.cuda.get_device_capability(index) == (10, 7) for index in range(world)):
             pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
     results = _run(world, workers.before_down_training)
-    assert [r["case"] for r in results[0]] == ["bf16-clamped-before-down"]
+    assert [r["case"] for r in results[0]] == [
+        "bf16-clamped-before-down-counts-" + "-".join(map(str, (list(counts) * world)[:world]))
+        for counts in workers.BEFORE_DOWN_COUNTS
+    ]
     _record(results, record_property)

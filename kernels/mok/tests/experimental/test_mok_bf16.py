@@ -33,11 +33,12 @@ facade is covered by ``test_cake_mok_det_train_api.py``.
 """
 
 import contextlib
+import dataclasses
 
 import pytest
 import torch
 
-from tests.experimental._mok_reference import require_gpu, single_rank_schedule
+from tests.experimental._mok_reference import production_inputs, require_gpu, single_rank_schedule
 from tests.cake.test_helpers.cake_package import cake_package
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
@@ -2207,6 +2208,56 @@ def test_before_down_recompute_and_context_free_forward(macro, experts, topk):
         assert torch.equal(a, b)
 
 
+def test_before_down_clamp_at_the_limit():
+    """The clamped SwiGLU of the router-weight-before-down kernels at exactly the limit 10, on the requester's input
+    distribution (:func:`production_inputs`, hidden 2048, 6 local experts, top-6), with one macrobatch holding every
+    route, so the backward's routed gate and up gradient rows are the saved context's rows.  Token 1's first expert
+    has gate exactly 10 and up exactly +10 and -10, and the forward saves them exactly.  The gradients pass where the
+    saved gate is at most the limit and the saved up within it, both ends included: they are nonzero at the pinned
+    elements and exactly zero wherever the saved gate is above the limit or the saved up beyond it."""
+    _require_role("forward_clamped_wbd")
+    tokens, hidden, intermediate, experts, topk, macro, mini, comm, limit = 512, 2048, 256, 6, 6, 4096, 256, 4, 10.0
+    p = production_inputs(tokens, hidden, intermediate, experts, topk, limit, seed=8377)
+    assert p["pinned"] is not None
+    x, dy, scores, shared, routed = p["x"], p["dy"], p["weights"], p["shared"], p["routed"]
+    s = single_rank_schedule(p["ids"], experts)
+    assert s["peers"].numel() <= macro  # one macrobatch: the backward replays nothing
+    schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+    weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    combine = torch.zeros(tokens * topk, hidden, **options)
+    dx_peer, ds_peer = torch.zeros_like(combine), torch.zeros_like(scores)
+    accumulators = [torch.zeros(w.shape, device="cuda") for w in (*shared, *routed)]
+    context = MoKForward(True, weight_before_down=True)(
+        x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+        *schedule, topk, limit, comm, macro, mini, weight_ptrs=[scores.data_ptr()],
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    slots = s["schedule"][: s["actual"]]
+    defined = slots >= 0
+    gate, up = context[2][: s["actual"]][defined].clone(), context[4][: s["actual"]][defined].clone()
+    token, expert = p["pinned"]
+    slot = token * topk + int((p["ids"][token] == expert).nonzero()[0, 0])
+    (position,) = (slots[defined] == slot).nonzero().flatten().tolist()
+    assert gate[position, 0].item() == limit
+    assert up[position, 0].item() == limit and up[position, 1].item() == -limit
+    above, beyond = gate > limit, up.abs() > limit
+    assert above.any().item() and beyond.any().item()
+    result = MoKBackward(True, True, weight_before_down=True)(
+        dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+        scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+        *weights, *context[:7], x, [x.data_ptr()], *schedule,
+        topk, limit, comm, macro, mini, weight_grad_accumulators=accumulators,
+    )  # fmt: skip
+    torch.cuda.synchronize()
+    d_gate, d_up = result[3][: s["actual"]][defined], result[5][: s["actual"]][defined]
+    assert torch.count_nonzero(d_gate[above]).item() == 0
+    assert torch.count_nonzero(d_up[beyond]).item() == 0
+    assert torch.count_nonzero(d_gate[~above]).item() > 0 and torch.count_nonzero(d_up[~beyond]).item() > 0
+    assert d_gate[position, 0].item() != 0
+    assert d_up[position, 0].item() != 0 and d_up[position, 1].item() != 0
+
+
 @pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
 def test_scheduler_at_the_capacity_bound(ep, experts):
     """At the requester's worst-case multiplier, 16,384 source rows per rank and top-6, full skew (every token of every
@@ -2310,8 +2361,12 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     """The adapter's router-weight-before-down training step at the requester's worst-case geometry of one rank:
     16,384 source rows, H 5120, I 2304, top-6, macrobatch 262,144, minibatch 4,096, the worst-case multiplier and full
     skew (every route of the group lands on this rank), emulated on one GPU (:class:`_OneGpuGroup`).  The context
-    step, the checkpointed step (context-free forward, recompute with the router weights, backward) and its CUDA
-    Graph replay complete with finite outputs and the same bytes, run to run."""
+    step, the checkpointed step (context-free forward, recompute with the router weights, backward; another router
+    weight in the workspace before the recompute and before the backward) and its CUDA Graph replay complete with
+    finite outputs and the same bytes, run to run.  The routed x ring's rows at byte offsets of 2^31 and beyond hold
+    their tokens' x exactly, and ``y``, ``dx`` and the router-weight gradients are the bytes of the same step with
+    32,768-row macrobatches, whose ring rows all lie below 2^31 bytes (per-row outputs; the weight gradients sum each
+    macrobatch's rows and are not compared).  Accuracy is judged at the smaller shapes."""
     _require_role("forward_clamped_wbd")
     _require_role(f"count_{ep}_{experts}")
     tokens, hidden, intermediate, topk, macro, mini, limit = 16384, 5120, 2304, 6, 262144, 4096, 10.0
@@ -2354,21 +2409,39 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     routed_rows = int(schedule.num_tokens.item())
     assert ep * tokens * topk <= routed_rows <= capacity
     assert routed_rows > macro  # several macrobatches: backward replays the later ones
+    # The first routed x ring row at a byte offset of 2^31 or more.
+    high = -(-(2**31) // (2 * hidden))
+    assert high < macro
 
-    def step(checkpointed):
+    def check_high_ring_rows(context):
+        """The resident macrobatch's routed x rows from byte offset 2^31 on: each holds its token's x exactly (every
+        peer's x is this rank's)."""
+        torch.cuda.synchronize()
+        rows = slice(high, macro)
+        defined = schedule.peer_rank[rows] >= 0
+        tokens_of = schedule.peer_token_idx[rows][defined].long() // topk
+        assert tokens_of.numel() > 0
+        assert torch.equal(context.x_routed[rows][defined], x[tokens_of])
+
+    def step(checkpointed, cfg=config, check=False):
         for accumulator in accumulators:
             accumulator.zero_()
         y, context = functional.forward(
-            config, workspace, schedule, x, scores, *weights, swiglu_limit=limit,
+            cfg, workspace, schedule, x, scores, *weights, swiglu_limit=limit,
             save_context=not checkpointed,
         )  # fmt: skip
+        if check:
+            check_high_ring_rows(context)
         if checkpointed:
+            # Another layer's router weights in the workspace: the recompute and the backward stage their own.
+            workspace.router_weight_buffer.fill_(0.75)
             context = functional.recompute_forward_context(
-                config, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4],
+                cfg, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4],
                 swiglu_limit=limit, router_weights=scores,
             )  # fmt: skip
+            workspace.router_weight_buffer.fill_(0.75)
         grads = functional.backward(
-            config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+            cfg, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
             weight_grad_accumulators=accumulators,
         )  # fmt: skip
         return (y, *grads)
@@ -2380,10 +2453,13 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
             assert torch.isfinite(value).all().item()
         return out
 
-    first = snapshot(step(False))
+    first = snapshot(step(False, check=True))
     assert all(torch.count_nonzero(value).item() > 0 for value in first)
     assert _same(first, snapshot(step(False)))
     assert _same(first, snapshot(step(True)))
+    small = dataclasses.replace(config, macrobatch_size=32768)
+    assert small.macrobatch_size * hidden * 2 < 2**31
+    assert _same(first[:3], snapshot(step(False, small))[:3])  # y, dx, router-weight gradients
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):

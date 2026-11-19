@@ -26,8 +26,10 @@ Workers of the multi-GPU MoK tests (``test_mok_distributed.py``): each runs in e
 * :func:`source_capacity`, :func:`backward_scratch`: the adapter's source-length guards, the schedule's expert
   layout, context ownership and the backward's scratch lifetime.
 * :func:`before_down_training`: the router weight before the down projection (``router_weight_position=
-  "before_down"``, clamped SwiGLU, FP32 weight gradients) through the adapter, recompute and the context-free forward
-  included, and a test-local autograd function around the checkpointed step.
+  "before_down"``, clamped SwiGLU, FP32 weight gradients) through the adapter over changing source counts on one
+  workspace (padded and unpadded staging), recompute and the context-free forward included, the unplanned launches
+  of a schedule without its expert layout, and a test-local autograd function around the checkpointed step that
+  overwrites the workspace's router weights between its launches.
 
 Every case checks the contract (shapes, finite values, exact zeros of empty ranks) and repeatability: five eager
 launches, five graph replays and the eager launch give the same bytes, recompute and the context-free forward give
@@ -52,6 +54,7 @@ from tests.cake_naive import TierJudge, judge_case
 from tests.experimental import _mok_naive as naive
 
 api = cake_package("cake_mok_bf16", "api")
+jit = cake_package("cake_mok_bf16", "jit")
 kernels = cake_package("cake_mok_bf16", "_kernels")
 MoKConfig = cake_package("cake_mok_bf16", "workspace").MoKConfig
 create_mok_bf16_workspace = api.create_mok_bf16_workspace
@@ -342,6 +345,9 @@ class TrainingIteration:
         if self.recompute:
             self.context = None
             w = self.forward_weights
+            # The router weights are an argument of the "before_down" recompute only; the "after_down" call keeps the
+            # form without them.
+            weighted = self.functional.router_weight_position == "before_down"
             self.context = self.functional.recompute_forward_context(
                 self.config,
                 self.workspace,
@@ -352,7 +358,7 @@ class TrainingIteration:
                 w[3],
                 w[4],
                 swiglu_limit=limit,
-                router_weights=self.scores,
+                **(dict(router_weights=self.scores) if weighted else {}),
             )
         extra = {}
         if self.accumulators is not None:
@@ -908,13 +914,28 @@ def backward_scratch():
 
 #: (local experts, top-k) of the router-weight-before-down worker per EP size: the diagnostic layouts.
 BEFORE_DOWN_DIST_LAYOUTS = {1: (4, 2), 4: (4, 2)}
+#: Source rows per rank of the router-weight-before-down worker's steps, all on one workspace whose source capacity
+#: covers the largest: padded staging (1031, 257 and 513 rows) and unpadded staging (768, a multiple of 256), several
+#: macrobatches.  EP1 runs 1031, 768 and 257.
+BEFORE_DOWN_COUNTS = ((1031, 768, 257, 513), (768, 257, 513, 1031), (257, 513, 1031, 768))
+#: A router weight no step uses: what another layer leaves in the shared workspace's router-weight buffer.
+OTHER_LAYER_WEIGHT = 0.75
+
+
+def _other_layer(step):
+    """Overwrite the workspace's router-weight buffer, as another layer's forward on the shared workspace does; the
+    launch that follows must stage its own router weights.  Every launch ends with a peer barrier, so no peer still
+    reads this rank's buffer."""
+    if step.get("other_layer"):
+        step["workspace"].storage.router_weight_buffer.fill_(OTHER_LAYER_WEIGHT)
 
 
 class _CheckpointedStep(torch.autograd.Function):
     """Test-local autograd function around one checkpointed router-weight-before-down step (the form a caller wraps
     the adapter in; the package ships none): forward without context, backward rebuilds the context with
     ``recompute_forward_context`` (the router weights included) and runs backward.  ``x`` and the router weights are
-    differentiable; the weight gradients go to the caller's FP32 accumulators."""
+    differentiable; the weight gradients go to the caller's FP32 accumulators.  With ``other_layer`` the workspace's
+    router-weight buffer holds another value before the recompute and before the backward (:func:`_other_layer`)."""
 
     @staticmethod
     def forward(ctx, x, scores, step):
@@ -933,10 +954,12 @@ class _CheckpointedStep(torch.autograd.Function):
         x, scores = ctx.saved_tensors
         step = ctx.step
         f, w = step["functional"], step["weights"]
+        _other_layer(step)
         context = f.recompute_forward_context(
             step["config"], step["workspace"], step["schedule"], x, w[0], w[1], w[3], w[4],
             swiglu_limit=step["limit"], router_weights=scores,
         )  # fmt: skip
+        _other_layer(step)
         for accumulator in step["accumulators"]:
             accumulator.zero_()
         gradients = f.backward(
@@ -946,18 +969,49 @@ class _CheckpointedStep(torch.autograd.Function):
         return gradients[0], gradients[1], None
 
 
+def _unplanned_steps(step, x, scores, dy, ids, local_experts):
+    """The adapter's unplanned launches (``_forward_native``, ``_recompute_native``, ``_backward_native``): a copy of
+    a fresh schedule without its expert layout, which every launcher then derives itself.  The context step, then the
+    checkpointed step (context-free forward, recompute, backward), each ``(y, dx, d_scores, *weight gradients)``."""
+    f, w, accumulators = step["functional"], step["weights"], step["accumulators"]
+    config, workspace, limit = step["config"], step["workspace"], step["limit"]
+    schedule = dataclasses.replace(
+        f.build_schedule(workspace, config, ids, num_local_experts=local_experts), layout=None
+    )
+    out = []
+    for save_context in (True, False):
+        for accumulator in accumulators:
+            accumulator.zero_()
+        y, context = f.forward(
+            config, workspace, schedule, x, scores, *w, swiglu_limit=limit, save_context=save_context
+        )
+        if not save_context:
+            context = f.recompute_forward_context(
+                config, workspace, schedule, x, w[0], w[1], w[3], w[4], swiglu_limit=limit, router_weights=scores,
+            )  # fmt: skip
+        gradients = f.backward(
+            config, workspace, schedule, context, dy, x, scores, *w, swiglu_limit=limit,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        out.append(_snapshot((y, *gradients)))
+    return out
+
+
 def before_down_training():
     """The router weight before the down projection through the adapter (clamped SwiGLU, FP32 weight gradients from
-    zeroed accumulators) over 1031 source rows per rank (padded staging, several macrobatches): the contract,
-    repeatability eager and under CUDA Graph replay, recompute and the context-free forward with the saved context's
-    bytes, a test-local autograd function around the checkpointed step with the same bytes; then judged."""
+    zeroed accumulators) on one workspace over the source counts of :data:`BEFORE_DOWN_COUNTS` (padded and unpadded
+    staging, several macrobatches, a new schedule per count): per count the contract, repeatability eager and under
+    CUDA Graph replay, recompute and the context-free forward with the saved context's bytes, the unplanned launches
+    with the same bytes, a test-local autograd function around the checkpointed step with the same bytes while
+    another router weight sits in the workspace between its launches; no count after the first loads a kernel; the
+    first count's graph replays its bytes after the later counts ran; every count judged."""
     _exact_matmul()
     device = torch.device("cuda", torch.cuda.current_device())
     rank, ep = dist.get_rank(), dist.get_world_size()
     local_experts, topk = BEFORE_DOWN_DIST_LAYOUTS[ep]
     total_experts = ep * local_experts
     hidden, intermediate, limit = 512, 256, LIMIT
-    counts = ([1031, 768, 257, 513] * ep)[:ep]
+    steps = [(list(counts) * ep)[:ep] for counts in BEFORE_DOWN_COUNTS]
     shared, global_routed, routed = _weights(ep, local_experts, hidden, intermediate, device)
     weights = (*shared, *routed)
     functional = prepare_mok_bf16(
@@ -969,7 +1023,8 @@ def before_down_training():
     config, workspace = create_mok_bf16_workspace(
         group=dist.group.WORLD,
         device=device,
-        num_local_tokens=counts[rank],
+        num_local_tokens=steps[0][rank],
+        source_capacity=max(max(counts) for counts in steps),
         hidden_size=hidden,
         topk=topk,
         fwd_num_comm_sms=8,
@@ -978,52 +1033,79 @@ def before_down_training():
         macrobatch_size=768,
         schedule_capacity_multiplier=1.0,
     )
-    torch.manual_seed(8293)
-    data = _random_data(counts, hidden, topk, total_experts, device, weight_before_down=True)
-    start = sum(counts[:rank])
-    section = slice(start, start + counts[rank])
-    x, ids, scores, dy = (data[k][section].clone() for k in ("x", "expert_ids", "scores", "d_output"))
+    assert workspace.initial_source_counts == tuple(steps[0])
     accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+    records, first, loads = [], None, None
+    for index, counts in enumerate(steps):
+        torch.manual_seed(8293 + index)
+        data = _random_data(counts, hidden, topk, total_experts, device, weight_before_down=True)
+        start = sum(counts[:rank])
+        section = slice(start, start + counts[rank])
+        x, ids, scores, dy = (data[k][section].clone() for k in ("x", "expert_ids", "scores", "d_output"))
+        case = "counts-" + "-".join(map(str, counts))
 
-    def iteration(recompute, save_context=True):
-        return TrainingIteration(
-            config, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
-            recompute=recompute, accumulators=accumulators, save_context=save_context,
+        def iteration(recompute, save_context=True, x=x, ids=ids, scores=scores, dy=dy):
+            return TrainingIteration(
+                config, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
+                recompute=recompute, accumulators=accumulators, save_context=save_context,
+            )  # fmt: skip
+
+        saved_context = iteration(False)
+        outputs = _snapshot(saved_context.run())
+        _contract(outputs, counts[rank], hidden, topk)
+        again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
+        assert all(_same(outputs, other) for other in again), (rank, case, "eager repeat")
+        for recompute, save_context in ((True, True), (True, False)):
+            checkpointed = _snapshot(iteration(recompute, save_context).run())
+            differs = [n for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True) if not torch.equal(a, b)]
+            assert not differs, (rank, case, "recompute" if save_context else "context-free", differs)
+        dist.barrier()
+        step = dict(
+            functional=functional, config=config, workspace=workspace, weights=weights, limit=limit,
+            accumulators=accumulators, other_layer=True, schedule=functional.build_schedule(
+                workspace, config, ids, num_local_experts=local_experts
+            ),
         )  # fmt: skip
-
-    saved_context = iteration(False)
-    outputs = _snapshot(saved_context.run())
-    _contract(outputs, counts[rank], hidden, topk)
-    again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
-    assert all(_same(outputs, other) for other in again), (rank, "eager repeat")
-    for recompute, save_context in ((True, True), (True, False)):
-        checkpointed = _snapshot(iteration(recompute, save_context).run())
-        differs = [n for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True) if not torch.equal(a, b)]
-        assert not differs, (rank, "recompute" if save_context else "context-free", differs)
-    dist.barrier()
-    step = dict(
-        functional=functional, config=config, workspace=workspace, weights=weights, limit=limit,
-        accumulators=accumulators, schedule=functional.build_schedule(
-            workspace, config, ids, num_local_experts=local_experts
-        ),
-    )  # fmt: skip
-    leaf_x, leaf_scores = x.detach().clone().requires_grad_(), scores.detach().clone().requires_grad_()
-    y = _CheckpointedStep.apply(leaf_x, leaf_scores, step)
-    y.backward(dy)
-    wrapped = _snapshot((y, leaf_x.grad, leaf_scores.grad, *(accumulators[i] for i in (3, 4, 5, 0, 1, 2))))
-    differs = [n for n, a, b in zip(RESULT_NAMES, outputs, wrapped, strict=True) if not torch.equal(a, b)]
-    assert not differs, (rank, "autograd function", differs)
-    dist.barrier()
-    saved_context.capture()
-    replays = [_snapshot(saved_context.run()) for _ in range(REPEATS)]
-    assert all(_same(outputs, other) for other in replays), (rank, "graph replay")
-    dist.barrier()
-    record = dict(case="bf16-clamped-before-down", counts=counts)
-    record["judged"] = judge(
-        saved_context, counts, shared, global_routed, topk=topk, local_experts=local_experts, hidden=hidden,
-        seed=4400, limit=limit, fp32_wgrad=True, weight_before_down=True,
-    )  # fmt: skip
-    del saved_context
+        for name, values in zip(
+            ("unplanned", "unplanned context-free"), _unplanned_steps(step, x, scores, dy, ids, local_experts),
+            strict=True,
+        ):
+            differs = [n for n, a, b in zip(RESULT_NAMES, outputs, values, strict=True) if not torch.equal(a, b)]
+            assert not differs, (rank, case, name, differs)
+        dist.barrier()
+        leaf_x, leaf_scores = x.detach().clone().requires_grad_(), scores.detach().clone().requires_grad_()
+        y = _CheckpointedStep.apply(leaf_x, leaf_scores, step)
+        y.backward(dy)
+        wrapped = _snapshot((y, leaf_x.grad, leaf_scores.grad, *(accumulators[i] for i in (3, 4, 5, 0, 1, 2))))
+        differs = [n for n, a, b in zip(RESULT_NAMES, outputs, wrapped, strict=True) if not torch.equal(a, b)]
+        assert not differs, (rank, case, "autograd function", differs)
+        dist.barrier()
+        saved_context.capture()
+        replays = [_snapshot(saved_context.run()) for _ in range(REPEATS)]
+        assert all(_same(outputs, other) for other in replays), (rank, case, "graph replay")
+        dist.barrier()
+        # A changed source count builds a new schedule and launch plan on the workspace; it loads no kernel.
+        misses = jit._load.cache_info().misses
+        if loads is None:
+            loads = misses
+        assert misses == loads, (rank, case, "kernel loads", loads, misses)
+        record = dict(case=f"bf16-clamped-before-down-{case}", counts=counts)
+        record["judged"] = judge(
+            saved_context, counts, shared, global_routed, topk=topk, local_experts=local_experts, hidden=hidden,
+            seed=4400 + index, limit=limit, fp32_wgrad=True, weight_before_down=True,
+        )  # fmt: skip
+        records.append(record)
+        if first is None:
+            first = (saved_context, data, counts, outputs)
+        else:
+            del saved_context
+        torch.cuda.synchronize()
+        dist.barrier()
+    saved_context, data, counts, outputs = first
+    _load(saved_context, data, counts)
+    assert _same(outputs, _snapshot(saved_context.run())), (rank, "the first count's graph after the later counts")
+    assert jit._load.cache_info().misses == loads
+    del saved_context, first
     torch.cuda.synchronize()
     dist.barrier()
-    return [record]
+    return records

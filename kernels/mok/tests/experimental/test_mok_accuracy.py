@@ -527,8 +527,11 @@ def _before_down_case(
 ):
     """One router-weight-before-down case: forward + backward (clamped SwiGLU, FP32 accumulators from nonzero
     starts) per draw, every floating output against the oracle beside the naive implementation.  ``production``
-    draws the requester's inputs (:func:`production_inputs`, its routes and a schedule per draw) and checks that the
-    pinned route's saved gate is exactly the limit when its rows are in the resident macrobatch."""
+    draws the requester's inputs (:func:`production_inputs`, its routes and a schedule per draw) and, right after the
+    forward (the backward rewrites the context's ring rows while it replays the later macrobatches), checks that the
+    saved gate and up of the resident macrobatch hold values exactly at the limit and beyond it, and that the pinned
+    route's saved gate and up are exactly the limit in every draw that holds its row in the resident macrobatch;
+    the case fails if no draw holds it."""
     hidden, intermediate, macro = geometry
     forward = kernels.MoKForward(True, weight_before_down=True)
     backward = kernels.MoKBackward(True, True, weight_before_down=True)
@@ -536,6 +539,7 @@ def _before_down_case(
     row = torch.arange(tokens, device="cuda")
     fixed = torch.stack([(row + slot) % (topk if empty else experts) for slot in range(topk)], -1)
     naive_values = {}
+    pinned_draws = []
 
     def run(j, draw):
         if production:
@@ -558,6 +562,23 @@ def _before_down_case(
             x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
             *schedule, topk, swiglu_limit, comm, macro, mini, weight_ptrs=[scores.data_ptr()],
         )  # fmt: skip
+        if production:
+            # The forward's saved context, before the backward rewrites its ring rows.
+            torch.cuda.synchronize()
+            resident = s["schedule"][: min(s["actual"], macro)]
+            defined = resident >= 0
+            gate, up = context[2][: resident.numel()][defined], context[4][: resident.numel()][defined]
+            assert (gate > swiglu_limit).any().item() and (up.abs() > swiglu_limit).any().item(), j
+            assert ((gate == swiglu_limit).sum() + (up.abs() == swiglu_limit).sum()).item() > 0, j
+            assert p["pinned"] is not None
+            token, expert = p["pinned"]
+            slot = token * topk + int((routes[token] == expert).nonzero()[0, 0])
+            position = (resident[defined] == slot).nonzero()
+            if position.numel():
+                pinned_gate, pinned_up = gate[position[0, 0]], up[position[0, 0]]
+                assert pinned_gate[0].item() == swiglu_limit and pinned_up[0].item() == swiglu_limit, j
+                assert pinned_up[1].item() == -swiglu_limit, j
+                pinned_draws.append(j)
         result = backward(
             dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
             scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
@@ -566,14 +587,6 @@ def _before_down_case(
             weight_grad_accumulators=accumulators,
         )  # fmt: skip
         torch.cuda.synchronize()
-        if production and p["pinned"] is not None:
-            token, expert = p["pinned"]
-            slot = token * topk + int((routes[token] == expert).nonzero()[0, 0])
-            position = (s["schedule"][: min(s["actual"], macro)] == slot).nonzero()
-            if position.numel():
-                gate, up = context[2][position[0, 0]], context[4][position[0, 0]]
-                assert gate[0].item() == swiglu_limit and up[0].item() == swiglu_limit, j
-                assert up[1].item() == -swiglu_limit, j
         outputs = dict(
             y_route=combine,
             y_shared=context[7],
@@ -599,6 +612,8 @@ def _before_down_case(
         return outputs, values[naive.ORACLE]
 
     judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden + experts)
+    if production and not pinned_draws:
+        failures = [*failures, "pinned route: no draw held its row in the resident macrobatch"]
     return judge, TierJudge(), failures
 
 
@@ -631,14 +646,16 @@ def test_before_down_zero_weights_accuracy(record_property):
 
 
 @pytest.mark.parametrize(
-    "experts,geometry",
-    [(6, (5120, 2304, 1536)), (48, (5120, 2304, 4096))],
-    ids=["local6", "local48"],
+    "experts,geometry,tokens,mini",
+    [(6, (5120, 2304, 1536), 512, 256), (48, (5120, 2304, 4096), 512, 256), (6, (5120, 2304, 4096), 1024, 4096)],
+    ids=["local6", "local48", "local6-mini4096"],
 )
-def test_before_down_production_shape_accuracy(record_property, experts, geometry):
+def test_before_down_production_shape_accuracy(record_property, experts, geometry, tokens, mini):
     """The requester's inputs (unit-RMS ``x``, ``sqrtsoftplus`` top-6 weights times 1.5 with exact zeros, gate and up
     past the limit 10 on a small fraction and exactly at it on one route) at hidden 5120 and intermediate 2304, the
-    production layouts' 6 and 48 local experts, several macrobatches."""
+    production layouts' 6 and 48 local experts, several macrobatches; the requester's minibatch of 4,096 rows on 6
+    local experts."""
     _before_down(
-        record_property, experts=experts, topk=6, geometry=geometry, swiglu_limit=10.0, production=True
-    )
+        record_property, experts=experts, topk=6, geometry=geometry, swiglu_limit=10.0, production=True,
+        tokens=tokens, mini=mini,
+    )  # fmt: skip
