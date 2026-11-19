@@ -51,9 +51,8 @@ Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
 call (each module's launch arguments and tvm-ffi function are looked up
 once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
-tensor), and a launch runs on torch's current stream of its tensors' device
-(0.2.5 took the current device's, the same stream whenever the current
-device is the tensors' device).
+tensor); a launch still runs on torch's current stream of its tensors'
+device, as in 0.2.5.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the

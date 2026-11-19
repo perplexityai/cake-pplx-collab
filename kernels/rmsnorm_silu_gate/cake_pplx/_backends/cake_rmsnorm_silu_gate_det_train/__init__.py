@@ -745,13 +745,16 @@ def _workspace_views(
 # Caller workspaces of earlier calls: id(workspace) -> (weak reference to the
 # workspace, the device of the call, its data pointer and elements then, a flat
 # tensor on its storage, {backward module name: its buffers}).  A call with
-# the same tensor, at the same address with as many elements, still FP32 and
-# contiguous, on the same device, takes the buffers checked and made by an
-# earlier call; any other call checks the workspace again (``_check_workspace``)
-# and makes a new entry.  The flat tensor shares the workspace's storage
-# (``Tensor.set_``) but is no view of the caller's tensor, so an entry does not
-# keep that tensor alive: the weak reference's callback drops the entry with
-# the tensor.
+# the same tensor, still FP32 and contiguous with as many elements, on the same
+# device, whose address is still the flat tensor's, takes the buffers checked
+# and made by an earlier call; any other call drops the entry, checks the
+# workspace again (``_check_workspace``) and makes a new one.  The flat tensor
+# shares the workspace's storage (``Tensor.set_``) but is no view of the
+# caller's tensor, so the entry does not keep that tensor alive: the weak
+# reference's callback drops the entry with the tensor.  A tensor rebound to
+# other memory (``set_``, ``.data``) keeps its entry, and so its former
+# storage, until its next call or its end; and ``torch.utils.swap_tensors``
+# refuses a tensor with a weak reference.
 _CALLER_WORKSPACES: dict[int, tuple[Any, ...]] = {}
 
 
@@ -769,16 +772,21 @@ def _caller_workspace(
 
     key = id(workspace)
     held = _CALLER_WORKSPACES.get(key)
-    if (
-        held is not None
-        and held[0]() is workspace
-        and held[1] == device
-        and held[2] == workspace.data_ptr()
-        and held[3] == workspace.numel()
-        and workspace.dtype == torch.float32
-        and workspace.is_contiguous()
-    ):
-        return held
+    if held is not None and held[0]() is workspace and held[1] == device:
+        try:
+            # where the entry's buffers are now: a storage freed in place, or
+            # another at the old address, is a new workspace
+            address = held[2] if held[4] is None else held[4].data_ptr()
+            if (
+                address == workspace.data_ptr()
+                and held[3] == workspace.numel()
+                and workspace.dtype == torch.float32
+                and workspace.is_contiguous()
+            ):
+                return held
+        except RuntimeError:  # a storage without memory
+            pass
+    _CALLER_WORKSPACES.pop(key, None)  # a refused workspace keeps no entry
     _check_workspace(workspace, device, _workspace_elements(arch))
     try:
         flat = torch.empty((0,), dtype=torch.float32, device=device).set_(
@@ -902,6 +910,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         package is refused (``ValueError``), also in a call with no rows.
         A call that reads none (the strided program) checks it and leaves it
         as it is.
+        The call keeps a weak reference to a caller's workspace and its checked
+        buffers (``torch.utils.swap_tensors`` refuses a tensor with a weak
+        reference); a workspace rebound to other memory is checked again at its
+        next call.
 
     Returns
     -------

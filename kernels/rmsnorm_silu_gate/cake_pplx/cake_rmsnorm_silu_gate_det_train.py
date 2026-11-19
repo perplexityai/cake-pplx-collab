@@ -347,6 +347,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         contiguous and 16-byte aligned, left zero by the call; the stream's
         own workspace when omitted.  A workspace of the non-deterministic
         package is refused (``ValueError``), also in a call with no rows.
+        The call keeps a weak reference to a caller's workspace and its checked
+        buffers (``torch.utils.swap_tensors`` refuses a tensor with a weak
+        reference); a workspace rebound to other memory is checked again at its
+        next call.
 
     Returns
     -------

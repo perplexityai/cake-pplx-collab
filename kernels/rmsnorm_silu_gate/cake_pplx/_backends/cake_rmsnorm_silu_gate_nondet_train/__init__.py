@@ -55,9 +55,8 @@ Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
 call (each module's launch arguments and tvm-ffi function are looked up
 once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
-tensor), and a launch runs on torch's current stream of its tensors' device
-(0.2.5 took the current device's, the same stream whenever the current
-device is the tensors' device).
+tensor); a launch still runs on torch's current stream of its tensors'
+device, as in 0.2.5.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -734,13 +733,16 @@ def _module_workspace_bytes(name: str) -> int:
 # Caller workspaces of earlier calls: id(workspace) -> (weak reference to the
 # workspace, the device of the call, its data pointer and bytes then, a flat
 # tensor on its storage, {backward module name: its buffers}).  A call with
-# the same tensor, at the same address with as many bytes, still uint8 and
-# contiguous, on the same device, takes the buffers checked and made by an
-# earlier call; any other call checks the workspace again (``_check_workspace``)
-# and makes a new entry.  The flat tensor shares the workspace's storage
-# (``Tensor.set_``) but is no view of the caller's tensor, so an entry does not
-# keep that tensor alive: the weak reference's callback drops the entry with
-# the tensor.
+# the same tensor, still uint8 and contiguous with as many bytes, on the same
+# device, whose address is still the flat tensor's, takes the buffers checked
+# and made by an earlier call; any other call drops the entry, checks the
+# workspace again (``_check_workspace``) and makes a new one.  The flat tensor
+# shares the workspace's storage (``Tensor.set_``) but is no view of the
+# caller's tensor, so the entry does not keep that tensor alive: the weak
+# reference's callback drops the entry with the tensor.  A tensor rebound to
+# other memory (``set_``, ``.data``) keeps its entry, and so its former
+# storage, until its next call or its end; and ``torch.utils.swap_tensors``
+# refuses a tensor with a weak reference.
 _CALLER_WORKSPACES: dict[int, tuple[Any, ...]] = {}
 
 
@@ -758,16 +760,21 @@ def _caller_workspace(
 
     key = id(workspace)
     held = _CALLER_WORKSPACES.get(key)
-    if (
-        held is not None
-        and held[0]() is workspace
-        and held[1] == device
-        and held[2] == workspace.data_ptr()
-        and held[3] == workspace.numel()
-        and workspace.dtype == torch.uint8
-        and workspace.is_contiguous()
-    ):
-        return held
+    if held is not None and held[0]() is workspace and held[1] == device:
+        try:
+            # where the entry's buffers are now: a storage freed in place, or
+            # another at the old address, is a new workspace
+            address = held[2] if held[4] is None else held[4].data_ptr()
+            if (
+                address == workspace.data_ptr()
+                and held[3] == workspace.numel()
+                and workspace.dtype == torch.uint8
+                and workspace.is_contiguous()
+            ):
+                return held
+        except RuntimeError:  # a storage without memory
+            pass
+    _CALLER_WORKSPACES.pop(key, None)  # a refused workspace keeps no entry
     _check_workspace(workspace, device, _workspace_bytes(arch))
     try:
         flat = torch.empty((0,), dtype=torch.uint8, device=device).set_(
