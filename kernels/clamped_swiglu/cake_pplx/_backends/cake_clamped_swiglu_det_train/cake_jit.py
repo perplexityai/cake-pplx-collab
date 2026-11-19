@@ -80,7 +80,7 @@ LIBRARY_PREFIX = "cake_clamped_swiglu_det_train"
 MANIFEST = "build.json"
 
 # The stages of one training step, in launch order.
-STAGES = ("fwd", "bwd")
+STAGES = ("fwd", "bwd", "bwd_unweighted")
 # The suffix of a stage's large-R role.
 LARGE = "_large"
 # The roles of the records: each stage's small-R role (the stage itself) and its large-R role.
@@ -185,6 +185,24 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_large",
         "stage": "bwd",
     },
+    # The backward of an unweighted call: d_gate and d_up (BF16) only, no weight and no d_weight, 128 threads, 32 lanes
+    # a (row, run) task (3 runs a row, 4 tasks a CTA), a lane's 3 loads of its run.
+    "cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_clamped_swiglu_det_train_f8ece5d554866a83bfdb",
+        "role": "bwd_unweighted",
+        "stage": "bwd_unweighted",
+    },
 }
 
 
@@ -214,6 +232,7 @@ WIDTH = 2304
 BUILD_OF: dict[str, dict[str, int]] = {
     "fwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
     "bwd": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128},
+    "bwd_unweighted": {"lanes": 32, "rows_per_thread": 1, "width_bits": 128, "tasks_per_row": 3},
 }
 
 # The kernels load ``width_bits`` at a time: every BF16 row stride is a multiple of one load (8 BF16 values for
