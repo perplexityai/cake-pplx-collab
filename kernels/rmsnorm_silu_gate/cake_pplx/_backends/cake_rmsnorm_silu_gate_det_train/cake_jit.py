@@ -52,17 +52,23 @@ BF16 backward's row arithmetic with all weight-gradient work removed at build
 time, so ``dx`` and ``dz`` are the bits of the BF16 backward on the same rows
 (at every grid).  The strided program (``bwd_bf16_nodw_strided``: the BF16
 backward's 256-thread CTAs of 16-row blocks, CTA ``b`` running the blocks
-``b``, ``b + grid``, ... with no claim, no ticket and no workspace; on
-packed rows its 128-thread build ``bwd_bf16_nodw_strided_packed``: 8-row
-blocks, a row to each 16 lanes as in the BF16 backward, packed rows read at
-their linear offsets) runs up to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM,
-the claimed program (``bwd_bf16_nodw``: the BF16 backward's claims, ticket
-and workspace; sm_100a and sm_103a) past it, and the long one
-(``bwd_bf16_nodw_long``: its look-ahead loop) where :func:`backward_module`
-runs ``bwd_bf16_long``; sm_107a routes no claimed program, so there the
-strided program runs every row count short of the long one.  An
-architecture that routes none of them runs the BF16 backward's module with
-``weight_grad`` 0, which gives the same bits.
+``b``, ``b + grid``, ... with no claim, no ticket and no workspace) runs up
+to ``NODW_STRIDED_ROWS_PER_SM`` rows per SM, the claimed program
+(``bwd_bf16_nodw``: the BF16 backward's claims, ticket and workspace;
+sm_100a and sm_103a) past it, and the long one (``bwd_bf16_nodw_long``: its
+look-ahead loop) where :func:`backward_module` runs ``bwd_bf16_long``;
+sm_107a routes no claimed program, so there the strided program runs every
+row count short of the long one.  Two 128-thread builds run in the strided
+program's place (8-row blocks, a row to each 16 lanes as in the BF16
+backward): ``bwd_bf16_nodw_strided_packed`` on packed rows and, up to
+``NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM, on rows of any layout (packed
+rows read at their linear offsets, other layouts at their token and head
+strides), and ``bwd_bf16_nodw_strided_packed_small`` on packed rows up to
+``PACKED_SMALL_ROWS_PER_SM`` rows per SM (a build of packed rows only: no
+stride test, every row read at its linear offset, a row's sum of squares and
+its dot product reduced across its lanes together).  An architecture that
+routes none of them runs the BF16 backward's module with ``weight_grad`` 0,
+which gives the same bits.
 
 Grids (:func:`launch_grid`): the forward launches one CTA per block of
 ``rows_per_block`` rows below ``persistent_from_rows_per_sm`` rows per SM, and
@@ -79,7 +85,7 @@ so the weight gradient's bits depend on the rows and
 the SM count only, not on which CTA runs a chunk.  A strided program
 launches ``min(blocks, ctas_per_sm * SMs)`` CTAs of its own rule (the
 256-thread one the BF16 backward's 16-row blocks and 4 CTAs per SM, the
-128-thread one of packed rows 8-row blocks and 8 CTAs per SM:
+128-thread ones 8-row blocks and 8 CTAs per SM:
 ``min(ceil(rows / 8), 8 * SMs)``), its CTAs walking their blocks with no
 claim.  The backward's workspace
 (``workspace`` of its record: ``slots`` accumulator copies of ``limbs``
@@ -643,7 +649,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # bits at any grid; the BF16 backward's kernel
     # parameters (the weight-gradient and workspace ones unread) and CTA
     # count; a call with compute_grad_weight=False runs it on rows that are
-    # not packed (packed rows run bwd_bf16_nodw_strided_packed) up to
+    # not packed past NODW_ANY_LAYOUT_ROWS_PER_SM rows per SM (packed rows,
+    # and fewer rows of any layout, run the 128-thread builds) up to
     # NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at every row count
     # (build {"dw": False, "math": "ax", "min_blocks": 4, "out": "bf16",
     # "prefetch_share": None, "strided": True, "threads": 256}).
@@ -725,15 +732,20 @@ MODULES: dict[str, dict[str, Any]] = {
     # of its work removed at build time) in 128-thread CTAs at most 8 per SM,
     # a row to each 16 lanes as in the BF16 backward, CTA b running the 8-row
     # blocks b, b + grid, ... with no claim, no ticket and no workspace word
-    # (packed rows read at their linear offsets; a CTA of one block takes its
-    # block count and prefetch test without an integer division), so dx and
-    # dz are the BF16 backward's bits at any grid; the BF16 backward's kernel
-    # parameters (the weight-gradient and workspace ones unread) and its own
-    # grid, min(ceil(rows / 8), 8 * SMs) CTAs; a call with
-    # compute_grad_weight=False runs it in the strided program's place on
-    # packed rows (dy, x and z of head stride 128 and token stride
-    # heads * 128) up to NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at
-    # every row count but the long program's (build {"dw": False, "math":
+    # (packed rows read at their linear offsets, other layouts at their token
+    # and head strides through the fast divmod of heads, as the 256-thread
+    # program reads them; a CTA of one block takes its block count and
+    # prefetch test without an integer division), so dx and dz are the BF16
+    # backward's bits at any grid; the BF16 backward's kernel parameters (the
+    # weight-gradient and workspace ones unread) and its own grid,
+    # min(ceil(rows / 8), 8 * SMs) CTAs; a call with compute_grad_weight=False
+    # runs it in the strided program's place on packed rows (dy, x and z of
+    # head stride 128 and token stride heads * 128, or, where
+    # PACKED_SMALL_ROWS_PER_SM has a cut, one token of head stride 128) past
+    # PACKED_SMALL_ROWS_PER_SM rows per SM up to
+    # NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at every row count but
+    # the long program's, and on rows of any layout up to
+    # NODW_ANY_LAYOUT_ROWS_PER_SM rows per SM (build {"dw": False, "math":
     # "ax", "min_blocks": 8, "out": "bf16", "prefetch_share": None,
     # "strided": True, "threads": 128}).
     "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79": {
@@ -808,6 +820,97 @@ MODULES: dict[str, dict[str, Any]] = {
             "z_tok": "z_tok",
         },
         "role": "bwd_bf16_nodw_strided_packed",
+    },
+    # The backward without the weight gradient, strided, for packed rows only,
+    # at small row counts: the 128-thread strided build of packed rows (8-row
+    # blocks, 128-thread CTAs at most 8 per SM, a row to each 16 lanes as in
+    # the BF16 backward, CTA b running the blocks b, b + grid, ... with no
+    # claim, no ticket and no workspace word) that takes no stride test and no
+    # division by the head count, reads every row at its linear offset (row *
+    # 128) and computes a row's sum of squares and its dot product before it
+    # reduces both across the row's 16 lanes together, with the BF16 backward's
+    # FP32 operations in the same order, so dx and dz are the BF16 backward's
+    # bits at any grid; the BF16 backward's kernel parameters (the strides and
+    # the weight-gradient and workspace ones unread) and the 128-thread build's
+    # grid, min(ceil(rows / 8), 8 * SMs) CTAs; a call with
+    # compute_grad_weight=False runs it in the strided program's place on
+    # packed rows only (dy, x and z of head stride 128 and token stride heads *
+    # 128, or one token of head stride 128) up to PACKED_SMALL_ROWS_PER_SM rows
+    # per SM (build {"dw": False, "math": "ax", "min_blocks": 8, "out": "bf16",
+    # "packed_rows": 1, "prefetch_share": None, "schedule": "joint", "strided":
+    # True, "threads": 128}).
+    "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 8,
+            "kind": "strided_row_blocks",
+            "rows_per_block": 8,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_nodw_strided_packed_small",
     },
     # The backward without the weight gradient, claimed: the BF16 backward
     # built without the weight gradient, with its claims, its arrival ticket
@@ -994,6 +1097,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "bwd_bf16_nodw_strided_packed_small": "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -1005,6 +1109,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "bwd_bf16_nodw_strided_packed_small": "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -1016,6 +1121,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_nodw_long": "cake_rmsnorm_silu_gate_det_train_d8dd2e7dae0ca8233241",
         "bwd_bf16_nodw_strided": "cake_rmsnorm_silu_gate_det_train_cfe88bc164eeaa58821d",
         "bwd_bf16_nodw_strided_packed": "cake_rmsnorm_silu_gate_det_train_07de4b4c9a438a52ff79",
+        "bwd_bf16_nodw_strided_packed_small": "cake_rmsnorm_silu_gate_det_train_38d04fbfa79b1461bc0c",
         "bwd_f32": "cake_rmsnorm_silu_gate_det_train_ae2073f31d0923e61736",
         "bwd_f32_long": "cake_rmsnorm_silu_gate_det_train_be861a132bbc76cb6433",
     },
@@ -1041,22 +1147,28 @@ LONG_ROLES = ("bwd_bf16_long", "bwd_f32_long")
 # weight gradient, claimed (``bwd_bf16_nodw``), strided
 # (``bwd_bf16_nodw_strided``: no claim, no ticket, no workspace), strided
 # for packed rows (``bwd_bf16_nodw_strided_packed``: its 128-thread build,
-# the strided role's program for packed rows) and in the look-ahead loop
-# (``bwd_bf16_nodw_long``); a call with ``compute_grad_weight=False`` runs one
-# of them where its architecture routes it.
+# the strided role's program for packed rows and, at small row counts, for
+# rows of any layout), strided for packed rows only at small row counts
+# (``bwd_bf16_nodw_strided_packed_small``: the 128-thread build of packed
+# rows only) and in the look-ahead loop (``bwd_bf16_nodw_long``); a call
+# with ``compute_grad_weight=False`` runs one of them where its architecture
+# routes it.
 NODW = "_nodw"
 STRIDED = "_strided"
 PACKED = "_packed"
+SMALL = "_small"
 NODW_ROLES = (
     "bwd_bf16_nodw",
     "bwd_bf16_nodw_strided",
     "bwd_bf16_nodw_strided_packed",
+    "bwd_bf16_nodw_strided_packed_small",
     "bwd_bf16_nodw_long",
 )
 GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks")
 # A call without the weight gradient runs the strided program (``role + NODW
 # + STRIDED``, on packed rows ``role + NODW + STRIDED + PACKED`` where
-# routed) up to this many rows per SM, by architecture and role, and the
+# routed, and the 128-thread builds of the two tables below up to their
+# cuts) up to this many rows per SM, by architecture and role, and the
 # claimed program (``role + NODW``) past it: a role has a cut where its
 # architecture routes both.  The cuts are measured per architecture (CUDA
 # Graph replays, cold L2): up to them the strided program is the faster.
@@ -1072,6 +1184,33 @@ GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 768},
     "sm_103a": {"bwd_bf16": 768},
+    "sm_107a": {},
+}
+# A call without the weight gradient on packed rows runs the build of packed
+# rows only (``role + NODW + STRIDED + PACKED + SMALL``) in the strided
+# program's place up to this many rows per SM, by architecture and role,
+# where the architecture routes it and the strided program; an architecture
+# or role without a cut never runs it.  A cut lies at or below the strided
+# cut.  Measured on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster
+# than the 128-thread strided build up to this cut, slower on sm_100a at 332
+# rows per SM; sm_107a has no cut until it is measured.  Host plan only.
+PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
+    "sm_100a": {"bwd_bf16": 128},
+    "sm_103a": {"bwd_bf16": 128},
+    "sm_107a": {},
+}
+# A call without the weight gradient on rows that are not packed runs the
+# 128-thread strided build (``role + NODW + STRIDED + PACKED``: other layouts
+# read at their token and head strides, with the 256-thread program's
+# addressing and row arithmetic) in the 256-thread one's place up to this
+# many rows per SM, by architecture and role, where the architecture routes
+# both; an architecture or role without a cut never runs it there.  Measured
+# on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster up to this
+# cut, where each 128-thread CTA runs one 8-row block; sm_107a has no cut
+# until it is measured.  Host plan only.
+NODW_ANY_LAYOUT_ROWS_PER_SM: dict[str, dict[str, int]] = {
+    "sm_100a": {"bwd_bf16": 32},
+    "sm_103a": {"bwd_bf16": 32},
     "sm_107a": {},
 }
 # Elements of one normalized row.
@@ -1225,15 +1364,16 @@ def backward_module(
     return module_for_rows(arch, role, rows, sm_count, packed)
 
 
-def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
+def _nodw_keys(role: str) -> tuple[str | None, str, str, str, str]:
     """The ROUTES keys :func:`nodw_module` looks up for a module of backward
     ``role``: for a long role ``base + LONG`` the key ``base + NODW + LONG``
-    (the other three empty), else ``None``, ``role + NODW + STRIDED``, that
-    key ``+ PACKED`` and ``role + NODW``."""
+    (the other four empty), else ``None``, ``role + NODW + STRIDED``, that
+    key ``+ PACKED``, that key ``+ SMALL`` and ``role + NODW``."""
 
     if role.endswith(LONG):
-        return role[: -len(LONG)] + NODW + LONG, "", "", ""
-    return None, role + NODW + STRIDED, role + NODW + STRIDED + PACKED, role + NODW
+        return role[: -len(LONG)] + NODW + LONG, "", "", "", ""
+    strided = role + NODW + STRIDED
+    return None, strided, strided + PACKED, strided + PACKED + SMALL, role + NODW
 
 
 # The keys of every role a module record names, spelled once at import: a
@@ -1242,6 +1382,9 @@ def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
 _NODW_KEYS = {
     record["role"]: _nodw_keys(record["role"]) for record in MODULES.values()
 }
+# An empty table (read, never written): the default of a lookup that may
+# miss, so :func:`nodw_module` makes no dict.
+_EMPTY: dict[str, Any] = {}
 
 
 def nodw_module(
@@ -1251,28 +1394,51 @@ def nodw_module(
     rows on ``arch`` with ``sm_count`` SMs, given ``name``, the module
     :func:`backward_module` names for the call's role (``bwd_bf16``), rows
     and layout, and ``packed``, whether the kernel reads packed rows
-    (:func:`backward_packed`): for a long module (packed rows past its cut)
-    the role's long module without the weight gradient (``role + NODW +
-    LONG``) where ``arch`` routes one, else ``name`` itself (run with
-    ``weight_grad`` 0); otherwise the strided module (``role + NODW +
-    STRIDED``; for packed rows ``role + NODW + STRIDED + PACKED`` in its
-    place where ``arch`` routes that too) where ``arch`` routes one and
-    ``rows <= NODW_STRIDED_ROWS_PER_SM[arch][role] * sm_count``, else the
-    claimed module (``role + NODW``) where routed, else the strided module
-    where routed (an architecture without a claimed module has no cut: its
-    strided module runs every row count), else ``name``.  Every one gives
-    the ``dx`` and ``dz`` bits of ``name``."""
+    (:func:`backward_packed`; the backward also passes one token of head
+    stride 128 as packed rows where ``PACKED_SMALL_ROWS_PER_SM[arch]`` has a
+    cut):
 
-    routes = ROUTES.get(arch, {})
+    - for a long module (packed rows past its cut) the role's long module
+      without the weight gradient (``role + NODW + LONG``) where ``arch``
+      routes one, else ``name`` itself (run with ``weight_grad`` 0);
+    - else, for packed rows up to ``PACKED_SMALL_ROWS_PER_SM[arch][role] *
+      sm_count``, the module of packed rows only (``role + NODW + STRIDED +
+      PACKED + SMALL``) where ``arch`` routes it and the strided module;
+    - else the strided module (``role + NODW + STRIDED``; in its place
+      ``role + NODW + STRIDED + PACKED`` where routed, for packed rows and
+      for rows of any layout up to ``NODW_ANY_LAYOUT_ROWS_PER_SM[arch][role]
+      * sm_count``) where ``arch`` routes one and ``rows <=
+      NODW_STRIDED_ROWS_PER_SM[arch][role] * sm_count``;
+    - else the claimed module (``role + NODW``) where routed, else the
+      strided module where routed (an architecture without a claimed module
+      has no cut: its strided module runs every row count), else ``name``.
+
+    Every one gives the ``dx`` and ``dz`` bits of ``name``; the module of
+    packed rows only never runs rows that are not packed."""
+
+    routes = ROUTES.get(arch, _EMPTY)
     role = MODULES[name]["role"]
     keys = _NODW_KEYS.get(role) or _nodw_keys(role)
-    long_key, strided_key, packed_key, claimed_key = keys
+    long_key, strided_key, packed_key, small_key, claimed_key = keys
     if long_key is not None:
         return routes.get(long_key, name)
     strided = routes.get(strided_key)
-    if packed and strided is not None:
-        strided = routes.get(packed_key, strided)
-    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(role)
+    if strided is not None:
+        if packed:
+            small = routes.get(small_key)
+            if (
+                small is not None
+                and rows
+                <= PACKED_SMALL_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0) * sm_count
+            ):
+                return small
+            strided = routes.get(packed_key, strided)
+        elif (
+            rows
+            <= NODW_ANY_LAYOUT_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0) * sm_count
+        ):
+            strided = routes.get(packed_key, strided)
+    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, _EMPTY).get(role)
     if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
         return strided
     claimed = routes.get(claimed_key)
@@ -1460,13 +1626,16 @@ __all__ = [
     "LONG_ROLES",
     "MODULES",
     "NODW",
+    "NODW_ANY_LAYOUT_ROWS_PER_SM",
     "NODW_ROLES",
     "NODW_STRIDED_ROWS_PER_SM",
     "PACKED",
     "PACKED_ROLES",
     "PACKED_ROWS",
+    "PACKED_SMALL_ROWS_PER_SM",
     "ROLES",
     "ROUTES",
+    "SMALL",
     "STRIDED",
     "arch_for_capability",
     "backward_module",
