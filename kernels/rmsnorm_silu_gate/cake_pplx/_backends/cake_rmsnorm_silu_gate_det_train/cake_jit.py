@@ -1414,37 +1414,72 @@ def nodw_module(
       has no cut: its strided module runs every row count), else ``name``.
 
     Every one gives the ``dx`` and ``dz`` bits of ``name``; the module of
-    packed rows only never runs rows that are not packed."""
+    packed rows only never runs rows that are not packed.  The modules and
+    cuts of ``arch`` and ``name`` come from :func:`_nodw_plan`, read once at
+    import for every routed architecture and module (``_NODW_PLANS``)."""
+
+    plan = _NODW_PLANS.get(arch, _EMPTY).get(name) or _nodw_plan(arch, name)
+    done, strided, any_layout, small, small_cut, any_cut, cut, claimed = plan
+    if done is not None:
+        return done
+    if packed:
+        if rows <= small_cut * sm_count:
+            return small
+        strided = any_layout
+    elif rows <= any_cut * sm_count:
+        strided = any_layout
+    if cut is not None and rows <= cut * sm_count:
+        return strided
+    if claimed is not None:
+        return claimed
+    return name if strided is None else strided
+
+
+def _nodw_plan(
+    arch: str, name: str
+) -> tuple[
+    str | None, str | None, str | None, str | None, int, int, int | None, str | None
+]:
+    """What :func:`nodw_module` reads for module ``name`` on ``arch``, from
+    ``ROUTES`` and the three cut tables: ``(done, strided, any_layout, small,
+    small_cut, any_cut, cut, claimed)``.  ``done`` is the answer for a long
+    module (its long module without the weight gradient where routed, else
+    ``name``), else ``None``; ``strided`` the strided module where routed;
+    ``any_layout`` the module that reads any layout (``role + NODW + STRIDED +
+    PACKED`` where routed, else ``strided``); ``small`` the module of packed
+    rows only and ``small_cut`` its rows per SM (-1, which no row count is
+    at most, where either the strided module or that module is not routed);
+    ``any_cut`` the rows per SM of the module that reads any layout on other
+    layouts (-1 without a strided module); ``cut`` the strided cut (``None``
+    without a strided module or a cut); ``claimed`` the claimed module where
+    routed."""
 
     routes = ROUTES.get(arch, _EMPTY)
     role = MODULES[name]["role"]
     keys = _NODW_KEYS.get(role) or _nodw_keys(role)
     long_key, strided_key, packed_key, small_key, claimed_key = keys
     if long_key is not None:
-        return routes.get(long_key, name)
+        return routes.get(long_key, name), None, None, None, -1, -1, None, None
     strided = routes.get(strided_key)
-    if strided is not None:
-        if packed:
-            small = routes.get(small_key)
-            if (
-                small is not None
-                and rows
-                <= PACKED_SMALL_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0) * sm_count
-            ):
-                return small
-            strided = routes.get(packed_key, strided)
-        elif (
-            rows
-            <= NODW_ANY_LAYOUT_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0) * sm_count
-        ):
-            strided = routes.get(packed_key, strided)
-    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, _EMPTY).get(role)
-    if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
-        return strided
     claimed = routes.get(claimed_key)
-    if claimed is not None:
-        return claimed
-    return name if strided is None else strided
+    if strided is None:
+        return None, None, None, None, -1, -1, None, claimed
+    small = routes.get(small_key)
+    small_cut = (
+        -1 if small is None else PACKED_SMALL_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0)
+    )
+    any_cut = NODW_ANY_LAYOUT_ROWS_PER_SM.get(arch, _EMPTY).get(role, 0)
+    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, _EMPTY).get(role)
+    any_layout = routes.get(packed_key, strided)
+    return None, strided, any_layout, small, small_cut, any_cut, cut, claimed
+
+
+# The plan of every routed architecture and module, read once at import: a
+# call without the weight gradient then makes two lookups and compares ints
+# (its host path is most of the time of a small call).
+_NODW_PLANS = {
+    arch: {name: _nodw_plan(arch, name) for name in MODULES} for arch in ROUTES
+}
 
 
 def workspace_elements(name: str) -> int:
