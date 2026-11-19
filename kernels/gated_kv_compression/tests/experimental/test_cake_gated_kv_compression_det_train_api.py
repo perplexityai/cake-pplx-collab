@@ -468,9 +468,9 @@ def launches(monkeypatch):
     found = []
     original = jit.run_module
 
-    def spy(role, values, *, rows, device_index):
+    def spy(role, values, *, rows, device_index, **options):
         found.append(role)
-        return original(role, values, rows=rows, device_index=device_index)
+        return original(role, values, rows=rows, device_index=device_index, **options)
 
     monkeypatch.setattr(jit, "run_module", spy)
     return found

@@ -526,6 +526,7 @@ def launch_grid(name: str, rows: int) -> tuple[int, int, int]:
 
 _TVM_FFI: Any = None
 _TVM_DEVICES: dict[int, Any] = {}
+_RAW_STREAM: Any = None
 
 
 def _tvm_ffi() -> Any:
@@ -542,6 +543,49 @@ def _tvm_device(device_index: int) -> Any:
     if found is None:
         found = _TVM_DEVICES[device_index] = _tvm_ffi().device("cuda", device_index)
     return found
+
+
+def _raw_stream(device_index: int) -> int:
+    """The handle of torch's current stream on CUDA device ``device_index``: the value of
+    ``torch.cuda.current_stream(device_index).cuda_stream``, read through ``torch._C._cuda_getCurrentRawStream`` when
+    torch has it (no stream object is made)."""
+    global _RAW_STREAM
+    if _RAW_STREAM is None:
+        import torch  # noqa: PLC0415
+
+        raw = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+        _RAW_STREAM = raw if raw is not None else lambda index: torch.cuda.current_stream(index).cuda_stream
+    return _RAW_STREAM(device_index)
+
+
+_GRID_AXES = ("grid_x", "grid_y", "grid_z")
+
+
+@functools.cache
+def _launch_plan(name: str) -> tuple[int, tuple[tuple[int, Any, str], ...]]:
+    """``(per, slots)`` of record ``name``, made once per process (the records are constant).  ``per`` is
+    :func:`rows_per_cta` for a ``rows`` grid rule and 0 for a ``one_cta`` rule, so the grid of ``rows`` rows is
+    :func:`launch_grid`'s.  ``slots`` is the argument plan in ``run`` order: ``(0, axis, key)`` for a grid dimension
+    (``axis`` 0, 1 or 2), ``(1, key, key)`` for a launch option and ``(2, name in values, key)`` for a kernel
+    parameter (through the record's ``logical`` map)."""
+    found = record(name)
+    kind = found["grid_rule"]["kind"]
+    if kind == "one_cta":
+        per = 0
+    elif kind == "rows":
+        per = rows_per_cta(name)
+    else:
+        raise ValueError(f"unknown Cake gated KV compression grid rule {kind!r} (known: {GRID_KINDS})")
+    logical = found.get("logical", {})
+    slots: list[tuple[int, Any, str]] = []
+    for kind, key in found["arg_plan"]:
+        if kind == "grid":
+            slots.append((0, _GRID_AXES.index(key), key))
+        elif kind == "launch":
+            slots.append((1, key, key))
+        else:
+            slots.append((2, logical.get(key, key), key))
+    return per, tuple(slots)
 
 
 @functools.cache
@@ -562,37 +606,33 @@ def _entry(name: str, arch: str) -> Any:
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
-def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int) -> None:
+def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int, arch: str | None = None) -> None:
     """Launch the record serving ``role`` on the architecture of device ``device_index`` (:func:`role_record`) with
     its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives ``rows``, on the current torch
-    stream of that device.
+    stream of that device.  ``arch``: that architecture when the caller has looked it up
+    (``device_arch(device_index)``); ``None`` looks it up here.
 
     ``values`` maps the kernel parameter names of the record (through its ``logical`` map when the record has one) to
     tensors and Python scalars.  A ``["launch", "enable_pdl"]`` entry of the argument plan (a binding whose PDL launch
-    is chosen per call, an int64 host parameter) gets ``1`` unless ``values`` sets it.  Nothing here reads device
-    memory or synchronizes."""
-    import torch  # noqa: PLC0415
-
-    arch = device_arch(device_index)
+    is chosen per call, an int64 host parameter) gets ``1`` unless ``values`` sets it.  The record's argument plan and
+    grid rule are read once per process (:func:`_launch_plan`).  Nothing here reads device memory or synchronizes."""
+    if arch is None:
+        arch = device_arch(device_index)
     name = role_record(role, arch)
-    found = record(name)
-    logical = found.get("logical", {})
-    grid = launch_grid(name, rows)
-    axes = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
-    args = []
-    for kind, key in found["arg_plan"]:
-        if kind == "grid":
-            args.append(axes[key])
-        elif kind == "launch":
-            args.append(int(bool(values.get(key, True))))
-        else:
-            want = logical.get(key, key)
-            if want not in values:
-                raise ValueError(f"record {name} needs {want!r} (kernel parameter {key!r})")
-            args.append(values[want])
+    per, slots = _launch_plan(name)
+    grid = (max(1, -(-int(rows) // per)) if per else 1, 1, 1)
+    try:
+        args = [
+            grid[slot] if kind == 0 else values[slot] if kind == 2 else int(bool(values.get(slot, True)))
+            for kind, slot, _ in slots
+        ]
+    except KeyError:
+        for kind, slot, key in slots:
+            if kind == 2 and slot not in values:
+                raise ValueError(f"record {name} needs {slot!r} (kernel parameter {key!r})") from None
+        raise
     run = _entry(name, arch)
-    stream = torch.cuda.current_stream(device_index).cuda_stream
-    with _tvm_ffi().use_raw_stream(_tvm_device(device_index), stream):
+    with _tvm_ffi().use_raw_stream(_tvm_device(device_index), _raw_stream(device_index)):
         run(*args)
 
 

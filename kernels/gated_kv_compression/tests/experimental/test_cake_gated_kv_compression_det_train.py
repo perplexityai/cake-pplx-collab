@@ -144,6 +144,12 @@ LAUNCHER_KEYWORDS = {
     "launch_fwd": ("c", "z", "cu_seqlens", "cu_pairs", "out", "c_ld", "z_ld"),
     "launch_bwd": ("dout", "c", "z", "cu_seqlens", "cu_pairs", "dc", "dz", "c_ld", "z_ld", "dc_ld", "dz_ld"),
 }
+# What a public call has already looked up and passes to its launches (each defaults to None: the launcher looks it up).
+LAUNCHER_OPTIONS = {
+    "launch_pair_table": ("device_index", "arch"),
+    "launch_fwd": ("role", "device_index", "arch"),
+    "launch_bwd": ("device_index", "arch"),
+}
 LAYOUTS = ("contiguous", "halves")
 
 # Packs with at least one pair: one document, empty and one-token documents, odd tails, the reference's mixed pack, many
@@ -358,23 +364,32 @@ def test_grids_cover_every_row() -> None:
 
 
 def test_launchers_take_named_buffers() -> None:
-    """Each launcher takes its buffers and strides by keyword only."""
+    """Each launcher takes its buffers and strides by keyword only, with no default, and the device index, the
+    architecture (and the forward's role) a public call passes down by keyword only, each defaulting to None."""
     for launcher, keywords in LAUNCHER_KEYWORDS.items():
         params = list(inspect.signature(getattr(cake_backend, launcher)).parameters.values())
         assert all(p.kind is p.KEYWORD_ONLY for p in params), launcher
-        assert sorted(p.name for p in params) == sorted(keywords), launcher
+        assert sorted(p.name for p in params) == sorted(keywords + LAUNCHER_OPTIONS[launcher]), launcher
+        assert all(p.default is p.empty for p in params if p.name in keywords), launcher
+        assert all(p.default is None for p in params if p.name in LAUNCHER_OPTIONS[launcher]), launcher
 
 
 def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     """Each launcher hands ``run_module`` exactly the kernel parameters of its record, with ``num_docs = S``, the
     rows of ``out`` / ``dout`` as ``G``, the strides it was given and the rows of its grid; the pair table of at most
     512 documents is the ``pair_table_small`` role, of more the ``pair_table`` role; the forward of at most 256
-    documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role (no
-    device: the architecture is given and the launch is a recorder)."""
+    documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the pair table and
+    the forward pass the architecture they looked up to ``run_module``, and every launcher passes a device index, an
+    architecture (and a forward role) a caller gives as given, with no lookup (no device: the architecture is given
+    and the launch is a recorder)."""
     calls = []
-    monkeypatch.setattr(
-        cake_jit, "run_module", lambda name, values, *, rows, device_index: calls.append((name, dict(values), rows))
-    )
+    options = []
+
+    def run_module(name, values, *, rows, device_index, arch=None):
+        calls.append((name, dict(values), rows))
+        options.append((device_index, arch))
+
+    monkeypatch.setattr(cake_jit, "run_module", run_module)
     monkeypatch.setattr(cake_jit, "device_arch", lambda index: "sm_100a")
     S, G, T = 5, 9, 23
     cu = torch.zeros(S + 1, dtype=torch.int32)
@@ -389,6 +404,9 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
         dout=out, c=c, z=z, cu_seqlens=cu, cu_pairs=table, dc=dc, dz=dz, c_ld=1024, z_ld=1024, dc_ld=512, dz_ld=512
     )
     assert [name for name, _, _ in calls] == ["pair_table_small", "fwd", "bwd"]
+    # CPU tensors: no device index; the pair table and the forward look the architecture up to choose their role and
+    # pass it on, the backward (one role) leaves it to run_module
+    assert options == [(None, "sm_100a"), (None, "sm_100a"), (None, None)]
     for name, values, rows in calls:
         assert set(values) == PARAMETERS[name], name
         assert values["num_docs"] == S and values["cu_seqlens"] is cu and values["cu_pairs"] is table, name
@@ -412,6 +430,45 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
             cake_backend.launch_fwd(c=c, z=z, cu_seqlens=bound, cu_pairs=bound, out=out, c_ld=1024, z_ld=1024)
             assert [(name, values["num_docs"], rows) for name, values, rows in calls] == [(role, docs, G)], (arch, docs)
             assert set(calls[0][1]) == PARAMETERS[role]
+    # A device index, an architecture and a forward role given by the caller reach run_module as given, and no
+    # architecture is looked up.
+    monkeypatch.setattr(cake_jit, "device_arch", lambda index: pytest.fail("looked up the architecture again"))
+    for arch in ARCHES:
+        calls.clear()
+        options.clear()
+        bound = torch.zeros(SMALL_DOCS + 2, dtype=torch.int32)
+        cake_backend.launch_pair_table(cu_seqlens=cu, cu_pairs=table, device_index=3, arch=arch)
+        cake_backend.launch_pair_table(cu_seqlens=bound, cu_pairs=bound, device_index=3, arch=arch)
+        for role in ("fwd", "fwd_unfused"):
+            cake_backend.launch_fwd(
+                c=c,
+                z=z,
+                cu_seqlens=cu,
+                cu_pairs=table,
+                out=out,
+                c_ld=1024,
+                z_ld=1024,
+                role=role,
+                device_index=3,
+                arch=arch,
+            )
+        cake_backend.launch_bwd(
+            dout=out,
+            c=c,
+            z=z,
+            cu_seqlens=cu,
+            cu_pairs=table,
+            dc=dc,
+            dz=dz,
+            c_ld=1024,
+            z_ld=1024,
+            dc_ld=512,
+            dz_ld=512,
+            device_index=3,
+            arch=arch,
+        )
+        assert [name for name, _, _ in calls] == ["pair_table_small", "pair_table", "fwd", "fwd_unfused", "bwd"], arch
+        assert options == [(3, arch)] * 5, arch
 
 
 def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -> None:
@@ -428,11 +485,16 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     def entry(name, arch):
         return lambda *args: launched.append((name, arch, len(args), tuple(args[-3:])))
 
+    streams = []
+
+    def use_raw_stream(device, stream):
+        streams.append((device, stream))
+        return contextlib.nullcontext()
+
     monkeypatch.setattr(cake_jit, "_entry", entry)
-    tvm_ffi = types.SimpleNamespace(use_raw_stream=lambda device, stream: contextlib.nullcontext())
-    monkeypatch.setattr(cake_jit, "_tvm_ffi", lambda: tvm_ffi)
-    monkeypatch.setattr(cake_jit, "_tvm_device", lambda index: None)
-    monkeypatch.setattr(torch.cuda, "current_stream", lambda index=None: types.SimpleNamespace(cuda_stream=0))
+    monkeypatch.setattr(cake_jit, "_tvm_ffi", lambda: types.SimpleNamespace(use_raw_stream=use_raw_stream))
+    monkeypatch.setattr(cake_jit, "_tvm_device", lambda index: ("device", index))
+    monkeypatch.setattr(cake_jit, "_raw_stream", lambda index: ("stream", index))
     S, G, T = 5, 9, 23
     cu = torch.zeros(S + 1, dtype=torch.int32)
     table = torch.zeros(S + 1, dtype=torch.int32)
@@ -466,8 +528,24 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
             grid = cake_jit.launch_grid(name, rows)
             expected.append((name, arch, len(cake_jit.MODULES[name]["arg_plan"]), grid))
     assert launched == expected
+    # every launch on the stream handle and tvm-ffi device of its operands' device (CPU tensors here: index None)
+    assert streams == [(("device", None), ("stream", None))] * len(expected)
     # nine forward rows: five CTAs of two rows on sm_100a / sm_103a, three CTAs of four rows on sm_107a
     assert [grid for name, _, _, grid in launched if name.startswith("fwd")] == [(5, 1, 1)] * 12 + [(3, 1, 1)] * 6
+
+
+def test_a_launch_without_a_kernel_argument_is_refused(monkeypatch) -> None:
+    """``run_module`` refuses ``values`` that lack a kernel parameter of the record with a ``ValueError`` naming the
+    record and the parameter, before it looks up the binding entry (no device: the entry lookup fails the test)."""
+    monkeypatch.setattr(cake_jit, "_entry", lambda name, arch: pytest.fail("looked up the binding entry"))
+    missing = r"record pair_table_small needs 'num_docs' \(kernel parameter 'num_docs'\)"
+    for arch in ARCHES:
+        with pytest.raises(ValueError, match=missing):
+            cake_jit.run_module("pair_table_small", {"cu_seqlens": 0, "cu_pairs": 0}, rows=1, device_index=0, arch=arch)
+        bwd = cake_jit.role_record("bwd", arch)
+        values = dict.fromkeys(PARAMETERS["bwd"] - {"dz_ld"}, 0)
+        with pytest.raises(ValueError, match=rf"record {bwd} needs 'dz_ld' \(kernel parameter 'dz_ld'\)"):
+            cake_jit.run_module("bwd", values, rows=9, device_index=0, arch=arch)
 
 
 def test_the_first_lookup_on_an_architecture_loads_every_role(monkeypatch) -> None:
@@ -511,6 +589,41 @@ def test_the_overlap_rule_is_exact_for_column_halves() -> None:
     assert overlaps(left, buffer.view(-1)[5 * 2 * WIDTH : 5 * 2 * WIDTH + 8])
     assert not overlaps(left, buffer.view(-1)[WIDTH : WIDTH + 8])  # inside row 0 of the right half
     assert not overlaps(left, torch.zeros(7, WIDTH)) and not overlaps(left, torch.zeros(0, WIDTH))
+
+
+def test_the_disjoint_check_refuses_exactly_the_overlapping_pairs() -> None:
+    """``_disjoint`` (which reads the written tensor's byte range once and runs the exact test only where two byte
+    ranges meet) refuses a written tensor exactly when ``_overlaps`` finds it shares a byte with one of the others,
+    naming the first such other; ``None`` and empty others are skipped."""
+    buffer = torch.zeros(7, 2 * WIDTH)
+    flat = buffer.view(-1)
+    views = {
+        "left": buffer[:, :WIDTH],
+        "right": buffer[:, WIDTH:],
+        "middle": buffer[:, 256:768],
+        "row3": buffer[3:4, :WIDTH],
+        "rows3-": buffer[3:, :WIDTH],
+        "left3": buffer[:3, :WIDTH],
+        "alias": flat[5 * 2 * WIDTH : 5 * 2 * WIDTH + 8],
+        "inside-right": flat[WIDTH : WIDTH + 8],
+        "separate": torch.zeros(7, WIDTH),
+        "empty": torch.zeros(0, WIDTH),
+    }
+    for written_name, written in views.items():
+        others = tuple((name, view) for name, view in views.items() if name != written_name) + (("none", None),)
+        hits = [name for name, view in others if view is not None and cake_backend._overlaps(written, view)]
+        if hits:
+            with pytest.raises(ValueError, match=f"^{written_name} must not overlap {hits[0]}$"):
+                cake_backend._disjoint((written_name, written), others)
+        else:
+            cake_backend._disjoint((written_name, written), others)
+        for name, view in others:
+            pair = ((name, view),)
+            if view is not None and cake_backend._overlaps(written, view):
+                with pytest.raises(ValueError, match=f"^{written_name} must not overlap {name}$"):
+                    cake_backend._disjoint((written_name, written), pair)
+            else:
+                cake_backend._disjoint((written_name, written), pair)
 
 
 def test_the_memory_report_separates_workspace_and_retained_state() -> None:
@@ -962,6 +1075,16 @@ def test_the_tail_tokens_change_no_output(pack, device) -> None:
             assert_bitwise(got, ref, f"{pack.id}: {name} after the tail tokens changed to {c_value}")
 
 
+def test_a_launch_takes_the_current_stream_of_its_device(device) -> None:
+    """The stream handle a launch takes (``cake_jit._raw_stream``) is ``torch.cuda.current_stream(index).cuda_stream``
+    of the operands' device: its current stream, and a side stream made current."""
+    assert cake_jit._raw_stream(device.index) == torch.cuda.current_stream(device).cuda_stream
+    side = torch.cuda.Stream(device)
+    with torch.cuda.stream(side):
+        assert cake_jit._raw_stream(device.index) == side.cuda_stream != 0
+    assert cake_jit._raw_stream(device.index) == torch.cuda.current_stream(device).cuda_stream
+
+
 def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     """The forward of a pack of at most ``fuse_docs`` (256) documents launches ``fwd`` alone (the record of the
     device's architecture: ``fwd`` on sm_100a / sm_103a, ``fwd_sm_107a`` on sm_107a), which builds the pair table
@@ -969,23 +1092,40 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     (``fwd_unfused`` on sm_100a / sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward a pair table then ``bwd``
     (``bwd`` on sm_100a / sm_103a, ``bwd_sm_107a`` on sm_107a), or ``bwd`` alone with ``pair_offsets``; the autograd
     entries launch no pair table in the backward.  The pair table of at most ``small_docs`` (512) documents is
-    ``pair_table_small``, of 513 ``pair_table``, in the forward and in the backward.  No call writes its inputs."""
+    ``pair_table_small``, of 513 ``pair_table``, in the forward and in the backward.  A call looks up the device's
+    architecture, ``fuse_docs`` and ``small_docs`` at most once each and passes the device index and the architecture
+    to its launches.  No call writes its inputs."""
     launched = []
     entries = []
+    passed = []
+    lookups = []
     original = cake_jit.run_module
     entry_of = cake_jit._entry
 
-    def spy(role, values, *, rows, device_index):
+    def spy(role, values, *, rows, device_index, **options):
         launched.append(role)
-        return original(role, values, rows=rows, device_index=device_index)
+        passed.append((device_index, options.get("arch")))
+        return original(role, values, rows=rows, device_index=device_index, **options)
 
     def entry_spy(name, arch):
         entries.append((name, arch))
         return entry_of(name, arch)
 
+    def counted(name, function):
+        def lookup(*args):
+            lookups.append(name)
+            return function(*args)
+
+        return lookup
+
+    arch = cake_jit.device_arch(device.index)
     monkeypatch.setattr(cake_jit, "run_module", spy)
     monkeypatch.setattr(cake_jit, "_entry", entry_spy)
-    arch = cake_jit.device_arch(device.index)
+    lookup_arch = counted("device_arch", cake_jit.device_arch)
+    for module in (cake_jit, cake_backend):
+        monkeypatch.setattr(module, "device_arch", lookup_arch)
+    for name in ("fuse_docs", "small_docs"):
+        monkeypatch.setattr(cake_jit, name, counted(name, getattr(cake_jit, name)))
     forward = "fwd_sm_107a" if arch == "sm_107a" else "fwd"
     unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
     backward = "bwd_sm_107a" if arch == "sm_107a" else "bwd"
@@ -994,8 +1134,12 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     many = make_inputs(Pack((1, 3, 5, 7) * 64), seed=41, device=device, layout="halves")
     launched.clear()
     entries.clear()
+    passed.clear()
+    lookups.clear()
     pkg.cake_gated_kv_compression_det_train_forward(many.c, many.z, many.cu, many.G)
     assert (many.S, launched, entries) == (FUSE_DOCS, ["fwd"], [(forward, arch)])
+    # one call looks up the architecture and the forward's bound once and passes the device and the architecture down
+    assert lookups == ["device_arch", "fuse_docs"] and passed == [(device.index, arch)]
     # 257, 300, 512, 513 and 8193 documents: past the forward's fused bound, on either side of small_docs, and far past
     for lengths, table in (
         ((1, 3, 5, 7) * 64 + (2,), "pair_table_small"),
@@ -1007,14 +1151,22 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         many = make_inputs(Pack(lengths), seed=41, device=device, layout="halves")
         launched.clear()
         entries.clear()
+        passed.clear()
+        lookups.clear()
         pkg.cake_gated_kv_compression_det_train_forward(many.c, many.z, many.cu, many.G)
         assert launched == [table, "fwd_unfused"], many.S
         assert entries == [(table, arch), (unfused, arch)], many.S
+        assert lookups == ["device_arch", "fuse_docs", "small_docs"], many.S
+        assert passed == [(device.index, arch)] * 2, many.S
         launched.clear()
         entries.clear()
+        passed.clear()
+        lookups.clear()
         pkg.cake_gated_kv_compression_det_train_backward(many.dout, many.c, many.z, many.cu)
         assert launched == [table, "bwd"], many.S
         assert entries == [(table, arch), (backward, arch)], many.S
+        assert lookups == ["device_arch", "small_docs"], many.S
+        assert passed == [(device.index, arch)] * 2, many.S
     launched.clear()
     entries.clear()
     x = make_inputs(MIXED, seed=37, device=device, layout="halves")
@@ -1025,10 +1177,13 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     launched.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu)
     assert launched == ["pair_table_small", "bwd"]
-    launched.clear()
     table = pair_table_of(MIXED.lengths, device)
+    launched.clear()
+    passed.clear()
+    lookups.clear()
     pkg.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, pair_offsets=table)
     assert launched == ["bwd"]
+    assert lookups == ["device_arch"] and passed == [(device.index, arch)]
     for entry, args in (
         (pkg.cake_gated_kv_compression_det_cz, lambda cz: (cz, x.cu, x.G)),
         (pkg.cake_gated_kv_compression_det, lambda cz: (cz[:, :WIDTH], cz[:, WIDTH:], x.cu, x.G)),

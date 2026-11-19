@@ -39,11 +39,12 @@ pair table (unless the caller passes the table as ``pair_offsets``) and
 of the odd-length documents' tail tokens).  The pair table is
 ``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents and
 ``pair_table`` for more (:func:`launch_pair_table`); both write the same
-bytes.  Every launch is a plain stream-ordered launch on the current torch
-stream of the operands' device.  Nothing here reads an environment variable,
-reads device memory or synchronizes: grids, buffer sizes and the pair-table
-launch come from tensor shapes and the caller's pair count ``G``, never from
-``cu_seqlens``.
+bytes.  A call looks up the operands' device index, its architecture and the
+roles once and passes them to its launches.  Every launch is a plain
+stream-ordered launch on the current torch stream of the operands' device.
+Nothing here reads an environment variable, reads device memory or
+synchronizes: grids, buffer sizes and the pair-table launch come from tensor
+shapes and the caller's pair count ``G``, never from ``cu_seqlens``.
 
 This is the deterministic package of its family, and the family's only
 package: every output element is one fixed chain of FP32 operations on its own
@@ -241,9 +242,18 @@ def _overlaps(a: torch.Tensor, b: torch.Tensor) -> bool:
 
 
 def _disjoint(written: tuple[str, torch.Tensor], others: tuple[tuple[str, Optional[torch.Tensor]], ...]) -> None:
+    """``ValueError`` when ``written`` may share a byte with one of ``others`` (:func:`_overlaps`).  The byte range of
+    ``written`` is read once, and only another tensor whose byte range meets it takes the exact test (two ranges that
+    do not meet share no byte, the first test of :func:`_overlaps`)."""
     name, t = written
+    if t.numel() == 0:
+        return
+    lo, hi = _extent(t)
     for other_name, other in others:
-        if other is not None and _overlaps(t, other):
+        if other is None or other.numel() == 0:
+            continue
+        other_lo, other_hi = _extent(other)
+        if lo < other_hi and other_lo < hi and _overlaps(t, other):
             raise ValueError(f"{name} must not overlap {other_name}")
 
 
@@ -303,15 +313,25 @@ def _pair_count(num_pairs: Any, out: Optional[torch.Tensor]) -> int:
 # Launchers: caller-owned buffers, the current stream, no allocation, no check of the operands' contents
 
 
-def launch_pair_table(*, cu_seqlens: torch.Tensor, cu_pairs: torch.Tensor) -> None:
+def launch_pair_table(
+    *,
+    cu_seqlens: torch.Tensor,
+    cu_pairs: torch.Tensor,
+    device_index: int | None = None,
+    arch: str | None = None,
+) -> None:
     """Launch a pair table: ``cu_pairs[0] = 0``, ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] -
     cu_seqlens[s]) // 2`` (int32 ``[S + 1]``, ``S >= 1``), by the ``pair_table_small`` role for ``S <=
-    cake_jit.small_docs(arch)`` and the ``pair_table`` role for more (the same bytes)."""
+    cake_jit.small_docs(arch)`` and the ``pair_table`` role for more (the same bytes).  ``device_index`` and ``arch``:
+    the index of the operands' device and its architecture when the caller has them; ``None`` looks them up."""
     S = int(cu_seqlens.numel()) - 1
-    index = cu_seqlens.device.index
-    role = "pair_table_small" if S <= cake_jit.small_docs(cake_jit.device_arch(index)) else "pair_table"
+    if device_index is None:
+        device_index = cu_seqlens.device.index
+    if arch is None:
+        arch = cake_jit.device_arch(device_index)
+    role = "pair_table_small" if S <= cake_jit.small_docs(arch) else "pair_table"
     values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
-    cake_jit.run_module(role, values, rows=1, device_index=index)
+    cake_jit.run_module(role, values, rows=1, device_index=device_index, arch=arch)
 
 
 def launch_fwd(
@@ -323,16 +343,25 @@ def launch_fwd(
     out: torch.Tensor,
     c_ld: int,
     z_ld: int,
+    role: str | None = None,
+    device_index: int | None = None,
+    arch: str | None = None,
 ) -> None:
     """Launch the forward: ``out [G, 512]`` (BF16) from the FP32 ``c`` and ``z`` rows (row strides ``c_ld`` and
     ``z_ld`` elements), ``cu_seqlens`` and its pair table ``cu_pairs`` (``S >= 1``, ``G >= 1``).  For
     ``S <= cake_jit.fuse_docs(arch)`` the ``fwd`` role (record ``fwd`` on SM100 / SM103, ``fwd_sm_107a`` on SM107)
     reads no entry of ``cu_pairs``: it builds the table itself and writes all ``S + 1`` entries.  For more documents
     the ``fwd_unfused`` role (record ``fwd_unfused`` on SM100 / SM103, ``fwd_unfused_sm_107a`` on SM107) reads the
-    table the caller's pair-table launch wrote."""
+    table the caller's pair-table launch wrote.  ``role`` (``fwd`` or ``fwd_unfused``), ``device_index`` and
+    ``arch``: the role the caller chose by that rule, the index of the operands' device and its architecture when
+    the caller has them; ``None`` looks them up."""
     S, G = int(cu_seqlens.numel()) - 1, int(out.shape[0])
-    index = out.device.index
-    role = "fwd" if S <= cake_jit.fuse_docs(cake_jit.device_arch(index)) else "fwd_unfused"
+    if device_index is None:
+        device_index = out.device.index
+    if arch is None:
+        arch = cake_jit.device_arch(device_index)
+    if role is None:
+        role = "fwd" if S <= cake_jit.fuse_docs(arch) else "fwd_unfused"
     values = {
         "c": c,
         "z": z,
@@ -344,7 +373,7 @@ def launch_fwd(
         "c_ld": int(c_ld),
         "z_ld": int(z_ld),
     }
-    cake_jit.run_module(role, values, rows=G, device_index=index)
+    cake_jit.run_module(role, values, rows=G, device_index=device_index, arch=arch)
 
 
 def launch_bwd(
@@ -360,10 +389,14 @@ def launch_bwd(
     z_ld: int,
     dc_ld: int,
     dz_ld: int,
+    device_index: int | None = None,
+    arch: str | None = None,
 ) -> None:
     """Launch the ``bwd`` role (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107): every ``dc`` and ``dz``
     row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16),
-    ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``, ``G >= 1``), on ``G + S`` virtual rows."""
+    ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``, ``G >= 1``), on ``G + S`` virtual rows.
+    ``device_index`` and ``arch``: the index of the operands' device and its architecture when the caller has them;
+    ``None`` looks them up."""
     S, G = int(cu_seqlens.numel()) - 1, int(dout.shape[0])
     values = {
         "dout": dout,
@@ -380,7 +413,9 @@ def launch_bwd(
         "dc_ld": int(dc_ld),
         "dz_ld": int(dz_ld),
     }
-    cake_jit.run_module("bwd", values, rows=G + S, device_index=dout.device.index)
+    if device_index is None:
+        device_index = dout.device.index
+    cake_jit.run_module("bwd", values, rows=G + S, device_index=device_index, arch=arch)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -405,7 +440,8 @@ def _forward(
         _dtype(out, "out", _BF16)
         _dense(out, "out", G, "out")
         _disjoint(("out", out), (("c", c), ("z", z), ("cu_seqlens", cu_seqlens)))
-    device_arch(device.index)  # RuntimeError on a device outside ARCHES
+    index = device.index
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
     if G == 0:
         return out, None
     if T == 0 or S == 0:
@@ -413,11 +449,26 @@ def _forward(
         out.zero_()
         return out, None
     cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
-    if S > cake_jit.fuse_docs(device_arch(device.index)):
-        # A forward of at most fuse_docs documents builds the table itself and writes cu_pairs for the backward; a
-        # forward of more reads the table this launch writes (launch_fwd runs fwd_unfused).
-        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs)
-    launch_fwd(c=c, z=z, cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, out=out, c_ld=c_ld, z_ld=z_ld)
+    # The device, its architecture and the roles are looked up once here and passed to the launches.
+    if S <= cake_jit.fuse_docs(arch):
+        # A forward of at most fuse_docs documents builds the table itself and writes cu_pairs for the backward.
+        role = "fwd"
+    else:
+        # A forward of more reads the table this launch writes.
+        role = "fwd_unfused"
+        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, device_index=index, arch=arch)
+    launch_fwd(
+        c=c,
+        z=z,
+        cu_seqlens=cu_seqlens,
+        cu_pairs=cu_pairs,
+        out=out,
+        c_ld=c_ld,
+        z_ld=z_ld,
+        role=role,
+        device_index=index,
+        arch=arch,
+    )
     return out, cu_pairs
 
 
@@ -475,7 +526,8 @@ def cake_gated_kv_compression_det_train_backward(
     reads = (("dout", dout), ("c", c), ("z", z), ("cu_seqlens", cu_seqlens), ("pair_offsets", pair_offsets))
     _disjoint(("dc", dc), (("dz", dz), *reads))
     _disjoint(("dz", dz), reads)
-    device_arch(device.index)  # RuntimeError on a device outside ARCHES
+    index = device.index
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
     if T == 0:
         return dc, dz
     if G == 0 or S == 0:
@@ -486,7 +538,7 @@ def cake_gated_kv_compression_det_train_backward(
     cu_pairs = pair_offsets
     if cu_pairs is None:
         cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
-        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs)
+        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, device_index=index, arch=arch)
     launch_bwd(
         dout=dout,
         c=c,
@@ -499,6 +551,8 @@ def cake_gated_kv_compression_det_train_backward(
         z_ld=z_ld,
         dc_ld=dc_ld,
         dz_ld=dz_ld,
+        device_index=index,
+        arch=arch,
     )
     return dc, dz
 
