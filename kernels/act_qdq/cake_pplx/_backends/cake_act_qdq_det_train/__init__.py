@@ -30,11 +30,14 @@ Host design (every switch is a keyword; no environment variable):
   place, any other buffer must not overlap ``x``.
 - The FP32 scales ``[..., D / G]`` are written when ``return_scales`` is
   true or a ``scales`` buffer is given.
-- A call runs the one program of its route (``cake_jit.selected_module``) in
-  64-thread CTAs on the current torch stream.  The grid is the ``tiles`` rule
-  of ``cake_jit.launch_grid``: one CTA per tile of 128 vectors (256 on
-  sm_107a) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on
-  sm_107a), else the resident CTAs walk the tiles.  It does not read device
+- A call runs one program of its route (``cake_jit.selected_module``) on the
+  current torch stream: the small program (256-thread CTAs, tiles of 512
+  vectors) when ``n_vecs = numel / 8`` lies in its range (65,537 to 524,288
+  on sm_100a and sm_103a, 1 to 262,144 on sm_107a), else the main program
+  (64-thread CTAs, tiles of 128 vectors, 256 on sm_107a).  The grid is the
+  ``tiles`` rule of ``cake_jit.launch_grid``: one CTA per tile once the tiles
+  pass 2.5 waves of resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the
+  small program), else the resident CTAs walk the tiles.  It does not read device
   memory on the host and does not synchronize.  A call with no elements
   launches nothing.
 - Every output repeats bit for bit for identical inputs: each group is
@@ -222,8 +225,9 @@ def cake_act_qdq_det_train_forward(
                 raise ValueError("scales must not overlap x or out")
 
     if numel:
-        name = cake_jit.selected_module(arch, format, scale_out=scale_out)
-        values = {"x": x, "y": y, "n_vecs": numel // cake_jit.VECTOR}
+        n_vecs = numel // cake_jit.VECTOR
+        name = cake_jit.selected_module(arch, format, scale_out=scale_out, n_vecs=n_vecs)
+        values = {"x": x, "y": y, "n_vecs": n_vecs}
         if scale_out:
             values["scales"] = s
         cake_jit.run_module(name, values, device_index=device_index)

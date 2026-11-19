@@ -55,21 +55,26 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has six programs: one per format, each with and without the scale output.  Each is built for `sm_100a`,
-`sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json` lists 18 libraries.  A
-call runs the one program of its route (`cake_jit.selected_module(arch, format, scale_out=...)`).
+The package has twelve programs: per format, with and without the scale output, a main program and a small one.  Each
+is built for `sm_100a`, `sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json`
+lists 36 libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format, scale_out=...,
+n_vecs=...)`): the small program when `n_vecs` lies in its `vectors` range (65,537 to 524,288 on `sm_100a` and
+`sm_103a`, 1 to 262,144 on `sm_107a`), and the main program otherwise.
 
-A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8`
-adjacent threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128
-vectors (256 on `sm_107a`) per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its
-whole warp and any grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_107a`) before it
-computes or stores any of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per
-tile once the tiles pass 2.5 waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many
-CTAs, at most one per tile; the SM count is read once per device.  Neither the last dimension, nor the rank, nor
-the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of
-its own format and scale output, so build every library of the architecture before a CUDA graph capture: call
-`build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format and scale
-output that the capture uses.
+A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
+threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
+on `sm_107a`) per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its whole warp and any
+grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_107a`) before it computes or stores any
+of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per tile once the tiles pass 2.5
+waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many CTAs, at most one per tile; the SM
+count is read once per device.  The small program is the same kernel with 256-thread CTAs that take 2 vectors per thread
+on every architecture (tiles of 512 vectors, 8 CTAs per SM, 4 on `sm_107a`).  Its sizes fill about one wave, where the
+time is mostly the start of the CTAs, and a 256-thread CTA starts four times the threads of a 64-thread one.  Both
+programs give the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
+kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own program, so build
+every library of the architecture before a CUDA graph capture: call `build_and_load()` on each spec of
+`cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output and program (size range) that the
+capture uses.
 
 ## Numerics
 

@@ -25,7 +25,9 @@ reaches, and random inputs of the model shapes (2-D, 3-D and 4-D, 1 to 4097
 rows, widths 16 to 4096, a width of 96; each released call site at 8192
 rows).  Each runs out of place and in place,
 with and without the scale output, and every program also runs directly on
-grids of 1 and 3 CTAs.  The suite also checks: out-of-place calls leave ``x``
+grids of 1 and 3 CTAs.  Calls on each side of the small program's size range
+run the program their route names there, and both programs of the route give
+the rule's bits on those inputs.  The suite also checks: out-of-place calls leave ``x``
 unchanged; caller ``out`` and ``scales`` buffers; five repeated calls bit for
 bit; argument validation; no launch for empty inputs; CUDA graph replay; no
 rebuild on a new shape; ``torch.utils.checkpoint`` through a straight-through
@@ -64,6 +66,23 @@ FORMATS = reference.FORMATS
 REPEATS = 5
 # The minimum CUDA toolkit of every library, per architecture.
 MIN_CUDA = {"sm_100a": "12.9", "sm_103a": "12.9", "sm_107a": "13.5"}
+# The inclusive n_vecs range of a route's small program, per architecture.
+SMALL_VECTORS = {"sm_100a": (65537, 524288), "sm_103a": (65537, 524288), "sm_107a": (1, 262144)}
+# The grid rules of the main and the small programs.
+MAIN_RULE = {
+    "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+    "kind": "tiles",
+    "persist_waves": 2.5,
+    "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+    "vector_elements": 8,
+}
+SMALL_RULE = {
+    "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+    "kind": "tiles",
+    "persist_waves": 2.5,
+    "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+    "vector_elements": 8,
+}
 
 
 def _supported() -> bool:
@@ -251,23 +270,54 @@ def test_every_program_runs_on_any_grid() -> None:
     and on the host's grid, out of place and in place."""
     arch = _arch()
     for kind, names in loader.ROUTES[arch].items():
-        (name,) = names
-        record = loader.MODULES[name]
-        fmt = record["format"]
-        x0 = reference.randn_input((4097, 96), fmt, seed=41)
+        for name in names:
+            record = loader.MODULES[name]
+            fmt = record["format"]
+            x0 = reference.randn_input((4097, 96), fmt, seed=41)
+            want = reference.qdq(x0, fmt)
+            n_vecs = x0.numel() // loader.VECTOR
+            for grid in ((1, 1, 1), (3, 1, 1), None):
+                for inplace in (False, True):
+                    x = x0.clone()
+                    y = x if inplace else torch.full_like(x0, float("nan"))
+                    values = {"x": x, "y": y, "n_vecs": n_vecs}
+                    s = None
+                    if record["scale_out"]:
+                        s = torch.full(_scale_shape(tuple(x0.shape), fmt), float("nan"), device="cuda")
+                        values["scales"] = s
+                    loader.run_module(name, values, device_index=0, grid=grid)
+                    _check(f"{kind} {name} grid={grid} inplace={inplace}", want, y, s)
+
+
+@gpu
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_calls_at_the_size_boundaries_match_the_rule(fmt: str) -> None:
+    """Inputs of width 32 just inside and just outside the small program's range: the call runs the program its
+    route names for that size, and each program of the route, launched directly, gives the rule's bits too."""
+    arch = _arch()
+    low, high = SMALL_VECTORS[arch]
+    first, last = -(-low // 4) * 4, high // 4 * 4  # a width-32 row is 4 vectors
+    cases = [(first, True), (last, True), (last + 4, False)]
+    if first > 4:
+        cases.append((first - 4, False))
+    for n_vecs, small in cases:
+        x0 = reference.randn_input((n_vecs // 4, 32), fmt, seed=n_vecs % 1000)
         want = reference.qdq(x0, fmt)
-        n_vecs = x0.numel() // loader.VECTOR
-        for grid in ((1, 1, 1), (3, 1, 1), None):
-            for inplace in (False, True):
-                x = x0.clone()
-                y = x if inplace else torch.full_like(x0, float("nan"))
-                values = {"x": x, "y": y, "n_vecs": n_vecs}
+        for scale_out in (False, True):
+            kind = loader.route_name(fmt, scale_out=scale_out)
+            chosen = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs)
+            assert chosen == kind + ("_small" if small else ""), (arch, n_vecs, chosen)
+            y, s = _call(x0, fmt, inplace=False, return_scales=scale_out)
+            _check(f"{fmt} n_vecs={n_vecs} call ({chosen})", want, y, s)
+            for name in loader.ROUTES[arch][kind]:
+                y = torch.full_like(x0, float("nan"))
+                values = {"x": x0, "y": y, "n_vecs": n_vecs}
                 s = None
-                if record["scale_out"]:
+                if scale_out:
                     s = torch.full(_scale_shape(tuple(x0.shape), fmt), float("nan"), device="cuda")
                     values["scales"] = s
-                loader.run_module(name, values, device_index=0, grid=grid)
-                _check(f"{kind} {name} grid={grid} inplace={inplace}", want, y, s)
+                loader.run_module(name, values, device_index=0)
+                _check(f"{fmt} n_vecs={n_vecs} {name}", want, y, s)
 
 
 # --------------------------------------------------------------------------- outputs, buffers and repeats
@@ -580,24 +630,34 @@ def test_constants() -> None:
 
 
 @pytest.mark.cpu_only
-def test_routes_select_one_program_per_format() -> None:
+def test_routes_select_a_program_by_size(monkeypatch) -> None:
     for capability, arch in ((10, 0), "sm_100a"), ((10, 3), "sm_103a"), ((10, 7), "sm_107a"):
         assert loader.arch_for_capability(capability) == arch
     assert loader.arch_for_capability((9, 0)) is None
     assert loader.arch_for_capability((12, 0)) is None
     for arch in loader.ARCHES:
+        low, high = SMALL_VECTORS[arch]
         chosen = set()
         for fmt in FORMATS:
             for scale_out in (False, True):
-                name = loader.selected_module(arch, fmt, scale_out=scale_out)
-                record = loader.MODULES[name]
-                assert record["format"] == fmt and record["scale_out"] is scale_out, name
-                chosen.add(name)
+                kind = loader.route_name(fmt, scale_out=scale_out)
+                for n_vecs in sorted({1, low - 1, low, high, high + 1, loader.MAX_VECTORS} - {0}):
+                    name = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs)
+                    record = loader.MODULES[name]
+                    assert record["format"] == fmt and record["scale_out"] is scale_out, name
+                    assert name == kind + ("_small" if low <= n_vecs <= high else ""), (arch, n_vecs, name)
+                    chosen.add(name)
         assert chosen == set(loader.MODULES), arch
     with pytest.raises(ValueError, match="format"):
-        loader.selected_module("sm_100a", "nvfp4", scale_out=False)
+        loader.selected_module("sm_100a", "nvfp4", scale_out=False, n_vecs=1)
     with pytest.raises(ValueError, match="route"):
         loader.route_modules("sm_90a", "fp4_e4m3_g16")
+    monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales"])
+    with pytest.raises(RuntimeError, match="one main record and at most one small record"):
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1)
+    monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales_small"])
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1)
 
 
 @pytest.mark.cpu_only
@@ -619,6 +679,12 @@ def test_launch_grid() -> None:
         ), arch
     with pytest.raises(ValueError, match="no tile for sm_90a"):
         loader.launch_grid(record, n_vecs=1, sm_count=148, arch="sm_90a")
+    small = loader.MODULES["mxfp8_e8m0_g32_small"]
+    for arch, resident in (("sm_100a", 8 * 148), ("sm_103a", 8 * 148), ("sm_107a", 4 * 148)):
+        assert loader.launch_grid(small, n_vecs=512, sm_count=148, arch=arch) == (1, 1, 1), arch
+        assert loader.launch_grid(small, n_vecs=513, sm_count=148, arch=arch) == (2, 1, 1), arch
+        high = SMALL_VECTORS[arch][1]
+        assert loader.launch_grid(small, n_vecs=high, sm_count=148, arch=arch) == (min(high // 512, resident), 1, 1)
 
 
 @pytest.mark.cpu_only
@@ -635,24 +701,23 @@ def test_registry_records_reference_the_build_manifest() -> None:
     for arch, routes in loader.ROUTES.items():
         assert set(routes) == set(loader.KINDS), arch
         for kind, names in routes.items():
-            assert names == [kind], (arch, kind)
+            assert names == [kind, f"{kind}_small"], (arch, kind)
     referenced = set()
     for name, record in loader.MODULES.items():
-        assert name == loader.route_name(record["format"], scale_out=record["scale_out"]), name
+        small = "vectors" in record
+        kind = loader.route_name(record["format"], scale_out=record["scale_out"])
+        assert name == kind + ("_small" if small else ""), name
+        if small:
+            assert record["vectors"] == SMALL_VECTORS, name
         assert re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
         assert tuple(record["arches"]) == loader.ARCHES, name
         assert record["ffi_entry"] == "run", name
-        assert record["grid_rule"] == {
-            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
-            "kind": "tiles",
-            "persist_waves": 2.5,
-            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
-            "vector_elements": loader.VECTOR,
-        }, name
+        assert record["grid_rule"] == (SMALL_RULE if small else MAIN_RULE), name
+        assert record["grid_rule"]["vector_elements"] == loader.VECTOR, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
         launch = record["launch"]
-        assert tuple(launch["block"]) == (64, 1, 1), name
+        assert tuple(launch["block"]) == (256 if small else 64, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         assert launch["dynamic_smem_bytes"] == 0, name
