@@ -1171,12 +1171,31 @@ def _route_fallback(arch: str, kind: str) -> str:
 
 
 def _rules_pick(arch: str, kind: str, C: int, S: int) -> str:
-    """The program the selection rules pick for ``(S, C)`` of route ``kind`` on ``arch`` (no fallback rows)."""
+    """The program the selection rules pick for ``(S, C)`` of route ``kind`` on ``arch`` (no fallback rows, no SM-wide
+    rows)."""
 
     with pytest.MonkeyPatch.context() as m:
         m.setattr(cake_jit, "FALLBACK_ROWS", {})
+        m.setattr(cake_jit, "SM_WIDE_ROWS", {})
         (name,) = cake_jit.selected_modules(arch, kind, C=C, S=S)
     return name
+
+
+def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
+    """The program the registry's ``SM_WIDE_ROWS`` segment, else its ``FALLBACK_ROWS`` range, holding ``(C, S)`` of
+    route ``kind`` on ``arch`` names (read from the two tables, not through the selection), ``None`` outside both."""
+
+    if C % 8:
+        return None
+    for (route, c_lo, c_hi), segments in cake_jit.SM_WIDE_ROWS.get(arch, {}).items():
+        if route == kind and c_lo <= C <= c_hi:
+            for s_lo, s_hi, name in segments:
+                if s_lo <= S <= s_hi:
+                    return name
+    for (route, c_lo, c_hi), (s_min, s_max) in cake_jit.FALLBACK_ROWS.get(arch, {}).items():
+        if route == kind and c_lo <= C <= c_hi and s_min <= S <= s_max:
+            return _route_fallback(arch, kind)
+    return None
 
 
 @pytest.mark.cpu_only
@@ -1208,11 +1227,12 @@ def test_fallback_rows_are_the_literal_rows() -> None:
 @pytest.mark.parametrize("arch", ARCHES)
 def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     """Inside a key (``C_lo <= C <= C_hi``, ``C`` a multiple of 8, ``S_min <= S <= S_max``) a call of the key's route
-    selects the route's fallback program, and the program the selection rules pick everywhere else: both sides of
-    every channel and token bound, on every backward route of the architecture.  ``fallback_row_range`` holds the
-    key's token range at its channel counts only; ``S`` of ``None`` is a ``ValueError`` where a key covers ``C``.
-    ``plan_row`` needs ``inside`` there (``ValueError`` without it) and plans the fallback inside the range and the
-    rules' program outside it; at a row no key covers it plans the same row whatever ``inside``."""
+    selects the route's fallback program, inside an ``SM_WIDE_ROWS`` segment the segment's program, and the program
+    the selection rules pick everywhere else: both sides of every channel and token bound, on every backward route
+    of the architecture.  ``fallback_row_range`` holds the key's token range at its channel counts only; ``S`` of
+    ``None`` is a ``ValueError`` where a key covers ``C``.  ``plan_row`` needs ``at`` there (``ValueError`` without
+    it) and plans, at the first token count of every side of ``row_sides``, the program of that side (``None`` on a
+    rules side where a token floor decides); at a row no key covers it plans the same row whatever ``at``."""
 
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
     rows = cake_jit.FALLBACK_ROWS.get(arch, {})
@@ -1222,6 +1242,9 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     for (_, c_lo, c_hi), (s_min, s_max) in rows.items():
         channels |= {c_lo - 8, c_lo, c_lo + 4, (c_lo + c_hi) // 16 * 8, c_hi, c_hi + 8}
         tokens |= {s_min - 1, s_min, s_max, s_max + 1}
+    for (_, c_lo, c_hi), segments in cake_jit.SM_WIDE_ROWS.get(arch, {}).items():
+        channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
+        tokens |= {bound for s_lo, s_hi, _ in segments for bound in (s_lo - 1, s_lo, s_hi, s_hi + 1)}
     inside_calls = 0
     for kind in cake_jit.backward_kinds(arch):
         fallback = _route_fallback(arch, kind)
@@ -1234,31 +1257,35 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
             assert len(keys) <= 1, (kind, C)
             bounds = keys[0] if keys else None
             assert cake_jit.fallback_row_range(arch, kind, C) == bounds, (kind, C)
-            for S in sorted(S for S in tokens if S > 0):
+            for S in sorted(S for S in tokens if 0 < S <= cake_jit.INT32_MAX):
                 inside = bounds is not None and bounds[0] <= S <= bounds[1]
-                want = fallback if inside else _rules_pick(arch, kind, C, S)
+                want = _table_pick(arch, kind, C, S) or _rules_pick(arch, kind, C, S)
+                assert inside is (want == fallback and _table_pick(arch, kind, C, S) is not None), (kind, C, S)
                 assert cake_jit.selected_modules(arch, kind, C=C, S=S) == (want,), (kind, C, S)
                 inside_calls += inside
             if C % 8:
                 continue
 
-            def row(side, kind=kind, C=C):
-                return cake_jit.plan_row(arch, kind, C, device_index=FAKE_DEVICE, inside=side)
+            def row(at, kind=kind, C=C):
+                return cake_jit.plan_row(arch, kind, C, device_index=FAKE_DEVICE, at=at)
 
-            if bounds is None:
-                assert row(None) == row(True) == row(False), (kind, C)
+            sides = cake_jit.row_sides(arch, kind, C)
+            if len(sides) == 1:
+                assert bounds is None and sides == ((0, sys.maxsize),), (kind, C)
+                assert row(None) == row(1) == row(cake_jit.INT32_MAX), (kind, C)
                 continue
             with pytest.raises(ValueError, match="needs S"):
                 cake_jit.selected_modules(arch, kind, C=C)
-            with pytest.raises(ValueError, match="inside"):
+            with pytest.raises(ValueError, match="at="):
                 row(None)
-            assert row(True).names == (fallback,), (kind, C)
-            outside = row(False)
-            if cake_jit.tokens_select(arch, kind, C):
-                assert outside is None, (kind, C)
-            else:
-                assert outside.names == (_rules_pick(arch, kind, C, bounds[1] + 1),), (kind, C)
-                assert outside.names != (fallback,), (kind, C)
+            for s_lo, _ in sides:
+                planned, picked = row(s_lo), _table_pick(arch, kind, C, s_lo)
+                if picked is None and cake_jit.tokens_select(arch, kind, C):
+                    assert planned is None, (kind, C, s_lo)
+                    continue
+                assert planned.names == (picked or _rules_pick(arch, kind, C, s_lo),), (kind, C, s_lo)
+                if picked is None and s_lo > 0:
+                    assert planned.names != (fallback,), (kind, C, s_lo)
     assert bool(inside_calls) is bool(rows), arch
 
 
@@ -1815,7 +1842,8 @@ FULL_PLAN_SWEEP = os.environ.get("CAKE_CONV1D_FULL_PLAN_SWEEP") == "1"
 def _plan_sweep_channels() -> tuple[int, ...]:
     """``CHANNELS``, rows off the 32-channel grid, and every selection threshold and ``TILE_OVERRIDES`` channel count
     of the registry with the multiple of 8 below it, both ends of every ``NARROW_TILES`` key with their neighbours
-    outside it, both ends of every ``FALLBACK_ROWS`` key with their neighbours outside it, and the forward's narrow rows
+    outside it, both ends of every ``FALLBACK_ROWS`` and ``SM_WIDE_ROWS`` key with their neighbours outside it, and
+    the forward's narrow rows
     (C 576 to 768, two of them off the 64-channel grid, and C 712, the first row of sm_103a's
     ``FORWARD_NARROW_ROW_MIN_S`` floor of the ``fwd_bias`` route) with their neighbours."""
 
@@ -1828,7 +1856,7 @@ def _plan_sweep_channels() -> tuple[int, ...]:
     for rows in cake_jit.TILE_OVERRIDES.values():
         for _, C in rows:
             channels |= {C - 8, C, C + 8}
-    for table in (cake_jit.NARROW_TILES, cake_jit.FALLBACK_ROWS):
+    for table in (cake_jit.NARROW_TILES, cake_jit.FALLBACK_ROWS, cake_jit.SM_WIDE_ROWS):
         for rows in table.values():
             for _, c_lo, c_hi in rows:
                 channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
@@ -1837,7 +1865,7 @@ def _plan_sweep_channels() -> tuple[int, ...]:
 
 def _plan_sweep_tokens() -> tuple[int, ...]:
     """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES``, ``NARROW_TILES``
-    and ``FALLBACK_ROWS`` ranges, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and
+    and ``FALLBACK_ROWS`` ranges and the ``SM_WIDE_ROWS`` segments, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and
     ``FORWARD_WIDTH_FLOORS``, the grid-trim minimums and the selection rules' token floors, plus a few others."""
 
     tokens = {1, 2, 63, 64, 1000, 250340, 1 << 20}
@@ -1854,6 +1882,10 @@ def _plan_sweep_tokens() -> tuple[int, ...]:
             for value in rows.values():
                 s_min, s_max = value[-2:]
                 tokens |= {s_min - 1, s_min, s_max, s_max + 1}
+    for rows in cake_jit.SM_WIDE_ROWS.values():
+        for segments in rows.values():
+            for s_lo, s_hi, _ in segments:
+                tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
     tokens |= {cake_jit.TILE_ALIGNED_MIN_S - 1, cake_jit.TILE_ALIGNED_MIN_S}
     for classes in cake_jit.TILE_ALIGNED_CLASSES.values():
         for s_min, _ in classes.values():
@@ -2102,11 +2134,12 @@ def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatc
                 m.setitem(cake_jit.FORWARD_NARROW_MIN_S, arch, S_min)
                 m.setitem(cake_jit.FORWARD_NARROW_ROW_MIN_S, arch, rows)
                 for (kind, C), plan_before in before.items():
-                    hit = pkg._ROW_PLANS.get((arch, kind, C, FAKE_DEVICE, 1))
-                    if hit is None:  # the call raised before planning a row
+                    sides = pkg._ROW_PLANS.get((arch, kind, C, FAKE_DEVICE, 1))
+                    if sides is None:  # the call raised before planning a row
                         assert isinstance(plan_before[1], str), (kind, C, plan_before)
                         continue
-                    if hit[0] is None:  # the selection reads ``S``: every call is planned
+                    (row,) = [row for s_lo, s_hi, row, _ in sides if s_lo <= S_min <= s_hi]
+                    if row is None:  # the selection reads ``S``: every call is planned
                         assert cake_jit.tokens_select(arch, kind, C), (kind, C)
                         continue
                     assert _row_planned(arch, kind, S_min, C, 3, 1, None) == plan_before, (kind, C)

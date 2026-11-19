@@ -4387,6 +4387,11 @@ GRID_KINDS = ("co_resident", "occupancy")
 # its route's fallback.  ``channels_tokens_at_least`` adds a token floor to the
 # channel threshold.
 SELECT_KINDS = ("channels_at_least", "channels_tokens_at_least")
+# The selection-rule kind of a backward record that runs only at the rows of
+# :data:`SM_WIDE_ROWS` (``{"kind": "rows"}``): no channel threshold or token
+# floor ever admits it (:func:`_admits` is ``False``), so the rules never pick
+# it and it is no route's fallback.
+ROWS_KIND = "rows"
 # The ``flags`` bit mask of the ``dtype_flags`` programs (every program of the
 # eight other routes ``fwd_dt``, ``fwd_bias``, ``bwd_dt``, ``bwd_bias``,
 # ``bwd_fp32g``, ``bwd_bias_fp32g``, ``bwd_dt_bf16_taps`` and
@@ -4570,6 +4575,9 @@ def select_rule(record: dict[str, Any]) -> dict[str, Any] | None:
     count is also at least ``tokens[arch]``.  When several records own a call,
     the one of the highest channel threshold runs; at a row of
     :data:`FALLBACK_ROWS` the route's fallback runs whatever the rules.
+    ``{"kind": "rows"}`` (:data:`ROWS_KIND`) owns no call by the rules: the
+    record runs only at the rows of :data:`SM_WIDE_ROWS` that name it, before
+    :data:`FALLBACK_ROWS` and the rules.
     """
 
     return record.get("select_rule")
@@ -4577,15 +4585,17 @@ def select_rule(record: dict[str, Any]) -> dict[str, Any] | None:
 
 def _threshold(rule: dict[str, Any], *, arch: str) -> int | None:
     """The channel count from which a selection rule owns the calls on ``arch``, ``None`` where it never does
-    (``ValueError`` for an unknown kind)."""
+    (a rule of kind :data:`ROWS_KIND` never does; ``ValueError`` for an unknown kind)."""
 
     kind = rule["kind"]
+    if kind == ROWS_KIND:
+        return None
     if kind in SELECT_KINDS:
         channels = rule["channels"]
         return int(channels[arch]) if arch in channels else None
     raise ValueError(
         f"unknown Cake causal conv1d training selection rule: {kind!r} "
-        f"(known: {SELECT_KINDS})"
+        f"(known: {(*SELECT_KINDS, ROWS_KIND)})"
     )
 
 
@@ -4659,27 +4669,106 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
     return None
 
 
+# The rows where a backward route runs one of its SM-wide programs (one CTA per SM
+# for the whole launch, each CTA a whole token stream of every channel) in place
+# of the program :data:`FALLBACK_ROWS` or its selection rules pick, ``{arch:
+# {(route, C_lo, C_hi): ((S_lo, S_hi, module), ...)}}``: a backward call of
+# ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8) and
+# ``S_lo <= S <= S_hi`` tokens launches ``module`` (:func:`sm_wide_module`), a
+# record of the route whose ``select_rule`` is of kind :data:`ROWS_KIND`.  The
+# segments of a key ascend, are contiguous and end at ``INT32_MAX``; the keys of
+# one ``(arch, route)`` are disjoint and share no ``(C, S)`` with a
+# :data:`FALLBACK_ROWS` range.  Rendered from the backward kernel generator's
+# table; every other channel count, route, ``S`` and architecture selects by
+# :data:`FALLBACK_ROWS` and the rules.
+SM_WIDE_ROWS: dict[str, dict[tuple[str, int, int], tuple[tuple[int, int, str], ...]]] = {}
+
+
+def sm_wide_segments(
+    arch: str, kind: str, C: int
+) -> tuple[tuple[int, int, str], ...] | None:
+    """The ``((S_lo, S_hi, module), ...)`` segments of the :data:`SM_WIDE_ROWS` key of ``arch`` on route ``kind``
+    covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of 8), ``None`` without one."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), segments in SM_WIDE_ROWS.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return tuple((int(s_lo), int(s_hi), str(name)) for s_lo, s_hi, name in segments)
+    return None
+
+
+def sm_wide_module(arch: str, kind: str, C: int, S: int | None) -> str | None:
+    """The SM-wide program a call of route ``kind`` on ``arch`` with ``C`` channels and ``S`` tokens launches: the
+    module of the :data:`SM_WIDE_ROWS` segment holding ``S`` (both bounds included) of the key covering ``C``,
+    ``None`` outside every segment or without a key.  ``S`` of ``None`` where a key covers ``C`` is a
+    ``ValueError``; a module the route does not list, or whose rule is not of kind :data:`ROWS_KIND`, is a registry
+    error (``RuntimeError``)."""
+
+    segments = sm_wide_segments(arch, kind, C)
+    if segments is None:
+        return None
+    if S is None:
+        raise ValueError(
+            f"the Cake causal conv1d training {kind!r} route on {arch} for C={int(C)} runs its SM-wide programs at "
+            f"S {segments[0][0]} to {segments[-1][1]}; the selection needs S"
+        )
+    for s_lo, s_hi, name in segments:
+        if s_lo <= int(S) <= s_hi:
+            if name not in route_modules(arch, kind) or (select_rule(MODULES[name]) or {}).get("kind") != ROWS_KIND:
+                raise RuntimeError(
+                    f"the SM_WIDE_ROWS segment ({s_lo}, {s_hi}) of route {kind!r} on {arch} names {name}, which is "
+                    f"no record of the route with a {ROWS_KIND!r} selection rule"
+                )
+            return name
+    return None
+
+
+def row_sides(arch: str, kind: str, C: int) -> tuple[tuple[int, int], ...]:
+    """The token ranges ``((s_lo, s_hi), ...)`` (ascending, disjoint, from 0 up, the last to ``sys.maxsize``) over
+    each of which the calls of route ``kind`` on ``arch`` with ``C`` channels select by one :data:`SM_WIDE_ROWS`
+    segment, the :data:`FALLBACK_ROWS` range or the rules: the bounds of every segment of the key covering ``C`` and
+    of the fallback range covering ``C`` cut the token axis.  One range ``((0, sys.maxsize),)`` without either key.
+    Inside a range :func:`selected_modules` picks one program, but where a token floor of the rules decides it
+    outside both tables (:func:`tokens_select`)."""
+
+    ranges = [] if (bounds := fallback_row_range(arch, kind, C)) is None else [bounds]
+    ranges += [(s_lo, s_hi) for s_lo, s_hi, _ in sm_wide_segments(arch, kind, C) or ()]
+    starts = {0}
+    for s_lo, s_hi in ranges:
+        starts |= {max(int(s_lo), 0), max(int(s_hi) + 1, 0)}
+    ordered = sorted(starts)
+    return tuple(zip(ordered, [*(start - 1 for start in ordered[1:]), sys.maxsize]))
+
+
 def selected_modules(
     arch: str, kind: str, *, C: int, S: int | None = None
 ) -> tuple[str, ...]:
     """Ordered module names one public call launches on ``arch`` for ``C`` channels and ``S`` tokens.
 
     A route may carry several programs of its kernel and launches exactly one:
-    at a row of :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``)
-    the route's single fallback record (the one without a rule); elsewhere, of
-    the records whose :func:`select_rule` admits the call on ``arch`` the one
-    of the highest channel threshold, else the fallback.  The choice is a pure
+    at a row of :data:`SM_WIDE_ROWS` (a segment holds ``S``) the segment's
+    SM-wide program (:func:`sm_wide_module`); else at a row of
+    :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``) the route's
+    single fallback record (the one without a rule); elsewhere, of the records
+    whose :func:`select_rule` admits the call on ``arch`` the one of the
+    highest channel threshold, else the fallback.  The choice is a pure
     function of the architecture, the route, ``C`` and ``S`` -- ``S`` enters
-    only through a rule's token floor or a :data:`FALLBACK_ROWS` range, and
-    the host never reads the data -- so a given ``(S, C, device)`` always runs
-    the same program of a route (``dx`` is that program's bits; ``dweight`` /
-    ``dbias`` are summed in an unordered cross-CTA order).  Two records of one
-    channel threshold that both reach ``C``, or zero or several fallbacks, are
-    registry errors (``RuntimeError``); an unknown rule kind, or ``S`` of
-    ``None`` where a token floor decides or a :data:`FALLBACK_ROWS` key covers
-    ``C``, is a ``ValueError``.
+    only through a rule's token floor, an :data:`SM_WIDE_ROWS` segment or a
+    :data:`FALLBACK_ROWS` range, and the host never reads the data -- so a
+    given ``(S, C, device)`` always runs the same program of a route (``dx``
+    is that program's bits; ``dweight`` / ``dbias`` are summed in an unordered
+    cross-CTA order).  Two records of one channel threshold that both reach
+    ``C``, zero or several fallbacks, or a segment naming no ``rows`` record of
+    the route, are registry errors (``RuntimeError``); an unknown rule kind, or
+    ``S`` of ``None`` where a token floor decides or an :data:`SM_WIDE_ROWS`
+    or :data:`FALLBACK_ROWS` key covers ``C``, is a ``ValueError``.
     """
 
+    sm_wide = sm_wide_module(arch, kind, C, S)
+    if sm_wide is not None:
+        return (sm_wide,)
     candidates, fallback = _ranked_candidates(arch, kind, C)
     bounds = fallback_row_range(arch, kind, C)
     if bounds is not None:
@@ -4698,7 +4787,8 @@ def selected_modules(
 
 def _ranked_candidates(arch: str, kind: str, C: int) -> tuple[tuple[str, ...], str]:
     """``(candidates, fallback)`` of :func:`selected_modules`: the records of ``kind`` on ``arch`` whose channel
-    threshold ``C`` reaches, highest threshold first, and the route's fallback record (registry errors as there)."""
+    threshold ``C`` reaches, highest threshold first, and the route's fallback record (registry errors as there).
+    A record of kind :data:`ROWS_KIND` has no threshold: it is neither a candidate nor the fallback."""
 
     names = route_modules(arch, kind)
     candidates: list[tuple[int, str]] = []
@@ -4735,9 +4825,10 @@ def tokens_select(arch: str, kind: str, C: int) -> bool:
     rule has a token floor, so the rules read ``S`` exactly when the
     highest-threshold record ``C`` reaches has one (in this registry the
     sm_107a ``bwd`` route at ``256 <= C < 512``); every other row's rules
-    select one program whatever ``S``.  A :data:`FALLBACK_ROWS` key reads
-    ``S`` too, as one range compare (:func:`fallback_row_range`; the row plan
-    of each side is :func:`plan_row`'s ``inside``).
+    select one program whatever ``S``.  An :data:`SM_WIDE_ROWS` key and a
+    :data:`FALLBACK_ROWS` key read ``S`` too, as range compares
+    (:func:`row_sides`; the row plan of each side is :func:`plan_row` ``at=`` a
+    token count of the side).
     """
 
     candidates, _ = _ranked_candidates(arch, kind, C)
@@ -4785,28 +4876,51 @@ def workspace_owners(arch: str) -> tuple[dict[str, Any], ...]:
     return owners
 
 
+def workspace_geometry(arch: str) -> dict[str, int]:
+    """The build geometry of the backward routes' fallback programs on ``arch``.
+
+    Every backward route has one fallback program (the record without a
+    ``select_rule``); fallbacks of different geometries are a registry error
+    (``RuntimeError``).
+    """
+
+    geometries = []
+    for kind in backward_kinds(arch):
+        for name in route_modules(arch, kind):
+            record = MODULES[name]
+            if select_rule(record) is None and record["grid_rule"]["geometry"] not in geometries:
+                geometries.append(record["grid_rule"]["geometry"])
+    if len(geometries) != 1:
+        raise RuntimeError(
+            f"the backward fallback programs on {arch} declare {len(geometries)} "
+            "build geometries; expected one"
+        )
+    return dict(geometries[0])
+
+
 def workspace_record(arch: str) -> dict[str, Any]:
     """The capacity owner of the backward workspace on ``arch``.
 
     The public workspace serves every backward program of every backward route
-    (:func:`workspace_owners`).  The owners share one build geometry, so for
-    every ``C`` they plan one ``n_ch_tiles`` and their workspaces differ only
-    in the accumulator bytes per channel, ``slots x taps x sizeof(acc)``: the
-    record with the most (a bias ``_fp32g`` route's sixteen copies of five FP32
-    words, 320 bytes per channel; :data:`KINDS` then route order break ties)
-    bounds them all.  Owners of different
-    geometries are a registry error (``RuntimeError``).
+    (:func:`workspace_owners`).  The owners of the :func:`workspace_geometry`
+    share one build geometry, so for every ``C`` they plan one ``n_ch_tiles``
+    and their workspaces differ only in the accumulator bytes per channel,
+    ``slots x taps x sizeof(acc)``: the record with the most (a bias
+    ``_fp32g`` route's sixteen copies of five FP32 words, 320 bytes per
+    channel; :data:`KINDS` then route order break ties) bounds them all.  An
+    owner of another geometry (an SM-wide program of :data:`SM_WIDE_ROWS`)
+    carries a ``select_rule`` (a fallback of another geometry is a registry
+    error, ``RuntimeError``) and is not the capacity owner; its own layout
+    (one channel tile, a few accumulator copies) counts in
+    :func:`backward_workspace_bytes`, the largest over every owner.
     """
 
-    owners = workspace_owners(arch)
-    geometries = {
-        tuple(sorted(owner["grid_rule"]["geometry"].items())) for owner in owners
-    }
-    if len(geometries) != 1:
-        raise RuntimeError(
-            f"the backward programs on {arch} declare {len(geometries)} build "
-            "geometries; one workspace serves them only when they share one"
-        )
+    geometry = workspace_geometry(arch)
+    owners = [
+        owner
+        for owner in workspace_owners(arch)
+        if owner["grid_rule"]["geometry"] == geometry
+    ]
     best = owners[0]
     for owner in owners[1:]:
         if _accumulator_bytes_per_channel(owner) > _accumulator_bytes_per_channel(best):
@@ -5751,9 +5865,9 @@ def launch_grid(
 
 
 class RowPlan(NamedTuple):
-    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` and, where a
-    :data:`FALLBACK_ROWS` key covers the row, the side of its token range -- for every ``S`` of that side and
-    ``num_docs`` (:func:`plan_row`); :func:`row_launch` completes it for one call."""
+    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` and, where an
+    :data:`SM_WIDE_ROWS` or :data:`FALLBACK_ROWS` key covers the row, one side of :func:`row_sides` -- for every
+    ``S`` of that side and ``num_docs`` (:func:`plan_row`); :func:`row_launch` completes it for one call."""
 
     # The programs the row launches (:func:`selected_modules`) and the record of the first.
     names: tuple[str, ...]
@@ -5779,41 +5893,41 @@ def plan_row(
     *,
     device_index: int,
     bwd_grid_mult: int = 1,
-    inside: bool | None = None,
+    at: int | None = None,
 ) -> RowPlan | None:
     """The :class:`RowPlan` of the calls of route ``kind`` with ``C`` channels on device ``device_index`` (of
     architecture ``arch``) launching ``bwd_grid_mult`` times the untrimmed backward grid (1: the default grid), or
     ``None`` where a token floor of the selection rules decides the program (:func:`tokens_select`).
 
-    Where a :data:`FALLBACK_ROWS` key covers ``(kind, C)`` on ``arch`` (:func:`fallback_row_range`) the row has
-    two sides and ``inside`` names one (``ValueError`` when it is ``None``): ``True`` plans the calls with ``S``
-    inside the key's ``[S_min, S_max]`` (the route's fallback program), ``False`` the calls outside it (the
-    program the selection rules pick there, or ``None`` where a token floor decides); elsewhere ``inside`` is not
-    read.  ``S`` enters a call's host plan only through that range, a token floor of the route's selection rules,
-    the ``[S_min, S_max]`` range of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token
-    floors of a narrow forward row (:func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS`) and the trim
-    of :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only
-    through :func:`search_steps`; so with this row (of the call's side) :func:`row_launch` returns what
-    :func:`plan` and :func:`launch_grid` return for the call (the planning ``_launch`` does: ``plan(..., arch=,
-    route=)`` with the record's route) without selecting, splitting or sizing the grid again.  Registry errors
-    raise as in :func:`selected_modules`.
+    Where an :data:`SM_WIDE_ROWS` or :data:`FALLBACK_ROWS` key covers ``(kind, C)`` on ``arch`` the row has
+    several sides (:func:`row_sides`) and ``at``, a token count, names the side the row plans (``ValueError`` when
+    it is ``None`` or lies in no side): inside an :data:`SM_WIDE_ROWS` segment that segment's SM-wide program,
+    else inside the :data:`FALLBACK_ROWS` range the route's fallback program, else the program the selection rules
+    pick there (or ``None`` where a token floor decides); with one side ``at`` is not read.  ``S`` enters a call's
+    host plan only through those sides, a token floor of the route's selection rules, the ``[S_min, S_max]`` range
+    of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors of a narrow forward
+    row (:func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS`) and the trim of :func:`launch_grid` (an
+    ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only through :func:`search_steps`; so
+    with this row (of the call's side) :func:`row_launch` returns what :func:`plan` and :func:`launch_grid` return
+    for the call (the planning ``_launch`` does: ``plan(..., arch=, route=)`` with the record's route) without
+    selecting, splitting or sizing the grid again.  Registry errors raise as in :func:`selected_modules`.
     """
 
     C = int(C)
     S: int | None = None
-    bounds = fallback_row_range(arch, kind, C)
-    if bounds is not None:
-        if inside is None:
+    sides = row_sides(arch, kind, C)
+    if len(sides) > 1:
+        if at is None or not any(s_lo <= int(at) <= s_hi for s_lo, s_hi in sides):
             raise ValueError(
-                f"the {kind!r} route on {arch} for C={C} runs its fallback program at S {bounds[0]} to "
-                f"{bounds[1]}; plan_row needs inside= (the side of that range the row plans)"
+                f"the {kind!r} route on {arch} for C={C} selects by S over the token ranges {sides}; plan_row needs "
+                f"at= (a token count of the side the row plans), got {at!r}"
             )
-        # One token count of the side: the key's S_min inside, the token count after S_max (or before S_min) outside.
-        if inside:
-            S = bounds[0]
-        else:
-            S = bounds[1] + 1 if bounds[1] < INT32_MAX else bounds[0] - 1
-    if not (bounds is not None and inside) and tokens_select(arch, kind, C):
+        S = int(at)
+    bounds = fallback_row_range(arch, kind, C)
+    keyed = S is not None and (
+        sm_wide_module(arch, kind, C, S) is not None or (bounds is not None and bounds[0] <= S <= bounds[1])
+    )
+    if not keyed and tokens_select(arch, kind, C):
         return None
     names = selected_modules(arch, kind, C=C, S=S)
     record = MODULES[names[0]]
@@ -6344,6 +6458,7 @@ __all__ = [
     "REQUIRED_KINDS",
     "ROLES",
     "ROUTES",
+    "ROWS_KIND",
     "SELECT_KINDS",
     "TILE_ALIGNED_CLASSES",
     "TILE_ALIGNED_CLASS_ROUTES",
@@ -6384,13 +6499,17 @@ __all__ = [
     "route_modules",
     "route_role",
     "row_may_trim",
+    "row_sides",
     "run_module",
     "run_modules",
     "select_rule",
     "selected_modules",
     "sm_count",
+    "sm_wide_module",
+    "sm_wide_segments",
     "specs_for_arch",
     "tile_aligned_grid",
+    "workspace_geometry",
     "workspace_owners",
     "workspace_record",
 ]

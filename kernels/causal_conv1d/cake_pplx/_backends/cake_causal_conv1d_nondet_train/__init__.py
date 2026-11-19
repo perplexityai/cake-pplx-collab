@@ -170,13 +170,14 @@ Host design (the knobs are keywords; no environment variable):
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
   ``launch_grid`` trims it by ``S``), so they launch the values a per-call
-  plan gives.  A row a ``cake_jit.FALLBACK_ROWS`` key covers is planned for
-  both sides of the key's token range at its first call (the route's
-  fallback program inside, the rules' program outside); a later call picks
-  its side with one compare of ``S``.  A row whose program selection reads
-  ``S`` through a token floor of the selection rules plans every call (on
-  that side).  :func:`cake_causal_conv1d_nondet_train_plan_cache_clear`
-  drops the rows.
+  plan gives.  A row a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS``
+  key covers is planned for every side of its token ranges at its first call
+  (``cake_jit.row_sides``: an SM-wide segment's program, the route's fallback
+  program inside the fallback range, the rules' program outside them); a
+  later call picks its side with a few compares of ``S``.  A row whose
+  program selection reads ``S`` through a token floor of the selection rules
+  plans every call (on that side).
+  :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
 """
 
 from __future__ import annotations
@@ -333,17 +334,17 @@ _LAYOUTS: dict[tuple, dict] = {}
 # callback drops the entry when the workspace dies.
 _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # The host plan of each call row, planned by the row's first call: ``(arch, route kind, C, device index,
-# bwd_grid_mult) -> (cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the backward's accumulator
-# layout})``.  Selecting the route's program, splitting C into channel tiles, looking up the TILE_OVERRIDES /
-# NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host time in front of every
-# launch; with the row's plan a call only compares ``S`` with the row's token ranges (``cake_jit.row_launch``).  A row
-# whose program selection reads ``S`` through a token floor (``cake_jit.tokens_select``) holds ``None`` and plans every
-# call.  A row a ``cake_jit.FALLBACK_ROWS`` key covers holds both sides of the key's token range, ``(plan inside, its
-# dict, S_min, S_max, plan outside, its dict)`` (``cake_jit.plan_row``'s ``inside`` True / False): a call takes the
-# first pair when ``S_min <= S <= S_max``, else the last.  At most ``_ROW_PLANS_MAX`` rows (then
-# emptied); :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry
-# tables, the SM count or the architecture a device reports, which the rows were planned from).
-_ROW_PLANS: dict[tuple, tuple[Optional[_loader.RowPlan], dict]] = {}
+# bwd_grid_mult) -> ((s_lo, s_hi, cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the
+# backward's accumulator layout}), ...)``, one entry per side of ``cake_jit.row_sides`` (ascending token ranges from
+# 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges
+# then cut the token axis).  Selecting the route's program, splitting C into channel tiles, looking
+# up the TILE_OVERRIDES / NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host
+# time in front of every launch; with the row's plan a call only compares ``S`` with the sides' ranges and the side's
+# token ranges (``cake_jit.row_launch``).  A side whose program selection reads ``S`` through a token floor
+# (``cake_jit.tokens_select``) holds ``None`` and plans every call.  At most ``_ROW_PLANS_MAX`` rows (then emptied);
+# :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties it (needed after a change of the registry tables,
+# the SM count or the architecture a device reports, which the rows were planned from).
+_ROW_PLANS: dict[tuple, tuple[tuple[int, int, Optional[_loader.RowPlan], dict], ...]] = {}
 _ROW_PLANS_MAX = 1024
 # The torch dtype of each accumulator / counter dtype name of a workspace rule.
 _TORCH_DTYPES = {
@@ -795,42 +796,40 @@ def _call_plan(
 ) -> tuple[tuple[str, ...], dict, dict[str, int], tuple[int, int, int], dict]:
     """``(names, record, scalars, grid, per_tiles)`` of one call of route ``kind``: the programs :func:`_route`
     selects, the first one's record, the :data:`cake_jit.PLAN_SCALARS` and the grid :func:`_launch` plans (same
-    values, same errors), from the call's ``_ROW_PLANS`` row; ``per_tiles`` is the row's dict for the host values
+    values, same errors), from the call's ``_ROW_PLANS`` row; ``per_tiles`` is the side's dict for the host values
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
     ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error.  A row a
-    :data:`cake_jit.FALLBACK_ROWS` key covers is planned for both sides of the key's token range by its first call;
-    the call's side is one compare of ``S`` with the range."""
+    :data:`cake_jit.SM_WIDE_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is planned for every side of
+    :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of ``S`` with the sides'
+    ranges."""
 
     key = (arch, kind, C, device_index, bwd_grid_mult)
-    hit = _ROW_PLANS.get(key)
-    if hit is None:
+    sides = _ROW_PLANS.get(key)
+    if sides is None:
         # A missing route or a registry error raises as in a per-call plan.
         _route(arch, kind, needs=_route_needs(policy), C=C, S=S)
-        bounds = _loader.fallback_row_range(arch, kind, C)
-        if bounds is None:
-            row = _loader.plan_row(
-                arch, kind, C, device_index=device_index, bwd_grid_mult=bwd_grid_mult
-            )
-            hit = (row, {})
-        else:
-            inside, outside = (
+        sides = tuple(
+            (
+                s_lo,
+                s_hi,
                 _loader.plan_row(
                     arch,
                     kind,
                     C,
                     device_index=device_index,
                     bwd_grid_mult=bwd_grid_mult,
-                    inside=side,
-                )
-                for side in (True, False)
+                    at=s_lo,
+                ),
+                {},
             )
-            hit = (inside, {}, int(bounds[0]), int(bounds[1]), outside, {})
+            for s_lo, s_hi in _loader.row_sides(arch, kind, C)
+        )
         if len(_ROW_PLANS) >= _ROW_PLANS_MAX:
             _ROW_PLANS.clear()
-        _ROW_PLANS[key] = hit
-    row, per_tiles = hit[0], hit[1]
-    if len(hit) > 2 and not hit[2] <= S <= hit[3]:
-        row, per_tiles = hit[4], hit[5]
+        _ROW_PLANS[key] = sides
+    for s_lo, s_hi, row, per_tiles in sides:
+        if s_lo <= S <= s_hi:
+            break
     if row is None:
         names = _route(arch, kind, needs=_route_needs(policy), C=C, S=S)
         record = _loader.MODULES[names[0]]
@@ -860,9 +859,9 @@ def _call_plan(
 def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
-    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``, the
-    forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim
-    tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
+    tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
+    ``SM_WIDE_ROWS``, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S`` and
+    ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` /
     ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
 
     n = len(_ROW_PLANS)
