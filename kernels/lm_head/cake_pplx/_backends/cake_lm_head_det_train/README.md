@@ -80,10 +80,13 @@ keyword.
   log-probability `dz` arm of the logits GEMM) also store each row's
   `r_t = s_t - f32(bf16(s_t))`, `s_t` the FP32 gradient of the label column
   and `bf16(s_t)` the value `dz` holds there (0 where `bf16(s_t)` is not
-  finite), into an FP32 `[T]` buffer `rlab` (outside the workspace; zeroed
-  once per call that computes `dX`, so an ignored row, a label at or beyond
-  `V` and a row the zero-gradient skip leaves out hold 0).  Every chunk's `dX`
-  rows end with the `slab_sum` kernel, which folds it:
+  finite), into an FP32 `[T]` buffer `rlab` (outside the workspace).  An
+  ignored row, a label at or beyond `V` and a row the zero-gradient skip
+  leaves out hold 0 there: `row_grad` stores +0 on such a row of its chunk,
+  and a call that computes `dX` with a `dz` arm among its producers (which
+  store only the rows whose label lies in the head) zeroes `rlab` once before
+  the first of them.  Every chunk's `dX` rows end with the `slab_sum` kernel,
+  which folds it:
   `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
   (after the slab adds of a K-sliced GEMM), one rounding of the exact
   product.  `dX_acc` is then `dz @ W + r * W[y]` in FP32, and the output cast
@@ -1152,9 +1155,10 @@ gather and logits GEMM ran before the count was known, see
 * `row_grad`: `dz_c = d_t * (1[v = y_t] - exp(z - lse_t))` in BF16, in place
   over `z_c`; ignored rows become zero.  It also stores each row's FP32 label
   residual `rlab[row0 + r] = s - f32(bf16(s))` of the label column's FP32
-  gradient `s` (0 where `bf16(s)` is not finite; nothing on an ignored row or
-  a label at or beyond `V`, which keep the call's zero fill); the `dz` arms of
-  the logits GEMM store the same values.
+  gradient `s` (0 where `bf16(s)` is not finite; +0 on an ignored row or a
+  label at or beyond `V`, so each launch writes every row of its chunk); the
+  `dz` arms of the logits GEMM store the same values on the rows whose label
+  lies in the head.
 * `gemm_dx`: `dX_acc[rows] = fp32(dz_c @ W)`.  A record also registers
   `gemm_dx_s`, the same GEMM as `k_slices` (2 .. 4, a launch scalar) K-slice
   work items per output tile (the persistent grid fills its last wave): slice

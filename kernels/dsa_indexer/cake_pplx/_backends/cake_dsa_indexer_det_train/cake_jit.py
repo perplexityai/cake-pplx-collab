@@ -64,9 +64,21 @@ from . import cake_build
 # BF16, unsplit and unpaired) takes the scan's arguments in the scan's order and,
 # right before ``K_scale``, ``CandBlk`` (its per-CTA block entries, in the
 # workspace behind the ticket tail), ``CandBlocks`` (the ``[T, 2048]`` int32
-# candidate-block rows) and ``blk_cap`` (block entries per query slot).
+# candidate-block rows) and ``blk_cap`` (block entries per query slot).  The
+# ``cand`` program (key ``cand``) is the top-k restricted to the 8-key blocks
+# each query's row of ``CandBlocks`` names: its own plan, with ``Kraw`` (the key
+# rows; the binding encodes the program's block tensor map from them), its
+# block lists (``Lists``), its candidate buffers (``Cand``) and its own
+# self-resetting ``TicketWord``, and no ``K_scale`` or zeroed region.
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-STAGES: list[str] = ["scan", "merge", "finalize", "finalize_rank", "scan_blocks"]
+STAGES: list[str] = [
+    "scan",
+    "merge",
+    "finalize",
+    "finalize_rank",
+    "scan_blocks",
+    "cand",
+]
 ABI: str = "dsa_indexer_v5"
 NUMERICS: dict[str, str] = {"zero_sign_policy": "positive_accumulator"}
 FFI_ENTRY: str = "run"
@@ -160,6 +172,31 @@ ARG_PLANS: dict[str, list[list[str]]] = {
         ["buffer", "K_scale"],
         ["buffer", "TicketWord"],
         ["zero", "zero_region"],
+        ["grid", "grid_x"],
+        ["grid", "grid_y"],
+        ["grid", "grid_z"],
+    ],
+    "cand": [
+        ["tma_buffer", "Q"],
+        ["buffer", "Kraw"],
+        ["buffer", "W"],
+        ["buffer", "cu_seqlens_q"],
+        ["buffer", "cu_seqlens_k"],
+        ["buffer", "q_offsets"],
+        ["buffer", "CandBlocks"],
+        ["buffer", "Indices"],
+        ["buffer", "Scores"],
+        ["buffer", "Lists"],
+        ["buffer", "Cand"],
+        ["buffer", "TicketWord"],
+        ["parameter", "num_segments"],
+        ["parameter", "top_k"],
+        ["parameter", "has_offsets"],
+        ["parameter", "cand_width"],
+        ["parameter", "cand_cap"],
+        ["parameter", "check_period"],
+        ["parameter", "grid_ctas"],
+        ["parameter", "softmax_scale"],
         ["grid", "grid_x"],
         ["grid", "grid_y"],
         ["grid", "grid_z"],
@@ -779,6 +816,11 @@ PROGRAMS: dict[str, dict[str, Any]] = {
         "library": "cake_dsa_indexer_det_topk_de1bd9be07a9255ff9e5",
         "arches": ["sm_103a"],
     },
+    "cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a": {
+        "role": "cand",
+        "library": "cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a",
+        "arches": ["sm_100a", "sm_103a"],
+    },
     "cake_dsa_indexer_det_topk_e13c66d0acb361a94a1b": {
         "role": "scan",
         "library": "cake_dsa_indexer_det_topk_e13c66d0acb361a94a1b",
@@ -849,6 +891,7 @@ PROGRAMS: dict[str, dict[str, Any]] = {
 }
 PROGRAM_KEYS: dict[str, dict[str, str]] = {
     "sm_100a": {
+        "cand": "cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a",
         "finalize:t128": "cake_dsa_indexer_det_topk_ed1192a18ca915b70af7",
         "finalize:t256": "cake_dsa_indexer_det_topk_d0b7ecc9edbdcd71b2d7",
         "finalize:t32": "cake_dsa_indexer_det_topk_e1e316281190b2a3203b",
@@ -920,6 +963,7 @@ PROGRAM_KEYS: dict[str, dict[str, str]] = {
         "scan_blocks:narrow:u1:s0:f1": "cake_dsa_indexer_det_topk_f9ec1e72ae9017bf1fb8",
     },
     "sm_103a": {
+        "cand": "cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a",
         "finalize:t128": "cake_dsa_indexer_det_topk_ed1192a18ca915b70af7",
         "finalize:t256": "cake_dsa_indexer_det_topk_d0b7ecc9edbdcd71b2d7",
         "finalize:t32": "cake_dsa_indexer_det_topk_e1e316281190b2a3203b",

@@ -46,7 +46,15 @@ top-k 512) add the arms ``nondet_cb`` / ``nondet_cb_aa`` (this package's
 ``[T, 2048]`` candidate blocks) and ``det_cb`` (the deterministic package's),
 timed next to ``nondet`` / ``det``, the plain call of the same ``top_k``;
 ``candidate_blocks`` records each candidate-block arm's block structure
-(counts, newest block, containment).
+(counts, newest block, containment).  ``nondet_in`` / ``nondet_in_aa`` (this
+package's ``prepare_dsa_indexer_nondet_topk_in_candidates``) and ``det_in``
+(the deterministic package's) time the top-k restricted to the row's own
+candidate blocks (computed once by the package's candidate-block call outside
+the timed span) next to ``nondet`` / ``det``; ``in_candidates`` records that
+every id lies in a consumed block and the number of rows whose set is the plain
+call's of the same package (``rows_with_plain_set``, information only: with the
+same ``q`` / ``w`` and ``top_k``, every row on inputs whose FP32 scores are
+exact in any summation order).
 
 Both arms are prepared runners over caller-owned outputs and workspace;
 ``det_aa`` / ``nondet_aa`` prepare the same arm a second time (the in-process
@@ -173,14 +181,26 @@ class NondetArm(det_bench.Arm):
     name = "nondet"
     package = "nondet"
 
-    def __init__(self, inputs, *, knobs=None, name=None, with_candidates=False):
+    def __init__(
+        self,
+        inputs,
+        *,
+        knobs=None,
+        name=None,
+        with_candidates=False,
+        in_candidates=False,
+    ):
         super().__init__(inputs)
         self.knobs = dict(knobs or {})
         if name is not None:
             self.name = name
         self.blocks = None
+        self.source_blocks = None
         if with_candidates:
             self._prepare_with_candidates(inputs)
+            return
+        if in_candidates:
+            self._prepare_in_candidates(inputs)
             return
         dev = inputs.device
         self.workspace_bytes = (
@@ -284,6 +304,60 @@ class NondetArm(det_bench.Arm):
             candidate_blocks=self.blocks,
         )
 
+    def _prepare_in_candidates(self, inputs):
+        dev = inputs.device
+        extra = det_bench.row_extra(inputs)
+        args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+        # the consumed candidate blocks: the row's own candidate-block call of this package, once, outside the timed
+        # span (the torch deterministic setting is left as the benchmark found it)
+        self.source_blocks = (
+            nondet_backend.cake_dsa_indexer_nondet_train_topk_with_candidates(
+                *args, **inputs.kwargs(), **extra
+            )[2].clone()
+        )
+        self.workspace_bytes = nondet_backend.cake_dsa_indexer_nondet_train_topk_in_candidates_workspace_size(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            device=dev,
+        )
+        self.workspace = torch.empty(
+            self.workspace_bytes, dtype=torch.uint8, device=dev
+        )
+        self.indices = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.int32, device=dev
+        )
+        self.scores = torch.empty(
+            (inputs.num_queries, inputs.top_k), dtype=torch.float32, device=dev
+        )
+        plan = nondet_backend.plan_dsa_indexer_nondet_topk_in_candidates(
+            inputs.num_queries,
+            inputs.num_keys,
+            inputs.num_segments,
+            top_k=inputs.top_k,
+            ratio=inputs.ratio,
+            candidate_width=int(self.source_blocks.shape[1]),
+            device=dev,
+        )
+        self.plan = dict(
+            scan_key=plan.cand_key,
+            n_split=1,
+            grid_ctas=int(plan.grid_ctas),
+            cand_cap=int(plan.cand_cap),
+            check_period=int(plan.check_period),
+        )
+        self.runner = nondet_backend.prepare_dsa_indexer_nondet_topk_in_candidates(
+            *args,
+            self.source_blocks,
+            **inputs.kwargs(),
+            **extra,
+            workspace_buffer=self.workspace,
+            indices=self.indices,
+            scores=self.scores,
+        )
+
     def __call__(self):
         return self.runner()
 
@@ -292,10 +366,14 @@ class NondetArm(det_bench.Arm):
         return ()
 
 
-def _det(name, knobs=None, with_candidates=False):
+def _det(name, knobs=None, with_candidates=False, in_candidates=False):
     def make(inputs):
         arm = det_bench.CakeArm(
-            inputs, knobs=knobs, name=name, with_candidates=with_candidates
+            inputs,
+            knobs=knobs,
+            name=name,
+            with_candidates=with_candidates,
+            in_candidates=in_candidates,
         )
         arm.package = "det"
         return arm
@@ -303,10 +381,14 @@ def _det(name, knobs=None, with_candidates=False):
     return make
 
 
-def _nondet(name, knobs=None, with_candidates=False):
+def _nondet(name, knobs=None, with_candidates=False, in_candidates=False):
     def make(inputs):
         return NondetArm(
-            inputs, knobs=knobs, name=name, with_candidates=with_candidates
+            inputs,
+            knobs=knobs,
+            name=name,
+            with_candidates=with_candidates,
+            in_candidates=in_candidates,
         )
 
     return make
@@ -325,6 +407,10 @@ ARMS = {
     "det_cb": _det("det_cb", with_candidates=True),
     "nondet_cb": _nondet("nondet_cb", with_candidates=True),
     "nondet_cb_aa": _nondet("nondet_cb_aa", with_candidates=True),
+    # the candidate-restricted call over the row's own candidate blocks (``--rows candidates``)
+    "det_in": _det("det_in", in_candidates=True),
+    "nondet_in": _nondet("nondet_in", in_candidates=True),
+    "nondet_in_aa": _nondet("nondet_in_aa", in_candidates=True),
 }
 DEFAULT_ARMS = "det,nondet"
 TIMING_BOUNDARY = (
@@ -408,6 +494,20 @@ def measure_row(name, inputs, arms, args):
             record["candidate_blocks"] = cb
             if cb["bad_counts"] or cb["missing_newest"] or cb["ids_outside_blocks"]:
                 record["structure_failures"].append(f"candidate_blocks {cb}")
+        if getattr(arm, "source_blocks", None) is not None:
+            rec = det_bench.in_candidates_record(
+                inputs, outputs[arm_name][0], arm.source_blocks
+            )
+            plain = arm.package
+            if plain in outputs:
+                rec["rows_with_plain_set"] = int(
+                    (canonical(outputs[arm_name])[0] == canonical(outputs[plain])[0])
+                    .all(dim=1)
+                    .sum()
+                )
+            record["in_candidates"] = rec
+            if rec["ids_outside_blocks"]:
+                record["structure_failures"].append(f"in_candidates {rec}")
         result["arms"][arm_name] = record
     if args.verify:
         reference = ref.select_reference(inputs)
@@ -429,7 +529,12 @@ def measure_row(name, inputs, arms, args):
             failures.append(f"{arm_name}: {rec['verdict']}")
     result["failures"] = failures
     # the candidate-block call over the plain call of the same package and top_k (above 1: the candidate blocks cost)
-    for cb_arm, plain in (("nondet_cb", "nondet"), ("det_cb", "det")):
+    for cb_arm, plain in (
+        ("nondet_cb", "nondet"),
+        ("det_cb", "det"),
+        ("nondet_in", "nondet"),
+        ("det_in", "det"),
+    ):
         if cb_arm in prepared and plain in prepared:
             result[f"{cb_arm}_over_{plain}"] = (
                 None

@@ -41,10 +41,11 @@ graph's released buffer smaller than the grown size dropped), one thread at a ti
 too), and CUDA Graph trees (``torch.compile``, backend ``"cudagraphs"``; one with more recorded backward nodes
 than the pool holds).  The default backward route's ``FALLBACK_ROWS`` programs under CUDA Graph replay (``bwd_grid_mult``
 1 to 4, the program checked per row), programmatic dependent launch, repeated launches and two streams.  Programmatic dependent
-launch: ``enable_pdl`` follows ``PDL_EAGER`` / ``PDL_GRAPH``; with the policy forced on, and with the shipped graph
-policy, a launch reads what the kernel before it wrote and does not overwrite what that kernel reads, and back-to-back
-launches share the package's workspaces; both packages in one process.  Autograd, non-reentrant activation checkpointing (2 x forward +
-backward) and gradient accumulation; torch's deterministic mode.
+launch: ``enable_pdl`` follows ``PDL_EAGER`` / ``PDL_GRAPH``, except the backward's 0 at the rows of ``PDL_OFF_ROWS``
+(eager and captured; one token below a row and the forward keep the tables' value); with the policy forced on, and
+with the shipped graph policy, a launch reads what the kernel before it wrote and does not overwrite what that kernel
+reads, and back-to-back launches share the package's workspaces; both packages in one process.  Autograd,
+non-reentrant activation checkpointing (2 x forward + backward) and gradient accumulation; torch's deterministic mode.
 
 The opt-in ``bwd_grid_mult`` (every value of ``BWD_GRID_MULTS``) on every route, at single-tile, multi-sub-tile and
 partial-last-tile channel counts and at small and large ``S``: the backward launches that many times its untrimmed
@@ -3202,6 +3203,51 @@ def test_enable_pdl_follows_the_policy(kind, eager_on, graph_on, monkeypatch) ->
     _assert_pdl(seen[2:], int(graph_on), f"{kind} capture")
     cap["graph"].replay()
     torch.cuda.synchronize(device)
+
+
+def _pdl_off_cases() -> tuple:
+    """``(S, C)`` of the default backward route around its ``PDL_OFF_ROWS`` keys on this architecture: each key's last
+    channel count at the key's first token count and one token below it; on an architecture without keys, C 1016 at
+    S 250340."""
+
+    cases = set()
+    for (route, _c_lo, c_hi), (s_min, _s_max) in loader.PDL_OFF_ROWS.get(_arch(), {}).items():
+        if route == "bwd":
+            cases |= {(s_min - 1, c_hi), (s_min, c_hi)}
+    return tuple(sorted(cases)) or ((250340, 1016),)
+
+
+@pytest.mark.parametrize("eager_on,graph_on", ((True, True), (False, False)))
+def test_enable_pdl_is_off_at_the_pdl_off_rows(eager_on, graph_on, monkeypatch) -> None:
+    """At a row of ``PDL_OFF_ROWS`` (:func:`_pdl_off_cases`) the backward launch passes ``enable_pdl`` 0, eagerly and
+    inside a CUDA Graph capture, whatever ``PDL_EAGER`` / ``PDL_GRAPH`` say; one token below the row, and at every
+    forward launch, it passes the tables' value (``cake_jit.pdl_enabled`` of the call's row); the captured graph
+    replays."""
+
+    _require_route("bwd")
+    arch, device = _arch(), _device()
+    monkeypatch.setitem(loader.PDL_EAGER, arch, eager_on)
+    monkeypatch.setitem(loader.PDL_GRAPH, arch, graph_on)
+    seen = _record_pdl(monkeypatch)
+    backward = set(loader.route_modules(arch, "bwd"))
+    for S, C in _pdl_off_cases():
+        bounds = loader.pdl_off_row_range(arch, "bwd", C)
+        inside = bounds is not None and bounds[0] <= S <= bounds[1]
+        inputs = _draw_inputs(S, C, "perf", "bwd", key=153)
+        outs = _phase_outs("step", inputs[0], inputs[1], inputs[4], "bwd")
+        seen.clear()
+        cap = _capture(
+            lambda: _phase_step("step", inputs, outs, "bwd"), torch.cuda.Stream(device=device), debug=False
+        )
+        assert [name in backward for name, _ in seen] == [False, True, False, True], seen
+        for (name, value), capturing in zip(seen, (False, False, True, True), strict=True):
+            table = int(graph_on if capturing else eager_on)
+            want = 0 if name in backward and inside else table
+            if name in backward:
+                assert loader.pdl_enabled(arch, capturing=capturing, kind="bwd", C=C, S=S) == want
+            assert value == want, (S, C, name, capturing, value, want)
+        cap["graph"].replay()
+        torch.cuda.synchronize(device)
 
 
 @pytest.mark.parametrize("mode", PDL_MODES)

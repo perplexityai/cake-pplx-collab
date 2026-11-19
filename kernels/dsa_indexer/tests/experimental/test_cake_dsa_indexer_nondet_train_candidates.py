@@ -242,7 +242,9 @@ def test_registry_ships_the_candidate_block_programs():
     program of the same unit; sm_107a registers none."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
-    assert cake_jit.STAGES[-1] == CB_ROLE and cake_jit.STAGES.count(CB_ROLE) == 1
+    assert cake_jit.STAGES.count(CB_ROLE) == 1
+    # after the family's roles; only the candidate-restricted top-k (``cand``) follows it
+    assert cake_jit.STAGES[cake_jit.STAGES.index(CB_ROLE) + 1 :] == ["cand"]
     scan = cake_jit.ARG_PLANS["scan"]
     at = [name for _, name in scan].index("K_scale")
     assert cake_jit.ARG_PLANS[CB_ROLE] == scan[:at] + CB_SLOTS_PLAN + scan[at:]

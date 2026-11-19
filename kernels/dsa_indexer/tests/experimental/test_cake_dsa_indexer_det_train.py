@@ -310,7 +310,7 @@ def test_registry_records_are_well_formed():
     assert (
         {"scan", "merge", "finalize"}
         <= set(cake_jit.STAGES)
-        <= {"scan", "merge", "finalize", "finalize_rank", "scan_blocks"}
+        <= {"scan", "merge", "finalize", "finalize_rank", "scan_blocks", "cand"}
     )
     for role, plan in cake_jit.ARG_PLANS.items():
         for kind, arg in plan:
@@ -358,9 +358,11 @@ def test_registry_records_are_well_formed():
         merge_rank_keys = sorted(k for k in keys if k.startswith("merge:rank:"))
         assert scan_keys and finalize_keys and MERGE_KEY in keys, arch
         cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
+        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a)
+        cand_keys = sorted(k for k in keys if k == "cand")
         assert set(keys) == set(scan_keys) | set(finalize_keys) | set(rank_keys) | set(
             merge_rank_keys
-        ) | set(cb_keys) | {MERGE_KEY}, arch
+        ) | set(cb_keys) | set(cand_keys) | {MERGE_KEY}, arch
         # the fused merge + rank finalize programs: one merge program per slab rank window, registered exactly where
         # the record turns merge_rank on
         assert bool(merge_rank_keys) == bool(policy.merge_rank), arch
@@ -5929,14 +5931,21 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
                 arch
             )  # every drawing program reads it, no static one does
     # the scan and the candidate-block scan (``scan_blocks``: the scan's plan with its block arguments before
-    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; no other role does
+    # ``K_scale``) take K_scale and TicketWord last before the zero region and the grid; the candidate-restricted
+    # top-k (``cand``) takes a self-resetting TicketWord of its own, no K_scale and no zero region; no other role
+    # takes either
     for role in ("scan", "scan_blocks"):
         assert cake_jit.ARG_PLANS[role][-5] == ["buffer", "TicketWord"], role
         assert cake_jit.ARG_PLANS[role][-6] == ["buffer", "K_scale"], role
+    cand_plan = cake_jit.ARG_PLANS.get("cand")
+    if cand_plan is not None:
+        assert cand_plan.count(["buffer", "TicketWord"]) == 1
+        assert ["buffer", "K_scale"] not in cand_plan
+        assert not any(kind == "zero" for kind, _ in cand_plan)
     assert all(
         ["buffer", "TicketWord"] not in plan and ["buffer", "K_scale"] not in plan
         for role, plan in cake_jit.ARG_PLANS.items()
-        if role not in ("scan", "scan_blocks")
+        if role not in ("scan", "scan_blocks", "cand")
     )
 
 

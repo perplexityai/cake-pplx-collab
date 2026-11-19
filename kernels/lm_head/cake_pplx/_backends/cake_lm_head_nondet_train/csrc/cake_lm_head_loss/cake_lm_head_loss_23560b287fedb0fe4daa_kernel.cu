@@ -225,16 +225,16 @@ kernel_cake_lm_head_loss_23560b287fedb0fe4daa(__nv_bfloat16* __restrict__ z, lon
     res[tid] = rg_r;
     __syncthreads();
     if (tid == 0) {
-        if (lbl >= 0ll) {
-            if (lbl < (long long)num_vecs * 8ll) {
-                int own_vec = (int)lbl >> 3;
-                int first_vec = blockIdx.x * 1024;
-                if (own_vec >= first_vec) {
-                    if (own_vec < first_vec + 1024) {
-                        rlab[t] = res[own_vec & 127];
-                    }
+        if ((unsigned long long)lbl < (unsigned long long)num_vecs * 8ull) {
+            int own_vec = (int)lbl >> 3;
+            int first_vec = blockIdx.x * 1024;
+            if (own_vec >= first_vec) {
+                if (own_vec < first_vec + 1024) {
+                    rlab[t] = res[own_vec & 127];
                 }
             }
+        } else if (blockIdx.x == 0) {
+            rlab[t] = 0.0f;
         }
     }
 }

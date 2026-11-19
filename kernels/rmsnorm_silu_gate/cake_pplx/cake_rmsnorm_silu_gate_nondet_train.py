@@ -63,6 +63,12 @@ weight gradient (8-row blocks: twice the CTAs of 16-row blocks at a small
 row count), other layouts the 0.2.4 256-thread one; this build and the
 fused band's strided program read packed rows at their linear offsets, and
 a CTA of theirs with one block takes no integer division before its loads.
+Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
+call (each module's launch arguments and tvm-ffi function are looked up
+once, the launch reads the handle of torch's current stream without making a
+stream object, and a caller's workspace is checked and viewed once per
+tensor); a launch still runs on torch's current stream of its tensors'
+device, as in 0.2.5.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -633,6 +639,10 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
         zero-filled buffer per capture and capture stream, from a reserve
         those calls keep).  One buffer per backward that
         may run at the same time on another stream.
+        The call keeps a weak reference to a caller's workspace and its checked
+        buffers (``torch.utils.swap_tensors`` refuses a tensor with a weak
+        reference); a workspace rebound to other memory is checked again at its
+        next call.
 
     Returns
     -------

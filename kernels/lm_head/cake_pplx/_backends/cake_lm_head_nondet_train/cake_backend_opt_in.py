@@ -2458,7 +2458,8 @@ def prepare_lm_head_loss(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
+        # ``dz`` arm of a call that computes dX)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
@@ -2937,7 +2938,8 @@ def prepare_lm_head_loss_temperature(
     t["loss"] = torch.empty((1,), dtype=torch.float32, device=device)
     if plan.need_dx or plan.need_dw or entry == "logprob":
         # the row-gradient producers' FP32 label residuals (``[rows]``, indexed like ``labels``; outside the
-        # workspace; zeroed by the ``rlab_zero`` step of a call that computes dX)
+        # workspace; ``row_grad`` writes every row of its chunk, and the ``rlab_zero`` step zeroes them ahead of a
+        # ``dz`` arm of a call that computes dX)
         # (a log-probability runner's backward keys run a producer even without a gradient)
         t["rlab"] = torch.empty((rows_loop,), dtype=torch.float32, device=device)
     if entry == "loss":
