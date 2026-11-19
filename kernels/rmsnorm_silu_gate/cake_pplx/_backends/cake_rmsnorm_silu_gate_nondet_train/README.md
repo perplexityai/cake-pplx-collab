@@ -47,6 +47,12 @@ CTAs of 16-row blocks at a small row count), other layouts the 0.2.4
 256-thread one; this build and the fused band's strided program read packed
 rows at their linear offsets, and a CTA of theirs with one block takes no
 integer division before its loads.
+Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
+call (each module's launch arguments and tvm-ffi function are looked up
+once, the launch reads the handle of torch's current stream without making a
+stream object, and a caller's workspace is checked and viewed once per
+tensor); a launch still runs on torch's current stream of its tensors'
+device, as in 0.2.5.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
