@@ -1374,6 +1374,51 @@ def specs_for_arch(arch: str) -> list[Any]:
     return cake_build.jit_specs(arch)
 
 
+_GRID_AXES = {"grid_x": 0, "grid_y": 1, "grid_z": 2}
+
+
+@functools.cache
+def _arguments(name: str) -> tuple[tuple[bool, Any, str], ...]:
+    """Kernel arguments of module record ``name`` in launch order:
+    ``(True, grid axis, parameter)`` for a grid dimension, else ``(False,
+    logical name, parameter)``.  Cached: the module records are constant."""
+
+    record = MODULES[name]
+    logical = record["logical"]
+    return tuple(
+        (True, _GRID_AXES[key], key) if kind == "grid" else (False, logical[key], key)
+        for kind, key in record["arg_plan"]
+    )
+
+
+@functools.cache
+def _entry(name: str, device_index: int) -> Any:
+    """The tvm-ffi function of module record ``name`` on CUDA device ``device_index``."""
+
+    return getattr(load(name, device_arch(device_index)), MODULES[name]["ffi_entry"])
+
+
+@functools.cache
+def _ffi_device(device_index: int) -> Any:
+    """The tvm-ffi device of CUDA device ``device_index``."""
+
+    return tvm_ffi.device(f"cuda:{device_index}")
+
+
+@functools.cache
+def current_raw_stream() -> Any:
+    """A function of a CUDA device index that returns the handle of torch's
+    current stream on that device (``torch.cuda.current_stream(index).cuda_stream``
+    without making a stream object)."""
+
+    import torch
+
+    raw = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+    if raw is not None:
+        return raw
+    return lambda index: torch.cuda.current_stream(index).cuda_stream
+
+
 def run_module(
     name: str, values: dict[str, Any], *, rows: int, device_index: int
 ) -> None:
@@ -1382,27 +1427,26 @@ def run_module(
     ``values`` maps logical names to tensors and Python scalars; the module
     record maps its kernel parameter names onto that vocabulary.  The launch
     grid is the module's :func:`launch_grid` on the device's SM count, and the
-    kernel runs on the current torch stream.
+    kernel runs on torch's current stream of CUDA device ``device_index``, the
+    device of its tensors.
     """
 
-    record = MODULES[name]
-    logical = record["logical"]
-    grid = launch_grid(record, rows=rows, sm_count=device_sm_count(device_index))
-    grid_values = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
-    args = []
-    for kind, key in record["arg_plan"]:
-        if kind == "grid":
-            args.append(grid_values[key])
-            continue
-        logical_name = logical[key]
-        if logical_name not in values:
-            raise ValueError(
-                f"module {name} needs {logical_name!r} (kernel parameter {key!r})"
-            )
-        args.append(values[logical_name])
-    module = load(name, device_arch(device_index))
-    with tvm_ffi.use_torch_stream():
-        getattr(module, record["ffi_entry"])(*args)
+    grid = launch_grid(MODULES[name], rows=rows, sm_count=device_sm_count(device_index))
+    arguments = _arguments(name)
+    try:
+        args = [grid[slot] if axis else values[slot] for axis, slot, _ in arguments]
+    except KeyError:
+        for axis, slot, key in arguments:
+            if not axis and slot not in values:
+                raise ValueError(
+                    f"module {name} needs {slot!r} (kernel parameter {key!r})"
+                ) from None
+        raise
+    entry = _entry(name, device_index)
+    with tvm_ffi.use_raw_stream(
+        _ffi_device(device_index), current_raw_stream()(device_index)
+    ):
+        entry(*args)
 
 
 __all__ = [
@@ -1427,6 +1471,7 @@ __all__ = [
     "arch_for_capability",
     "backward_module",
     "backward_packed",
+    "current_raw_stream",
     "device_arch",
     "device_sm_count",
     "forward_module",

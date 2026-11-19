@@ -63,6 +63,13 @@ weight gradient (8-row blocks: twice the CTAs of 16-row blocks at a small
 row count), other layouts the 0.2.4 256-thread one; this build and the
 fused band's strided program read packed rows at their linear offsets, and
 a CTA of theirs with one block takes no integer division before its loads.
+Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
+call (each module's launch arguments and tvm-ffi function are looked up
+once, the launch reads the handle of torch's current stream without making a
+stream object, and a caller's workspace is checked and viewed once per
+tensor), and a launch runs on torch's current stream of its tensors' device
+(0.2.5 took the current device's, the same stream whenever the current
+device is the tensors' device).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

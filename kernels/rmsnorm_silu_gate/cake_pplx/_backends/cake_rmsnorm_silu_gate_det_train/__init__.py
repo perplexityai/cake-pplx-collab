@@ -141,13 +141,13 @@ Host design (every control is a keyword; no environment variable):
   the workspace of its capture and capture stream for good, so a replay
   launches no fill kernel (see ``_RESERVES``; with none ready, the graph
   zero-fills one of its own).
-- No call synchronizes the host or the device, and every kernel runs on the
-  current torch stream.  No launch is cooperative or uses programmatic
-  dependent launch, and no CTA waits for another CTA: beside a kernel resident
-  on another stream, a backward CTA that is not resident yet starts as any of
-  the backward's CTAs exits and claims only the blocks left (a CTA of the
-  strided program without the weight gradient, which claims none, runs all of
-  its own blocks once it starts).
+- No call synchronizes the host or the device, and every kernel runs on
+  torch's current stream of its tensors' device.  No launch is cooperative or
+  uses programmatic dependent launch, and no CTA waits for another CTA: beside
+  a kernel resident on another stream, a backward CTA that is not resident yet
+  starts as any of the backward's CTAs exits and claims only the blocks left
+  (a CTA of the strided program without the weight gradient, which claims
+  none, runs all of its own blocks once it starts).
 - Mode: the mode is part of the name (``det``).  Every entry point is
   deterministic and takes no ``deterministic`` keyword (passing one is a
   ``TypeError``); every launch gives the same bits for the same inputs on
@@ -163,6 +163,7 @@ from __future__ import annotations
 
 import functools
 import threading
+import weakref
 from typing import Any, Optional
 
 import torch
@@ -179,6 +180,7 @@ from .cake_jit import (
     ROUTES,
     arch_for_capability,
     backward_module,
+    current_raw_stream,
     device_sm_count,
     nodw_module,
     workspace_elements,
@@ -285,10 +287,13 @@ def _kernel_view(
         )
     tokens, heads = _rows_shape(shape)
     view = None
-    try:
-        view = tensor.view(tokens, heads, HEAD_DIM)
-    except RuntimeError:
-        view = None
+    if len(shape) == 3:
+        view = tensor  # already [T, H, 128]
+    else:
+        try:
+            view = tensor.view(tokens, heads, HEAD_DIM)
+        except RuntimeError:
+            view = None
     if view is not None:
         tok = int(view.stride(0)) if tokens > 1 else 0
         head = int(view.stride(1)) if heads > 1 else HEAD_DIM
@@ -562,6 +567,15 @@ def _refill_reserve(arch: str, device: torch.device) -> None:
     current stream (no host synchronization)."""
 
     index = _device_index(device)
+    reserve = _RESERVES.get(index)
+    if (
+        reserve is not None
+        and not reserve["pending"]
+        and 2 * len(reserve["ready"]) >= _RESERVE_SIZE
+    ):
+        # The common case, read without the lock: no fill pending and at least
+        # half the reserve ready, where the locked path returns as well.
+        return
     with _RESERVE_LOCK:
         reserve = _RESERVES.get(index)
         if reserve is None:
@@ -648,7 +662,8 @@ def _stream_workspace_views(
     if torch.cuda.is_current_stream_capturing():
         return _workspace_views(_capture_workspace(arch, device), name, device)
     _refill_reserve(arch, device)
-    key = (_device_index(device), torch.cuda.current_stream(device).cuda_stream)
+    index = _device_index(device)
+    key = (index, current_raw_stream()(index))
     views = _STREAM_WORKSPACES.get(key)
     if views is None:
         views = _workspace_views(
@@ -725,6 +740,79 @@ def _workspace_views(
     flags = flat[digits : digits + HEAD_DIM].view(torch.uint32)
     done = flat[digits + HEAD_DIM : elements].view(torch.uint32)
     return acc, flags, done
+
+
+# Caller workspaces of earlier calls: id(workspace) -> (weak reference to the
+# workspace, the device of the call, its data pointer and elements then, a flat
+# tensor on its storage, {backward module name: its buffers}).  A call with
+# the same tensor, at the same address with as many elements, still FP32 and
+# contiguous, on the same device, takes the buffers checked and made by an
+# earlier call; any other call checks the workspace again (``_check_workspace``)
+# and makes a new entry.  The flat tensor shares the workspace's storage
+# (``Tensor.set_``) but is no view of the caller's tensor, so an entry does not
+# keep that tensor alive: the weak reference's callback drops the entry with
+# the tensor.
+_CALLER_WORKSPACES: dict[int, tuple[Any, ...]] = {}
+
+
+def _forget_caller_workspace(key: int, ref: Any) -> None:
+    held = _CALLER_WORKSPACES.get(key)
+    if held is not None and held[0] is ref:
+        _CALLER_WORKSPACES.pop(key, None)
+
+
+def _caller_workspace(
+    workspace: torch.Tensor, device: torch.device, arch: str
+) -> tuple[Any, ...]:
+    """The entry of a caller's workspace (see ``_CALLER_WORKSPACES``), checked
+    against every backward module of ``arch`` when it is new or changed."""
+
+    key = id(workspace)
+    held = _CALLER_WORKSPACES.get(key)
+    if (
+        held is not None
+        and held[0]() is workspace
+        and held[1] == device
+        and held[2] == workspace.data_ptr()
+        and held[3] == workspace.numel()
+        and workspace.dtype == torch.float32
+        and workspace.is_contiguous()
+    ):
+        return held
+    _check_workspace(workspace, device, _workspace_elements(arch))
+    try:
+        flat = torch.empty((0,), dtype=torch.float32, device=device).set_(
+            workspace.untyped_storage(),
+            workspace.storage_offset(),
+            (workspace.numel(),),
+            (1,),
+        )
+    except RuntimeError:
+        flat = None  # no entry views: every call views the workspace itself
+    held = (
+        weakref.ref(workspace, functools.partial(_forget_caller_workspace, key)),
+        device,
+        workspace.data_ptr(),
+        workspace.numel(),
+        flat,
+        {},
+    )
+    _CALLER_WORKSPACES[key] = held
+    return held
+
+
+def _caller_workspace_views(
+    held: tuple[Any, ...], workspace: torch.Tensor, name: str, device: torch.device
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """``_workspace_views`` of backward module ``name`` on a caller's
+    workspace, made once per entry and module."""
+
+    if held[4] is None:
+        return _workspace_views(workspace, name, device)
+    views = held[5].get(name)
+    if views is None:
+        views = held[5][name] = _workspace_views(held[4], name, device)
+    return views
 
 
 @functools.cache
@@ -849,8 +937,9 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     dz, dz_user = _output(grad_z, "grad_z", shape=shape, device=device)
     # A caller's workspace is checked for any row count (its size does not
     # depend on the rows), so before the return of a call with no rows.
+    held = None
     if workspace is not None:
-        _check_workspace(workspace, device, _workspace_elements(arch))
+        held = _caller_workspace(workspace, device, arch)
     if rows == 0:
         if dw is not None and not accumulate_grad_weight:
             dw.zero_()
@@ -902,7 +991,7 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     elif workspace is None:
         acc, flags, done = _stream_workspace_views(name, arch, device)
     else:
-        acc, flags, done = _workspace_views(workspace, name, device)
+        acc, flags, done = _caller_workspace_views(held, workspace, name, device)
     values = {
         "dy": gv,
         "x": xv,

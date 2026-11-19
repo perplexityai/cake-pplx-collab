@@ -51,6 +51,13 @@ blocks: twice the CTAs of 16-row blocks at a small row count), other
 layouts the 0.2.4 256-thread one; this build and the fused band's strided
 program read packed rows at their linear offsets, and a CTA of theirs with
 one block takes no integer division before its loads.
+Version 0.2.6 changes no kernel and no bits: it lowers the host time of a
+call (each module's launch arguments and tvm-ffi function are looked up
+once, the launch reads the handle of torch's current stream without making a
+stream object, and a caller's workspace is checked and viewed once per
+tensor), and a launch runs on torch's current stream of its tensors' device
+(0.2.5 took the current device's, the same stream whenever the current
+device is the tensors' device).
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -358,8 +365,8 @@ Host design (the input layout rules are the deterministic package's):
   ``b`` running the blocks ``b``, ``b + G``, ...; a claimed or long one
   launches its band program's grid.
   No kernel is cooperative; no
-  call synchronizes the host or the device, and every kernel runs on the
-  current torch stream.
+  call synchronizes the host or the device, and every kernel runs on torch's
+  current stream of its tensors' device.
 - Beside kernels resident on other streams: a kernel
   holding every SM with a small shared-memory carveout delays the start of a
   kernel whose CTAs need more shared memory than is left, until it exits;
@@ -370,6 +377,7 @@ from __future__ import annotations
 
 import functools
 import threading
+import weakref
 import warnings
 from typing import Any, Optional
 
@@ -387,6 +395,7 @@ from .cake_jit import (
     arch_for_capability,
     backward_chunks,
     backward_ctas,
+    current_raw_stream,
     device_sm_count,
     module_for_rows,
     nodw_module,
@@ -542,10 +551,13 @@ def _kernel_view(
         )
     tokens, heads = _rows_shape(shape)
     view = None
-    try:
-        view = tensor.view(tokens, heads, HEAD_DIM)
-    except RuntimeError:
-        view = None
+    if len(shape) == 3:
+        view = tensor  # already [T, H, 128]
+    else:
+        try:
+            view = tensor.view(tokens, heads, HEAD_DIM)
+        except RuntimeError:
+            view = None
     if view is not None:
         tok = int(view.stride(0)) if tokens > 1 else 0
         head = int(view.stride(1)) if heads > 1 else HEAD_DIM
@@ -719,6 +731,79 @@ def _module_workspace_bytes(name: str) -> int:
     return workspace_bytes(name)
 
 
+# Caller workspaces of earlier calls: id(workspace) -> (weak reference to the
+# workspace, the device of the call, its data pointer and bytes then, a flat
+# tensor on its storage, {backward module name: its buffers}).  A call with
+# the same tensor, at the same address with as many bytes, still uint8 and
+# contiguous, on the same device, takes the buffers checked and made by an
+# earlier call; any other call checks the workspace again (``_check_workspace``)
+# and makes a new entry.  The flat tensor shares the workspace's storage
+# (``Tensor.set_``) but is no view of the caller's tensor, so an entry does not
+# keep that tensor alive: the weak reference's callback drops the entry with
+# the tensor.
+_CALLER_WORKSPACES: dict[int, tuple[Any, ...]] = {}
+
+
+def _forget_caller_workspace(key: int, ref: Any) -> None:
+    held = _CALLER_WORKSPACES.get(key)
+    if held is not None and held[0] is ref:
+        _CALLER_WORKSPACES.pop(key, None)
+
+
+def _caller_workspace(
+    workspace: torch.Tensor, device: torch.device, arch: str
+) -> tuple[Any, ...]:
+    """The entry of a caller's workspace (see ``_CALLER_WORKSPACES``), checked
+    against every backward module of ``arch`` when it is new or changed."""
+
+    key = id(workspace)
+    held = _CALLER_WORKSPACES.get(key)
+    if (
+        held is not None
+        and held[0]() is workspace
+        and held[1] == device
+        and held[2] == workspace.data_ptr()
+        and held[3] == workspace.numel()
+        and workspace.dtype == torch.uint8
+        and workspace.is_contiguous()
+    ):
+        return held
+    _check_workspace(workspace, device, _workspace_bytes(arch))
+    try:
+        flat = torch.empty((0,), dtype=torch.uint8, device=device).set_(
+            workspace.untyped_storage(),
+            workspace.storage_offset(),
+            (workspace.numel(),),
+            (1,),
+        )
+    except RuntimeError:
+        flat = None  # no entry views: every call views the workspace itself
+    held = (
+        weakref.ref(workspace, functools.partial(_forget_caller_workspace, key)),
+        device,
+        workspace.data_ptr(),
+        workspace.numel(),
+        flat,
+        {},
+    )
+    _CALLER_WORKSPACES[key] = held
+    return held
+
+
+def _caller_workspace_views(
+    held: tuple[Any, ...], workspace: torch.Tensor, name: str, device: torch.device
+) -> dict[str, torch.Tensor]:
+    """``_workspace_views`` of backward module ``name`` on a caller's
+    workspace, made once per entry and module."""
+
+    if held[4] is None:
+        return _workspace_views(workspace, name, device)
+    views = held[5].get(name)
+    if views is None:
+        views = held[5][name] = _workspace_views(held[4], name, device)
+    return views
+
+
 @functools.cache
 def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
     """An empty ``dtype`` tensor on CUDA device ``device_index``, made once:
@@ -864,6 +949,15 @@ def _refill_reserve(arch: str, device: torch.device) -> None:
     current stream (no host synchronization)."""
 
     index = _device_index(device)
+    reserve = _RESERVES.get(index)
+    if (
+        reserve is not None
+        and not reserve["pending"]
+        and 2 * len(reserve["ready"]) >= _RESERVE_SIZE
+    ):
+        # The common case, read without the lock: no fill pending and at least
+        # half the reserve ready, where the locked path returns as well.
+        return
     with _RESERVE_LOCK:
         reserve = _RESERVES.get(index)
         if reserve is None:
@@ -950,7 +1044,8 @@ def _stream_workspace_views(
     if torch.cuda.is_current_stream_capturing():
         return _workspace_views(_capture_workspace(arch, device), name, device)
     _refill_reserve(arch, device)
-    key = (_device_index(device), torch.cuda.current_stream(device).cuda_stream, name)
+    index = _device_index(device)
+    key = (index, current_raw_stream()(index), name)
     views = _STREAM_WORKSPACES.get(key)
     if views is None:
         views = _workspace_views(
@@ -1128,7 +1223,7 @@ def _backward(
         # workspace word: no workspace and no reserve (a caller's is checked
         # and left as it is).
         if workspace is not None:
-            _check_workspace(workspace, device, _workspace_bytes(arch))
+            _caller_workspace(workspace, device, arch)
         if dw is None:
             # empty tensors of the binding's dtypes for the unread buffers
             buffers = _no_workspace(index)
@@ -1143,8 +1238,8 @@ def _backward(
         if workspace is not None:
             # A caller's workspace holds the documented bytes in every band,
             # whatever part of them this module uses.
-            _check_workspace(workspace, device, _workspace_bytes(arch))
-            buffers.update(_workspace_views(workspace, name, device))
+            held = _caller_workspace(workspace, device, arch)
+            buffers.update(_caller_workspace_views(held, workspace, name, device))
     if dw is not None and _loader.MODULES[name]["grid_rule"]["kind"] == "row_claims":
         # The CTAs of a row-claims or a fused backward add their weight-gradient
         # sums in an order that depends on scheduling: PyTorch's alert, after
