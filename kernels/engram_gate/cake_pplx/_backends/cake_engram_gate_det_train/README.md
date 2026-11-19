@@ -112,16 +112,18 @@ The gradients are those of the one backward. The `out` errors of the two forward
 `dot_sum="fp32"` rounds more output elements away from the correctly rounded (BF16 of FP64) result where the products
 nearly cancel: 17802 of the 8.19 million output elements of the near-cancelling draws, against 117 for the default
 (an FP32 evaluation of the formula: 21917); 152 against 113 on the random draws. The `"fp32"` forward takes about
-13% less time (GB300, `T = 16384`: 0.326 ms against 0.375 ms).
+5-10% less time, depending on the GPU (`T = 16384`, FP32 weights: B200 0.320 ms against 0.347 ms, GB200 0.309 ms
+against 0.332 ms, GB300 0.313 ms against 0.329 ms, VR200 0.197 ms against 0.218 ms).
 
 ## Workspace and retained state
 
 - Retained for the backward (autograd): the inputs only. The backward recomputes the norms and the dot product; no
   statistics are saved.
-- Forward workspace: the FP32 weight product (80 KiB), plus an FP32 copy of a BF16 `q_weight` (80 KiB).
-- Backward workspace: the weight product, FP32 copies of BF16 weights (80 KiB each) and one FP32 `[4, 5120]` row of
-  weight-gradient partial sums per cluster of the backward grid (80 KiB each);
-  `cake_engram_gate_det_train_workspace_bytes(T, device)`.
+- Forward workspace: none. The forward kernel reads BF16 and FP32 weights as stored and forms their FP32 product
+  itself; a forward call is one launch.
+- Backward workspace: one FP32 `[4, 5120]` row of weight-gradient partial sums per cluster of the backward grid
+  (80 KiB each); `cake_engram_gate_det_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32
+  weights as stored and write the autograd weight gradients in each parameter's dtype.
 
 ## Determinism
 

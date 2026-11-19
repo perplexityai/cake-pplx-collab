@@ -8,6 +8,9 @@ Public module:
 
 The family has a deterministic module only (no `nondet` module): every output is elementwise or a sum within one row.
 
+The kernels compile on first use: a JIT build needs a CUDA toolkit of at least 12.8 for `sm_100a`, 12.9 for `sm_103a`
+and 13.5 for `sm_107a`.
+
 Install this family alone, pinned to a commit:
 
 ```bash

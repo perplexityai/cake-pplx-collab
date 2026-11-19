@@ -58,10 +58,10 @@ GROUPS = ROW_DIM // GROUP
 PACKED_ROW_BYTES = ROW_DIM + GROUPS
 
 # Launch geometry: warps per CTA (the program's block), looked-up rows per warp and step (the program's unroll), and
-# the resident CTAs per SM the grid is capped at.
+# per architecture the CTAs of the program an SM holds at once, which the grid is capped at.
 WARPS_PER_CTA = 8
 ROWS_PER_WARP = 4
-CTAS_PER_SM = 8
+CTAS_PER_SM = {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4}
 
 MODULES: dict[str, dict[str, Any]] = {
     "lookup": {
@@ -82,9 +82,9 @@ MODULES: dict[str, dict[str, Any]] = {
 }
 
 
-def grid(positions: int, sm_count: int) -> tuple[int, int, int]:
-    """The launch grid of a lookup of ``positions`` rows on a device of ``sm_count`` SMs: one CTA per
-    ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM`` CTAs per SM (the kernel walks the rows
-    grid-stride, so the cap leaves no row out), at least one CTA."""
+def grid(positions: int, sm_count: int, arch: str) -> tuple[int, int, int]:
+    """The launch grid of a lookup of ``positions`` rows on a device of ``sm_count`` SMs and architecture ``arch``:
+    one CTA per ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM[arch]`` CTAs per SM, the CTAs the
+    device holds at once (the kernel walks the rows grid-stride, so the cap leaves no row out), at least one CTA."""
     per_cta = WARPS_PER_CTA * ROWS_PER_WARP
-    return (max(1, min(-(-int(positions) // per_cta), int(sm_count) * CTAS_PER_SM)), 1, 1)
+    return (max(1, min(-(-int(positions) // per_cta), int(sm_count) * CTAS_PER_SM[arch])), 1, 1)

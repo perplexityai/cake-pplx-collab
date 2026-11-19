@@ -5858,10 +5858,10 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
         )
     elif stage == "slab_sum":
         values.update(
-            dx=t["dx_acc"][row0:stop],
+            dx=_chunk_rows(t["dx_acc"], row0, stop),
             ws=t["dx_ws"] if _slab_count(plan, index) else t["f32_dummy"],
-            labels=t["labels"][row0:stop],
-            rlab=t["rlab"][row0:stop],
+            labels=_chunk_rows(t["labels"], row0, stop),
+            rlab=_chunk_rows(t["rlab"], row0, stop),
             W=t["W"],
         )
     elif base == "gemm_dw_acc":
@@ -5929,6 +5929,12 @@ def _slot_values_temperature(
     values = _slot_values(role, t, plan, index)
     values["temperature"] = t["temperature"]
     return values
+
+
+def _chunk_rows(x: torch.Tensor, row0: int, stop: int) -> torch.Tensor:
+    """``x[row0:stop]`` as a per-call slot binds it: ``x`` itself when the rows are all of it (a one-chunk plan's),
+    which has the address, shape, strides, dtype and device of that view (:func:`_same_view`), so no view is formed."""
+    return x if row0 == 0 and stop == x.shape[0] else x[row0:stop]
 
 
 def _same_view(a, b) -> bool:
@@ -6484,8 +6490,8 @@ class LmHeadDetLossRunner:
     engine: Optional[ReferenceEngine] = field(default=None, repr=False)
     dw_stream: str = "auto"
     _tma_prepared: bool = False
-    # built only to template a remembered binding on a hidden valid-row count's chunk-0 buffers
-    # (``prepare_lm_head_det_loss(_chunk_views=...)``): those buffers hold the count's chunk 0, so it never launches
+    # built only to template a remembered binding (``prepare_lm_head_det_loss(_template_only=True)``; on a hidden
+    # valid-row count's chunk-0 buffers, ``_chunk_views=...``, which hold the count's chunk 0): it never launches
     _template_only: bool = False
 
     @property
@@ -6555,8 +6561,7 @@ class LmHeadDetLossRunner:
     def _run(self, keys: tuple) -> None:
         if self._template_only:
             raise RuntimeError(
-                "this runner only templates a remembered binding (its chunk buffers are a hidden valid-row count's); "
-                "it never launches"
+                "this runner only templates a remembered binding; it never launches"
             )
         if self.backend == "cake":
             self.prepare_tma()
@@ -6791,6 +6796,7 @@ def prepare_lm_head_det_loss(
     logprob_keep: bool = False,
     dcnt: Optional[torch.Tensor] = None,
     dx_slices_cap: Optional[int] = None,
+    _template_only: bool = False,
     _chunk_views: Optional["_HiddenCount"] = None,
 ) -> LmHeadDetLossRunner:
     """Validate one binding and prepare its launches.
@@ -6871,6 +6877,13 @@ def prepare_lm_head_det_loss(
     buffers (:data:`CHUNK_VIEW_REGIONS`) and the other regions one smaller
     allocation (:func:`_chunk_view_layout`), so preparing it beside those
     buffers allocates no second chunk buffer; it never launches.
+
+    ``_template_only`` (private; the eager entry points, ``cake`` backend): the
+    runner only templates a remembered binding (:meth:`_Binding.from_runner`),
+    which launches with per-call buffers and the device's constant cells
+    (:func:`_device_constants`).  It binds those cells too, rather than filling
+    cells of its own, and it never launches (a runner of ``_chunk_views`` is
+    one).
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -6878,6 +6891,9 @@ def prepare_lm_head_det_loss(
         raise ValueError(
             "_chunk_views templates a cake-backend runner on its own workspace"
         )
+    if _template_only and backend != "cake":
+        raise ValueError("a template-only runner templates a cake-backend binding")
+    template_only = _template_only or _chunk_views is not None
     if entry != "logprob" and (logprob_dz or logprob_lbl or logprob_keep):
         raise ValueError(
             "logprob_dz / logprob_lbl / logprob_keep select logits GEMM arms of the log-probability entry"
@@ -7054,12 +7070,22 @@ def prepare_lm_head_det_loss(
     t["term"] = carve("term", torch.float32, (rows,))
     t["loss_acc"] = _loss_acc(carve("loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the unsliced GEMMs
+    if template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`_device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the unsliced GEMMs
     if plan.dx_ws_slabs:
         t["dx_ws"] = carve("dx_ws", torch.float32, (plan.dx_ws_slabs, rows, H))
     if plan.compact:
@@ -7179,7 +7205,7 @@ def prepare_lm_head_det_loss(
         memory=memory,
         engine=engine,
         dw_stream=stream_mode,
-        _template_only=_chunk_views is not None,
+        _template_only=template_only,
     )
 
 
@@ -7216,6 +7242,7 @@ def prepare_lm_head_det_loss_temperature(
     logprob_lbl: Optional[bool] = None,
     temperature: Optional[torch.Tensor] = None,
     dcnt: Optional[torch.Tensor] = None,
+    _template_only: bool = False,
     _chunk_views: Optional["_HiddenCount"] = None,
 ) -> LmHeadDetLossRunner:
     """Validate one binding and prepare its launches.
@@ -7284,7 +7311,8 @@ def prepare_lm_head_det_loss_temperature(
     with the counted dW forms, and the forms without the count otherwise.
 
     ``_chunk_views`` (private): a template runner on the hidden valid-row count's chunk-0 buffers, as in
-    :func:`prepare_lm_head_det_loss`; it never launches.
+    :func:`prepare_lm_head_det_loss`; it never launches.  ``_template_only`` (private): a template runner that binds the
+    device's constant cells, as in :func:`prepare_lm_head_det_loss`.
     """
     if backend not in BACKENDS:
         raise ValueError(f"backend must be one of {BACKENDS}")
@@ -7292,6 +7320,9 @@ def prepare_lm_head_det_loss_temperature(
         raise ValueError(
             "_chunk_views templates a cake-backend runner on its own workspace"
         )
+    if _template_only and backend != "cake":
+        raise ValueError("a template-only runner templates a cake-backend binding")
+    template_only = _template_only or _chunk_views is not None
     if entry != "logprob" and (logprob_dz or logprob_lbl):
         raise ValueError(
             "logprob_dz / logprob_lbl select logits GEMM arms of the log-probability entry"
@@ -7503,12 +7534,22 @@ def prepare_lm_head_det_loss_temperature(
     t["term"] = carve("term", torch.float32, (rows,))
     t["loss_acc"] = _loss_acc(carve("loss_acc", torch.float32, (LOSS_ACC_WORDS,)))
     t["grad_scale"] = carve("grad_scale", torch.float32, (1,))
-    t["unit_scale"] = torch.ones(
-        (1,), dtype=torch.float32, device=device
-    )  # the log-probability entry's cast scale
-    t["f32_dummy"] = torch.zeros(
-        (16,), dtype=torch.float32, device=device
-    )  # unused ``WS`` of the unsliced GEMMs
+    if template_only:
+        # the device's constant cells, which the binding this runner templates binds on every call
+        # (:func:`_device_constants`): building the template fills no cells of its own
+        cell_index = (
+            torch.cuda.current_device() if device.index is None else device.index
+        )
+        constants = _device_constants(int(cell_index))
+        t["unit_scale"] = constants["unit_scale"]
+        t["f32_dummy"] = constants["f32_dummy"]
+    else:
+        t["unit_scale"] = torch.ones(
+            (1,), dtype=torch.float32, device=device
+        )  # the log-probability entry's cast scale
+        t["f32_dummy"] = torch.zeros(
+            (16,), dtype=torch.float32, device=device
+        )  # unused ``WS`` of the unsliced GEMMs
     if plan.dx_ws_slabs:
         t["dx_ws"] = carve("dx_ws", torch.float32, (plan.dx_ws_slabs, rows, H))
     if plan.compact:
@@ -7647,7 +7688,7 @@ def prepare_lm_head_det_loss_temperature(
         memory=memory,
         engine=engine,
         dw_stream=stream_mode,
-        _template_only=_chunk_views is not None,
+        _template_only=template_only,
     )
 
 
@@ -7892,13 +7933,18 @@ class _Binding:
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         for key, launch in runner.launches.items():
             if keep is None or key in keep:
-                _check_slot_values(key, t, plan, [name for _, name in launch.slots])
+                _check_slot_values(
+                    key, t, plan, [name for _, name in launch.slots], formed.get(key)
+                )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
-                _check_slot_values(key, t, plan, ["src", "idx", "out"])
+                _check_slot_values(key, t, plan, ["src", "idx", "out"], formed.get(key))
         early = forward_early_keys(plan)
         split = next(
             (i for i, key in enumerate(early) if _reads_labels(key[0])), len(early)
@@ -8273,7 +8319,10 @@ class _TemperatureBinding(_Binding):
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
-        # own tensors for every launch and host gather of this binding (fail closed)
+        # own tensors for every launch and host gather of this binding (fail closed).  On the runner's own plan (no
+        # ``hidden``) those host values are the runner's ``values``: formed by the same function on these tensors
+        # when it was prepared, and bound into its launches -- the check reads them rather than forming them again
+        formed = runner.values if hidden is None else {}
         tau = plan.problem.temperature
         slot_values = _slot_values_temperature if tau else _slot_values
         full_values = stage_values_temperature if tau else stage_values
@@ -8286,11 +8335,18 @@ class _TemperatureBinding(_Binding):
                     [name for _, name in launch.slots],
                     slot_values,
                     full_values,
+                    formed.get(key),
                 )
         for key in forward_order + backward_order:
             if key[0] == "gather_rows":
                 _check_slot_values_temperature(
-                    key, t, plan, ["src", "idx", "out"], slot_values, full_values
+                    key,
+                    t,
+                    plan,
+                    ["src", "idx", "out"],
+                    slot_values,
+                    full_values,
+                    formed.get(key),
                 )
         early = forward_early_keys(plan)
         split = next(
@@ -8540,10 +8596,12 @@ class _KeptBinding(_Binding):
         return dx, t.get("dw_out")
 
 
-def _check_slot_values(key, t: dict[str, Any], plan: Plan, names) -> None:
-    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``."""
+def _check_slot_values(key, t: dict[str, Any], plan: Plan, names, full=None) -> None:
+    """:func:`_slot_values` binds what :func:`stage_values` binds for the host values ``names`` of launch ``key``
+    (``full``: the host values :func:`stage_values` formed for it, when they are already at hand)."""
     fast = _slot_values(key[0], t, plan, key[1])
-    full = stage_values(key[0], t, plan, key[1])
+    if full is None:
+        full = stage_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -8558,11 +8616,14 @@ def _check_slot_values_temperature(
     names,
     slot_values=_slot_values,
     full_values=stage_values,
+    full=None,
 ) -> None:
     """:func:`_slot_values` (or the binding's ``slot_values``) binds what :func:`stage_values` (or the binding's
-    ``full_values``) binds for the host values ``names`` of launch ``key``."""
+    ``full_values``) binds for the host values ``names`` of launch ``key`` (``full``: the host values ``full_values``
+    formed for it, when they are already at hand)."""
     fast = slot_values(key[0], t, plan, key[1])
-    full = full_values(key[0], t, plan, key[1])
+    if full is None:
+        full = full_values(key[0], t, plan, key[1])
     for name in names:
         if not _same_view(fast.get(name), full.get(name)):
             raise RuntimeError(
@@ -9200,6 +9261,7 @@ def forward_loss(
                 dx_finalize=fused_dx,
                 dw_stream=stream_mode,
                 dx_slices_cap=dx_cap,
+                _template_only=True,
                 **common,
             )
             binding = _Binding.from_runner(runner, hc)
@@ -9270,6 +9332,7 @@ def forward_loss(
             dx_finalize=fused_dx,
             dw_stream=stream_mode,
             dx_slices_cap=dx_cap,
+            _template_only=backend == "cake",
             **common,
         )
         if backend == "cake":
@@ -10128,6 +10191,7 @@ def _forward_logprob_rows(
         compact_rows=False if row_index is None else row_index,
         gemm_tuning=tuning,
         logprob_lbl=lbl,
+        _template_only=arena is not None and backend == "cake",
         _chunk_views=hc,
     )
     if hc is not None or (arena is not None and backend == "cake"):
@@ -10344,6 +10408,7 @@ def backward_logprob(
         )
         if skip
         else None,
+        _template_only=hc is not None and backend == "cake",
     )
     if hc is not None or (skip and runner.plan.dcnt):
         binding = _Binding.from_runner(runner, hc)
@@ -10836,6 +10901,7 @@ def backward_logprob_temperature(
         )
         if skip
         else None,
+        _template_only=hc is not None and backend == "cake",
     )
     if hc is not None or (skip and runner.plan.dcnt):
         binding = cast(_TemperatureBinding, _TemperatureBinding.from_runner(runner, hc))
@@ -10999,6 +11065,7 @@ def _forward_keep_bound(
             gemm_tuning=tuning,
             logprob_lbl=False,
             logprob_keep=True,
+            _template_only=backend == "cake",
         )
         # the kept views are bound per call: every call launches through the templated binding
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner, hc))
@@ -11124,6 +11191,7 @@ def backward_logprob_keep(
             dw_stream=stream_mode,
             logprob_dz=False,
             logprob_keep=True,
+            _template_only=backend == "cake",
         )
         binding = cast(_KeptBinding, _KeptBinding.from_runner(runner))
         del runner

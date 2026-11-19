@@ -6891,6 +6891,104 @@ def test_template_only_runner_never_launches():
             launch()
 
 
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_from_runner_checks_slots_against_the_runner_host_values(module, monkeypatch):
+    """A binding made on its runner's own plan (no hidden valid-row count) checks every per-call slot against the host
+    values the runner was prepared with (``runner.values``: :func:`stage_values` of its tensors, which its launches
+    bind) and forms none of them again; a runner value that is not the slot's view still fails the check.  The
+    template is a reference runner of a compacted plan marked ``cake``: it binds no launch, so a stand-in launch of
+    chunk 0's row gradient joins its host gathers."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _host_inputs(37)
+    runner = mod.prepare_lm_head_det_loss(
+        inp.X,
+        inp.W,
+        inp.labels,
+        objective="ce",
+        loss_div=inp.loss_div,
+        chunk_size=16,
+        backend="reference",
+        compact_rows=True,
+    )
+    gathers = [key for key in runner.forward_order if key[0] == "gather_rows"]
+    grad = ("row_grad", 0)
+    assert gathers and grad in runner.values
+    runner.backend = "cake"
+    runner.launches = {
+        grad: SimpleNamespace(
+            slots=tuple(enumerate(("z", "labels", "lse", "d", "rlab"))),
+            templated=lambda: None,
+        )
+    }
+    formed = []
+    real = mod.stage_values
+
+    def counted(stage, t, plan, index, **kw):
+        formed.append((stage, index))
+        return real(stage, t, plan, index, **kw)
+
+    monkeypatch.setattr(mod, "stage_values", counted)
+    mod._Binding.from_runner(runner)
+    assert not [key for key in formed if key == grad or key[0] == "gather_rows"]
+    for key, name in ((gathers[0], "out"), (grad, "rlab")):
+        kept = runner.values[key]
+        runner.values[key] = dict(kept, **{name: kept[name][:1]})
+        with pytest.raises(RuntimeError, match=re.escape(f"{name!r} differs")):
+            mod._Binding.from_runner(runner)
+        runner.values[key] = kept
+
+
+def test_default_module_template_only_runner_takes_the_cake_backend():
+    """The default module's ``_template_only`` runners (the eager entry points' binding build, which binds the device's
+    constant cells) take the ``cake`` backend only, with and without a temperature."""
+    inp = _host_inputs(37)
+    for prepare in (prepare_lm_head_det_loss, prepare_lm_head_det_loss_temperature):
+        with pytest.raises(ValueError, match="template-only"):
+            prepare(
+                inp.X,
+                inp.W,
+                inp.labels,
+                chunk_size=16,
+                backend="reference",
+                _template_only=True,
+            )
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_slab_sum_slots_of_a_whole_tensor_chunk_form_no_view(module):
+    """The per-call slots of a slab sum (``_slot_values``, and the opt-in module's temperature form) bind what
+    ``stage_values`` binds -- the same address, shape, strides, dtype and device -- and, where the chunk's rows are all
+    of ``dX_acc`` / ``labels`` / ``rlab`` (a one-chunk plan), those tensors themselves rather than a view of them."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    slot_forms = [mod._slot_values]
+    if mod is opt_in:
+        slot_forms.append(mod._slot_values_temperature)
+    rows_of = (("dx", "dx_acc"), ("labels", "labels"), ("rlab", "rlab"))
+    same = cake_backend._same_view
+    inp = _host_inputs(37)
+    for chunk in (64, 16):
+        runner = mod.prepare_lm_head_det_loss(
+            inp.X,
+            inp.W,
+            inp.labels,
+            objective="ce",
+            loss_div=inp.loss_div,
+            chunk_size=chunk,
+            backend="reference",
+        )
+        plan, t = runner.plan, runner.tensors
+        assert plan.num_chunks == (1 if chunk == 64 else 3)
+        whole = plan.num_chunks == 1
+        for i in range(plan.num_chunks):
+            full = mod.stage_values("slab_sum", t, plan, i)
+            for slots in slot_forms:
+                v = slots("slab_sum", t, plan, i)
+                for name in STAGE_TENSORS["slab_sum"]:
+                    assert same(v[name], full[name]), (chunk, i, name)
+                for name, rows in rows_of:
+                    assert (v[name] is t[rows]) is whole, (chunk, i, name)
+
+
 _ISSUE_SHAPES = (  # (H, V, T) of the issue's shapes; about a third of the labels ignored
     (6144, 154880, 16384),
     (4096, 154880, 16384),
@@ -7948,6 +8046,40 @@ def test_device_binding_scratch_binds_constant_cells(glm_weight):
     assert (
         tuple(t["f32_dummy"].shape) == (16,) and t["f32_dummy"].dtype == torch.float32
     )
+
+
+def test_device_template_runner_binds_constant_cells(glm_weight, monkeypatch):
+    """The runner an eager call prepares only to template its remembered binding (``_template_only``) binds the
+    device's constant cells (``unit_scale`` / ``f32_dummy``), as the binding's scratch does, and never launches; a
+    runner prepared without the switch fills cells of its own."""
+    _require_program(entry="loss")
+    inp = _device_inputs(4097, W=glm_weight)
+    kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=4096, backend="cake")
+    real = cake_backend.prepare_lm_head_det_loss
+    runners = []
+
+    def recording(*args, **kwargs):
+        runners.append((real(*args, **kwargs), kwargs.get("_template_only", False)))
+        return runners[-1][0]
+
+    monkeypatch.setattr(cake_backend, "prepare_lm_head_det_loss", recording)
+    with _cache(True) as cache:
+        cache.clear()
+        cake_backend.forward_loss(inp.X, inp.W, inp.labels, **kw)
+    assert [flag for _, flag in runners] == [True]
+    runner = runners[0][0]
+    constants = cake_backend._device_constants(runner.device_index)
+    assert runner._template_only
+    cells = ("unit_scale", "f32_dummy")
+    assert all(runner.tensors[name] is constants[name] for name in cells)
+    with pytest.raises(RuntimeError, match="never launches"):
+        runner.forward()
+    own = real(inp.X, inp.W, inp.labels, **kw)
+    assert not own._template_only
+    assert not any(own.tensors[name] is constants[name] for name in cells)
+    torch.cuda.synchronize()
+    assert own.tensors["unit_scale"].tolist() == [1.0]
+    assert not bool(own.tensors["f32_dummy"].any())
 
 
 def test_device_binding_cache_hits_are_bitwise_and_pin_nothing(glm_weight):
