@@ -25,6 +25,9 @@ Workers of the multi-GPU MoK tests (``test_mok_distributed.py``): each runs in e
   weight-gradient accumulation and native MXFP8 routed experts over unequal ranks.
 * :func:`source_capacity`, :func:`backward_scratch`: the adapter's source-length guards, the schedule's expert
   layout, context ownership and the backward's scratch lifetime.
+* :func:`before_down_training`: the router weight before the down projection (``router_weight_position=
+  "before_down"``, clamped SwiGLU, FP32 weight gradients) through the adapter, recompute and the context-free forward
+  included, and a test-local autograd function around the checkpointed step.
 
 Every case checks the contract (shapes, finite values, exact zeros of empty ranks) and repeatability: five eager
 launches, five graph replays and the eager launch give the same bytes, recompute and the context-free forward give
@@ -111,8 +114,9 @@ def _weights(ep, local_experts, hidden, intermediate, device, seed=32471):
     return shared, global_routed, routed
 
 
-def _random_data(counts, hidden, topk, experts, device):
-    """Global inputs of one step from the current random state (identical on every rank)."""
+def _random_data(counts, hidden, topk, experts, device, weight_before_down=False):
+    """Global inputs of one step from the current random state (identical on every rank).  With
+    ``weight_before_down`` the router weights are in [0, 1.5) and every 5th token's first one is exactly 0."""
     total = sum(counts)
     options = dict(dtype=torch.bfloat16, device=device)
     x = torch.randn(total, hidden, **options) * 0.125
@@ -120,6 +124,9 @@ def _random_data(counts, hidden, topk, experts, device):
     ids = torch.rand(total, experts, device=device).argsort(-1)[:, :topk].contiguous()
     scores = torch.rand(total, topk, device=device) + 0.1
     scores = scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
+    if weight_before_down:
+        scores = torch.rand(total, topk, device=device) * 1.5
+        scores[::5, 0] = 0.0
     return dict(x=x, d_output=dy, expert_ids=ids, scores=scores)
 
 
@@ -195,10 +202,12 @@ def judge(
     mxfp8_global=None,
     fp32_wgrad=False,
     macro=768,
+    weight_before_down=False,
 ):
     """Judge the iteration's outputs of the whole group over :data:`tests.cake_naive.DRAWS` draws of random inputs,
     and over stage 2's where an output asks for them (every rank runs the same judge on gathered values, so every rank
-    takes the same draws).  Returns the verdicts, the alternatives' verdicts and the failures."""
+    takes the same draws).  ``weight_before_down``: the router weight before the down projection (the naive layer's
+    form, :func:`_random_data`'s weights).  Returns the verdicts, the alternatives' verdicts and the failures."""
     experts = len(counts) * local_experts
     device = iteration.x.device
     alt = TierJudge()
@@ -206,7 +215,7 @@ def judge(
     mx = None if mxfp8_global is None else dict(forward=mxfp8_global[0], backward=mxfp8_global[1])
 
     def run(j, _seed):
-        data = _random_data(counts, hidden, topk, experts, device)
+        data = _random_data(counts, hidden, topk, experts, device, weight_before_down)
         _load(iteration, data, counts)
         values = _snapshot(iteration.run())
         local_routed_dw = values[3:6]
@@ -224,7 +233,7 @@ def judge(
         for dtype in (naive.ORACLE, naive.NAIVE):
             refs[dtype] = naive.layer(
                 data["x"], data["d_output"], data["scores"], shared, global_routed, segs, limit, dtype,
-                sections=counts, mx=mx, macro=None if fp32_wgrad else macro,
+                sections=counts, mx=mx, macro=None if fp32_wgrad else macro, weight_before_down=weight_before_down,
             )  # fmt: skip
         oracle = {n: v for n, v in zip(("y", "dx", "d_scores"), (refs[naive.ORACLE][k] for k in ("y", "dx", "d_scores")))}
         oracle.update(zip(RESULT_NAMES[3:], refs[naive.ORACLE]["dw"]))
@@ -233,7 +242,8 @@ def judge(
         if "alt_dw" in r:
             for name, value in zip(RESULT_NAMES[3:6], r["alt_dw"], strict=True):
                 alt.add(name, j, outputs[name], oracle[name], {"bf16": value})
-        alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r["alt_d_scores"]})
+        if "alt_d_scores" in r:
+            alt.add("d_scores", j, outputs["d_scores"], oracle["d_scores"], {"bf16": r["alt_d_scores"]})
         return outputs, oracle
 
     verdict, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed, reported=(alt,))
@@ -342,6 +352,7 @@ class TrainingIteration:
                 w[3],
                 w[4],
                 swiglu_limit=limit,
+                router_weights=self.scores,
             )
         extra = {}
         if self.accumulators is not None:
@@ -893,3 +904,126 @@ def backward_scratch():
     assert all(gradients[2 + i] is weight_grads[j] for i, j in enumerate(order))
     torch.cuda.synchronize()
     dist.barrier()
+
+
+#: (local experts, top-k) of the router-weight-before-down worker per EP size: the diagnostic layouts.
+BEFORE_DOWN_DIST_LAYOUTS = {1: (4, 2), 4: (4, 2)}
+
+
+class _CheckpointedStep(torch.autograd.Function):
+    """Test-local autograd function around one checkpointed router-weight-before-down step (the form a caller wraps
+    the adapter in; the package ships none): forward without context, backward rebuilds the context with
+    ``recompute_forward_context`` (the router weights included) and runs backward.  ``x`` and the router weights are
+    differentiable; the weight gradients go to the caller's FP32 accumulators."""
+
+    @staticmethod
+    def forward(ctx, x, scores, step):
+        f = step["functional"]
+        y, context = f.forward(
+            step["config"], step["workspace"], step["schedule"], x, scores, *step["weights"],
+            swiglu_limit=step["limit"], save_context=False,
+        )  # fmt: skip
+        assert context is None
+        ctx.step = step
+        ctx.save_for_backward(x, scores)
+        return y
+
+    @staticmethod
+    def backward(ctx, dy):
+        x, scores = ctx.saved_tensors
+        step = ctx.step
+        f, w = step["functional"], step["weights"]
+        context = f.recompute_forward_context(
+            step["config"], step["workspace"], step["schedule"], x, w[0], w[1], w[3], w[4],
+            swiglu_limit=step["limit"], router_weights=scores,
+        )  # fmt: skip
+        for accumulator in step["accumulators"]:
+            accumulator.zero_()
+        gradients = f.backward(
+            step["config"], step["workspace"], step["schedule"], context, dy.contiguous(), x, scores, *w,
+            swiglu_limit=step["limit"], weight_grad_accumulators=step["accumulators"],
+        )  # fmt: skip
+        return gradients[0], gradients[1], None
+
+
+def before_down_training():
+    """The router weight before the down projection through the adapter (clamped SwiGLU, FP32 weight gradients from
+    zeroed accumulators) over 1031 source rows per rank (padded staging, several macrobatches): the contract,
+    repeatability eager and under CUDA Graph replay, recompute and the context-free forward with the saved context's
+    bytes, a test-local autograd function around the checkpointed step with the same bytes; then judged."""
+    _exact_matmul()
+    device = torch.device("cuda", torch.cuda.current_device())
+    rank, ep = dist.get_rank(), dist.get_world_size()
+    local_experts, topk = BEFORE_DOWN_DIST_LAYOUTS[ep]
+    total_experts = ep * local_experts
+    hidden, intermediate, limit = 512, 256, LIMIT
+    counts = ([1031, 768, 257, 513] * ep)[:ep]
+    shared, global_routed, routed = _weights(ep, local_experts, hidden, intermediate, device)
+    weights = (*shared, *routed)
+    functional = prepare_mok_bf16(
+        ep_size=ep, local_experts=local_experts, topk=topk, clamped_swiglu=True, fp32_wgrad=True,
+        router_weight_position="before_down",
+    )  # fmt: skip
+    functional.prepare(limit, save_context=False)
+    functional.prepare_recompute(limit)
+    config, workspace = create_mok_bf16_workspace(
+        group=dist.group.WORLD,
+        device=device,
+        num_local_tokens=counts[rank],
+        hidden_size=hidden,
+        topk=topk,
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=256,
+        macrobatch_size=768,
+        schedule_capacity_multiplier=1.0,
+    )
+    torch.manual_seed(8293)
+    data = _random_data(counts, hidden, topk, total_experts, device, weight_before_down=True)
+    start = sum(counts[:rank])
+    section = slice(start, start + counts[rank])
+    x, ids, scores, dy = (data[k][section].clone() for k in ("x", "expert_ids", "scores", "d_output"))
+    accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+
+    def iteration(recompute, save_context=True):
+        return TrainingIteration(
+            config, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
+            recompute=recompute, accumulators=accumulators, save_context=save_context,
+        )  # fmt: skip
+
+    saved_context = iteration(False)
+    outputs = _snapshot(saved_context.run())
+    _contract(outputs, counts[rank], hidden, topk)
+    again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
+    assert all(_same(outputs, other) for other in again), (rank, "eager repeat")
+    for recompute, save_context in ((True, True), (True, False)):
+        checkpointed = _snapshot(iteration(recompute, save_context).run())
+        differs = [n for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True) if not torch.equal(a, b)]
+        assert not differs, (rank, "recompute" if save_context else "context-free", differs)
+    dist.barrier()
+    step = dict(
+        functional=functional, config=config, workspace=workspace, weights=weights, limit=limit,
+        accumulators=accumulators, schedule=functional.build_schedule(
+            workspace, config, ids, num_local_experts=local_experts
+        ),
+    )  # fmt: skip
+    leaf_x, leaf_scores = x.detach().clone().requires_grad_(), scores.detach().clone().requires_grad_()
+    y = _CheckpointedStep.apply(leaf_x, leaf_scores, step)
+    y.backward(dy)
+    wrapped = _snapshot((y, leaf_x.grad, leaf_scores.grad, *(accumulators[i] for i in (3, 4, 5, 0, 1, 2))))
+    differs = [n for n, a, b in zip(RESULT_NAMES, outputs, wrapped, strict=True) if not torch.equal(a, b)]
+    assert not differs, (rank, "autograd function", differs)
+    dist.barrier()
+    saved_context.capture()
+    replays = [_snapshot(saved_context.run()) for _ in range(REPEATS)]
+    assert all(_same(outputs, other) for other in replays), (rank, "graph replay")
+    dist.barrier()
+    record = dict(case="bf16-clamped-before-down", counts=counts)
+    record["judged"] = judge(
+        saved_context, counts, shared, global_routed, topk=topk, local_experts=local_experts, hidden=hidden,
+        seed=4400, limit=limit, fp32_wgrad=True, weight_before_down=True,
+    )  # fmt: skip
+    del saved_context
+    torch.cuda.synchronize()
+    dist.barrier()
+    return [record]

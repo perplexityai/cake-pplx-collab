@@ -47,6 +47,7 @@ RE_EXPORTS = (
     "IMBALANCE_THRESHOLD",
     "IMBALANCE_THRESHOLDS",
     "MOK_PRECISIONS",
+    "ROUTER_WEIGHT_POSITIONS",
     "resolve_comm_sms",
     "resolve_imbalance_comm_sms",
     "resolve_imbalance_threshold",
@@ -103,3 +104,40 @@ def test_argument_errors_of_the_package_surface_unchanged():
         mok.prepare_mok_bf16(ep_size=3, local_experts=4, topk=2)
     with pytest.raises(ValueError, match="precision must be one of"):
         mok.resolve_imbalance_threshold("fp8")
+
+
+@pytest.mark.parametrize(
+    "position,ep,experts,topk,clamped,fp32,error,match",
+    [
+        ("middle", 64, 6, 6, True, True, ValueError, "router_weight_position must be one of"),
+        (1, 64, 6, 6, True, True, TypeError, "router_weight_position must be one of"),
+        ("after_down", 64, 6, 6, True, True, ValueError, "top-k 6 is supported only with"),
+        ("after_down", 16, 16, 6, False, False, ValueError, "top-k 6 is supported only with"),
+        ("after_down", 64, 6, 8, False, False, ValueError, r"layout \(64, 6\) is supported only with"),
+        ("after_down", 8, 48, 2, False, False, ValueError, r"layout \(8, 48\) is supported only with"),
+        ("after_down", 3, 4, 2, False, False, ValueError, "Unsupported"),
+        ("before_down", 8, 32, 8, True, True, ValueError, r"supports \(EP, local experts, top-k\)"),
+        ("before_down", 64, 6, 2, True, True, ValueError, r"got \(64, 6, 2\)"),
+        ("before_down", 64, 6, 6, False, True, ValueError, "clamped SwiGLU only"),
+        ("before_down", 8, 48, 6, True, False, ValueError, "weight gradients in FP32 only"),
+    ],
+    ids=[
+        "unknown-position", "position-type", "top6-after-down", "top6-other-layout", "layout-64-6-top8",
+        "layout-8-48-top2", "unsupported-layout", "before-down-layout", "before-down-topk", "before-down-plain",
+        "before-down-bf16-wgrad",
+    ],
+)
+def test_prepare_refuses_unsupported_router_weight_combinations(
+    position, ep, experts, topk, clamped, fp32, error, match
+):
+    """``prepare_mok_bf16`` refuses every unsupported (router-weight position, EP, local experts, top-k, SwiGLU form,
+    weight-gradient accumulation) combination with a message naming it, before any device work (no GPU needed)."""
+    with pytest.raises(error, match=match):
+        mok.prepare_mok_bf16(
+            ep_size=ep,
+            local_experts=experts,
+            topk=topk,
+            clamped_swiglu=clamped,
+            fp32_wgrad=fp32,
+            router_weight_position=position,
+        )

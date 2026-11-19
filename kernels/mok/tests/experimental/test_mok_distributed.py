@@ -19,9 +19,10 @@ Multi-GPU MoK tests: EP1 and EP4 groups on one node, each test starting its own 
 
 The workers live in :mod:`tests.experimental._mok_dist`: the complete training step eager and under CUDA Graph
 replay, unequal source counts per rank (empty ranks included), the training features (clamped SwiGLU, recompute and
-the context-free forward, FP32 weight-gradient accumulation, native MXFP8) and the adapter's source-length guards and
-scratch lifetime.  Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case
-(the whole group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
+the context-free forward, FP32 weight-gradient accumulation, native MXFP8), the router weight before the down
+projection through the adapter (EP1 on SM100a / SM103a) and the adapter's source-length guards and scratch lifetime.
+Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
+group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
 own under a strict expected-failure marker, from the same group run: the BF16 routed weight gradients of the cases
 whose experts' rows cross a macrobatch boundary and miss the tier.
@@ -30,6 +31,7 @@ Backend suite: the package is imported only through :func:`tests.cake.test_helpe
 """
 
 import pytest
+import torch
 
 from tests.experimental import _mok_dist as workers
 from tests.experimental import _mok_gaps as gaps
@@ -114,3 +116,15 @@ def test_source_capacity_and_context_ownership():
 
 def test_backward_releases_launcher_scratch_before_epilogue():
     run_ranks(4, workers.backward_scratch)
+
+
+@pytest.mark.parametrize("world", [1], ids=["ep1"])
+def test_before_down_training(record_property, world):
+    """``router_weight_position="before_down"`` through the adapter: contract, repeatability, graph replay, recompute,
+    the context-free forward and a test-local autograd function with the saved context's bytes; judged."""
+    if torch.cuda.is_available() and torch.cuda.device_count() >= world:
+        if any(torch.cuda.get_device_capability(index) == (10, 7) for index in range(world)):
+            pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+    results = _run(world, workers.before_down_training)
+    assert [r["case"] for r in results[0]] == ["bf16-clamped-before-down"]
+    _record(results, record_property)
