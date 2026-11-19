@@ -40,7 +40,7 @@ copied layouts, weighted and unweighted calls, values on the clamp boundary, dee
 sigmoid, a gate below -87 in each third of every row beside ordinary and boundary values, every BF16 gate, a limit
 between two BF16 values and a small limit.  Beside the judge, exact facts of the contract (no tolerance): the inclusive
 masks (a gradient is 0 exactly where its mask is 0 and passes at ``g = L`` and ``u = +-L``); zero-weight rows give
-exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other weight; the sigmoid's exact path (taken
+exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other weight; the sigmoid's deep path (taken
 by a warp's run of loads with a clamped gate at or below -87) gives the bits of its fast path wherever the clamped gate
 is above -87, in each program; ``d_weight`` sums the FP32 ``a``, and ``h`` is the FP32 product ``w a`` rounded once to
 BF16; ``R = 0`` returns empty outputs and launches nothing; one library per program serves every row count, limit,
@@ -987,7 +987,7 @@ def test_clamp_masks_are_inclusive(limit, device) -> None:
 @pytest.mark.parametrize("layout", ["split", "merged"])
 @pytest.mark.parametrize("limit", [10.0, 7.3])
 def test_masked_gradients_are_exactly_zero(data, layout, limit, device) -> None:
-    """On boundary data, also with a gate of -88 in each third of every row (the sigmoid's exact path), ``d_gate`` is
+    """On boundary data, also with a gate of -88 in each third of every row (the sigmoid's deep path), ``d_gate`` is
     exactly 0 wherever ``gate > L`` and ``d_up`` wherever ``|up| > L``, and the gradient passes on the boundary:
     nonzero at ``gate <= L`` (``up = +-L``) wherever its other factors are."""
     t = make_inputs(Case(257, layout, data=data, L=limit), seed=3, device=device)
@@ -1177,9 +1177,9 @@ def test_large_row_counts(rows, device) -> None:
 def test_the_exact_sigmoid_gives_the_bits_of_the_fast_one(layout, w, program, device, monkeypatch) -> None:
     """In each stage's small-R and large-R program (forced through the route), on ordinary and boundary values whose
     clamped gates are all above -87 (the sigmoid's fast path everywhere), a gate of -88 at columns 0, 768 and 1536 of
-    every row (one in each third: every run takes the exact path, the row of a one-run program and each run of 768
+    every row (one in each third: every run takes the deep path, the row of a one-run program and each run of 768
     columns of a three-run one) keeps the bits of ``h``, ``d_gate`` and ``d_up`` at every other column, and the value
-    of ``d_weight`` (``dh`` is 0 at those columns in both inputs).  The exact path ran: at the gates of -88, ``h`` and
+    of ``d_weight`` (``dh`` is 0 at those columns in both inputs).  The deep path ran: at the gates of -88, ``h`` and
     ``d_gate`` (``dh`` 1 there) are nonzero in every row with a nonzero weight, where the fast path's sigmoid is 0 (its
     approximate reciprocal of ``1 + e^88`` flushes to 0)."""
     _force(monkeypatch, program)

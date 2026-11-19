@@ -84,8 +84,9 @@ of a stage runs the small-R one at every `R`.
 A window changes 0.1.1's route only where forced small/large sweeps showed the other program not slower by more than
 0.5 % on that architecture, with both weighted and unweighted inputs.  In these sweeps the route was forced to each
 program, and both were timed at fixed row counts on B200, GB300 and VR200, with warm L2 (CUDA graph) and cold L2
-(CUPTI).  The inputs were weighted, unweighted and deep-gate (every warp takes the exact sigmoid).  The sweeps timed the
-backward alone and in forward + backward and checkpointed steps.  They timed the forward alone with merged and split
+(CUPTI).  The inputs were weighted, unweighted and deep-gate (every warp takes the deep-gate sigmoid, exact before
+0.1.4).  The sweeps timed the backward alone and in forward + backward and checkpointed steps.  They timed the
+forward alone with merged and split
 inputs, and in those steps only on GB300 with a split input.  They have no forward + backward or checkpointed timing for
 the B200 forward change (96 to 112 rows per SM).  There only the release A/B of 0.1.2 against 0.1.1 covers those steps,
 and it marks none of them slower: on the graph and CUPTI timers the highest ratio of 0.1.2's time to 0.1.1's is 1.006,
