@@ -6593,11 +6593,12 @@ def test_a_pool_eviction_keeps_the_forward_plans(monkeypatch) -> None:
     assert plans == {"key": "plan"}
 
 
-# the module globals a forward plan holds by identity (beside cake_backend.device_arch): helpers its steps call, the
-# route switches and tape words they read, and its caches
+# the module globals a forward plan holds by identity (beside cake_backend.device_arch): helpers its steps call (the
+# direct executor's rows and eager steps among them), the route switches and tape words they read, and its caches
 FWD_PLAN_HELD = ("_device_props", "_available", "wy_stage", "use_prep_tma", "FWD_A_ARCHS", "FWD_SPLIT_A_MIN_PIECE",
                  "VIEWS_TAKE_PREP_TMA", "WY_TC2_ARCHS", "FWD_HO_VH2_ARCHS", "_POOLED", "_WALKS", "_SIDE_STREAMS",
-                 "_GRAPH_TABLES", "LAUNCH_ARGS", "FWD_A_TAPE", "FWD_FUSED_TAPE", "_index_copy_heads")  # fmt: skip
+                 "_GRAPH_TABLES", "LAUNCH_ARGS", "FWD_A_TAPE", "FWD_FUSED_TAPE", "_index_copy_heads", "_aligned",
+                 "_table_rows", "_caller_rows")  # fmt: skip
 # the switches, caches and state of the forward plan and its record gate: no plan holds them (rebinding one changes no
 # plan's identity)
 FWD_PLAN_NOT_HELD = ("FWD_PLAN", "_FWD_PLANS", "_PLAN_KEYS", "FWD_PLAN_GATE", "FWD_PLAN_REPEAT", "FWD_PLAN_PAYBACK",
@@ -7082,11 +7083,12 @@ FWD_EXECUTOR_FUNCTIONS = ("_train_forward", "_forward_a", "_forward_split", "_fo
                           "_launch_wy_a", "_forward_tape_tensors", "_split_workspaces", "_forward_state",
                           "_forward_result")  # fmt: skip
 # the calls they make only through it: allocations, events and stream switches, the launch, the copies of its rows
-# steps and the uses of a cached table; torch.arange and _table_ready only inside _walk's cache fill (ex.fill())
+# steps and its eager steps, and the uses of a cached table; torch.arange and _table_ready only inside _walk's cache
+# fill (ex.fill())
 FWD_OUTSIDE_CALLS = frozenset(("torch.empty", "torch.zeros", "torch.full", "torch.arange", "torch.cuda.Event",
                                "torch.cuda.stream", "torch.cuda.current_stream", "torch.cuda.set_stream", "_launch",
-                               "_aligned", "_table_rows", "_caller_rows", "_side_stream", "_use_table",
-                               "_table_ready"))  # fmt: skip
+                               "_aligned", "_table_rows", "_caller_rows", "_index_copy_heads", "_side_stream",
+                               "_use_table", "_table_ready"))  # fmt: skip
 FWD_FILL_CALLS = frozenset(("torch.arange", "_table_ready"))
 # the tensor methods they call only on the executor (any method ending in "_" too: an in-place op), and the take of a
 # pooled workspace (a take outside the executor would be missing from a replay's take steps)

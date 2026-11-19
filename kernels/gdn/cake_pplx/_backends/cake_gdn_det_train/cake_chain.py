@@ -2943,7 +2943,7 @@ def _tma_operands(q, k, ex=None):
     if _tma_rows(q) and _tma_rows(k):
         return q, k
     ex = ex or _DIRECT
-    return ex.rows(_aligned, q, TMA_ALIGN_BYTES), ex.rows(_aligned, k, TMA_ALIGN_BYTES)
+    return ex.aligned(q, TMA_ALIGN_BYTES), ex.aligned(k, TMA_ALIGN_BYTES)
 
 
 def _forward_state(meta: ChunkMeta, kn, v):
@@ -2978,13 +2978,13 @@ def _start_state(initial_state, meta: ChunkMeta, output_final_state: bool, num_v
             f32,
             device,
         )
-    initial_rows = ex.rows(_table_rows, initial_state, meta)
+    initial_rows = ex.table_rows(initial_state, meta)
     if initial_rows is None:
         return final_state, final_state, 0
     h0 = ex.rows(torch.Tensor.contiguous, initial_rows)
     if h0.dtype != f32:
         h0 = ex.call(torch.Tensor.float, h0)
-    return final_state, ex.rows(_aligned, h0, ROW_ALIGN_BYTES), 1
+    return final_state, ex.aligned(h0, ROW_ALIGN_BYTES), 1
 
 
 def _launch_wy_a(q, k, g32, beta32, meta: ChunkMeta, num_heads: int, num_v_heads: int, index: int,
@@ -3042,7 +3042,7 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
     q, k = _tma_operands(q, k, ex)
     # fwd_ho_a's tensor map reads v in place where the stages that read v by rows do (:func:`_v_rows`), else a copy
     if _v_rows(v) is None:
-        v = ex.rows(_aligned, v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
         q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
@@ -3070,7 +3070,7 @@ def _forward_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, output
               segs.seg_chunk_start, segs.seg_seq, meta.seq_chunk_start, walk, num_heads, num_v_heads, use_init,
               1 if output_final_state else 0, 0, float(scale), word)  # fmt: skip
     if output_final_state:
-        final_state = ex.rows(_caller_rows, final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3366,7 +3366,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
     # 16-byte aligned among them, is copied into contiguous rows
     v_rows = _v_rows(v)
     if v_rows is None:
-        v, v_rows = ex.rows(_aligned, v, ROW_ALIGN_BYTES), num_v_heads
+        v, v_rows = ex.aligned(v, ROW_ALIGN_BYTES), num_v_heads
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
         q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
@@ -3424,7 +3424,7 @@ def _forward_split(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, ou
         0,
     )
     if output_final_state:
-        final_state = ex.rows(_caller_rows, final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3457,7 +3457,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
     q, k = _tma_operands(q, k, ex)
     # fwd_ho_a's and fwd_summary_a's tensor maps read v in place where the stages that read v by rows do, else a copy
     if _v_rows(v) is None:
-        v = ex.rows(_aligned, v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
     kept = cake_plan.tape_state(arch, options.save_state) if tape else ()
     qn, kn, rstd_q, rstd_k, g_cs, A = _launch_wy_a(
         q, k, g32, beta32, meta, num_heads, num_v_heads, index, ex
@@ -3519,7 +3519,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
             else ex.call(torch.Tensor.index_select, first_final, 0, split.first_seq)
         )
         # one distinct segment row per first piece: a plain copy, the same bits under any order
-        ex.call(_index_copy_heads, seg_state, split.first_index, ends)
+        ex.index_copy_heads(seg_state, split.first_index, ends)
     ex.launch("stitch", meta.num_seqs, hv, STITCH_VSPLIT, seg_state, h0, seg_start, split.seq_seg_start, seg_flag, hv,
               use_init, 0)  # fmt: skip
     wave(
@@ -3532,7 +3532,7 @@ def _forward_split_a(q, k, v, g32, beta32, *, meta, arch, scale, initial_state, 
         final_state,
     )
     if output_final_state:
-        final_state = ex.rows(_caller_rows, final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     fwd: dict[str, Any] = {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3581,8 +3581,8 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
     split = fwd_split_route(meta, arch, q, k, v, beta, normalize_qk, options)
     if split or fwd_a_route(meta, arch, q, k, v, beta, normalize_qk, options):
         g32 = g if g.dtype == torch.float32 else ex.call(torch.Tensor.float, g)
-        g_rows = ex.rows(_aligned, g32, ROW_ALIGN_BYTES)
-        beta_rows = ex.rows(_aligned, beta, ROW_ALIGN_BYTES)
+        g_rows = ex.aligned(g32, ROW_ALIGN_BYTES)
+        beta_rows = ex.aligned(beta, ROW_ALIGN_BYTES)
         run = _forward_split if split else _forward_a
         return run(q, k, v, g_rows, beta_rows, meta=meta, arch=arch, scale=scale, initial_state=initial_state,
                    output_final_state=output_final_state, normalize_qk=normalize_qk, options=options,
@@ -3593,14 +3593,14 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
     # contiguous rows only); an operand whose address the loads cannot take is copied
     in_place = _tma_rows(q) and _tma_rows(k)
     if not in_place:
-        q, k = ex.rows(_aligned, q, PREP_ALIGN_BYTES), ex.rows(_aligned, k, PREP_ALIGN_BYTES)  # fmt: skip
+        q, k = ex.aligned(q, PREP_ALIGN_BYTES), ex.aligned(k, PREP_ALIGN_BYTES)
     views = VIEWS_TAKE_PREP_TMA and _view_rows(q) and _view_rows(k)
     prep = _prep_stage(q, k, meta.num_chunks, num_heads, arch, options, views=views)
     if prep != "prep_tma" and in_place:
         q, k = ex.rows(torch.Tensor.contiguous, q), ex.rows(torch.Tensor.contiguous, k)  # fmt: skip
     v_rows = _v_rows(v) if wy_stage(arch) == "wy_tc2" else None
     if v_rows is None:
-        v = ex.rows(_aligned, v, ROW_ALIGN_BYTES)
+        v = ex.aligned(v, ROW_ALIGN_BYTES)
         v_rows = num_v_heads
     g32 = ex.rows(torch.Tensor.contiguous, g)
     if g32.dtype != torch.float32:
@@ -3644,12 +3644,12 @@ def _train_forward(q, k, v, g, beta, *, meta, arch, scale, initial_state, output
         wy = (v, beta32, A, v_rows)
     workspaces = _workspaces(options)
     table = workspaces.table(_tensor_index(kn))
-    h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, ex.rows(_table_rows, initial_state, meta),
+    h, v_new, final_state, o = _launch_fwd_ho(arch, qn, kn, w, u, g_cs, ex.table_rows(initial_state, meta),
                                               meta, num_heads, num_v_heads, store_final_state=output_final_state,
                                               table=table, workspaces=workspaces, options=options, scale=scale,
                                               wy=wy, ex=ex)  # fmt: skip
     if output_final_state:
-        final_state = ex.rows(_caller_rows, final_state, meta)
+        final_state = ex.caller_rows(final_state, meta)
     return {
         "arch": arch, "normalize_qk": normalize_qk, "num_heads": num_heads, "num_v_heads": num_v_heads,
         "total_tokens": total_tokens, "qn": qn, "kn": kn, "rstd_q": rstd_q, "rstd_k": rstd_k, "g_cs": g_cs, "A": A,
@@ -3721,7 +3721,8 @@ _OP_VIEW, _OP_CALL, _OP_SIGNAL, _OP_WAIT, _OP_USE, _OP_DROP, _OP_TAKE = range(6,
 # plan replays only while they and the module globals they read are the recorded objects (:func:`_fwd_plan_globals`)
 _FWD_PLAN_ROOTS = ("_train_forward", "_forward_a", "_forward_split", "_forward_split_a", "_launch_wy", "_wy_outputs",
                    "_launch_wy_a", "_launch_fwd_ho", "_first_wave", "_start_state", "_walk", "_launch", "_prepared",
-                   "_fire", "_side_stream", "_use_table")  # fmt: skip
+                   "_fire", "_side_stream", "_use_table", "_aligned", "_table_rows", "_caller_rows",
+                   "_index_copy_heads")  # fmt: skip
 _FWD_PLAN_GLOBALS: Any = None  # their getter, made at the first call
 # the entries of the forward's result that :func:`_function_forward` reads, the ones a plan returns
 _FWD_OUTPUTS = ("qn", "kn", "rstd_q", "rstd_k", "v", "g_cs", "beta32", "A", "w", "u", "h", "v_new", "output",
@@ -3753,10 +3754,13 @@ class _DirectExecutor:
     - ``launch(stage, gx, gy, gz, *values)``: :func:`_launch`;
     - ``empty(shape, dtype=..., device=...)``: ``torch.empty``;
     - ``view(t, dtype)``: ``t`` viewed as ``dtype`` (the 32-bit words a kernel reads);
-    - ``call(fn, *args)``: ``fn(*args)``, an eager step of the forward (a cast, an index fill / select / copy);
+    - ``call(fn, *args)``: ``fn(*args)``, an eager step of the forward (a cast, an index fill / select);
     - ``rows(fn, t, *args)``: ``fn(t, *args)`` for a function that returns ``t`` itself where ``t`` already has the
-      layout it makes (:func:`_aligned`, :func:`_table_rows`, :func:`_caller_rows`, ``Tensor.contiguous``), else a new
-      tensor;
+      layout it makes (``Tensor.contiguous``), else a new tensor;
+    - ``aligned(t, align)``, ``table_rows(state, meta)``, ``caller_rows(state, meta)``: :func:`_aligned`,
+      :func:`_table_rows`, :func:`_caller_rows`, rows steps of their own, each called as the general path calls the
+      function (where ``rows`` would call a Python function from C: a frame of the interpreter loop of its own);
+    - ``index_copy_heads(state, index, rows)``: :func:`_index_copy_heads`, an eager step of its own, likewise;
     - ``take(pool, table, role, shape, dtype, device)``: ``pool.take(table, role, shape, dtype, device)``, a workspace
       of the pool ``pool`` (:func:`_take`).
 
@@ -3766,13 +3770,18 @@ class _DirectExecutor:
     general path, of a recording and of a replay.  The recorders (:class:`_SlotRecorder`, :class:`_FwdRecorder`) have
     methods of these names in place of the slots."""
 
-    __slots__ = ("launch", "empty", "view", "call", "rows", "take")
+    __slots__ = ("launch", "empty", "view", "call", "rows", "aligned", "table_rows", "caller_rows",
+                 "index_copy_heads", "take")  # fmt: skip
 
     def __init__(self):
         self.launch = _launch
         self.empty = torch.empty
         self.view = torch.Tensor.view
         self.call = self.rows = _call
+        self.aligned = _aligned
+        self.table_rows = _table_rows
+        self.caller_rows = _caller_rows
+        self.index_copy_heads = _index_copy_heads
         self.take = _take
 
     def fork(self, index):
@@ -4365,6 +4374,18 @@ class _FwdRecorder(_SlotRecorder):
         if out is not t:  # ``t`` itself: the layout in the key fixes that, no step
             self._call(fn, (t, *args), out)
         return out
+
+    def aligned(self, t, align):
+        return self.rows(_aligned, t, align)
+
+    def table_rows(self, state, meta):
+        return self.rows(_table_rows, state, meta)
+
+    def caller_rows(self, state, meta):
+        return self.rows(_caller_rows, state, meta)
+
+    def index_copy_heads(self, state, index, rows) -> None:
+        self.call(_index_copy_heads, state, index, rows)
 
     def _call(self, fn, args, out) -> None:
         if self.why is not None:
