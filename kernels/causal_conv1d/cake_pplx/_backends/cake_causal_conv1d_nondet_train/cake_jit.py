@@ -35,9 +35,12 @@ copies of the det forward programs (no cross-CTA reduction, so ``y`` is the
 det program's bits), and the backward routes ``bwd`` / ``bwd_dt`` /
 ``bwd_bias`` / ``bwd_fp32g`` / ``bwd_bias_fp32g`` / ``bwd_dt_bf16_taps`` /
 ``bwd_bias_bf16_taps`` select, by the same channel
-(and token) thresholds, single-launch builds of the det backward bodies.  A
-backward call is ONE ordinary launch: every per-thread and per-CTA FP32 step
-and ``dx`` are the det program's, and only the cross-CTA reduction of
+(and token) thresholds, single-launch builds of the det backward bodies,
+except at the rows of ``FALLBACK_ROWS`` (:func:`selected_modules`), where a
+route runs its fallback program (the single-launch build of the det route's
+fallback body).  A backward call is ONE ordinary launch: every per-thread and
+per-CTA FP32 step and ``dx`` are those of the det program it is built from,
+and only the cross-CTA reduction of
 ``dweight`` / ``dbias`` differs.  Instead of storing one partial row per CTA
 for a reduce program to sum in a fixed order, each CTA adds its CTA row into
 the accumulators (logical tensor ``acc``, kernel parameter ``dw_acc``) with
@@ -77,6 +80,18 @@ The program name of a forward copy is ``cake_causal_conv1d_train_<20 hex>``
 (the det program's identity digits under this package's prefix); the backward
 programs' names are the identity digests of their own kernel module key (so no
 backward name equals a name the det package ships).
+
+Every program but the pair routes' launches with ``launch.use_pdl`` of
+``"runtime"``: its binding takes the ``enable_pdl`` launch scalar and sets the
+programmatic dependent launch attribute when it is 1, which the host chooses
+per architecture and per mode (outside or inside a CUDA Graph capture;
+:data:`PDL_EAGER`, :data:`PDL_GRAPH`, :func:`pdl_enabled`).  Each program
+waits for the stream's preceding kernel (``griddepcontrol.wait``) before it
+reads or writes global memory, so the attribute changes only when a launch may
+start, never what it computes.  The det package's forward programs, which this
+package's forward copies run, launch without it (its backward reduce programs
+set it on every launch); a forward copy differs from its det program in the
+kernel symbol, the library name and this launch scalar.
 """
 
 from __future__ import annotations
@@ -94,6 +109,10 @@ from . import cake_build
 # ``launch.cluster``, ``launch.cooperative``, ``launch.dynamic_smem_bytes``,
 # ``launch.use_pdl``, ``arg_plan`` and ``logical``) are rewritten by the
 # exporter from the rendered program; every other field is host plan.
+# ``launch.use_pdl`` is also host plan: the rendered binding takes it from the
+# record (``"runtime"``: the ``enable_pdl`` launch scalar, ``("launch",
+# "enable_pdl")`` in ``arg_plan``), and a record's ``logical`` names every
+# host parameter, ``enable_pdl`` included.
 MODULES: dict[str, dict[str, Any]] = {
     # Route ``fwd``: this package's copy of the det forward program
     # ``cake_causal_conv1d_det_train_f5497330bfd286211643`` (built with ``fast=True, sched="dynamic",
@@ -119,6 +138,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "ct_vec"],
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -140,7 +160,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 46208,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_f5497330bfd286211643",
         "logical": {
@@ -148,6 +168,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -170,7 +191,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``acc`` (``[C x 4]``), takes a ticket on its channel tile's ``work`` counter (uint32 ``[n_ch_tiles]``),
     # and the tile's last CTA stores FP32 ``dw`` once (one rounding from FP32) and zeroes its accumulators and
     # counter, so ``acc`` / ``work`` are zero before and after every launch.  No reduce program, no host
-    # synchronization, no cooperative launch.
+    # synchronization, no cooperative launch.  On sm_100a / sm_103a it also runs at the rows of ``FALLBACK_ROWS``
+    # (C = 520 to 1016 up to a per-C token bound), in place of the program the ``bwd`` thresholds pick there.
     "cake_causal_conv1d_train_ea326ebe0f84d8cf2adb": {
         "arches": [
             "sm_100a",
@@ -194,6 +216,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -219,7 +242,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 66560,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_ea326ebe0f84d8cf2adb",
         "logical": {
@@ -232,6 +255,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -280,6 +304,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -304,7 +329,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 66560,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_a79ed3e33712abf525ad",
         "logical": {
@@ -317,6 +342,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -363,6 +389,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "ct_vec"],
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -387,7 +414,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_5ed71ee5908c07376183",
         "logical": {
@@ -399,6 +426,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -457,6 +485,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -483,7 +512,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_461d358d7090642c65de",
         "logical": {
@@ -496,6 +525,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -544,6 +574,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -568,7 +599,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_06cfd917a14c30ce8ebc",
         "logical": {
@@ -581,6 +612,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -632,6 +664,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -656,7 +689,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 66560,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
         "logical": {
@@ -669,6 +702,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -724,6 +758,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -749,7 +784,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 66560,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab",
         "logical": {
@@ -762,6 +797,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -817,6 +853,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -841,7 +878,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_c798878a383c652c428d",
         "logical": {
@@ -854,6 +891,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -903,6 +941,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -924,7 +963,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 46208,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_9c1e7ee9f37e3102660e",
         "logical": {
@@ -932,6 +971,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -975,6 +1015,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -996,7 +1037,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 46208,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_08880ca12e4064bc8cdb",
         "logical": {
@@ -1005,6 +1046,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "b": "b",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1044,6 +1086,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "ct_vec"],
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1065,7 +1108,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_8665d0756b8240ecb4d0",
         "logical": {
@@ -1073,6 +1116,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -1121,6 +1165,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1142,7 +1187,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_176ebb3e14f7ad9c94dc",
         "logical": {
@@ -1150,6 +1195,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1200,6 +1246,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1221,7 +1268,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_d829c95e1d610bc14b23",
         "logical": {
@@ -1230,6 +1277,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "b": "b",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1277,6 +1325,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "ct_vec"],
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1298,7 +1347,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_d00a2892aa363564c673",
         "logical": {
@@ -1306,6 +1355,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -1351,6 +1401,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1372,7 +1423,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_6211cda590057b12f1a2",
         "logical": {
@@ -1380,6 +1431,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "S": "S",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1427,6 +1479,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1448,7 +1501,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 33920,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_77af6383ff00b1cd047c",
         "logical": {
@@ -1457,6 +1510,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "b": "b",
             "ct_vec": "ct_vec",
             "cu": "cu",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1511,6 +1565,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1536,7 +1591,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_32c5625f33586925f154",
         "logical": {
@@ -1549,6 +1604,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1597,6 +1653,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1621,7 +1678,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_d7f458b69c0249f63c37",
         "logical": {
@@ -1633,6 +1690,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1685,6 +1743,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1710,7 +1769,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_befc06774f6fee7c36ce",
         "logical": {
@@ -1725,6 +1784,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1775,6 +1835,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1799,7 +1860,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_17d30c46fe34f0266e26",
         "logical": {
@@ -1813,6 +1874,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1864,6 +1926,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1889,7 +1952,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_e3ff1615646de68a1aab",
         "logical": {
@@ -1902,6 +1965,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -1951,6 +2015,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -1975,7 +2040,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_c5abee01ba7440dd50b8",
         "logical": {
@@ -1987,6 +2052,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2040,6 +2106,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2065,7 +2132,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_8433ef0894e75c192d4b",
         "logical": {
@@ -2080,6 +2147,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2131,6 +2199,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2155,7 +2224,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_286b95d7960d16de0849",
         "logical": {
@@ -2169,6 +2238,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2576,6 +2646,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2602,7 +2673,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_012b6319a0cc717911b9",
         "logical": {
@@ -2615,6 +2686,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2678,6 +2750,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2704,7 +2777,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_383cb5839559d5b0e72b",
         "logical": {
@@ -2719,6 +2792,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2771,6 +2845,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2795,7 +2870,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_fdd0d538db009e587335",
         "logical": {
@@ -2810,6 +2885,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2869,6 +2945,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2895,7 +2972,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_41fcd5b4c3749107aba7",
         "logical": {
@@ -2908,6 +2985,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -2958,6 +3036,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -2982,7 +3061,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_3fdd49d8bc8a1048df1d",
         "logical": {
@@ -2995,6 +3074,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3056,6 +3136,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3082,7 +3163,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_7dd30c23ccab6ab97182",
         "logical": {
@@ -3097,6 +3178,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3362,6 +3444,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_ch_tiles"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3387,7 +3470,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 66560,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_e8e950fb254d3376db52",
         "logical": {
@@ -3400,6 +3483,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
             "num_docs": "num_docs",
@@ -3453,6 +3537,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3478,7 +3563,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
         "logical": {
@@ -3491,6 +3576,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3535,6 +3621,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3559,7 +3646,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 50176,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_d3273135fc61ea150378",
         "logical": {
@@ -3571,6 +3658,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3618,6 +3706,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3644,7 +3733,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 82944,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_092af77575f0fdbf3615",
         "logical": {
@@ -3657,6 +3746,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3714,6 +3804,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3739,7 +3830,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_93f7280de3dcb9ad7f49",
         "logical": {
@@ -3754,6 +3845,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3800,6 +3892,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "n_sub"],
             ["parameter", "n_ch_tiles"],
             ["parameter", "flags"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3824,7 +3917,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 54272,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_6a8201512a0992310513",
         "logical": {
@@ -3838,6 +3931,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dw_acc": "acc",
             "dx": "dx",
             "dy": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3887,6 +3981,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -3913,7 +4008,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_92aeee41bc2e2d394937",
         "logical": {
@@ -3928,6 +4023,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -3983,6 +4079,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["parameter", "flags"],
             ["buffer", "x_map"],
             ["buffer", "dy_map"],
+            ["launch", "enable_pdl"],
             ["grid", "grid_x"],
             ["grid", "grid_y"],
             ["grid", "grid_z"],
@@ -4007,7 +4104,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "cluster": (1, 1, 1),
             "cooperative": False,
             "dynamic_smem_bytes": 87040,
-            "use_pdl": False,
+            "use_pdl": "runtime",
         },
         "library": "cake_causal_conv1d_train_4c8b21939791ace6e830",
         "logical": {
@@ -4022,6 +4119,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dx": "dx",
             "dy": "dy",
             "dy_map": "dy",
+            "enable_pdl": "enable_pdl",
             "flags": "flags",
             "n_ch_tiles": "n_ch_tiles",
             "n_sub": "n_sub",
@@ -4353,7 +4451,10 @@ PLAN_SCALARS = (
     "n_sub",
     "n_ch_tiles",
 )
-LOGICAL_SCALARS = (*PLAN_SCALARS, "flags")
+# ``enable_pdl`` (0 or 1) is the per-call launch scalar of a record whose
+# ``launch.use_pdl`` is ``"runtime"``: its binding sets the programmatic
+# dependent launch attribute only when it is 1 (:func:`pdl_enabled`).
+LOGICAL_SCALARS = (*PLAN_SCALARS, "flags", "enable_pdl")
 
 
 def arch_for_capability(device_capability: Sequence[int]) -> str | None:
@@ -4465,7 +4566,8 @@ def select_rule(record: dict[str, Any]) -> dict[str, Any] | None:
     others.  ``{"kind": "channels_tokens_at_least", "channels": {arch: C_min,
     ...}, "tokens": {arch: S_min, ...}}`` owns those calls only when the token
     count is also at least ``tokens[arch]``.  When several records own a call,
-    the one of the highest channel threshold runs.
+    the one of the highest channel threshold runs; at a row of
+    :data:`FALLBACK_ROWS` the route's fallback runs whatever the rules.
     """
 
     return record.get("select_rule")
@@ -4517,26 +4619,75 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
     return int(S) >= floor
 
 
+# The rows where a backward route runs its fallback program (the route's record
+# without a ``select_rule``) in place of the program its selection rules pick,
+# ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}``: a backward call of
+# ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a multiple of 8)
+# and ``S_min <= S <= S_max`` tokens launches the fallback
+# (:func:`selected_modules`); its tiles stay the route's (:func:`plan`).  The
+# keys of one ``(arch, route)`` are disjoint.  Written by the exporter from the
+# backward kernel generator's table; every other channel count, route, ``S``
+# and architecture selects by the rules.
+FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("bwd", 520, 760): (1, 131072),
+        ("bwd", 768, 768): (1, 262144),
+        ("bwd", 776, 1016): (1, 62585),
+    },
+    "sm_103a": {
+        ("bwd", 520, 760): (1, 31292),
+        ("bwd", 768, 768): (1, 250340),
+        ("bwd", 776, 1016): (1, 125170),
+    },
+}
+
+
+def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
+    """The ``(S_min, S_max)`` of the :data:`FALLBACK_ROWS` key of ``arch`` on
+    route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
+    8), ``None`` without one: inside that token range (both bounds included)
+    the call launches the route's fallback program."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), (s_min, s_max) in FALLBACK_ROWS.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return int(s_min), int(s_max)
+    return None
+
+
 def selected_modules(
     arch: str, kind: str, *, C: int, S: int | None = None
 ) -> tuple[str, ...]:
     """Ordered module names one public call launches on ``arch`` for ``C`` channels and ``S`` tokens.
 
     A route may carry several programs of its kernel and launches exactly one:
-    of the records whose :func:`select_rule` admits the call on ``arch`` the
-    one of the highest channel threshold, else the route's single fallback
-    record (the one without a rule).  The choice is a pure function of the
-    architecture, the route, ``C`` and ``S`` -- ``S`` enters only through a
-    rule's token floor, and the host never reads the data -- so a given ``(S,
-    C, device)`` always runs the same program of a route (``dx`` is that
-    program's bits; ``dweight`` / ``dbias`` are summed in an unordered
-    cross-CTA order).  Two records of one channel threshold that
-    both reach ``C``, or zero or several fallbacks, are registry errors
-    (``RuntimeError``); an unknown rule kind, or ``S`` of ``None`` where a
-    token floor decides, is a ``ValueError``.
+    at a row of :data:`FALLBACK_ROWS` (:func:`fallback_row_range` holds ``S``)
+    the route's single fallback record (the one without a rule); elsewhere, of
+    the records whose :func:`select_rule` admits the call on ``arch`` the one
+    of the highest channel threshold, else the fallback.  The choice is a pure
+    function of the architecture, the route, ``C`` and ``S`` -- ``S`` enters
+    only through a rule's token floor or a :data:`FALLBACK_ROWS` range, and
+    the host never reads the data -- so a given ``(S, C, device)`` always runs
+    the same program of a route (``dx`` is that program's bits; ``dweight`` /
+    ``dbias`` are summed in an unordered cross-CTA order).  Two records of one
+    channel threshold that both reach ``C``, or zero or several fallbacks, are
+    registry errors (``RuntimeError``); an unknown rule kind, or ``S`` of
+    ``None`` where a token floor decides or a :data:`FALLBACK_ROWS` key covers
+    ``C``, is a ``ValueError``.
     """
 
     candidates, fallback = _ranked_candidates(arch, kind, C)
+    bounds = fallback_row_range(arch, kind, C)
+    if bounds is not None:
+        if S is None:
+            raise ValueError(
+                f"the Cake causal conv1d training {kind!r} route on {arch} for C={int(C)} runs its fallback "
+                f"program at S {bounds[0]} to {bounds[1]}; the selection needs S"
+            )
+        if bounds[0] <= int(S) <= bounds[1]:
+            return (fallback,)
     for name in candidates:
         if _admits(select_rule(MODULES[name]), arch=arch, C=C, S=S):
             return (name,)
@@ -4575,13 +4726,16 @@ def _ranked_candidates(arch: str, kind: str, C: int) -> tuple[tuple[str, ...], s
 
 
 def tokens_select(arch: str, kind: str, C: int) -> bool:
-    """Whether ``S`` enters :func:`selected_modules` for ``C`` channels of ``kind`` on ``arch``.
+    """Whether a token floor of the selection rules decides :func:`selected_modules` for ``C`` channels of
+    ``kind`` on ``arch``.
 
     A record whose channel threshold ``C`` reaches admits the call unless its
-    rule has a token floor, so the selection reads ``S`` exactly when the
+    rule has a token floor, so the rules read ``S`` exactly when the
     highest-threshold record ``C`` reaches has one (in this registry the
-    sm_107a ``bwd`` route at ``256 <= C < 512``); every other row selects one
-    program whatever ``S``.
+    sm_107a ``bwd`` route at ``256 <= C < 512``); every other row's rules
+    select one program whatever ``S``.  A :data:`FALLBACK_ROWS` key reads
+    ``S`` too, as one range compare (:func:`fallback_row_range`; the row plan
+    of each side is :func:`plan_row`'s ``inside``).
     """
 
     candidates, _ = _ranked_candidates(arch, kind, C)
@@ -4720,25 +4874,35 @@ SPLIT_ROLES = ("fwd", "bwd")
 # generator; :data:`FORWARD_NARROW_MIN_S` and :data:`FORWARD_NARROW_ROW_MIN_S`
 # are this package's own tables.  A row's floor is
 # :func:`forward_narrow_min_s`: the architecture's floor, or the floor of
-# :data:`FORWARD_NARROW_ROW_MIN_S` for the rows from a channel-vector count
-# upward; on each architecture the largest token count at which a measured
-# narrow row was still slower than its single tile lies below that row's
-# floor.  On sm_103a the rows of 89 to 96 vectors (C = 712 to 768) take
-# 20480: on a GB300 at 16384 x 768 the 32-vector tiles of the forward under
-# CUDA Graph replay were slower than the single tile in two measurements
-# each (FP32 taps, BF16 bias: 17.14 us single tile, 17.41 / 17.38 us
-# narrow; FP32 taps, FP32 bias: 17.12 vs 17.36 / 17.41 us).  The floor
-# gives up the 32-vector tiles' gain on the other forward routes there:
-# under CUDA Graph replay the default route ran 1.025 / 1.028 times as fast
-# at 12288 x 768 (14.90 us single tile, 14.48 / 14.50 us narrow) and the
-# BF16-taps routes 1.003 to 1.032 times as fast at 16384 x 768.  C = 768
-# runs faster from 20480 on the default route and on every timed route at
-# 31292.  C = 704 (88 vectors) keeps 12288: on the default route, the one
-# route timed at C = 704, its 32-vector tiles were not slower than the single
-# tile in either measurement at any timed token count from 12288 to 250340.
-# C = 712 to 760 are not measured and take the higher floor.  The backward
-# plans its narrower rows by :data:`TILE_OVERRIDES` and :data:`NARROW_TILES`
-# instead.
+# :data:`FORWARD_NARROW_ROW_MIN_S` for the rows of its routes from a
+# channel-vector count upward; on each architecture the largest token count
+# at which a measured narrow row of a route was still slower than its single
+# tile lies below that row's floor on the route.  On sm_103a the ``fwd_bias``
+# rows of 89 to 96 vectors (C = 712 to 768) take 20480: on a GB300 at 16384 x
+# 768 the 32-vector tiles of that route under CUDA Graph replay were slower
+# than the single tile in two measurements each (FP32 taps, BF16 bias: 17.14
+# us single tile, 17.41 / 17.38 us narrow; FP32 taps, FP32 bias: 17.12 vs
+# 17.36 / 17.41 us).  The ``fwd`` and ``fwd_dt`` rows keep the
+# architecture's 12288: under CUDA Graph replay the default route ran 1.025 /
+# 1.028 times as fast at 12288 x 768 with the 32-vector tiles (14.90 us
+# single tile, 14.48 / 14.50 us narrow), and the BF16-taps calls 1.003 to
+# 1.032 times as fast at 16384 x 768.  The ``fwd_bias`` route covers both tap
+# dtypes (the plan does not see the taps' dtype), so its BF16-taps calls keep
+# the single tile from 12288 to 20479 as well.  C = 768 runs faster from 20480
+# on the default route and on every timed route at 31292.  C = 704 (88
+# vectors) keeps 12288 on every route: on the default route, the one route
+# timed at C = 704, its 32-vector tiles were not slower than the single tile
+# in either measurement at any timed token count from 12288 to 250340.  C =
+# 736 (92 vectors) was timed on the ``fwd`` and ``fwd_dt`` routes on the GB300:
+# under CUDA Graph replay the 32-vector tiles ran 1.023 / 1.023 times as fast
+# as the single tile at 12288 / 16384 x 736 on the default route (14.40 ->
+# 14.08 us, 16.54 -> 16.18 us) and 1.030 / 1.014 times as fast with BF16 taps
+# (14.05 -> 13.63 us, 16.00 -> 15.78 us).  The other channel counts from C =
+# 712 to 760 are not measured and take the floors of C = 768 on each route;
+# the ``fwd_bias`` rows of C = 712 to 760 take C = 768's 20480 without a
+# measurement at those widths.
+# The backward plans its narrower rows by :data:`TILE_OVERRIDES` and
+# :data:`NARROW_TILES` instead.
 FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
 FORWARD_NARROW_THREADS = 128
 FORWARD_NARROW_WIDTHS: dict[int, int] = {72: 18, 80: 40}
@@ -4748,28 +4912,38 @@ FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
     "sm_107a": {72: 40960, 80: 36864},
 }
 FORWARD_NARROW_MIN_S: dict[str, int] = {"sm_100a": 20480, "sm_103a": 12288, "sm_107a": 16384}
-# ``{arch: ((cv, S), ...)}``, ``cv`` ascending: the narrow rows of at least
-# ``cv`` channel vectors take the token floor ``S`` on ``arch`` instead of
-# the architecture's :data:`FORWARD_NARROW_MIN_S` floor (the last entry they
-# reach wins); read through :func:`forward_narrow_min_s`.
-FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int], ...]] = {"sm_103a": ((89, 20480),)}
+# ``{arch: ((cv, S, routes), ...)}``, ``cv`` non-decreasing: on ``arch`` the
+# narrow forward rows of at least ``cv`` channel vectors on a forward route of
+# ``routes`` take the token floor ``S`` instead of the architecture's
+# :data:`FORWARD_NARROW_MIN_S` floor (of the entries a row reaches on its
+# route, the last wins); read through :func:`forward_narrow_min_s`.
+# ``routes`` is a non-empty tuple of :data:`FORWARD_NARROW_ROUTES` in that
+# order.  ``fwd_bias`` covers both tap dtypes: the plan does not see the taps'
+# dtype.
+FORWARD_NARROW_ROW_MIN_S: dict[str, tuple[tuple[int, int, tuple[str, ...]], ...]] = {
+    "sm_103a": ((89, 20480, ("fwd_bias",)),),
+}
 
 
-def forward_narrow_min_s(arch: str | None, channel_vectors: int) -> int | None:
+def forward_narrow_min_s(arch: str | None, channel_vectors: int, *, route: str) -> int | None:
     """The token floor from which the forward row of ``channel_vectors``
-    vectors on ``arch`` plans as the deterministic forward: the
-    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the last entry of ``arch``
-    whose channel-vector count the row reaches, else the architecture's
-    :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the single tile at every
-    ``S``) on an architecture :data:`FORWARD_NARROW_MIN_S` does not list.
-    The per-call plan (:func:`_forward_tiles`), the row plan
-    (:func:`plan_row`) and the tests read the floor here."""
+    vectors on route ``route`` (one of :data:`FORWARD_NARROW_ROUTES`, a
+    ``ValueError`` otherwise) on ``arch`` plans as the deterministic forward:
+    the floor of the last :data:`FORWARD_NARROW_ROW_MIN_S` entry of ``arch``
+    that lists ``route`` and whose channel-vector count the row reaches, else
+    the architecture's :data:`FORWARD_NARROW_MIN_S` floor; ``None`` (the
+    single tile at every ``S``) on an architecture
+    :data:`FORWARD_NARROW_MIN_S` does not list.  The per-call plan
+    (:func:`_forward_tiles`), the row plan (:func:`plan_row`) and the tests
+    read the floor here."""
 
+    if route not in FORWARD_NARROW_ROUTES:
+        raise ValueError(f"route must be one of {FORWARD_NARROW_ROUTES}, got {route!r}")
     floor = FORWARD_NARROW_MIN_S.get(arch)
     if floor is None:
         return None
-    for cv, S in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
-        if int(channel_vectors) >= int(cv):
+    for cv, S, routes in FORWARD_NARROW_ROW_MIN_S.get(arch, ()):
+        if int(channel_vectors) >= int(cv) and route in routes:
             floor = S
     return int(floor)
 
@@ -4821,19 +4995,19 @@ def channel_split(
     768 run 32-vector tiles, ``(32, threads // 32, ceil(cv / 32))``, when the
     call names its token count ``S`` and its architecture ``arch`` (one of
     :data:`ARCHES`, a ``ValueError`` otherwise) and ``S`` is at least the
-    row's floor on ``arch`` (:func:`forward_narrow_min_s`: the
+    row's floor on its route and ``arch`` (:func:`forward_narrow_min_s`: the
     architecture's :data:`FORWARD_NARROW_MIN_S` floor, or a
-    :data:`FORWARD_NARROW_ROW_MIN_S` floor): C = 576, 640 and 768
+    :data:`FORWARD_NARROW_ROW_MIN_S` floor of the route): C = 576, 640 and 768
     as (32, 4, 3) instead of one tile of 72, 80 and 96 vectors.  A row of
     :data:`FORWARD_NARROW_WIDTHS` runs whole tiles of its width instead from
     its floor on ``arch`` in :data:`FORWARD_WIDTH_FLOORS` (and the row's
     floor): C = 576 as (18, 7, 4) and C = 640 as (40, 3, 2).  Without ``S``
-    or ``arch``, below the row's floor on ``arch`` and on an architecture
+    or ``arch``, below the row's floor on its route and ``arch`` and on an architecture
     :data:`FORWARD_NARROW_MIN_S` does not list, the single tile stays (the
     0.2.0 plan); ``y`` keeps its bits in every plan.  Without a route, under
     ``legacy`` and for the backward role the split above stays (the
     backward's narrower rows are :func:`plan`'s :data:`TILE_OVERRIDES` and
-    :data:`NARROW_TILES`).  From the row's floor on ``arch`` (and on every
+    :data:`NARROW_TILES`).  From the row's floor on its route and ``arch`` (and on every
     other row) this is the deterministic package's ``channel_split`` for the
     forward role.
     """
@@ -4867,8 +5041,8 @@ def _forward_tiles(
 ) -> str:
     """Which tiles of :data:`FORWARD_TILES` a narrow forward row runs: for a
     forward call on a route of :data:`FORWARD_NARROW_ROUTES` that names ``S``
-    and ``arch``, with ``S`` at least the row's floor on ``arch``
-    (:func:`forward_narrow_min_s`), ``"wide"`` when the row has a width in
+    and ``arch``, with ``S`` at least the row's floor on that route and
+    ``arch`` (:func:`forward_narrow_min_s`), ``"wide"`` when the row has a width in
     :data:`FORWARD_NARROW_WIDTHS` and ``S`` is at least its floor on ``arch``
     in :data:`FORWARD_WIDTH_FLOORS`, else ``"narrow"``; ``"one"`` otherwise.
     Only the rows :func:`_forward_narrow_tile` names read it.  The memoized
@@ -4879,7 +5053,7 @@ def _forward_tiles(
         return "one"
     if route not in FORWARD_NARROW_ROUTES:
         return "one"
-    min_s = forward_narrow_min_s(arch, channel_vectors)
+    min_s = forward_narrow_min_s(arch, channel_vectors, route=route)
     if min_s is None or int(S) < min_s:
         return "one"
     floor = FORWARD_WIDTH_FLOORS.get(arch, {}).get(channel_vectors)
@@ -5015,7 +5189,6 @@ TILE_OVERRIDES: dict[str, dict[tuple[str, int], tuple[int, int, int]]] = {
         ("bwd_fp32g", 3072): (64, 31292, 500680),
     },
     "sm_103a": {
-        ("bwd", 768): (32, 62585, 500680),
         ("bwd_bias", 768): (32, 62585, 500680),
         ("bwd_bias_fp32g", 768): (32, 31292, 500680),
         ("bwd_dt", 768): (32, 62585, 500680),
@@ -5119,8 +5292,7 @@ def override_tiles(arch: str, route: str, C: int, geometry: dict[str, int]) -> i
 NARROW_TILES: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
         ("bwd", 224, 224): (1, 2147483647),
-        ("bwd", 520, 760): (1, 2147483647),
-        ("bwd", 776, 1016): (1, 2147483647),
+        ("bwd", 520, 1016): (1, 2147483647),
         ("bwd_dt", 224, 224): (1, 2147483647),
         ("bwd_dt", 520, 760): (1, 2147483647),
         ("bwd_dt", 776, 1016): (1, 2147483647),
@@ -5136,8 +5308,7 @@ NARROW_TILES: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     },
     "sm_103a": {
         ("bwd", 224, 224): (1, 2147483647),
-        ("bwd", 520, 760): (1, 2147483647),
-        ("bwd", 776, 1016): (1, 2147483647),
+        ("bwd", 520, 1016): (1, 2147483647),
         ("bwd_dt", 224, 224): (1, 2147483647),
         ("bwd_dt", 520, 760): (1, 2147483647),
         ("bwd_dt", 776, 1016): (1, 2147483647),
@@ -5253,8 +5424,8 @@ def plan(
     / vec / 32))``; without them and under ``legacy`` the split is
     :func:`channel_split`'s.  For the forward role ``route``, ``S`` and
     ``arch`` are passed on to :func:`channel_split` (not under ``legacy``):
-    from the row's floor on ``arch`` (:func:`forward_narrow_min_s`) the
-    forward record's route runs the 32-vector tiles of its narrow rows, and
+    from the row's floor on the record's route and ``arch``
+    (:func:`forward_narrow_min_s`) the forward record's route runs the 32-vector tiles of its narrow rows, and
     a row of :data:`FORWARD_NARROW_WIDTHS` its width from its token floor on
     ``arch``, as the deterministic package's forward plans them; below that
     floor the row keeps its single tile.
@@ -5578,7 +5749,8 @@ def launch_grid(
 
 
 class RowPlan(NamedTuple):
-    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` -- for every ``S`` and
+    """The host plan of one call row -- ``(arch, route, C, device, bwd_grid_mult)`` and, where a
+    :data:`FALLBACK_ROWS` key covers the row, the side of its token range -- for every ``S`` of that side and
     ``num_docs`` (:func:`plan_row`); :func:`row_launch` completes it for one call."""
 
     # The programs the row launches (:func:`selected_modules`) and the record of the first.
@@ -5599,29 +5771,49 @@ class RowPlan(NamedTuple):
 
 
 def plan_row(
-    arch: str, kind: str, C: int, *, device_index: int, bwd_grid_mult: int = 1
+    arch: str,
+    kind: str,
+    C: int,
+    *,
+    device_index: int,
+    bwd_grid_mult: int = 1,
+    inside: bool | None = None,
 ) -> RowPlan | None:
     """The :class:`RowPlan` of the calls of route ``kind`` with ``C`` channels on device ``device_index`` (of
     architecture ``arch``) launching ``bwd_grid_mult`` times the untrimmed backward grid (1: the default grid), or
-    ``None`` where the program selection reads ``S`` (:func:`tokens_select`).
+    ``None`` where a token floor of the selection rules decides the program (:func:`tokens_select`).
 
-    ``S`` enters a call's host plan only through a token floor of the
-    route's selection rules, the ``[S_min, S_max]`` range of the record's
-    :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token floors
-    of a narrow forward row (:func:`forward_narrow_min_s` and
-    :data:`FORWARD_WIDTH_FLOORS`) and the trim of :func:`launch_grid` (an
-    ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs``
-    only through :func:`search_steps`; so with this row :func:`row_launch`
-    returns what :func:`plan` and :func:`launch_grid` return for the call
-    (the planning ``_launch`` does: ``plan(..., arch=, route=)`` with the
-    record's route) without selecting, splitting or sizing the grid again.
-    Registry errors raise as in :func:`selected_modules`.
+    Where a :data:`FALLBACK_ROWS` key covers ``(kind, C)`` on ``arch`` (:func:`fallback_row_range`) the row has
+    two sides and ``inside`` names one (``ValueError`` when it is ``None``): ``True`` plans the calls with ``S``
+    inside the key's ``[S_min, S_max]`` (the route's fallback program), ``False`` the calls outside it (the
+    program the selection rules pick there, or ``None`` where a token floor decides); elsewhere ``inside`` is not
+    read.  ``S`` enters a call's host plan only through that range, a token floor of the route's selection rules,
+    the ``[S_min, S_max]`` range of the record's :data:`TILE_OVERRIDES` row or :data:`NARROW_TILES` row, the token
+    floors of a narrow forward row (:func:`forward_narrow_min_s` and :data:`FORWARD_WIDTH_FLOORS`) and the trim
+    of :func:`launch_grid` (an ``occupancy`` record at ``C % 32`` on the default grid), and ``num_docs`` only
+    through :func:`search_steps`; so with this row (of the call's side) :func:`row_launch` returns what
+    :func:`plan` and :func:`launch_grid` return for the call (the planning ``_launch`` does: ``plan(..., arch=,
+    route=)`` with the record's route) without selecting, splitting or sizing the grid again.  Registry errors
+    raise as in :func:`selected_modules`.
     """
 
     C = int(C)
-    if tokens_select(arch, kind, C):
+    S: int | None = None
+    bounds = fallback_row_range(arch, kind, C)
+    if bounds is not None:
+        if inside is None:
+            raise ValueError(
+                f"the {kind!r} route on {arch} for C={C} runs its fallback program at S {bounds[0]} to "
+                f"{bounds[1]}; plan_row needs inside= (the side of that range the row plans)"
+            )
+        # One token count of the side: the key's S_min inside, the token count after S_max (or before S_min) outside.
+        if inside:
+            S = bounds[0]
+        else:
+            S = bounds[1] + 1 if bounds[1] < INT32_MAX else bounds[0] - 1
+    if not (bounds is not None and inside) and tokens_select(arch, kind, C):
         return None
-    names = selected_modules(arch, kind, C=C)
+    names = selected_modules(arch, kind, C=C, S=S)
     record = MODULES[names[0]]
     rule = record["grid_rule"]
     geometry, role = rule["geometry"], record["role"]
@@ -5635,7 +5827,7 @@ def plan_row(
         floors = sorted(
             {
                 int(S)
-                for S in (forward_narrow_min_s(arch, cv), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
+                for S in (forward_narrow_min_s(arch, cv, route=route), FORWARD_WIDTH_FLOORS.get(arch, {}).get(cv))
                 if S is not None
             }
         )
@@ -5985,6 +6177,25 @@ def _stream_context(device_index: int) -> Any:
     return tvm_ffi.use_raw_stream(device, _raw_stream_getter()(device_index))
 
 
+# The programmatic dependent launch policy of the records whose ``launch.use_pdl`` is ``"runtime"`` (their binding
+# takes the ``enable_pdl`` launch scalar, :data:`LOGICAL_SCALARS`), per architecture: ``PDL_EAGER[arch]`` for a call
+# outside a CUDA Graph capture, ``PDL_GRAPH[arch]`` for a call inside one (read through :func:`pdl_enabled`).  With
+# the attribute the launch may start while the stream's preceding kernel finishes; every program waits for that
+# kernel (``griddepcontrol.wait``) before it reads or writes global memory, so the results are the same either way.
+PDL_EAGER: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+PDL_GRAPH: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+
+
+def pdl_enabled(arch: str, *, capturing: bool) -> int:
+    """The ``enable_pdl`` value, 0 or 1, of a launch on ``arch`` (one of :data:`ARCHES`, a ``ValueError``
+    otherwise): :data:`PDL_GRAPH` inside a CUDA Graph capture (``capturing``), else :data:`PDL_EAGER`.  A record
+    whose ``launch.use_pdl`` is not ``"runtime"`` binds no ``enable_pdl`` and ignores the value."""
+
+    if arch not in ARCHES:
+        raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
+    return int(bool((PDL_GRAPH if capturing else PDL_EAGER)[arch]))
+
+
 def run_modules(
     launches: Sequence[tuple[str, tuple[int, int, int] | None]],
     values: dict[str, Any],
@@ -6064,6 +6275,8 @@ __all__ = [
     "LOGICAL_TENSORS",
     "MODULES",
     "PAIR_ROUTES",
+    "PDL_EAGER",
+    "PDL_GRAPH",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
@@ -6089,6 +6302,7 @@ __all__ = [
     "class_aligned_grid",
     "counter_words",
     "device_arch",
+    "fallback_row_range",
     "forward_kinds",
     "forward_route",
     "forward_workspace_words",
@@ -6099,6 +6313,7 @@ __all__ = [
     "library_name",
     "load",
     "main_grid",
+    "pdl_enabled",
     "plan",
     "record_route",
     "route_applies",

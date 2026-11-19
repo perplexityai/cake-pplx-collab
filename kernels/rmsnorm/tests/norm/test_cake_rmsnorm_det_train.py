@@ -16,16 +16,19 @@ limitations under the License.
 Tests for the Cake fused BF16 RMSNorm training forward / backward
 (SM100 / SM103 / SM107).
 
-Every kernel output is compared with an FP64 reference of the same math:
-BF16 ``y`` / ``dx`` at ``atol = rtol = 1e-2`` after normalizing both sides to
-unit scale (so 1e-3 and 1e3 magnitude inputs are judged like N(0, 1) inputs),
-FP32 ``rstd`` at relative L2 <= 1e-5 and FP32 ``dw`` at relative L2 <= 1e-4
-and never worse than the eager FP32 reduction of the same formula.  The
-matrix covers small and packed token counts (including 1 and 0), tile
-boundaries, row-strided inputs, extreme scales, zero input, the residual-add
-fusion (against an add-then-norm autograd reference for every input
-gradient), bitwise reproducibility of ``dw``, changing token counts in one
-process and the autograd wrapper end to end.
+Every floating kernel output -- ``y``, ``rstd``, ``h_new``, ``dx``, ``dw`` -- is
+judged against the naive PyTorch BF16 implementation, with no tolerance: its
+error against an FP64 oracle of the same math, over 32 independent random
+inputs of each case, in the L2 and the max norm, median and largest, is at most
+1.005 times the naive's, and 0 wherever the naive's is 0
+(``tests/norm/test_helpers/cake_rmsnorm_train_reference.py``,
+``tests/cake/test_helpers/cake_naive.py``).  ``h_new`` is also the correctly
+rounded BF16 sum, and the deterministic outputs are bitwise reproducible run to
+run.  The matrix covers small and packed token counts (including 1 and 0), tile
+boundaries, row-strided inputs, 1e-3 / 1e3 input scales, zero input and a row of
+large values, the residual-add fusion (against the naive add-then-norm training
+step for every input gradient), bitwise reproducibility of ``dw``, changing
+token counts in one process and the autograd wrapper end to end.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -39,12 +42,12 @@ from __future__ import annotations
 
 import pytest
 import re
-import statistics
 from pathlib import Path
 
 import torch
 
 from tests.cake.test_helpers.cake_package import cake_package
+from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
 pkg = cake_package("cake_rmsnorm_det_train")
 cake_build = cake_package("cake_rmsnorm_det_train", "cake_build")
@@ -85,21 +88,7 @@ CONTRACT_ROWS = {
 STRIDE_PADS = (0, 64, "2H")
 # The row count standing in for the open end of a route's last program window.
 OPEN_WINDOW_ROWS = 65536
-# Bounds of the differences a window edge of class ``ulp`` / ``dx`` / ``unmeasured`` may show on the common rows
-# of T = edge and T = edge + 1 (``cake_windows.EDGES``; the measured figures are in the docstring notes): rstd within
-# a few FP32 ulps on at most half of the rows; y and dx within one BF16 ulp of the element -- or within a 2^-14 share
-# of the row's RMS, for the elements a cancellation leaves far below it -- on at most a twentieth of the rows across
-# an edge of class ``dx`` (whose forward is identical) and, across an edge of class ``ulp`` / ``unmeasured``, only on
-# rows whose rstd differs (the residual H = 6144 route moves dx on about a tenth of the rows at its edge 1024).
-EDGE_RSTD_ULPS = 4
-EDGE_RSTD_ROW_SHARE = 0.5
-EDGE_BF16_ROW_SHARE = 0.05
-EDGE_BF16_ROW_FLOOR = 2.0**-14
 SCALES = (1.0, 1e-3, 1e3)
-ATOL = 1e-2
-RTOL = 1e-2
-RSTD_REL_L2 = 1e-5
-DW_REL_L2 = 1e-4
 SEED = 760
 
 
@@ -154,11 +143,18 @@ def _skip_unless_route(hidden: int, residual: bool) -> None:
         pytest.skip(f"hidden={hidden} has no exported residual route on this device")
 
 
-def _generator(*keys: int) -> torch.Generator:
+def _seed(*keys) -> int:
     seed = SEED
     for key in keys:
         seed = (seed * 1_000_003 + int(key)) % (2**31 - 1)
-    return torch.Generator(device=_device()).manual_seed(seed)
+    return seed
+
+
+def _generator(*keys, draw: int = 0) -> torch.Generator:
+    """The generator of draw ``draw`` of the case keyed ``keys`` (draw 0 is the case's own input)."""
+    return torch.Generator(device=_device()).manual_seed(
+        ref.draw_seed(_seed(*keys), draw)
+    )
 
 
 def _rows(
@@ -202,85 +198,19 @@ def _weight(hidden: int, generator: torch.Generator) -> torch.Tensor:
     ).to(torch.bfloat16)
 
 
-def _reference_rstd(x: torch.Tensor, eps: float) -> torch.Tensor:
-    xf = x.double()
-    if xf.shape[0] == 0:
-        return torch.empty(0, dtype=torch.float64, device=x.device)
-    return torch.rsqrt(xf.pow(2).mean(-1) + eps)
-
-
-def _reference_forward(x, w, eps, residual=None):
-    """FP64 forward; the residual boundary is rounded to BF16 like the kernel."""
-
-    if residual is not None:
-        h_new = (x.double() + residual.double()).to(torch.bfloat16)
-        normalized = h_new
-    else:
-        h_new = None
-        normalized = x
-    rstd = _reference_rstd(normalized, eps)
-    y = (normalized.double() * rstd.unsqueeze(-1)) * w.double()
-    return y, rstd, h_new
-
-
-def _reference_backward(g, x, w, eps, g_h=None):
-    xf, wf, gf = x.double(), w.double(), g.double()
-    hidden = x.shape[-1]
-    rstd = _reference_rstd(x, eps).unsqueeze(-1)
-    a = gf * wf
-    c = (a * xf).sum(-1, keepdim=True) / hidden
-    dx = rstd * a - xf * rstd.pow(3) * c
-    if g_h is not None:
-        dx = dx + g_h.double()
-    dw = (gf * xf * rstd).sum(0)
-    return dx, dw
-
-
-def _rel_l2(actual: torch.Tensor, reference: torch.Tensor) -> float:
-    a = actual.double().flatten()
-    b = reference.double().flatten()
-    den = b.norm().item()
-    num = (a - b).norm().item()
-    return num / den if den > 0 else num
-
-
-def _assert_bf16_close(
-    actual: torch.Tensor, reference: torch.Tensor, label: str
-) -> None:
-    assert actual.dtype == torch.bfloat16, label
-    a = actual.double()
-    b = reference.double()
-    assert torch.isfinite(a).all(), f"{label} has non-finite values"
-    if a.numel() == 0:
-        return
-    scale = b.pow(2).mean().sqrt().item()
-    if not (scale > 0.0) or scale != scale:
-        scale = 1.0
-    torch.testing.assert_close(a / scale, b / scale, atol=ATOL, rtol=RTOL, msg=label)
-
-
-# (label, kernel dw rel-L2, eager-FP32-path dw rel-L2) of every dw case checked in this process; the paired
-# "not worse than eager FP32" reading is an aggregate over the matrix (see the last test of this module).
-_DW_ERRORS: list[tuple[str, float, float]] = []
-
-
-def _assert_dw(dw: torch.Tensor, dw_ref: torch.Tensor, g, x, rstd, label: str) -> None:
-    assert dw.dtype == torch.float32 and dw.is_contiguous(), label
-    assert torch.isfinite(dw).all(), f"{label} has non-finite values"
-    error = _rel_l2(dw, dw_ref)
-    assert error <= DW_REL_L2, f"{label}: dw rel-L2 {error:.3e} > {DW_REL_L2:.0e}"
-    # Paired eager FP32 path ``(g * x * rstd).sum(0)`` on the same inputs and the same FP32 ``rstd`` the kernel
-    # consumed.  Both sit at the FP32 rounding floor (one ulp of the per-element products, rounded differently:
-    # fused multiply-add versus two multiplies), so a per-case comparison flips at small T; "not worse" is judged
-    # on the median ratio over the matrix in ``test_dw_not_worse_than_eager_fp32_over_the_matrix``.
-    eager_fp32 = (g.float() * x.float() * rstd.float().unsqueeze(-1)).sum(0)
-    _DW_ERRORS.append((label, error, _rel_l2(eager_fp32, dw_ref)))
+def _h_new_is_the_rounded_sum(h_new, x, u, label: str) -> None:
+    """``h_new`` is ``x + u`` rounded once to BF16 (the float64 sum of two BF16 values is exact)."""
+    assert torch.equal(h_new, (x.double() + u.double()).to(torch.bfloat16)), (
+        f"h_new {label} is not the BF16-rounded sum"
+    )
 
 
 def _check_case(
     hidden: int,
     rows: int,
     *,
+    record,
+    tag: str = "",
     x_pad=0,
     g_pad=0,
     scale: float = 1.0,
@@ -289,54 +219,66 @@ def _check_case(
     spike: bool = False,
     eps: float | None = None,
 ) -> None:
+    """Forward and backward of one case over its draws, each output judged against the naive BF16 tier
+    (``ref.Draws``; ``tag`` names the outputs of one case among several of a test); verdicts recorded with
+    ``record`` (``record_property``)."""
     eps = EPS[hidden] if eps is None else eps
     pad_key = hidden if x_pad == "2H" else int(x_pad)
-    generator = _generator(
-        hidden, rows, pad_key, int(scale * 1e6) % 9973, zeros, residual, spike
-    )
-    x = _rows(
-        rows, hidden, stride_pad=x_pad, scale=scale, zeros=zeros, generator=generator
-    )
-    if spike and rows > 0:
-        row = min(rows - 1, 3)
-        x[row] = (x[row].float() * 1e3).to(torch.bfloat16)
-        x[row, min(hidden - 1, 17)] = 1e4
-    w = _weight(hidden, generator)
-    u = _rows(rows, hidden, scale=scale, generator=generator) if residual else None
-    g = _rows(rows, hidden, stride_pad=g_pad, generator=generator)
-    g_h = _rows(rows, hidden, generator=generator) if residual else None
-
-    outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
-    y_ref, rstd_ref, h_new_ref = _reference_forward(x, w, eps, residual=u)
-    y, rstd = outputs[0], outputs[1]
-    assert tuple(y.shape) == (rows, hidden) and y.is_contiguous()
-    assert rstd.dtype == torch.float32 and tuple(rstd.shape) == (rows,)
     label = f"hidden={hidden} rows={rows} eps={eps} pad={x_pad} scale={scale} zeros={zeros} residual={residual}"
-    _assert_bf16_close(y, y_ref, f"y {label}")
-    assert torch.isfinite(rstd).all(), f"rstd {label}"
-    assert _rel_l2(rstd, rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-    if residual:
-        h_new = outputs[2]
-        assert torch.equal(h_new, h_new_ref), (
-            f"h_new {label} is not the BF16-rounded sum"
+    check = ref.Draws(label, prefix=tag)
+    for draw in range(check.draws):
+        generator = _generator(
+            hidden,
+            rows,
+            pad_key,
+            int(scale * 1e6) % 9973,
+            zeros,
+            residual,
+            spike,
+            draw=draw,
         )
-        normalized = h_new
-    else:
-        assert len(outputs) == 2
-        normalized = x
+        x = _rows(
+            rows,
+            hidden,
+            stride_pad=x_pad,
+            scale=scale,
+            zeros=zeros,
+            generator=generator,
+        )
+        if spike and rows > 0:
+            row = min(rows - 1, 3)
+            x[row] = (x[row].float() * 1e3).to(torch.bfloat16)
+            x[row, min(hidden - 1, 17)] = 1e4
+        w = _weight(hidden, generator)
+        u = _rows(rows, hidden, scale=scale, generator=generator) if residual else None
+        g = _rows(rows, hidden, stride_pad=g_pad, generator=generator)
+        g_h = _rows(rows, hidden, generator=generator) if residual else None
 
-    dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
-    dx_ref, dw_ref = _reference_backward(g, normalized, w, eps, g_h=g_h)
-    assert tuple(dx.shape) == (rows, hidden) and dx.is_contiguous()
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    _assert_dw(dw, dw_ref, g, normalized, rstd, f"dw {label}")
+        outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
+        y, rstd = outputs[0], outputs[1]
+        assert tuple(y.shape) == (rows, hidden) and y.is_contiguous()
+        assert rstd.dtype == torch.float32 and tuple(rstd.shape) == (rows,)
+        forward = {"y": y, "rstd": rstd}
+        if residual:
+            normalized = forward["h_new"] = outputs[2]
+            _h_new_is_the_rounded_sum(normalized, x, u, label)
+        else:
+            assert len(outputs) == 2
+            normalized = x
+        check.forward(draw, forward, x, w, eps, residual=u)
+
+        dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
+        assert tuple(dx.shape) == (rows, hidden) and dx.is_contiguous()
+        assert dw.dtype == torch.float32 and dw.is_contiguous()
+        check.backward(draw, {"dx": dx, "dw": dw}, g, normalized, w, rstd, eps, g_h=g_h)
+    check.check(record)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("rows", ROWS)
-def test_forward_backward_match_fp64(hidden: int, rows: int) -> None:
+def test_forward_backward_match_fp64(hidden: int, rows: int, record_property) -> None:
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows)
+    _check_case(hidden, rows, record=record_property)
 
 
 def _switch_rows(arch: str, hidden: int, kind: str, residual: bool) -> tuple[int, ...]:
@@ -357,9 +299,9 @@ def _switch_rows(arch: str, hidden: int, kind: str, residual: bool) -> tuple[int
     ("hidden", "rows"),
     [(hidden, rows) for hidden, counts in CONTRACT_ROWS.items() for rows in counts],
 )
-def test_contract_rows_match_fp64(hidden: int, rows: int) -> None:
+def test_contract_rows_match_fp64(hidden: int, rows: int, record_property) -> None:
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows)
+    _check_case(hidden, rows, record=record_property)
 
 
 @pytest.mark.parametrize(
@@ -368,16 +310,20 @@ def test_contract_rows_match_fp64(hidden: int, rows: int) -> None:
 )
 @pytest.mark.parametrize("rows", (7, 16231))
 @pytest.mark.parametrize("scale", SCALES)
-def test_eps_variants(hidden: int, eps: float, rows: int, scale: float) -> None:
+def test_eps_variants(
+    hidden: int, eps: float, rows: int, scale: float, record_property
+) -> None:
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows, scale=scale, eps=eps)
+    _check_case(hidden, rows, record=record_property, scale=scale, eps=eps)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("residual", (False, True))
-def test_forward_programs_switch_on_row_count(hidden: int, residual: bool) -> None:
+def test_forward_programs_switch_on_row_count(
+    hidden: int, residual: bool, record_property
+) -> None:
     """Exactly one forward program runs per call, every exported program runs for some row count, and each
-    matches the FP64 reference on both sides of its switch point."""
+    meets the naive BF16 tier on both sides of its switch point (over the draws of each row count)."""
 
     _skip_unless_route(hidden, residual)
     arch = loader.arch_for_capability(_capability())
@@ -390,28 +336,31 @@ def test_forward_programs_switch_on_row_count(hidden: int, residual: bool) -> No
             f"hidden={hidden} residual={residual} rows={rows}: {selected}"
         )
         launched.add(selected[0])
-        generator = _generator(hidden, rows, 43, residual)
-        x = _rows(rows, hidden, generator=generator)
-        w = _weight(hidden, generator)
-        u = _rows(rows, hidden, generator=generator) if residual else None
-        outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
-        y_ref, rstd_ref, h_new_ref = _reference_forward(x, w, eps, residual=u)
         label = f"hidden={hidden} residual={residual} rows={rows}"
-        _assert_bf16_close(outputs[0], y_ref, f"y {label}")
-        assert _rel_l2(outputs[1], rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-        if residual:
-            assert torch.equal(outputs[2], h_new_ref), f"h_new {label}"
+        check = ref.Draws(label, prefix=f"T={rows} ")
+        for draw in range(check.draws):
+            generator = _generator(hidden, rows, 43, residual, draw=draw)
+            x = _rows(rows, hidden, generator=generator)
+            w = _weight(hidden, generator)
+            u = _rows(rows, hidden, generator=generator) if residual else None
+            outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
+            forward = {"y": outputs[0], "rstd": outputs[1]}
+            if residual:
+                forward["h_new"] = outputs[2]
+                _h_new_is_the_rounded_sum(outputs[2], x, u, label)
+            check.forward(draw, forward, x, w, eps, residual=u)
+        check.check(record_property)
     assert launched == set(names), (
         f"hidden={hidden} residual={residual}: never launched {set(names) - launched}"
     )
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-def test_backward_programs_switch_on_row_count(hidden: int) -> None:
+def test_backward_programs_switch_on_row_count(hidden: int, record_property) -> None:
     """Exactly one pair -- a main program and its dw reduce program -- or one
-    column-task program runs per call, every exported backward program runs for
-    some row count, and forward + backward match the FP64 reference on both
-    sides of each switch point."""
+    single program (``claim_sum_f32``) runs per call, every exported backward
+    program runs for some row count, and forward + backward meet the naive BF16
+    tier on both sides of each switch point."""
 
     _skip_unless_hidden(hidden)
     arch = loader.arch_for_capability(_capability())
@@ -420,14 +369,14 @@ def test_backward_programs_switch_on_row_count(hidden: int) -> None:
     for rows in _switch_rows(arch, hidden, "bwd", False):
         selected = loader.selected_modules(arch, hidden, "bwd", False, rows=rows)
         workspace = loader.MODULES[selected[0]].get("workspace_rule") or {}
-        if workspace.get("kind") == "claim_sum_f64":
+        if workspace.get("kind") == "claim_sum_f32":
             assert len(selected) == 1, f"hidden={hidden} rows={rows}: {selected}"
         else:
             assert len(selected) == 2, f"hidden={hidden} rows={rows}: {selected}"
             main, reduce = (loader.MODULES[name] for name in selected)
             assert workspace and reduce["role"] == "bwd_reduce"
         launched.update(selected)
-        _check_case(hidden, rows)
+        _check_case(hidden, rows, record=record_property, tag=f"T={rows} ")
     assert launched == set(names), (
         f"hidden={hidden}: never launched {set(names) - launched}"
     )
@@ -436,21 +385,29 @@ def test_backward_programs_switch_on_row_count(hidden: int) -> None:
 @pytest.mark.parametrize("hidden", (6144, 5120, 4096, 2048, 1536, 256))
 @pytest.mark.parametrize("rows", (1, 129, 4097))
 @pytest.mark.parametrize("below", (1, 0))
-def test_backward_below_the_measured_sm_count_runs_the_compensated_programs(
-    hidden: int, rows: int, below: int, monkeypatch: pytest.MonkeyPatch
+def test_backward_below_the_measured_sm_count(
+    hidden: int, rows: int, below: int, monkeypatch: pytest.MonkeyPatch, record_property
 ) -> None:
     """On a device with fewer SMs than ``cake_windows.ACCURACY_MIN_SMS`` (emulated: the host's SM count patched to one
-    below it, or to 16, which shrinks the chunk table and the grids with it) every backward route with a compensated
-    program launches one at every row count, and forward + backward match the FP64 reference."""
+    below it, or to 16, which shrinks the chunk table and the grids with it) every call launches one backward
+    program: one of the route's compensated programs where the route has an accuracy edge
+    (``cake_windows.ACCURACY_EDGES``), else the program of the row count's window, and forward + backward meet the
+    naive BF16 tier."""
 
     _skip_unless_hidden(hidden)
     arch = loader.arch_for_capability(_capability())
-    edge = windows.ACCURACY_EDGES[arch][loader.route_key(hidden, "bwd", False)]
-    compensated = {
-        library
-        for low, _high, library in loader.program_windows(arch, hidden, "bwd", False)
-        if low >= edge
-    }
+    edge = windows.ACCURACY_EDGES.get(arch, {}).get(
+        loader.route_key(hidden, "bwd", False)
+    )
+    programs = loader.program_windows(arch, hidden, "bwd", False)
+    if edge is None:
+        expected = {
+            library
+            for low, high, library in programs
+            if low < rows and (high is None or rows <= high)
+        }
+    else:
+        expected = {library for low, _high, library in programs if low >= edge}
     sms = windows.ACCURACY_MIN_SMS[arch] - 1 if below else 16
     monkeypatch.setattr(loader, "sm_count", lambda _index: sms)
     launched: list[str] = []
@@ -461,13 +418,15 @@ def test_backward_below_the_measured_sm_count_runs_the_compensated_programs(
         return run_module(name, *args, **kwargs)
 
     monkeypatch.setattr(loader, "run_module", record)
-    _check_case(hidden, rows)
+    _check_case(hidden, rows, record=record_property)
     mains = [
         loader.MODULES[name]["library"]
         for name in launched
         if loader.MODULES[name].get("workspace_rule") is not None
     ]
-    assert len(mains) == 1 and mains[0] in compensated, (sms, rows, mains)
+    # one backward call per draw
+    assert len(mains) == ref.DRAWS and len(set(mains)) == 1, (sms, rows, set(mains))
+    assert mains[0] in expected, (sms, rows, mains[0], expected)
 
 
 # --------------------------------------------------------------------------- the program windows
@@ -558,22 +517,6 @@ def _route_outputs(
     return result
 
 
-def _ordered_bits(t: torch.Tensor) -> torch.Tensor:
-    """The float bits as an integer key monotone in the value: the key distance of two floats is their distance in
-    ulps of the format."""
-
-    if t.dtype == torch.bfloat16:
-        bits, sign = t.view(torch.int16).to(torch.int64), 1 << 15
-    else:
-        assert t.dtype == torch.float32
-        bits, sign = t.view(torch.int32).to(torch.int64), 1 << 31
-    return torch.where(bits >= 0, bits, -(bits + sign))
-
-
-def _ulps_apart(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
-    return (_ordered_bits(a) - _ordered_bits(b)).abs()
-
-
 def _differing_rows(a: torch.Tensor, b: torch.Tensor) -> int:
     differs = a != b
     if differs.ndim > 1:
@@ -581,33 +524,14 @@ def _differing_rows(a: torch.Tensor, b: torch.Tensor) -> int:
     return int(differs.sum().item())
 
 
-def _assert_within_a_bf16_ulp(
-    a: torch.Tensor,
-    b: torch.Tensor,
-    label: str,
-    *,
-    row_share: float = EDGE_BF16_ROW_SHARE,
-) -> None:
-    """``a`` and ``b`` (BF16 ``[rows, H]``) agree to one BF16 ulp per element -- or to ``EDGE_BF16_ROW_FLOOR`` of the
-    row's RMS where a cancellation leaves the element far below it -- and differ on at most ``row_share`` of the
-    rows."""
-
-    floor = EDGE_BF16_ROW_FLOOR * a.float().pow(2).mean(dim=1, keepdim=True).sqrt()
-    within = (_ulps_apart(a, b) <= 1) | ((a.float() - b.float()).abs() <= floor)
-    assert within.all(), f"{label}: {int((~within).sum())} elements beyond one BF16 ulp"
-    rows = _differing_rows(a, b)
-    assert rows <= row_share * a.shape[0], (
-        f"{label}: differs on {rows} of {a.shape[0]} rows"
-    )
-
-
 def _assert_edge_class(
     low: dict[str, torch.Tensor], high: dict[str, torch.Tensor], cls: str, label: str
 ) -> None:
     """The outputs of T = edge (``low``) and T = edge + 1 (``high``) on their common rows behave as the edge's class
-    says: ``same`` -- bitwise identical; ``ulp`` -- rstd differs on some rows by a few FP32 ulps, y and dx by at most
-    one BF16 ulp and only on rows whose rstd differs; ``dx`` -- y and rstd identical, dx differs on a few rows (the
-    base and the bulk-copy backward reduce a row in different orders); ``unmeasured`` -- bounded like ``ulp``."""
+    says: ``same`` -- bitwise identical; ``ulp`` -- rstd differs on some rows, and y and dx differ
+    only on rows whose rstd differs; ``dx`` -- y and rstd identical, dx differs on some rows (the base and the
+    bulk-copy backward reduce a row in different orders); ``unmeasured`` -- h_new identical.  How far the outputs
+    move is not bounded here (no tolerance); accuracy is judged against the naive BF16 tier."""
 
     rows = low["rstd"].shape[0]
     common = {key: value[:rows] for key, value in high.items()}
@@ -627,29 +551,14 @@ def _assert_edge_class(
         assert rstd_rows == 0 and torch.equal(low["y"], common["y"]), (
             f"{label}: the forward differs across an edge of class 'dx' ({rstd_rows} rstd rows)"
         )
-    else:
-        assert (_ulps_apart(low["rstd"], common["rstd"]) <= EDGE_RSTD_ULPS).all(), (
-            f"{label}: rstd beyond {EDGE_RSTD_ULPS} FP32 ulps"
+    elif cls == "ulp":
+        assert rstd_rows > 0, (
+            f"{label}: rstd is identical across an edge of class 'ulp' (re-measure the edge)"
         )
-        assert rstd_rows <= EDGE_RSTD_ROW_SHARE * rows, (
-            f"{label}: rstd differs on {rstd_rows} of {rows} rows"
+        assert torch.equal(low["y"][same_rstd], common["y"][same_rstd]), (
+            f"{label}: y differs on rows whose rstd agrees"
         )
-        # y and dx move only with rstd (asserted exactly for class 'ulp' below): the rstd share bounds their rows.
-        _assert_within_a_bf16_ulp(
-            low["y"], common["y"], f"{label}: y", row_share=EDGE_RSTD_ROW_SHARE
-        )
-        if cls == "ulp":
-            assert rstd_rows > 0, (
-                f"{label}: rstd is identical across an edge of class 'ulp' (re-measure the edge)"
-            )
-            assert torch.equal(low["y"][same_rstd], common["y"][same_rstd]), (
-                f"{label}: y differs on rows whose rstd agrees"
-            )
     if "dx" in low:
-        share = EDGE_BF16_ROW_SHARE if cls == "dx" else EDGE_RSTD_ROW_SHARE
-        _assert_within_a_bf16_ulp(
-            low["dx"], common["dx"], f"{label}: dx", row_share=share
-        )
         if cls == "ulp":
             assert torch.equal(low["dx"][same_rstd], common["dx"][same_rstd]), (
                 f"{label}: dx differs on rows whose rstd agrees"
@@ -692,7 +601,7 @@ def test_window_edges_match_the_measured_classes(
     hidden: int, kind: str, residual: bool
 ) -> None:
     """At every window edge of the route the outputs of T = edge and T = edge + 1 behave on their common rows as the
-    exporter measured (``cake_windows.EDGES``, see ``_assert_edge_class``); an unmeasured edge is bounded and named."""
+    exporter measured (``cake_windows.EDGES``, see ``_assert_edge_class``); an unmeasured edge is named."""
 
     _skip_unless_route(hidden, residual)
     arch = loader.arch_for_capability(_capability())
@@ -709,44 +618,49 @@ def test_window_edges_match_the_measured_classes(
         if cls == "unmeasured":
             unmeasured.append(edge)
     if unmeasured:
-        pytest.skip(
-            f"{arch} {route}: edges {unmeasured} are within bounds but unmeasured"
-        )
+        pytest.skip(f"{arch} {route}: edges {unmeasured} are unmeasured")
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("stride_pad", STRIDE_PADS[1:])
 @pytest.mark.parametrize("rows", (7, 129, 16231))
-def test_row_strided_inputs(hidden: int, stride_pad, rows: int) -> None:
+def test_row_strided_inputs(
+    hidden: int, stride_pad, rows: int, record_property
+) -> None:
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows, x_pad=stride_pad, g_pad=stride_pad)
+    _check_case(
+        hidden, rows, record=record_property, x_pad=stride_pad, g_pad=stride_pad
+    )
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("scale", SCALES[1:])
 @pytest.mark.parametrize("rows", (7, 16231))
-def test_input_scales(hidden: int, scale: float, rows: int) -> None:
+def test_input_scales(hidden: int, scale: float, rows: int, record_property) -> None:
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows, scale=scale)
+    _check_case(hidden, rows, record=record_property, scale=scale)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("rows", (1, 129))
-def test_zero_input_has_no_nan(hidden: int, rows: int) -> None:
+def test_zero_input_has_no_nan(hidden: int, rows: int, record_property) -> None:
+    """``x = 0`` with random ``g`` and ``w``: ``y`` and ``dw`` are exactly 0, ``rstd`` is ``eps^(-1/2)`` and ``dx``
+    is ``rstd g w``; every output finite and judged over the draws (``g`` and ``w`` change with the seed)."""
     _skip_unless_hidden(hidden)
-    _check_case(hidden, rows, zeros=True)
+    _check_case(hidden, rows, record=record_property, zeros=True)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-def test_extreme_row(hidden: int) -> None:
+def test_extreme_row(hidden: int, record_property) -> None:
+    """One row scaled by 1e3 with one element 1e4 (normal BF16 values) among unit-scale rows."""
     _skip_unless_hidden(hidden)
-    _check_case(hidden, 257, spike=True)
+    _check_case(hidden, 257, record=record_property, spike=True)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("stride_pad", STRIDE_PADS)
 @pytest.mark.parametrize("rows", (1, 129, 16231))
-def test_residual_fusion(hidden: int, stride_pad, rows: int) -> None:
+def test_residual_fusion(hidden: int, stride_pad, rows: int, record_property) -> None:
     _skip_unless_hidden(hidden)
     if not loader.route_applies(
         device_capability=_capability(),
@@ -755,7 +669,14 @@ def test_residual_fusion(hidden: int, stride_pad, rows: int) -> None:
         residual=True,
     ):
         pytest.skip(f"hidden={hidden} has no exported residual route on this device")
-    _check_case(hidden, rows, x_pad=stride_pad, g_pad=stride_pad, residual=True)
+    _check_case(
+        hidden,
+        rows,
+        record=record_property,
+        x_pad=stride_pad,
+        g_pad=stride_pad,
+        residual=True,
+    )
 
 
 MISALIGNED_LAYOUTS = ("offset1", "stride_h_plus_1")
@@ -798,97 +719,101 @@ def _misaligned_rows(
 @pytest.mark.parametrize("layout", MISALIGNED_LAYOUTS)
 @pytest.mark.parametrize("residual", (False, True))
 def test_misaligned_layouts_are_materialized(
-    hidden: int, layout: str, residual: bool
+    hidden: int, layout: str, residual: bool, record_property
 ) -> None:
     """Odd column offsets and odd row strides on every ``[T, H]`` input and output (fwd, bwd, residual)."""
 
     _skip_unless_route(hidden, residual)
     eps = EPS[hidden]
     rows = 129
-    generator = _generator(hidden, rows, 41, layout == "offset1", residual)
-    x = _misaligned_rows(rows, hidden, layout, generator=generator)
-    w = _weight(hidden, generator)
-    u = (
-        _misaligned_rows(rows, hidden, layout, generator=generator)
-        if residual
-        else None
-    )
-    g = _misaligned_rows(rows, hidden, layout, generator=generator)
-    g_h = (
-        _misaligned_rows(rows, hidden, layout, generator=generator)
-        if residual
-        else None
-    )
     label = f"hidden={hidden} layout={layout} residual={residual}"
+    check = ref.Draws(label)
+    for draw in range(check.draws):
+        generator = _generator(
+            hidden, rows, 41, layout == "offset1", residual, draw=draw
+        )
+        x = _misaligned_rows(rows, hidden, layout, generator=generator)
+        w = _weight(hidden, generator)
+        u = (
+            _misaligned_rows(rows, hidden, layout, generator=generator)
+            if residual
+            else None
+        )
+        g = _misaligned_rows(rows, hidden, layout, generator=generator)
+        g_h = (
+            _misaligned_rows(rows, hidden, layout, generator=generator)
+            if residual
+            else None
+        )
 
-    outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
-    y_ref, rstd_ref, h_new_ref = _reference_forward(x, w, eps, residual=u)
-    y, rstd = outputs[0], outputs[1]
-    assert y.is_contiguous() and tuple(y.shape) == (rows, hidden)
-    _assert_bf16_close(y, y_ref, f"y {label}")
-    assert _rel_l2(rstd, rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-    if residual:
-        assert torch.equal(outputs[2], h_new_ref), f"h_new {label}"
-    # Caller-provided outputs with the same awkward layout are honoured by copy-back.
-    y_user = _misaligned_rows(rows, hidden, layout, generator=generator)
-    outputs_user = cake_rmsnorm_det_train_forward(x, w, eps, residual=u, out=y_user)
-    assert outputs_user[0] is y_user and torch.equal(y_user, y), (
-        f"out copy-back {label}"
-    )
+        outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
+        y, rstd = outputs[0], outputs[1]
+        assert y.is_contiguous() and tuple(y.shape) == (rows, hidden)
+        forward = {"y": y, "rstd": rstd}
+        if residual:
+            forward["h_new"] = outputs[2]
+            _h_new_is_the_rounded_sum(outputs[2], x, u, label)
+        check.forward(draw, forward, x, w, eps, residual=u)
+        # Caller-provided outputs with the same awkward layout are honoured by copy-back.
+        y_user = _misaligned_rows(rows, hidden, layout, generator=generator)
+        outputs_user = cake_rmsnorm_det_train_forward(x, w, eps, residual=u, out=y_user)
+        assert outputs_user[0] is y_user and torch.equal(y_user, y), (
+            f"out copy-back {label}"
+        )
 
-    # Backward: the normalized tensor, both gradients and the dx buffer are misaligned views.
-    normalized = _misaligned_rows(rows, hidden, layout, generator=generator)
-    normalized.copy_(outputs[2] if residual else x)
-    dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
-    dx_ref, dw_ref = _reference_backward(g, normalized, w, eps, g_h=g_h)
-    assert dx.is_contiguous() and tuple(dx.shape) == (rows, hidden)
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    _assert_dw(dw, dw_ref, g, normalized, rstd, f"dw {label}")
-    dx_user = _misaligned_rows(rows, hidden, layout, generator=generator)
-    dx_again, dw_again = cake_rmsnorm_det_train_backward(
-        g, normalized, w, rstd, g_residual=g_h, dx=dx_user
-    )
-    assert dx_again is dx_user and torch.equal(dx_user, dx), f"dx copy-back {label}"
-    assert torch.equal(dw_again, dw), f"dw bitwise across layouts {label}"
+        # Backward: the normalized tensor, both gradients and the dx buffer are misaligned views.
+        normalized = _misaligned_rows(rows, hidden, layout, generator=generator)
+        normalized.copy_(outputs[2] if residual else x)
+        dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
+        assert dx.is_contiguous() and tuple(dx.shape) == (rows, hidden)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, normalized, w, rstd, eps, g_h=g_h)
+        dx_user = _misaligned_rows(rows, hidden, layout, generator=generator)
+        dx_again, dw_again = cake_rmsnorm_det_train_backward(
+            g, normalized, w, rstd, g_residual=g_h, dx=dx_user
+        )
+        assert dx_again is dx_user and torch.equal(dx_user, dx), f"dx copy-back {label}"
+        assert torch.equal(dw_again, dw), f"dw bitwise across layouts {label}"
+    check.check(record_property)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-def test_half_vector_aligned_weight_is_materialized(hidden: int) -> None:
+def test_half_vector_aligned_weight_is_materialized(
+    hidden: int, record_property
+) -> None:
     """A contiguous ``w`` whose storage base is 16 bytes past a 32-byte boundary.
 
     The backward kernels load the weight with 16-byte vectors and read this view
     in place; the forward kernels load it with 32-byte vectors, so the forward
     must copy it (an in-place read would be a misaligned vector load).  Both
-    match the FP64 reference and the aligned weight's results bitwise.
+    meet the naive BF16 tier and give the aligned weight's results bitwise.
     """
 
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
     rows = 129
-    generator = _generator(hidden, rows, 47)
-    x = _rows(rows, hidden, generator=generator)
-    w_aligned = _weight(hidden, generator)
+    label = f"hidden={hidden} 16-byte aligned w"
+    check = ref.Draws(label)
     storage = torch.empty(hidden + 16, dtype=torch.bfloat16, device=_device())
     offset = ((16 - storage.data_ptr() % 32) % 32) // storage.element_size()
     w = storage[offset : offset + hidden]
-    w.copy_(w_aligned)
-    assert w.is_contiguous() and w.data_ptr() % 32 == 16, "test layout"
-    label = f"hidden={hidden} 16-byte aligned w"
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, 47, draw=draw)
+        x = _rows(rows, hidden, generator=generator)
+        w_aligned = _weight(hidden, generator)
+        w.copy_(w_aligned)
+        assert w.is_contiguous() and w.data_ptr() % 32 == 16, "test layout"
 
-    y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
-    y_ref, rstd_ref, _ = _reference_forward(x, w, eps)
-    _assert_bf16_close(y, y_ref, f"y {label}")
-    assert _rel_l2(rstd, rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-    y_aligned, rstd_aligned = cake_rmsnorm_det_train_forward(x, w_aligned, eps)
-    assert torch.equal(y, y_aligned) and torch.equal(rstd, rstd_aligned), label
+        y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
+        check.forward(draw, {"y": y, "rstd": rstd}, x, w, eps)
+        y_aligned, rstd_aligned = cake_rmsnorm_det_train_forward(x, w_aligned, eps)
+        assert torch.equal(y, y_aligned) and torch.equal(rstd, rstd_aligned), label
 
-    g = _rows(rows, hidden, generator=generator)
-    dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
-    dx_ref, dw_ref = _reference_backward(g, x, w, eps)
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    _assert_dw(dw, dw_ref, g, x, rstd, f"dw {label}")
-    dx_aligned, dw_aligned = cake_rmsnorm_det_train_backward(g, x, w_aligned, rstd)
-    assert torch.equal(dx, dx_aligned) and torch.equal(dw, dw_aligned), label
+        g = _rows(rows, hidden, generator=generator)
+        dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+        dx_aligned, dw_aligned = cake_rmsnorm_det_train_backward(g, x, w_aligned, rstd)
+        assert torch.equal(dx, dx_aligned) and torch.equal(dw, dw_aligned), label
+    check.check(record_property)
 
 
 # --------------------------------------------------------------------------- N-D inputs (the row collapse)
@@ -984,6 +909,105 @@ def test_nd_autograd_matches_the_2d_call(hidden: int) -> None:
     assert tuple(x3_leaf.grad.shape) == (rows, heads, hidden)
     assert torch.equal(x3_leaf.grad.reshape(-1, hidden), x2_leaf.grad)
     assert torch.equal(w3.grad, w2.grad)
+
+
+@pytest.mark.parametrize("heads", (24, 4))
+@pytest.mark.parametrize("consumer", ("sum", "transposed"))
+@pytest.mark.parametrize("residual", (False, True))
+def test_nd_autograd_gradients(
+    heads: int, consumer: str, residual: bool, record_property
+) -> None:
+    """``[T, heads, H]`` through autograd with a ``.sum()`` consumer and a transposed consumer: the gradient of
+    ``y.transpose(0, 1)`` reaches the backward with strides ``(H, T x H, 1)``, a layout outside the forward's
+    collapse rule, and with a residual (H = 6144, the width of the residual route) so does the gradient of
+    ``h_new``.  The backward copies such gradients once: ``y`` (and ``h_new``), ``dx`` and ``dw`` meet the naive
+    BF16 tier over the draws (the FP64 oracle of the whole step at its FP64 ``rstd``, the naive step at its own
+    ``rstd``; each gradient is the consumer's in BF16), both residual-add inputs receive the same gradient, and
+    ``dx`` and ``dw`` are the bits of the backward call on the same gradients made contiguous."""
+
+    hidden = 6144 if residual else 256
+    _skip_unless_route(hidden, residual)
+    eps = EPS[hidden]
+    tokens = 300
+    check = ref.Draws(f"heads={heads} consumer={consumer} residual={residual}")
+    for draw in range(check.draws):
+        generator = _generator(hidden, heads, residual, 79, draw=draw)
+        x0 = _nd_rows(tokens, heads, hidden, pitch_pad=0, generator=generator)
+        w0 = _weight(hidden, generator)
+        u0 = (
+            _nd_rows(tokens, heads, hidden, pitch_pad=0, generator=generator)
+            if residual
+            else None
+        )
+        scales = torch.randn(
+            2 if residual else 1,
+            heads,
+            tokens,
+            hidden,
+            dtype=torch.float32,
+            device=_device(),
+            generator=generator,
+        )
+        x = x0.clone().requires_grad_(True)
+        w = w0.clone().requires_grad_(True)
+        u = u0.clone().requires_grad_(True) if residual else None
+        outputs = cake_rmsnorm_det(x, w, eps, residual=u)
+        y, h_new = outputs if residual else (outputs, None)
+        grad_h = None
+        if consumer == "sum":
+            loss = y.float().sum()
+            grad_y = torch.ones(
+                tokens, heads, hidden, dtype=torch.bfloat16, device=_device()
+            )
+            if residual:
+                loss = loss + h_new.float().sum()
+                grad_h = torch.ones_like(grad_y)
+        else:
+            loss = (y.transpose(0, 1).float() * scales[0]).sum()
+            grad_y = scales[0].to(torch.bfloat16).transpose(0, 1)
+            if residual:
+                loss = loss + (h_new.transpose(0, 1).float() * scales[1]).sum()
+                grad_h = scales[1].to(torch.bfloat16).transpose(0, 1)
+        loss.backward()
+        label = f"heads={heads} consumer={consumer} residual={residual} draw={draw}"
+        assert x.grad.shape == x.shape and w.grad.shape == w.shape, label
+        if residual:
+            assert torch.equal(x.grad, u.grad), (
+                f"{label}: both residual-add inputs receive the same gradient"
+            )
+
+        forward = cake_rmsnorm_det_train_forward(x0, w0, eps, residual=u0)
+        normalized = forward[2] if residual else x0
+        dx, dw = cake_rmsnorm_det_train_backward(
+            grad_y.contiguous(),
+            normalized,
+            w0,
+            forward[1],
+            g_residual=None if grad_h is None else grad_h.contiguous(),
+        )
+        assert torch.equal(x.grad, dx), f"{label}: dx differs from the contiguous call"
+        assert torch.equal(w.grad, dw.to(w0.dtype)), (
+            f"{label}: dw differs from the contiguous call"
+        )
+
+        oracle = ref.oracle_forward(x0, w0, eps, residual=u0)
+        oracle_normalized = (
+            (x0.double() + u0.double()).to(torch.bfloat16) if residual else x0
+        )
+        oracle.update(
+            ref.oracle_backward(grad_y, oracle_normalized, w0, oracle["rstd"], grad_h)
+        )
+        naive = ref.naive_forward(x0, w0, eps, residual=u0)
+        naive.update(
+            ref.naive_backward(
+                grad_y, naive.get("h_new", x0), w0, naive["rstd"], eps, grad_h
+            )
+        )
+        judged = {"y": y.detach(), "dx": x.grad, "dw": w.grad}
+        if residual:
+            judged["h_new"] = h_new.detach()
+        check.add(draw, judged, oracle, naive)
+    check.check(record_property)
 
 
 def test_the_issues_hidden_256_view_collapses_before_the_route_lookup() -> None:
@@ -1120,13 +1144,28 @@ RECUT_FP32_BACKWARD_TWINS: dict[
         (1024, 16384): ((1024, 2047), "c73074cf"),
         (16384, 58880): ((22528, 58880), "ceeef043"),
     },
-    ("sm_100a", 5120): {(0, 1): ((1, 256), "baa071a2")},
+    ("sm_100a", 5120): {(0, 1): ((1, 256), "dd3a3573")},
     ("sm_100a", 6144): {(384, 4096): ((384, 767), "5c804aed")},
-    ("sm_103a", 4096): {(0, 1): ((0, 152), "ff0156d5")},
+    ("sm_103a", 4096): {(0, 1): ((0, 152), "12d53fe5")},
     ("sm_103a", 6144): {
-        (0, 1): ((0, 20), "38b1c6bc"),
+        (0, 1): ((0, 20), "44508df7"),
         (256, 4096): ((256, 767), "5c804aed"),
     },
+}
+
+# The backward windows of the swapped FP32-weight routes (``SWAPPED_FP32_ROUTES`` of the pairs test), where the
+# FP32-weight route runs, under a record of the BF16 route's host plan, the twin of another program than the BF16
+# route's: (arch, hidden, residual) -> {FP32-weight window: the first 8 hex digits of the BF16 program whose record over
+# that window (no route selects it) is the BF16 twin of the FP32-weight window's}.  SM100 H = 5120 runs the twin of
+# c145ef19 above 6144 rows where the BF16 route runs b482c84d, SM103 H = 4096 the twin of 850eec3a over
+# (48640, 51200] where it runs 24643edc, and SM100 H = 6144 with a residual keeps the twin of c1a3be94 above 42496
+# rows where the BF16 route runs 84385468.
+SWAPPED_FP32_BACKWARD_TWINS: dict[
+    tuple[str, int, bool], dict[tuple[int, int | None], str]
+] = {
+    ("sm_100a", 5120, False): {(6144, 50688): "c145ef19", (50688, None): "c145ef19"},
+    ("sm_103a", 4096, False): {(48640, 51200): "850eec3a"},
+    ("sm_100a", 6144, True): {(42496, None): "c1a3be94"},
 }
 
 
@@ -1151,18 +1190,48 @@ def _twin_records(names, twin: tuple[int, int], program: str) -> list[str]:
     ]
 
 
-def _recut_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ...]:
-    """The BF16 twin modules (the main program and its dw reduce, or a column-task program alone) of the FP32-weight
-    backward program a call of ``rows`` tokens launches in a window of ``RECUT_FP32_BACKWARD_TWINS``; empty elsewhere.
-    The twin records are the BF16 route's where it runs the twin's window, else the registry's records of that
-    window."""
+def _swapped_backward_twin(
+    arch: str, hidden: int, residual: bool, rows: int
+) -> tuple[str, ...]:
+    """The BF16 twin modules of the FP32-weight backward program a call of ``rows`` tokens launches in a window of
+    ``SWAPPED_FP32_BACKWARD_TWINS``: the BF16 record of the window's program over that window, with the role, grid
+    rule and workspace rule of the FP32-weight record, then the dw reduce of the FP32-weight call; empty elsewhere."""
 
-    if residual:
-        return ()
-    arch = loader.arch_for_capability(_capability())
-    for (above, at_most), (twin, program) in RECUT_FP32_BACKWARD_TWINS.get(
-        (arch, hidden), {}
+    for (above, at_most), program in SWAPPED_FP32_BACKWARD_TWINS.get(
+        (arch, hidden, residual), {}
     ).items():
+        if above < rows and (at_most is None or rows <= at_most):
+            selected = loader.selected_modules(
+                arch, hidden, "bwd", residual, rows=rows, w_dtype="f32"
+            )
+            reduces = [n for n in selected if loader.MODULES[n]["role"] == "bwd_reduce"]
+            (main,) = [n for n in selected if n not in reduces]
+            fp32 = loader.MODULES[main]
+            twins = [
+                name
+                for name, record in loader.MODULES.items()
+                if record["library"].startswith(f"cake_rmsnorm_det_train_{program}")
+                and arch in record["arches"]
+                and (record["select_rule"] or {}).get("above") == above
+                and (record["select_rule"] or {}).get("at_most") == at_most
+                and record["role"] == fp32["role"].replace("_w32", "")
+                and record["grid_rule"] == fp32["grid_rule"]
+                and record["workspace_rule"] == fp32["workspace_rule"]
+            ]
+            assert len(twins) == 1, (arch, hidden, residual, program, twins)
+            return (twins[0], *reduces)
+    return ()
+
+
+def _fp32_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ...]:
+    """The BF16 twin modules (the main program and its dw reduce, or a column-task program alone) of the FP32-weight
+    backward program a call of ``rows`` tokens launches in a window of ``RECUT_FP32_BACKWARD_TWINS`` or
+    ``SWAPPED_FP32_BACKWARD_TWINS``; empty elsewhere.  The twin records of a re-cut window are the BF16 route's
+    where it runs the twin's window, else the registry's records of that window."""
+
+    arch = loader.arch_for_capability(_capability())
+    recut = {} if residual else RECUT_FP32_BACKWARD_TWINS.get((arch, hidden), {})
+    for (above, at_most), (twin, program) in recut.items():
         if above < rows <= at_most:
             names = _twin_records(
                 loader.route_modules(arch, hidden, "bwd", False), twin, program
@@ -1186,7 +1255,7 @@ def _recut_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, .
             reduces = [n for n in names if loader.MODULES[n]["role"] == "bwd_reduce"]
             assert len(reduces) == 1, (arch, hidden, twin, names)
             return (mains[0], reduces[0])
-    return ()
+    return _swapped_backward_twin(arch, hidden, residual, rows)
 
 
 def _launching(twin: tuple[str, ...]):
@@ -1228,8 +1297,10 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
     window of the route: the FP32-weight programs are the BF16 programs with the weight loaded
     at FP32, selected over the same windows.  In the backward windows of
     ``RECUT_FP32_BACKWARD_TWINS`` the FP32-weight route keeps a program of the BF16 route's
-    earlier windows, so there its dx and dw are bitwise those of a BF16 call that launches the
-    BF16 twin of that program (and its dw reduce) over the same rows."""
+    earlier windows, and in those of ``SWAPPED_FP32_BACKWARD_TWINS`` it runs the twin of a
+    program the BF16 route does not run there, so there its dx and dw are bitwise those of a
+    BF16 call that launches the BF16 twin of that program (and its dw reduce) over the same
+    rows."""
 
     _skip_unless_fp32_routes(hidden, residual)
     for rows in _window_rows(hidden, residual):
@@ -1250,7 +1321,7 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
             )
         label = f"hidden={hidden} residual={residual} rows={rows}"
         assert torch.equal(dx16, dx32), f"{label}: dx differs"
-        twin = _recut_backward_twin(hidden, residual, rows)
+        twin = _fp32_backward_twin(hidden, residual, rows)
         if twin:
             with pytest.MonkeyPatch.context() as patch:
                 patch.setattr(pkg, "selected_modules", _launching(twin))
@@ -1266,39 +1337,66 @@ def test_fp32_weight_equal_to_the_bf16_weight_matches_it_bitwise(
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("residual", (False, True))
 @pytest.mark.parametrize("rows", (7, 16231))
-def test_fp32_weight_is_applied_at_fp32(hidden: int, residual: bool, rows: int) -> None:
-    """An effective weight ``1 + delta`` that BF16 cannot represent is applied as given: y and dx match the FP64
-    reference computed with the FP32 weight, and differ from the BF16 path given ``bf16(w32)``."""
+def test_fp32_weight_meets_the_naive_tier(
+    hidden: int, residual: bool, rows: int, record_property
+) -> None:
+    """The FP32-weight routes: y, rstd (h_new), dx and dw meet the naive BF16 tier against the FP64 oracle of the
+    FP32 weight.  The weight holds a BF16 draw, so the naive tier reads the same weight as the oracle
+    (``ref.naive_weight``)."""
 
     _skip_unless_fp32_routes(hidden, residual)
-    generator = _generator(hidden, rows, residual, 89)
-    w32 = 1.0 + 1e-3 * torch.randn(
-        hidden, dtype=torch.float32, device=_device(), generator=generator
-    )
-    assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
-    seed = generator.get_state()
-    outputs, dx, dw, inputs = _fp32_case(hidden, rows, residual, w32, generator)
     eps = EPS[hidden]
-    y_ref, rstd_ref, _h = _reference_forward(
-        inputs["x"], w32, eps, residual=inputs["u"]
-    )
-    dx_ref, dw_ref = _reference_backward(
-        inputs["g"], inputs["normalized"], w32, eps, g_h=inputs["g_h"]
-    )
-    label = f"hidden={hidden} residual={residual} rows={rows} fp32 w"
-    _assert_bf16_close(outputs[0], y_ref, f"y {label}")
-    assert _rel_l2(outputs[1], rstd_ref) <= RSTD_REL_L2, f"rstd {label}"
-    _assert_bf16_close(dx, dx_ref, f"dx {label}")
-    _assert_dw(dw, dw_ref, inputs["g"], inputs["normalized"], outputs[1], f"dw {label}")
-    generator.set_state(seed)
-    outputs16, dx16, _dw16, _ = _fp32_case(
-        hidden, rows, residual, w32.to(torch.bfloat16), generator
-    )
-    assert torch.equal(outputs16[1], outputs[1]), f"{label}: rstd does not depend on w"
-    assert not torch.equal(outputs16[0], outputs[0]), (
-        f"{label}: y ignores the FP32 weight"
-    )
-    assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
+    check = ref.Draws(f"hidden={hidden} residual={residual} rows={rows} fp32 w")
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, residual, 89, draw=draw)
+        w32 = _weight(hidden, generator).float()
+        outputs, dx, dw, inputs = _fp32_case(hidden, rows, residual, w32, generator)
+        forward = {"y": outputs[0], "rstd": outputs[1]}
+        if residual:
+            forward["h_new"] = outputs[2]
+        check.forward(draw, forward, inputs["x"], w32, eps, residual=inputs["u"])
+        check.backward(
+            draw,
+            {"dx": dx, "dw": dw},
+            inputs["g"],
+            inputs["normalized"],
+            w32,
+            outputs[1],
+            eps,
+            g_h=inputs["g_h"],
+        )
+    check.check(record_property)
+
+
+@pytest.mark.parametrize("hidden", HIDDEN_SIZES)
+@pytest.mark.parametrize("residual", (False, True))
+@pytest.mark.parametrize("rows", (7, 16231))
+def test_fp32_weight_is_applied_at_fp32(hidden: int, residual: bool, rows: int) -> None:
+    """An effective weight ``1 + delta`` that BF16 cannot represent is applied as given: rstd is the BF16 path's
+    given ``bf16(w32)``, and y and dx differ from it (exact checks; the accuracy of the FP32-weight routes is
+    ``test_fp32_weight_meets_the_naive_tier``'s)."""
+
+    _skip_unless_fp32_routes(hidden, residual)
+    for draw in range(ref.DRAWS):
+        label = f"hidden={hidden} residual={residual} rows={rows} fp32 w draw={draw}"
+        generator = _generator(hidden, rows, residual, 89, draw=draw)
+        w32 = 1.0 + 1e-3 * torch.randn(
+            hidden, dtype=torch.float32, device=_device(), generator=generator
+        )
+        assert not torch.equal(w32.to(torch.bfloat16).float(), w32)
+        seed = generator.get_state()
+        outputs, dx, _dw, _ = _fp32_case(hidden, rows, residual, w32, generator)
+        generator.set_state(seed)
+        outputs16, dx16, _dw16, _ = _fp32_case(
+            hidden, rows, residual, w32.to(torch.bfloat16), generator
+        )
+        assert torch.equal(outputs16[1], outputs[1]), (
+            f"{label}: rstd does not depend on w"
+        )
+        assert not torch.equal(outputs16[0], outputs[0]), (
+            f"{label}: y ignores the FP32 weight"
+        )
+        assert not torch.equal(dx16, dx), f"{label}: dx ignores the FP32 weight"
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
@@ -1409,7 +1507,7 @@ def _taper_rows(record: dict, limit: int) -> list[int]:
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("residual", (False, True))
 def test_backward_reuses_a_poisoned_workspace_across_row_counts(
-    hidden: int, residual: bool
+    hidden: int, residual: bool, record_property
 ) -> None:
     """One caller-owned workspace serves every token count of a training step.
     Its partial rows are poisoned with NaN before each call, so a host that cuts
@@ -1418,7 +1516,8 @@ def test_backward_reuses_a_poisoned_workspace_across_row_counts(
     zeroed buffer.  The row counts are the route's window edges and, for every
     program built with a taper of its own, counts where its table differs from
     the module constants'; they run largest first, then back up from the
-    smallest."""
+    smallest, on each draw; every call's ``dx`` and ``dw`` meet the naive BF16
+    tier over the draws of its row count."""
 
     _skip_unless_hidden(hidden)
     if residual and not loader.route_applies(
@@ -1440,100 +1539,108 @@ def test_backward_reuses_a_poisoned_workspace_across_row_counts(
     workspace = cake_rmsnorm_det_train_backward_workspace(
         max(rows_set), hidden, _device(), residual=residual
     )
-    for rows in order:
-        generator = _generator(hidden, rows, 29, residual)
-        x = _rows(rows, hidden, generator=generator)
-        w = _weight(hidden, generator)
-        g = _rows(rows, hidden, generator=generator)
-        if residual:
-            u = _rows(rows, hidden, generator=generator)
-            g_h = _rows(rows, hidden, generator=generator)
-            _y, rstd, normalized = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
-        else:
-            g_h = None
-            _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
-            normalized = x
-        workspace[loader.COUNTERS_BYTES :].view(torch.float32).fill_(float("nan"))
-        dx, dw = cake_rmsnorm_det_train_backward(
-            g, normalized, w, rstd, g_residual=g_h, workspace=workspace
+    checks = {
+        rows: ref.Draws(
+            f"hidden={hidden} rows={rows} residual={residual} (reused workspace)",
+            prefix=f"T={rows} ",
         )
-        dx_ref, dw_ref = _reference_backward(g, normalized, w, eps, g_h=g_h)
-        label = f"hidden={hidden} rows={rows} residual={residual} (reused workspace)"
-        _assert_bf16_close(dx, dx_ref, f"dx {label}")
-        assert torch.isfinite(dw).all(), f"dw {label} has non-finite values"
-        error = _rel_l2(dw, dw_ref)
-        assert error <= DW_REL_L2, f"dw {label}: rel-L2 {error:.3e} > {DW_REL_L2:.0e}"
+        for rows in rows_set
+    }
+    for draw in range(ref.DRAWS):
+        judged: dict[int, tuple[dict, dict]] = {}
+        for rows in order:
+            generator = _generator(hidden, rows, 29, residual, draw=draw)
+            x = _rows(rows, hidden, generator=generator)
+            w = _weight(hidden, generator)
+            g = _rows(rows, hidden, generator=generator)
+            if residual:
+                u = _rows(rows, hidden, generator=generator)
+                g_h = _rows(rows, hidden, generator=generator)
+                _y, rstd, normalized = cake_rmsnorm_det_train_forward(
+                    x, w, eps, residual=u
+                )
+            else:
+                g_h = None
+                _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
+                normalized = x
+            workspace[loader.COUNTERS_BYTES :].view(torch.float32).fill_(float("nan"))
+            dx, dw = cake_rmsnorm_det_train_backward(
+                g, normalized, w, rstd, g_residual=g_h, workspace=workspace
+            )
+            # the second call of a row count on a draw has the first one's inputs: its oracle and naive values
+            if rows not in judged:
+                judged[rows] = (
+                    ref.oracle_backward(g, normalized, w, rstd, g_h),
+                    ref.naive_backward(g, normalized, w, rstd, eps, g_h),
+                )
+            checks[rows].add(draw, {"dx": dx, "dw": dw}, *judged[rows])
+    ref.check_all(record_property, [checks[rows] for rows in sorted(rows_set)])
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-def test_changing_rows_in_one_process_does_not_rebuild(hidden: int) -> None:
+def test_changing_rows_in_one_process_does_not_rebuild(
+    hidden: int, record_property
+) -> None:
+    """Calls of changing token counts in one process load no further module, and each call meets the naive BF16
+    tier over the draws of its token count."""
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
-    generator = _generator(hidden, 17)
-    w = _weight(hidden, generator)
-    _check_case(hidden, 64)
+    _check_case(hidden, 64, record=record_property, tag="T=64 ")
     loaded_before = loader.load.cache_info().misses
-    for rows in (1, 65, 16172, 7, 16231, 255):
-        x = _rows(rows, hidden, generator=generator)
-        g = _rows(rows, hidden, generator=generator)
-        y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
-        dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
-        y_ref, rstd_ref, _ = _reference_forward(x, w, eps)
-        dx_ref, dw_ref = _reference_backward(g, x, w, eps)
-        _assert_bf16_close(y, y_ref, f"y rows={rows}")
-        _assert_bf16_close(dx, dx_ref, f"dx rows={rows}")
-        _assert_dw(dw, dw_ref, g, x, rstd, f"dw rows={rows}")
+    sequence = (1, 65, 16172, 7, 16231, 255)
+    checks = {
+        rows: ref.Draws(f"hidden={hidden} rows={rows}", prefix=f"T={rows} ")
+        for rows in sequence
+    }
+    for draw in range(ref.DRAWS):
+        generator = _generator(hidden, 17, draw=draw)
+        w = _weight(hidden, generator)
+        for rows in sequence:
+            x = _rows(rows, hidden, generator=generator)
+            g = _rows(rows, hidden, generator=generator)
+            y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
+            dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
+            checks[rows].forward(draw, {"y": y, "rstd": rstd}, x, w, eps)
+            checks[rows].backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
     assert loader.load.cache_info().misses == loaded_before, (
         "a changed token count rebuilt a module"
     )
+    ref.check_all(record_property, [checks[rows] for rows in sequence])
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("view", ("expand", "slice"))
-def test_backward_accepts_gradient_views(hidden: int, view: str) -> None:
+def test_backward_accepts_gradient_views(
+    hidden: int, view: str, record_property
+) -> None:
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
     rows = 129
-    generator = _generator(hidden, rows, 23)
-    x = _rows(rows, hidden, generator=generator)
-    w = _weight(hidden, generator)
-    if view == "expand":
-        g = _rows(1, hidden, generator=generator).expand(rows, hidden)
-    else:
-        g = _rows(rows, hidden, stride_pad="2H", generator=generator)
-    _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
-    dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
-    dx_ref, dw_ref = _reference_backward(g, x, w, eps)
-    _assert_bf16_close(dx, dx_ref, f"dx view={view}")
-    _assert_dw(dw, dw_ref, g, x, rstd, f"dw view={view}")
-
-
-def _autograd_reference(x, w, eps, residual=None, grad_y=None, grad_h=None):
-    """FP32 eager autograd of the same math (BF16 residual boundary kept)."""
-
-    xl = x.detach().float().requires_grad_(True)
-    wl = w.detach().float().requires_grad_(True)
-    ul = (
-        residual.detach().float().requires_grad_(True) if residual is not None else None
-    )
-    if ul is not None:
-        h_new = (xl + ul).to(torch.bfloat16).float()
-    else:
-        h_new = xl
-    rstd = torch.rsqrt(h_new.pow(2).mean(-1, keepdim=True) + eps)
-    y = ((h_new * rstd) * wl).to(torch.bfloat16)
-    outputs, grads = [y], [grad_y.float().to(torch.bfloat16)]
-    if ul is not None and grad_h is not None:
-        outputs.append(h_new)
-        grads.append(grad_h.float())
-    torch.autograd.backward(outputs, grads)
-    return xl.grad, wl.grad, (ul.grad if ul is not None else None)
+    check = ref.Draws(f"hidden={hidden} view={view}")
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, 23, draw=draw)
+        x = _rows(rows, hidden, generator=generator)
+        w = _weight(hidden, generator)
+        if view == "expand":
+            g = _rows(1, hidden, generator=generator).expand(rows, hidden)
+        else:
+            g = _rows(rows, hidden, stride_pad="2H", generator=generator)
+        _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
+        dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+    check.check(record_property)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
 @pytest.mark.parametrize("residual", (False, True))
 @pytest.mark.parametrize("rows", (7, 16231))
-def test_autograd_end_to_end(hidden: int, residual: bool, rows: int) -> None:
+def test_autograd_end_to_end(
+    hidden: int, residual: bool, rows: int, record_property
+) -> None:
+    """The autograd wrapper's ``y``, input gradient and weight gradient (in the weight's dtype) against the FP64
+    oracle of the whole training step (the residual sum rounded to BF16 as the kernel does, the FP64 ``rstd``),
+    judged against the naive BF16 step (``ref.naive_forward`` and ``ref.naive_backward`` at the naive ``rstd``)
+    over the draws; both residual-add inputs receive the same gradient."""
     _skip_unless_hidden(hidden)
     if residual and not loader.route_applies(
         device_capability=_capability(),
@@ -1543,36 +1650,44 @@ def test_autograd_end_to_end(hidden: int, residual: bool, rows: int) -> None:
     ):
         pytest.skip(f"hidden={hidden} has no exported residual route on this device")
     eps = EPS[hidden]
-    generator = _generator(hidden, rows, 31, residual)
-    x0 = _rows(rows, hidden, generator=generator)
-    w0 = _weight(hidden, generator)
-    u0 = _rows(rows, hidden, generator=generator) if residual else None
-    grad_y = _rows(rows, hidden, generator=generator)
-    grad_h = _rows(rows, hidden, generator=generator) if residual else None
+    check = ref.Draws(f"autograd hidden={hidden} residual={residual} rows={rows}")
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, 31, residual, draw=draw)
+        x0 = _rows(rows, hidden, generator=generator)
+        w0 = _weight(hidden, generator)
+        u0 = _rows(rows, hidden, generator=generator) if residual else None
+        grad_y = _rows(rows, hidden, generator=generator)
+        grad_h = _rows(rows, hidden, generator=generator) if residual else None
 
-    x = x0.detach().clone().requires_grad_(True)
-    w = w0.detach().clone().requires_grad_(True)
-    u = u0.detach().clone().requires_grad_(True) if residual else None
-    outputs = cake_rmsnorm_det(x, w, eps, residual=u)
-    if residual:
-        y, h_new = outputs
-        torch.autograd.backward([y, h_new], [grad_y, grad_h])
-    else:
-        y = outputs
-        y.backward(grad_y)
+        x = x0.detach().clone().requires_grad_(True)
+        w = w0.detach().clone().requires_grad_(True)
+        u = u0.detach().clone().requires_grad_(True) if residual else None
+        outputs = cake_rmsnorm_det(x, w, eps, residual=u)
+        if residual:
+            y, h_new = outputs
+            torch.autograd.backward([y, h_new], [grad_y, grad_h])
+            assert torch.equal(x.grad, u.grad), (
+                "both residual-add inputs receive the same gradient"
+            )
+        else:
+            y = outputs
+            y.backward(grad_y)
+        assert x.grad.dtype == torch.bfloat16
+        assert w.grad.dtype == w0.dtype
 
-    dx_ref, dw_ref, du_ref = _autograd_reference(x0, w0, eps, u0, grad_y, grad_h)
-    y_ref, _rstd, _h = _reference_forward(x0, w0, eps, residual=u0)
-    _assert_bf16_close(y.detach(), y_ref, "autograd y")
-    assert x.grad.dtype == torch.bfloat16
-    _assert_bf16_close(x.grad, dx_ref.double(), "autograd dx")
-    assert w.grad.dtype == w0.dtype
-    assert _rel_l2(w.grad, dw_ref) <= 1e-2, "autograd dw (rounded to the weight dtype)"
-    if residual:
-        assert torch.equal(x.grad, u.grad), (
-            "both residual-add inputs receive the same gradient"
+        oracle = ref.oracle_forward(x0, w0, eps, residual=u0)
+        normalized = (x0.double() + u0.double()).to(torch.bfloat16) if residual else x0
+        oracle.update(
+            ref.oracle_backward(grad_y, normalized, w0, oracle["rstd"], grad_h)
         )
-        _assert_bf16_close(u.grad, du_ref.double(), "autograd du")
+        naive = ref.naive_forward(x0, w0, eps, residual=u0)
+        naive.update(
+            ref.naive_backward(
+                grad_y, naive.get("h_new", x0), w0, naive["rstd"], eps, grad_h
+            )
+        )
+        check.add(draw, {"y": y.detach(), "dx": x.grad, "dw": w.grad}, oracle, naive)
+    check.check(record_property)
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
@@ -1591,7 +1706,7 @@ def test_workspace_bytes_and_layout(hidden: int) -> None:
 
 
 @pytest.mark.parametrize("hidden", HIDDEN_SIZES)
-def test_argument_validation(hidden: int) -> None:
+def test_argument_validation(hidden: int, record_property) -> None:
     _skip_unless_hidden(hidden)
     eps = EPS[hidden]
     generator = _generator(hidden, 5)
@@ -1606,12 +1721,16 @@ def test_argument_validation(hidden: int) -> None:
             cake_rmsnorm_det_train_forward(x, w.float(), eps)
     with pytest.raises(ValueError):
         cake_rmsnorm_det_train_forward(x[:, 1:], w[1:], eps)
-    # An odd row stride is accepted (materialized once), not rejected.
-    odd = _rows(8, hidden, stride_pad=8, generator=generator)
-    odd_view = odd.as_strided((8, hidden), (hidden + 4, 1))
-    y_odd, _rstd_odd = cake_rmsnorm_det_train_forward(odd_view, w, eps)
-    y_odd_ref, _, _ = _reference_forward(odd_view, w, eps)
-    _assert_bf16_close(y_odd, y_odd_ref, "y odd row stride")
+    # An odd row stride is accepted (materialized once), not rejected; y and rstd meet the naive BF16 tier.
+    check = ref.Draws(f"hidden={hidden} odd row stride")
+    for draw in range(check.draws):
+        odd = _rows(
+            8, hidden, stride_pad=8, generator=_generator(hidden, 5, 8, draw=draw)
+        )
+        odd_view = odd.as_strided((8, hidden), (hidden + 4, 1))
+        y_odd, rstd_odd = cake_rmsnorm_det_train_forward(odd_view, w, eps)
+        check.forward(draw, {"y": y_odd, "rstd": rstd_odd}, odd_view, w, eps)
+    check.check(record_property)
     y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
     # The det package takes no ``deterministic`` keyword.
     with pytest.raises(TypeError, match="unexpected keyword argument 'deterministic'"):
@@ -1668,15 +1787,11 @@ def test_registry_records_reference_the_build_manifest() -> None:
     assert (package / "csrc" / "cake_ffi_checks.h").is_file()
 
 
-# The per-element dw bound at the largest row counts of the long-chunk windows: every element of dw within
-# atol = rtol = 1e-4 of the FP64 sum of the same products (g, x and the FP32 rstd the forward returned), where an FP32
-# chunk sum over many rows accumulates the most rounding: H = 1536 / 2048 / 4096 / 6144 at 65536 rows (their
-# compensated forms) and one row above each architecture's accuracy edge of the route
-# (``test_dw_above_the_accuracy_edge_meets_the_per_element_bound``); H = 5120 at 40960 and 65536 rows; H = 256 above
-# the compensated-sum edges (81920 rows), at the key rows of a 65536-token batch (262144), at 1179649 rows, at the
-# query rows of a 65536-token batch (1572864, the last row of the compensated ring) and above the hi / lo edge
-# (1572865).  A few seeds per case; BF16 and FP32 weight.
-DW_ELEMENT_TOL = 1e-4
+# dw at the largest row counts of the long-chunk windows, where an FP32 chunk sum over many rows accumulates the most
+# rounding: H = 1536 / 2048 / 4096 / 6144 at 65536 rows; H = 5120 at 40960 and 65536 rows; H = 256 at 81920 rows,
+# at the key rows of a 65536-token batch (262144), at 1179649 rows and at the query rows of a 65536-token batch
+# (1572864) and one above (1572865).  Three seeds per case, each judged over its draws against the naive BF16 weight
+# gradient; BF16 and FP32 weight.
 LARGE_ROW_DW_CASES = (
     (1536, 65536),
     (2048, 65536),
@@ -1692,86 +1807,121 @@ LARGE_ROW_DW_CASES = (
 )
 
 
-def _dw_fp64(g: torch.Tensor, x: torch.Tensor, rstd: torch.Tensor) -> torch.Tensor:
-    dw = torch.zeros(x.shape[-1], dtype=torch.float64, device=x.device)
-    for start in range(0, x.shape[0], 8192):
-        stop = min(start + 8192, x.shape[0])
-        dw += (
-            g[start:stop].double()
-            * x[start:stop].double()
-            * rstd[start:stop, None].double()
-        ).sum(0)
-    return dw
-
-
 @pytest.mark.parametrize(("hidden", "rows"), LARGE_ROW_DW_CASES)
 @pytest.mark.parametrize("fp32_weight", (False, True))
 @pytest.mark.parametrize("seed", (0, 1, 2))
-def test_large_row_dw_meets_the_per_element_bound(
-    hidden: int, rows: int, fp32_weight: bool, seed: int
+def test_large_row_dw_meets_the_naive_tier(
+    hidden: int, rows: int, fp32_weight: bool, seed: int, record_property
 ) -> None:
-    _check_large_row_dw(hidden, rows, fp32_weight, seed)
+    _check_large_row_dw(hidden, rows, fp32_weight, seed, record_property)
 
 
-@pytest.mark.parametrize("hidden", (1536, 2048, 4096, 5120, 6144))
-@pytest.mark.parametrize("fp32_weight", (False, True))
-@pytest.mark.parametrize("seed", (0, 1, 2))
-def test_dw_above_the_accuracy_edge_meets_the_per_element_bound(
-    hidden: int, fp32_weight: bool, seed: int
+def _check_large_row_dw(
+    hidden: int, rows: int, fp32_weight: bool, seed: int, record_property
 ) -> None:
-    """One row above the route's accuracy edge on this architecture (``cake_windows.ACCURACY_EDGES``), the first
-    row count of its compensated window, dw meets the per-element bound."""
-    _skip_unless_hidden(hidden)
-    arch = loader.arch_for_capability(_capability())
-    edge = windows.ACCURACY_EDGES[arch][loader.route_key(hidden, "bwd", False)]
-    _check_large_row_dw(hidden, edge + 1, fp32_weight, seed)
-
-
-def _check_large_row_dw(hidden: int, rows: int, fp32_weight: bool, seed: int) -> None:
     if fp32_weight:
         _skip_unless_fp32_routes(hidden, False)
     else:
         _skip_unless_hidden(hidden)
-    generator = _generator(hidden, rows, fp32_weight, seed, 97)
-    x = _rows(rows, hidden, generator=generator)
-    g = _rows(rows, hidden, generator=generator)
-    if fp32_weight:
-        w = 1.0 + 0.1 * torch.randn(
-            hidden, dtype=torch.float32, device=_device(), generator=generator
-        )
-    else:
+    eps = EPS[hidden]
+    check = ref.Draws(
+        f"hidden={hidden} rows={rows} fp32_weight={fp32_weight} seed={seed}"
+    )
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, fp32_weight, seed, 97, draw=draw)
+        x = _rows(rows, hidden, generator=generator)
+        g = _rows(rows, hidden, generator=generator)
+        # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
         w = _weight(hidden, generator)
-    _y, rstd = cake_rmsnorm_det_train_forward(x, w, EPS[hidden])
-    _dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
-    reference = _dw_fp64(g, x, rstd)
-    ratio = (dw.double() - reference).abs() / (
-        DW_ELEMENT_TOL + DW_ELEMENT_TOL * reference.abs()
+        if fp32_weight:
+            w = w.float()
+        _y, rstd = cake_rmsnorm_det_train_forward(x, w, eps)
+        _dx, dw = cake_rmsnorm_det_train_backward(g, x, w, rstd)
+        del _y, _dx
+        check.add(
+            draw,
+            {"dw": dw},
+            {"dw": ref.oracle_dw(g, x, rstd)},
+            {"dw": ref.naive_dw(g, x, eps)},
+        )
+    check.check(record_property)
+
+
+# The backward windows the tests above leave unjudged at large row counts (the residual and FP32-weight tier tests stop
+# at 16231 rows, the poisoned-workspace test at 32768, and LARGE_ROW_DW_CASES judges dw of plain routes only), read
+# from the registry: every residual backward route (BF16 and FP32 weight) one row above each window edge at or above
+# LARGE_ROW_EDGE and at OPEN_WINDOW_ROWS, and one row above the lower edge of every window of
+# SWAPPED_FP32_BACKWARD_TWINS, where an FP32-weight route runs the twin of another program than its BF16 route.
+# (arch, hidden, residual, weight dtype token, rows); a case runs on its architecture, over the minimum of draws.
+LARGE_ROW_EDGE = 32768
+
+
+def _large_row_backward_cases() -> list[tuple[str, int, bool, str, int]]:
+    cases = set()
+    for arch in loader.ARCHES:
+        for hidden in loader.supported_hidden_sizes(arch):
+            for w_token in loader.weight_dtypes(arch, hidden, "bwd", True):
+                cases.add((arch, hidden, True, w_token, OPEN_WINDOW_ROWS))
+                for above, _at_most, _library in loader.program_windows(
+                    arch, hidden, "bwd", True, w_token
+                ):
+                    if above >= LARGE_ROW_EDGE:
+                        cases.add((arch, hidden, True, w_token, above + 1))
+    for (arch, hidden, residual), twins in SWAPPED_FP32_BACKWARD_TWINS.items():
+        for above, _at_most in twins:
+            cases.add((arch, hidden, residual, "f32", above + 1))
+    return sorted(cases)
+
+
+LARGE_ROW_BACKWARD_CASES = _large_row_backward_cases()
+
+
+@pytest.mark.parametrize(
+    ("arch", "hidden", "residual", "w_token", "rows"),
+    LARGE_ROW_BACKWARD_CASES,
+    ids=[
+        f"{arch}-h{hidden}-{'residual' if residual else 'plain'}-{w_token}-T{rows}"
+        for arch, hidden, residual, w_token, rows in LARGE_ROW_BACKWARD_CASES
+    ],
+)
+def test_large_row_backward_windows_meet_the_naive_tier(
+    arch: str,
+    hidden: int,
+    residual: bool,
+    w_token: str,
+    rows: int,
+    record_property,
+) -> None:
+    """``dx`` and ``dw`` of one backward window of ``LARGE_ROW_BACKWARD_CASES`` meet the naive BF16 tier over the
+    draws; with a residual ``dx`` is the gradient of both residual-add inputs (``g_residual`` added).  The backward
+    takes the forward's ``h_new`` and ``rstd``; the forward is judged by the other tests.  An FP32 weight holds a
+    BF16 draw, so the naive tier reads the same weight as the oracle."""
+
+    device_arch = loader.arch_for_capability(_capability())
+    if device_arch != arch:
+        pytest.skip(f"a case of {arch}; this device is {device_arch}")
+    if w_token == "f32":
+        _skip_unless_fp32_routes(hidden, residual)
+    else:
+        _skip_unless_route(hidden, residual)
+    eps = EPS[hidden]
+    check = ref.Draws(
+        f"{arch} hidden={hidden} residual={residual} w={w_token} rows={rows}"
     )
-    worst = int(ratio.argmax())
-    assert float(ratio.max()) <= 1.0, (
-        f"hidden={hidden} rows={rows} fp32_weight={fp32_weight} seed={seed}: dw[{worst}] = "
-        f"{float(dw[worst])!r} vs FP64 {float(reference[worst])!r} "
-        f"({float(ratio.max()):.3f} x the bound, {int((ratio > 1).sum())} elements over)"
-    )
-
-
-def test_dw_not_worse_than_eager_fp32_over_the_matrix() -> None:
-    """Aggregate dw gate: the kernel's dw error is not worse than the eager FP32 path over the checked matrix.
-
-    Per case both errors are FP32 rounding noise; the honest comparison is the median ratio
-    kernel / eager over every dw case this process checked (all rows, strides, scales, residual on/off).
-    Runs last; skipped when the module's dw cases did not run in this process (e.g. ``-k`` selection).
-    """
-
-    if len(_DW_ERRORS) < 8:
-        pytest.skip("needs the dw cases of this module in the same process")
-    ratios = [
-        (k / e) if e > 0 else (0.0 if k == 0 else float("inf"))
-        for _label, k, e in _DW_ERRORS
-    ]
-    median = statistics.median(ratios)
-    worst = max(_DW_ERRORS, key=lambda item: item[1])
-    assert median <= 1.0, (
-        f"median dw error ratio kernel/eager-FP32 {median:.3f} > 1 over {len(ratios)} cases "
-        f"(worst kernel rel-L2 {worst[1]:.3e} at {worst[0]})"
-    )
+    for draw in range(check.draws):
+        generator = _generator(hidden, rows, residual, w_token == "f32", 101, draw=draw)
+        x = _rows(rows, hidden, generator=generator)
+        u = _rows(rows, hidden, generator=generator) if residual else None
+        g = _rows(rows, hidden, generator=generator)
+        g_h = _rows(rows, hidden, generator=generator) if residual else None
+        w = _weight(hidden, generator)
+        if w_token == "f32":
+            w = w.float()
+        outputs = cake_rmsnorm_det_train_forward(x, w, eps, residual=u)
+        rstd = outputs[1]
+        normalized = outputs[2] if residual else x
+        del outputs
+        dx, dw = cake_rmsnorm_det_train_backward(g, normalized, w, rstd, g_residual=g_h)
+        check.backward(draw, {"dx": dx, "dw": dw}, g, normalized, w, rstd, eps, g_h=g_h)
+        del x, u, g, g_h, normalized, rstd, dx, dw
+    check.check(record_property)

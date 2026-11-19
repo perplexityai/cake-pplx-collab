@@ -92,12 +92,12 @@ def _det_name(name: str) -> str:
 
 
 def _shipped_keys(keys: dict) -> dict:
-    """The keys of a deterministic registry that this package ships: the scan keys of both forms and the plain
-    merge."""
+    """The keys of a deterministic registry that this package ships: the scan keys of both forms, the candidate-block
+    scan keys and the plain merge."""
     return {
         key: name
         for key, name in keys.items()
-        if key.startswith("scan:") or key == MERGE_KEY
+        if key.startswith(("scan:", "scan_blocks:")) or key == MERGE_KEY
     }
 
 
@@ -148,7 +148,7 @@ def test_program_keys_are_the_deterministic_scan_keys_and_the_plain_merge():
         assert cake_jit.PROGRAM_KEYS[arch] == expected, arch
         shipped |= set(expected.values())
         for key, det_name in _shipped_keys(det_keys).items():
-            if key.startswith("scan:"):
+            if key.startswith(("scan:", "scan_blocks:")):
                 assert cake_backend.reads_ticket_word(
                     _nondet_name(det_name), arch
                 ) == det_backend.reads_ticket_word(det_name, arch), (arch, key)

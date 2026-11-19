@@ -76,7 +76,7 @@ void Run(TensorView a_x, TensorView a_y, TensorView a_scales, int64_t a_n_vecs, 
   void* kernel_args[] = {&v_x, &v_y, &v_scales, &v_n_vecs};
   cudaLaunchConfig_t config{};
   config.gridDim = dim3(static_cast<unsigned>(grid_x), static_cast<unsigned>(grid_y), static_cast<unsigned>(grid_z));
-  config.blockDim = dim3(256, 1, 1);
+  config.blockDim = dim3(64, 1, 1);
   config.dynamicSmemBytes = 0;
   config.stream = stream;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_act_qdq_e51efb4c536c4e1ed3a3), kernel_args),

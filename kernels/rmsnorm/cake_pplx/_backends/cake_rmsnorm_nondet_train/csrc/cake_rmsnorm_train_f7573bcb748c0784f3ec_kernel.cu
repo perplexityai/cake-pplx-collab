@@ -90,6 +90,12 @@ __device__ __forceinline__ void mbarrier_wait(int mbar_addr, int phase) {
 }
 
 
+__device__ __forceinline__ void mbarrier_arrive(int mbar_addr) {
+    asm volatile(
+        "mbarrier.arrive.release.cta.shared::cta.b64 _, [%0];"
+        :: "r"(mbar_addr) : "memory");
+}
+
 
 __device__ __forceinline__ void mbarrier_arrive_expect_tx(int mbar_addr, uint32_t bytes) {
     asm volatile(
@@ -102,7 +108,7 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(int mbar_addr, uint32_
 extern "C" {
 
 __global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, double* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     // Grid-dependency payloads: written while the kernel runs, read with coherent loads only.
     asm volatile("" : "+l"(partial));
@@ -134,14 +140,14 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
     const int flags_addr = smem + 1024;
     float* dots = reinterpret_cast<float*>(smem_raw + 1056);
     const int dots_addr = smem + 1056;
-    double* sums = reinterpret_cast<double*>(smem_raw + 1152);
+    float* sums = reinterpret_cast<float*>(smem_raw + 1152);
     const int sums_addr = smem + 1152;
     float* dwbuf = reinterpret_cast<float*>(smem_raw + 1152);
     const int dwbuf_addr = smem + 1152;
     int* meta = reinterpret_cast<int*>(smem_raw + 1120);
     const int meta_addr = smem + 1120;
-    uint8_t* ring = reinterpret_cast<uint8_t*>(smem_raw + 33920);
-    const int ring_addr = smem + 33920;
+    uint8_t* ring = reinterpret_cast<uint8_t*>(smem_raw + 17536);
+    const int ring_addr = smem + 17536;
 
     // Mbarrier init (3 barriers at smem_raw[0..24))
 
@@ -215,7 +221,6 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
         ww[8 + 7] = __uint_as_float(_ldv8_2_7);
     }
     float acc[16];
-    float comp[1];
     acc[0] = 0.0f;
     acc[1] = 0.0f;
     acc[2] = 0.0f;
@@ -235,22 +240,22 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
     int c = 0;
     int first_c = 0;
     int rows_mine = 0;
-    sums[rg * 4096 + tir] = 0.0;
-    sums[rg * 4096 + 256 + tir] = 0.0;
-    sums[rg * 4096 + 512 + tir] = 0.0;
-    sums[rg * 4096 + 768 + tir] = 0.0;
-    sums[rg * 4096 + 1024 + tir] = 0.0;
-    sums[rg * 4096 + 1280 + tir] = 0.0;
-    sums[rg * 4096 + 1536 + tir] = 0.0;
-    sums[rg * 4096 + 1792 + tir] = 0.0;
-    sums[rg * 4096 + 2048 + tir] = 0.0;
-    sums[rg * 4096 + 2304 + tir] = 0.0;
-    sums[rg * 4096 + 2560 + tir] = 0.0;
-    sums[rg * 4096 + 2816 + tir] = 0.0;
-    sums[rg * 4096 + 3072 + tir] = 0.0;
-    sums[rg * 4096 + 3328 + tir] = 0.0;
-    sums[rg * 4096 + 3584 + tir] = 0.0;
-    sums[rg * 4096 + 3840 + tir] = 0.0;
+    sums[rg * 4096 + tir] = 0.0f;
+    sums[rg * 4096 + 256 + tir] = 0.0f;
+    sums[rg * 4096 + 512 + tir] = 0.0f;
+    sums[rg * 4096 + 768 + tir] = 0.0f;
+    sums[rg * 4096 + 1024 + tir] = 0.0f;
+    sums[rg * 4096 + 1280 + tir] = 0.0f;
+    sums[rg * 4096 + 1536 + tir] = 0.0f;
+    sums[rg * 4096 + 1792 + tir] = 0.0f;
+    sums[rg * 4096 + 2048 + tir] = 0.0f;
+    sums[rg * 4096 + 2304 + tir] = 0.0f;
+    sums[rg * 4096 + 2560 + tir] = 0.0f;
+    sums[rg * 4096 + 2816 + tir] = 0.0f;
+    sums[rg * 4096 + 3072 + tir] = 0.0f;
+    sums[rg * 4096 + 3328 + tir] = 0.0f;
+    sums[rg * 4096 + 3584 + tir] = 0.0f;
+    sums[rg * 4096 + 3840 + tir] = 0.0f;
     int pc = 0;
     int prow = 0;
     int pend = 0;
@@ -421,6 +426,8 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
                 " [%0], [%1], %2, [%3], %4;"
                 :: "r"(sbase + 8192), "l"(reinterpret_cast<const uint8_t*>(x + row_i_0 * x_stride)), "r"((unsigned)(8192)), "r"(full_addr),
                    "l"(0x12F0000000000000ULL) : "memory");
+        } else {
+            mbarrier_arrive(full_addr);
         }
         prow = prow + nval;
         int slot_0 = 1;
@@ -515,6 +522,8 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
                 " [%0], [%1], %2, [%3], %4;"
                 :: "r"(sbase_1 + 8192), "l"(reinterpret_cast<const uint8_t*>(x + row_i_1 * x_stride)), "r"((unsigned)(8192)), "r"(full_addr + 8),
                    "l"(0x12F0000000000000ULL) : "memory");
+        } else {
+            mbarrier_arrive(full_addr + 8);
         }
         prow = prow + nval_0;
         int slot_1 = 2;
@@ -609,6 +618,8 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
                 " [%0], [%1], %2, [%3], %4;"
                 :: "r"(sbase_2 + 8192), "l"(reinterpret_cast<const uint8_t*>(x + row_i_2 * x_stride)), "r"((unsigned)(8192)), "r"(full_addr + 16),
                    "l"(0x12F0000000000000ULL) : "memory");
+        } else {
+            mbarrier_arrive(full_addr + 16);
         }
         prow = prow + nval_1;
     }
@@ -622,7 +633,7 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
     float dot[1];
     #pragma unroll 1
     for (int k_4 = 0; k_4 < T + n_chunks; k_4++) {
-        if (nval_2 == 0) {
+        if (nval_2 < 1) {
             break;
         }
         rows_mine = rows_mine + nval_2;
@@ -788,6 +799,8 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
                     " [%0], [%1], %2, [%3], %4;"
                     :: "r"(sbase_3 + 8192), "l"(reinterpret_cast<const uint8_t*>(x + row_i_3 * x_stride)), "r"((unsigned)(8192)), "r"(full_addr + ((int)((unsigned int)(k_4 + 3) % 3)) * 8),
                        "l"(0x12F0000000000000ULL) : "memory");
+            } else {
+                mbarrier_arrive(full_addr + ((int)((unsigned int)(k_4 + 3) % 3)) * 8);
             }
             prow = prow + nval_2_1;
         }
@@ -897,136 +910,140 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
         nval_2 = nval_n;
         rr[0] = rr[1];
         if ((k_4 + 1 & 15) == 0) {
-            sums[rg * 4096 + tir] = sums[rg * 4096 + tir] + (double)acc[0];
+            sums[rg * 4096 + tir] = sums[rg * 4096 + tir] + acc[0];
             acc[0] = 0.0f;
-            sums[rg * 4096 + 256 + tir] = sums[rg * 4096 + 256 + tir] + (double)acc[1];
+            sums[rg * 4096 + 256 + tir] = sums[rg * 4096 + 256 + tir] + acc[1];
             acc[1] = 0.0f;
-            sums[rg * 4096 + 512 + tir] = sums[rg * 4096 + 512 + tir] + (double)acc[2];
+            sums[rg * 4096 + 512 + tir] = sums[rg * 4096 + 512 + tir] + acc[2];
             acc[2] = 0.0f;
-            sums[rg * 4096 + 768 + tir] = sums[rg * 4096 + 768 + tir] + (double)acc[3];
+            sums[rg * 4096 + 768 + tir] = sums[rg * 4096 + 768 + tir] + acc[3];
             acc[3] = 0.0f;
-            sums[rg * 4096 + 1024 + tir] = sums[rg * 4096 + 1024 + tir] + (double)acc[4];
+            sums[rg * 4096 + 1024 + tir] = sums[rg * 4096 + 1024 + tir] + acc[4];
             acc[4] = 0.0f;
-            sums[rg * 4096 + 1280 + tir] = sums[rg * 4096 + 1280 + tir] + (double)acc[5];
+            sums[rg * 4096 + 1280 + tir] = sums[rg * 4096 + 1280 + tir] + acc[5];
             acc[5] = 0.0f;
-            sums[rg * 4096 + 1536 + tir] = sums[rg * 4096 + 1536 + tir] + (double)acc[6];
+            sums[rg * 4096 + 1536 + tir] = sums[rg * 4096 + 1536 + tir] + acc[6];
             acc[6] = 0.0f;
-            sums[rg * 4096 + 1792 + tir] = sums[rg * 4096 + 1792 + tir] + (double)acc[7];
+            sums[rg * 4096 + 1792 + tir] = sums[rg * 4096 + 1792 + tir] + acc[7];
             acc[7] = 0.0f;
-            sums[rg * 4096 + 2048 + tir] = sums[rg * 4096 + 2048 + tir] + (double)acc[8];
+            sums[rg * 4096 + 2048 + tir] = sums[rg * 4096 + 2048 + tir] + acc[8];
             acc[8] = 0.0f;
-            sums[rg * 4096 + 2304 + tir] = sums[rg * 4096 + 2304 + tir] + (double)acc[9];
+            sums[rg * 4096 + 2304 + tir] = sums[rg * 4096 + 2304 + tir] + acc[9];
             acc[9] = 0.0f;
-            sums[rg * 4096 + 2560 + tir] = sums[rg * 4096 + 2560 + tir] + (double)acc[10];
+            sums[rg * 4096 + 2560 + tir] = sums[rg * 4096 + 2560 + tir] + acc[10];
             acc[10] = 0.0f;
-            sums[rg * 4096 + 2816 + tir] = sums[rg * 4096 + 2816 + tir] + (double)acc[11];
+            sums[rg * 4096 + 2816 + tir] = sums[rg * 4096 + 2816 + tir] + acc[11];
             acc[11] = 0.0f;
-            sums[rg * 4096 + 3072 + tir] = sums[rg * 4096 + 3072 + tir] + (double)acc[12];
+            sums[rg * 4096 + 3072 + tir] = sums[rg * 4096 + 3072 + tir] + acc[12];
             acc[12] = 0.0f;
-            sums[rg * 4096 + 3328 + tir] = sums[rg * 4096 + 3328 + tir] + (double)acc[13];
+            sums[rg * 4096 + 3328 + tir] = sums[rg * 4096 + 3328 + tir] + acc[13];
             acc[13] = 0.0f;
-            sums[rg * 4096 + 3584 + tir] = sums[rg * 4096 + 3584 + tir] + (double)acc[14];
+            sums[rg * 4096 + 3584 + tir] = sums[rg * 4096 + 3584 + tir] + acc[14];
             acc[14] = 0.0f;
-            sums[rg * 4096 + 3840 + tir] = sums[rg * 4096 + 3840 + tir] + (double)acc[15];
+            sums[rg * 4096 + 3840 + tir] = sums[rg * 4096 + 3840 + tir] + acc[15];
             acc[15] = 0.0f;
         }
     }
-    sums[rg * 4096 + tir] = sums[rg * 4096 + tir] + (double)acc[0];
+    sums[rg * 4096 + tir] = sums[rg * 4096 + tir] + acc[0];
     acc[0] = 0.0f;
-    sums[rg * 4096 + 256 + tir] = sums[rg * 4096 + 256 + tir] + (double)acc[1];
+    sums[rg * 4096 + 256 + tir] = sums[rg * 4096 + 256 + tir] + acc[1];
     acc[1] = 0.0f;
-    sums[rg * 4096 + 512 + tir] = sums[rg * 4096 + 512 + tir] + (double)acc[2];
+    sums[rg * 4096 + 512 + tir] = sums[rg * 4096 + 512 + tir] + acc[2];
     acc[2] = 0.0f;
-    sums[rg * 4096 + 768 + tir] = sums[rg * 4096 + 768 + tir] + (double)acc[3];
+    sums[rg * 4096 + 768 + tir] = sums[rg * 4096 + 768 + tir] + acc[3];
     acc[3] = 0.0f;
-    sums[rg * 4096 + 1024 + tir] = sums[rg * 4096 + 1024 + tir] + (double)acc[4];
+    sums[rg * 4096 + 1024 + tir] = sums[rg * 4096 + 1024 + tir] + acc[4];
     acc[4] = 0.0f;
-    sums[rg * 4096 + 1280 + tir] = sums[rg * 4096 + 1280 + tir] + (double)acc[5];
+    sums[rg * 4096 + 1280 + tir] = sums[rg * 4096 + 1280 + tir] + acc[5];
     acc[5] = 0.0f;
-    sums[rg * 4096 + 1536 + tir] = sums[rg * 4096 + 1536 + tir] + (double)acc[6];
+    sums[rg * 4096 + 1536 + tir] = sums[rg * 4096 + 1536 + tir] + acc[6];
     acc[6] = 0.0f;
-    sums[rg * 4096 + 1792 + tir] = sums[rg * 4096 + 1792 + tir] + (double)acc[7];
+    sums[rg * 4096 + 1792 + tir] = sums[rg * 4096 + 1792 + tir] + acc[7];
     acc[7] = 0.0f;
-    sums[rg * 4096 + 2048 + tir] = sums[rg * 4096 + 2048 + tir] + (double)acc[8];
+    sums[rg * 4096 + 2048 + tir] = sums[rg * 4096 + 2048 + tir] + acc[8];
     acc[8] = 0.0f;
-    sums[rg * 4096 + 2304 + tir] = sums[rg * 4096 + 2304 + tir] + (double)acc[9];
+    sums[rg * 4096 + 2304 + tir] = sums[rg * 4096 + 2304 + tir] + acc[9];
     acc[9] = 0.0f;
-    sums[rg * 4096 + 2560 + tir] = sums[rg * 4096 + 2560 + tir] + (double)acc[10];
+    sums[rg * 4096 + 2560 + tir] = sums[rg * 4096 + 2560 + tir] + acc[10];
     acc[10] = 0.0f;
-    sums[rg * 4096 + 2816 + tir] = sums[rg * 4096 + 2816 + tir] + (double)acc[11];
+    sums[rg * 4096 + 2816 + tir] = sums[rg * 4096 + 2816 + tir] + acc[11];
     acc[11] = 0.0f;
-    sums[rg * 4096 + 3072 + tir] = sums[rg * 4096 + 3072 + tir] + (double)acc[12];
+    sums[rg * 4096 + 3072 + tir] = sums[rg * 4096 + 3072 + tir] + acc[12];
     acc[12] = 0.0f;
-    sums[rg * 4096 + 3328 + tir] = sums[rg * 4096 + 3328 + tir] + (double)acc[13];
+    sums[rg * 4096 + 3328 + tir] = sums[rg * 4096 + 3328 + tir] + acc[13];
     acc[13] = 0.0f;
-    sums[rg * 4096 + 3584 + tir] = sums[rg * 4096 + 3584 + tir] + (double)acc[14];
+    sums[rg * 4096 + 3584 + tir] = sums[rg * 4096 + 3584 + tir] + acc[14];
     acc[14] = 0.0f;
-    sums[rg * 4096 + 3840 + tir] = sums[rg * 4096 + 3840 + tir] + (double)acc[15];
+    sums[rg * 4096 + 3840 + tir] = sums[rg * 4096 + 3840 + tir] + acc[15];
     acc[15] = 0.0f;
     c = pc;
+    int _min_31 = (((int)num_bids) < (n_chunks) ? ((int)num_bids) : (n_chunks));
+    int nrep = ((_min_31) < (4) ? (_min_31) : (4));
     asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
     __syncthreads();
     if (tid == 0) {
         if (first_c < n_chunks) {
             {
-                void* _cpred_dst_31 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_32 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_31), "r"(sums_addr + 0), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_32), "r"(sums_addr + 0), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_32 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 512));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_33 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 512));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_32), "r"(sums_addr + 4096), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_33), "r"(sums_addr + 2048), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_33 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 1024));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_34 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 1024));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_33), "r"(sums_addr + 8192), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_34), "r"(sums_addr + 4096), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_34 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 1536));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_35 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 1536));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_34), "r"(sums_addr + 12288), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_35), "r"(sums_addr + 6144), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_35 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 2048));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_36 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 2048));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_35), "r"(sums_addr + 16384), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_36), "r"(sums_addr + 8192), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_36 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 2560));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_37 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 2560));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_36), "r"(sums_addr + 20480), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_37), "r"(sums_addr + 10240), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_37 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 3072));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_38 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 3072));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_37), "r"(sums_addr + 24576), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_38), "r"(sums_addr + 12288), "r"((uint32_t)(2048))
                     : "memory");
             }
             {
-                void* _cpred_dst_38 = reinterpret_cast<void*>(partial + (long long)((int)bid % 4 * 4096 + 3584));
-                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f64"
+                void* _cpred_dst_39 = reinterpret_cast<void*>(partial + (long long)((int)bid % nrep * 4096 + 3584));
+                asm volatile("cp.reduce.async.bulk.global.shared::cta.bulk_group.add.f32"
                     " [%0], [%1], %2;"
-                    :: "l"(_cpred_dst_38), "r"(sums_addr + 28672), "r"((uint32_t)(4096))
+                    :: "l"(_cpred_dst_39), "r"(sums_addr + 14336), "r"((uint32_t)(2048))
                     : "memory");
             }
             asm volatile("cp.async.bulk.commit_group;");
             asm volatile("cp.async.bulk.wait_group 0;");
             asm volatile("fence.proxy.async.global;" ::: "memory");
+        }
+        if (first_c < n_chunks) {
             asm volatile("red.release.gpu.global.add.u32 [%0], %1;" :: "l"((reinterpret_cast<unsigned int*>(counters) + (1))), "r"(static_cast<unsigned int>((unsigned int)rows_mine)) : "memory");
         }
         int hs = -1;
@@ -1059,40 +1076,59 @@ kernel_cake_rmsnorm_train_f7573bcb748c0784f3ec(__nv_bfloat16* __restrict__ g, __
                 break;
             }
             int at_0 = sl_5 * 256 + tid;
-            double tw_0[4];
-            {
-                uint64_t _scalar_bits_39;
-                asm volatile("ld.global.cg.b64 %0, [%1];"
-                    : "=l"(_scalar_bits_39) : "l"((const void*)(partial + (at_0))) : "memory");
-                tw_0[0] = __longlong_as_double(_scalar_bits_39);
+            float tv[4];
+            tv[0] = 0.0f;
+            if (0 < nrep) {
+                {
+                    uint32_t _scalar_bits_40;
+                    asm volatile("ld.global.cg.b32 %0, [%1];"
+                        : "=r"(_scalar_bits_40) : "l"((const void*)(partial + (at_0))) : "memory");
+                    tv[0] = __uint_as_float(_scalar_bits_40);
+                }
             }
-            {
-                uint64_t _scalar_bits_40;
-                asm volatile("ld.global.cg.b64 %0, [%1];"
-                    : "=l"(_scalar_bits_40) : "l"((const void*)(partial + (4096 + at_0))) : "memory");
-                tw_0[1] = __longlong_as_double(_scalar_bits_40);
+            tv[1] = 0.0f;
+            if (1 < nrep) {
+                {
+                    uint32_t _scalar_bits_41;
+                    asm volatile("ld.global.cg.b32 %0, [%1];"
+                        : "=r"(_scalar_bits_41) : "l"((const void*)(partial + (4096 + at_0))) : "memory");
+                    tv[1] = __uint_as_float(_scalar_bits_41);
+                }
             }
-            {
-                uint64_t _scalar_bits_41;
-                asm volatile("ld.global.cg.b64 %0, [%1];"
-                    : "=l"(_scalar_bits_41) : "l"((const void*)(partial + (8192 + at_0))) : "memory");
-                tw_0[2] = __longlong_as_double(_scalar_bits_41);
+            tv[2] = 0.0f;
+            if (2 < nrep) {
+                {
+                    uint32_t _scalar_bits_42;
+                    asm volatile("ld.global.cg.b32 %0, [%1];"
+                        : "=r"(_scalar_bits_42) : "l"((const void*)(partial + (8192 + at_0))) : "memory");
+                    tv[2] = __uint_as_float(_scalar_bits_42);
+                }
             }
-            {
-                uint64_t _scalar_bits_42;
-                asm volatile("ld.global.cg.b64 %0, [%1];"
-                    : "=l"(_scalar_bits_42) : "l"((const void*)(partial + (12288 + at_0))) : "memory");
-                tw_0[3] = __longlong_as_double(_scalar_bits_42);
+            tv[3] = 0.0f;
+            if (3 < nrep) {
+                {
+                    uint32_t _scalar_bits_43;
+                    asm volatile("ld.global.cg.b32 %0, [%1];"
+                        : "=r"(_scalar_bits_43) : "l"((const void*)(partial + (12288 + at_0))) : "memory");
+                    tv[3] = __uint_as_float(_scalar_bits_43);
+                }
             }
-            double tot2_0 = tw_0[0];
-            tot2_0 = tot2_0 + tw_0[1];
-            tot2_0 = tot2_0 + tw_0[2];
-            tot2_0 = tot2_0 + tw_0[3];
-            *(reinterpret_cast<float*>(dw) + ((at_0 / 256 / 8 * 256 + at_0 % 256) * 8 + at_0 / 256 % 8)) = (float)tot2_0;
-            *reinterpret_cast<unsigned long long*>(partial + (at_0)) = (unsigned long long)((unsigned long long)(0.0));
-            *reinterpret_cast<unsigned long long*>(partial + (4096 + at_0)) = (unsigned long long)((unsigned long long)(0.0));
-            *reinterpret_cast<unsigned long long*>(partial + (8192 + at_0)) = (unsigned long long)((unsigned long long)(0.0));
-            *reinterpret_cast<unsigned long long*>(partial + (12288 + at_0)) = (unsigned long long)((unsigned long long)(0.0));
+            tv[0] = tv[0] + tv[1];
+            tv[2] = tv[2] + tv[3];
+            tv[0] = tv[0] + tv[2];
+            *(reinterpret_cast<float*>(dw) + ((at_0 / 256 / 8 * 256 + at_0 % 256) * 8 + at_0 / 256 % 8)) = tv[0];
+            if (0 < nrep) {
+                *(reinterpret_cast<float*>(partial) + (at_0)) = 0.0f;
+            }
+            if (1 < nrep) {
+                *(reinterpret_cast<float*>(partial) + (4096 + at_0)) = 0.0f;
+            }
+            if (2 < nrep) {
+                *(reinterpret_cast<float*>(partial) + (8192 + at_0)) = 0.0f;
+            }
+            if (3 < nrep) {
+                *(reinterpret_cast<float*>(partial) + (12288 + at_0)) = 0.0f;
+            }
         }
         __syncthreads();
         if (tid == 0) {

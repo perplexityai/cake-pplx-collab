@@ -32,15 +32,16 @@ A route is the ordered list of module records one public call may launch.
 ``fwd`` / ``fwd_residual`` launch one forward program of the deterministic
 package (the forward has no cross-row reduction).  ``bwd`` / ``bwd_residual``
 select one of two backward forms per token-count window.  The single kernel
-(workspace rule ``claim_sum_f64``) is one launch: its persistent CTAs claim row
+(workspace rule ``claim_sum_f32``) is one launch: its persistent CTAs claim row
 chunks from a counter in the workspace, write ``dx`` and add their per-column
-``dw`` sums into the workspace's FP64 sums with bulk reductions in the order
-they finish; the CTA that finishes last stores ``dw``, the FP32 rounding of the
-sums, so ``dw`` is not guaranteed bitwise reproducible.  The pair-row single
-kernel (workspace rule ``claim_part_f32``) is one launch too: its CTAs keep their
-``dw`` sums as FP32 pairs, write them as one row of FP32 pairs each into
-scratch in the workspace, and once every row is in, helper CTAs fold the rows
-and store ``dw`` (no FP64 sums; the row order follows scheduling, so ``dw`` is
+``dw`` sums into the workspace's FP32 sums (one word per column) with bulk
+reductions in the order they finish; the CTA that finishes last stores ``dw``,
+the FP32 sum of the replicas, so ``dw`` is not guaranteed bitwise reproducible.
+The part-row single kernel (workspace rule ``claim_part_f32``) is one launch
+too: its CTAs write their FP32 ``dw`` sums as one FP32 row each into
+scratch in the workspace, and once every row is in,
+helper CTAs fold the rows and store ``dw`` (no column sums and no atomic add of
+a sum; the row order follows scheduling, so ``dw`` is
 not guaranteed bitwise reproducible either).  The deterministic
 package's pair (``chunk_partials``; its programs renamed into this package)
 is two launches: the main kernel writes one FP32 partial row of ``dw`` per
@@ -4275,7 +4276,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H256 bf16 weight: (64, 20480] backward time 0.804-1.231x the det pair's at 4 to 16384 rows over two to ten timing sessions per row count, above 1 only in one session at 5112 and 5124 rows (B200)
+    # sm_100a H256 bf16 weight: (64, 20480] the single kernel 195c4317 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_195c4317b51bb4ea1137": {
         "arches": [
             "sm_100a",
@@ -4304,11 +4305,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    # sm_100a H256 f32 weight: (64, 20480] backward time 0.762-1.052x the det pair's at 4 to 16384 rows over two to six timing sessions per row count, above 1 only in one session at 5112, 5120 and 5124 rows (B200)
+    # sm_100a H256 f32 weight: (64, 20480] the single kernel 8de01314 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_8de0131445eed6eeabb7": {
         "arches": [
             "sm_100a",
@@ -4337,11 +4338,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    # sm_100a H512 bf16 weight: (1280, 4096] benchmark ratio < 1 against the det pair in both sessions (B200); above T 4096 the deterministic package's det pairs run for dw accuracy: this kernel's 16-step FP32 dw windows put its worst dw error at up to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200 (rows of stride 576)
+    # sm_100a H512 bf16 weight: (1280, 4096] the single kernel d0bde38a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_d0bde38aa443d42a5f04": {
         "arches": [
             "sm_100a",
@@ -4370,11 +4371,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
         },
     },
-    # sm_100a H512 bf16 weight: (4096, 32768] the deterministic package's det pair of these rows (main kernel ad1a5a3c and fixed-order dw reduce 7097069b with that package's host plan), renamed into this package, for dw accuracy: the single kernel d0bde38a it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.15x to 1.91x the deterministic package's median FP64 error over 5 repeats at T 14928 to 32768 on B200 (rows of stride 576; concentrated, saturated_hi and saturated_lo inputs); the det pair took 16.22, 16.38 and 16.54 us against the single's 15.14, 15.94 and 15.97 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H512 bf16 weight: (4096, 32768] the deterministic package's det pair of these rows (main kernel ad1a5a3c and fixed-order dw reduce 7097069b with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_ad1a5a3c5f88e3d10036__4096_32768": {
         "arches": [
             "sm_100a",
@@ -4406,7 +4407,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H512 bf16 weight: (32768, inf] the deterministic package's det pair of these rows (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package, for dw accuracy: the single kernel d0bde38a it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.90x the deterministic package's median FP64 error over 5 repeats at T 65536 on B200 (rows of stride 576, concentrated inputs)
+    # sm_100a H512 bf16 weight: (32768, inf] the deterministic package's det pair of these rows (main kernel 8877322a and fixed-order dw reduce 122721bd with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_8877322a3002e3a4fefd__32768_inf": {
         "arches": [
             "sm_100a",
@@ -4438,7 +4439,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H512 f32 weight: (960, inf] above T 960 for dw accuracy (over inputs 0-59 of each family the det pairs' worst dw error exceeds the FP32 eager reference's at T 1024 (0.0846 against 0.0703) and 1152 (0.0912 against 0.0832) on B200)
+    # sm_100a H512 f32 weight: (960, inf] the single kernel fd08c6f4 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_fd08c6f436eb6071fa22": {
         "arches": [
             "sm_100a",
@@ -4467,12 +4468,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
         },
     },
-    # sm_100a H1536 bf16 weight: (78784, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in registers, evict_last loads, 3 stages): it replaces the twosum single b42efd6b for speed up to T 131072; worst dw element 0.7634 of the budget at the sampled T from 78785 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single b42efd6b keeps the window; backward time 0.88 times the replaced single's (B200)
-    "cake_rmsnorm_train_66238d219de588fca483": {
+    # sm_100a H1536 bf16 weight: (78784, 131072] the single kernel 0d5dc239 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_0d5dc239536f113f4926": {
         "arches": [
             "sm_100a",
         ],
@@ -4486,12 +4487,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_66238d219de588fca483",
+        "kernel": "cake_rmsnorm_train_0d5dc239536f113f4926",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_66238d219de588fca483",
+        "library": "cake_rmsnorm_train_0d5dc239536f113f4926",
         "role": "bwd_main",
         "select_rule": {
             "above": 78784,
@@ -4500,12 +4501,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy: the single kernel it replaces exceeds the per-element budget at T 118528 (1.029) and at larger T (2.402 at T 1048576), worst of 120 inputs of each of three families, on B200; its worst dw element stays within 0.0006 of the per-element budget at 790 sampled T from 57408 to 1048576 (every 64th T to 98304, every 256th to 131072 and 21 T to 1048576; worst of 120 inputs of each of three families in both rstd forms) on B200, and its dx is bitwise the deterministic=True backward's; backward time 1.09x to 1.11x the replaced kernel's at T 86272, 98304, 131072 and 262144 (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_b42efd6bf06148d75151__131072_inf": {
+    # sm_100a H1536 bf16 weight: (131072, inf] the single kernel ae610afd (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_ae610afdf77ff6714a5b__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4519,12 +4520,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_b42efd6bf06148d75151",
+        "kernel": "cake_rmsnorm_train_ae610afdf77ff6714a5b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_b42efd6bf06148d75151",
+        "library": "cake_rmsnorm_train_ae610afdf77ff6714a5b",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -4533,11 +4534,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (32768, 75776] above T 32768 for dw accuracy (the det pair's worst dw error exceeds the FP32 eager reference's at T 33280 on B200, 0.6840 against 0.6219 of the per-element budget); backward time 0.941-0.965x the det pair's at T 32769, 33280, 34816 and 36864 in two timing sessions, benchmark ratio < 1 against the det pair in both sessions above T 36864 (B200); up to T 75776 its worst dw element stays within 0.793 of the per-element budget at every sampled T (every 256th row from 32768 to 65536 and every 64th from 65536 to 75776, worst of 120 inputs of each of three families in both rstd forms) on B200; it exceeds the budget at T 108736 (1.060); the twosum form of this kernel runs above T 75776; the twosum form takes 1.05x to 1.12x this kernel's backward time from T 32769 to 75776 (B200)
+    # sm_100a H1536 f32 weight: (32768, 75776] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_4b6981c10fd40a9d8aec__32768_75776": {
         "arches": [
             "sm_100a",
@@ -4566,12 +4567,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (75776, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in registers, evict_last loads, 4 stages): it replaces the twosum single e2b99fee for speed up to T 131072; worst dw element 0.7705 of the budget and at or below the FP32 eager reference's at the sampled T from 75777 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single e2b99fee keeps the window; backward time 0.89 to 0.90 times the replaced single's (B200)
-    "cake_rmsnorm_train_5e78d78f2d8203948198": {
+    # sm_100a H1536 f32 weight: (75776, 131072] the single kernel 363eabb3 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_363eabb3661dab78f3d3": {
         "arches": [
             "sm_100a",
         ],
@@ -4585,12 +4586,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_5e78d78f2d8203948198",
+        "kernel": "cake_rmsnorm_train_363eabb3661dab78f3d3",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_5e78d78f2d8203948198",
+        "library": "cake_rmsnorm_train_363eabb3661dab78f3d3",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 75776,
@@ -4599,12 +4600,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the worst dw element of the single kernel it replaces exceeds the per-element budget at T 108736 (1.060, worst of 120 inputs of each of three families) on B200; its worst dw element stays within 0.0006 of the per-element budget at every sampled T from 75777 to 131072 and at T 1048576 (72 T, worst of 120 inputs of each of three families in both rstd forms) on B200; backward time 1.10x to 1.11x the replaced kernel's at T 75777, 98304 and 131072 (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_e2b99fee32764cfd1295__131072_inf": {
+    # sm_100a H1536 f32 weight: (131072, inf] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4618,12 +4619,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_e2b99fee32764cfd1295",
+        "kernel": "cake_rmsnorm_train_4b6981c10fd40a9d8aec",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_e2b99fee32764cfd1295",
+        "library": "cake_rmsnorm_train_4b6981c10fd40a9d8aec",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -4632,11 +4633,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (1024, 4096] the single kernel of its largest token counts for dw accuracy: the chunk-partials pair of (1024, 4096] exceeded the FP32 eager reference's dw error at T 3136 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.1063 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (49 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.02x to 1.23x the programs' it replaces at T 1025, 1152, 1280, 1408, 1536, 1792, 2048, 3136 and 4096 in two sessions (B200)
+    # sm_100a H1536 f32 weight: (1024, 4096] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_4096": {
         "arches": [
             "sm_100a",
@@ -4665,11 +4666,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_100a H5120 f32 weight: (1792, 6144] the single kernel whose twosum form runs its top window for dw accuracy: the chunk-partials pair of (256, 6144] exceeded the FP32 eager reference's dw error at T 2752, 3840, 4224, 4352 and 5504 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.2149 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (68 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.14x to 1.21x the programs' it replaces at T 2048, 2304, 2560, 2752, 3072, 4352 and 6144 in two sessions (B200)
+    # sm_100a H5120 f32 weight: (1792, 6144] the single kernel de8f6091 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_de8f6091077dc7ac5947__1792_6144": {
         "arches": [
             "sm_100a",
@@ -4698,11 +4699,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 81920,
         },
     },
-    # sm_100a H2048 f32 weight: (336, 1024] the column-task kernel of its lowest window for dw accuracy: the chunk-partials pair of (336, 3072] exceeded the FP32 eager reference's dw error at T 1728 and 2773 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.0375 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (12 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.86x to 1.15x the programs' it replaces at T 337, 400, 480, 560, 640, 720, 800, 880, 960 and 1024 in two sessions (B200)
+    # sm_100a H2048 f32 weight: (336, 1024] the column-task kernel 17493054 (64 column tasks).
     "cake_rmsnorm_train_17493054fed5409b6df9__336_1024": {
         "arches": [
             "sm_100a",
@@ -4732,11 +4733,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (42496, 65536] benchmark ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.751 of the per-element budget at every sampled T from 5633 to 65536 (75 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 72 of them) on B200; its worst dw error was 1.07x the deterministic package's median FP64 error over 5 repeats at T 65536 on B200 (concentrated inputs); below T 42496 the deterministic package's det pair runs for dw accuracy; the twosum form of this kernel runs above T 65536
+    # sm_100a H6144 bf16 weight: (42496, 65536] the single kernel 9433061d (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_9433061da18b2db4299d__42496_65536": {
         "arches": [
             "sm_100a",
@@ -4765,12 +4766,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 bf16 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; help finish, pairs in registers, evict_last loads, 4 stages): it replaces the twosum single 10a41132 for speed up to T 131072; worst dw element 0.9091 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single 10a41132 keeps the window; backward time 0.93 times the replaced single's (B200)
-    "cake_rmsnorm_train_995b2229fe43c772b2c7": {
+    # sm_100a H6144 bf16 weight: (65536, 131072] the single kernel 301133b6 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_301133b646c4197fe462": {
         "arches": [
             "sm_100a",
         ],
@@ -4784,12 +4785,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_995b2229fe43c772b2c7",
+        "kernel": "cake_rmsnorm_train_301133b646c4197fe462",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_995b2229fe43c772b2c7",
+        "library": "cake_rmsnorm_train_301133b646c4197fe462",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -4798,12 +4799,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the worst dw element of the single kernel it replaces above T 65536 exceeds the per-element budget at T 105259 (1.047, measured with FP32 weight; the BF16-weight program computes the same dw) on B200; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.07x to 1.08x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_10a41132a42d594ce6dd__131072_inf": {
+    # sm_100a H6144 bf16 weight: (131072, inf] the single kernel 9433061d (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_9433061da18b2db4299d__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4817,12 +4818,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_10a41132a42d594ce6dd",
+        "kernel": "cake_rmsnorm_train_9433061da18b2db4299d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_10a41132a42d594ce6dd",
+        "library": "cake_rmsnorm_train_9433061da18b2db4299d",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -4831,11 +4832,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 f32 weight: (3584, 65536] backward time 0.970-1.001x the det pair's at T 4096, 14928, 16384, 32768 and 65536 over four timing sessions (B200); up to T 65536 its worst dw element stays within 0.790 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 3585 to 65536 (196 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 195 of them) on B200; the twosum form of this kernel runs above T 65536
+    # sm_100a H6144 f32 weight: (3584, 65536] the single kernel a562656c (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_a562656cef5bf5dda160__3584_65536": {
         "arches": [
             "sm_100a",
@@ -4864,12 +4865,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 f32 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; help finish, pairs in registers, evict_last loads, 4 stages): it replaces the twosum single 45cf60e3 for speed up to T 131072; worst dw element 0.8561 of the budget and at or below the FP32 eager reference's at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single 45cf60e3 keeps the window; backward time 0.92 to 0.93 times the replaced single's (B200)
-    "cake_rmsnorm_train_d5a17016b7ff2c6e3ba9": {
+    # sm_100a H6144 f32 weight: (65536, 131072] the single kernel c61519fe (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_c61519fe43c45818b9b4": {
         "arches": [
             "sm_100a",
         ],
@@ -4883,12 +4884,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_d5a17016b7ff2c6e3ba9",
+        "kernel": "cake_rmsnorm_train_c61519fe43c45818b9b4",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d5a17016b7ff2c6e3ba9",
+        "library": "cake_rmsnorm_train_c61519fe43c45818b9b4",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -4897,12 +4898,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the worst dw element of the single kernel it replaces above T 65536 exceeds the per-element budget at T 105259 (1.047) on B200; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.09x to 1.10x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_45cf60e3cd8603c2abeb__131072_inf": {
+    # sm_100a H6144 f32 weight: (131072, inf] the single kernel a562656c (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_a562656cef5bf5dda160__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4916,12 +4917,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_45cf60e3cd8603c2abeb",
+        "kernel": "cake_rmsnorm_train_a562656cef5bf5dda160",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_45cf60e3cd8603c2abeb",
+        "library": "cake_rmsnorm_train_a562656cef5bf5dda160",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -4930,12 +4931,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (1408, 65536] the twosum help single kernel 1609f796 at stages=3, for speed with the dw arithmetic of 1609f796, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 3fbfdd75 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.16x to 1.97x the deterministic package's median FP64 error over 5 repeats at T 14928 to 65536 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 1409 to 65536 it took 1.04x to 1.05x the time of the program this package's previous version runs at T <= 2048, 1.01x to 1.02x at T 3072 to 4096 and 0.97x to 0.99x from T 6144 (1609f796: 0.98x to 1.09x), with the dw error of 1609f796
-    "cake_rmsnorm_train_eb332e8c97f6387027c6__1408_65536": {
+    # sm_100a H6144 residual bf16 weight: (1408, 65536] the single kernel f6537c86 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_f6537c86c7ffae183a50__1408_65536": {
         "arches": [
             "sm_100a",
         ],
@@ -4949,12 +4950,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_eb332e8c97f6387027c6",
+        "kernel": "cake_rmsnorm_train_f6537c86c7ffae183a50",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_eb332e8c97f6387027c6",
+        "library": "cake_rmsnorm_train_f6537c86c7ffae183a50",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 1408,
@@ -4963,12 +4964,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 4 stages): it replaces the twosum single 1609f796 for speed up to T 131072; worst dw element 0.8328 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single 1609f796 keeps the window; backward time 0.92 to 0.94 times the replaced single's (B200)
-    "cake_rmsnorm_train_7c216db7f9e0c6fd9c4d": {
+    # sm_100a H6144 residual bf16 weight: (65536, 131072] the single kernel 6feab384 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_6feab384e4c85e893ed5": {
         "arches": [
             "sm_100a",
         ],
@@ -4982,12 +4983,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_7c216db7f9e0c6fd9c4d",
+        "kernel": "cake_rmsnorm_train_6feab384e4c85e893ed5",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7c216db7f9e0c6fd9c4d",
+        "library": "cake_rmsnorm_train_6feab384e4c85e893ed5",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 65536,
@@ -4996,12 +4997,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the single kernel it replaces stays within the per-element budget at every sampled T above T 65536, worst 0.903 at T 126976, on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.00x to 1.01x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_1609f7969c50fba7f2c7__131072_inf": {
+    # sm_100a H6144 residual bf16 weight: (131072, inf] the single kernel 3fbfdd75 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_3fbfdd750cbeb47032b5__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -5015,12 +5016,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_1609f7969c50fba7f2c7",
+        "kernel": "cake_rmsnorm_train_3fbfdd750cbeb47032b5",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1609f7969c50fba7f2c7",
+        "library": "cake_rmsnorm_train_3fbfdd750cbeb47032b5",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 131072,
@@ -5029,11 +5030,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual f32 weight: (1408, 65536] benchmark ratio < 1 against the det pair in both sessions (B200); up to T 65536 its worst dw element stays within 0.723 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 1409 to 65536 (168 T, every multiple of 64 rows from 61504 to 65536 among them, worst of 60 inputs of each of three families in both rstd forms at 167 of them) on B200; the twosum form of this kernel runs above T 65536
+    # sm_100a H6144 residual f32 weight: (1408, 65536] the single kernel a640d0b7 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_a640d0b799889f785ad5__1408_65536": {
         "arches": [
             "sm_100a",
@@ -5062,12 +5063,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual f32 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 4 stages): it replaces the twosum single d3d67437 for speed up to T 131072; worst dw element 0.8547 of the budget and at or below the FP32 eager reference's at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single d3d67437 keeps the window; backward time 0.92 to 0.93 times the replaced single's (B200)
-    "cake_rmsnorm_train_0bdcd2c63a9a4c5cb9d4": {
+    # sm_100a H6144 residual f32 weight: (65536, 131072] the single kernel f5453c09 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_f5453c09151f9d441744": {
         "arches": [
             "sm_100a",
         ],
@@ -5081,12 +5082,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_0bdcd2c63a9a4c5cb9d4",
+        "kernel": "cake_rmsnorm_train_f5453c09151f9d441744",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_0bdcd2c63a9a4c5cb9d4",
+        "library": "cake_rmsnorm_train_f5453c09151f9d441744",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 65536,
@@ -5095,12 +5096,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H6144 residual f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the single kernel it replaces stays within 0.836 of the per-element budget at 13 sampled T above T 65536 on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.00x to 1.01x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_d3d674373d17aaf425c0__131072_inf": {
+    # sm_100a H6144 residual f32 weight: (131072, inf] the single kernel a640d0b7 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_a640d0b799889f785ad5__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -5114,12 +5115,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_d3d674373d17aaf425c0",
+        "kernel": "cake_rmsnorm_train_a640d0b799889f785ad5",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d3d674373d17aaf425c0",
+        "library": "cake_rmsnorm_train_a640d0b799889f785ad5",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 131072,
@@ -5128,12 +5129,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 98304,
         },
     },
-    # sm_100a H2048 bf16 weight: (12, 64] the fixed-claim column-task form (64 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.32x to 1.59x the det package's speed and 1.33x to 1.63x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_ef052c0918725ffa68d4__12_64": {
+    # sm_100a H2048 bf16 weight: (12, 64] the column-task kernel 518cf16a (64 column tasks).
+    "cake_rmsnorm_train_518cf16a7bf8e88042ee__12_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5148,12 +5149,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "kernel": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "library": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "role": "bwd_main",
         "select_rule": {
             "above": 12,
@@ -5162,11 +5163,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 bf16 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 bf16 weight: (64, 336] the column-task kernel 64e6aa82 (64 column tasks).
     "cake_rmsnorm_train_64e6aa82bb2c6d4ea978__64_336": {
         "arches": [
             "sm_100a",
@@ -5196,12 +5197,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (14, 64] the fixed-claim column-task form (64 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.39x to 1.53x the det package's speed and 1.35x to 1.56x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_382e45788ace3ff40ba1__14_64": {
+    # sm_100a H2048 f32 weight: (14, 64] the column-task kernel c2f08c95 (64 column tasks).
+    "cake_rmsnorm_train_c2f08c957d4b0f17dddd__14_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5216,12 +5217,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_382e45788ace3ff40ba1",
+        "kernel": "cake_rmsnorm_train_c2f08c957d4b0f17dddd",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_382e45788ace3ff40ba1",
+        "library": "cake_rmsnorm_train_c2f08c957d4b0f17dddd",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 14,
@@ -5230,11 +5231,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (64, 336] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H2048 f32 weight: (64, 336] the column-task kernel 17493054 (64 column tasks).
     "cake_rmsnorm_train_17493054fed5409b6df9__64_336": {
         "arches": [
             "sm_100a",
@@ -5264,12 +5265,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (12, 64] the fixed-claim column-task form (128 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.27x to 1.49x the det package's speed and 1.09x to 1.30x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_231e01eca0459c2c0bf5__12_64": {
+    # sm_100a H4096 bf16 weight: (12, 64] the column-task kernel 82b84544 (128 column tasks).
+    "cake_rmsnorm_train_82b84544dba8e2b70bc1__12_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5284,12 +5285,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_231e01eca0459c2c0bf5",
+        "kernel": "cake_rmsnorm_train_82b84544dba8e2b70bc1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_231e01eca0459c2c0bf5",
+        "library": "cake_rmsnorm_train_82b84544dba8e2b70bc1",
         "role": "bwd_main",
         "select_rule": {
             "above": 12,
@@ -5298,11 +5299,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (64, 1152] backward time 0.925-1.020x the det pair's at T 256 and 1024 over four timing sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H4096 bf16 weight: (64, 1152] the column-task kernel 4822793e (128 column tasks).
     "cake_rmsnorm_train_4822793ea0c954c11af6__64_1152": {
         "arches": [
             "sm_100a",
@@ -5332,12 +5333,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (14, 64] the fixed-claim column-task form (128 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.20x to 1.40x the det package's speed and 1.13x to 1.31x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_ce1f7d216ecc0a1573b9__14_64": {
+    # sm_100a H4096 f32 weight: (14, 64] the column-task kernel cdef0b34 (128 column tasks).
+    "cake_rmsnorm_train_cdef0b34f5080dbc61d1__14_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5352,12 +5353,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_ce1f7d216ecc0a1573b9",
+        "kernel": "cake_rmsnorm_train_cdef0b34f5080dbc61d1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ce1f7d216ecc0a1573b9",
+        "library": "cake_rmsnorm_train_cdef0b34f5080dbc61d1",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 14,
@@ -5366,11 +5367,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (64, 1792] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H4096 f32 weight: (64, 1792] the column-task kernel 86160705 (128 column tasks).
     "cake_rmsnorm_train_8616070567821eaa3e35__64_1792": {
         "arches": [
             "sm_100a",
@@ -5400,12 +5401,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 bf16 weight: (4, 64] the fixed-claim column-task form (80 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.18x to 1.41x the det package's speed and 1.16x to 1.42x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__4_64": {
+    # sm_100a H5120 bf16 weight: (4, 64] the column-task kernel 29bcbde1 (80 column tasks).
+    "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5420,12 +5421,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "kernel": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "library": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "role": "bwd_main",
         "select_rule": {
             "above": 4,
@@ -5434,11 +5435,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 bf16 weight: (64, 896] backward time 0.923-1.014x the det pair's at T 256 over eight timing sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H5120 bf16 weight: (64, 896] the column-task kernel 080e0a6c (80 column tasks).
     "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_896": {
         "arches": [
             "sm_100a",
@@ -5468,12 +5469,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (4, 64] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.42x to 2.09x the det package's speed and 1.21x to 1.51x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_d70f2562a592151ec4f9__4_64": {
+    # sm_100a H6144 bf16 weight: (4, 64] the column-task kernel e6475d8f (96 column tasks).
+    "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__4_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5488,12 +5489,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_d70f2562a592151ec4f9",
+        "kernel": "cake_rmsnorm_train_e6475d8fa504ef4d7d2d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d70f2562a592151ec4f9",
+        "library": "cake_rmsnorm_train_e6475d8fa504ef4d7d2d",
         "role": "bwd_main",
         "select_rule": {
             "above": 4,
@@ -5502,11 +5503,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 bf16 weight: (64, 1152] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 bf16 weight: (64, 1152] the column-task kernel 44508df7 (96 column tasks).
     "cake_rmsnorm_train_44508df7dab2ab688f85__64_1152": {
         "arches": [
             "sm_100a",
@@ -5536,12 +5537,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 f32 weight: (4, 64] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.37x to 2.15x the det package's speed and 1.22x to 1.43x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_9b37923697ee8ca52a9e__4_64": {
+    # sm_100a H6144 f32 weight: (4, 64] the column-task kernel f4d41a09 (96 column tasks).
+    "cake_rmsnorm_train_f4d41a0991647b82ac21__4_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5556,12 +5557,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_9b37923697ee8ca52a9e",
+        "kernel": "cake_rmsnorm_train_f4d41a0991647b82ac21",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9b37923697ee8ca52a9e",
+        "library": "cake_rmsnorm_train_f4d41a0991647b82ac21",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 4,
@@ -5570,11 +5571,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 f32 weight: (64, 1168] benchmark ratio < 1 against the det pair in both sessions (B200); the det pair runs above T 1168 (faster from T 1184 in every session, 1.05x at T 1408); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 f32 weight: (64, 1168] the column-task kernel b3e6531e (96 column tasks).
     "cake_rmsnorm_train_b3e6531e46667901ab91__64_1168": {
         "arches": [
             "sm_100a",
@@ -5604,12 +5605,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (2, 64] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.31x to 2.04x the det package's speed and 1.24x to 1.51x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_7b0f5a6a8769473c322e__2_64": {
+    # sm_100a H6144 residual bf16 weight: (2, 64] the column-task kernel 3a55646d (96 column tasks).
+    "cake_rmsnorm_train_3a55646d574035bfa271__2_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5624,12 +5625,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "kernel": "cake_rmsnorm_train_3a55646d574035bfa271",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "library": "cake_rmsnorm_train_3a55646d574035bfa271",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 2,
@@ -5638,11 +5639,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual bf16 weight: (64, 1408] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__64_1408": {
         "arches": [
             "sm_100a",
@@ -5672,12 +5673,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual f32 weight: (4, 64] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.32x to 2.10x the det package's speed and 1.25x to 1.46x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_ac9d69f94aabfc68aa40__4_64": {
+    # sm_100a H6144 residual f32 weight: (4, 64] the column-task kernel 6e0d06ab (96 column tasks).
+    "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__4_64": {
         "arches": [
             "sm_100a",
         ],
@@ -5692,12 +5693,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "kernel": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "library": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 4,
@@ -5706,11 +5707,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual f32 weight: (64, 1408] benchmark ratio < 1 against the det pair in both sessions (B200); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H6144 residual f32 weight: (64, 1408] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__64_1408": {
         "arches": [
             "sm_100a",
@@ -5740,12 +5741,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (4608, 16384] the twosum help single kernel c67fc8b9 with evict_last loads and without r_ahead, for speed with the dw arithmetic of c67fc8b9, which runs these rows for dw accuracy (its twosum form: exact per-thread dw sums; the plain form 15e157d2 sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.10x to 2.30x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on B200): on B200 (CUDA graph replay, cold L2, paired rounds) at T 4609 to 16384 it took 1.00x to 1.04x the time of the program this package's previous version runs (c67fc8b9: 1.01x to 1.06x), with the dw error of c67fc8b9 (q <= 0.987 of the deterministic package's program in its earlier version)
-    "cake_rmsnorm_train_2443b1f0183048c47b15__4608_16384": {
+    # sm_100a H4096 bf16 weight: (4608, 16384] the single kernel cf4c213e (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_cf4c213e50482afdacdb__4608_16384": {
         "arches": [
             "sm_100a",
         ],
@@ -5759,12 +5760,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_2443b1f0183048c47b15",
+        "kernel": "cake_rmsnorm_train_cf4c213e50482afdacdb",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2443b1f0183048c47b15",
+        "library": "cake_rmsnorm_train_cf4c213e50482afdacdb",
         "role": "bwd_main",
         "select_rule": {
             "above": 4608,
@@ -5773,12 +5774,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 bf16 weight: (16384, 36864] the twosum help single kernel c67fc8b9 with evict_last loads, for speed with the dw arithmetic of c67fc8b9 (the reason of (4608, 16384]): on B200 (CUDA graph replay, cold L2, paired rounds) it took 0.99x to 1.01x the time of the program this package's previous version runs from T 20480 to 36864 (c67fc8b9: 1.01x to 1.06x over T 4609 to 36864), with the dw error of c67fc8b9 (q <= 0.987)
-    "cake_rmsnorm_train_03f6488b89b5f9ae3db5__16384_36864": {
+    # sm_100a H4096 bf16 weight: (16384, 36864] the single kernel 681b33d9 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_681b33d9c9d0ac4d29a4__16384_36864": {
         "arches": [
             "sm_100a",
         ],
@@ -5792,12 +5793,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_03f6488b89b5f9ae3db5",
+        "kernel": "cake_rmsnorm_train_681b33d9c9d0ac4d29a4",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_03f6488b89b5f9ae3db5",
+        "library": "cake_rmsnorm_train_681b33d9c9d0ac4d29a4",
         "role": "bwd_main",
         "select_rule": {
             "above": 16384,
@@ -5806,11 +5807,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (3584, 36864] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H4096 f32 weight: (3584, 36864] the single kernel f7573bcb (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_f7573bcb748c0784f3ec": {
         "arches": [
             "sm_100a",
@@ -5839,11 +5840,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (1792, 3584] the single kernel of its largest token counts for dw accuracy: the chunk-partials pair of (1792, 3584] exceeded the FP32 eager reference's dw error at T 2569 on B200 (the deterministic package runs the same pair there); its worst dw error stays within 0.1404 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows from 1856 to 3584 on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.96x to 1.05x the pair's at T 2048, 2569 and 3584 in two sessions (B200)
+    # sm_100a H4096 f32 weight: (1792, 3584] the single kernel f7573bcb (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_f7573bcb748c0784f3ec__1792_3584": {
         "arches": [
             "sm_100a",
@@ -5872,11 +5873,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_100a H2048 bf16 weight: (7168, 11264] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 bf16 weight: (7168, 11264] the single kernel 0fa4f255 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_0fa4f255caf709d09f66": {
         "arches": [
             "sm_100a",
@@ -5905,11 +5906,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 bf16 weight: (16384, 45056] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy: the single kernel 0fa4f255 it replaces sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.25x the deterministic package's median FP64 error over 5 repeats at T 32768 on B200 (concentrated inputs); up to T 58880, the deterministic package's own edge, since 0fa4f255 also exceeds 1.1x that package's median dw error at T 51968 on B200 (off the gate's rows), where the det pair takes 0.973x to 0.984x its backward time
+    # sm_100a H2048 bf16 weight: (16384, 58880] the deterministic package's det pair of these rows (main kernel ceeef043 and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_ceeef043ac64f37fc529__16384_58880": {
         "arches": [
             "sm_100a",
@@ -5941,7 +5942,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H2048 f32 weight: (15403, 45056] benchmark ratio < 1 against the det pair in both sessions (B200)
+    # sm_100a H2048 f32 weight: (15403, 45056] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_ba7dbf6a07744268705e": {
         "arches": [
             "sm_100a",
@@ -5970,11 +5971,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (45056, 58880] the single kernel of its window above, within 2 % of the det pair's backward time (the det pair of the window, the deterministic package's program, reaches 0.900 of the per-element budget, K form, worst of 120 inputs of each of three families on B200); this single kernel's worst dw element stays within 0.777 of the per-element budget and at or below the FP32 eager reference's at every 64th T of the window (worst of 120 inputs of each of three families in both rstd forms) on B200; backward time 0.98x to 1.01x the det pair's at T 45057, 51968 and 58880 (B200)
+    # sm_100a H2048 f32 weight: (45056, 58880] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_ba7dbf6a07744268705e__45056_58880": {
         "arches": [
             "sm_100a",
@@ -6003,11 +6004,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (1024, 4096] the single kernel whose twosum form runs its top window for dw accuracy: the chunk-partials pairs of (336, 3072] and (3072, 4096] exceeded the FP32 eager reference's dw error at T 1728 and 2773 and at T 3920 on B200 (the deterministic package runs the same pairs there); its worst dw error stays within 0.1265 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (50 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.86x to 1.17x the programs' it replaces at T 1152, 1728, 2773, 3072 and 3920 in two sessions (B200)
+    # sm_100a H2048 f32 weight: (1024, 4096] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_ba7dbf6a07744268705e__1024_4096": {
         "arches": [
             "sm_100a",
@@ -6036,12 +6037,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_103a H5120 bf16 weight: (61952, 393216] above T 61952 for dw accuracy (both weight dtypes switch at T 61952: the FP32-weight route's compensated det pair, the same dw computation, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.588 of the budget at the sampled T from 61953 to 131072 on GB300 (3 x 60 inputs, kernel and torch rstd); its FP32-weight twin, the same dw computation, 0.688 at 73 sampled T from 61953 to 131072, 1.16 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 393216, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.993 of it); at T 524288 it is 1.100 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144 and 393216, kernel and torch rstd)
-    "cake_rmsnorm_train_b523a764b029e5ca1aaf__61952_393216": {
+    # sm_103a H5120 bf16 weight: (61952, 393216] the single kernel e21acade (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_e21acade55e05f342053__61952_393216": {
         "arches": [
             "sm_103a",
         ],
@@ -6055,12 +6056,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_b523a764b029e5ca1aaf",
+        "kernel": "cake_rmsnorm_train_e21acade55e05f342053",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_b523a764b029e5ca1aaf",
+        "library": "cake_rmsnorm_train_e21acade55e05f342053",
         "role": "bwd_main",
         "select_rule": {
             "above": 61952,
@@ -6069,12 +6070,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 81920,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 40960,
         },
     },
-    # sm_103a H5120 bf16 weight: (393216, inf] the twosum single above T 393216 for dw accuracy (the kblock single below exceeds the per-element budget at T 524288, 1.100 of it, on GB300); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 524288 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_9e4c0825df92af02074f__393216_inf": {
+    # sm_103a H5120 bf16 weight: (393216, inf] the single kernel 826e6a14 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_826e6a14a93bd988be4d__393216_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -6088,12 +6089,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_9e4c0825df92af02074f",
+        "kernel": "cake_rmsnorm_train_826e6a14a93bd988be4d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9e4c0825df92af02074f",
+        "library": "cake_rmsnorm_train_826e6a14a93bd988be4d",
         "role": "bwd_main",
         "select_rule": {
             "above": 393216,
@@ -6102,12 +6103,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 81920,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 40960,
         },
     },
-    # sm_103a H5120 f32 weight: (61952, 196608] above T 61952 for dw accuracy (the compensated det pair, from T 5120, reaches 0.888 of the per-element budget at T 62464 on GB300); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.688 of the budget at 73 sampled T from 61953 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.18 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 196608, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.700 of it); at T 262144 it is 1.004 of it (GB300, 3 x 120 inputs per T, 3 x 240 at T 262144, kernel and torch rstd)
-    "cake_rmsnorm_train_90598c14b4e396f5c8b0__61952_196608": {
+    # sm_103a H5120 f32 weight: (61952, 196608] the single kernel 05078a17 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_05078a174a09119cfe3c__61952_196608": {
         "arches": [
             "sm_103a",
         ],
@@ -6121,12 +6122,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_90598c14b4e396f5c8b0",
+        "kernel": "cake_rmsnorm_train_05078a174a09119cfe3c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_90598c14b4e396f5c8b0",
+        "library": "cake_rmsnorm_train_05078a174a09119cfe3c",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 61952,
@@ -6135,12 +6136,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 81920,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 40960,
         },
     },
-    # sm_103a H5120 f32 weight: (196608, inf] the twosum single above T 196608 for dw accuracy (the kblock single below exceeds the per-element budget at T 262144, 1.004 of it, on GB300); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 262144 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_f165933caadda3434828__196608_inf": {
+    # sm_103a H5120 f32 weight: (196608, inf] the single kernel 91a40f30 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_91a40f3094182a35c784__196608_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -6154,12 +6155,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_f165933caadda3434828",
+        "kernel": "cake_rmsnorm_train_91a40f3094182a35c784",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_f165933caadda3434828",
+        "library": "cake_rmsnorm_train_91a40f3094182a35c784",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 196608,
@@ -6168,12 +6169,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 81920,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 40960,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (6, 31] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.08x to 1.47x the det package's speed and 1.10x to 1.49x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_7b0f5a6a8769473c322e__6_31": {
+    # sm_103a H6144 residual bf16 weight: (6, 31] the column-task kernel 3a55646d (96 column tasks).
+    "cake_rmsnorm_train_3a55646d574035bfa271__6_31": {
         "arches": [
             "sm_103a",
         ],
@@ -6188,12 +6189,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "kernel": "cake_rmsnorm_train_3a55646d574035bfa271",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "library": "cake_rmsnorm_train_3a55646d574035bfa271",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 6,
@@ -6202,12 +6203,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks), for speed: 0.80x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 17 to 32 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_07135550fae8b07bb82c__31_32": {
+    # sm_103a H6144 residual bf16 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks).
+    "cake_rmsnorm_train_864e84f3d874f850c091__31_32": {
         "arches": [
             "sm_103a",
         ],
@@ -6222,12 +6223,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_07135550fae8b07bb82c",
+        "kernel": "cake_rmsnorm_train_864e84f3d874f850c091",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_07135550fae8b07bb82c",
+        "library": "cake_rmsnorm_train_864e84f3d874f850c091",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 31,
@@ -6236,12 +6237,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (32, 48] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.08x to 1.47x the det package's speed and 1.10x to 1.49x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_7b0f5a6a8769473c322e__32_48": {
+    # sm_103a H6144 residual bf16 weight: (32, 48] the column-task kernel 3a55646d (96 column tasks).
+    "cake_rmsnorm_train_3a55646d574035bfa271__32_48": {
         "arches": [
             "sm_103a",
         ],
@@ -6256,12 +6257,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "kernel": "cake_rmsnorm_train_3a55646d574035bfa271",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7b0f5a6a8769473c322e",
+        "library": "cake_rmsnorm_train_3a55646d574035bfa271",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 32,
@@ -6270,11 +6271,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (48, 56] backward time 0.69x the det pair's at T 8 and 0.93x at T 56 (GB300); from T 56 to 304 the det pair runs (1.04-1.10x faster at T 57 to 64 and 280 to 304); T 1 to 48 runs the fixed-claim column-task form
+    # sm_103a H6144 residual bf16 weight: (48, 56] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__48_56": {
         "arches": [
             "sm_103a",
@@ -6304,11 +6305,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (304, 1920] backward time 0.88x the det pair's at T 312, 0.85x at T 512, 0.89x at T 1024 and 0.95x at T 1792 (GB300); level at T 1920, from where the det pair runs (1.04x faster at T 1984)
+    # sm_103a H6144 residual bf16 weight: (304, 1920] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__304_1920": {
         "arches": [
             "sm_103a",
@@ -6338,11 +6339,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (320, 1824] benchmark ratio < 1 against the det pair in both sessions (GB300; 0.95x at T 1824); the det pair runs above T 1824 (1.03x faster at T 1832 to 1856)
+    # sm_103a H6144 residual f32 weight: (320, 1824] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__320_1824": {
         "arches": [
             "sm_103a",
@@ -6372,12 +6373,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (7168, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.6 to 555 us at T 7169 to 131072, 0.80x to 0.81x the time of the twosum single kernel c07ab5f1 that this package's previous version runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.047x that of the deterministic package's program in its earlier version, except 1.133x at T 8192 (saturated_lo inputs), equal to c07ab5f1's there
-    "cake_rmsnorm_train_16c5f0465183f87c5229__7168_131072": {
+    # sm_107a H6144 residual bf16 weight: (7168, 131072] the part-row single kernel 853d4447 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_853d4447e18f114f5da5__7168_131072": {
         "arches": [
             "sm_107a",
         ],
@@ -6392,12 +6393,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_16c5f0465183f87c5229",
+        "kernel": "cake_rmsnorm_train_853d4447e18f114f5da5",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_16c5f0465183f87c5229",
+        "library": "cake_rmsnorm_train_853d4447e18f114f5da5",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 7168,
@@ -6407,11 +6408,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (131072, inf] above the pair-row single's measured range (16c5f046 runs (7168, 131072]), the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the worst dw element of the single kernel it replaces exceeds the per-element budget at T 127424 (1.014, measured with FP32 weight; the BF16-weight program computes the same dw) on R200 with 212 SMs; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 7169 to 131072 (65 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.96x to 0.98x the single kernel's at T 7169, 32768, 65536, 98304 and 131072 in two sessions (R200, 212 SMs); faster than the deterministic package's program for those token counts too (0.95x to 0.99x its time at the same T)
-    "cake_rmsnorm_train_c07ab5f16934c0cc8421__131072_inf": {
+    # sm_107a H6144 residual bf16 weight: (131072, inf] the single kernel 87d2866c (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_87d2866c1ea3bcc08b13__131072_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -6425,12 +6426,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_c07ab5f16934c0cc8421",
+        "kernel": "cake_rmsnorm_train_87d2866c1ea3bcc08b13",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c07ab5f16934c0cc8421",
+        "library": "cake_rmsnorm_train_87d2866c1ea3bcc08b13",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 131072,
@@ -6439,12 +6440,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_107a H6144 residual f32 weight: (7168, 131072] the FP32-weight twin of the pair-row single kernel of the BF16-weight route (table_slots 4; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 41.0 to 556 us at T 7169 to 131072, 0.78x to 0.82x the time of the twosum single kernel e655055e that this package's previous version runs there, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.025x that of the deterministic package's program in its earlier version
-    "cake_rmsnorm_train_999d4acb1d1a4e0cbef0__7168_131072": {
+    # sm_107a H6144 residual f32 weight: (7168, 131072] the part-row single kernel b394bc75 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_b394bc75f9df18f002f2__7168_131072": {
         "arches": [
             "sm_107a",
         ],
@@ -6459,12 +6460,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_999d4acb1d1a4e0cbef0",
+        "kernel": "cake_rmsnorm_train_b394bc75f9df18f002f2",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_999d4acb1d1a4e0cbef0",
+        "library": "cake_rmsnorm_train_b394bc75f9df18f002f2",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 7168,
@@ -6474,11 +6475,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_107a H6144 residual f32 weight: (131072, inf] above the pair-row single's measured range (999d4acb runs (7168, 131072]), the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the worst dw element of the single kernel it replaces exceeds the per-element budget at T 127424 (1.014) on R200 with 212 SMs; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 7169 to 131072 (131 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.96x to 0.99x the single kernel's at T 14337, 32768, 65536, 98304 and 131072 in two sessions (R200, 212 SMs); faster than the deterministic package's program for those token counts too (0.95x to 0.97x its time at the same T)
-    "cake_rmsnorm_train_e655055ead76f8df4d24__131072_inf": {
+    # sm_107a H6144 residual f32 weight: (131072, inf] the single kernel 64758944 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_647589443d4915ca8fde__131072_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -6492,12 +6493,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_e655055ead76f8df4d24",
+        "kernel": "cake_rmsnorm_train_647589443d4915ca8fde",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_e655055ead76f8df4d24",
+        "library": "cake_rmsnorm_train_647589443d4915ca8fde",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 131072,
@@ -6506,11 +6507,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (576, 3584] backward time 1.009-1.046x the det pair's at T 1024 in four timing sessions (R200, 212 SMs)
+    # sm_107a H6144 residual bf16 weight: (576, 3584] the column-task kernel 864e84f3 (96 column tasks).
     "cake_rmsnorm_train_864e84f3d874f850c091__576_3584": {
         "arches": [
             "sm_107a",
@@ -6540,11 +6541,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (768, 3584] backward time 1.039-1.050x the det pair's at T 1024 in four timing sessions (R200, 212 SMs)
+    # sm_107a H6144 residual f32 weight: (768, 3584] the column-task kernel 71d36617 (96 column tasks).
     "cake_rmsnorm_train_71d36617003ab7742a77__768_3584": {
         "arches": [
             "sm_107a",
@@ -6574,12 +6575,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H256 bf16 weight: (524288, inf] the twosum form with an L2 warm-up: exact per-thread dw sums, so the dw error does not grow with T (from 92160 to 524288 rows the deterministic package's det pair runs: its worst dw element stays within 0.69 of the per-element budget at the sampled row counts from 80896 to 524288 rows on B200, both weight dtypes, worst of 60 inputs of each of three families, and exceeds the budget above 864240 rows)
-    "cake_rmsnorm_train_172a47a15d4c1a76c061": {
+    # sm_100a H256 bf16 weight: (524288, inf] the single kernel 44ef3141 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_44ef314181f3f2e93293": {
         "arches": [
             "sm_100a",
         ],
@@ -6593,12 +6594,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "kernel": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "library": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "role": "bwd_main",
         "select_rule": {
             "above": 524288,
@@ -6607,12 +6608,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    # sm_100a H256 bf16 weight: (20480, 92160] the twosum form with an L2 warm-up: exact per-thread dw sums, so the dw error does not grow with T, and no slower than the plain form above 20480 rows; from 92160 to 524288 rows the deterministic package's det pair for those rows runs (main kernel 083ea823, dw reduce b4b63d5b: faster at every sampled row count above 98304 on B200, level with this form from 80896 to 92160 rows)
-    "cake_rmsnorm_train_172a47a15d4c1a76c061__20480_92160": {
+    # sm_100a H256 bf16 weight: (20480, 92160] the single kernel 44ef3141 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_44ef314181f3f2e93293__20480_92160": {
         "arches": [
             "sm_100a",
         ],
@@ -6626,12 +6627,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "kernel": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "library": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "role": "bwd_main",
         "select_rule": {
             "above": 20480,
@@ -6640,11 +6641,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    "cake_rmsnorm_train_083ea823c691e0631ad3__92160_524288": {
+    "cake_rmsnorm_train_a385ae1681a2c078344e__92160_524288": {
         "arches": [
             "sm_100a",
         ],
@@ -6658,12 +6659,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 92160,
@@ -6675,7 +6676,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_b4b63d5b5028c7a60333__92160_524288": {
+    "cake_rmsnorm_train_affa1b95f68bab8c411b__92160_524288": {
         "arches": [
             "sm_100a",
         ],
@@ -6684,12 +6685,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "kernel": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "library": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 92160,
@@ -6698,8 +6699,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H256 f32 weight: (92160, 864240] the dw reduce of the det pair c4c89f0d of that window (the BF16-weight route keeps b4b63d5b__92160_524288)
-    "cake_rmsnorm_train_b4b63d5b5028c7a60333__92160_864240": {
+    # sm_100a H256 f32 weight: (92160, 864240] the dw reduce of the det pair 420788e6 of that window (the BF16-weight route keeps affa1b95__92160_524288)
+    "cake_rmsnorm_train_affa1b95f68bab8c411b__92160_864240": {
         "arches": [
             "sm_100a",
         ],
@@ -6708,12 +6709,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "kernel": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "library": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 92160,
@@ -6722,8 +6723,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H256 f32 weight: (864240, inf] the twosum form with an L2 warm-up: exact per-thread dw sums, so the dw error does not grow with T (from 92160 to 864240 rows the deterministic package's det pair runs: its worst dw element stays within 0.69 of the per-element budget at the sampled row counts from 80896 to 524288 rows on B200, worst of 60 inputs of each of three families, and within 0.52 at 589824, 786432 and 864240 rows, worst of 100 inputs of each of two families; against the FP64 reference at the FP64 rstd it reaches 1.11 of the budget at 864264 rows)
-    "cake_rmsnorm_train_7c2aa4b429538da06a2a__864240_inf": {
+    # sm_100a H256 f32 weight: (864240, inf] the single kernel b71bbe98 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_b71bbe9852c16fe03114__864240_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -6737,12 +6738,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "kernel": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "library": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 864240,
@@ -6751,12 +6752,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    # sm_100a H256 f32 weight: (20480, 92160] the twosum form with an L2 warm-up: exact per-thread dw sums, so the dw error does not grow with T, and no slower than the plain form above 20480 rows; from 92160 to 524288 rows the deterministic package's det pair for those rows runs (main kernel c4c89f0d, dw reduce b4b63d5b; one cut with the BF16-weight route)
-    "cake_rmsnorm_train_7c2aa4b429538da06a2a__20480_92160": {
+    # sm_100a H256 f32 weight: (20480, 92160] the single kernel b71bbe98 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_b71bbe9852c16fe03114__20480_92160": {
         "arches": [
             "sm_100a",
         ],
@@ -6770,12 +6771,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "kernel": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "library": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 20480,
@@ -6784,12 +6785,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 2048,
         },
     },
-    # sm_100a H256 f32 weight: (92160, 864240] the deterministic package's det pair of these rows (main kernel c4c89f0d and fixed-order dw reduce b4b63d5b with that package's host plan, det record (80896, 1572864]), renamed into this package and cut to this window (the BF16-weight route cuts its pair at 524288 rows); from 524288 rows for speed: on B200 its backward took 0.887x to 0.899x the time of the twosum single 7c2aa4b4 at 524304 to 864240 rows (benchmark, L2 flushed before every call, two runs), and it is the program the deterministic package in its earlier version runs there
-    "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__92160_864240": {
+    # sm_100a H256 f32 weight: (92160, 864240] the deterministic package's det pair main kernel 420788e6 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_420788e663a2c3a810f6__92160_864240": {
         "arches": [
             "sm_100a",
         ],
@@ -6803,12 +6804,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 92160,
@@ -6820,8 +6821,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H6144 residual bf16 weight: (1920, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 25.7 to 909 us at T 1921 to 131072, 0.84x to 0.94x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program in its earlier version
-    "cake_rmsnorm_train_601fb35c90bc116731b1__1920_131072": {
+    # sm_103a H6144 residual bf16 weight: (1920, 131072] the part-row single kernel aac3ebbf (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_aac3ebbf0e11c453c472__1920_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -6835,12 +6836,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_601fb35c90bc116731b1",
+        "kernel": "cake_rmsnorm_train_aac3ebbf0e11c453c472",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_601fb35c90bc116731b1",
+        "library": "cake_rmsnorm_train_aac3ebbf0e11c453c472",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 1920,
@@ -6850,11 +6851,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (131072, inf] above the pair-row single's measured range, the twosum form of the single kernel (its knobs plus twosum: exact per-thread dw sums, so the dw error does not grow with T) for dw accuracy: the plain form's 32-row FP32 dw sums put its worst dw error at 1.28x to 3.56x the deterministic package's median FP64 error over 5 repeats at T 14928 to 32768 on GB300 (BF16 weight, all five input families); within 3 % of the plain form's time
-    "cake_rmsnorm_train_52831494c1b62db758fd": {
+    # sm_103a H6144 residual bf16 weight: (131072, inf] the single kernel 115dcc71 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_115dcc719a6de4b079f1": {
         "arches": [
             "sm_103a",
         ],
@@ -6868,12 +6869,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_52831494c1b62db758fd",
+        "kernel": "cake_rmsnorm_train_115dcc719a6de4b079f1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_52831494c1b62db758fd",
+        "library": "cake_rmsnorm_train_115dcc719a6de4b079f1",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 131072,
@@ -6882,12 +6883,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 98304,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 49152,
         },
     },
-    # sm_103a H6144 residual f32 weight: (1824, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 24.3 to 907 us at T 1825 to 131072, 0.85x to 0.92x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 1.0x that of, except 1.2x at T 98304 (equal to the twosum single's there), the deterministic package's program in its earlier version; the FP32-weight twin computes the BF16-weight program's dw
-    "cake_rmsnorm_train_cf1cf64436893a2a2d03__1824_131072": {
+    # sm_103a H6144 residual f32 weight: (1824, 131072] the part-row single kernel 5fbcc18d (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_5fbcc18d24f37f0ba607__1824_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -6901,12 +6902,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_cf1cf64436893a2a2d03",
+        "kernel": "cake_rmsnorm_train_5fbcc18d24f37f0ba607",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cf1cf64436893a2a2d03",
+        "library": "cake_rmsnorm_train_5fbcc18d24f37f0ba607",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 1824,
@@ -6916,11 +6917,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_103a H6144 residual f32 weight: (131072, inf] above the pair-row single's measured range, the twosum form of the single kernel (its knobs plus twosum: exact per-thread dw sums, so the dw error does not grow with T) for dw accuracy: the plain form's 32-row FP32 dw sums put its worst dw error at 1.28x to 3.56x the deterministic package's median FP64 error over 5 repeats at T 14928 to 32768 on GB300 (BF16 weight, all five input families); the FP32-weight twins compute the same dw; within 3 % of the plain form's time
-    "cake_rmsnorm_train_56c46a201c168050aa60": {
+    # sm_103a H6144 residual f32 weight: (131072, inf] the single kernel 3c390339 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_3c390339fa8c82311a0a": {
         "arches": [
             "sm_103a",
         ],
@@ -6934,12 +6935,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_56c46a201c168050aa60",
+        "kernel": "cake_rmsnorm_train_3c390339fa8c82311a0a",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_56c46a201c168050aa60",
+        "library": "cake_rmsnorm_train_3c390339fa8c82311a0a",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 131072,
@@ -6948,12 +6949,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 98304,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 49152,
         },
     },
-    # sm_103a H1536 bf16 weight: (46592, 53184] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.241 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.403 of the budget at the sampled T up to 53184
-    "cake_rmsnorm_train_1df502fd0e17091869b7__46592_53184": {
+    # sm_103a H1536 bf16 weight: (46592, 53184] the single kernel 20d7a230 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_20d7a230ed8dc161a93a__46592_53184": {
         "arches": [
             "sm_103a",
         ],
@@ -6967,12 +6968,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1df502fd0e17091869b7",
+        "kernel": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1df502fd0e17091869b7",
+        "library": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
         "role": "bwd_main",
         "select_rule": {
             "above": 46592,
@@ -6981,12 +6982,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 bf16 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.72x to 0.82x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 65 to 214 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_53285b9598170177d3e0__64_214": {
+    # sm_103a H1536 bf16 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80__64_214": {
         "arches": [
             "sm_103a",
         ],
@@ -7001,12 +7002,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_53285b9598170177d3e0",
+        "kernel": "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_53285b9598170177d3e0",
+        "library": "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80",
         "role": "bwd_main",
         "select_rule": {
             "above": 64,
@@ -7015,12 +7016,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (53184, 76352] the deterministic package's program as an ND pair for speed: backward 0.977-0.978 of the kblock single's time (R2-65 GB300 records); worst dw element 0.904 of the budget at the sampled T (GB300, at least 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_cbeae168d70edd196417__53184_76352": {
+    # sm_103a H1536 bf16 weight: (53184, 76352] the deterministic package's det pair main kernel 9cd3c766 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_9cd3c766db4b70ed7213__53184_76352": {
         "arches": [
             "sm_103a",
         ],
@@ -7034,12 +7035,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_cbeae168d70edd196417",
+        "kernel": "cake_rmsnorm_train_9cd3c766db4b70ed7213",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cbeae168d70edd196417",
+        "library": "cake_rmsnorm_train_9cd3c766db4b70ed7213",
         "role": "bwd_large",
         "select_rule": {
             "above": 53184,
@@ -7051,7 +7052,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_882ec880717f382e43eb__53184_76352": {
+    "cake_rmsnorm_train_1863320f3158d35eead6__53184_76352": {
         "arches": [
             "sm_103a",
         ],
@@ -7060,12 +7061,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_882ec880717f382e43eb",
+        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_882ec880717f382e43eb",
+        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 53184,
@@ -7074,8 +7075,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 bf16 weight: (76352, 131072] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.244 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.724 of the budget at the sampled T up to 131072
-    "cake_rmsnorm_train_1df502fd0e17091869b7__76352_131072": {
+    # sm_103a H1536 bf16 weight: (76352, 131072] the single kernel 20d7a230 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_20d7a230ed8dc161a93a__76352_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -7089,12 +7090,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1df502fd0e17091869b7",
+        "kernel": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1df502fd0e17091869b7",
+        "library": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
         "role": "bwd_main",
         "select_rule": {
             "above": 76352,
@@ -7103,12 +7104,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 bf16 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.446 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_327bfeb4ab8fefc2731d__131072_inf": {
+    # sm_103a H1536 bf16 weight: (131072, inf] the single kernel 3f75f4a8 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_3f75f4a81f2fb8269389__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7122,12 +7123,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_327bfeb4ab8fefc2731d",
+        "kernel": "cake_rmsnorm_train_3f75f4a81f2fb8269389",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_327bfeb4ab8fefc2731d",
+        "library": "cake_rmsnorm_train_3f75f4a81f2fb8269389",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -7136,12 +7137,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 f32 weight: (37888, 40448] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.256 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.416 of the budget at the sampled T up to 40448
-    "cake_rmsnorm_train_9a47ed21f63c848f2a59__37888_40448": {
+    # sm_103a H1536 f32 weight: (37888, 40448] the single kernel 17846048 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_178460487a7835e97912__37888_40448": {
         "arches": [
             "sm_103a",
         ],
@@ -7155,12 +7156,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_9a47ed21f63c848f2a59",
+        "kernel": "cake_rmsnorm_train_178460487a7835e97912",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9a47ed21f63c848f2a59",
+        "library": "cake_rmsnorm_train_178460487a7835e97912",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 37888,
@@ -7169,12 +7170,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 f32 weight: (40448, 76352] the deterministic package's program as an ND pair for speed: backward 0.962-0.972 of the kblock single's time (R2-65 GB300 records); worst dw element 0.904 of the budget at the sampled T (GB300, at least 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_ca6211f3ea2ce8c86a05__40448_76352": {
+    # sm_103a H1536 f32 weight: (40448, 76352] the deterministic package's det pair main kernel 51f46ff1 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_51f46ff164b142ec8888__40448_76352": {
         "arches": [
             "sm_103a",
         ],
@@ -7188,12 +7189,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_ca6211f3ea2ce8c86a05",
+        "kernel": "cake_rmsnorm_train_51f46ff164b142ec8888",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ca6211f3ea2ce8c86a05",
+        "library": "cake_rmsnorm_train_51f46ff164b142ec8888",
         "role": "bwd_large_w32",
         "select_rule": {
             "above": 40448,
@@ -7205,7 +7206,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_882ec880717f382e43eb__40448_76352": {
+    "cake_rmsnorm_train_1863320f3158d35eead6__40448_76352": {
         "arches": [
             "sm_103a",
         ],
@@ -7214,12 +7215,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_882ec880717f382e43eb",
+        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_882ec880717f382e43eb",
+        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 40448,
@@ -7228,8 +7229,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 f32 weight: (76352, 131072] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.253 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.707 of the budget at the sampled T up to 131072
-    "cake_rmsnorm_train_9a47ed21f63c848f2a59__76352_131072": {
+    # sm_103a H1536 f32 weight: (76352, 131072] the single kernel 17846048 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_178460487a7835e97912__76352_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -7243,12 +7244,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_9a47ed21f63c848f2a59",
+        "kernel": "cake_rmsnorm_train_178460487a7835e97912",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9a47ed21f63c848f2a59",
+        "library": "cake_rmsnorm_train_178460487a7835e97912",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 76352,
@@ -7257,12 +7258,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H1536 f32 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.363 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_963a7ca8d03f78bbe6f9__131072_inf": {
+    # sm_103a H1536 f32 weight: (131072, inf] the single kernel 7c0dd63f (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_7c0dd63f0b011049603e__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7276,12 +7277,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_963a7ca8d03f78bbe6f9",
+        "kernel": "cake_rmsnorm_train_7c0dd63f0b011049603e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_963a7ca8d03f78bbe6f9",
+        "library": "cake_rmsnorm_train_7c0dd63f0b011049603e",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -7290,12 +7291,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 24576,
         },
     },
-    # sm_103a H4096 bf16 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks), for speed: 0.84x to 0.89x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 33 to 152 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_ff0156d59b2b99144701__32_152": {
+    # sm_103a H4096 bf16 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks).
+    "cake_rmsnorm_train_12d53fe5b85b212fc800__32_152": {
         "arches": [
             "sm_103a",
         ],
@@ -7310,12 +7311,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_ff0156d59b2b99144701",
+        "kernel": "cake_rmsnorm_train_12d53fe5b85b212fc800",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ff0156d59b2b99144701",
+        "library": "cake_rmsnorm_train_12d53fe5b85b212fc800",
         "role": "bwd_main",
         "select_rule": {
             "above": 32,
@@ -7324,12 +7325,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H4096 bf16 weight: (10239, 65536] the pair-row single kernel with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; 128-thread CTAs of 32 items, two per SM, 128 helper CTAs) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 125.89 us and 237.73 us at T 32768 and 65536, 0.953x and 0.938x the time of the programs this package's previous version runs there (the det pair 35a0b0ca, the twosum single 8250eb92), with a dw error (relative L2 or worst element, the larger over six input families) of 0.975x and 0.860x that of the deterministic package's program in its earlier version; from T 10240 to 32768, where the det pair 35a0b0ca ran before, its backward took 0.940x to 0.959x the det pair's time on GB300 (benchmark, L2 flushed before every call, two runs at T 10240, 12288, 14928, 15288, 15566, 16114, 16164, 16384, 16385, 18432, 20480, 24576, 28672 and 32768), with a dw error of at most 0.979x the median of the deterministic package's program in its earlier version (six input families, three seeds, five repeats) at the gated T; the dw gate has not sampled T 10240 yet: it passes at T 8192 and 12288 next to it, and the worst dw element stays within 0.0006 of the per-element budget at T 8192 and 16384 (0.125 and 0.173 against the FP64-rstd reference); below T 10240 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at T 4097, 4608 and 8192
-    "cake_rmsnorm_train_06e5f7e09e42d1108365__10239_65536": {
+    # sm_103a H4096 bf16 weight: (10239, 65536] the part-row single kernel ef9f8d46 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_ef9f8d46c22e4af7aef1__10239_65536": {
         "arches": [
             "sm_103a",
         ],
@@ -7344,12 +7345,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_06e5f7e09e42d1108365",
+        "kernel": "cake_rmsnorm_train_ef9f8d46c22e4af7aef1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_06e5f7e09e42d1108365",
+        "library": "cake_rmsnorm_train_ef9f8d46c22e4af7aef1",
         "role": "bwd_main",
         "select_rule": {
             "above": 10239,
@@ -7359,11 +7360,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 32768,
+            "part_row_bytes": 16384,
         },
     },
-    # sm_103a H4096 bf16 weight: (65536, 262144] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 196 to 952 us at T 50688 to 262144, 0.97x to 0.98x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.86x that of the deterministic package's program in its earlier version
-    "cake_rmsnorm_train_3e6231b66942e510fdae__65536_262144": {
+    # sm_103a H4096 bf16 weight: (65536, 262144] the part-row single kernel f0aebb74 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_f0aebb74650c8dc3f128__65536_262144": {
         "arches": [
             "sm_103a",
         ],
@@ -7377,12 +7378,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_3e6231b66942e510fdae",
+        "kernel": "cake_rmsnorm_train_f0aebb74650c8dc3f128",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3e6231b66942e510fdae",
+        "library": "cake_rmsnorm_train_f0aebb74650c8dc3f128",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -7392,11 +7393,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 32768,
+            "part_row_bytes": 16384,
         },
     },
-    # sm_103a H4096 bf16 weight: (262144, inf] the twosum single above T 262144, the top of the pair-row single's measured range, for dw accuracy (above T 50176 the det pair's worst dw element exceeds the per-element budget at T 50688 on GB300, 1.032 of it); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 393216 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd); the kblock single, 1.01 times its speed in the benchmark (GB300, 4 sessions), put its worst dw error at 1.36x the deterministic package's median FP64 error over 5 repeats at T 65536 on GB300 (concentrated inputs, one of three seeds): its 8-row FP32 blocks have the deterministic package's error, at block boundaries that change from run to run
-    "cake_rmsnorm_train_8c8bebecc5b08454b6a0__262144_inf": {
+    # sm_103a H4096 bf16 weight: (262144, inf] the single kernel 35888fb3 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_35888fb3b729e1f8e239__262144_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7410,12 +7411,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_8c8bebecc5b08454b6a0",
+        "kernel": "cake_rmsnorm_train_35888fb3b729e1f8e239",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_8c8bebecc5b08454b6a0",
+        "library": "cake_rmsnorm_train_35888fb3b729e1f8e239",
         "role": "bwd_main",
         "select_rule": {
             "above": 262144,
@@ -7424,12 +7425,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_107a H256 bf16 weight: (786432, inf] the twosum form with an L2 warm-up (172a47a1): exact per-thread dw sums, so the dw error does not grow with T, and no slower than the plain form above 36864 rows; it stays above 786432 rows, where the det pair exceeds the dw budget
-    "cake_rmsnorm_train_172a47a15d4c1a76c061__786432_inf": {
+    # sm_107a H256 bf16 weight: (786432, inf] the single kernel 44ef3141 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_44ef314181f3f2e93293__786432_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7443,12 +7444,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "kernel": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_172a47a15d4c1a76c061",
+        "library": "cake_rmsnorm_train_44ef314181f3f2e93293",
         "role": "bwd_main",
         "select_rule": {
             "above": 786432,
@@ -7457,12 +7458,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_107a H256 f32 weight: (786432, inf] the twosum form with an L2 warm-up (7c2aa4b4): exact per-thread dw sums, so the dw error does not grow with T, and no slower than the plain form above 36864 rows; it stays above 786432 rows, where the det pair exceeds the dw budget
-    "cake_rmsnorm_train_7c2aa4b429538da06a2a__786432_inf": {
+    # sm_107a H256 f32 weight: (786432, inf] the single kernel b71bbe98 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_b71bbe9852c16fe03114__786432_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7476,12 +7477,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "kernel": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7c2aa4b429538da06a2a",
+        "library": "cake_rmsnorm_train_b71bbe9852c16fe03114",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 786432,
@@ -7490,12 +7491,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 4096,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_107a H4096 bf16 weight: (65536, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the single kernel it replaces exceeds the per-element budget at T 119040 (1.181) on R200 with 212 SMs, and so does the deterministic package's program for those token counts, at T 74610 (1.168, worst of 120 inputs of each of three families in both rstd forms); the window keeps its start at T 65536 until a follow-up has qualifying evidence for either program above it; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 65537 to 131072 (130 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.04x to 1.09x the single kernel's at T 65537, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_5e9d7baa36814bb7aaf6__65536_inf": {
+    # sm_107a H4096 bf16 weight: (65536, inf] the single kernel f11a8616 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_f11a86167db4f8e9a5da__65536_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7509,12 +7510,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_5e9d7baa36814bb7aaf6",
+        "kernel": "cake_rmsnorm_train_f11a86167db4f8e9a5da",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_5e9d7baa36814bb7aaf6",
+        "library": "cake_rmsnorm_train_f11a86167db4f8e9a5da",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -7523,12 +7524,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 131072,
         },
     },
-    # sm_107a H4096 f32 weight: (24064, 65536] the deterministic package's compensated det pair of these rows (main kernel fa3d4fc5, the FP32-weight twin of 99a01f2a, and fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the single kernel a1f537fc it replaces (this package's previous version runs the same one there) put its worst dw error at 1.340x, 1.244x and 1.547x the median FP64 error of the deterministic package in its earlier version (its fa3d4fc5 pair) over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_lo and concentrated inputs); the deterministic package in its earlier version runs this pair at every T above 24064, the deterministic package now up to T 50176; its time and its worst dw error in this window are not measured yet
-    "cake_rmsnorm_train_fa3d4fc5dbd76348b31a__24064_65536": {
+    # sm_107a H4096 f32 weight: (24064, 65536] the deterministic package's det pair main kernel 0ff440da with its fixed-order dw reduce.
+    "cake_rmsnorm_train_0ff440daa6f9f304e544__24064_65536": {
         "arches": [
             "sm_107a",
         ],
@@ -7542,12 +7543,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_fa3d4fc5dbd76348b31a",
+        "kernel": "cake_rmsnorm_train_0ff440daa6f9f304e544",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_fa3d4fc5dbd76348b31a",
+        "library": "cake_rmsnorm_train_0ff440daa6f9f304e544",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 24064,
@@ -7559,8 +7560,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 f32 weight: (65536, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the single kernel it replaces exceeds the per-element budget at T 114422 (1.211) and the deterministic package's program for those token counts at T 88074 (1.050), worst of 120 inputs of each of three families in both rstd forms on R200 with 212 SMs; the window keeps its start at T 65536 until a follow-up has qualifying evidence for either program above it; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 65537 to 131072 (130 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.08x to 1.13x the single kernel's at T 65537, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_23cee954b648495ceef1__65536_inf": {
+    # sm_107a H4096 f32 weight: (65536, inf] the single kernel a1f537fc (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_a1f537fc94bde175bb3c__65536_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7574,12 +7575,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_23cee954b648495ceef1",
+        "kernel": "cake_rmsnorm_train_a1f537fc94bde175bb3c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_23cee954b648495ceef1",
+        "library": "cake_rmsnorm_train_a1f537fc94bde175bb3c",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -7588,12 +7589,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 131072,
         },
     },
-    # sm_107a H6144 bf16 weight: (30720, 131072] the pair-row single kernel with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 110 to 434 us at T 30721 to 131072, 0.87x to 0.90x the time of the twosum single kernel 083b5f2e that this package's previous version runs there (0.97x that of the deterministic package's program at T 32768 and 65536), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.963x that of the deterministic package's program in its earlier version, equal to 083b5f2e's
-    "cake_rmsnorm_train_3edefef1a5b4b9561a13__30720_131072": {
+    # sm_107a H6144 bf16 weight: (30720, 131072] the part-row single kernel ffbcfda2 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_ffbcfda26d306410e01f__30720_131072": {
         "arches": [
             "sm_107a",
         ],
@@ -7608,12 +7609,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_3edefef1a5b4b9561a13",
+        "kernel": "cake_rmsnorm_train_ffbcfda26d306410e01f",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3edefef1a5b4b9561a13",
+        "library": "cake_rmsnorm_train_ffbcfda26d306410e01f",
         "role": "bwd_main",
         "select_rule": {
             "above": 30720,
@@ -7623,11 +7624,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_107a H6144 bf16 weight: (131072, inf] above the pair-row single's measured range (3edefef1 runs (30720, 131072]), the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the deterministic package's program for those token counts, faster here, exceeds the per-element budget at T 131072 (1.234) on R200 with 212 SMs, and its FP32-weight twin (the same dw computation) at T 98826 (1.098, worst of 120 inputs of each of three families in both rstd forms); the single kernel it replaces exceeds it at T 129472 (1.188, measured with FP32 weight; the BF16-weight program computes the same dw); its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 30721 to 131072 (65 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.78x to 0.81x the single kernel's at T 30721, 65536, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_083b5f2e2a0d1b4f1c82__131072_inf": {
+    # sm_107a H6144 bf16 weight: (131072, inf] the single kernel ddedaa3b (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_ddedaa3be7466a4faa97__131072_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7641,12 +7642,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_083b5f2e2a0d1b4f1c82",
+        "kernel": "cake_rmsnorm_train_ddedaa3be7466a4faa97",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_083b5f2e2a0d1b4f1c82",
+        "library": "cake_rmsnorm_train_ddedaa3be7466a4faa97",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -7655,11 +7656,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_107a H6144 f32 weight: (2304, 19456] the single kernel whose twosum form runs (28672, inf), for dw accuracy: the pair of (20, 28672] exceeded the FP32 eager reference's dw error at 18 sampled T from 4544 to 19264 on R200 with 212 SMs (the deterministic package runs the same pair there); its worst dw error stays at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges on R200, worst of 60 inputs of each of three families in both rstd forms
+    # sm_107a H6144 f32 weight: (2304, 19456] the single kernel e77387f1 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_e77387f14390ba486055__2304_19456": {
         "arches": [
             "sm_107a",
@@ -7688,12 +7689,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_107a H6144 f32 weight: (28672, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the single kernel it replaces exceeds the per-element budget at T 129472 (1.188) on R200 with 212 SMs, and so does the deterministic package's program for those token counts, faster here, at T 98826 (1.098, worst of 120 inputs of each of three families in both rstd forms); the window keeps its start at T 28672 until a follow-up has qualifying evidence for the deterministic package's program above it; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 28673 to 131072 (65 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.80x to 0.84x the single kernel's at T 28673, 65536, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_25f9b466fa418dd2afc4__28672_inf": {
+    # sm_107a H6144 f32 weight: (28672, inf] the single kernel e77387f1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_e77387f14390ba486055__28672_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -7707,12 +7708,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_25f9b466fa418dd2afc4",
+        "kernel": "cake_rmsnorm_train_e77387f14390ba486055",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_25f9b466fa418dd2afc4",
+        "library": "cake_rmsnorm_train_e77387f14390ba486055",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 28672,
@@ -7721,12 +7722,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 196608,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_103a H4096 f32 weight: (65536, 262144] above the det pairs of the deterministic package's earlier version (faster up to T 65536 on GB300; not measured above); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs): worst dw element 0.670 of the budget at 71 sampled T from 9217 to 131072 on GB300 (3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.01 to 1.07 times the twosum single's speed in the benchmark (GB300, 4 sessions); up to T 262144, the largest sampled T at or below which its worst dw element stays within the per-element budget (0.933 of it); at T 393216 it is 1.038 of it (GB300, 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_2911faf7a786144495a6__65536_262144": {
+    # sm_103a H4096 f32 weight: (65536, 262144] the single kernel bd22da7e (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_bd22da7e2d4914167050__65536_262144": {
         "arches": [
             "sm_103a",
         ],
@@ -7740,12 +7741,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_2911faf7a786144495a6",
+        "kernel": "cake_rmsnorm_train_bd22da7e2d4914167050",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2911faf7a786144495a6",
+        "library": "cake_rmsnorm_train_bd22da7e2d4914167050",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -7754,12 +7755,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_103a H4096 f32 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks), for speed: 0.84x to 0.88x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 33 to 152 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_11820fe48711775d5685__32_152": {
+    # sm_103a H4096 f32 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks).
+    "cake_rmsnorm_train_27615d0e36c9f2fe0856__32_152": {
         "arches": [
             "sm_103a",
         ],
@@ -7774,12 +7775,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_11820fe48711775d5685",
+        "kernel": "cake_rmsnorm_train_27615d0e36c9f2fe0856",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_11820fe48711775d5685",
+        "library": "cake_rmsnorm_train_27615d0e36c9f2fe0856",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 32,
@@ -7788,12 +7789,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H4096 f32 weight: (262144, inf] the twosum single above T 262144 for dw accuracy (the kblock single below exceeds the per-element budget at T 393216, 1.038 of it, on GB300); twosum: exact per-thread dw sums, so the dw error does not grow with T: worst dw element 0.0006 of the budget at the sampled T from 393216 to 1048576 on GB300 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_131a495c5897206b6874__262144_inf": {
+    # sm_103a H4096 f32 weight: (262144, inf] the single kernel 36790f79 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_36790f79b8845172d188__262144_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7807,12 +7808,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_131a495c5897206b6874",
+        "kernel": "cake_rmsnorm_train_36790f79b8845172d188",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_131a495c5897206b6874",
+        "library": "cake_rmsnorm_train_36790f79b8845172d188",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 262144,
@@ -7821,12 +7822,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_103a H6144 bf16 weight: (24575, 65536] the pair-row single kernel with 96 helper CTAs and its chunk table cut for 6 slots per SM (table_slots 6: more, shorter chunks than CTAs, the grid unchanged) for speed: on GB300 (CUDA graph replay, cold L2, 7 rounds) it took 183.78 us and 351.71 us at T 32768 and 65536, 0.969x and 0.962x the time of the programs this package's previous version runs there (the det pair 322574af, the kblock single 87e0b860), with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.961x that of the deterministic package's program in its earlier version; from T 24576 to 32768, where the det pair 322574af ran before, its backward took 0.972x to 0.980x the det pair's time on GB300 (benchmark, L2 flushed before every call, two runs at T 24576, 28672 and 32768), with a dw error of at most 0.907x the median of the deterministic package's program in its earlier version (six input families, three seeds, five repeats); below T 24576 the det pair stays: there a forward and backward call or a training step was slower with this kernel in both runs at some sampled T
-    "cake_rmsnorm_train_f5806bd223b2ad27230a__24575_65536": {
+    # sm_103a H6144 bf16 weight: (24575, 65536] the part-row single kernel 455174e1 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_455174e1a3be71c79452__24575_65536": {
         "arches": [
             "sm_103a",
         ],
@@ -7841,12 +7842,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_f5806bd223b2ad27230a",
+        "kernel": "cake_rmsnorm_train_455174e1a3be71c79452",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_f5806bd223b2ad27230a",
+        "library": "cake_rmsnorm_train_455174e1a3be71c79452",
         "role": "bwd_main",
         "select_rule": {
             "above": 24575,
@@ -7856,11 +7857,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_103a H6144 bf16 weight: (65536, 131072] the pair-row single kernel (twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on GB300 (CUDA graph replay, cold L2) it took 315 to 699 us at T 57345 to 131072, 0.97x to 0.99x the time of the programs this package's previous version runs at those T, with a dw error (relative L2 or worst element, the larger over six input families) of at most 0.972x that of the deterministic package's program in its earlier version
-    "cake_rmsnorm_train_7236b7379272c82c7614__65536_131072": {
+    # sm_103a H6144 bf16 weight: (65536, 131072] the part-row single kernel 850fba46 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_850fba46397a84b8cd7b__65536_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -7874,12 +7875,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_7236b7379272c82c7614",
+        "kernel": "cake_rmsnorm_train_850fba46397a84b8cd7b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7236b7379272c82c7614",
+        "library": "cake_rmsnorm_train_850fba46397a84b8cd7b",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -7889,11 +7890,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 49152,
+            "part_row_bytes": 24576,
         },
     },
-    # sm_103a H6144 bf16 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.864 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_582b2a20f9be648af8ec__131072_inf": {
+    # sm_103a H6144 bf16 weight: (131072, inf] the single kernel 38337af1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_38337af146209d6a60ea__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7907,12 +7908,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_582b2a20f9be648af8ec",
+        "kernel": "cake_rmsnorm_train_38337af146209d6a60ea",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_582b2a20f9be648af8ec",
+        "library": "cake_rmsnorm_train_38337af146209d6a60ea",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -7921,12 +7922,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 98304,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 49152,
         },
     },
-    # sm_103a H6144 f32 weight: (49152, 83392] the deterministic package's program as an ND pair for speed: backward 0.952-0.974 of the kblock single's time (R2-65 GB300 records); worst dw element 0.997 of the budget at the sampled T (GB300, at least 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_aa46aa07d86900ad832f__49152_83392": {
+    # sm_103a H6144 f32 weight: (49152, 83392] the deterministic package's det pair main kernel 9a8c0396 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_9a8c0396edd85d4d545e__49152_83392": {
         "arches": [
             "sm_103a",
         ],
@@ -7940,12 +7941,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_aa46aa07d86900ad832f",
+        "kernel": "cake_rmsnorm_train_9a8c0396edd85d4d545e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_aa46aa07d86900ad832f",
+        "library": "cake_rmsnorm_train_9a8c0396edd85d4d545e",
         "role": "bwd_mid_w32",
         "select_rule": {
             "above": 49152,
@@ -7980,8 +7981,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 f32 weight: (83392, 131072] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.028-1.044 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.699 of the budget at the sampled T up to 131072
-    "cake_rmsnorm_train_935b8bea9166f29912ff__83392_131072": {
+    # sm_103a H6144 f32 weight: (83392, 131072] the single kernel cb1aee12 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_cb1aee125561ad8d4e29__83392_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -7995,12 +7996,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_935b8bea9166f29912ff",
+        "kernel": "cake_rmsnorm_train_cb1aee125561ad8d4e29",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_935b8bea9166f29912ff",
+        "library": "cake_rmsnorm_train_cb1aee125561ad8d4e29",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 83392,
@@ -8009,12 +8010,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 98304,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 49152,
         },
     },
-    # sm_103a H6144 f32 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.736 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_4f9a76e68671f213ab7c__131072_inf": {
+    # sm_103a H6144 f32 weight: (131072, inf] the single kernel 5a635713 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_5a635713b08645d57f48__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -8028,12 +8029,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_4f9a76e68671f213ab7c",
+        "kernel": "cake_rmsnorm_train_5a635713b08645d57f48",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_4f9a76e68671f213ab7c",
+        "library": "cake_rmsnorm_train_5a635713b08645d57f48",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -8042,12 +8043,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 98304,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 49152,
         },
     },
-    # sm_107a H2048 bf16 weight: (50176, 50688] above T 50176 for dw accuracy (the det pair 845cdcd8's worst dw element reaches 0.900 of the per-element budget at T 51200 on R200 with 212 SMs; the deterministic package's compensated det pair 694decfb runs from T 50688 to 65536); twosum: exact per-thread dw sums
-    "cake_rmsnorm_train_1a3df5ac020055477581__50176_50688": {
+    # sm_107a H2048 bf16 weight: (50176, 50688] the single kernel 395fedeb (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_395fedebf0299f78a745__50176_50688": {
         "arches": [
             "sm_107a",
         ],
@@ -8061,12 +8062,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_1a3df5ac020055477581",
+        "kernel": "cake_rmsnorm_train_395fedebf0299f78a745",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1a3df5ac020055477581",
+        "library": "cake_rmsnorm_train_395fedebf0299f78a745",
         "role": "bwd_main",
         "select_rule": {
             "above": 50176,
@@ -8075,12 +8076,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
         },
     },
-    # sm_107a H2048 bf16 weight: (50688, 65536] the deterministic package's det pair of these rows (its compensated program over 8-row blocks: main kernel 694decfb and fixed-order dw reduce c4d8be67 with that package's host plan, det record (50688, inf]), renamed into this package and cut to this window, for speed: on R200 with 212 SMs its backward took 0.831x to 0.854x the time of the twosum single 1a3df5ac at the sampled T from 50689 to 65536 (benchmark, L2 flushed before every call, two runs), its worst dw element stays within 0.58 of the per-element budget at T 50689, 57344 and 65536 (212 SMs, 45 inputs), and it is the program the deterministic package in its earlier version runs there
-    "cake_rmsnorm_train_694decfb79ba96468f62__50688_65536": {
+    # sm_107a H2048 bf16 weight: (50688, 65536] the deterministic package's det pair main kernel 21ee6fc9 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_21ee6fc93139c5e0cd41__50688_65536": {
         "arches": [
             "sm_107a",
         ],
@@ -8094,12 +8095,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_694decfb79ba96468f62",
+        "kernel": "cake_rmsnorm_train_21ee6fc93139c5e0cd41",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_694decfb79ba96468f62",
+        "library": "cake_rmsnorm_train_21ee6fc93139c5e0cd41",
         "role": "bwd_large",
         "select_rule": {
             "above": 50688,
@@ -8134,8 +8135,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H2048 bf16 weight: (65536, inf] above T 65536, the largest token count the dw gate against the deterministic package in its earlier version samples on this route (the compensated det pair 694decfb runs below, from T 50688); twosum: exact per-thread dw sums
-    "cake_rmsnorm_train_1a3df5ac020055477581__65536_inf": {
+    # sm_107a H2048 bf16 weight: (65536, inf] the single kernel 395fedeb (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_395fedebf0299f78a745__65536_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -8149,12 +8150,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_1a3df5ac020055477581",
+        "kernel": "cake_rmsnorm_train_395fedebf0299f78a745",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1a3df5ac020055477581",
+        "library": "cake_rmsnorm_train_395fedebf0299f78a745",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -8163,12 +8164,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
         },
     },
-    # sm_107a H2048 f32 weight: (50176, inf] above T 50176 for dw accuracy (both weight dtypes switch at T 50176: the BF16-weight route's det pair, the same dw computation, reaches 0.900 of the per-element budget at T 51200 on R200 with 212 SMs; this route's det pair reaches 0.895 at T 57344 in the kernel-tests harness and 0.861 at T 61952 on R200 with 212 SMs); twosum: exact per-thread dw sums
-    "cake_rmsnorm_train_810989bdea464df479ce": {
+    # sm_107a H2048 f32 weight: (50176, inf] the single kernel e90d94fc (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_e90d94fcdd76f08fe027": {
         "arches": [
             "sm_107a",
         ],
@@ -8182,12 +8183,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_810989bdea464df479ce",
+        "kernel": "cake_rmsnorm_train_e90d94fcdd76f08fe027",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_810989bdea464df479ce",
+        "library": "cake_rmsnorm_train_e90d94fcdd76f08fe027",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 50176,
@@ -8196,12 +8197,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
         },
     },
-    # sm_107a H2048 f32 weight: (1024, 16384] the single kernel of (50176, inf) for dw accuracy: the pair of the window exceeded the FP32 eager reference's dw error at T 1280 (torch rstd), 1728 and 1984 on R200 with 212 SMs (the deterministic package runs the same pair there); its worst dw error stays at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges on R200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_810989bdea464df479ce__1024_16384": {
+    # sm_107a H2048 f32 weight: (1024, 16384] the single kernel e90d94fc (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_e90d94fcdd76f08fe027__1024_16384": {
         "arches": [
             "sm_107a",
         ],
@@ -8215,12 +8216,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_810989bdea464df479ce",
+        "kernel": "cake_rmsnorm_train_e90d94fcdd76f08fe027",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_810989bdea464df479ce",
+        "library": "cake_rmsnorm_train_e90d94fcdd76f08fe027",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 1024,
@@ -8229,12 +8230,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
         },
     },
-    # sm_107a H1536 bf16 weight: (65536, inf] the twosum form of the single kernel (its knobs plus twosum and l2_ahead 2; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the deterministic package's program for those token counts, faster here, exceeds the per-element budget at T 91148 (1.026, worst of 120 inputs of each of three families in both rstd forms) and at T 124992 (1.098) on R200 with 212 SMs; the single kernel it replaces exceeds it at T 1048576 (2.259, worst of 120 inputs of each of three families in both rstd forms); the window keeps its start at T 65536 until a follow-up has qualifying evidence for the deterministic package's program above it; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 66624 to 131072 (54 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.79x to 0.80x the single kernel's at T 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_dca25ace64c075a81625__65536_inf": {
+    # sm_107a H1536 bf16 weight: (65536, inf] the single kernel c93d0266 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_c93d0266065acad326fb__65536_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -8248,12 +8249,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_dca25ace64c075a81625",
+        "kernel": "cake_rmsnorm_train_c93d0266065acad326fb",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_dca25ace64c075a81625",
+        "library": "cake_rmsnorm_train_c93d0266065acad326fb",
         "role": "bwd_main",
         "select_rule": {
             "above": 65536,
@@ -8262,11 +8263,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 129024,
         },
     },
-    # sm_107a H1536 f32 weight: (1024, 16384] the single kernel whose twosum form runs (65536, inf), for dw accuracy: the pair of the window exceeded the FP32 eager reference's dw error at T 1264 (torch rstd) on R200 with 212 SMs (the deterministic package runs the same pair there); its worst dw error stays at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges on R200, worst of 60 inputs of each of three families in both rstd forms
+    # sm_107a H1536 f32 weight: (1024, 16384] the single kernel 7c0dd63f (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_7c0dd63f0b011049603e__1024_16384": {
         "arches": [
             "sm_107a",
@@ -8295,12 +8296,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 129024,
         },
     },
-    # sm_107a H1536 f32 weight: (65536, inf] the twosum form of the single kernel (its knobs plus twosum and l2_ahead 2; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the deterministic package's program for those token counts, faster here, exceeds the per-element budget at T 106874 (1.018, worst of 120 inputs of each of three families in both rstd forms) and at T 131072 (1.119) on R200 with 212 SMs, and its BF16-weight twin (the same dw computation) at T 91148 (1.026); the single kernel it replaces exceeds it at T 118719 (1.049, worst of 120 inputs of each of three families in both rstd forms); the window keeps its start at T 65536 until a follow-up has qualifying evidence for the deterministic package's program above it; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 66624 to 131072 (54 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.79x to 0.80x the single kernel's at T 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_ccd94d87e9036a0b2faf__65536_inf": {
+    # sm_107a H1536 f32 weight: (65536, inf] the single kernel c9dc9e43 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_c9dc9e43af546ff815d3__65536_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -8314,12 +8315,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_ccd94d87e9036a0b2faf",
+        "kernel": "cake_rmsnorm_train_c9dc9e43af546ff815d3",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ccd94d87e9036a0b2faf",
+        "library": "cake_rmsnorm_train_c9dc9e43af546ff815d3",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -8328,11 +8329,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 49152,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 129024,
         },
     },
-    # sm_107a H512 f32 weight: (1024, 4096] for dw accuracy (the det pair's worst dw error exceeds the FP32 eager reference's at T 1088, 0.0896 against 0.0861 of the per-element budget, and at T 1664, 1920 and 2368 on R200 with 212 SMs; the det pair of (4096, 16384], run at these T, does too at T 1088 and 2048)
+    # sm_107a H512 f32 weight: (1024, 4096] the single kernel fd08c6f4 (FP32 dw sums added in FP32 in no fixed order).
     "cake_rmsnorm_train_fd08c6f436eb6071fa22__1024_4096": {
         "arches": [
             "sm_107a",
@@ -8361,12 +8362,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 bf16 weight: (58880, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 3 stages): from T 58880 to 65536 for dw accuracy, it replaces the single kernel 0fa4f255, whose FP32 dw sums over windows of 16 steps put its worst dw error at 1.20x the median FP64 error of the det pair the deterministic package ran there in its earlier version over 5 repeats at T 65536 on B200 (saturated_hi inputs); that det pair (0cb817d1 + d0960be9) reaches 0.883 of the per-element budget at T 59392 on B200, above this package's 0.85 det pair margin; above T 65536 it replaces the twosum single 83f905ff for speed up to T 131072; worst dw element 0.7531 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd), not yet sampled from T 58881 to 65536; above T 131072, beyond the sampled token counts, the twosum single 83f905ff keeps the window; backward time 0.86 to 0.87 times the replaced single's above T 65536 (B200)
-    "cake_rmsnorm_train_8b8cf4f5b82e77554908": {
+    # sm_100a H2048 bf16 weight: (58880, 131072] the single kernel 8404aa43 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_8404aa4380f6db7259cc": {
         "arches": [
             "sm_100a",
         ],
@@ -8380,12 +8381,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_8b8cf4f5b82e77554908",
+        "kernel": "cake_rmsnorm_train_8404aa4380f6db7259cc",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_8b8cf4f5b82e77554908",
+        "library": "cake_rmsnorm_train_8404aa4380f6db7259cc",
         "role": "bwd_main",
         "select_rule": {
             "above": 58880,
@@ -8394,12 +8395,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the single kernel it replaces stays within the per-element budget at every sampled T above T 65536, worst 0.887 at T 110016, on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.10x to 1.13x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_83f905ffd00c0ef641e2__131072_inf": {
+    # sm_100a H2048 bf16 weight: (131072, inf] the single kernel 0fa4f255 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_0fa4f255caf709d09f66__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -8413,12 +8414,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_83f905ffd00c0ef641e2",
+        "kernel": "cake_rmsnorm_train_0fa4f255caf709d09f66",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_83f905ffd00c0ef641e2",
+        "library": "cake_rmsnorm_train_0fa4f255caf709d09f66",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -8427,12 +8428,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 25068ede, the FP32-weight twin of 0cb817d1, and dw reduce d0960be9 with that package's host plan), renamed into this package, for dw accuracy at the single kernel's speed: the single kernel ba7dbf6a it replaces keeps within 1.1x the deterministic package's median dw error at T 65536 on B200 on the median rule only (off the gate's rows), and the det pair took 0.994x its backward time there
-    "cake_rmsnorm_train_25068edea92269e1bdb1__58880_65536": {
+    # sm_100a H2048 f32 weight: (58880, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 7e6a0b63, the FP32-weight twin of ceeef043, and dw reduce d0960be9 with that package's host plan), renamed into this package.
+    "cake_rmsnorm_train_7e6a0b631aea3edf51f9__58880_65536": {
         "arches": [
             "sm_100a",
         ],
@@ -8446,12 +8447,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_25068edea92269e1bdb1",
+        "kernel": "cake_rmsnorm_train_7e6a0b631aea3edf51f9",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_25068edea92269e1bdb1",
+        "library": "cake_rmsnorm_train_7e6a0b631aea3edf51f9",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 58880,
@@ -8486,8 +8487,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_100a H2048 f32 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in the shared row, evict_last loads, 3 stages): it replaces the twosum single 9f775c72 for speed up to T 131072; worst dw element 0.7771 of the budget and at or below the FP32 eager reference's at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single 9f775c72 keeps the window; backward time 0.86 times the replaced single's (B200)
-    "cake_rmsnorm_train_273d3f9b357669a821e2": {
+    # sm_100a H2048 f32 weight: (65536, 131072] the single kernel 54f6e4b8 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_54f6e4b8d937f7fb5619": {
         "arches": [
             "sm_100a",
         ],
@@ -8501,12 +8502,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_273d3f9b357669a821e2",
+        "kernel": "cake_rmsnorm_train_54f6e4b8d937f7fb5619",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_273d3f9b357669a821e2",
+        "library": "cake_rmsnorm_train_54f6e4b8d937f7fb5619",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -8515,12 +8516,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 65536,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
-    # sm_100a H2048 f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the single kernel it replaces stays within the per-element budget at every sampled T above T 65536, worst 0.942 at T 112240, on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.11x to 1.14x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_9f775c72c1335f4b08ac__131072_inf": {
+    # sm_100a H2048 f32 weight: (131072, inf] the single kernel ba7dbf6a (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_ba7dbf6a07744268705e__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -8534,12 +8535,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_9f775c72c1335f4b08ac",
+        "kernel": "cake_rmsnorm_train_ba7dbf6a07744268705e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9f775c72c1335f4b08ac",
+        "library": "cake_rmsnorm_train_ba7dbf6a07744268705e",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -8548,11 +8549,109 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_35a0b0ca6b2060313255__44032_65536": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 1,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 4096,
+        "kernel": "cake_rmsnorm_train_35a0b0ca6b2060313255",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_35a0b0ca6b2060313255",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 44032,
+            "at_most": 65536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 128,
+            "kind": "chunk_partials",
+        },
+    },
+    # sm_100a H4096 bf16 weight: (65536, 131072] the single kernel cda582bb (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_cda582bb216e6776b449": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 4096,
+        "kernel": "cake_rmsnorm_train_cda582bb216e6776b449",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_cda582bb216e6776b449",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 65536,
+            "at_most": 131072,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 3,
+            "kind": "claim_sum_f32",
             "sum_bytes": 65536,
         },
     },
-    "cake_rmsnorm_train_7122dbcd697b3fbe1ee0__44032_65536": {
+    # sm_100a H4096 bf16 weight: (131072, inf] the single kernel 15e157d2 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_15e157d2ee9080d206a9__131072_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 4096,
+        "kernel": "cake_rmsnorm_train_15e157d2ee9080d206a9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_15e157d2ee9080d206a9",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 131072,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 3,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
+        },
+    },
+    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 626aed74, the FP32-weight twin of 35a0b0ca, and dw reduce fcbfa14d with that package's host plan), renamed into this package.
+    "cake_rmsnorm_train_626aed743358c27513f1__44032_65536": {
         "arches": [
             "sm_100a",
         ],
@@ -8566,110 +8665,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_7122dbcd697b3fbe1ee0",
+        "kernel": "cake_rmsnorm_train_626aed743358c27513f1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7122dbcd697b3fbe1ee0",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 44032,
-            "at_most": 65536,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 128,
-            "kind": "chunk_partials",
-        },
-    },
-    # sm_100a H4096 bf16 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; help finish, pairs in the shared row, evict_last loads, 3 stages): it replaces the twosum single c67fc8b9 for speed up to T 131072; worst dw element 0.8311 of the budget at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single c67fc8b9 keeps the window; backward time 0.96 to 0.97 times the replaced single's (B200)
-    "cake_rmsnorm_train_fd7ae1d7547fca6156a0": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 1,
-            "tail_div": 12,
-        },
-        "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_fd7ae1d7547fca6156a0",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_fd7ae1d7547fca6156a0",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 65536,
-            "at_most": 131072,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
-        },
-    },
-    # sm_100a H4096 bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the worst dw element of the single kernel it replaces at the sampled T above T 65536 reaches 0.987 of the per-element budget, at T 120192, on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.00x to 1.01x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_c67fc8b9d1b1edb8d7da__131072_inf": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 1,
-            "tail_div": 12,
-        },
-        "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_c67fc8b9d1b1edb8d7da",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_c67fc8b9d1b1edb8d7da",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 131072,
-            "at_most": None,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
-        },
-    },
-    # sm_100a H4096 f32 weight: (44032, 65536] the FP32-weight det pair the deterministic package runs here (main kernel 5ef5f1f1, the FP32-weight twin of 7122dbcd, and dw reduce fcbfa14d with that package's host plan), renamed into this package, for dw accuracy: the single kernel f7573bcb, which this package's previous version runs here, put its worst dw element at 1.554x, 1.537x and 2.006x the deterministic package's (its earlier version) at T 45056, 49152 and 65536 on B200 (concentrated inputs; 5, 5 and 3 of 5 repeats above 1.1x), and the det pair took 0.990x, 0.997x and 0.978x its time there
-    "cake_rmsnorm_train_5ef5f1f13ed8f2b994c4__44032_65536": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 1,
-            "tail_div": 12,
-        },
-        "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_5ef5f1f13ed8f2b994c4",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_5ef5f1f13ed8f2b994c4",
+        "library": "cake_rmsnorm_train_626aed743358c27513f1",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 44032,
@@ -8681,8 +8682,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H4096 f32 weight: (65536, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; help finish, pairs in the shared row, evict_last loads, 3 stages): it replaces the twosum single 9ebd0232 for speed up to T 131072; worst dw element 0.8588 of the budget and at or below the FP32 eager reference's at the sampled T from 65537 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single 9ebd0232 keeps the window; backward time 0.96 to 0.97 times the replaced single's (B200)
-    "cake_rmsnorm_train_6e65495154249f51e74b": {
+    # sm_100a H4096 f32 weight: (65536, 131072] the single kernel 3a10d379 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_3a10d379e6a7ae778964": {
         "arches": [
             "sm_100a",
         ],
@@ -8696,12 +8697,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_6e65495154249f51e74b",
+        "kernel": "cake_rmsnorm_train_3a10d379e6a7ae778964",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_6e65495154249f51e74b",
+        "library": "cake_rmsnorm_train_3a10d379e6a7ae778964",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 65536,
@@ -8710,12 +8711,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_100a H4096 f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) up to T 131072, the top of the qualified range (the worst dw element of the single kernel it replaces at the sampled T above T 65536 reaches 0.907 of the per-element budget, at T 122112, on B200, worst of 60 inputs of each of three families in both rstd forms, not yet qualifying evidence); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 65537 to 131072 (82 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.00x to 1.01x the single kernel's at T 65537, 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_9ebd0232954f1b1842f7__131072_inf": {
+    # sm_100a H4096 f32 weight: (131072, inf] the single kernel f7573bcb (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_f7573bcb748c0784f3ec__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -8729,12 +8730,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_9ebd0232954f1b1842f7",
+        "kernel": "cake_rmsnorm_train_f7573bcb748c0784f3ec",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9ebd0232954f1b1842f7",
+        "library": "cake_rmsnorm_train_f7573bcb748c0784f3ec",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -8743,12 +8744,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 3,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 131072,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 65536,
         },
     },
-    # sm_103a H2048 bf16 weight: (61952, 68160] the deterministic package's program as an ND pair for speed: backward 0.968-0.972 of the kblock single's time (R2-65 GB300 records); worst dw element 0.962 of the budget at the sampled T (GB300, at least 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_018f0cd723106f709f11__61952_68160": {
+    # sm_103a H2048 bf16 weight: (61952, 68160] the deterministic package's det pair main kernel 302f64db with its fixed-order dw reduce.
+    "cake_rmsnorm_train_302f64db6abe79e5259e__61952_68160": {
         "arches": [
             "sm_103a",
         ],
@@ -8762,12 +8763,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_018f0cd723106f709f11",
+        "kernel": "cake_rmsnorm_train_302f64db6abe79e5259e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_018f0cd723106f709f11",
+        "library": "cake_rmsnorm_train_302f64db6abe79e5259e",
         "role": "bwd_main",
         "select_rule": {
             "above": 61952,
@@ -8802,8 +8803,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H2048 bf16 weight: (68160, 131072] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.082-1.084 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.782 of the budget at the sampled T up to 131072
-    "cake_rmsnorm_train_2c32330b326a6db3f77b__68160_131072": {
+    # sm_103a H2048 bf16 weight: (68160, 131072] the single kernel 87532fb0 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_87532fb038ad204517e1__68160_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -8817,12 +8818,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_2c32330b326a6db3f77b",
+        "kernel": "cake_rmsnorm_train_87532fb038ad204517e1",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2c32330b326a6db3f77b",
+        "library": "cake_rmsnorm_train_87532fb038ad204517e1",
         "role": "bwd_main",
         "select_rule": {
             "above": 68160,
@@ -8831,12 +8832,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 32768,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 16384,
         },
     },
-    # sm_103a H2048 bf16 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.444 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_8bd89a4c834f80db8a34__131072_inf": {
+    # sm_103a H2048 bf16 weight: (131072, inf] the single kernel 33e5c382 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_33e5c382e06419d65390__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -8850,12 +8851,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_8bd89a4c834f80db8a34",
+        "kernel": "cake_rmsnorm_train_33e5c382e06419d65390",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_8bd89a4c834f80db8a34",
+        "library": "cake_rmsnorm_train_33e5c382e06419d65390",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -8864,12 +8865,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 32768,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 16384,
         },
     },
-    # sm_103a H2048 f32 weight: (61952, 68160] the deterministic package's program as an ND pair for speed: backward 0.969-0.974 of the kblock single's time (R2-65 GB300 records); worst dw element 0.962 of the budget at the sampled T (GB300, at least 3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_ca8ca4674a3dbd89ad16__61952_68160": {
+    # sm_103a H2048 f32 weight: (61952, 68160] the deterministic package's det pair main kernel e98cb156 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e98cb156abfe1666c76f__61952_68160": {
         "arches": [
             "sm_103a",
         ],
@@ -8883,12 +8884,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_ca8ca4674a3dbd89ad16",
+        "kernel": "cake_rmsnorm_train_e98cb156abfe1666c76f",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ca8ca4674a3dbd89ad16",
+        "library": "cake_rmsnorm_train_e98cb156abfe1666c76f",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 61952,
@@ -8900,8 +8901,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 f32 weight: (68160, 131072] kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs) for speed: backward 1.151-1.155 times as fast as the twosum single (R2-65 GB300 record); worst dw element 0.661 of the budget at the sampled T up to 131072
-    "cake_rmsnorm_train_76e43a7d9c7ea1f59e0d__68160_131072": {
+    # sm_103a H2048 f32 weight: (68160, 131072] the single kernel 149b129c (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_149b129cdd1468145b13__68160_131072": {
         "arches": [
             "sm_103a",
         ],
@@ -8915,12 +8916,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_76e43a7d9c7ea1f59e0d",
+        "kernel": "cake_rmsnorm_train_149b129cdd1468145b13",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_76e43a7d9c7ea1f59e0d",
+        "library": "cake_rmsnorm_train_149b129cdd1468145b13",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 68160,
@@ -8929,12 +8930,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 32768,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 16384,
         },
     },
-    # sm_103a H2048 f32 weight: (64, 171] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.69x to 0.77x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 67 to 171 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_2e9171b7753650cda515__64_171": {
+    # sm_103a H2048 f32 weight: (64, 171] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_978741b43372951cb5b9__64_171": {
         "arches": [
             "sm_103a",
         ],
@@ -8949,12 +8950,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_2e9171b7753650cda515",
+        "kernel": "cake_rmsnorm_train_978741b43372951cb5b9",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2e9171b7753650cda515",
+        "library": "cake_rmsnorm_train_978741b43372951cb5b9",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -8963,12 +8964,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 f32 weight: (131072, inf] the twosum single above T 131072: the kblock single's dw accuracy is qualified to T 131072 only (its worst dw element is 1.383 of the budget at T 1048576 on GB300)
-    "cake_rmsnorm_train_88c6c6b2af1922f4c1a9__131072_inf": {
+    # sm_103a H2048 f32 weight: (131072, inf] the single kernel 1166d499 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_1166d499d4e846fcb2d6__131072_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -8982,12 +8983,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_88c6c6b2af1922f4c1a9",
+        "kernel": "cake_rmsnorm_train_1166d499d4e846fcb2d6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_88c6c6b2af1922f4c1a9",
+        "library": "cake_rmsnorm_train_1166d499d4e846fcb2d6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -8996,11 +8997,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 32768,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 16384,
         },
     },
-    "cake_rmsnorm_train_083ea823c691e0631ad3__97280_720896": {
+    "cake_rmsnorm_train_a385ae1681a2c078344e__97280_720896": {
         "arches": [
             "sm_103a",
         ],
@@ -9014,12 +9015,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 97280,
@@ -9031,7 +9032,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__97280_720896": {
+    "cake_rmsnorm_train_420788e663a2c3a810f6__97280_720896": {
         "arches": [
             "sm_103a",
         ],
@@ -9045,12 +9046,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 97280,
@@ -9062,7 +9063,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H1536 bf16 weight: (64, 384] the column-task form (16 columns per task): faster than the single kernel of (0, 14] and the det pair from 14 rows at every sampled T up to 384 on B200 in both sessions, level at 448 and slower from 512; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 14 on B200, 0.0048 against 0.0047 of the per-element budget); T 1 to 64 runs the fixed-claim column-task form
+    # sm_100a H1536 bf16 weight: (64, 384] the column-task kernel dc478ac1 (96 column tasks).
     "cake_rmsnorm_train_dc478ac1195882aedee6__64_384": {
         "arches": [
             "sm_100a",
@@ -9092,12 +9093,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H512 bf16 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 26] and the pair of (26, 1024] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB) (their time 1.18x to 1.33x its); the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 26 on B200, 0.0062 against 0.0061 of the per-element budget)
-    "cake_rmsnorm_train_5f3e3fccaea795d0a806__16_227": {
+    # sm_100a H512 bf16 weight: (16, 227] the column-task kernel 931757c8 (32 column tasks).
+    "cake_rmsnorm_train_931757c844a9d257c08b__16_227": {
         "arches": [
             "sm_100a",
         ],
@@ -9112,12 +9113,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_5f3e3fccaea795d0a806",
+        "kernel": "cake_rmsnorm_train_931757c844a9d257c08b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_5f3e3fccaea795d0a806",
+        "library": "cake_rmsnorm_train_931757c844a9d257c08b",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -9126,12 +9127,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (64, 384] the column-task form (16 columns per task; twosum: exact per-thread dw sums): the single kernel of (0, 64] exceeded the FP32 eager reference's dw error at T 3 on B200 (torch rstd); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 1 to 1152 on B200, worst of 60 inputs of each of three families in both rstd forms, and it is faster than the programs it replaces up to T 384; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 64 on B200, 0.0227 against 0.0203 of the per-element budget); T 1 to 64 runs the fixed-claim column-task form
-    "cake_rmsnorm_train_3ddc5ca5ad86c7725d7e__64_384": {
+    # sm_100a H1536 f32 weight: (64, 384] the column-task kernel e83ee45f (96 column tasks).
+    "cake_rmsnorm_train_e83ee45f66352eaef755__64_384": {
         "arches": [
             "sm_100a",
         ],
@@ -9146,12 +9147,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_3ddc5ca5ad86c7725d7e",
+        "kernel": "cake_rmsnorm_train_e83ee45f66352eaef755",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3ddc5ca5ad86c7725d7e",
+        "library": "cake_rmsnorm_train_e83ee45f66352eaef755",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -9160,12 +9161,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 f32 weight: (64, 1792] the column-task form (twosum: exact per-thread dw sums) for dw accuracy: the chunk-partials pairs of (22, 256] and (256, 6144] exceeded the FP32 eager reference's dw error at T 23 and 77 and at T 2752, 3840, 4224, 4352 and 5504 on B200 (the deterministic package runs the same pairs from T 122; up to T 121 it runs this kernel, with the same launch); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges (113 T) on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 0.34x to 1.27x the programs' it replaces at T 1, 4, 8, 13, 16, 22, 23, 77, 256, 1024, 1280, 1536 and 1792 in two sessions (B200); the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 22 on B200, 0.0134 against 0.0130 of the per-element budget); T 1 to 64 runs the fixed-claim column-task form
-    "cake_rmsnorm_train_68f6e584c687c30c0084__64_1792": {
+    # sm_100a H5120 f32 weight: (64, 1792] the column-task kernel 139d162a (80 column tasks).
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_1792": {
         "arches": [
             "sm_100a",
         ],
@@ -9180,12 +9181,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_68f6e584c687c30c0084",
+        "kernel": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_68f6e584c687c30c0084",
+        "library": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -9194,12 +9195,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 f32 weight: (16, 256] the det-new column-task program 440bd6f2 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.562x to 0.793x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
-    "cake_rmsnorm_train_440bd6f2a114414ea9db__16_256": {
+    # sm_107a H4096 f32 weight: (16, 256] the column-task program 30ec8bb6 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_30ec8bb68cf4fe0c817b__16_256": {
         "arches": [
             "sm_107a",
         ],
@@ -9214,12 +9215,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_440bd6f2a114414ea9db",
+        "kernel": "cake_rmsnorm_train_30ec8bb68cf4fe0c817b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_440bd6f2a114414ea9db",
+        "library": "cake_rmsnorm_train_30ec8bb68cf4fe0c817b",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -9228,12 +9229,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 bf16 weight: (2, 64] the fixed-claim column-task form (96 column tasks of 16 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.46x to 1.64x the det package's speed and 2.04x to 2.88x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 14 on B200, 0.0048 against 0.0047 of the per-element budget)
-    "cake_rmsnorm_train_38e972a94141a1961c90__2_64": {
+    # sm_100a H1536 bf16 weight: (2, 64] the column-task kernel 02e761bc (96 column tasks).
+    "cake_rmsnorm_train_02e761bcf94053af6fc3__2_64": {
         "arches": [
             "sm_100a",
         ],
@@ -9248,12 +9249,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_38e972a94141a1961c90",
+        "kernel": "cake_rmsnorm_train_02e761bcf94053af6fc3",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_38e972a94141a1961c90",
+        "library": "cake_rmsnorm_train_02e761bcf94053af6fc3",
         "role": "bwd_main",
         "select_rule": {
             "above": 2,
@@ -9262,12 +9263,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (2, 64] the fixed-claim column-task form (96 column tasks of 16 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.40x to 1.68x the det package's speed and 2.49x to 3.06x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 64 on B200, 0.0227 against 0.0203 of the per-element budget)
-    "cake_rmsnorm_train_d5a621af7a24e403b5f3__2_64": {
+    # sm_100a H1536 f32 weight: (2, 64] the column-task kernel 166e288c (96 column tasks).
+    "cake_rmsnorm_train_166e288c9192be6b994c__2_64": {
         "arches": [
             "sm_100a",
         ],
@@ -9282,12 +9283,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_d5a621af7a24e403b5f3",
+        "kernel": "cake_rmsnorm_train_166e288c9192be6b994c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d5a621af7a24e403b5f3",
+        "library": "cake_rmsnorm_train_166e288c9192be6b994c",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 2,
@@ -9296,12 +9297,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 f32 weight: (4, 64] the fixed-claim column-task form (80 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.16x to 1.41x the det package's speed and 1.71x to 3.79x the programs it replaces at every sampled T from 1 to 64 on B200 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on B200, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 22 on B200, 0.0134 against 0.0130 of the per-element budget)
-    "cake_rmsnorm_train_244b7d841d62d9721c99__4_64": {
+    # sm_100a H5120 f32 weight: (4, 64] the column-task kernel cb653957 (80 column tasks).
+    "cake_rmsnorm_train_cb6539573725ac861f94__4_64": {
         "arches": [
             "sm_100a",
         ],
@@ -9316,12 +9317,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_244b7d841d62d9721c99",
+        "kernel": "cake_rmsnorm_train_cb6539573725ac861f94",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_244b7d841d62d9721c99",
+        "library": "cake_rmsnorm_train_cb6539573725ac861f94",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 4,
@@ -9330,12 +9331,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (5, 64] the fixed-claim column-task form (96 column tasks of 16 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.31x to 1.59x the det package's speed and 1.44x to 3.77x the programs it replaces at every sampled T from 1 to 64 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 14 on GB300, 0.0048 against 0.0047 of the per-element budget)
-    "cake_rmsnorm_train_38e972a94141a1961c90__0_64_103": {
+    # sm_103a H1536 bf16 weight: (5, 64] the column-task kernel 02e761bc (96 column tasks).
+    "cake_rmsnorm_train_02e761bcf94053af6fc3__0_64_103": {
         "arches": [
             "sm_103a",
         ],
@@ -9350,12 +9351,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_38e972a94141a1961c90",
+        "kernel": "cake_rmsnorm_train_02e761bcf94053af6fc3",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_38e972a94141a1961c90",
+        "library": "cake_rmsnorm_train_02e761bcf94053af6fc3",
         "role": "bwd_main",
         "select_rule": {
             "above": 5,
@@ -9364,12 +9365,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 bf16 weight: (16, 63] the fixed-claim column-task form (64 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.17x to 1.62x the det package's speed and 1.24x to 4.56x the programs it replaces at every sampled T from 1 to 64 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 12 on GB300, 0.0047 against 0.0045 of the per-element budget)
-    "cake_rmsnorm_train_ef052c0918725ffa68d4__16_63": {
+    # sm_103a H2048 bf16 weight: (16, 63] the column-task kernel 518cf16a (64 column tasks).
+    "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_63": {
         "arches": [
             "sm_103a",
         ],
@@ -9384,12 +9385,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "kernel": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "library": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -9398,12 +9399,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 bf16 weight: (63, 171] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.69x to 0.86x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 64 to 171 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_2b4c0f5b0e9c312fa43e__63_171": {
+    # sm_103a H2048 bf16 weight: (63, 171] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_ed36a8d998abba41f227__63_171": {
         "arches": [
             "sm_103a",
         ],
@@ -9418,12 +9419,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_2b4c0f5b0e9c312fa43e",
+        "kernel": "cake_rmsnorm_train_ed36a8d998abba41f227",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2b4c0f5b0e9c312fa43e",
+        "library": "cake_rmsnorm_train_ed36a8d998abba41f227",
         "role": "bwd_main",
         "select_rule": {
             "above": 63,
@@ -9432,12 +9433,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 bf16 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel 083ea823 and fixed-order dw reduce b4b63d5b with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight; the BF16-weight single computes the same dw); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
-    "cake_rmsnorm_train_083ea823c691e0631ad3__64_1080": {
+    # sm_103a H256 bf16 weight: (64, 1080] the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package.
+    "cake_rmsnorm_train_a385ae1681a2c078344e__64_1080": {
         "arches": [
             "sm_103a",
         ],
@@ -9451,12 +9452,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 64,
@@ -9468,8 +9469,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H5120 bf16 weight: (4, 16] the fixed-claim column-task form (80 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.03x to 1.44x the det package's speed and 1.02x to 1.44x the programs it replaces at every sampled T from 1 to 64 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 22 on GB300, 0.0134 against 0.0119 of the per-element budget)
-    "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__4_16": {
+    # sm_103a H5120 bf16 weight: (4, 16] the column-task kernel 29bcbde1 (80 column tasks).
+    "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_16": {
         "arches": [
             "sm_103a",
         ],
@@ -9484,12 +9485,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "kernel": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "library": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "role": "bwd_main",
         "select_rule": {
             "above": 4,
@@ -9498,12 +9499,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (6, 64] the fixed-claim column-task form (96 column tasks of 16 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.33x to 1.57x the det package's speed and 2.73x to 3.69x the programs it replaces at every sampled T from 1 to 64 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 320 on GB300, 0.0596 against 0.0583 of the per-element budget, and at T 64, 0.0227 against 0.0203)
-    "cake_rmsnorm_train_d5a621af7a24e403b5f3__0_64_103": {
+    # sm_103a H1536 f32 weight: (6, 64] the column-task kernel 166e288c (96 column tasks).
+    "cake_rmsnorm_train_166e288c9192be6b994c__0_64_103": {
         "arches": [
             "sm_103a",
         ],
@@ -9518,12 +9519,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_d5a621af7a24e403b5f3",
+        "kernel": "cake_rmsnorm_train_166e288c9192be6b994c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d5a621af7a24e403b5f3",
+        "library": "cake_rmsnorm_train_166e288c9192be6b994c",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 6,
@@ -9532,12 +9533,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.38x to 0.42x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 65 to 214 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_5c5be9a6aeac20fd2776__64_214": {
+    # sm_103a H1536 f32 weight: (64, 214] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_698c3d36d67408394ccf__64_214": {
         "arches": [
             "sm_103a",
         ],
@@ -9552,12 +9553,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_5c5be9a6aeac20fd2776",
+        "kernel": "cake_rmsnorm_train_698c3d36d67408394ccf",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_5c5be9a6aeac20fd2776",
+        "library": "cake_rmsnorm_train_698c3d36d67408394ccf",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -9566,12 +9567,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H2048 f32 weight: (16, 64] the fixed-claim column-task form (64 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.23x to 1.57x the det package's speed and 1.21x to 4.32x the programs it replaces at every sampled T from 1 to 64 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 26 on GB300, 0.0152 against 0.0134 of the per-element budget, and at T 42 in the kernel-tests harness, 0.0205 against 0.0189)
-    "cake_rmsnorm_train_382e45788ace3ff40ba1__0_64_103": {
+    # sm_103a H2048 f32 weight: (16, 64] the column-task kernel c2f08c95 (64 column tasks).
+    "cake_rmsnorm_train_c2f08c957d4b0f17dddd__0_64_103": {
         "arches": [
             "sm_103a",
         ],
@@ -9586,12 +9587,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_382e45788ace3ff40ba1",
+        "kernel": "cake_rmsnorm_train_c2f08c957d4b0f17dddd",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_382e45788ace3ff40ba1",
+        "library": "cake_rmsnorm_train_c2f08c957d4b0f17dddd",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -9600,12 +9601,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H256 f32 weight: (64, 1080] rows the deterministic package's det pair of these rows (main kernel c4c89f0d and fixed-order dw reduce b4b63d5b with that package's host plan), renamed into this package, for dw accuracy: the single kernel it replaces rounds every row's dw product to FP32, which put its worst dw error at up to 3.46x the det pair's median FP64 error over 5 repeats at T 1 of the [T, 4, 256] and [T, 24, 256] views on GB300 (FP32 weight); the det pair also took 0.84x to 0.88x the single's backward time there (GB300, CUDA-graph span, 4 sessions)
-    "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__64_1080": {
+    # sm_103a H256 f32 weight: (64, 1080] the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce affa1b95 with that package's host plan), renamed into this package.
+    "cake_rmsnorm_train_420788e663a2c3a810f6__64_1080": {
         "arches": [
             "sm_103a",
         ],
@@ -9619,12 +9620,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -9636,8 +9637,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (16, 32] the fixed-claim column-task form (128 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.28x to 1.44x the det package's speed and 1.40x to 4.45x the programs it replaces at every sampled T from 1 to 32 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 15 on GB300, 0.0105 against 0.0092 of the per-element budget)
-    "cake_rmsnorm_train_c1b9ee6b9f10766cd537__16_32": {
+    # sm_103a H4096 f32 weight: (16, 32] the column-task kernel 8274f36f (128 column tasks).
+    "cake_rmsnorm_train_8274f36f6fd2f50dd508__16_32": {
         "arches": [
             "sm_103a",
         ],
@@ -9652,12 +9653,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_c1b9ee6b9f10766cd537",
+        "kernel": "cake_rmsnorm_train_8274f36f6fd2f50dd508",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c1b9ee6b9f10766cd537",
+        "library": "cake_rmsnorm_train_8274f36f6fd2f50dd508",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -9666,12 +9667,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H5120 f32 weight: (5, 16] the fixed-claim column-task form (80 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.03x to 1.47x the det package's speed and 1.03x to 5.03x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 22 on GB300, 0.0134 against 0.0130 of the per-element budget)
-    "cake_rmsnorm_train_244b7d841d62d9721c99__5_16": {
+    # sm_103a H5120 f32 weight: (5, 16] the column-task kernel cb653957 (80 column tasks).
+    "cake_rmsnorm_train_cb6539573725ac861f94__5_16": {
         "arches": [
             "sm_103a",
         ],
@@ -9686,12 +9687,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_244b7d841d62d9721c99",
+        "kernel": "cake_rmsnorm_train_cb6539573725ac861f94",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_244b7d841d62d9721c99",
+        "library": "cake_rmsnorm_train_cb6539573725ac861f94",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 5,
@@ -9700,12 +9701,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 f32 weight: (12, 16] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.03x to 1.53x the det package's speed and 1.04x to 1.53x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 20 on GB300, 0.0147 against 0.0138 of the per-element budget)
-    "cake_rmsnorm_train_9b37923697ee8ca52a9e__12_16": {
+    # sm_103a H6144 f32 weight: (12, 16] the column-task kernel f4d41a09 (96 column tasks).
+    "cake_rmsnorm_train_f4d41a0991647b82ac21__12_16": {
         "arches": [
             "sm_103a",
         ],
@@ -9720,12 +9721,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_9b37923697ee8ca52a9e",
+        "kernel": "cake_rmsnorm_train_f4d41a0991647b82ac21",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9b37923697ee8ca52a9e",
+        "library": "cake_rmsnorm_train_f4d41a0991647b82ac21",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 12,
@@ -9734,12 +9735,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (10, 31] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.08x to 1.55x the det package's speed and 1.07x to 1.92x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 6 on GB300, 0.0067 against 0.0063 of the per-element budget)
-    "cake_rmsnorm_train_ac9d69f94aabfc68aa40__10_31": {
+    # sm_103a H6144 residual f32 weight: (10, 31] the column-task kernel 6e0d06ab (96 column tasks).
+    "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__10_31": {
         "arches": [
             "sm_103a",
         ],
@@ -9754,12 +9755,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "kernel": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "library": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 10,
@@ -9768,12 +9769,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks), for speed: 0.81x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 17 to 32 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_570eec506ed94f36f062__31_32": {
+    # sm_103a H6144 residual f32 weight: (31, 32] the deterministic package's column-task program of these token counts (96 column tasks).
+    "cake_rmsnorm_train_71d36617003ab7742a77__31_32": {
         "arches": [
             "sm_103a",
         ],
@@ -9788,12 +9789,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_570eec506ed94f36f062",
+        "kernel": "cake_rmsnorm_train_71d36617003ab7742a77",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_570eec506ed94f36f062",
+        "library": "cake_rmsnorm_train_71d36617003ab7742a77",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 31,
@@ -9802,12 +9803,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (32, 48] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.08x to 1.55x the det package's speed and 1.07x to 1.92x the programs it replaces at every sampled T from 1 to 48 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 6 on GB300, 0.0067 against 0.0063 of the per-element budget)
-    "cake_rmsnorm_train_ac9d69f94aabfc68aa40__32_48": {
+    # sm_103a H6144 residual f32 weight: (32, 48] the column-task kernel 6e0d06ab (96 column tasks).
+    "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__32_48": {
         "arches": [
             "sm_103a",
         ],
@@ -9822,12 +9823,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "kernel": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ac9d69f94aabfc68aa40",
+        "library": "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 32,
@@ -9836,12 +9837,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 bf16 weight: (16, 320] the det-new column-task program 9e71ed0d of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.660x to 0.941x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 35 of them inside this window)
-    "cake_rmsnorm_train_9e71ed0d9ad7a7739002__16_320": {
+    # sm_107a H1536 bf16 weight: (16, 320] the column-task program 1207b056 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_1207b05663ed2b4de14b__16_320": {
         "arches": [
             "sm_107a",
         ],
@@ -9856,12 +9857,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_9e71ed0d9ad7a7739002",
+        "kernel": "cake_rmsnorm_train_1207b05663ed2b4de14b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9e71ed0d9ad7a7739002",
+        "library": "cake_rmsnorm_train_1207b05663ed2b4de14b",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -9870,12 +9871,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 bf16 weight: (16, 31] the fixed-claim column-task form (64 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.14x to 1.52x the det package's speed and 1.14x to 3.00x the programs it replaces at every sampled T from 1 to 64 on R200 with 212 SMs (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on R200 with 212 SMs, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 6 on R200 with 212 SMs, 0.0028 against 0.0027 of the per-element budget)
-    "cake_rmsnorm_train_ef052c0918725ffa68d4__16_31": {
+    # sm_107a H2048 bf16 weight: (16, 31] the column-task kernel 518cf16a (64 column tasks).
+    "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_31": {
         "arches": [
             "sm_107a",
         ],
@@ -9890,12 +9891,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "kernel": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ef052c0918725ffa68d4",
+        "library": "cake_rmsnorm_train_518cf16a7bf8e88042ee",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -9904,12 +9905,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 bf16 weight: (31, 256] the det-new column-task program 32eb12e2 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.648x to 0.928x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 58 of them inside this window)
-    "cake_rmsnorm_train_32eb12e27be1360b890d__31_256": {
+    # sm_107a H2048 bf16 weight: (31, 256] the column-task program 6720b4a1 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_6720b4a159be2b84b325__31_256": {
         "arches": [
             "sm_107a",
         ],
@@ -9924,12 +9925,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_32eb12e27be1360b890d",
+        "kernel": "cake_rmsnorm_train_6720b4a159be2b84b325",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_32eb12e27be1360b890d",
+        "library": "cake_rmsnorm_train_6720b4a159be2b84b325",
         "role": "bwd_main",
         "select_rule": {
             "above": 31,
@@ -9938,12 +9939,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H256 bf16 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel 083ea823 and fixed-order dw reduce b4b63d5b, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.806x to 0.952x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows its FP32-weight twin exceeds the dw budget (1.057 at 1271400 rows) and this pair computes the same dw, so the ND program stays there
-    "cake_rmsnorm_train_083ea823c691e0631ad3__64_786432": {
+    # sm_107a H256 bf16 weight: (64, 786432] the deterministic package's det pair of these rows (main kernel a385ae16 and fixed-order dw reduce 312bbe08), renamed into this package.
+    "cake_rmsnorm_train_a385ae1681a2c078344e__64_786432": {
         "arches": [
             "sm_107a",
         ],
@@ -9957,12 +9958,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_083ea823c691e0631ad3",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 64,
@@ -9974,21 +9975,21 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_786432": {
+    "cake_rmsnorm_train_312bbe084eac69d858c4__64_786432": {
         "arches": [
             "sm_107a",
         ],
         "grid_rule": {
-            "ctas": 64,
+            "ctas": 8,
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "kernel": "cake_rmsnorm_train_312bbe084eac69d858c4",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "library": "cake_rmsnorm_train_312bbe084eac69d858c4",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 64,
@@ -9997,8 +9998,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H256 f32 weight: (64, 786432] rows the det-new pair (#8813) of the deterministic package, main kernel c4c89f0d and fixed-order dw reduce b4b63d5b, renamed into this package (the copies sm_100a and sm_103a already run); faster than the ND program at every sampled row count up to 786432 in two R200 records with 212 SMs (30 row counts of the flat, per-head [T, 24, 256] and [T, 4, 256] views, det/ND 0.761x to 0.946x over both records) and in a VR200 screen; worst dw element 0.713 of the per-element budget up to 786432 rows (120 inputs x 3 families per sampled row count), 0.723 in an earlier flat and [T, 24, 256] run above 36864 rows; above 786432 rows this pair exceeds the dw budget (1.057 at 1271400 rows), so the ND program stays there
-    "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__64_786432": {
+    # sm_107a H256 f32 weight: (64, 786432] the deterministic package's det pair of these rows (main kernel 420788e6 and fixed-order dw reduce 312bbe08), renamed into this package.
+    "cake_rmsnorm_train_420788e663a2c3a810f6__64_786432": {
         "arches": [
             "sm_107a",
         ],
@@ -10012,12 +10013,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -10029,8 +10030,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H512 f32 weight: (16, 384] the det-new column-task program 685b53bf of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.547x to 0.889x at the sampled T from 1 to 384, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 33 of them inside this window)
-    "cake_rmsnorm_train_685b53bf6ce1b6ff13f8__16_384": {
+    # sm_107a H512 f32 weight: (16, 384] the column-task program 8f29656c of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_8f29656c0018a749a588__16_384": {
         "arches": [
             "sm_107a",
         ],
@@ -10045,12 +10046,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_685b53bf6ce1b6ff13f8",
+        "kernel": "cake_rmsnorm_train_8f29656c0018a749a588",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_685b53bf6ce1b6ff13f8",
+        "library": "cake_rmsnorm_train_8f29656c0018a749a588",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10059,12 +10060,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (1664, 2304] the column-task form (twosum: exact per-thread dw sums); from T 20 for dw accuracy: the pair of (20, 28672] exceeded the FP32 eager reference's dw error at 18 sampled T from 4544 to 19264 on R200 with 212 SMs (the deterministic package runs the same pair there); its worst dw error stays at or below the FP32 eager reference's at every multiple of 64 rows of the window and both edges on R200, worst of 60 inputs of each of three families in both rstd forms; faster than the single kernel of (2304, 19456] up to T 2304; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 20 on R200 with 212 SMs, 0.0147 against 0.0138 of the per-element budget); T 1 to 64 runs the fixed-claim column-task form
-    "cake_rmsnorm_train_44c5b870a7dcbb8de924__1664_2304": {
+    # sm_107a H6144 f32 weight: (1664, 2304] the column-task kernel b3e6531e (96 column tasks).
+    "cake_rmsnorm_train_b3e6531e46667901ab91__1664_2304": {
         "arches": [
             "sm_107a",
         ],
@@ -10079,12 +10080,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_44c5b870a7dcbb8de924",
+        "kernel": "cake_rmsnorm_train_b3e6531e46667901ab91",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_44c5b870a7dcbb8de924",
+        "library": "cake_rmsnorm_train_b3e6531e46667901ab91",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 1664,
@@ -10093,12 +10094,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H4096 bf16 weight: (16, 256] the det-new column-task program 44511fa0 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.619x to 0.868x at the sampled T from 2 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 65 of them inside this window)
-    "cake_rmsnorm_train_44511fa02465a6d7283d__16_256": {
+    # sm_107a H4096 bf16 weight: (16, 256] the column-task program c1de7e41 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_c1de7e41da4550cca0bc__16_256": {
         "arches": [
             "sm_107a",
         ],
@@ -10113,12 +10114,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_44511fa02465a6d7283d",
+        "kernel": "cake_rmsnorm_train_c1de7e41da4550cca0bc",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_44511fa02465a6d7283d",
+        "library": "cake_rmsnorm_train_c1de7e41da4550cca0bc",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -10127,12 +10128,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 f32 weight: (16, 320] the det-new column-task program db8d986d of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.607x to 0.919x at the sampled T from 2 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 576] (120 inputs per T; 36 of them inside this window)
-    "cake_rmsnorm_train_db8d986d719b909621d0__16_320": {
+    # sm_107a H1536 f32 weight: (16, 320] the column-task program 137ba532 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_137ba5328176fb07b37d__16_320": {
         "arches": [
             "sm_107a",
         ],
@@ -10147,12 +10148,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_db8d986d719b909621d0",
+        "kernel": "cake_rmsnorm_train_137ba5328176fb07b37d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_db8d986d719b909621d0",
+        "library": "cake_rmsnorm_train_137ba5328176fb07b37d",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10161,12 +10162,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H2048 f32 weight: (16, 256] the det-new column-task program 22944704 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.574x to 0.915x at the sampled T from 1 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 256] (120 inputs per T; 66 of them inside this window)
-    "cake_rmsnorm_train_22944704b77a80a04834__16_256": {
+    # sm_107a H2048 f32 weight: (16, 256] the column-task program 23c90013 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_23c900134dc889302136__16_256": {
         "arches": [
             "sm_107a",
         ],
@@ -10181,12 +10182,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_22944704b77a80a04834",
+        "kernel": "cake_rmsnorm_train_23c900134dc889302136",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_22944704b77a80a04834",
+        "library": "cake_rmsnorm_train_23c900134dc889302136",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10195,12 +10196,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (16, 1664] the det-new column-task program a501b31f of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.650x to 0.945x at the sampled T from 2 to 1664, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 65 of them inside this window)
-    "cake_rmsnorm_train_a501b31feb94fa326722__16_1664": {
+    # sm_107a H6144 f32 weight: (16, 1664] the column-task program 5cca2d0f of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_5cca2d0fa4553f992406__16_1664": {
         "arches": [
             "sm_107a",
         ],
@@ -10215,12 +10216,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_a501b31feb94fa326722",
+        "kernel": "cake_rmsnorm_train_5cca2d0fa4553f992406",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_a501b31feb94fa326722",
+        "library": "cake_rmsnorm_train_5cca2d0fa4553f992406",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10229,12 +10230,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (16, 768] the det-new column-task program a1c12b0e of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.630x to 0.973x at the sampled T from 1 to 768, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 53 of them inside this window)
-    "cake_rmsnorm_train_a1c12b0ee6454391a37f__16_768": {
+    # sm_107a H6144 residual f32 weight: (16, 768] the column-task program 3bbd4f84 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_3bbd4f848b4847bff893__16_768": {
         "arches": [
             "sm_107a",
         ],
@@ -10249,12 +10250,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_a1c12b0ee6454391a37f",
+        "kernel": "cake_rmsnorm_train_3bbd4f848b4847bff893",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_a1c12b0ee6454391a37f",
+        "library": "cake_rmsnorm_train_3bbd4f848b4847bff893",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 16,
@@ -10263,12 +10264,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H4096 bf16 weight: (16, 32] the fixed-claim column-task form (128 column tasks of 32 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.27x to 1.47x the det package's speed and 1.42x to 4.61x the programs it replaces at every sampled T from 1 to 32 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 3 on GB300, by less than 0.0001 of the per-element budget)
-    "cake_rmsnorm_train_3dbab2323fa42435a72d__16_32": {
+    # sm_103a H4096 bf16 weight: (16, 32] the column-task kernel dc7ed206 (128 column tasks).
+    "cake_rmsnorm_train_dc7ed206fba49ab22d1d__16_32": {
         "arches": [
             "sm_103a",
         ],
@@ -10283,12 +10284,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_3dbab2323fa42435a72d",
+        "kernel": "cake_rmsnorm_train_dc7ed206fba49ab22d1d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3dbab2323fa42435a72d",
+        "library": "cake_rmsnorm_train_dc7ed206fba49ab22d1d",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -10297,12 +10298,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 bf16 weight: (6, 16] the fixed-claim column-task form (96 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.20x to 1.51x the det package's speed and 1.19x to 1.95x the programs it replaces at every sampled T from 1 to 32 on GB300 (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on GB300, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (the det pair's median dw error over the sampled inputs exceeds the FP32 eager reference's at T 3 on GB300, by less than 0.0001 of the per-element budget)
-    "cake_rmsnorm_train_d70f2562a592151ec4f9__6_16": {
+    # sm_103a H6144 bf16 weight: (6, 16] the column-task kernel e6475d8f (96 column tasks).
+    "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__6_16": {
         "arches": [
             "sm_103a",
         ],
@@ -10317,12 +10318,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_d70f2562a592151ec4f9",
+        "kernel": "cake_rmsnorm_train_e6475d8fa504ef4d7d2d",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_d70f2562a592151ec4f9",
+        "library": "cake_rmsnorm_train_e6475d8fa504ef4d7d2d",
         "role": "bwd_main",
         "select_rule": {
             "above": 6,
@@ -10331,12 +10332,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (16, 960] the det-new column-task program 57d45549 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.639x to 0.967x at the sampled T from 16 to 960, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 37 of them inside this window)
-    "cake_rmsnorm_train_57d45549f8ed34e34e65__16_960": {
+    # sm_107a H6144 bf16 weight: (16, 960] the column-task program 0dafdf09 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_0dafdf094615d080fcc9__16_960": {
         "arches": [
             "sm_107a",
         ],
@@ -10351,12 +10352,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_57d45549f8ed34e34e65",
+        "kernel": "cake_rmsnorm_train_0dafdf094615d080fcc9",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_57d45549f8ed34e34e65",
+        "library": "cake_rmsnorm_train_0dafdf094615d080fcc9",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -10365,12 +10366,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (1151, 1152] the det-new column-task program 57d45549 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.916x at T 1152, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1664] (120 inputs per T; 1 of them inside this window)
-    "cake_rmsnorm_train_57d45549f8ed34e34e65__1151_1152": {
+    # sm_107a H6144 bf16 weight: (1151, 1152] the column-task program 0dafdf09 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_0dafdf094615d080fcc9__1151_1152": {
         "arches": [
             "sm_107a",
         ],
@@ -10385,12 +10386,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_57d45549f8ed34e34e65",
+        "kernel": "cake_rmsnorm_train_0dafdf094615d080fcc9",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_57d45549f8ed34e34e65",
+        "library": "cake_rmsnorm_train_0dafdf094615d080fcc9",
         "role": "bwd_main",
         "select_rule": {
             "above": 1151,
@@ -10399,12 +10400,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (15, 320] the det-new column-task program c15868b8 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.600x to 0.938x at the sampled T from 16 to 320, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 20 of them inside this window)
-    "cake_rmsnorm_train_c15868b87bfb2c21645e__15_320": {
+    # sm_107a H6144 residual bf16 weight: (15, 320] the column-task program ee1be07a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_ee1be07a89a0482de45e__15_320": {
         "arches": [
             "sm_107a",
         ],
@@ -10419,12 +10420,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_c15868b87bfb2c21645e",
+        "kernel": "cake_rmsnorm_train_ee1be07a89a0482de45e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c15868b87bfb2c21645e",
+        "library": "cake_rmsnorm_train_ee1be07a89a0482de45e",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 15,
@@ -10433,12 +10434,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (447, 576] the det-new column-task program c15868b8 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.867x to 0.897x at the sampled T from 448 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 960] (120 inputs per T; 9 of them inside this window)
-    "cake_rmsnorm_train_c15868b87bfb2c21645e__447_576": {
+    # sm_107a H6144 residual bf16 weight: (447, 576] the column-task program ee1be07a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_ee1be07a89a0482de45e__447_576": {
         "arches": [
             "sm_107a",
         ],
@@ -10453,12 +10454,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_c15868b87bfb2c21645e",
+        "kernel": "cake_rmsnorm_train_ee1be07a89a0482de45e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c15868b87bfb2c21645e",
+        "library": "cake_rmsnorm_train_ee1be07a89a0482de45e",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 447,
@@ -10467,12 +10468,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H512 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.50x to 0.80x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 5 to 62 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_877751ba915bbc261064__16_64": {
+    # sm_103a H512 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_bdfd77893d8f9db3c9bb__16_64": {
         "arches": [
             "sm_103a",
         ],
@@ -10487,12 +10488,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_877751ba915bbc261064",
+        "kernel": "cake_rmsnorm_train_bdfd77893d8f9db3c9bb",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_877751ba915bbc261064",
+        "library": "cake_rmsnorm_train_bdfd77893d8f9db3c9bb",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -10501,12 +10502,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H512 bf16 weight: (16, 576] the det-new column-task program bcd8d6a9 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.528x to 0.934x at the sampled T from 1 to 576, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 768] (120 inputs per T; 49 of them inside this window)
-    "cake_rmsnorm_train_bcd8d6a9c739c7a11c36__16_576": {
+    # sm_107a H512 bf16 weight: (16, 576] the column-task program 49af1e75 of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_49af1e75185ddd637b76__16_576": {
         "arches": [
             "sm_107a",
         ],
@@ -10521,12 +10522,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_bcd8d6a9c739c7a11c36",
+        "kernel": "cake_rmsnorm_train_49af1e75185ddd637b76",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_bcd8d6a9c739c7a11c36",
+        "library": "cake_rmsnorm_train_49af1e75185ddd637b76",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -10535,12 +10536,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (49152, inf] above T 49152, where the det pair stops; kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.807 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), 1.74 to 1.87 times the FP64-row single's speed in the benchmark (R200, 4 sessions)
-    "cake_rmsnorm_train_56634f53e6456b34f76f": {
+    # sm_107a H5120 bf16 weight: (49152, inf] the single kernel 670f4caf (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_670f4cafe8c34a429d30": {
         "arches": [
             "sm_107a",
         ],
@@ -10554,12 +10555,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_56634f53e6456b34f76f",
+        "kernel": "cake_rmsnorm_train_670f4cafe8c34a429d30",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_56634f53e6456b34f76f",
+        "library": "cake_rmsnorm_train_670f4cafe8c34a429d30",
         "role": "bwd_main",
         "select_rule": {
             "above": 49152,
@@ -10568,12 +10569,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_107a H5120 f32 weight: (32767, 131072] the pair-row single kernel in its kblock form (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers, pipe) with its chunk table cut for 4 slots per SM (table_slots 4: more, shorter chunks than CTAs, the grid unchanged; each CTA writes its pairs as one row of a scratch area, and 128 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 99.6 to 363 us at T 32768 to 131072, 0.93x to 0.95x the time of the det pair de0cf457 + cdcd68d9 (up to T 49152) and of the kblock single kernel 6cedccdf (above) it replaces, with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 1.08x that of the deterministic package's program in its earlier version; at T 20480 it reaches 1.13x, so the det pair keeps the window below; only the FP32-weight twin ships
-    "cake_rmsnorm_train_9cdd6eef6888b2a1dd6a__32767_131072": {
+    # sm_107a H5120 f32 weight: (32767, 131072] the part-row single kernel e7cb6972 (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_e7cb6972099b7e10c035__32767_131072": {
         "arches": [
             "sm_107a",
         ],
@@ -10588,12 +10589,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_9cdd6eef6888b2a1dd6a",
+        "kernel": "cake_rmsnorm_train_e7cb6972099b7e10c035",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9cdd6eef6888b2a1dd6a",
+        "library": "cake_rmsnorm_train_e7cb6972099b7e10c035",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 32767,
@@ -10603,11 +10604,11 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 40960,
+            "part_row_bytes": 20480,
         },
     },
-    # sm_107a H5120 f32 weight: (131072, inf] above the pair-row single's measured range (9cdd6eef runs (32767, 131072]); kblock pipe single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs in registers): worst dw element 0.719 of the budget at 265 sampled T from 49153 to 131072 on R200 (212 SMs, 3 x 60 inputs per T, kernel and torch rstd), at most the FP32 eager reference's, 1.66 to 1.78 times the FP64-row single's speed in the benchmark (R200, 4 sessions)
-    "cake_rmsnorm_train_6cedccdf3a58f23f260f__131072_inf": {
+    # sm_107a H5120 f32 weight: (131072, inf] the single kernel 13bd0c5f (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_13bd0c5f56e37867eb26__131072_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -10621,12 +10622,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_6cedccdf3a58f23f260f",
+        "kernel": "cake_rmsnorm_train_13bd0c5f56e37867eb26",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_6cedccdf3a58f23f260f",
+        "library": "cake_rmsnorm_train_13bd0c5f56e37867eb26",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -10635,12 +10636,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 122880,
         },
     },
-    # sm_100a H512 f32 weight: (16, 227] the deterministic package's column-task program of this window (16 columns per task; twosum: exact per-thread dw sums): faster than the single kernel of (0, 292] it replaces at every sampled T from 1 to 227 in the balanced small-T sweep on B200 (lane RB) (its time 1.30x to 1.41x); the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 288 on B200, 0.0521 against 0.0409 of the per-element budget, and the FP64-accumulating single kernel this route runs above T 960 exceeds it at T 4, 0.0033 against 0.0032; with the kernel-tests harness inputs included the det pair's worst dw error exceeds it at T 292, 0.0558 against 0.0554)
-    "cake_rmsnorm_train_942503b80a21f22cd392__16_227": {
+    # sm_100a H512 f32 weight: (16, 227] the column-task kernel 404c8f54 (32 column tasks).
+    "cake_rmsnorm_train_404c8f54ab3129877350__16_227": {
         "arches": [
             "sm_100a",
         ],
@@ -10655,12 +10656,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_942503b80a21f22cd392",
+        "kernel": "cake_rmsnorm_train_404c8f54ab3129877350",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_942503b80a21f22cd392",
+        "library": "cake_rmsnorm_train_404c8f54ab3129877350",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10669,12 +10670,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H512 f32 weight: (227, 292] for dw accuracy at small T (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 288 on B200, 0.0521 against 0.0409 of the per-element budget, and the FP64-accumulating single kernel this route runs above T 960 exceeds it at T 4, 0.0033 against 0.0032; with the kernel-tests harness inputs included the det pair's worst dw error exceeds it at T 292, 0.0558 against 0.0554); twosum: exact per-thread dw sums; the deterministic package's column-task program runs up to T 227
-    "cake_rmsnorm_train_aa7c5a5407cba063b9d5__227_292": {
+    # sm_100a H512 f32 weight: (227, 292] the single kernel 1a322bb1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_1a322bb1c550a7d70638__227_292": {
         "arches": [
             "sm_100a",
         ],
@@ -10688,12 +10689,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_aa7c5a5407cba063b9d5",
+        "kernel": "cake_rmsnorm_train_1a322bb1c550a7d70638",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_aa7c5a5407cba063b9d5",
+        "library": "cake_rmsnorm_train_1a322bb1c550a7d70638",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 227,
@@ -10702,12 +10703,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
         },
     },
-    # sm_107a H5120 bf16 weight: (12, 31] the fixed-claim column-task form (80 column tasks of 64 columns; each CTA takes its rows and column tasks by its index, no claim tickets; twosum: exact per-thread dw sums; dx and dw bitwise its ticket twin's): 1.29x to 1.71x the det package's speed and 1.29x to 3.56x the programs it replaces at every sampled T from 1 to 64 on R200 with 212 SMs (CUDA-graph span, four sessions); its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every T from 1 to 64 on R200 with 212 SMs, worst of 60 inputs of each of three families in both rstd forms; the det pair stays out of this window for dw accuracy (over 60 inputs of each of three families the det pair's worst dw error exceeds the FP32 eager reference's at T 15 on R200 with 212 SMs, 0.0120 against 0.0114 of the per-element budget, and at T 18 in the kernel-tests harness, 0.0136 against 0.0134)
-    "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__12_31": {
+    # sm_107a H5120 bf16 weight: (12, 31] the column-task kernel 29bcbde1 (80 column tasks).
+    "cake_rmsnorm_train_29bcbde1d271ea989fa8__12_31": {
         "arches": [
             "sm_107a",
         ],
@@ -10722,12 +10723,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "kernel": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c",
+        "library": "cake_rmsnorm_train_29bcbde1d271ea989fa8",
         "role": "bwd_main",
         "select_rule": {
             "above": 12,
@@ -10736,12 +10737,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (31, 256] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.596x to 0.847x at the sampled T from 32 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 12 of them inside this window)
-    "cake_rmsnorm_train_505283a5225ac45bc095__31_256": {
+    # sm_107a H5120 bf16 weight: (31, 256] the column-task program 080e0a6c of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_080e0a6c3b18e9bad790__31_256": {
         "arches": [
             "sm_107a",
         ],
@@ -10756,12 +10757,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "kernel": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "library": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "role": "bwd_main",
         "select_rule": {
             "above": 31,
@@ -10770,12 +10771,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (511, 640] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.911x to 0.928x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
-    "cake_rmsnorm_train_505283a5225ac45bc095__511_640": {
+    # sm_107a H5120 bf16 weight: (511, 640] the column-task program 080e0a6c of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_080e0a6c3b18e9bad790__511_640": {
         "arches": [
             "sm_107a",
         ],
@@ -10790,12 +10791,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "kernel": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "library": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "role": "bwd_main",
         "select_rule": {
             "above": 511,
@@ -10804,12 +10805,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (895, 896] the det-new column-task program 505283a5 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.953x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
-    "cake_rmsnorm_train_505283a5225ac45bc095__895_896": {
+    # sm_107a H5120 bf16 weight: (895, 896] the column-task program 080e0a6c of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_080e0a6c3b18e9bad790__895_896": {
         "arches": [
             "sm_107a",
         ],
@@ -10824,12 +10825,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "kernel": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "library": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "role": "bwd_main",
         "select_rule": {
             "above": 895,
@@ -10838,12 +10839,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (15, 256] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.605x to 0.930x at the sampled T from 16 to 256, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 13 of them inside this window)
-    "cake_rmsnorm_train_3a7bd162c370762719b3__15_256": {
+    # sm_107a H5120 f32 weight: (15, 256] the column-task program 139d162a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__15_256": {
         "arches": [
             "sm_107a",
         ],
@@ -10858,12 +10859,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "kernel": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "library": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 15,
@@ -10872,12 +10873,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (511, 640] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.900x to 0.915x at the sampled T from 512 to 640, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; 7 of them inside this window)
-    "cake_rmsnorm_train_3a7bd162c370762719b3__511_640": {
+    # sm_107a H5120 f32 weight: (511, 640] the column-task program 139d162a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__511_640": {
         "arches": [
             "sm_107a",
         ],
@@ -10892,12 +10893,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "kernel": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "library": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 511,
@@ -10906,12 +10907,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (895, 896] the det-new column-task program 3a7bd162 of the deterministic package (#8813), renamed into this package; faster than the ND program at every sampled T in two R200 records with 212 SMs (det/ND 0.935x at T 896, the slower record per T) and in a VR200 screen; worst dw element 0.0006 of the per-element budget over 66 sampled T of the program's window (0, 1280] (120 inputs per T; none of them inside this window)
-    "cake_rmsnorm_train_3a7bd162c370762719b3__895_896": {
+    # sm_107a H5120 f32 weight: (895, 896] the column-task program 139d162a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896": {
         "arches": [
             "sm_107a",
         ],
@@ -10926,12 +10927,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "kernel": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "library": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 895,
@@ -10940,12 +10941,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H512 f32 weight: (16, 227] the deterministic package's column-task program of these token counts (32 column tasks), for speed: 0.39x to 0.42x the backward time of the programs it replaces at the sampled T in two GB300 records; worst dw element 0.0006 of the budget at the sampled T from 5 to 227 (3 x 120 inputs per T, kernel and torch rstd)
-    "cake_rmsnorm_train_81d9adbf31a26a4ebc02__16_227": {
+    # sm_103a H512 f32 weight: (16, 227] the deterministic package's column-task program of these token counts (32 column tasks).
+    "cake_rmsnorm_train_2c60470d16e0a7fb6089__16_227": {
         "arches": [
             "sm_103a",
         ],
@@ -10960,12 +10961,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_81d9adbf31a26a4ebc02",
+        "kernel": "cake_rmsnorm_train_2c60470d16e0a7fb6089",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_81d9adbf31a26a4ebc02",
+        "library": "cake_rmsnorm_train_2c60470d16e0a7fb6089",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -10974,7 +10975,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -11136,7 +11137,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_b5bdabba0b80fb8afcc5__36352_78784": {
+    "cake_rmsnorm_train_b457c4d134e44476dc6f__36352_78784": {
         "arches": [
             "sm_100a",
         ],
@@ -11150,12 +11151,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_b5bdabba0b80fb8afcc5",
+        "kernel": "cake_rmsnorm_train_b457c4d134e44476dc6f",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_b5bdabba0b80fb8afcc5",
+        "library": "cake_rmsnorm_train_b457c4d134e44476dc6f",
         "role": "bwd_large",
         "select_rule": {
             "above": 36352,
@@ -11494,7 +11495,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H2048 bf16 weight: (11264, 16384] the deterministic package's det pair of these rows (main kernel c73074cf and fixed-order dw reduce d0960be9 with that package's host plan), renamed into this package; from T 13608 for dw accuracy: the single kernel 0fa4f255 it replaces there sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.26x to 1.62x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on B200 (concentrated inputs); the det pair took 38.02, 40.38 and 40.32 us against the single's 36.48, 38.77 and 38.88 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H2048 bf16 weight: (11264, 16384] the deterministic package's det pair main kernel c73074cf with its fixed-order dw reduce.
     "cake_rmsnorm_train_c73074cf44f07fcf3bb6__11264_16384": {
         "arches": [
             "sm_100a",
@@ -12184,7 +12185,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H512 f32 weight: (227, 960] the det pair; from T 227 to 292, where it replaces a single kernel, for speed: 0.50x that kernel's backward time at the sampled T in two GB300 records; worst dw element 0.0575 of the budget at the sampled T from 228 to 292 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H512 f32 weight: (227, 960] the deterministic package's det pair main kernel 9f07cea1 with its fixed-order dw reduce.
     "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_960": {
         "arches": [
             "sm_103a",
@@ -12294,7 +12295,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c145ef195d7aeb04f242__6144_56256": {
+    "cake_rmsnorm_train_b482c84dbffcd75a4a4c__6144_56256": {
         "arches": [
             "sm_100a",
         ],
@@ -12308,12 +12309,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_c145ef195d7aeb04f242",
+        "kernel": "cake_rmsnorm_train_b482c84dbffcd75a4a4c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c145ef195d7aeb04f242",
+        "library": "cake_rmsnorm_train_b482c84dbffcd75a4a4c",
         "role": "bwd_main",
         "select_rule": {
             "above": 6144,
@@ -12325,8 +12326,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H5120 bf16 weight: (56256, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in registers, evict_last loads, 4 stages): it replaces the twosum single ade9f6a4 for speed up to T 131072; worst dw element 0.8835 of the budget at the sampled T from 56257 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single ade9f6a4 keeps the window; backward time 0.80 to 0.82 times the replaced single's (B200)
-    "cake_rmsnorm_train_56634f53e6456b34f76f__56256_131072": {
+    # sm_100a H5120 bf16 weight: (56256, 131072] the single kernel 670f4caf (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_670f4cafe8c34a429d30__56256_131072": {
         "arches": [
             "sm_100a",
         ],
@@ -12340,12 +12341,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_56634f53e6456b34f76f",
+        "kernel": "cake_rmsnorm_train_670f4cafe8c34a429d30",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_56634f53e6456b34f76f",
+        "library": "cake_rmsnorm_train_670f4cafe8c34a429d30",
         "role": "bwd_main",
         "select_rule": {
             "above": 56256,
@@ -12354,12 +12355,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 81920,
         },
     },
-    # sm_100a H5120 bf16 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the det pair it replaces exceeds the per-element budget at T 56320 (1.024; worst of 240 inputs of each of three families in both rstd forms, every 64th T from 45056 to 57344; at most 0.842 up to T 56256) on B200; the single kernel it replaces above T 65536 exceeds the budget at T 125952 (1.040, measured with FP32 weight; the BF16-weight program computes the same dw) on B200; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 57345 to 131072 (82 T) and within 0.0006 of it at T 56257, 56320, 56832 and 57344 on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.24x to 1.24x the single kernel's at T 57345 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_ade9f6a4f10b069ba8a3__131072_inf": {
+    # sm_100a H5120 bf16 weight: (131072, inf] the single kernel 2f05000c (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_2f05000ca9242ea4d6cb__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -12373,12 +12374,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_ade9f6a4f10b069ba8a3",
+        "kernel": "cake_rmsnorm_train_2f05000ca9242ea4d6cb",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ade9f6a4f10b069ba8a3",
+        "library": "cake_rmsnorm_train_2f05000ca9242ea4d6cb",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -12387,8 +12388,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 81920,
         },
     },
     "cake_rmsnorm_train_c5831b29d17867842e5f__896_6144": {
@@ -12468,8 +12469,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H5120 f32 weight: (56256, 131072]; kblock single (FP32 sums of 8-row blocks kept as FP32 TwoSum pairs; producer warp, pairs in registers, evict_last loads, 4 stages): it replaces the twosum single fc2a52a2 for speed up to T 131072; worst dw element 0.9988 of the budget and at or below the FP32 eager reference's at the sampled T from 56257 to 131072 on B200 (3 x 120 inputs per T and 3 x 240 at 40 T, kernel and torch rstd); above T 131072, beyond the sampled token counts, the twosum single fc2a52a2 keeps the window; backward time 0.79 to 0.81 times the replaced single's (B200)
-    "cake_rmsnorm_train_6cedccdf3a58f23f260f__56256_131072": {
+    # sm_100a H5120 f32 weight: (56256, 131072] the single kernel 13bd0c5f (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_13bd0c5f56e37867eb26__56256_131072": {
         "arches": [
             "sm_100a",
         ],
@@ -12483,12 +12484,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_6cedccdf3a58f23f260f",
+        "kernel": "cake_rmsnorm_train_13bd0c5f56e37867eb26",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_6cedccdf3a58f23f260f",
+        "library": "cake_rmsnorm_train_13bd0c5f56e37867eb26",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 56256,
@@ -12497,12 +12498,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 81920,
         },
     },
-    # sm_100a H5120 f32 weight: (131072, inf] the twosum form of the single kernel (its knobs plus twosum; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the det pair it replaces is the FP32-weight twin of the BF16-weight route's det pair (the same dw for the same inputs), which exceeds the per-element budget at T 56320 (1.024) on B200; the single kernel it replaces above T 65536 exceeds the budget at T 125952 (1.040) on B200; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 57345 to 131072 (82 T) and within 0.0006 of it, at or below the FP32 eager reference's, at T 56257, 56320, 56832 and 57344 on B200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.13x to 1.13x the programs it replaces at T 98304 and 131072 in two sessions (B200); above T 131072 it also stands in for the kblock single of the window below, whose dw accuracy is sampled only up to T 131072 (B200)
-    "cake_rmsnorm_train_fc2a52a2c9bf8c5be9af__131072_inf": {
+    # sm_100a H5120 f32 weight: (131072, inf] the single kernel de8f6091 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_de8f6091077dc7ac5947__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -12516,12 +12517,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_fc2a52a2c9bf8c5be9af",
+        "kernel": "cake_rmsnorm_train_de8f6091077dc7ac5947",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_fc2a52a2c9bf8c5be9af",
+        "library": "cake_rmsnorm_train_de8f6091077dc7ac5947",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -12530,8 +12531,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 163840,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 81920,
         },
     },
     "cake_rmsnorm_train_5c804aed7ad14b99e1d0__1152_4096": {
@@ -12565,7 +12566,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a H6144 bf16 weight: (4096, 42496] the deterministic package's det pair of these rows (main kernel b93bf060 and fixed-order dw reduce 5f5cdc51 with that package's host plan), renamed into this package; from T 5632 for dw accuracy: the single kernel 9433061d it replaces there sums each thread's dw in FP32 over windows of 16 steps, which put its worst dw error at 1.10x to 1.62x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16231 on B200 (concentrated and saturated_lo inputs); the det pair took 95.26, 102.08 and 102.69 us against the single's 93.22, 99.90 and 100.74 us at T 14928, 16172 and 16384 (B200, CUDA-graph span, 2 sessions)
+    # sm_100a H6144 bf16 weight: (4096, 42496] the deterministic package's det pair main kernel b93bf060 with its fixed-order dw reduce.
     "cake_rmsnorm_train_b93bf060d4d3defc8150__4096_42496": {
         "arches": [
             "sm_100a",
@@ -12859,7 +12860,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 f32 weight: (214, 1024] the det pair; from T 214 to 320, where it replaces a single kernel, for speed: 0.40x to 0.53x that kernel's backward time at the sampled T in two GB300 records; worst dw element 0.0596 of the budget at the sampled T from 215 to 320 (3 x 120 inputs per T, kernel and torch rstd)
+    # sm_103a H1536 f32 weight: (214, 1024] the deterministic package's det pair main kernel baff9ecb with its fixed-order dw reduce.
     "cake_rmsnorm_train_baff9ecbafe7de1e6030__214_1024": {
         "arches": [
             "sm_103a",
@@ -13100,7 +13101,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 bf16 weight: (32768, 58496] the det pair up to T 58496: above it the pair breaches the per-element dw budget (worst dw element 1.0622 of the budget at T 58560 on GB300, FP32-weight route, torch rstd, 3 x 120 and 3 x 240 inputs; the BF16-weight route runs the same dw computation), so the window ends at the last every-64 T below that point
+    # sm_103a H2048 bf16 weight: (32768, 58496] the deterministic package's det pair main kernel 302f64db with its fixed-order dw reduce.
     "cake_rmsnorm_train_302f64db6abe79e5259e__32768_58496": {
         "arches": [
             "sm_103a",
@@ -13155,8 +13156,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H2048 bf16 weight: (58496, 61952] the deterministic package's program for these token counts for dw accuracy up to T 61952: worst dw element 0.9454 of the budget at the sampled T from 58497 to 61952 on GB300 (3 x 120 inputs per T, kernel and torch rstd); backward time 1.01 of the det pair's (GB300 record)
-    "cake_rmsnorm_train_018f0cd723106f709f11__58496_61952": {
+    # sm_103a H2048 bf16 weight: (58496, 61952] the deterministic package's det pair main kernel 302f64db with its fixed-order dw reduce.
+    "cake_rmsnorm_train_302f64db6abe79e5259e__58496_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -13170,12 +13171,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_018f0cd723106f709f11",
+        "kernel": "cake_rmsnorm_train_302f64db6abe79e5259e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_018f0cd723106f709f11",
+        "library": "cake_rmsnorm_train_302f64db6abe79e5259e",
         "role": "bwd_main",
         "select_rule": {
             "above": 58496,
@@ -13372,7 +13373,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 f32 weight: (32768, 58496] the det pair up to T 58496: above it the pair breaches the per-element dw budget (worst dw element 1.0622 of the budget at T 58560 on GB300, FP32-weight route, torch rstd, 3 x 120 and 3 x 240 inputs; the BF16-weight route runs the same dw computation), so the window ends at the last every-64 T below that point
+    # sm_103a H2048 f32 weight: (32768, 58496] the deterministic package's det pair main kernel e98cb156 with its fixed-order dw reduce.
     "cake_rmsnorm_train_e98cb156abfe1666c76f__32768_58496": {
         "arches": [
             "sm_103a",
@@ -13404,8 +13405,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H2048 f32 weight: (58496, 61952] the deterministic package's program for these token counts for dw accuracy up to T 61952: worst dw element 0.9454 of the budget at the sampled T from 58497 to 61952 on GB300 (3 x 120 inputs per T, kernel and torch rstd); backward time 1.01 of the det pair's (GB300 record)
-    "cake_rmsnorm_train_ca8ca4674a3dbd89ad16__58496_61952": {
+    # sm_103a H2048 f32 weight: (58496, 61952] the deterministic package's det pair main kernel e98cb156 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e98cb156abfe1666c76f__58496_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -13419,12 +13420,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_ca8ca4674a3dbd89ad16",
+        "kernel": "cake_rmsnorm_train_e98cb156abfe1666c76f",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_ca8ca4674a3dbd89ad16",
+        "library": "cake_rmsnorm_train_e98cb156abfe1666c76f",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 58496,
@@ -13583,7 +13584,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_0291949ba535c646c3a8__720896_1572864": {
+    "cake_rmsnorm_train_a385ae1681a2c078344e__720896_1572864": {
         "arches": [
             "sm_103a",
         ],
@@ -13597,12 +13598,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_0291949ba535c646c3a8",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_0291949ba535c646c3a8",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 720896,
@@ -13614,7 +13615,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c18297d75c0d424978fd": {
+    "cake_rmsnorm_train_a385ae1681a2c078344e": {
         "arches": [
             "sm_103a",
         ],
@@ -13628,12 +13629,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_c18297d75c0d424978fd",
+        "kernel": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_c18297d75c0d424978fd",
+        "library": "cake_rmsnorm_train_a385ae1681a2c078344e",
         "role": "bwd_main",
         "select_rule": {
             "above": 1572864,
@@ -13643,7 +13644,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 128,
             "kind": "chunk_partials",
-            "partial_rows": 2,
         },
     },
     "cake_rmsnorm_train_72138dce40d43da44aaf__5120_12288": {
@@ -13715,7 +13715,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_1080": {
+    "cake_rmsnorm_train_affa1b95f68bab8c411b__64_1080": {
         "arches": [
             "sm_103a",
         ],
@@ -13724,12 +13724,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "kernel": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "library": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 64,
@@ -13738,7 +13738,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_b4b63d5b5028c7a60333__97280_720896": {
+    "cake_rmsnorm_train_affa1b95f68bab8c411b__97280_720896": {
         "arches": [
             "sm_103a",
         ],
@@ -13747,12 +13747,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "kernel": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_b4b63d5b5028c7a60333",
+        "library": "cake_rmsnorm_train_affa1b95f68bab8c411b",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 97280,
@@ -13761,7 +13761,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_0ac243f8385c32960e14__720896_1572864": {
+    "cake_rmsnorm_train_72138dce40d43da44aaf__720896_1572864": {
         "arches": [
             "sm_103a",
         ],
@@ -13770,12 +13770,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_0ac243f8385c32960e14",
+        "kernel": "cake_rmsnorm_train_72138dce40d43da44aaf",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_0ac243f8385c32960e14",
+        "library": "cake_rmsnorm_train_72138dce40d43da44aaf",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 720896,
@@ -13784,7 +13784,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_e73321cec89d33336ea1": {
+    "cake_rmsnorm_train_72138dce40d43da44aaf": {
         "arches": [
             "sm_103a",
         ],
@@ -13793,12 +13793,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_e73321cec89d33336ea1",
+        "kernel": "cake_rmsnorm_train_72138dce40d43da44aaf",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_e73321cec89d33336ea1",
+        "library": "cake_rmsnorm_train_72138dce40d43da44aaf",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 1572864,
@@ -13931,7 +13931,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_89505762fa1cbf33cb8f__720896_1572864": {
+    "cake_rmsnorm_train_420788e663a2c3a810f6__720896_1572864": {
         "arches": [
             "sm_103a",
         ],
@@ -13945,12 +13945,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_89505762fa1cbf33cb8f",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_89505762fa1cbf33cb8f",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 720896,
@@ -13962,7 +13962,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_f788ef57163552825d27": {
+    "cake_rmsnorm_train_420788e663a2c3a810f6": {
         "arches": [
             "sm_103a",
         ],
@@ -13976,12 +13976,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 256,
-        "kernel": "cake_rmsnorm_train_f788ef57163552825d27",
+        "kernel": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_f788ef57163552825d27",
+        "library": "cake_rmsnorm_train_420788e663a2c3a810f6",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 1572864,
@@ -13991,7 +13991,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 128,
             "kind": "chunk_partials",
-            "partial_rows": 2,
         },
     },
     "cake_rmsnorm_train_50044ee3bd1ca54bd821__152_256": {
@@ -14303,7 +14302,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (4096, 48640] the FP32-weight det pair the deterministic package ran in its earlier version up to its edge T 48640 (main kernel 626aed74, dw reduce fcbfa14d with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.961x, 0.986x, 0.989x and 0.987x the time of the kblock single kernel 2911faf7, which this package's previous version runs above T 9216, at T 10240, 16384, 32768 and 40960 (7 rounds, A/A within 0.9982 to 1.0024); the deterministic package now runs its row-issuer program below T 32768
+    # sm_103a H4096 f32 weight: (4096, 48640] the deterministic package's det pair main kernel 626aed74 with its fixed-order dw reduce.
     "cake_rmsnorm_train_626aed743358c27513f1__4096_48640": {
         "arches": [
             "sm_103a",
@@ -14335,7 +14334,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (48640, 65536] the FP32-weight det pair the deterministic package ran above T 48640 in its earlier version (main kernel cb164a27, the FP32-weight twin of 850eec3a, and dw reduce 5d75ea5f with that package's host plan), renamed into this package, for speed (its dw is that package's): on GB300 it took 0.976x and 0.980x the time of the kblock single kernel 2911faf7 at T 49152 and 65536 (7 rounds); the deterministic package now cuts it at T 51200
+    # sm_103a H4096 f32 weight: (48640, 65536] the deterministic package's FP32-pair det pair main kernel cb164a27 with its fixed-order dw reduce.
     "cake_rmsnorm_train_cb164a27c0157ed0712d__48640_65536": {
         "arches": [
             "sm_103a",
@@ -14660,8 +14659,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 bf16 weight: (16, 64] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 64 its backward took 4.70 and 4.74 us against 6.00 and 5.98 us of the fixed-claim form it replaces and a forward and backward call 7.28 and 7.55 us against 8.40 and 8.64 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 64 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); at T 96, 128, 256, 448 and from 640 to 1024 a forward and backward call or a checkpointed step was slower than with the det pair of the window above in both runs (8.80 and 8.70 us against 8.62 and 8.66 us for a forward and backward call at T 96), so that pair runs above T 64; the edge 16 against the window below is not measured yet
-    "cake_rmsnorm_train_505283a5225ac45bc095__16_64": {
+    # sm_103a H5120 bf16 weight: (16, 64] the column-task kernel 080e0a6c (80 column tasks).
+    "cake_rmsnorm_train_080e0a6c3b18e9bad790__16_64": {
         "arches": [
             "sm_103a",
         ],
@@ -14676,12 +14675,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "kernel": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_505283a5225ac45bc095",
+        "library": "cake_rmsnorm_train_080e0a6c3b18e9bad790",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -14690,7 +14689,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -14779,7 +14778,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_7ffb443a63a92ab6b0e0__5120_61952": {
+    "cake_rmsnorm_train_2fc4932fbde0bc848b32__5120_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -14793,12 +14792,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_7ffb443a63a92ab6b0e0",
+        "kernel": "cake_rmsnorm_train_2fc4932fbde0bc848b32",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_7ffb443a63a92ab6b0e0",
+        "library": "cake_rmsnorm_train_2fc4932fbde0bc848b32",
         "role": "bwd_main",
         "select_rule": {
             "above": 5120,
@@ -14833,8 +14832,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H5120 f32 weight: (16, 192] the deterministic package's column-task program of these token counts (80 column tasks, ticket form), for speed: at T 192 its backward took 6.94 and 6.88 us against 7.68 and 7.65 us of the det pair it replaces and a forward and backward call 9.71 and 9.76 us against 9.94 and 9.86 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 192 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.73x the det pair's at T 64 (GB300, kernel-tests harness); at T 256 and from 640 to 1024 a forward and backward call and a checkpointed step were slower than with the det pair of the window above in both runs (10.68 and 10.64 us against 10.45 and 10.14 us for a forward and backward call at T 256), so that pair runs above T 192; the edge 16 against the window below is not measured yet
-    "cake_rmsnorm_train_3a7bd162c370762719b3__16_192": {
+    # sm_103a H5120 f32 weight: (16, 192] the column-task kernel 139d162a (80 column tasks).
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__16_192": {
         "arches": [
             "sm_103a",
         ],
@@ -14849,12 +14848,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "kernel": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_3a7bd162c370762719b3",
+        "library": "cake_rmsnorm_train_139d162a8bb29d1b2d35",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -14863,7 +14862,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -14952,7 +14951,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_f9f7d4cd75ef91cc8374__5120_61952": {
+    "cake_rmsnorm_train_79811a76205d7d7dd197__5120_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -14966,12 +14965,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 4,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_f9f7d4cd75ef91cc8374",
+        "kernel": "cake_rmsnorm_train_79811a76205d7d7dd197",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_f9f7d4cd75ef91cc8374",
+        "library": "cake_rmsnorm_train_79811a76205d7d7dd197",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 5120,
@@ -15006,8 +15005,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 bf16 weight: (16, 896] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 896 its backward took 13.97 us against 15.25 us of the det pair it replaces and a forward and backward call 19.58 us against 20.16 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call), and no sampled T from 24 to 896 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); FP64 dw error 0.75x the det pair's at T 64 (GB300, kernel-tests harness); at T 1024 its backward was still faster (14.94 us against 16.08 and 16.19 us in two runs) but a checkpointed step was slower in both runs (26.46 and 26.61 us against 25.95 and 25.87 us), so the det pair of the window above runs above T 896; the edge 16 against the window below is not measured yet
-    "cake_rmsnorm_train_38b1c6bc8fa558bccc49__16_896": {
+    # sm_103a H6144 bf16 weight: (16, 896] the column-task kernel 44508df7 (96 column tasks).
+    "cake_rmsnorm_train_44508df7dab2ab688f85__16_896": {
         "arches": [
             "sm_103a",
         ],
@@ -15022,12 +15021,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_38b1c6bc8fa558bccc49",
+        "kernel": "cake_rmsnorm_train_44508df7dab2ab688f85",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_38b1c6bc8fa558bccc49",
+        "library": "cake_rmsnorm_train_44508df7dab2ab688f85",
         "role": "bwd_main",
         "select_rule": {
             "above": 16,
@@ -15036,7 +15035,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -15225,8 +15224,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_103a H6144 f32 weight: (16, 1024] the deterministic package's column-task program of these token counts (96 column tasks, ticket form), for speed: at T 1024 its backward took 14.72 and 14.62 us against 16.10 and 16.19 us of the det pair it replaces and a forward and backward call 21.06 and 21.24 us against 21.63 and 21.26 us (GB300, benchmark, CUDA-graph span, L2 flushed before every call, two runs), and no sampled T from 24 to 1024 had a backward call, a forward and backward call or a checkpointed step (two forward calls and a backward call) slower beyond the run-to-run band in all its runs (one or two); above T 1024 the det pair of the window above runs, faster from T 1536 in an earlier benchmark run without the L2 flush (18.43 us against 19.31 us of this program); the edge 16 against the window below is not measured yet
-    "cake_rmsnorm_train_017091c7827bdc8c95d5__16_1024": {
+    # sm_103a H6144 f32 weight: (16, 1024] the column-task kernel b3e6531e (96 column tasks).
+    "cake_rmsnorm_train_b3e6531e46667901ab91__16_1024": {
         "arches": [
             "sm_103a",
         ],
@@ -15241,12 +15240,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_017091c7827bdc8c95d5",
+        "kernel": "cake_rmsnorm_train_b3e6531e46667901ab91",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_017091c7827bdc8c95d5",
+        "library": "cake_rmsnorm_train_b3e6531e46667901ab91",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 16,
@@ -15255,7 +15254,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -15321,8 +15320,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H6144 residual bf16 weight: (56, 304] the deterministic package's column-task program of these token counts (96 column tasks; that package runs it from T 0 to 1216), in place of the det pair 0dcdc563 + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families)
-    "cake_rmsnorm_train_07135550fae8b07bb82c__56_304": {
+    # sm_103a H6144 residual bf16 weight: (56, 304] the column-task kernel 864e84f3 (96 column tasks).
+    "cake_rmsnorm_train_864e84f3d874f850c091__56_304": {
         "arches": [
             "sm_103a",
         ],
@@ -15337,12 +15336,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_07135550fae8b07bb82c",
+        "kernel": "cake_rmsnorm_train_864e84f3d874f850c091",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_07135550fae8b07bb82c",
+        "library": "cake_rmsnorm_train_864e84f3d874f850c091",
         "role": "bwd_main_residual",
         "select_rule": {
             "above": 56,
@@ -15351,12 +15350,12 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 570eec50 of the deterministic package's column-task program 07135550 of these token counts (that package runs it from T 0 to 1216), in place of the det pair 56f988dd + 2e8d2128, a whole-SM program that program replaced in that package: the all-SM test excuses a det pair window that waits beside a kernel resident on every SM only where the deterministic package runs the same program; on GB300 it took 5.82, 8.13 and 9.34 us at T 64, 256 and 304 where the det pair took 7.65, 10.24 and 10.53 us, with 0.965 to 0.982 times the det pair's dw error against an FP64 reference (relative L2 or worst element, the larger over six input families) (BF16 weight; the FP32-weight twin computes the same dw)
-    "cake_rmsnorm_train_570eec506ed94f36f062__48_320": {
+    # sm_103a H6144 residual f32 weight: (48, 320] the FP32-weight twin 71d36617 of the deterministic package's column-task program 864e84f3 of these token counts.
+    "cake_rmsnorm_train_71d36617003ab7742a77__48_320": {
         "arches": [
             "sm_103a",
         ],
@@ -15371,12 +15370,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_570eec506ed94f36f062",
+        "kernel": "cake_rmsnorm_train_71d36617003ab7742a77",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_570eec506ed94f36f062",
+        "library": "cake_rmsnorm_train_71d36617003ab7742a77",
         "role": "bwd_main_w32_residual",
         "select_rule": {
             "above": 48,
@@ -15385,7 +15384,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 1,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -15482,8 +15481,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H1536 bf16 weight: (45056, 65536] the deterministic package's compensated det pair of these rows (main kernel e694b0a2: the register form of block-compensated in-chunk dw sums, a Kahan step every 4 steps; fixed-order dw reduce db5c0b67 with that package's host plan), renamed into this package, from T 45056, that package's accuracy edge, for speed and dw accuracy: the twosum single kernel dca25ace it replaces in (53248, 65536] took 73.54 us against 65.15 us for this pair in the deterministic package at T 65536 on R200 with 212 SMs (backward, harness pooled median), and the plain det pair 56d26996 + db5c0b67 it replaces in (45056, 53248] sums dw without compensation above that package's accuracy edge; the twosum single kernel keeps (65536, inf], where this pair exceeds the per-element budget at T 91148 (1.026) on R200 with 212 SMs; this pair's worst dw element over the per-element budget in this window is not sampled yet
-    "cake_rmsnorm_train_e694b0a25ea01d1f6cdc__45056_65536": {
+    # sm_107a H1536 bf16 weight: (45056, 65536] the deterministic package's det pair main kernel 411e270c with its fixed-order dw reduce.
+    "cake_rmsnorm_train_411e270c0575d26a77f4__45056_65536": {
         "arches": [
             "sm_107a",
         ],
@@ -15497,12 +15496,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_e694b0a25ea01d1f6cdc",
+        "kernel": "cake_rmsnorm_train_411e270c0575d26a77f4",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_e694b0a25ea01d1f6cdc",
+        "library": "cake_rmsnorm_train_411e270c0575d26a77f4",
         "role": "bwd_main",
         "select_rule": {
             "above": 45056,
@@ -15645,8 +15644,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H1536 f32 weight: (45056, 65536] the deterministic package's compensated det pair of these rows (main kernel 0f0b782f, the FP32-weight twin of e694b0a2, and fixed-order dw reduce db5c0b67 with that package's host plan), renamed into this package, from T 45056, that package's accuracy edge, for dw accuracy: the single kernel 7c0dd63f it replaces in (53248, 65536] is the FP32-weight twin of 3f75f4a8 and computes its dw (FP32 dw sums over windows of 16 steps), which put its worst dw error at 1.18x the deterministic package's median FP64 error over 5 repeats at T 65536 on R200 with 212 SMs (BF16 weight, normal inputs), and the plain det pair de8e07d4 + db5c0b67 it replaces in (45056, 53248] sums dw without compensation above that package's accuracy edge; the twosum single kernel ccd94d87 keeps (65536, inf], where this pair exceeds the per-element budget at T 106874 (1.018) on R200 with 212 SMs; its time and its worst dw element over the per-element budget in this window are not measured yet
-    "cake_rmsnorm_train_0f0b782f1e538caad3ce__45056_65536": {
+    # sm_107a H1536 f32 weight: (45056, 65536] the deterministic package's det pair main kernel 64ffe19b with its fixed-order dw reduce.
+    "cake_rmsnorm_train_64ffe19b041f5bfa34fb__45056_65536": {
         "arches": [
             "sm_107a",
         ],
@@ -15660,12 +15659,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_0f0b782f1e538caad3ce",
+        "kernel": "cake_rmsnorm_train_64ffe19b041f5bfa34fb",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_0f0b782f1e538caad3ce",
+        "library": "cake_rmsnorm_train_64ffe19b041f5bfa34fb",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 45056,
@@ -15986,7 +15985,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (4096, 24064] the deterministic package's det pair of these rows (main kernel ee4a9053 and fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, up to T 24064, where that package switches to its compensated program: above T 24064 this pair put its worst dw error at 1.25x to 2.00x the deterministic package's median FP64 error over 5 repeats at T 32768 on R200 with 212 SMs (normal, cancel, concentrated, saturated_hi and saturated_lo inputs)
+    # sm_107a H4096 bf16 weight: (4096, 24064] the deterministic package's det pair main kernel ee4a9053 with its fixed-order dw reduce.
     "cake_rmsnorm_train_ee4a9053bb25b8d49fcf__4096_24064": {
         "arches": [
             "sm_107a",
@@ -16018,8 +16017,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's compensated det pair of these rows (main kernel 99a01f2a: block-compensated in-chunk dw sums over 8-step blocks; fixed-order dw reduce 10e24516 with that package's host plan), renamed into this package, for dw accuracy: the plain det pair ee4a9053 + 10e24516 it replaced in (24064, 36864] put its worst dw error at 1.25x to 2.00x the deterministic package's median FP64 error over 5 repeats at T 32768 on R200 with 212 SMs (normal, cancel, concentrated, saturated_hi and saturated_lo inputs), and the single kernel f11a8616 it replaced in (36864, 65536] (this package's previous version runs the same one there) put its worst dw error at 1.321x, 1.127x and 1.410x the median FP64 error of the deterministic package in its earlier version over 5 repeats at T 40960, 49152 and 65536 on R200 (3 seeds; concentrated, saturated_hi and concentrated inputs), where this pair stays at 1.000x; the deterministic package in its earlier version runs this pair at every T above 24064, the deterministic package now up to T 50176, above which its worst dw error passes 0.8 of the per-element budget on sm_107a; its time in this window is not measured yet; the pair-row single aed93ac9 runs above it, to T 65536, for speed
-    "cake_rmsnorm_train_99a01f2a850874718c3f__24064_24576": {
+    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's det pair main kernel e9e21bbe with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e9e21bbe4fa478075868__24064_24576": {
         "arches": [
             "sm_107a",
         ],
@@ -16033,12 +16032,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_99a01f2a850874718c3f",
+        "kernel": "cake_rmsnorm_train_e9e21bbe4fa478075868",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_99a01f2a850874718c3f",
+        "library": "cake_rmsnorm_train_e9e21bbe4fa478075868",
         "role": "bwd_main",
         "select_rule": {
             "above": 24064,
@@ -16050,8 +16049,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (24576, 65536] the pair-row single kernel (32 items, one row per issue, two CTAs per SM) with its chunk table cut for 8 slots per SM (table_slots 8: more, shorter chunks than CTAs, the grid unchanged; twosum per-thread dw sums kept as FP32 pairs; each CTA writes its pairs as one row of a scratch area, and 256 helper CTAs fold the rows by pair addition and round dw once; no FP64 instruction) for speed: on R200 with 212 SMs (CUDA graph replay, cold L2, 7 rounds) it took 63.9 to 150 us at T 24577 to 65536, 0.96x to 0.98x the time of the deterministic package's compensated det pair 99a01f2a + 10e24516 it replaces (the single kernels this package's previous version runs there exceed 1.1x the deterministic package's dw error), with a dw error (relative L2 or worst element, the larger over six input families, 3 seeds x 5 repeats; dx equal to the deterministic package's) of at most 0.93x that of the deterministic package's program in its earlier version (that det pair)
-    "cake_rmsnorm_train_aed93ac9e4828f1b8b47__24576_65536": {
+    # sm_107a H4096 bf16 weight: (24576, 65536] the part-row single kernel 23573e0c (FP32 dw sums, one FP32 row per CTA, folded by its helper CTAs).
+    "cake_rmsnorm_train_23573e0c42a194a04876__24576_65536": {
         "arches": [
             "sm_107a",
         ],
@@ -16066,12 +16065,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_aed93ac9e4828f1b8b47",
+        "kernel": "cake_rmsnorm_train_23573e0c42a194a04876",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_aed93ac9e4828f1b8b47",
+        "library": "cake_rmsnorm_train_23573e0c42a194a04876",
         "role": "bwd_main",
         "select_rule": {
             "above": 24576,
@@ -16081,7 +16080,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "workspace_rule": {
             "counters": 4,
             "kind": "claim_part_f32",
-            "part_row_bytes": 32768,
+            "part_row_bytes": 16384,
         },
     },
     "cake_rmsnorm_train_69bf6e104bb48b6b74bf__256_1024": {
@@ -16416,8 +16415,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H512 bf16 weight: (49152, inf] the twosum form of the H512 row instance (its knobs (4 reps, 4 slices) plus twosum and l2_ahead 2; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the det pair it replaces (the deterministic package runs the same pair there) exceeds the per-element budget at T 92912 (1.036, worst of 120 inputs of each of three families in both rstd forms) and at T 131072 (1.145) on R200 with 212 SMs, and its FP32-weight twin (the same dw computation) at T 80754 (1.012); the window keeps its start at T 49152 until a follow-up has qualifying evidence for the pair above it; its worst dw error stays within 0.0006 of the per-element budget at every sampled T from 49153 to 131072 (130 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.26x to 1.29x the pair's (the deterministic package's run of it) at T 49153, 65536, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_30501ccec48cc058333a__49152_inf": {
+    # sm_107a H512 bf16 weight: (49152, inf] the single kernel 7764c8a3 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_7764c8a34009f3728312__49152_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -16431,12 +16430,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_30501ccec48cc058333a",
+        "kernel": "cake_rmsnorm_train_7764c8a34009f3728312",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_30501ccec48cc058333a",
+        "library": "cake_rmsnorm_train_7764c8a34009f3728312",
         "role": "bwd_main",
         "select_rule": {
             "above": 49152,
@@ -16445,8 +16444,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
     "cake_rmsnorm_train_f94861c36a14eb75e39c__576_1024": {
@@ -16634,8 +16633,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H512 f32 weight: (49152, inf] the twosum form of the H512 row instance (its knobs (4 reps, 4 slices) plus twosum and l2_ahead 2; twosum: exact per-thread dw sums) for dw accuracy up to T 131072, the top of the qualified range: the det pair it replaces (the deterministic package runs the same pair there) exceeds the per-element budget at T 80754 (1.012, worst of 120 inputs of each of three families in both rstd forms) and at T 118784 (1.097) on R200 with 212 SMs; the window keeps its start at T 49152 until a follow-up has qualifying evidence for the pair above it; its worst dw error stays within 0.0006 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 49153 to 131072 (130 T) on R200, worst of 60 inputs of each of three families in both rstd forms; backward time 1.25x to 1.28x the pair's (the deterministic package's run of it) at T 49153, 65536, 98304 and 131072 in two sessions (R200, 212 SMs)
-    "cake_rmsnorm_train_26fbe8e6f07a658e26f6__49152_inf": {
+    # sm_107a H512 f32 weight: (49152, inf] the single kernel 5117a0f6 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_5117a0f693a160485d76__49152_inf": {
         "arches": [
             "sm_107a",
         ],
@@ -16649,12 +16648,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 512,
-        "kernel": "cake_rmsnorm_train_26fbe8e6f07a658e26f6",
+        "kernel": "cake_rmsnorm_train_5117a0f693a160485d76",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_26fbe8e6f07a658e26f6",
+        "library": "cake_rmsnorm_train_5117a0f693a160485d76",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 49152,
@@ -16663,8 +16662,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 2,
-            "kind": "claim_sum_f64",
-            "sum_bytes": 16384,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
         },
     },
     "cake_rmsnorm_train_f94861c36a14eb75e39c__384_1024": {
@@ -16960,7 +16959,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_cdcd68d9227a76af4e88__19968_32767": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__19968_32767": {
         "arches": [
             "sm_107a",
         ],
@@ -16969,12 +16968,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_cdcd68d9227a76af4e88",
+        "kernel": "cake_rmsnorm_train_c5831b29d17867842e5f",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_cdcd68d9227a76af4e88",
+        "library": "cake_rmsnorm_train_c5831b29d17867842e5f",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 19968,
@@ -16983,7 +16982,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package, for dw accuracy: the row single kernel dd795e84 it replaces put its worst dw error at 1.12x to 1.59x the deterministic package's median FP64 error over 5 repeats at T 14928 to 16384 on R200 with 212 SMs (normal, concentrated and saturated_lo inputs); the plain det pair's worst dw element stays within 0.545 of the per-element budget up to T 19968 on R200 with 212 SMs and within 0.499 with 216 SMs (60 or more inputs of each of three families, kernel rstd; both weight dtypes compute the same dw); its dw error exceeds the FP32 eager reference's at T 13024, 17472, 17728 and 19520 and at T 18304 (torch rstd) on R200 with 212 SMs
+    # sm_107a H5120 f32 weight: (4096, 19968] the deterministic package's det pair of these rows (main kernel 468cc4d1, the FP32-weight twin of the plain program 6816fb80 the BF16-weight route runs here, and fixed-order dw reduce 2af4cf2f with that package's host plan), renamed into this package.
     "cake_rmsnorm_train_468cc4d1b8128187b4b3__4096_19968": {
         "arches": [
             "sm_107a",
@@ -17108,7 +17107,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H5120 f32 weight: (19968, 32767] the deterministic package's compensated det pair of these rows (main kernel de0cf457, the FP32-weight twin of 47da668e: block sums of the fold buffer over 8-step blocks; fixed-order TwoSum dw reduce cdcd68d9 with that package's host plan), renamed into this package, for dw accuracy: the compensated det pair 7b9e10b2 + 2af4cf2f (16-step blocks) it replaces put its worst dw error at 1.18x to 1.71x the deterministic package's median FP64 error over 5 repeats at T 32768 on R200 with 212 SMs (normal, cancel, concentrated, saturated_hi and saturated_lo inputs); this pair's worst dw element over the per-element budget is not sampled in this window yet; the pair-row single 9cdd6eef runs above, to T 131072
+    # sm_107a H5120 f32 weight: (19968, 32767] the deterministic package's det pair main kernel de0cf457 with its fixed-order dw reduce.
     "cake_rmsnorm_train_de0cf457cd240f9c6422__19968_32767": {
         "arches": [
             "sm_107a",
@@ -17202,8 +17201,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H6144 bf16 weight: (19456, 30720] the det pair program; its worst dw error stays at or below 0.57 of the budget at every sampled T from 19457 to 30721 (every 64 rows) on R200, worst of 60 inputs of each of three families in both rstd forms; a follow-up returns this window to the pair of (3, 30720], which stays within the per-element budget at 66 sampled T from 19457 to 30720 (worst 0.913 at T 29680, worst of 120 inputs of each of three families in both rstd forms, R200 with 212 SMs) and takes 0.97x to 0.99x this det pair's backward time
-    "cake_rmsnorm_train_19e18371f9243bd1a91a__19456_30720": {
+    # sm_107a H6144 bf16 weight: (19456, 30720] the deterministic package's det pair main kernel 9cc51adf with its fixed-order dw reduce.
+    "cake_rmsnorm_train_9cc51adfe9826056658b__19456_30720": {
         "arches": [
             "sm_107a",
         ],
@@ -17217,12 +17216,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_19e18371f9243bd1a91a",
+        "kernel": "cake_rmsnorm_train_9cc51adfe9826056658b",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_19e18371f9243bd1a91a",
+        "library": "cake_rmsnorm_train_9cc51adfe9826056658b",
         "role": "bwd_main",
         "select_rule": {
             "above": 19456,
@@ -17303,8 +17302,8 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    # sm_107a H6144 f32 weight: (19456, 28672] the det pair program for dw accuracy: the pair of (20, 28672] exceeded the FP32 eager reference's dw error at 21 sampled T from 20416 rows on R200; its worst dw error stays within 0.631 of the per-element budget and at or below the FP32 eager reference's at every sampled T from 19457 to 28673 (every 64 rows) on R200, worst of 60 inputs of each of three families in both rstd forms
-    "cake_rmsnorm_train_b83f8b3d546630a60675__19456_28672": {
+    # sm_107a H6144 f32 weight: (19456, 28672] the deterministic package's det pair main kernel bdfba721 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_bdfba721a43e0d093668__19456_28672": {
         "arches": [
             "sm_107a",
         ],
@@ -17318,12 +17317,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 6144,
-        "kernel": "cake_rmsnorm_train_b83f8b3d546630a60675",
+        "kernel": "cake_rmsnorm_train_bdfba721a43e0d093668",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_b83f8b3d546630a60675",
+        "library": "cake_rmsnorm_train_bdfba721a43e0d093668",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 19456,
@@ -17497,7 +17496,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_780c64c6f2c4615bfbcf": {
         "arches": [
             "sm_100a",
@@ -17523,11 +17522,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 24 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_f2ccf7197a641c39acbf": {
         "arches": [
             "sm_100a",
@@ -17553,11 +17552,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 24 and 64 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 bf16 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_9fb6b410e91f9d92becf": {
         "arches": [
             "sm_100a",
@@ -17583,11 +17582,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_67cb56412bd46304b711": {
         "arches": [
             "sm_100a",
@@ -17613,11 +17612,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 24 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (4, 24] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 24): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_aa745395d7542d8a8e3a": {
         "arches": [
             "sm_100a",
@@ -17643,11 +17642,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H256 f32 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 24 and 64 are not measured yet
+    # sm_100a / sm_103a / sm_107a H256 f32 weight: (24, 64] the one-cluster kernel (1 CTA in one thread-block cluster, 8 row groups, max_rows 64): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6a0114cb0b27a780a4c3": {
         "arches": [
             "sm_100a",
@@ -17673,11 +17672,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_64a299691c17079fe510": {
         "arches": [
             "sm_100a",
@@ -17703,11 +17702,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c167e0d26b363cf19e7b": {
         "arches": [
             "sm_100a",
@@ -17733,11 +17732,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_8c261dfc6e34351d7a11": {
         "arches": [
             "sm_100a",
@@ -17763,11 +17762,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H512 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_100a / sm_103a / sm_107a H512 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_88e6252beaf7d056d555": {
         "arches": [
             "sm_100a",
@@ -17793,11 +17792,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 bf16 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H1536 bf16 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_db218c92c4c86b9da85a__0_2": {
         "arches": [
             "sm_100a",
@@ -17821,11 +17820,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H1536 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H1536 bf16 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4": {
         "arches": [
             "sm_103a",
@@ -17850,11 +17849,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (4, 5] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 5 are not measured yet
+    # sm_103a H1536 bf16 weight: (4, 5] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c2a523de1ff578621a88__4_5": {
         "arches": [
             "sm_103a",
@@ -17878,11 +17877,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H1536 bf16 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c2a523de1ff578621a88__4_16": {
         "arches": [
             "sm_107a",
@@ -17906,11 +17905,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H1536 f32 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H1536 f32 weight: (0, 2] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_2": {
         "arches": [
             "sm_100a",
@@ -17934,11 +17933,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H1536 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H1536 f32 weight: (0, 4] the one-cluster kernel (1 CTA in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_4": {
         "arches": [
             "sm_103a",
@@ -17963,11 +17962,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 f32 weight: (4, 6] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H1536 f32 weight: (4, 6] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_744aa77460c886f4f429__4_6": {
         "arches": [
             "sm_103a",
@@ -17991,11 +17990,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H1536 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H1536 f32 weight: (4, 16] the one-cluster kernel (2 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_744aa77460c886f4f429__4_16": {
         "arches": [
             "sm_107a",
@@ -18019,11 +18018,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H2048 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H2048 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c5f62407b828a85f82ec": {
         "arches": [
             "sm_100a",
@@ -18049,11 +18048,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_100a H2048 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a951623c157d070e85ab__4_12": {
         "arches": [
             "sm_100a",
@@ -18077,11 +18076,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H2048 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H2048 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a951623c157d070e85ab__4_16": {
         "arches": [
             "sm_103a",
@@ -18106,11 +18105,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H2048 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H2048 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_0017ab41f68d8689ebc2": {
         "arches": [
             "sm_100a",
@@ -18136,11 +18135,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 14 are not measured yet
+    # sm_100a H2048 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_14": {
         "arches": [
             "sm_100a",
@@ -18164,11 +18163,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H2048 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H2048 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_16": {
         "arches": [
             "sm_103a",
@@ -18193,11 +18192,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H4096 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H4096 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_945a0afdb82ab47eb643": {
         "arches": [
             "sm_100a",
@@ -18223,11 +18222,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_100a H4096 bf16 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_41f44b4bc0b765350a50__4_12": {
         "arches": [
             "sm_100a",
@@ -18251,11 +18250,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H4096 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H4096 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_41f44b4bc0b765350a50__4_16": {
         "arches": [
             "sm_103a",
@@ -18280,11 +18279,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H4096 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H4096 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_f6bd1634a115bd281055": {
         "arches": [
             "sm_100a",
@@ -18310,11 +18309,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H4096 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 14 are not measured yet
+    # sm_100a H4096 f32 weight: (4, 14] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_b378ba007691c582171e__4_14": {
         "arches": [
             "sm_100a",
@@ -18338,11 +18337,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H4096 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_103a / sm_107a H4096 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_b378ba007691c582171e__4_16": {
         "arches": [
             "sm_103a",
@@ -18367,11 +18366,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H5120 bf16 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H5120 bf16 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_dbc680f356be4cd643de": {
         "arches": [
             "sm_100a",
@@ -18397,11 +18396,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 bf16 weight: (4, 12] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_107a H5120 bf16 weight: (4, 12] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_904b1ad45d6219b4f43c__4_12": {
         "arches": [
             "sm_107a",
@@ -18425,11 +18424,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H5120 f32 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H5120 f32 weight: (0, 4] the one-cluster kernel (4 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_d47138228b123e55fe5d": {
         "arches": [
             "sm_100a",
@@ -18455,11 +18454,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H5120 f32 weight: (4, 5] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 5 are not measured yet
+    # sm_103a H5120 f32 weight: (4, 5] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_05396cd3a077d3772fdc__4_5": {
         "arches": [
             "sm_103a",
@@ -18483,11 +18482,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (4, 15] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 15 are not measured yet
+    # sm_107a H5120 f32 weight: (4, 15] the one-cluster kernel (4 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_05396cd3a077d3772fdc__4_15": {
         "arches": [
             "sm_107a",
@@ -18511,11 +18510,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_e37752b056dd4e4a0bee": {
         "arches": [
             "sm_100a",
@@ -18541,11 +18540,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H6144 bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_fdfb73350c1a926a4929__4_6": {
         "arches": [
             "sm_103a",
@@ -18569,11 +18568,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 bf16 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_fdfb73350c1a926a4929__4_16": {
         "arches": [
             "sm_107a",
@@ -18597,11 +18596,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_35b97e6e2bfa3e9f2ff9": {
         "arches": [
             "sm_100a",
@@ -18627,11 +18626,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 f32 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 12 are not measured yet
+    # sm_103a H6144 f32 weight: (4, 12] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_18b8b8054c7053942bcd__4_12": {
         "arches": [
             "sm_103a",
@@ -18655,11 +18654,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 8 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_18b8b8054c7053942bcd__4_16": {
         "arches": [
             "sm_107a",
@@ -18683,11 +18682,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a H6144 residual bf16 weight: (0, 2] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 2 are not measured yet
+    # sm_100a H6144 residual bf16 weight: (0, 2] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_deeb187630473818923d__0_2": {
         "arches": [
             "sm_100a",
@@ -18711,11 +18710,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a / sm_107a H6144 residual bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_103a / sm_107a H6144 residual bf16 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_deeb187630473818923d__0_4": {
         "arches": [
             "sm_103a",
@@ -18740,11 +18739,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 6 are not measured yet
+    # sm_103a H6144 residual bf16 weight: (4, 6] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_6": {
         "arches": [
             "sm_103a",
@@ -18768,11 +18767,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual bf16 weight: (4, 15] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 15 are not measured yet
+    # sm_107a H6144 residual bf16 weight: (4, 15] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_15": {
         "arches": [
             "sm_107a",
@@ -18796,11 +18795,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_100a / sm_103a / sm_107a H6144 residual f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 are not measured yet
+    # sm_100a / sm_103a / sm_107a H6144 residual f32 weight: (0, 4] the one-cluster kernel (8 CTAs in one thread-block cluster, 2 row groups, max_rows 4): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_a6b1a6e565dc98b49e1a": {
         "arches": [
             "sm_100a",
@@ -18826,11 +18825,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_103a H6144 residual f32 weight: (4, 10] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 10 are not measured yet
+    # sm_103a H6144 residual f32 weight: (4, 10] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c29a8f856283578103dc__4_10": {
         "arches": [
             "sm_103a",
@@ -18854,11 +18853,11 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
-    # sm_107a H6144 residual f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order dw exact to second order, the same bits on every launch; its time against the program it replaces and the dx class at the edge 4 and 16 are not measured yet
+    # sm_107a H6144 residual f32 weight: (4, 16] the one-cluster kernel (8 CTAs in one thread-block cluster, 4 row groups, max_rows 16): one launch, no workspace and no atomic; dx as the single kernel forms it and a fixed-order FP32 dw, the same bits on every launch.
     "cake_rmsnorm_train_c29a8f856283578103dc__4_16": {
         "arches": [
             "sm_107a",
@@ -18882,7 +18881,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": {
             "counters": 0,
-            "kind": "claim_sum_f64",
+            "kind": "claim_sum_f32",
             "sum_bytes": 0,
         },
     },
@@ -18993,25 +18992,25 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
             "cake_rmsnorm_train_9fb6b410e91f9d92becf",
             "cake_rmsnorm_train_195c4317b51bb4ea1137",
-            "cake_rmsnorm_train_172a47a15d4c1a76c061__20480_92160",
-            "cake_rmsnorm_train_083ea823c691e0631ad3__92160_524288",
-            "cake_rmsnorm_train_172a47a15d4c1a76c061",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__92160_524288",
+            "cake_rmsnorm_train_44ef314181f3f2e93293__20480_92160",
+            "cake_rmsnorm_train_a385ae1681a2c078344e__92160_524288",
+            "cake_rmsnorm_train_44ef314181f3f2e93293",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__92160_524288",
         ],
         "bwd_w32_h256": [
             "cake_rmsnorm_train_67cb56412bd46304b711",
             "cake_rmsnorm_train_aa745395d7542d8a8e3a",
             "cake_rmsnorm_train_6a0114cb0b27a780a4c3",
             "cake_rmsnorm_train_8de0131445eed6eeabb7",
-            "cake_rmsnorm_train_7c2aa4b429538da06a2a__20480_92160",
-            "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__92160_864240",
-            "cake_rmsnorm_train_7c2aa4b429538da06a2a__864240_inf",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__92160_864240",
+            "cake_rmsnorm_train_b71bbe9852c16fe03114__20480_92160",
+            "cake_rmsnorm_train_420788e663a2c3a810f6__92160_864240",
+            "cake_rmsnorm_train_b71bbe9852c16fe03114__864240_inf",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__92160_864240",
         ],
         "bwd_h512": [
             "cake_rmsnorm_train_64a299691c17079fe510",
             "cake_rmsnorm_train_c167e0d26b363cf19e7b",
-            "cake_rmsnorm_train_5f3e3fccaea795d0a806__16_227",
+            "cake_rmsnorm_train_931757c844a9d257c08b__16_227",
             "cake_rmsnorm_train_09601d42628de24f6f87__227_1024",
             "cake_rmsnorm_train_123db0b2f7fb38cfab03__1024_1280",
             "cake_rmsnorm_train_d0bde38aa443d42a5f04",
@@ -19025,23 +19024,23 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h512": [
             "cake_rmsnorm_train_8c261dfc6e34351d7a11",
             "cake_rmsnorm_train_88e6252beaf7d056d555",
-            "cake_rmsnorm_train_942503b80a21f22cd392__16_227",
-            "cake_rmsnorm_train_aa7c5a5407cba063b9d5__227_292",
+            "cake_rmsnorm_train_404c8f54ab3129877350__16_227",
+            "cake_rmsnorm_train_1a322bb1c550a7d70638__227_292",
             "cake_rmsnorm_train_9f07cea1d13b923ed91e__292_960",
             "cake_rmsnorm_train_fd08c6f436eb6071fa22",
             "cake_rmsnorm_train_7097069b8eea6ba44d5a__292_960",
         ],
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_2",
-            "cake_rmsnorm_train_38e972a94141a1961c90__2_64",
+            "cake_rmsnorm_train_02e761bcf94053af6fc3__2_64",
             "cake_rmsnorm_train_dc478ac1195882aedee6__64_384",
             "cake_rmsnorm_train_7dc29629ff21625607f8__384_1024",
             "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
             "cake_rmsnorm_train_21c8bb55c8d672b63952",
             "cake_rmsnorm_train_b457c4d134e44476dc6f__32768_36352",
-            "cake_rmsnorm_train_b5bdabba0b80fb8afcc5__36352_78784",
-            "cake_rmsnorm_train_66238d219de588fca483",
-            "cake_rmsnorm_train_b42efd6bf06148d75151__131072_inf",
+            "cake_rmsnorm_train_b457c4d134e44476dc6f__36352_78784",
+            "cake_rmsnorm_train_0d5dc239536f113f4926",
+            "cake_rmsnorm_train_ae610afdf77ff6714a5b__131072_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__384_1024",
             "cake_rmsnorm_train_1863320f3158d35eead6",
             "cake_rmsnorm_train_1863320f3158d35eead6__4096_32768",
@@ -19050,21 +19049,21 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_w32_h1536": [
             "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_2",
-            "cake_rmsnorm_train_d5a621af7a24e403b5f3__2_64",
-            "cake_rmsnorm_train_3ddc5ca5ad86c7725d7e__64_384",
+            "cake_rmsnorm_train_166e288c9192be6b994c__2_64",
+            "cake_rmsnorm_train_e83ee45f66352eaef755__64_384",
             "cake_rmsnorm_train_baff9ecbafe7de1e6030__384_1024",
             "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_4096",
             "cake_rmsnorm_train_4bf450b6af0314ed03be",
             "cake_rmsnorm_train_4b6981c10fd40a9d8aec__32768_75776",
-            "cake_rmsnorm_train_5e78d78f2d8203948198",
-            "cake_rmsnorm_train_e2b99fee32764cfd1295__131072_inf",
+            "cake_rmsnorm_train_363eabb3661dab78f3d3",
+            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__131072_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__384_1024",
             "cake_rmsnorm_train_1863320f3158d35eead6__4096_32768",
         ],
         "bwd_h2048": [
             "cake_rmsnorm_train_c5f62407b828a85f82ec",
             "cake_rmsnorm_train_a951623c157d070e85ab__4_12",
-            "cake_rmsnorm_train_ef052c0918725ffa68d4__12_64",
+            "cake_rmsnorm_train_518cf16a7bf8e88042ee__12_64",
             "cake_rmsnorm_train_64e6aa82bb2c6d4ea978__64_336",
             "cake_rmsnorm_train_caf6978ed0a17fbf65b9__336_3072",
             "cake_rmsnorm_train_9ac8d21e46a658e7913f",
@@ -19072,8 +19071,8 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_0fa4f255caf709d09f66",
             "cake_rmsnorm_train_c73074cf44f07fcf3bb6__11264_16384",
             "cake_rmsnorm_train_ceeef043ac64f37fc529__16384_58880",
-            "cake_rmsnorm_train_8b8cf4f5b82e77554908",
-            "cake_rmsnorm_train_83f905ffd00c0ef641e2__131072_inf",
+            "cake_rmsnorm_train_8404aa4380f6db7259cc",
+            "cake_rmsnorm_train_0fa4f255caf709d09f66__131072_inf",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__336_3072",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__3072_4096",
             "cake_rmsnorm_train_d0960be986e58f449f50__4096_7168",
@@ -19083,32 +19082,32 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h2048": [
             "cake_rmsnorm_train_0017ab41f68d8689ebc2",
             "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_14",
-            "cake_rmsnorm_train_382e45788ace3ff40ba1__14_64",
+            "cake_rmsnorm_train_c2f08c957d4b0f17dddd__14_64",
             "cake_rmsnorm_train_17493054fed5409b6df9__64_336",
             "cake_rmsnorm_train_17493054fed5409b6df9__336_1024",
             "cake_rmsnorm_train_ba7dbf6a07744268705e__1024_4096",
             "cake_rmsnorm_train_b187e5989302def22b2d__4096_15403",
             "cake_rmsnorm_train_ba7dbf6a07744268705e",
             "cake_rmsnorm_train_ba7dbf6a07744268705e__45056_58880",
-            "cake_rmsnorm_train_25068edea92269e1bdb1__58880_65536",
-            "cake_rmsnorm_train_273d3f9b357669a821e2",
-            "cake_rmsnorm_train_9f775c72c1335f4b08ac__131072_inf",
+            "cake_rmsnorm_train_7e6a0b631aea3edf51f9__58880_65536",
+            "cake_rmsnorm_train_54f6e4b8d937f7fb5619",
+            "cake_rmsnorm_train_ba7dbf6a07744268705e__131072_inf",
             "cake_rmsnorm_train_d0960be986e58f449f50__4096_15403",
             "cake_rmsnorm_train_d0960be986e58f449f50__58880_65536",
         ],
         "bwd_h4096": [
             "cake_rmsnorm_train_945a0afdb82ab47eb643",
             "cake_rmsnorm_train_41f44b4bc0b765350a50__4_12",
-            "cake_rmsnorm_train_231e01eca0459c2c0bf5__12_64",
+            "cake_rmsnorm_train_82b84544dba8e2b70bc1__12_64",
             "cake_rmsnorm_train_4822793ea0c954c11af6__64_1152",
             "cake_rmsnorm_train_9a830956447d4e304914__1152_4096",
             "cake_rmsnorm_train_35a0b0ca6b2060313255__4096_4608",
-            "cake_rmsnorm_train_2443b1f0183048c47b15__4608_16384",
-            "cake_rmsnorm_train_03f6488b89b5f9ae3db5__16384_36864",
+            "cake_rmsnorm_train_cf4c213e50482afdacdb__4608_16384",
+            "cake_rmsnorm_train_681b33d9c9d0ac4d29a4__16384_36864",
             "cake_rmsnorm_train_35a0b0ca6b2060313255__36864_44032",
-            "cake_rmsnorm_train_7122dbcd697b3fbe1ee0__44032_65536",
-            "cake_rmsnorm_train_fd7ae1d7547fca6156a0",
-            "cake_rmsnorm_train_c67fc8b9d1b1edb8d7da__131072_inf",
+            "cake_rmsnorm_train_35a0b0ca6b2060313255__44032_65536",
+            "cake_rmsnorm_train_cda582bb216e6776b449",
+            "cake_rmsnorm_train_15e157d2ee9080d206a9__131072_inf",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__1152_4096",
             "cake_rmsnorm_train_fcbfa14d591a9babfd26__4096_4608",
             "cake_rmsnorm_train_fcbfa14d591a9babfd26__36864_44032",
@@ -19117,75 +19116,75 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h4096": [
             "cake_rmsnorm_train_f6bd1634a115bd281055",
             "cake_rmsnorm_train_b378ba007691c582171e__4_14",
-            "cake_rmsnorm_train_ce1f7d216ecc0a1573b9__14_64",
+            "cake_rmsnorm_train_cdef0b34f5080dbc61d1__14_64",
             "cake_rmsnorm_train_8616070567821eaa3e35__64_1792",
             "cake_rmsnorm_train_f7573bcb748c0784f3ec__1792_3584",
             "cake_rmsnorm_train_f7573bcb748c0784f3ec",
             "cake_rmsnorm_train_626aed743358c27513f1__36864_44032",
-            "cake_rmsnorm_train_5ef5f1f13ed8f2b994c4__44032_65536",
-            "cake_rmsnorm_train_6e65495154249f51e74b",
-            "cake_rmsnorm_train_9ebd0232954f1b1842f7__131072_inf",
+            "cake_rmsnorm_train_626aed743358c27513f1__44032_65536",
+            "cake_rmsnorm_train_3a10d379e6a7ae778964",
+            "cake_rmsnorm_train_f7573bcb748c0784f3ec__131072_inf",
             "cake_rmsnorm_train_fcbfa14d591a9babfd26__36864_44032",
             "cake_rmsnorm_train_fcbfa14d591a9babfd26__44032_65536",
         ],
         "bwd_h5120": [
             "cake_rmsnorm_train_dbc680f356be4cd643de",
-            "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__4_64",
+            "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_64",
             "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_896",
             "cake_rmsnorm_train_b482c84dbffcd75a4a4c__896_6144",
-            "cake_rmsnorm_train_c145ef195d7aeb04f242__6144_56256",
-            "cake_rmsnorm_train_56634f53e6456b34f76f__56256_131072",
-            "cake_rmsnorm_train_ade9f6a4f10b069ba8a3__131072_inf",
+            "cake_rmsnorm_train_b482c84dbffcd75a4a4c__6144_56256",
+            "cake_rmsnorm_train_670f4cafe8c34a429d30__56256_131072",
+            "cake_rmsnorm_train_2f05000ca9242ea4d6cb__131072_inf",
             "cake_rmsnorm_train_c5831b29d17867842e5f__896_6144",
             "cake_rmsnorm_train_c5831b29d17867842e5f__6144_56256",
         ],
         "bwd_w32_h5120": [
             "cake_rmsnorm_train_d47138228b123e55fe5d",
-            "cake_rmsnorm_train_244b7d841d62d9721c99__4_64",
-            "cake_rmsnorm_train_68f6e584c687c30c0084__64_1792",
+            "cake_rmsnorm_train_cb6539573725ac861f94__4_64",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_1792",
             "cake_rmsnorm_train_de8f6091077dc7ac5947__1792_6144",
             "cake_rmsnorm_train_9479b1298a1b19d4d996__6144_56256",
-            "cake_rmsnorm_train_6cedccdf3a58f23f260f__56256_131072",
-            "cake_rmsnorm_train_fc2a52a2c9bf8c5be9af__131072_inf",
+            "cake_rmsnorm_train_13bd0c5f56e37867eb26__56256_131072",
+            "cake_rmsnorm_train_de8f6091077dc7ac5947__131072_inf",
             "cake_rmsnorm_train_c5831b29d17867842e5f__6144_56256",
         ],
         "bwd_h6144": [
             "cake_rmsnorm_train_e37752b056dd4e4a0bee",
-            "cake_rmsnorm_train_d70f2562a592151ec4f9__4_64",
+            "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__4_64",
             "cake_rmsnorm_train_44508df7dab2ab688f85__64_1152",
             "cake_rmsnorm_train_5c804aed7ad14b99e1d0__1152_4096",
             "cake_rmsnorm_train_b93bf060d4d3defc8150__4096_42496",
             "cake_rmsnorm_train_9433061da18b2db4299d__42496_65536",
-            "cake_rmsnorm_train_995b2229fe43c772b2c7",
-            "cake_rmsnorm_train_10a41132a42d594ce6dd__131072_inf",
+            "cake_rmsnorm_train_301133b646c4197fe462",
+            "cake_rmsnorm_train_9433061da18b2db4299d__131072_inf",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__1152_4096",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__4096_42496",
         ],
         "bwd_residual_h6144": [
             "cake_rmsnorm_train_deeb187630473818923d__0_2",
-            "cake_rmsnorm_train_7b0f5a6a8769473c322e__2_64",
+            "cake_rmsnorm_train_3a55646d574035bfa271__2_64",
             "cake_rmsnorm_train_864e84f3d874f850c091__64_1408",
-            "cake_rmsnorm_train_eb332e8c97f6387027c6__1408_65536",
-            "cake_rmsnorm_train_7c216db7f9e0c6fd9c4d",
-            "cake_rmsnorm_train_1609f7969c50fba7f2c7__131072_inf",
+            "cake_rmsnorm_train_f6537c86c7ffae183a50__1408_65536",
+            "cake_rmsnorm_train_6feab384e4c85e893ed5",
+            "cake_rmsnorm_train_3fbfdd750cbeb47032b5__131072_inf",
         ],
         "bwd_w32_h6144": [
             "cake_rmsnorm_train_35b97e6e2bfa3e9f2ff9",
-            "cake_rmsnorm_train_9b37923697ee8ca52a9e__4_64",
+            "cake_rmsnorm_train_f4d41a0991647b82ac21__4_64",
             "cake_rmsnorm_train_b3e6531e46667901ab91__64_1168",
             "cake_rmsnorm_train_41b80b6af97974feb181__1168_3584",
             "cake_rmsnorm_train_a562656cef5bf5dda160__3584_65536",
-            "cake_rmsnorm_train_d5a17016b7ff2c6e3ba9",
-            "cake_rmsnorm_train_45cf60e3cd8603c2abeb__131072_inf",
+            "cake_rmsnorm_train_c61519fe43c45818b9b4",
+            "cake_rmsnorm_train_a562656cef5bf5dda160__131072_inf",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__1168_3584",
         ],
         "bwd_w32_residual_h6144": [
             "cake_rmsnorm_train_a6b1a6e565dc98b49e1a",
-            "cake_rmsnorm_train_ac9d69f94aabfc68aa40__4_64",
+            "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__4_64",
             "cake_rmsnorm_train_71d36617003ab7742a77__64_1408",
             "cake_rmsnorm_train_a640d0b799889f785ad5__1408_65536",
-            "cake_rmsnorm_train_0bdcd2c63a9a4c5cb9d4",
-            "cake_rmsnorm_train_d3d674373d17aaf425c0__131072_inf",
+            "cake_rmsnorm_train_f5453c09151f9d441744",
+            "cake_rmsnorm_train_a640d0b799889f785ad5__131072_inf",
         ],
     },
     "sm_103a": {
@@ -19292,48 +19291,48 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_780c64c6f2c4615bfbcf",
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
             "cake_rmsnorm_train_9fb6b410e91f9d92becf",
-            "cake_rmsnorm_train_083ea823c691e0631ad3__64_1080",
+            "cake_rmsnorm_train_a385ae1681a2c078344e__64_1080",
             "cake_rmsnorm_train_af005462cd6a301f31c4__1080_5120",
             "cake_rmsnorm_train_a385ae1681a2c078344e__5120_12288",
             "cake_rmsnorm_train_af005462cd6a301f31c4__12288_40960",
             "cake_rmsnorm_train_a385ae1681a2c078344e__40960_97280",
-            "cake_rmsnorm_train_083ea823c691e0631ad3__97280_720896",
-            "cake_rmsnorm_train_0291949ba535c646c3a8__720896_1572864",
-            "cake_rmsnorm_train_c18297d75c0d424978fd",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_1080",
+            "cake_rmsnorm_train_a385ae1681a2c078344e__97280_720896",
+            "cake_rmsnorm_train_a385ae1681a2c078344e__720896_1572864",
+            "cake_rmsnorm_train_a385ae1681a2c078344e",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__64_1080",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__1080_5120",
             "cake_rmsnorm_train_72138dce40d43da44aaf__5120_12288",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__12288_40960",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__40960_97280",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__97280_720896",
-            "cake_rmsnorm_train_0ac243f8385c32960e14__720896_1572864",
-            "cake_rmsnorm_train_e73321cec89d33336ea1",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__97280_720896",
+            "cake_rmsnorm_train_72138dce40d43da44aaf__720896_1572864",
+            "cake_rmsnorm_train_72138dce40d43da44aaf",
         ],
         "bwd_w32_h256": [
             "cake_rmsnorm_train_67cb56412bd46304b711",
             "cake_rmsnorm_train_aa745395d7542d8a8e3a",
             "cake_rmsnorm_train_6a0114cb0b27a780a4c3",
-            "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__64_1080",
+            "cake_rmsnorm_train_420788e663a2c3a810f6__64_1080",
             "cake_rmsnorm_train_b7d9577ff884de98ea06__1080_5120",
             "cake_rmsnorm_train_420788e663a2c3a810f6__5120_12288",
             "cake_rmsnorm_train_b7d9577ff884de98ea06__12288_40960",
             "cake_rmsnorm_train_420788e663a2c3a810f6__40960_97280",
-            "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__97280_720896",
-            "cake_rmsnorm_train_89505762fa1cbf33cb8f__720896_1572864",
-            "cake_rmsnorm_train_f788ef57163552825d27",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_1080",
+            "cake_rmsnorm_train_420788e663a2c3a810f6__97280_720896",
+            "cake_rmsnorm_train_420788e663a2c3a810f6__720896_1572864",
+            "cake_rmsnorm_train_420788e663a2c3a810f6",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__64_1080",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__1080_5120",
             "cake_rmsnorm_train_72138dce40d43da44aaf__5120_12288",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__12288_40960",
             "cake_rmsnorm_train_affa1b95f68bab8c411b__40960_97280",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__97280_720896",
-            "cake_rmsnorm_train_0ac243f8385c32960e14__720896_1572864",
-            "cake_rmsnorm_train_e73321cec89d33336ea1",
+            "cake_rmsnorm_train_affa1b95f68bab8c411b__97280_720896",
+            "cake_rmsnorm_train_72138dce40d43da44aaf__720896_1572864",
+            "cake_rmsnorm_train_72138dce40d43da44aaf",
         ],
         "bwd_h512": [
             "cake_rmsnorm_train_64a299691c17079fe510",
             "cake_rmsnorm_train_c167e0d26b363cf19e7b",
-            "cake_rmsnorm_train_877751ba915bbc261064__16_64",
+            "cake_rmsnorm_train_bdfd77893d8f9db3c9bb__16_64",
             "cake_rmsnorm_train_09601d42628de24f6f87__64_1024",
             "cake_rmsnorm_train_8e7f4d811e55a351a22e",
             "cake_rmsnorm_train_274b0055aace183f2367",
@@ -19346,7 +19345,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h512": [
             "cake_rmsnorm_train_8c261dfc6e34351d7a11",
             "cake_rmsnorm_train_88e6252beaf7d056d555",
-            "cake_rmsnorm_train_81d9adbf31a26a4ebc02__16_227",
+            "cake_rmsnorm_train_2c60470d16e0a7fb6089__16_227",
             "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_960",
             "cake_rmsnorm_train_56ee8e66479625fd078a__960_32768",
             "cake_rmsnorm_train_a546f410ec8cf03ef20d",
@@ -19357,59 +19356,59 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4",
             "cake_rmsnorm_train_c2a523de1ff578621a88__4_5",
-            "cake_rmsnorm_train_38e972a94141a1961c90__0_64_103",
-            "cake_rmsnorm_train_53285b9598170177d3e0__64_214",
+            "cake_rmsnorm_train_02e761bcf94053af6fc3__0_64_103",
+            "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80__64_214",
             "cake_rmsnorm_train_7dc29629ff21625607f8__214_1024",
             "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
             "cake_rmsnorm_train_1df7db17277d363b5168",
             "cake_rmsnorm_train_4df08ce51fb01ba1193f",
             "cake_rmsnorm_train_f522f5b8d4343d96ca04__15566_46592",
-            "cake_rmsnorm_train_1df502fd0e17091869b7__46592_53184",
-            "cake_rmsnorm_train_cbeae168d70edd196417__53184_76352",
-            "cake_rmsnorm_train_1df502fd0e17091869b7__76352_131072",
-            "cake_rmsnorm_train_327bfeb4ab8fefc2731d__131072_inf",
+            "cake_rmsnorm_train_20d7a230ed8dc161a93a__46592_53184",
+            "cake_rmsnorm_train_9cd3c766db4b70ed7213__53184_76352",
+            "cake_rmsnorm_train_20d7a230ed8dc161a93a__76352_131072",
+            "cake_rmsnorm_train_3f75f4a81f2fb8269389__131072_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__214_1024",
             "cake_rmsnorm_train_1863320f3158d35eead6",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_14928",
             "cake_rmsnorm_train_1863320f3158d35eead6__14928_15566",
             "cake_rmsnorm_train_1863320f3158d35eead6__15566_46592",
-            "cake_rmsnorm_train_882ec880717f382e43eb__53184_76352",
+            "cake_rmsnorm_train_1863320f3158d35eead6__53184_76352",
         ],
         "bwd_w32_h1536": [
             "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_4",
             "cake_rmsnorm_train_744aa77460c886f4f429__4_6",
-            "cake_rmsnorm_train_d5a621af7a24e403b5f3__0_64_103",
-            "cake_rmsnorm_train_5c5be9a6aeac20fd2776__64_214",
+            "cake_rmsnorm_train_166e288c9192be6b994c__0_64_103",
+            "cake_rmsnorm_train_698c3d36d67408394ccf__64_214",
             "cake_rmsnorm_train_baff9ecbafe7de1e6030__214_1024",
             "cake_rmsnorm_train_17d9cdfd157ba4b86c2b",
             "cake_rmsnorm_train_a99e2b380514c4d86d60",
             "cake_rmsnorm_train_7a72e97bd6cb4dc0efc2",
             "cake_rmsnorm_train_109f19bb177c8f20cadc__15566_37888",
-            "cake_rmsnorm_train_9a47ed21f63c848f2a59__37888_40448",
-            "cake_rmsnorm_train_ca6211f3ea2ce8c86a05__40448_76352",
-            "cake_rmsnorm_train_9a47ed21f63c848f2a59__76352_131072",
-            "cake_rmsnorm_train_963a7ca8d03f78bbe6f9__131072_inf",
+            "cake_rmsnorm_train_178460487a7835e97912__37888_40448",
+            "cake_rmsnorm_train_51f46ff164b142ec8888__40448_76352",
+            "cake_rmsnorm_train_178460487a7835e97912__76352_131072",
+            "cake_rmsnorm_train_7c0dd63f0b011049603e__131072_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__214_1024",
             "cake_rmsnorm_train_1863320f3158d35eead6",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_14928",
             "cake_rmsnorm_train_1863320f3158d35eead6__14928_15566",
             "cake_rmsnorm_train_1863320f3158d35eead6__15566_37888",
-            "cake_rmsnorm_train_882ec880717f382e43eb__40448_76352",
+            "cake_rmsnorm_train_1863320f3158d35eead6__40448_76352",
         ],
         "bwd_h2048": [
             "cake_rmsnorm_train_c5f62407b828a85f82ec",
             "cake_rmsnorm_train_a951623c157d070e85ab__4_16",
-            "cake_rmsnorm_train_ef052c0918725ffa68d4__16_63",
-            "cake_rmsnorm_train_2b4c0f5b0e9c312fa43e__63_171",
+            "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_63",
+            "cake_rmsnorm_train_ed36a8d998abba41f227__63_171",
             "cake_rmsnorm_train_caf6978ed0a17fbf65b9__171_3072",
             "cake_rmsnorm_train_9ac8d21e46a658e7913f",
             "cake_rmsnorm_train_caf6978ed0a17fbf65b9__large",
             "cake_rmsnorm_train_caf6978ed0a17fbf65b9__16384_32768",
             "cake_rmsnorm_train_302f64db6abe79e5259e__32768_58496",
-            "cake_rmsnorm_train_018f0cd723106f709f11__58496_61952",
-            "cake_rmsnorm_train_018f0cd723106f709f11__61952_68160",
-            "cake_rmsnorm_train_2c32330b326a6db3f77b__68160_131072",
-            "cake_rmsnorm_train_8bd89a4c834f80db8a34__131072_inf",
+            "cake_rmsnorm_train_302f64db6abe79e5259e__58496_61952",
+            "cake_rmsnorm_train_302f64db6abe79e5259e__61952_68160",
+            "cake_rmsnorm_train_87532fb038ad204517e1__68160_131072",
+            "cake_rmsnorm_train_33e5c382e06419d65390__131072_inf",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__171_3072",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__3072_4096",
             "cake_rmsnorm_train_d0960be986e58f449f50",
@@ -19421,17 +19420,17 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h2048": [
             "cake_rmsnorm_train_0017ab41f68d8689ebc2",
             "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_16",
-            "cake_rmsnorm_train_382e45788ace3ff40ba1__0_64_103",
-            "cake_rmsnorm_train_2e9171b7753650cda515__64_171",
+            "cake_rmsnorm_train_c2f08c957d4b0f17dddd__0_64_103",
+            "cake_rmsnorm_train_978741b43372951cb5b9__64_171",
             "cake_rmsnorm_train_07f9f2fbea7163639c27__171_3072",
             "cake_rmsnorm_train_d96a14fe8882bbd9ec2e",
             "cake_rmsnorm_train_07f9f2fbea7163639c27__large",
             "cake_rmsnorm_train_07f9f2fbea7163639c27__16384_32768",
             "cake_rmsnorm_train_e98cb156abfe1666c76f__32768_58496",
-            "cake_rmsnorm_train_ca8ca4674a3dbd89ad16__58496_61952",
-            "cake_rmsnorm_train_ca8ca4674a3dbd89ad16__61952_68160",
-            "cake_rmsnorm_train_76e43a7d9c7ea1f59e0d__68160_131072",
-            "cake_rmsnorm_train_88c6c6b2af1922f4c1a9__131072_inf",
+            "cake_rmsnorm_train_e98cb156abfe1666c76f__58496_61952",
+            "cake_rmsnorm_train_e98cb156abfe1666c76f__61952_68160",
+            "cake_rmsnorm_train_149b129cdd1468145b13__68160_131072",
+            "cake_rmsnorm_train_1166d499d4e846fcb2d6__131072_inf",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__171_3072",
             "cake_rmsnorm_train_880768a0a264e04dbfb5__3072_4096",
             "cake_rmsnorm_train_d0960be986e58f449f50",
@@ -19443,15 +19442,15 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h4096": [
             "cake_rmsnorm_train_945a0afdb82ab47eb643",
             "cake_rmsnorm_train_41f44b4bc0b765350a50__4_16",
-            "cake_rmsnorm_train_3dbab2323fa42435a72d__16_32",
-            "cake_rmsnorm_train_ff0156d59b2b99144701__32_152",
+            "cake_rmsnorm_train_dc7ed206fba49ab22d1d__16_32",
+            "cake_rmsnorm_train_12d53fe5b85b212fc800__32_152",
             "cake_rmsnorm_train_50044ee3bd1ca54bd821__152_256",
             "cake_rmsnorm_train_ad2bb26ea5916baef963",
             "cake_rmsnorm_train_24643edc7e1143da24e0",
             "cake_rmsnorm_train_35a0b0ca6b2060313255__4096_10239",
-            "cake_rmsnorm_train_06e5f7e09e42d1108365__10239_65536",
-            "cake_rmsnorm_train_3e6231b66942e510fdae__65536_262144",
-            "cake_rmsnorm_train_8c8bebecc5b08454b6a0__262144_inf",
+            "cake_rmsnorm_train_ef9f8d46c22e4af7aef1__10239_65536",
+            "cake_rmsnorm_train_f0aebb74650c8dc3f128__65536_262144",
+            "cake_rmsnorm_train_35888fb3b729e1f8e239__262144_inf",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__152_256",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__256_1024",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__1024_4096",
@@ -19460,15 +19459,15 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h4096": [
             "cake_rmsnorm_train_f6bd1634a115bd281055",
             "cake_rmsnorm_train_b378ba007691c582171e__4_16",
-            "cake_rmsnorm_train_c1b9ee6b9f10766cd537__16_32",
-            "cake_rmsnorm_train_11820fe48711775d5685__32_152",
+            "cake_rmsnorm_train_8274f36f6fd2f50dd508__16_32",
+            "cake_rmsnorm_train_27615d0e36c9f2fe0856__32_152",
             "cake_rmsnorm_train_3fd77c8ce97e8a523abb__152_256",
             "cake_rmsnorm_train_16545056022785f2a7d8",
             "cake_rmsnorm_train_78c26a53e83c9803bcbf",
             "cake_rmsnorm_train_626aed743358c27513f1__4096_48640",
             "cake_rmsnorm_train_cb164a27c0157ed0712d__48640_65536",
-            "cake_rmsnorm_train_2911faf7a786144495a6__65536_262144",
-            "cake_rmsnorm_train_131a495c5897206b6874__262144_inf",
+            "cake_rmsnorm_train_bd22da7e2d4914167050__65536_262144",
+            "cake_rmsnorm_train_36790f79b8845172d188__262144_inf",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__152_256",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__256_1024",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__1024_4096",
@@ -19477,13 +19476,13 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
         "bwd_h5120": [
             "cake_rmsnorm_train_dbc680f356be4cd643de",
-            "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__4_16",
-            "cake_rmsnorm_train_505283a5225ac45bc095__16_64",
+            "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_16",
+            "cake_rmsnorm_train_080e0a6c3b18e9bad790__16_64",
             "cake_rmsnorm_train_2fc4932fbde0bc848b32__64_1024",
             "cake_rmsnorm_train_2fc4932fbde0bc848b32__1024_5120",
-            "cake_rmsnorm_train_7ffb443a63a92ab6b0e0__5120_61952",
-            "cake_rmsnorm_train_b523a764b029e5ca1aaf__61952_393216",
-            "cake_rmsnorm_train_9e4c0825df92af02074f__393216_inf",
+            "cake_rmsnorm_train_2fc4932fbde0bc848b32__5120_61952",
+            "cake_rmsnorm_train_e21acade55e05f342053__61952_393216",
+            "cake_rmsnorm_train_826e6a14a93bd988be4d__393216_inf",
             "cake_rmsnorm_train_c5831b29d17867842e5f__64_1024",
             "cake_rmsnorm_train_c5831b29d17867842e5f__1024_5120",
             "cake_rmsnorm_train_c5831b29d17867842e5f__5120_61952",
@@ -19491,13 +19490,13 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h5120": [
             "cake_rmsnorm_train_d47138228b123e55fe5d",
             "cake_rmsnorm_train_05396cd3a077d3772fdc__4_5",
-            "cake_rmsnorm_train_244b7d841d62d9721c99__5_16",
-            "cake_rmsnorm_train_3a7bd162c370762719b3__16_192",
+            "cake_rmsnorm_train_cb6539573725ac861f94__5_16",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__16_192",
             "cake_rmsnorm_train_79811a76205d7d7dd197__192_1024",
             "cake_rmsnorm_train_79811a76205d7d7dd197__1024_5120",
-            "cake_rmsnorm_train_f9f7d4cd75ef91cc8374__5120_61952",
-            "cake_rmsnorm_train_90598c14b4e396f5c8b0__61952_196608",
-            "cake_rmsnorm_train_f165933caadda3434828__196608_inf",
+            "cake_rmsnorm_train_79811a76205d7d7dd197__5120_61952",
+            "cake_rmsnorm_train_05078a174a09119cfe3c__61952_196608",
+            "cake_rmsnorm_train_91a40f3094182a35c784__196608_inf",
             "cake_rmsnorm_train_c5831b29d17867842e5f__192_1024",
             "cake_rmsnorm_train_c5831b29d17867842e5f__1024_5120",
             "cake_rmsnorm_train_c5831b29d17867842e5f__5120_61952",
@@ -19505,14 +19504,14 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h6144": [
             "cake_rmsnorm_train_e37752b056dd4e4a0bee",
             "cake_rmsnorm_train_fdfb73350c1a926a4929__4_6",
-            "cake_rmsnorm_train_d70f2562a592151ec4f9__6_16",
-            "cake_rmsnorm_train_38b1c6bc8fa558bccc49__16_896",
+            "cake_rmsnorm_train_e6475d8fa504ef4d7d2d__6_16",
+            "cake_rmsnorm_train_44508df7dab2ab688f85__16_896",
             "cake_rmsnorm_train_5c804aed7ad14b99e1d0__896_1024",
             "cake_rmsnorm_train_5c804aed7ad14b99e1d0__1024_4096",
             "cake_rmsnorm_train_322574af704b51aef0bb__4096_24575",
-            "cake_rmsnorm_train_f5806bd223b2ad27230a__24575_65536",
-            "cake_rmsnorm_train_7236b7379272c82c7614__65536_131072",
-            "cake_rmsnorm_train_582b2a20f9be648af8ec__131072_inf",
+            "cake_rmsnorm_train_455174e1a3be71c79452__24575_65536",
+            "cake_rmsnorm_train_850fba46397a84b8cd7b__65536_131072",
+            "cake_rmsnorm_train_38337af146209d6a60ea__131072_inf",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__896_1024",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__1024_4096",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__4096_24575",
@@ -19520,25 +19519,25 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_residual_h6144": [
             "cake_rmsnorm_train_deeb187630473818923d__0_4",
             "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_6",
-            "cake_rmsnorm_train_7b0f5a6a8769473c322e__6_31",
-            "cake_rmsnorm_train_07135550fae8b07bb82c__31_32",
-            "cake_rmsnorm_train_7b0f5a6a8769473c322e__32_48",
+            "cake_rmsnorm_train_3a55646d574035bfa271__6_31",
+            "cake_rmsnorm_train_864e84f3d874f850c091__31_32",
+            "cake_rmsnorm_train_3a55646d574035bfa271__32_48",
             "cake_rmsnorm_train_864e84f3d874f850c091__48_56",
-            "cake_rmsnorm_train_07135550fae8b07bb82c__56_304",
+            "cake_rmsnorm_train_864e84f3d874f850c091__56_304",
             "cake_rmsnorm_train_864e84f3d874f850c091__304_1920",
-            "cake_rmsnorm_train_601fb35c90bc116731b1__1920_131072",
-            "cake_rmsnorm_train_52831494c1b62db758fd",
+            "cake_rmsnorm_train_aac3ebbf0e11c453c472__1920_131072",
+            "cake_rmsnorm_train_115dcc719a6de4b079f1",
         ],
         "bwd_w32_h6144": [
             "cake_rmsnorm_train_35b97e6e2bfa3e9f2ff9",
             "cake_rmsnorm_train_18b8b8054c7053942bcd__4_12",
-            "cake_rmsnorm_train_9b37923697ee8ca52a9e__12_16",
-            "cake_rmsnorm_train_017091c7827bdc8c95d5__16_1024",
+            "cake_rmsnorm_train_f4d41a0991647b82ac21__12_16",
+            "cake_rmsnorm_train_b3e6531e46667901ab91__16_1024",
             "cake_rmsnorm_train_41b80b6af97974feb181__1024_4096",
             "cake_rmsnorm_train_9a8c0396edd85d4d545e__4096_49152",
-            "cake_rmsnorm_train_aa46aa07d86900ad832f__49152_83392",
-            "cake_rmsnorm_train_935b8bea9166f29912ff__83392_131072",
-            "cake_rmsnorm_train_4f9a76e68671f213ab7c__131072_inf",
+            "cake_rmsnorm_train_9a8c0396edd85d4d545e__49152_83392",
+            "cake_rmsnorm_train_cb1aee125561ad8d4e29__83392_131072",
+            "cake_rmsnorm_train_5a635713b08645d57f48__131072_inf",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__1024_4096",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__4096_49152",
             "cake_rmsnorm_train_5f5cdc5151e3c0620bcd__49152_83392",
@@ -19546,13 +19545,13 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_residual_h6144": [
             "cake_rmsnorm_train_a6b1a6e565dc98b49e1a",
             "cake_rmsnorm_train_c29a8f856283578103dc__4_10",
-            "cake_rmsnorm_train_ac9d69f94aabfc68aa40__10_31",
-            "cake_rmsnorm_train_570eec506ed94f36f062__31_32",
-            "cake_rmsnorm_train_ac9d69f94aabfc68aa40__32_48",
-            "cake_rmsnorm_train_570eec506ed94f36f062__48_320",
+            "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__10_31",
+            "cake_rmsnorm_train_71d36617003ab7742a77__31_32",
+            "cake_rmsnorm_train_6e0d06ab3a746b6a7a4c__32_48",
+            "cake_rmsnorm_train_71d36617003ab7742a77__48_320",
             "cake_rmsnorm_train_71d36617003ab7742a77__320_1824",
-            "cake_rmsnorm_train_cf1cf64436893a2a2d03__1824_131072",
-            "cake_rmsnorm_train_56c46a201c168050aa60",
+            "cake_rmsnorm_train_5fbcc18d24f37f0ba607__1824_131072",
+            "cake_rmsnorm_train_3c390339fa8c82311a0a",
         ],
     },
     "sm_107a": {
@@ -19658,27 +19657,27 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_780c64c6f2c4615bfbcf",
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
             "cake_rmsnorm_train_9fb6b410e91f9d92becf",
-            "cake_rmsnorm_train_083ea823c691e0631ad3__64_786432",
-            "cake_rmsnorm_train_172a47a15d4c1a76c061__786432_inf",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_786432",
+            "cake_rmsnorm_train_a385ae1681a2c078344e__64_786432",
+            "cake_rmsnorm_train_44ef314181f3f2e93293__786432_inf",
+            "cake_rmsnorm_train_312bbe084eac69d858c4__64_786432",
         ],
         "bwd_w32_h256": [
             "cake_rmsnorm_train_67cb56412bd46304b711",
             "cake_rmsnorm_train_aa745395d7542d8a8e3a",
             "cake_rmsnorm_train_6a0114cb0b27a780a4c3",
-            "cake_rmsnorm_train_c4c89f0d04b7b3a38d0b__64_786432",
-            "cake_rmsnorm_train_7c2aa4b429538da06a2a__786432_inf",
-            "cake_rmsnorm_train_b4b63d5b5028c7a60333__64_786432",
+            "cake_rmsnorm_train_420788e663a2c3a810f6__64_786432",
+            "cake_rmsnorm_train_b71bbe9852c16fe03114__786432_inf",
+            "cake_rmsnorm_train_312bbe084eac69d858c4__64_786432",
         ],
         "bwd_h512": [
             "cake_rmsnorm_train_64a299691c17079fe510",
             "cake_rmsnorm_train_c167e0d26b363cf19e7b",
-            "cake_rmsnorm_train_bcd8d6a9c739c7a11c36__16_576",
+            "cake_rmsnorm_train_49af1e75185ddd637b76__16_576",
             "cake_rmsnorm_train_3feed5026e1156d2fba2__576_1024",
             "cake_rmsnorm_train_3feed5026e1156d2fba2__1024_4096",
             "cake_rmsnorm_train_dfaf378aa8ad93e68bbd",
             "cake_rmsnorm_train_eb141cc9e0a93c6f0ce3__16384_49152",
-            "cake_rmsnorm_train_30501ccec48cc058333a__49152_inf",
+            "cake_rmsnorm_train_7764c8a34009f3728312__49152_inf",
             "cake_rmsnorm_train_f94861c36a14eb75e39c__576_1024",
             "cake_rmsnorm_train_d75459d901441384398b",
             "cake_rmsnorm_train_8f032213ba6eeb5d959f",
@@ -19687,12 +19686,12 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h512": [
             "cake_rmsnorm_train_8c261dfc6e34351d7a11",
             "cake_rmsnorm_train_88e6252beaf7d056d555",
-            "cake_rmsnorm_train_685b53bf6ce1b6ff13f8__16_384",
+            "cake_rmsnorm_train_8f29656c0018a749a588__16_384",
             "cake_rmsnorm_train_b841d64bbcaefff5ce7b__384_1024",
             "cake_rmsnorm_train_fd08c6f436eb6071fa22__1024_4096",
             "cake_rmsnorm_train_383f709cd5c4fadd9436",
             "cake_rmsnorm_train_03efa681eb38f59b00c2__16384_49152",
-            "cake_rmsnorm_train_26fbe8e6f07a658e26f6__49152_inf",
+            "cake_rmsnorm_train_5117a0f693a160485d76__49152_inf",
             "cake_rmsnorm_train_f94861c36a14eb75e39c__384_1024",
             "cake_rmsnorm_train_8f032213ba6eeb5d959f",
             "cake_rmsnorm_train_8f032213ba6eeb5d959f__16384_49152",
@@ -19700,12 +19699,12 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4",
             "cake_rmsnorm_train_c2a523de1ff578621a88__4_16",
-            "cake_rmsnorm_train_9e71ed0d9ad7a7739002__16_320",
+            "cake_rmsnorm_train_1207b05663ed2b4de14b__16_320",
             "cake_rmsnorm_train_7dc29629ff21625607f8__320_1024",
             "cake_rmsnorm_train_6a428da2227972ae18ae",
             "cake_rmsnorm_train_56d26996239835327501__16384_45056",
-            "cake_rmsnorm_train_e694b0a25ea01d1f6cdc__45056_65536",
-            "cake_rmsnorm_train_dca25ace64c075a81625__65536_inf",
+            "cake_rmsnorm_train_411e270c0575d26a77f4__45056_65536",
+            "cake_rmsnorm_train_c93d0266065acad326fb__65536_inf",
             "cake_rmsnorm_train_628248febbdfe17c3325__320_1024",
             "cake_rmsnorm_train_db5c0b673c516bd0295d",
             "cake_rmsnorm_train_db5c0b673c516bd0295d__16384_45056",
@@ -19714,12 +19713,12 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h1536": [
             "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_4",
             "cake_rmsnorm_train_744aa77460c886f4f429__4_16",
-            "cake_rmsnorm_train_db8d986d719b909621d0__16_320",
+            "cake_rmsnorm_train_137ba5328176fb07b37d__16_320",
             "cake_rmsnorm_train_baff9ecbafe7de1e6030__320_1024_107",
             "cake_rmsnorm_train_7c0dd63f0b011049603e__1024_16384",
             "cake_rmsnorm_train_de8e07d4cb312b06dbc4__16384_45056",
-            "cake_rmsnorm_train_0f0b782f1e538caad3ce__45056_65536",
-            "cake_rmsnorm_train_ccd94d87e9036a0b2faf__65536_inf",
+            "cake_rmsnorm_train_64ffe19b041f5bfa34fb__45056_65536",
+            "cake_rmsnorm_train_c9dc9e43af546ff815d3__65536_inf",
             "cake_rmsnorm_train_628248febbdfe17c3325__320_1024",
             "cake_rmsnorm_train_db5c0b673c516bd0295d__16384_45056",
             "cake_rmsnorm_train_db5c0b673c516bd0295d__45056_65536",
@@ -19727,14 +19726,14 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h2048": [
             "cake_rmsnorm_train_c5f62407b828a85f82ec",
             "cake_rmsnorm_train_a951623c157d070e85ab__4_16",
-            "cake_rmsnorm_train_ef052c0918725ffa68d4__16_31",
-            "cake_rmsnorm_train_32eb12e27be1360b890d__31_256",
+            "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_31",
+            "cake_rmsnorm_train_6720b4a159be2b84b325__31_256",
             "cake_rmsnorm_train_845cdcd8145ada631461__256_1024",
             "cake_rmsnorm_train_81c3d8ab0a482e3af043",
             "cake_rmsnorm_train_845cdcd8145ada631461__16384_50176",
-            "cake_rmsnorm_train_1a3df5ac020055477581__50176_50688",
-            "cake_rmsnorm_train_694decfb79ba96468f62__50688_65536",
-            "cake_rmsnorm_train_1a3df5ac020055477581__65536_inf",
+            "cake_rmsnorm_train_395fedebf0299f78a745__50176_50688",
+            "cake_rmsnorm_train_21ee6fc93139c5e0cd41__50688_65536",
+            "cake_rmsnorm_train_395fedebf0299f78a745__65536_inf",
             "cake_rmsnorm_train_271082c56c222bf10d77",
             "cake_rmsnorm_train_c4d8be677fa70b841877",
             "cake_rmsnorm_train_c4d8be677fa70b841877__16384_50176",
@@ -19743,24 +19742,24 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h2048": [
             "cake_rmsnorm_train_0017ab41f68d8689ebc2",
             "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_16",
-            "cake_rmsnorm_train_22944704b77a80a04834__16_256",
+            "cake_rmsnorm_train_23c900134dc889302136__16_256",
             "cake_rmsnorm_train_838a9a4054731f7942af__256_1024",
-            "cake_rmsnorm_train_810989bdea464df479ce__1024_16384",
+            "cake_rmsnorm_train_e90d94fcdd76f08fe027__1024_16384",
             "cake_rmsnorm_train_838a9a4054731f7942af__16384_50176",
-            "cake_rmsnorm_train_810989bdea464df479ce",
+            "cake_rmsnorm_train_e90d94fcdd76f08fe027",
             "cake_rmsnorm_train_271082c56c222bf10d77",
             "cake_rmsnorm_train_c4d8be677fa70b841877__16384_50176",
         ],
         "bwd_h4096": [
             "cake_rmsnorm_train_945a0afdb82ab47eb643",
             "cake_rmsnorm_train_41f44b4bc0b765350a50__4_16",
-            "cake_rmsnorm_train_44511fa02465a6d7283d__16_256",
+            "cake_rmsnorm_train_c1de7e41da4550cca0bc__16_256",
             "cake_rmsnorm_train_a647fccc3d9fa9134733",
             "cake_rmsnorm_train_d41a514f5210e9adc39f",
             "cake_rmsnorm_train_ee4a9053bb25b8d49fcf__4096_24064",
-            "cake_rmsnorm_train_99a01f2a850874718c3f__24064_24576",
-            "cake_rmsnorm_train_aed93ac9e4828f1b8b47__24576_65536",
-            "cake_rmsnorm_train_5e9d7baa36814bb7aaf6__65536_inf",
+            "cake_rmsnorm_train_e9e21bbe4fa478075868__24064_24576",
+            "cake_rmsnorm_train_23573e0c42a194a04876__24576_65536",
+            "cake_rmsnorm_train_f11a86167db4f8e9a5da__65536_inf",
             "cake_rmsnorm_train_69bf6e104bb48b6b74bf__256_1024",
             "cake_rmsnorm_train_2030d80884deb8abcf7b",
             "cake_rmsnorm_train_10e24516314c244771f4__4096_24064",
@@ -19769,12 +19768,12 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h4096": [
             "cake_rmsnorm_train_f6bd1634a115bd281055",
             "cake_rmsnorm_train_b378ba007691c582171e__4_16",
-            "cake_rmsnorm_train_440bd6f2a114414ea9db__16_256",
+            "cake_rmsnorm_train_30ec8bb68cf4fe0c817b__16_256",
             "cake_rmsnorm_train_dc439f8335327e482025",
             "cake_rmsnorm_train_b08633208e60b8ce94fd",
             "cake_rmsnorm_train_0f1859b9fe9e47668a1c__4096_24064",
-            "cake_rmsnorm_train_fa3d4fc5dbd76348b31a__24064_65536",
-            "cake_rmsnorm_train_23cee954b648495ceef1__65536_inf",
+            "cake_rmsnorm_train_0ff440daa6f9f304e544__24064_65536",
+            "cake_rmsnorm_train_a1f537fc94bde175bb3c__65536_inf",
             "cake_rmsnorm_train_69bf6e104bb48b6b74bf__256_1024",
             "cake_rmsnorm_train_2030d80884deb8abcf7b",
             "cake_rmsnorm_train_10e24516314c244771f4__4096_24064",
@@ -19783,16 +19782,16 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h5120": [
             "cake_rmsnorm_train_dbc680f356be4cd643de",
             "cake_rmsnorm_train_904b1ad45d6219b4f43c__4_12",
-            "cake_rmsnorm_train_cc082d1fc7f42b4b3f2c__12_31",
-            "cake_rmsnorm_train_505283a5225ac45bc095__31_256",
+            "cake_rmsnorm_train_29bcbde1d271ea989fa8__12_31",
+            "cake_rmsnorm_train_080e0a6c3b18e9bad790__31_256",
             "cake_rmsnorm_train_838c077df3a6d35d55b7__256_511",
-            "cake_rmsnorm_train_505283a5225ac45bc095__511_640",
+            "cake_rmsnorm_train_080e0a6c3b18e9bad790__511_640",
             "cake_rmsnorm_train_838c077df3a6d35d55b7__640_895",
-            "cake_rmsnorm_train_505283a5225ac45bc095__895_896",
+            "cake_rmsnorm_train_080e0a6c3b18e9bad790__895_896",
             "cake_rmsnorm_train_838c077df3a6d35d55b7__896_4096",
             "cake_rmsnorm_train_6816fb80e97380f1bcbc",
             "cake_rmsnorm_train_b8b0913b40f035f43b76__19968_49152",
-            "cake_rmsnorm_train_56634f53e6456b34f76f",
+            "cake_rmsnorm_train_670f4cafe8c34a429d30",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__256_511",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__640_895",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__896_4096",
@@ -19802,32 +19801,32 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_w32_h5120": [
             "cake_rmsnorm_train_d47138228b123e55fe5d",
             "cake_rmsnorm_train_05396cd3a077d3772fdc__4_15",
-            "cake_rmsnorm_train_3a7bd162c370762719b3__15_256",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__15_256",
             "cake_rmsnorm_train_cd612de56c0985bb4caa__256_511",
-            "cake_rmsnorm_train_3a7bd162c370762719b3__511_640",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__511_640",
             "cake_rmsnorm_train_cd612de56c0985bb4caa__640_895",
-            "cake_rmsnorm_train_3a7bd162c370762719b3__895_896",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896",
             "cake_rmsnorm_train_cd612de56c0985bb4caa__896_4096",
             "cake_rmsnorm_train_468cc4d1b8128187b4b3__4096_19968",
             "cake_rmsnorm_train_de0cf457cd240f9c6422__19968_32767",
-            "cake_rmsnorm_train_9cdd6eef6888b2a1dd6a__32767_131072",
-            "cake_rmsnorm_train_6cedccdf3a58f23f260f__131072_inf",
+            "cake_rmsnorm_train_e7cb6972099b7e10c035__32767_131072",
+            "cake_rmsnorm_train_13bd0c5f56e37867eb26__131072_inf",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__256_511",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__640_895",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__896_4096",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__4096_19968",
-            "cake_rmsnorm_train_cdcd68d9227a76af4e88__19968_32767",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__19968_32767",
         ],
         "bwd_h6144": [
             "cake_rmsnorm_train_e37752b056dd4e4a0bee",
             "cake_rmsnorm_train_fdfb73350c1a926a4929__4_16",
-            "cake_rmsnorm_train_57d45549f8ed34e34e65__16_960",
+            "cake_rmsnorm_train_0dafdf094615d080fcc9__16_960",
             "cake_rmsnorm_train_5d292172df772adb17ae__960_1151",
-            "cake_rmsnorm_train_57d45549f8ed34e34e65__1151_1152",
+            "cake_rmsnorm_train_0dafdf094615d080fcc9__1151_1152",
             "cake_rmsnorm_train_5d292172df772adb17ae__1152_19456",
-            "cake_rmsnorm_train_19e18371f9243bd1a91a__19456_30720",
-            "cake_rmsnorm_train_3edefef1a5b4b9561a13__30720_131072",
-            "cake_rmsnorm_train_083b5f2e2a0d1b4f1c82__131072_inf",
+            "cake_rmsnorm_train_9cc51adfe9826056658b__19456_30720",
+            "cake_rmsnorm_train_ffbcfda26d306410e01f__30720_131072",
+            "cake_rmsnorm_train_ddedaa3be7466a4faa97__131072_inf",
             "cake_rmsnorm_train_fb3f2a96e954f0e241bc__960_1151",
             "cake_rmsnorm_train_fb3f2a96e954f0e241bc__1152_19456",
             "cake_rmsnorm_train_fb3f2a96e954f0e241bc__19456_30720",
@@ -19835,34 +19834,34 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_residual_h6144": [
             "cake_rmsnorm_train_deeb187630473818923d__0_4",
             "cake_rmsnorm_train_94c547eccfe2ca37ee0f__4_15",
-            "cake_rmsnorm_train_c15868b87bfb2c21645e__15_320",
+            "cake_rmsnorm_train_ee1be07a89a0482de45e__15_320",
             "cake_rmsnorm_train_0dcdc563be377247044e__320_447",
-            "cake_rmsnorm_train_c15868b87bfb2c21645e__447_576",
+            "cake_rmsnorm_train_ee1be07a89a0482de45e__447_576",
             "cake_rmsnorm_train_864e84f3d874f850c091__576_3584",
             "cake_rmsnorm_train_0dcdc563be377247044e__3584_7168",
-            "cake_rmsnorm_train_16c5f0465183f87c5229__7168_131072",
-            "cake_rmsnorm_train_c07ab5f16934c0cc8421__131072_inf",
+            "cake_rmsnorm_train_853d4447e18f114f5da5__7168_131072",
+            "cake_rmsnorm_train_87d2866c1ea3bcc08b13__131072_inf",
             "cake_rmsnorm_train_60bfcb24560bbae612c3__320_447",
             "cake_rmsnorm_train_60bfcb24560bbae612c3__3584_7168",
         ],
         "bwd_w32_h6144": [
             "cake_rmsnorm_train_35b97e6e2bfa3e9f2ff9",
             "cake_rmsnorm_train_18b8b8054c7053942bcd__4_16",
-            "cake_rmsnorm_train_a501b31feb94fa326722__16_1664",
-            "cake_rmsnorm_train_44c5b870a7dcbb8de924__1664_2304",
+            "cake_rmsnorm_train_5cca2d0fa4553f992406__16_1664",
+            "cake_rmsnorm_train_b3e6531e46667901ab91__1664_2304",
             "cake_rmsnorm_train_e77387f14390ba486055__2304_19456",
-            "cake_rmsnorm_train_b83f8b3d546630a60675__19456_28672",
-            "cake_rmsnorm_train_25f9b466fa418dd2afc4__28672_inf",
+            "cake_rmsnorm_train_bdfba721a43e0d093668__19456_28672",
+            "cake_rmsnorm_train_e77387f14390ba486055__28672_inf",
             "cake_rmsnorm_train_fb3f2a96e954f0e241bc__19456_28672",
         ],
         "bwd_w32_residual_h6144": [
             "cake_rmsnorm_train_a6b1a6e565dc98b49e1a",
             "cake_rmsnorm_train_c29a8f856283578103dc__4_16",
-            "cake_rmsnorm_train_a1c12b0ee6454391a37f__16_768",
+            "cake_rmsnorm_train_3bbd4f848b4847bff893__16_768",
             "cake_rmsnorm_train_71d36617003ab7742a77__768_3584",
             "cake_rmsnorm_train_56f988dde54db37f09d9__3584_7168",
-            "cake_rmsnorm_train_999d4acb1d1a4e0cbef0__7168_131072",
-            "cake_rmsnorm_train_e655055ead76f8df4d24__131072_inf",
+            "cake_rmsnorm_train_b394bc75f9df18f002f2__7168_131072",
+            "cake_rmsnorm_train_647589443d4915ca8fde__131072_inf",
             "cake_rmsnorm_train_60bfcb24560bbae612c3__3584_7168",
         ],
     },
@@ -20118,13 +20117,13 @@ def _round_up(value: int, multiple: int) -> int:
 # The backward workspace starts with the deterministic pairs' ``uint32``
 # counter table (192 words at most, padded to four 256-byte lines); every pair
 # kernel leaves the words it uses at zero.  The single kernel's counters
-# (``SINGLE_COUNTERS_BYTES`` at ``SINGLE_COUNTERS_OFFSET``) and FP64 column sums
+# (``SINGLE_COUNTERS_BYTES`` at ``SINGLE_COUNTERS_OFFSET``) and FP32 sums
 # (``SUMS_BYTES`` at ``SUMS_OFFSET``: the widest sums of the package's single
 # records, their workspace rules' ``sum_bytes``) follow; the single kernel leaves
 # its sums at zero and its counters in their rest state after every launch.
 # The FP32 partial rows of the pairs' main kernels come last
-# (``PAIR_ROWS_OFFSET``); a pair-row single kernel (``claim_part_f32``) binds the
-# single counters and, at ``PAIR_ROWS_OFFSET``, scratch of one row of FP32 pairs
+# (``PAIR_ROWS_OFFSET``); a part-row single kernel (``claim_part_f32``) binds the
+# single counters and, at ``PAIR_ROWS_OFFSET``, scratch of one FP32 row
 # per CTA (its rule's ``part_row_bytes``), which needs no rest state, like the
 # pairs' rows.  Every offset is the package's, not the call's, so one
 # buffer, zero when first used, serves calls of any token count, window, hidden
@@ -20135,17 +20134,17 @@ SINGLE_COUNTERS_OFFSET = COUNTERS_BYTES
 SINGLE_COUNTERS_BYTES = 256
 SUMS_OFFSET = SINGLE_COUNTERS_OFFSET + SINGLE_COUNTERS_BYTES
 # The workspace rule kinds of the backward forms: the main kernel of a
-# deterministic pair, the single kernel, the pair-row single kernel.
-WORKSPACE_KINDS = ("chunk_partials", "claim_sum_f64", "claim_part_f32")
+# deterministic pair, the single kernel, the part-row single kernel.
+WORKSPACE_KINDS = ("chunk_partials", "claim_sum_f32", "claim_part_f32")
 
 
 def _sum_bytes(record: dict[str, Any]) -> int:
-    """Bytes of the FP64 column sums a single-kernel record binds to
+    """Bytes of the FP32 column sums a single-kernel record binds to
     ``partial`` (its workspace rule's ``sum_bytes``, the kernel's
     ``workspace_bytes`` of the build); 0 for another record."""
 
     rule = record["workspace_rule"]
-    if rule is None or rule["kind"] != "claim_sum_f64":
+    if rule is None or rule["kind"] != "claim_sum_f32":
         return 0
     return int(rule["sum_bytes"])
 
@@ -20214,7 +20213,7 @@ def chunk_rounds(
     taper.  Under a deterministic pair the FP32 partial row of every chunk, and
     the ``dw`` the reduce kernel folds from them in chunk order, are pure
     functions of ``(T, slots, rpi, tail_div, max_halving)``; the single kernel
-    adds the chunks' sums into FP64 column sums in the order its CTAs finish,
+    adds the chunks' sums into FP32 column sums in the order its CTAs finish,
     so its ``dw`` depends on scheduling (its ``dx`` does not).
     """
 
@@ -20447,11 +20446,11 @@ def workspace_layout(
 
     The workspace is one CUDA ``uint8`` buffer: the deterministic pairs'
     ``uint32`` counters in its first :data:`COUNTERS_BYTES` bytes, the single
-    kernel's counters at :data:`SINGLE_COUNTERS_OFFSET`, its FP64 column sums at
+    kernel's counters at :data:`SINGLE_COUNTERS_OFFSET`, its FP32 sums at
     :data:`SUMS_OFFSET` and the pairs' FP32 partial rows at
     :data:`PAIR_ROWS_OFFSET`.  A single-kernel module (workspace rule
-    ``claim_sum_f64``) binds the single counters and its rule's ``sum_bytes``
-    of sums, whatever ``rows``.  A pair-row single-kernel module (workspace
+    ``claim_sum_f32``) binds the single counters and its rule's ``sum_bytes``
+    of sums, whatever ``rows``.  A part-row single-kernel module (workspace
     rule ``claim_part_f32``) binds the single counters and, at
     :data:`PAIR_ROWS_OFFSET`, ``part_row_bytes`` of FP32 scratch per CTA of its
     launch grid (:func:`launch_grid`, returned as ``grid``; the chunk table's
@@ -20475,17 +20474,17 @@ def workspace_layout(
     chunks, slots = chunking(record, rows, device_index=device_index)
     hidden = int(record["hidden"])
     counters = int(rule["counters"])
-    if rule["kind"] == "claim_sum_f64":
+    if rule["kind"] == "claim_sum_f32":
         if 4 * max(counters, 1) > SINGLE_COUNTERS_BYTES:
             raise ValueError(
                 f"module kernel_{record['kernel']} declares {counters} counters; the "
                 f"single kernel's table holds {SINGLE_COUNTERS_BYTES // 4}"
             )
         partial_bytes = _sum_bytes(record)
-        if partial_bytes % 8 or partial_bytes > SUMS_BYTES:
+        if partial_bytes % 4 or partial_bytes > SUMS_BYTES:
             raise ValueError(
                 f"module kernel_{record['kernel']} declares {partial_bytes} bytes of "
-                f"FP64 sums; the workspace holds {SUMS_BYTES}"
+                f"FP32 sums; the workspace holds {SUMS_BYTES}"
             )
         return {
             "n_chunks": chunks,
@@ -20504,10 +20503,10 @@ def workspace_layout(
                 f"single kernel's table holds {SINGLE_COUNTERS_BYTES // 4}"
             )
         row_bytes = int(rule["part_row_bytes"])
-        if row_bytes <= 0 or row_bytes % 8:
+        if row_bytes <= 0 or row_bytes % 4:
             raise ValueError(
                 f"module kernel_{record['kernel']} declares {row_bytes} part_row_bytes; "
-                "one row of FP32 pairs is a positive multiple of 8 bytes"
+                "one FP32 row is a positive multiple of 4 bytes"
             )
         grid = launch_grid(record, rows, device_index=device_index)[0]
         ctas = int(record["grid_rule"]["ctas_per_sm"]) * sm_count(device_index)

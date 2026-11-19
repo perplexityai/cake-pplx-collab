@@ -250,6 +250,18 @@ on sm_107a the column-slab pass keeps the attribute on at every token count
 and SM count (hidden 4096: a cell without a band in place of the
 deterministic column slab's checkpointed-backward band); every other board
 keeps ``PDL_OFF_BANDS``.
+
+Pre handoff (``HANDOFF_KINDS``, :func:`handoff_hidden_sizes`: hidden 5120 on
+sm_100a / sm_103a / sm_107a): ``fwd_prepare_handoff_h5120`` is ``fwd_prepare_h5120``
+with ``fwd_collapse__h5120`` replaced by ``fwd_collapse__pi_pn__h5120`` (it
+reads ``pre_in`` in place of the coefficient pass's ``pre`` and writes
+``pre_next``); ``bwd_finish_handoff_h5120`` is ``bwd_finish_h5120`` with each
+``bwd_token__<form>__h5120`` replaced by ``bwd_token__<form>_ho__h5120`` (the
+base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
+record; same grid, block and selection); ``collapse_forward_h5120`` /
+``collapse_backward_h5120`` are one record each (``collapse_fwd__h5120``,
+``collapse_bwd__h5120``: own library stems, no workspace; the forward takes the per-call
+PDL attribute on its own edge ``K4->C``, no band).
 """
 
 from __future__ import annotations
@@ -7978,6 +7990,524 @@ MODULES: dict[str, dict[str, Any]] = {
             "workspace": "bwd",
         },
     },
+    "cake_mhc_train_fwd_collapse__pi_pn__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "stats"],
+            ["buffer", "u"],
+            ["buffer", "pre_next"],
+            ["parameter", "T"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 5,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        "logical": {
+            "T": "rows",
+            "pre_in": "pre_in",
+            "pre_next": "pre_next",
+            "stats": "stats",
+            "u": "u",
+            "x": "x",
+        },
+        "role": "fwd_collapse",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_fwd__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "u"],
+            ["parameter", "T"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 5,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_fwd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_fwd__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_mhc_train_collapse_fwd__h5120",
+        "logical": {
+            "T": "rows",
+            "pre_in": "pre_in",
+            "u": "u",
+            "x": "x",
+        },
+        "role": "collapse_fwd",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_collapse_bwd__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "pre_in"],
+            ["buffer", "du"],
+            ["buffer", "dx"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "col_split": 1,
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_collapse_bwd__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_collapse_bwd__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 51456,
+            "persistent_ctas_per_sm": 1,
+            "use_pdl": False,
+        },
+        "library": "cake_mhc_train_collapse_bwd__h5120",
+        "logical": {
+            "T": "rows",
+            "dpre_in": "dpre_in",
+            "du": "du",
+            "dx": "dx",
+            "pre_in": "pre_in",
+            "x": "x",
+        },
+        "role": "collapse_bwd",
+        "select_rule": None,
+        "workspace_rule": None,
+    },
+    "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 111616,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "ao22_rae7_pd1_ntr",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__dot_ao8_ho__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 111616,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["buffer", "ticket"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 113664,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "ticket": "ticket",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_trows_dyn",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__rt64_ho__h5120": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["parameter", "sinkhorn_iters"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__rt64_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__rt64_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 71296,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__rt64_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "sinkhorn_iters": "sinkhorn_iters",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "run_time_iters",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
+    "cake_mhc_train_bwd_token__dot_ao8_l2l_ho__h5120": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "X"],
+            ["buffer", "dU"],
+            ["buffer", "stats"],
+            ["buffer", "gstats"],
+            ["buffer", "scale"],
+            ["buffer", "base"],
+            ["buffer", "dzp"],
+            ["buffer", "tokp"],
+            ["buffer", "param_partial"],
+            ["buffer", "pre_in"],
+            ["buffer", "dpre_next"],
+            ["buffer", "dpre_in"],
+            ["parameter", "T"],
+            ["parameter", "t_pad"],
+            ["parameter", "rows_per_cta"],
+            ["parameter", "hc_eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "chunks_rule": "k6_grid",
+            "ctas_per_sm": 2,
+            "group_rows": 8,
+            "kind": "chunks",
+        },
+        "hidden": 5120,
+        "kernel": "cake_mhc_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "kernel_symbol": "kernel_cake_mhc_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 111616,
+            "persistent_ctas_per_sm": 2,
+            "use_pdl": True,
+        },
+        "library": "cake_mhc_train_bwd_token__dot_ao8_l2l_ho__h5120",
+        "logical": {
+            "T": "rows",
+            "X": "x",
+            "base": "base",
+            "dU": "du",
+            "dpre_in": "dpre_in",
+            "dpre_next": "dpre_next",
+            "dzp": "dzp",
+            "gstats": "gstats",
+            "hc_eps": "hc_eps",
+            "param_partial": "param_partial",
+            "pre_in": "pre_in",
+            "rows_per_cta": "rows_per_cta",
+            "scale": "scale",
+            "stats": "stats",
+            "t_pad": "t_pad",
+            "tokp": "tokp",
+        },
+        "role": "bwd_token",
+        "select_rule": {
+            "kind": "program",
+            "program": "dot_ao8_l2l",
+            "rule": "bwd_token_program",
+        },
+        "workspace_rule": {
+            "kind": "regions",
+            "workspace": "bwd",
+        },
+    },
 }
 
 # Route key -> ordered module records, per architecture.  Every route lists
@@ -8161,6 +8691,36 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__st8_lp2_as_el_qd__h7168",
             "cake_mhc_train_fwd_coef__rt64__h7168",
         ],
+        "bwd_finish_handoff_h5120": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_ho__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
+            "cake_mhc_train_bwd_token__rt64_ho__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_dep__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
+        ],
+        "collapse_backward_h5120": [
+            "cake_mhc_train_collapse_bwd__h5120",
+        ],
+        "collapse_forward_h5120": [
+            "cake_mhc_train_collapse_fwd__h5120",
+        ],
+        "fwd_prepare_handoff_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_pu4__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        ],
     },
     "sm_103a": {
         "bwd_finish_h4096": [
@@ -8308,6 +8868,35 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__lp2_w8_adj__h7168",
             "cake_mhc_train_fwd_coef__rt64__h7168",
         ],
+        "bwd_finish_handoff_h5120": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_ho__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_trows_dyn_ho__h5120",
+            "cake_mhc_train_bwd_token__rt64_ho__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_dep__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr_os__h5120",
+        ],
+        "collapse_backward_h5120": [
+            "cake_mhc_train_collapse_bwd__h5120",
+        ],
+        "collapse_forward_h5120": [
+            "cake_mhc_train_collapse_fwd__h5120",
+        ],
+        "fwd_prepare_handoff_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_pu4__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        ],
     },
     "sm_107a": {
         "bwd_finish_h4096": [
@@ -8443,6 +9032,33 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h7168",
             "cake_mhc_train_fwd_coef__rt64__h7168",
         ],
+        "bwd_finish_handoff_h5120": [
+            "cake_mhc_train_bwd_token__ao22_rae7_pd1_ntr_ho__h5120",
+            "cake_mhc_train_bwd_token__dot_ao8_l2l_ho__h5120",
+            "cake_mhc_train_bwd_token__rt64_ho__h5120",
+            "cake_mhc_train_fn_split_atomic__tv128_t128_dep__h5120",
+            "cake_mhc_train_bwd_slab_fold__dynr__h5120",
+        ],
+        "collapse_backward_h5120": [
+            "cake_mhc_train_collapse_bwd__h5120",
+        ],
+        "collapse_forward_h5120": [
+            "cake_mhc_train_collapse_fwd__h5120",
+        ],
+        "fwd_prepare_handoff_h5120": [
+            "cake_mhc_train_fn_split__h5120",
+            "cake_mhc_train_fwd_map__nsx_st5_mb1__h5120",
+            "cake_mhc_train_fwd_map__nsx_g2_ol2l__h5120",
+            "cake_mhc_train_fwd_coef__st16_w4_tree__h5120",
+            "cake_mhc_train_fwd_coef__pfl2_qmt__h5120",
+            "cake_mhc_train_fwd_coef__st16_lp2_as_el_qd__h5120",
+            "cake_mhc_train_fwd_coef__g2_el__h5120",
+            "cake_mhc_train_fwd_coef__qe_mb10_tree__h5120",
+            "cake_mhc_train_fwd_coef__st8_lp2_tree_asel_qd__h5120",
+            "cake_mhc_train_fwd_coef__lp2_w8_adj_qe__h5120",
+            "cake_mhc_train_fwd_coef__rt64__h5120",
+            "cake_mhc_train_fwd_collapse__pi_pn__h5120",
+        ],
     },
 }
 # Every hidden size the registry holds records for.  An architecture serves a
@@ -8461,12 +9077,29 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
     (10, 7): "sm_107a",
 }
 KINDS = ("fwd_prepare", "fwd_recompute", "fwd_finish", "bwd_prepare", "bwd_finish")
+# The routes of the pre handoff (a sublayer collapses its streams with the ``pre``
+# of the previous sublayer, ``pre_in``, and hands its own ``pre`` on as
+# ``pre_next``), served at the hidden sizes of :func:`handoff_hidden_sizes`:
+# ``fwd_prepare_handoff`` (``fwd_prepare`` with the collapse that reads ``pre_in``
+# and writes ``pre_next``), ``bwd_finish_handoff`` (``bwd_finish`` with the
+# token-owner forms that take ``pre_in`` and the incoming ``dpre_next`` and store
+# ``dpre_in``) and the standalone collapse ``collapse_forward`` /
+# ``collapse_backward`` (no parameters, no workspace).  ``fwd_recompute``,
+# ``fwd_finish`` and ``bwd_prepare`` serve both contracts.
+HANDOFF_KINDS = (
+    "fwd_prepare_handoff",
+    "bwd_finish_handoff",
+    "collapse_forward",
+    "collapse_backward",
+)
 # The routes that hold a caller-owned workspace, by the ``workspace`` name of
 # their records' ``workspace_rule``.
 WORKSPACE_OF_KIND: dict[str, str] = {
     "fwd_prepare": "fwd",
     "fwd_recompute": "fwd",
     "bwd_finish": "bwd",
+    "fwd_prepare_handoff": "fwd",
+    "bwd_finish_handoff": "bwd",
 }
 
 # Model constants the kernels are built for (``_static_`` dimensions).
@@ -8630,6 +9263,11 @@ LOGICAL_TENSORS = (
     "dfn",
     "dscale",
     "dbase",
+    "pre_in",
+    "pre_next",
+    "dpre_next",
+    "dpre_in",
+    "dx",
     "dfn_slot",
     "slab_cnt",
 )
@@ -10168,10 +10806,11 @@ def rules_table(
 
 
 def route_key(hidden: int, kind: str) -> str:
-    """Name the route of one public call: ``<kind>_h<hidden>``."""
+    """Name the route of one public call: ``<kind>_h<hidden>`` (``kind`` one of
+    :data:`KINDS` or :data:`HANDOFF_KINDS`)."""
 
-    if kind not in KINDS:
-        raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+    if kind not in KINDS and kind not in HANDOFF_KINDS:
+        raise ValueError(f"kind must be one of {KINDS + HANDOFF_KINDS}, got {kind!r}")
     return f"{kind}_h{int(hidden)}"
 
 
@@ -10192,6 +10831,18 @@ def supported_hidden_sizes(arch: str) -> tuple[int, ...]:
         hidden
         for hidden in HIDDEN_SIZES
         if all(route_key(hidden, kind) in routes for kind in KINDS)
+    )
+
+
+def handoff_hidden_sizes(arch: str) -> tuple[int, ...]:
+    """Hidden sizes with every route of :data:`KINDS` and :data:`HANDOFF_KINDS` on ``arch``: the
+    sizes the pre-handoff entry points and the standalone collapse serve there."""
+
+    routes = ROUTES.get(arch, {})
+    return tuple(
+        hidden
+        for hidden in supported_hidden_sizes(arch)
+        if all(route_key(hidden, kind) in routes for kind in HANDOFF_KINDS)
     )
 
 
@@ -10531,10 +11182,12 @@ PDL_PATHS = ("forward", "backward", "checkpoint")
 # package has (the column slab (every form), launched behind the fn
 # split that the token-owner pass releases at once, takes the deterministic
 # column slab's K6->K7 bands, except on sm_107a, where its own cell of
-# PDL_BAND_OVERRIDES keeps the attribute on; there is no K7->K8 edge).
+# PDL_BAND_OVERRIDES keeps the attribute on; there is no K7->K8 edge).  ``K4->C``: the standalone
+# collapse (``collapse_fwd``, the pre handoff's final collapse) after the last sublayer's residual mixing; no band (on).
 PDL_EDGES = {
     "cake_mhc_train_bwd_prepare": "K1->K5",
     "cake_mhc_train_bwd_slab_fold": "K6->K7",
+    "cake_mhc_train_collapse_fwd": "K4->C",
     "cake_mhc_train_fwd_collapse": "K1->K3",
 }
 PDL_OFF_BANDS: dict[str, dict[str, dict[str, tuple[tuple[int, int], ...]]]] = {
@@ -10735,8 +11388,8 @@ def enable_pdl(
 def workspace_kind(kind: str) -> str | None:
     """The workspace a route holds (``"fwd"`` / ``"bwd"``), or ``None``."""
 
-    if kind not in KINDS:
-        raise ValueError(f"kind must be one of {KINDS}, got {kind!r}")
+    if kind not in KINDS and kind not in HANDOFF_KINDS:
+        raise ValueError(f"kind must be one of {KINDS + HANDOFF_KINDS}, got {kind!r}")
     return WORKSPACE_OF_KIND.get(kind)
 
 
@@ -10956,6 +11609,7 @@ __all__ = [
     "H_TABLES",
     "H_TABLE_NAMES",
     "KINDS",
+    "HANDOFF_KINDS",
     "LOGICAL_SCALARS",
     "LOGICAL_TENSORS",
     "MAPPING_ROWS",
@@ -11062,6 +11716,7 @@ __all__ = [
     "sm_count",
     "specs_for_arch",
     "supported_hidden_sizes",
+    "handoff_hidden_sizes",
     "t_pad",
     "workspace_bytes",
     "workspace_bytes_upto",

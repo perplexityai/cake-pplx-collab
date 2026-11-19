@@ -51,6 +51,24 @@ Every Cake call gets caller-owned outputs and workspaces from the package's own 
 instance of each Cake arm (``<arm>~aa``, its own buffers), timed like any other arm: its ratio to the first instance
 is the noise band of the row.
 
+The pre handoff (hidden 5120 only, ``rms_eps`` 1e-20, ``hc_eps`` 1e-6; not in the default ``--ops``):
+
+* ``hfwd``: Cake ``handoff_forward_prepare`` + ``forward_finish`` (``U`` collapsed with ``pre_in``, ``pre_next``, the
+  statistics and ``Y``); a non-Cake arm's handoff forward (autograd graph recorded);
+* ``hbwd``: Cake ``backward_prepare`` + ``handoff_backward_finish`` from the saved statistics (``dB`` and the gradient
+  statistics, then ``dX``, ``dpre_in``, ``dfn``, ``dscale``, ``dbase`` from ``dY``, ``dU`` and ``dpre_next``); a
+  non-Cake arm's backward of a recorded handoff forward;
+* ``hckpt``: the handoff forward, the handoff forward recomputed in full, the handoff backward;
+* ``hcfwd``: ``hfwd`` followed by the final collapse of its ``Y`` with its ``pre_next`` (Cake ``collapse_forward``,
+  which takes the per-call PDL attribute on its edge ``K4->C``: ``--collapse-pdl off`` turns it off in the process,
+  before any call, so that two runs measure the collapse with and without it);
+* ``cfwd`` / ``cbwd``: the standalone collapse ``U = BF16(sum_i pre_in_i X_i)`` and its VJP ``(dX, dpre_in)`` (Cake
+  ``collapse_forward`` / ``collapse_backward``, no workspace).
+
+Each handoff kind (the sublayer, the collapse) has its own oracle check per row and its own naive-tier judge per
+hidden size (``cake_mhc_baselines.reference(i, dtype, kind="handoff" | "collapse")``); the comparisons of these
+operations are ``compile_max_autotune`` and ``liger``.
+
 Comparisons.  The non-Cake arm of each comparison is fixed (``cake_mhc_baselines.COMPARISONS``): ``fwd-A``
 ``tk_cublas``, ``fwd-B`` ``tk_deepgemm``, ``bwd`` / ``ckpt`` ``compile_max_autotune`` and the ``bwd-liger`` /
 ``ckpt-liger`` columns ``liger`` (``bwd_acc`` uses the ``bwd`` comparisons and ``ckpt_stats`` the ``ckpt`` ones), the
@@ -139,6 +157,15 @@ OP_DEFINITIONS = {
                   "statistics-only replay, the same work as their ckpt",
     "bwd_acc": "bwd adding into the parameter gradients only (Cake accumulate=True; non-Cake: the .grad of X and B "
                "cleared before each call)",
+    "hfwd": "pre handoff, one sublayer: Cake handoff_forward_prepare + forward_finish; non-Cake: the handoff forward "
+            "(autograd graph recorded)",
+    "hbwd": "pre handoff, one sublayer: Cake backward_prepare + handoff_backward_finish (dY, dU, dpre_next); "
+            "non-Cake: the backward of a recorded handoff forward",
+    "hckpt": "pre handoff, one sublayer: the handoff forward, the handoff forward recomputed in full, the backward",
+    "hcfwd": "pre handoff: the last sublayer's handoff forward, then the final collapse of its Y with its pre_next",
+    "cfwd": "standalone collapse U = BF16(sum_i pre_in_i X_i): Cake collapse_forward; non-Cake: the collapse forward",
+    "cbwd": "standalone collapse VJP (dX, dpre_in): Cake collapse_backward; non-Cake: the backward of a recorded "
+            "collapse",
 }
 
 
@@ -345,6 +372,16 @@ class CakeArm(base.Arm):
             return False, f"accumulation={self.accumulation!r} serves hidden {PAIR_HIDDEN} only"
         return True, ""
 
+    def supports(self, op: str, device, hidden: int) -> tuple:
+        ok, note = super().supports(op, device, hidden)
+        if not ok or base.op_kind(op) == "standard":
+            return ok, note
+        if self.accumulation != "fp32":
+            return False, "the pre handoff runs the one-word programs only"
+        if not bool(getattr(self.mod, f"is_cake_mhc_{self.mode}_train_handoff_supported")(device, hidden)):
+            return False, f"the package exports no pre-handoff route for hidden {hidden} on this device"
+        return True, ""
+
     def backend_dir(self) -> Path:
         backend = importlib.import_module(f"cake_pplx._backends.cake_mhc_{self.mode}_train")
         return Path(backend.__file__).resolve().parent
@@ -434,7 +471,91 @@ class CakeArm(base.Arm):
         backward(b["S"])
         return {k: b[k] for k in base.OUTPUTS}
 
+    def _handoff_buffers(self, i: dict) -> dict:
+        T, dev = i["T"], i["X"].device
+        b = self._buffers(i)
+        b.update({k: torch.empty(T, base.STREAMS, dtype=torch.float32, device=dev) for k in ("pre_next", "dpre_in")})
+        b["Uc"] = torch.empty_like(b["U"])
+        b["dXc"] = torch.empty_like(b["dX"])
+        b["dpre_c"] = torch.empty_like(b["dpre_in"])
+        return b
+
+    def _handoff_calls(self, i: dict, b: dict):
+        X, fn, scale, bse, B, dY, dU, pre_in, dpn = (
+            i[k] for k in ("X", "fn", "scale", "base", "B", "dY", "dU", "pre_in", "dpre_next")
+        )
+        hp, ff = self.f("handoff_forward_prepare"), self.f("forward_finish")
+        bp, hb = self.f("backward_prepare"), self.f("handoff_backward_finish")
+        cf, cb = self.f("collapse_forward"), self.f("collapse_backward")
+        kw = {"rms_eps": base.HANDOFF_RMS_EPS}
+        if i["iters"] != base.SINKHORN_ITERS:
+            kw["sinkhorn_iters"] = i["iters"]
+
+        def forward(stats) -> None:
+            hp(X, pre_in, fn, scale, bse, out=b["U"], pre_next_out=b["pre_next"], stats_out=stats, workspace=b["fws"],
+               **kw)
+            ff(X, B, stats, out=b["Y"])
+
+        def backward(stats) -> None:
+            bp(dY, B, X, stats, dB=b["dB"], grad_stats_out=b["G"])
+            hb(X, dY, dU, pre_in, dpn, B, fn, scale, bse, stats, b["G"], workspace=b["bws"], dX=b["dX"],
+               dpre_in=b["dpre_in"], dfn=b["dfn"], dscale=b["dscale"], dbase=b["dbase"], **kw)
+
+        def collapse(X=X, pre=pre_in) -> None:
+            cf(X, pre, out=b["Uc"])
+
+        def collapse_vjp() -> None:
+            cb(X, pre_in, dU, dX=b["dXc"], dpre_in=b["dpre_c"])
+
+        return forward, backward, collapse, collapse_vjp
+
+    def run_handoff(self, i: dict) -> dict:
+        b = self._handoff_buffers(i)
+        forward, backward, _, _ = self._handoff_calls(i, b)
+        forward(b["S"])
+        backward(b["S"])
+        return {k: b[k] for k in base.HANDOFF_OUTPUTS}
+
+    def run_collapse(self, i: dict) -> dict:
+        b = self._handoff_buffers(i)
+        _, _, collapse, collapse_vjp = self._handoff_calls(i, b)
+        collapse()
+        collapse_vjp()
+        return {"U": b["Uc"], "dX": b["dXc"], "dpre_in": b["dpre_c"]}
+
+    def _make_handoff(self, i: dict, op: str) -> Callable[[], None]:
+        b = self._handoff_buffers(i)
+        forward, backward, collapse, collapse_vjp = self._handoff_calls(i, b)
+        if op == "hfwd":
+            return lambda: forward(b["S"])
+        if op == "hcfwd":  # the last sublayer's forward, then the final collapse of its Y with its pre_next
+
+            def call() -> None:
+                forward(b["S"])
+                collapse(b["Y"], b["pre_next"])
+
+            return call
+        if op == "hbwd":
+            forward(b["S"])
+
+            return lambda: backward(b["S"])
+        if op == "hckpt":  # the forward, the forward recomputed in full, the backward
+
+            def call() -> None:
+                forward(b["S"])
+                forward(b["S2"])
+                backward(b["S2"])
+
+            return call
+        if op == "cfwd":
+            return collapse
+        if op == "cbwd":
+            return collapse_vjp
+        raise ValueError(op)
+
     def make(self, i: dict, op: str) -> Callable[[], None]:
+        if base.op_kind(op) != "standard":
+            return self._make_handoff(i, op)
         b = self._buffers(i)
         forward, backward, replay = self._calls(i, b)
         if op == "fwd":
@@ -674,6 +795,10 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
                  "iters": args.sinkhorn_iters, "arms": {}, "ops": {}}
     t0 = time.time()
     i = base.make_inputs(tokens, hidden, seed=row["seed"], device=device, iters=args.sinkhorn_iters)
+    # The kinds of function the requested operations time (the standard function, the pre handoff, the collapse):
+    # each kind has its own compile trials, its own oracle check, and an arm that breaks one kind's contract is not
+    # timed on that kind.
+    kinds = list(dict.fromkeys(base.op_kind(op) for op in args.ops))
     live = []
     for arm in arms:
         ok, note = arm.available(device, hidden)
@@ -682,43 +807,60 @@ def run_row(hidden: int, tokens: int, arms: list, args, timer: Timer, judge, dev
             print(f"H={hidden} T={tokens} {arm.name}: unsupported: {note}", flush=True)
             continue
         try:
-            rec["prepare"] = arm.prepare_shape(i, timer)
+            rec["prepare"] = arm.prepare_shape(i, timer, kinds=kinds)
         except Exception as exc:  # noqa: BLE001
             rec["error"] = "prepare: " + _err(exc, f"{arm.name} prepare H={hidden} T={tokens}")
             _free()
             continue
         live.append(arm)
-    if args.check and live:
-        outputs, failed = {}, set()
-        for arm in live:
-            try:
-                outputs[arm.name] = arm.run_once(i)
-            except Exception as exc:  # noqa: BLE001
-                row["arms"][arm.name]["error"] = "check run: " + _err(exc, f"{arm.name} check run H={hidden} T={tokens}")
-                failed.add(arm.name)
-                _free()
-        try:
-            report = base.check_outputs(i, outputs, judge)
-        except torch.cuda.OutOfMemoryError as exc:
-            report = {n: {"error": "check: out of memory: " + _err(exc)} for n in outputs}
-        del outputs
-        _free()
-        for name, rep in report.items():
-            row["arms"][name]["check"] = rep
-            if any(isinstance(v, dict) and v.get("contract") for v in rep.values()):
-                failed.add(name)
-        live = [a for a in live if a.name not in failed]
-    if args.det_runs > 1:
-        for arm in live:
-            if arm.name.endswith("~aa"):
+    runnable = {kind: [a for a in live if any(a.supports(op, device, hidden)[0] for op in args.ops
+                                              if base.op_kind(op) == kind)] for kind in kinds}
+    failed_kind: dict = {kind: set() for kind in kinds}
+    if args.check:
+        for kind in kinds:
+            outputs = {}
+            for arm in runnable[kind]:
+                try:
+                    outputs[arm.name] = arm.run_kind(i, kind)
+                except Exception as exc:  # noqa: BLE001
+                    # per kind (``error_standard`` / ``error_handoff`` / ``error_collapse``): a failed check run of
+                    # one kind leaves the other kinds' cells; ``error`` is the arm's prepare failure (every kind)
+                    where = f"{arm.name} {kind} check H={hidden} T={tokens}"
+                    row["arms"][arm.name][f"error_{kind}"] = "check run: " + _err(exc, where)
+                    failed_kind[kind].add(arm.name)
+                    _free()
+            if not outputs:
                 continue
             try:
-                row["arms"][arm.name]["determinism"] = base.determinism_runs(arm, i, args.det_runs)
-            except Exception as exc:  # noqa: BLE001 - recorded; the timing continues
-                row["arms"][arm.name]["determinism"] = {"error": _err(exc, f"{arm.name} determinism")}
+                report = base.check_outputs(i, outputs, judge, kind=kind)
+            except torch.cuda.OutOfMemoryError as exc:
+                report = {n: {"error": "check: out of memory: " + _err(exc)} for n in outputs}
+            del outputs
             _free()
+            for name, rep in report.items():
+                row["arms"][name]["check" if kind == "standard" else f"check_{kind}"] = rep
+                if any(isinstance(v, dict) and v.get("contract") for v in rep.values()):
+                    failed_kind[kind].add(name)
+    if args.det_runs > 1:
+        for kind in kinds:
+            for arm in runnable[kind]:
+                if arm.name.endswith("~aa") or arm.name in failed_kind[kind]:
+                    continue
+                key = "determinism" if kind == "standard" else f"determinism_{kind}"
+                try:
+                    row["arms"][arm.name][key] = base.determinism_runs(arm, i, args.det_runs, kind)
+                except Exception as exc:  # noqa: BLE001 - recorded; the timing continues
+                    row["arms"][arm.name][key] = {"error": _err(exc, f"{arm.name} determinism {kind}")}
+                _free()
     for op in args.ops:
-        participants = [a for a in live if op in a.ops]
+        kind = base.op_kind(op)
+        participants = []
+        for a in live:
+            ok, note = a.supports(op, device, hidden)
+            if not ok:
+                row["arms"][a.name].setdefault("unsupported_ops", {})[op] = note
+            elif a.name not in failed_kind[kind]:
+                participants.append(a)
         for mode in args.modes:
             res = time_op(participants, i, op, mode, args, timer, device)
             res["comparisons"] = comparisons(arms, row, res, op, hidden, eligible)
@@ -738,23 +880,28 @@ def comparisons(arms: list, row: dict, res: dict, op: str, hidden: int, eligible
         return {}
     by_name = {a.name: a for a in arms}
     cake = next((a.name for a in arms if a.cake and "active_us" in res.get(a.name, {})), None)
+    kind = base.op_kind(op)
+    suffix = "" if kind == "standard" else f"_{kind}"
     out = {}
     for cname, aname in base.comparisons_for(op):
+        key = (hidden, aname) if kind == "standard" else (hidden, aname, kind)
         cell: dict = {"arm": aname, "label": by_name[aname].label() if aname in by_name else aname, "reference": cake,
-                      "judge": eligible.get((hidden, aname))}
+                      "judge": eligible.get(key)}
         rec = row["arms"].get(aname)
         r = res.get(aname, {})
         if aname not in by_name:
             cell["status"] = "not run: the arm was not selected"
         elif not rec or not rec.get("available"):
             cell["status"] = "unsupported: " + ((rec or {}).get("note") or "not available")
-        elif rec.get("error"):
-            cell["status"] = "error: " + rec["error"]
-        elif any(isinstance(v, dict) and v.get("contract") for v in (rec.get("check") or {}).values()):
+        elif op in (rec.get("unsupported_ops") or {}):
+            cell["status"] = "unsupported: " + rec["unsupported_ops"][op]
+        elif rec.get("error") or rec.get(f"error_{kind}"):
+            cell["status"] = "error: " + (rec.get("error") or rec.get(f"error_{kind}"))
+        elif any(isinstance(v, dict) and v.get("contract") for v in (rec.get(f"check{suffix}") or {}).values()):
             cell["status"] = "different contract: the arm breaks the contract on this row's inputs"
         elif "active_us" not in r:
             cell["status"] = "error: " + str(r.get("error") or "not timed")
-        elif eligible.get((hidden, aname)) is False:
+        elif eligible.get(key) is False:
             cell["status"] = "different contract: the arm misses the naive-tier judge"
         else:
             cell["status"] = "ok"
@@ -806,6 +953,9 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     p.add_argument("--hidden", type=int, nargs="*", default=None)
     p.add_argument("--tokens", type=int, nargs="*", default=None)
     p.add_argument("--ops", default="fwd,bwd,ckpt", help="comma-separated: " + ", ".join(base.OPS))
+    p.add_argument("--collapse-pdl", default="on", choices=("on", "off"),
+                   help="the per-call PDL attribute of the standalone collapse (edge K4->C); off: turned off in both "
+                   "packages before any call")
     p.add_argument("--sinkhorn-iters", type=int, default=base.SINKHORN_ITERS,
                    help="Sinkhorn count of every arm and reference (default 20; 1..64 for the Cake packages)")
     p.add_argument("--det-runs", type=int, default=5,
@@ -834,6 +984,34 @@ def build_parser(description: str, default_arms: str) -> argparse.ArgumentParser
     return p
 
 
+def collapse_pdl_off() -> dict:
+    """Turn the per-call PDL attribute of the standalone collapse (each package's ``PDL_EDGES`` stem ``*_collapse_fwd``)
+    off on every architecture and path, in every band table of both packages (module, per hidden size, override
+    cells; the launch plans cache the argument: call this before any call).  Returns the edges per package."""
+    done = {}
+    for mode in CAKE_MODES:
+        loader = importlib.import_module(f"cake_pplx._backends.cake_mhc_{mode}_train.cake_jit")
+        edges = sorted({edge for stem, edge in loader.PDL_EDGES.items() if stem.endswith("_collapse_fwd")})
+        off = {path: ((0, None),) for path in loader.PDL_PATHS}
+        tables = [loader.PDL_OFF_BANDS]
+        try:
+            per_size = loader._tab("PDL_OFF_BANDS", base.HANDOFF_HIDDEN)
+        except (AttributeError, KeyError):
+            per_size = None
+        if per_size is not None and per_size is not loader.PDL_OFF_BANDS:
+            tables.append(per_size)
+        for table in tables:
+            for arch in loader.ARCHES:
+                for edge in edges:
+                    table.setdefault(arch, {})[edge] = dict(off)
+        for cell in getattr(loader, "PDL_BAND_OVERRIDES", {}).values():
+            for edge in edges:
+                if edge in cell:
+                    cell[edge] = dict(off)
+        done[mode] = edges
+    return done
+
+
 def make_arms(names: list, args) -> list:
     arms: list = []
     for name in names:
@@ -858,6 +1036,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
     if "liger" in args.arms and "TRITON_F32_DEFAULT" not in os.environ:
         os.environ["TRITON_F32_DEFAULT"] = "tf32x3"
     base.set_ieee_fp32()
+    collapse_pdl = collapse_pdl_off() if args.collapse_pdl == "off" else None
     device = torch.device("cuda", torch.cuda.current_device())
     timer = Timer(device, args.timer, args.calls, args.dry)
     try:  # a timer that cannot record (e.g. a CUPTI too old for the device) fails the run here, not per arm
@@ -881,6 +1060,7 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                      "statistic": "median of group medians of per-call CUPTI active time (us)",
                      "judge_draws": args.judge_draws, "judge_tokens": args.judge_tokens, "check": args.check,
                      "sinkhorn_iters": args.sinkhorn_iters, "det_runs": args.det_runs,
+                     "collapse_pdl": args.collapse_pdl, "collapse_pdl_off_edges": collapse_pdl,
                      "op_definitions": {op: OP_DEFINITIONS[op] for op in args.ops}},
         "comparisons": [{"name": n, "ops": list(o), "arm": a} for n, o, a in base.COMPARISONS],
         "arms": {a.name: a.describe() for a in arms},
@@ -931,17 +1111,27 @@ def main(argv: Optional[list] = None, *, description: str, default_arms: str) ->
                 else:
                     record["judge"].setdefault(str(hidden), {})[arm.name] = {"unavailable": note}
                     print(f"judge H={hidden} {arm.name}: unsupported: {note}", flush=True)
-            verdicts = base.judge_arms(candidates, hidden, device=device, judge=judge, draws=args.judge_draws,
-                                       tokens=args.judge_tokens, seed=args.seed, iters=args.sinkhorn_iters)
-            record["judge"].setdefault(str(hidden), {}).update(verdicts)
-            for name, v in verdicts.items():
-                eligible[(hidden, name)] = bool(v.get("meets_contract"))
-                print(f"judge H={hidden} T={args.judge_tokens} {name}: "
-                      f"{'meets the contract' if v.get('meets_contract') else 'DIFFERENT CONTRACT'} "
-                      f"{v.get('error') or ''} {'; '.join(v.get('failures', [])[:3])}", flush=True)
-                for line in v.get("tier_lines", []):
-                    print("  " + line, flush=True)
-            _free()
+            for kind in dict.fromkeys(base.op_kind(op) for op in args.ops):
+                judged = {
+                    n: a for n, a in candidates.items()
+                    if any(a.supports(op, device, hidden)[0] for op in args.ops if base.op_kind(op) == kind)
+                }
+                if not judged:
+                    continue
+                verdicts = base.judge_arms(judged, hidden, device=device, judge=judge, draws=args.judge_draws,
+                                           tokens=args.judge_tokens, seed=args.seed, iters=args.sinkhorn_iters,
+                                           kind=kind)
+                key = str(hidden) if kind == "standard" else f"{hidden}/{kind}"
+                record["judge"].setdefault(key, {}).update(verdicts)
+                for name, v in verdicts.items():
+                    ekey = (hidden, name) if kind == "standard" else (hidden, name, kind)
+                    eligible[ekey] = bool(v.get("meets_contract"))
+                    print(f"judge {kind} H={hidden} T={args.judge_tokens} {name}: "
+                          f"{'meets the contract' if v.get('meets_contract') else 'DIFFERENT CONTRACT'} "
+                          f"{v.get('error') or ''} {'; '.join(v.get('failures', [])[:3])}", flush=True)
+                    for line in v.get("tier_lines", []):
+                        print("  " + line, flush=True)
+                _free()
             dump()
     if not args.judge_only:
         for hidden, tokens in shapes:

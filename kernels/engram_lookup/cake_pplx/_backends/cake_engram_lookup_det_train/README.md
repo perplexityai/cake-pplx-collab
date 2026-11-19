@@ -68,7 +68,7 @@ row strides of `weight` and `scale` come from the tensors (264 for the packed
 views; a one-row table goes in with 256 and 8, which change no address since
 its only valid id is 0), and byte offsets are 64-bit (tables past 2^31 bytes and outputs past
 2^31 elements are served).  The grid is one CTA per 32 looked-up rows, capped
-at 8 CTAs per SM.
+at the CTAs the device holds at once: 8 per SM on SM100 and SM103, 4 on SM107.
 
 ## Numerics
 

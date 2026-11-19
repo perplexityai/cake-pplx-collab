@@ -59,15 +59,17 @@ The package has six programs: one per format, each with and without the scale ou
 `sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json` lists 18 libraries.  A
 call runs the one program of its route (`cake_jit.selected_module(arch, format, scale_out=...)`).
 
-A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes).  A thread loads one
-vector, and the `G / 8` adjacent threads of one group combine their maxima with warp shuffles.  A CTA has 256
-threads and takes 256 vectors per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its
-whole warp and any grid of at least one CTA is correct.  The host launches `min(ceil(n_vecs / 256), 8 * SM count)`
-CTAs; the SM count is read once per device.  Neither the last dimension, nor the rank, nor the row count enters the
-kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own format and
-scale output, so build every library of the architecture before a CUDA graph capture: call `build_and_load()` on each
-spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format and scale output that the capture
-uses.
+A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8`
+adjacent threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128
+vectors (256 on `sm_107a`) per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its
+whole warp and any grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_107a`) before it
+computes or stores any of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per
+tile once the tiles pass 2.5 waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many
+CTAs, at most one per tile; the SM count is read once per device.  Neither the last dimension, nor the rank, nor
+the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of
+its own format and scale output, so build every library of the architecture before a CUDA graph capture: call
+`build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format and scale
+output that the capture uses.
 
 ## Numerics
 

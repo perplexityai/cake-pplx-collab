@@ -717,9 +717,11 @@ def test_autograd_backward_alerts_once_deterministic_algorithms_are_enabled(
             y.backward(torch.ones_like(y))
         want = module(shape)
         if not weight_grad:
-            # the band's program without the weight gradient
+            # the band's program without the weight gradient (contiguous
+            # inputs: packed rows but for a single token)
             rows = shape[0] * shape[1]
-            want = loader.nodw_module(arch, want, rows, _sm_count())
+            packed = suite._backward_packed(*shape)
+            want = loader.nodw_module(arch, want, rows, _sm_count(), packed=packed)
         assert launched == [want], (shape, weight_grad, launched)
 
 

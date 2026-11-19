@@ -43,7 +43,8 @@ The non-Cake arms (each ``available()`` says why it cannot run on a device or so
   default / ``"max-autotune-no-cudagraphs"``, ``fullgraph=True``, ``dynamic=False``, TF32 off).  The compiled code
   varies from compile to compile; with ``compile_trials > 1`` each trial compiles a fresh copy of the function with
   the inductor caches disabled and the fastest trial (by the median of one group of training steps) is the one timed
-  (every trial's time is recorded);
+  (every trial's time is recorded), separately for each function the run times (the standard function, the pre
+  handoff, the collapse);
 * ``liger``: Liger Kernel's mHC autograd functions (``liger_kernel.ops.mhc``: the coefficient function with
   ``allow_fp32=True``, the pre-mix and the post / residual mix).  Liger's residual mix is ``out_o = sum_i h_res[o, i]
   x_i``, so it is given ``C`` transposed; its mapping matrix is a ``[4H, 24]`` parameter (Liger's layout) and the
@@ -76,6 +77,20 @@ architecture) and ``fwd-B`` (``tk_deepgemm``, where DeepGEMM runs; elsewhere the
 backward and the checkpointed step (``ckpt`` and ``ckpt_stats``) compare with ``compile_max_autotune`` and, in a second
 column, with ``liger``.
 
+The pre handoff (operations ``hfwd``, ``hbwd``, ``hckpt``; hidden 5120, ``rms_eps`` :data:`HANDOFF_RMS_EPS` = 1e-20,
+``hc_eps`` 1e-6) is one sublayer of DeepSeek-V4.1-Flash: the coefficients of ``X`` as above, the collapse with the
+incoming ``pre_in`` (``U = BF16(sum_i pre_in_i X_i)``) and ``pre`` handed on as ``pre_next``; its backward from
+``dY``, ``dU`` and ``dpre_next`` (the gradient of ``pre_next``) adds ``dpre_in = sum_d dU_d X_id``
+(:func:`reference` with ``kind="handoff"``); ``hcfwd`` is the last sublayer's handoff forward followed by the final
+collapse of its ``Y`` with its ``pre_next`` (the sequence where the collapse's launch can overlap its predecessor).
+The standalone collapse (``cfwd``, ``cbwd``) is ``U = BF16(sum_i pre_in_i X_i)`` and its VJP ``(dX, dpre_in)``
+(:func:`reference` with ``kind="collapse"``).  :func:`make_inputs` draws ``pre_in`` (``sigmoid(N(0, 1)) + 1e-6``)
+and ``dpre_next`` (``sqrt(H) N(0, 1)``) after the standard inputs, which keep their values.  The autograd arms
+run the handoff as the same Python function with ``pre_in`` (``eager_fp32``, ``compile_*``) and Liger as its
+coefficient function, its pre-mix applied to ``pre_in`` and its post / residual mix (the coefficient function's
+``h_pre`` handed on); the TileKernels arms have no handoff.  Each handoff operation compares with
+``compile_max_autotune`` and with ``liger``.
+
 Determinism class.  Each arm declares what is known about its run-to-run bits (:attr:`Arm.determinism`), and
 :func:`determinism_runs` measures it: the same call on the same inputs several times, every output compared bit for
 bit with the first run's.
@@ -89,6 +104,7 @@ import importlib.util
 import os
 import statistics
 import types
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Callable, Optional
 
@@ -113,7 +129,29 @@ BACKWARD_OUTPUTS = ("dX", "dfn", "dscale", "dbase", "dB")
 OUTPUTS = FORWARD_OUTPUTS + BACKWARD_OUTPUTS
 PER_TOKEN_OUTPUTS = ("U", "Y", "dX", "dB")
 PARAMETER_OUTPUTS = ("dfn", "dscale", "dbase")
-OPS = ("fwd", "bwd", "ckpt", "ckpt_stats", "bwd_acc")
+STANDARD_OPS = ("fwd", "bwd", "ckpt", "ckpt_stats", "bwd_acc")
+#: The pre-handoff operations (one sublayer) and the standalone collapse (hidden :data:`HANDOFF_HIDDEN`).
+HANDOFF_OPS = ("hfwd", "hbwd", "hckpt", "hcfwd")
+COLLAPSE_OPS = ("cfwd", "cbwd")
+OPS = STANDARD_OPS + HANDOFF_OPS + COLLAPSE_OPS
+HANDOFF_HIDDEN = 5120
+HANDOFF_RMS_EPS = 1e-20
+HANDOFF_FORWARD_OUTPUTS = ("U", "Y", "pre_next")
+HANDOFF_BACKWARD_OUTPUTS = ("dX", "dpre_in", "dfn", "dscale", "dbase", "dB")
+HANDOFF_OUTPUTS = HANDOFF_FORWARD_OUTPUTS + HANDOFF_BACKWARD_OUTPUTS
+COLLAPSE_OUTPUTS = ("U", "dX", "dpre_in")
+#: The outputs of each kind of check: ``(per-token outputs, parameter outputs)``.
+KIND_OUTPUTS = {
+    "standard": (PER_TOKEN_OUTPUTS, PARAMETER_OUTPUTS),
+    "handoff": (("U", "Y", "pre_next", "dX", "dpre_in", "dB"), PARAMETER_OUTPUTS),
+    "collapse": (COLLAPSE_OUTPUTS, ()),
+}
+
+
+def op_kind(op: str) -> str:
+    """``"standard"``, ``"handoff"`` or ``"collapse"``: the function an operation times."""
+    return "handoff" if op in HANDOFF_OPS else "collapse" if op in COLLAPSE_OPS else "standard"
+
 BF16, F32, F64 = torch.bfloat16, torch.float32, torch.float64
 
 #: The fixed comparisons: ``(name, operations, non-Cake arm)``.  The arm is the same on every architecture; where it
@@ -125,6 +163,18 @@ COMPARISONS = (
     ("bwd-liger", ("bwd", "bwd_acc"), "liger"),
     ("ckpt", ("ckpt", "ckpt_stats"), "compile_max_autotune"),
     ("ckpt-liger", ("ckpt", "ckpt_stats"), "liger"),
+    ("hfwd", ("hfwd",), "compile_max_autotune"),
+    ("hfwd-liger", ("hfwd",), "liger"),
+    ("hbwd", ("hbwd",), "compile_max_autotune"),
+    ("hbwd-liger", ("hbwd",), "liger"),
+    ("hckpt", ("hckpt",), "compile_max_autotune"),
+    ("hckpt-liger", ("hckpt",), "liger"),
+    ("hcfwd", ("hcfwd",), "compile_max_autotune"),
+    ("hcfwd-liger", ("hcfwd",), "liger"),
+    ("cfwd", ("cfwd",), "compile_max_autotune"),
+    ("cfwd-liger", ("cfwd",), "liger"),
+    ("cbwd", ("cbwd",), "compile_max_autotune"),
+    ("cbwd-liger", ("cbwd",), "liger"),
 )
 
 
@@ -182,8 +232,9 @@ def dist_version(name: str) -> Optional[str]:
 
 
 def make_inputs(T: int, hidden: int, *, seed: int, device: torch.device, iters: int = SINKHORN_ITERS) -> dict:
-    """``X, B, dY, dU ~ N(0, 1)`` BF16, ``fn ~ 1e-2 N(0, 1)``, ``scale ~ 1 + 0.1 N``, ``base ~ 0.1 N`` (FP32), from a
-    device generator seeded with ``seed``; ``iters`` is the Sinkhorn count of every arm on these inputs."""
+    """``X, B, dY, dU ~ N(0, 1)`` BF16, ``fn ~ 1e-2 N(0, 1)``, ``scale ~ 1 + 0.1 N``, ``base ~ 0.1 N`` (FP32), then the
+    pre-handoff inputs ``pre_in = sigmoid(N(0, 1)) + 1e-6`` and ``dpre_next = sqrt(H) N(0, 1)`` (FP32 ``[T, 4]``), from
+    a device generator seeded with ``seed``; ``iters`` is the Sinkhorn count of every arm on these inputs."""
     g = torch.Generator(device=device).manual_seed(seed)
 
     def randn(*shape: int) -> torch.Tensor:
@@ -196,8 +247,10 @@ def make_inputs(T: int, hidden: int, *, seed: int, device: torch.device, iters: 
     B = randn(T, hidden).to(BF16)
     dY = randn(T, STREAMS, hidden).to(BF16)
     dU = randn(T, hidden).to(BF16)
+    pre_in = (torch.sigmoid(randn(T, STREAMS)) + 1e-6).contiguous()
+    dpre_next = (randn(T, STREAMS) * hidden**0.5).contiguous()
     return {"X": X, "fn": fn, "scale": scale, "base": base, "B": B, "dY": dY, "dU": dU, "T": T, "hidden": hidden,
-            "iters": int(iters)}
+            "iters": int(iters), "pre_in": pre_in, "dpre_next": dpre_next}
 
 
 def sinkhorn(logits: torch.Tensor, hc_eps: float = HC_EPS, iters: int = SINKHORN_ITERS) -> torch.Tensor:
@@ -228,6 +281,56 @@ def mhc_forward(X, fn, scale, base, B, *, dtype: torch.dtype, iters: int = SINKH
     return U, Y
 
 
+def mhc_handoff_forward(X, pre_in, fn, scale, base, B, *, dtype: torch.dtype, iters: int = SINKHORN_ITERS,
+                        rms_eps: float = HANDOFF_RMS_EPS):
+    """``(U, Y, pre_next)`` of one handoff sublayer in ``dtype``: the coefficients of ``X``, ``U`` collapsed with
+    ``pre_in``, this sublayer's ``pre`` as ``pre_next`` (an autograd graph when the inputs require grad)."""
+    T = X.shape[0]
+    Xd = X.to(dtype)
+    u = Xd.reshape(T, -1)
+    r = torch.rsqrt(u.square().mean(dim=-1, keepdim=True) + rms_eps)
+    z = (u * r) @ fn.to(dtype).T
+    s = scale.to(dtype)
+    b = base.to(dtype)
+    pre = torch.sigmoid(z[:, 0:4] * s[0] + b[0:4]) + HC_EPS
+    post = POST_MULT * torch.sigmoid(z[:, 4:8] * s[1] + b[4:8])
+    C = sinkhorn((z[:, 8:] * s[2] + b[8:]).reshape(T, STREAMS, STREAMS), iters=iters)
+    U = (pre_in.to(dtype).unsqueeze(-1) * Xd).sum(dim=1)
+    Y = post.unsqueeze(-1) * B.to(dtype).unsqueeze(1) + torch.einsum("tij,tid->tjd", C, Xd)
+    return U, Y, pre
+
+
+def collapse_forward(X, pre_in, *, dtype: torch.dtype):
+    """``U = sum_i pre_in_i X_i`` in ``dtype``."""
+    return (pre_in.to(dtype).unsqueeze(-1) * X.to(dtype)).sum(dim=1)
+
+
+def _reference_block_handoff(i: dict, lo: int, hi: int, dtype: torch.dtype) -> dict:
+    with torch.enable_grad():
+        leaves = [
+            t.detach().to(dtype).requires_grad_(True)
+            for t in (i["X"][lo:hi], i["fn"], i["scale"], i["base"], i["B"][lo:hi], i["pre_in"][lo:hi])
+        ]
+        X, fn, scale, base, B, pre_in = leaves
+        U, Y, pre_next = mhc_handoff_forward(X, pre_in, fn, scale, base, B, dtype=dtype,
+                                             iters=i.get("iters", SINKHORN_ITERS))
+        grads = torch.autograd.grad(
+            [U, Y, pre_next], leaves,
+            grad_outputs=[i["dU"][lo:hi].to(dtype), i["dY"][lo:hi].to(dtype), i["dpre_next"][lo:hi].to(dtype)],
+        )
+    out = {"U": U.detach(), "Y": Y.detach(), "pre_next": pre_next.detach()}
+    out.update(zip(("dX", "dfn", "dscale", "dbase", "dB", "dpre_in"), grads, strict=True))
+    return out
+
+
+def _reference_block_collapse(i: dict, lo: int, hi: int, dtype: torch.dtype) -> dict:
+    x = i["X"][lo:hi].to(dtype)
+    p = i["pre_in"][lo:hi].to(dtype)
+    u = i["dU"][lo:hi].to(dtype)
+    return {"U": collapse_forward(x, p, dtype=dtype), "dX": p.unsqueeze(-1) * u.unsqueeze(1),
+            "dpre_in": (u.unsqueeze(1) * x).sum(dim=-1)}
+
+
 def _reference_block(i: dict, lo: int, hi: int, dtype: torch.dtype) -> dict:
     """Every output of rows ``lo:hi`` in ``dtype`` (leaves in ``dtype``; the parameter gradients of these rows)."""
     with torch.enable_grad():
@@ -244,19 +347,25 @@ def _reference_block(i: dict, lo: int, hi: int, dtype: torch.dtype) -> dict:
     return out
 
 
-def reference_blocks(i: dict, dtype: torch.dtype, block_tokens: int = BLOCK_TOKENS):
-    """``(lo, hi, outputs of rows lo:hi)`` in ``dtype``, in row blocks of ``block_tokens``."""
+_BLOCKS = {"standard": _reference_block, "handoff": _reference_block_handoff, "collapse": _reference_block_collapse}
+
+
+def reference_blocks(i: dict, dtype: torch.dtype, block_tokens: int = BLOCK_TOKENS, kind: str = "standard"):
+    """``(lo, hi, outputs of rows lo:hi)`` in ``dtype``, in row blocks of ``block_tokens`` (``kind``: the function,
+    :data:`KIND_OUTPUTS`)."""
     T = i["T"]
+    block = _BLOCKS[kind]
     for lo in range(0, T, block_tokens):
         hi = min(T, lo + block_tokens)
-        yield lo, hi, _reference_block(i, lo, hi, dtype)
+        yield lo, hi, block(i, lo, hi, dtype)
 
 
-def reference(i: dict, dtype: torch.dtype, block_tokens: int = BLOCK_TOKENS) -> dict:
+def reference(i: dict, dtype: torch.dtype, block_tokens: int = BLOCK_TOKENS, kind: str = "standard") -> dict:
     """Every output in ``dtype``: per-token outputs concatenated, parameter gradients summed in block order."""
-    blocks = [b for _, _, b in reference_blocks(i, dtype, block_tokens)]
-    out = {k: torch.cat([b[k] for b in blocks]) for k in PER_TOKEN_OUTPUTS}
-    for k in PARAMETER_OUTPUTS:
+    per_token, parameters = KIND_OUTPUTS[kind]
+    blocks = [b for _, _, b in reference_blocks(i, dtype, block_tokens, kind)]
+    out = {k: torch.cat([b[k] for b in blocks]) for k in per_token}
+    for k in parameters:
         acc = blocks[0][k].clone()
         for b in blocks[1:]:
             acc += b[k]
@@ -275,7 +384,7 @@ def load_naive_judge():
     return module
 
 
-def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_TOKENS) -> dict:
+def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_TOKENS, kind: str = "standard") -> dict:
     """One draw: each arm's outputs (``{arm: {output: tensor}}``) against the float64 oracle, beside the naive BF16
     tier on the same inputs.  Per arm and output: the contract message (None when held), the L2 and max errors of the
     output and of the tier, and their ratios.  The oracle and the tier run in row blocks; nothing of the size of an
@@ -301,13 +410,14 @@ def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_T
                 else:
                     rec[norm][k] = max(rec[norm][k], values[k])
 
-    for lo, hi, o in reference_blocks(i, F64, block_tokens):
-        n = _reference_block(i, lo, hi, BF16)
+    per_token, parameters = KIND_OUTPUTS[kind]
+    for lo, hi, o in reference_blocks(i, F64, block_tokens, kind):
+        n = _BLOCKS[kind](i, lo, hi, BF16)
         for arm, outs in arm_outputs.items():
-            for name in PER_TOKEN_OUTPUTS:
+            for name in per_token:
                 if name in outs:
                     add(arm, name, outs[name][lo:hi], o[name], n[name])
-        for name in PARAMETER_OUTPUTS:
+        for name in parameters:
             if name in oracle_params:
                 oracle_params[name] += o[name]
                 naive_params[name] += n[name]
@@ -316,7 +426,7 @@ def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_T
                 naive_params[name] = n[name].clone()
         del o, n
     for arm, outs in arm_outputs.items():
-        for name in PARAMETER_OUTPUTS:
+        for name in parameters:
             if name in outs:
                 add(arm, name, outs[name], oracle_params[name], naive_params[name])
     report: dict = {}
@@ -338,7 +448,7 @@ def check_outputs(i: dict, arm_outputs: dict, judge, block_tokens: int = BLOCK_T
 
 def judge_arms(
     arms: dict, hidden: int, *, device: torch.device, judge, draws: int = JUDGE_DRAWS,
-    tokens: int = JUDGE_TOKENS, seed: int = 0, iters: int = SINKHORN_ITERS,
+    tokens: int = JUDGE_TOKENS, seed: int = 0, iters: int = SINKHORN_ITERS, kind: str = "standard",
 ) -> dict:
     """Hold each arm (``{name: arm}``, each with ``run_once``) to the naive-tier judge over ``draws`` draws of the case
     ``(tokens, hidden)``: per arm the verdict of every output, the failures (empty: the arm meets the contract) and the
@@ -350,13 +460,13 @@ def judge_arms(
         s = judge.draw_seed(seed, j)
         judge.seed_all(s)
         i = make_inputs(tokens, hidden, seed=s, device=device, iters=iters)
-        oracle = reference(i, F64)
-        naive = reference(i, BF16)
+        oracle = reference(i, F64, kind=kind)
+        naive = reference(i, BF16, kind=kind)
         for name, arm in arms.items():
             if name in errors:
                 continue
             try:
-                outs = arm.run_once(i)
+                outs = arm.run_kind(i, kind)
             except Exception as exc:  # noqa: BLE001 - the arm's failure is its verdict
                 errors[name] = f"{type(exc).__name__}: {exc}"[:400]
                 continue
@@ -395,13 +505,13 @@ def _bits(t: torch.Tensor) -> torch.Tensor:
     return t.detach().contiguous().view(width)
 
 
-def determinism_runs(arm: "Arm", i: dict, runs: int) -> dict:
-    """Run ``arm.run_once(i)`` ``runs`` times on the same inputs and compare every output bit for bit with the first
-    run's: ``{"runs", "bitwise", "differs": {output: [runs that differ]}}``."""
-    first = {k: v.detach().clone() for k, v in arm.run_once(i).items()}
+def determinism_runs(arm: "Arm", i: dict, runs: int, kind: str = "standard") -> dict:
+    """Run ``arm.run_kind(i, kind)`` ``runs`` times on the same inputs and compare every output bit for bit with the
+    first run's: ``{"runs", "bitwise", "differs": {output: [runs that differ]}}``."""
+    first = {k: v.detach().clone() for k, v in arm.run_kind(i, kind).items()}
     differs: dict = {}
     for r in range(1, runs):
-        outs = arm.run_once(i)
+        outs = arm.run_kind(i, kind)
         for k, v in outs.items():
             if not torch.equal(_bits(v), _bits(first[k])):
                 differs.setdefault(k, []).append(r)
@@ -444,12 +554,32 @@ class Arm:
                 "determinism_declared": self.determinism, "composite": self.composite, "label": self.label(),
                 "ops": list(self.ops)}
 
-    def prepare_shape(self, i: dict, timer=None) -> dict:
-        """Per-shape setup before the check and the timing (e.g. compile trials); returns what to record."""
+    def prepare_shape(self, i: dict, timer=None, kinds: Sequence[str] = ("standard",)) -> dict:
+        """Per-shape setup before the check and the timing of the function ``kinds`` (:func:`op_kind`) the run times
+        (e.g. compile trials); returns what to record."""
         return {}
 
     def run_once(self, i: dict) -> dict:
         raise NotImplementedError
+
+    def run_handoff(self, i: dict) -> dict:
+        """Every output of one handoff sublayer (:data:`HANDOFF_OUTPUTS`) on ``i``."""
+        raise NotImplementedError
+
+    def run_collapse(self, i: dict) -> dict:
+        """The standalone collapse and its VJP (:data:`COLLAPSE_OUTPUTS`) on ``i``."""
+        raise NotImplementedError
+
+    def run_kind(self, i: dict, kind: str) -> dict:
+        return {"standard": self.run_once, "handoff": self.run_handoff, "collapse": self.run_collapse}[kind](i)
+
+    def supports(self, op: str, device: torch.device, hidden: int) -> tuple[bool, str]:
+        """Whether the arm runs ``op`` at ``hidden`` on ``device`` (beyond :meth:`available`), and why not."""
+        if op not in self.ops:
+            return False, f"the arm has no {op}"
+        if op_kind(op) != "standard" and hidden != HANDOFF_HIDDEN:
+            return False, f"the pre handoff is measured at hidden {HANDOFF_HIDDEN}"
+        return True, ""
 
     def make(self, i: dict, op: str) -> Callable[[], None]:
         raise NotImplementedError
@@ -489,7 +619,87 @@ class AutogradArm(Arm):
         out.update(self.gradients(leaves))
         return out
 
+    def forward_handoff(self, leaves: list, pre_in: torch.Tensor, iters: int):
+        """``(U, Y, pre_next)`` of one handoff sublayer (an autograd graph over ``leaves`` and ``pre_in``)."""
+        raise NotImplementedError
+
+    def forward_collapse(self, X: torch.Tensor, pre_in: torch.Tensor) -> torch.Tensor:
+        raise NotImplementedError
+
+    def run_handoff(self, i: dict) -> dict:
+        leaves = self.leaves(i)
+        pre_in = i["pre_in"].detach().requires_grad_(True)
+        U, Y, pre_next = self.forward_handoff(leaves, pre_in, i["iters"])
+        torch.autograd.backward([U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]])
+        out = {"U": U.detach(), "Y": Y.detach(), "pre_next": pre_next.detach(), "dpre_in": pre_in.grad}
+        out.update(self.gradients(leaves))
+        for t in (*leaves, pre_in):
+            t.grad = None
+        return out
+
+    def run_collapse(self, i: dict) -> dict:
+        X = i["X"].detach().requires_grad_(True)
+        pre_in = i["pre_in"].detach().requires_grad_(True)
+        U = self.forward_collapse(X, pre_in)
+        U.backward(i["dU"])
+        out = {"U": U.detach(), "dX": X.grad, "dpre_in": pre_in.grad}
+        X.grad = pre_in.grad = None
+        return out
+
+    def _make_handoff(self, i: dict, op: str) -> Callable[[], None]:
+        """The handoff (``hfwd``, ``hbwd``, ``hckpt``, ``hcfwd``) and collapse (``cfwd``, ``cbwd``) operations."""
+        leaves = self.leaves(i)
+        pre_in = i["pre_in"].detach().requires_grad_(True)
+        X = leaves[0]
+        dU, dY, dpn, iters = i["dU"], i["dY"], i["dpre_next"], i["iters"]
+        everything = (*leaves, pre_in)
+
+        def clear() -> None:
+            for t in everything:
+                t.grad = None
+
+        if op == "hfwd":
+            return lambda: self.forward_handoff(leaves, pre_in, iters)
+        if op == "hcfwd":
+
+            def call() -> None:
+                _U, Y, pre_next = self.forward_handoff(leaves, pre_in, iters)
+                self.forward_collapse(Y, pre_next)
+
+            return call
+        if op == "hbwd":
+            outs = self.forward_handoff(leaves, pre_in, iters)
+
+            def call() -> None:
+                clear()
+                torch.autograd.backward(list(outs), [dU, dY, dpn], retain_graph=True)
+
+            return call
+        if op == "hckpt":
+
+            def call() -> None:
+                clear()
+                with torch.no_grad():
+                    self.forward_handoff(leaves, pre_in, iters)
+                outs = self.forward_handoff(leaves, pre_in, iters)
+                torch.autograd.backward(list(outs), [dU, dY, dpn])
+
+            return call
+        if op == "cfwd":
+            return lambda: self.forward_collapse(X, pre_in)
+        if op == "cbwd":
+            U = self.forward_collapse(X, pre_in)
+
+            def call() -> None:
+                clear()
+                U.backward(dU, retain_graph=True)
+
+            return call
+        raise ValueError(op)
+
     def make(self, i: dict, op: str) -> Callable[[], None]:
+        if op_kind(op) != "standard":
+            return self._make_handoff(i, op)
         leaves = self.leaves(i)
         dU, dY, iters = i["dU"], i["dY"], i["iters"]
         forward = self.forward
@@ -542,6 +752,15 @@ def _fp32_mhc(X, fn, scale, base, B, iters: int = SINKHORN_ITERS):
     return U.to(BF16), Y.to(BF16)
 
 
+def _fp32_mhc_handoff(X, fn, scale, base, B, pre_in, iters: int = SINKHORN_ITERS):
+    U, Y, pre_next = mhc_handoff_forward(X, pre_in, fn, scale, base, B, dtype=F32, iters=iters)
+    return U.to(BF16), Y.to(BF16), pre_next
+
+
+def _fp32_collapse(X, pre_in):
+    return collapse_forward(X, pre_in, dtype=F32).to(BF16)
+
+
 class EagerFP32(AutogradArm):
     name = "eager_fp32"
     library = "PyTorch eager FP32 (TF32 off)"
@@ -554,6 +773,12 @@ class EagerFP32(AutogradArm):
     def forward(self, leaves, iters):
         return _fp32_mhc(*leaves, iters)
 
+    def forward_handoff(self, leaves, pre_in, iters):
+        return _fp32_mhc_handoff(*leaves, pre_in, iters)
+
+    def forward_collapse(self, X, pre_in):
+        return _fp32_collapse(X, pre_in)
+
 
 def _fresh_function(fn: Callable, tag: str) -> Callable:
     """A copy of ``fn`` with its own code object, so that ``torch.compile`` compiles it anew."""
@@ -562,7 +787,8 @@ def _fresh_function(fn: Callable, tag: str) -> Callable:
 
 
 class Compiled(AutogradArm):
-    """``torch.compile`` of :func:`_fp32_mhc`; ``trials`` fresh compiles per shape, the fastest one timed."""
+    """``torch.compile`` of :func:`_fp32_mhc` (and of the handoff and collapse functions); ``trials`` fresh compiles
+    per shape and function kind, the fastest one timed."""
 
     determinism = "not declared: the generated Triton kernels may split reductions (measured by the benchmarks)"
 
@@ -572,6 +798,8 @@ class Compiled(AutogradArm):
         self.trials = max(1, int(trials))
         self.library = f"torch.compile (mode={mode or 'default'}, fullgraph, static shapes, TF32 off, no buffer donation)"
         self._fn: Optional[Callable] = None
+        self._fn_handoff: Callable | None = None
+        self._fn_collapse: Callable | None = None
         self._count = 0
 
     def available(self, device, hidden):
@@ -589,7 +817,7 @@ class Compiled(AutogradArm):
                 "mode": self.mode or "default", "trials": self.trials, "donated_buffer": False,
                 "cublas": cublas_version()}
 
-    def _compile(self) -> Callable:
+    def _compile(self, fn: Callable = _fp32_mhc) -> Callable:
         # The ``bwd`` operation runs the backward of one recorded forward repeatedly (``retain_graph=True``), which a
         # compiled backward that donates its saved buffers refuses: donation is turned off for the compiled arms.
         import torch._functorch.config as functorch_config
@@ -599,47 +827,90 @@ class Compiled(AutogradArm):
         kwargs = {"fullgraph": True, "dynamic": False}
         if self.mode:
             kwargs["mode"] = self.mode
-        return torch.compile(_fresh_function(_fp32_mhc, f"{self.name}_{self._count}"), **kwargs)
+        return torch.compile(_fresh_function(fn, f"{self.name}_{self._count}"), **kwargs)
 
     def forward(self, leaves, iters):
         if self._fn is None:
             self._fn = self._compile()
         return self._fn(*leaves, iters)
 
-    def prepare_shape(self, i: dict, timer=None) -> dict:
-        """Compile for this shape; with several trials, time one group of training steps (forward + backward) of each
-        fresh compile and keep the fastest."""
-        self._fn = None
+    def forward_handoff(self, leaves, pre_in, iters):
+        if self._fn_handoff is None:
+            self._fn_handoff = self._compile(_fp32_mhc_handoff)
+        return self._fn_handoff(*leaves, pre_in, iters)
+
+    def forward_collapse(self, X, pre_in):
+        if self._fn_collapse is None:
+            self._fn_collapse = self._compile(_fp32_collapse)
+        return self._fn_collapse(X, pre_in)
+
+    def _trial_step(self, kind: str, fn: Callable, i: dict) -> Callable[[], None]:
+        """One training step (forward + backward) of a compiled function of ``kind``, as the timed operations run it."""
+        if kind == "collapse":
+            X = i["X"].detach().requires_grad_(True)
+            pre_in = i["pre_in"].detach().requires_grad_(True)
+
+            def collapse_step() -> None:
+                X.grad = pre_in.grad = None
+                fn(X, pre_in).backward(i["dU"])
+
+            return collapse_step
+        leaves = self.leaves(i)
+        if kind == "handoff":
+            pre_in = i["pre_in"].detach().requires_grad_(True)
+
+            def handoff_step() -> None:
+                for t in (*leaves, pre_in):
+                    t.grad = None
+                U, Y, pre_next = fn(*leaves, pre_in, i["iters"])
+                torch.autograd.backward([U, Y, pre_next], [i["dU"], i["dY"], i["dpre_next"]])
+
+            return handoff_step
+
+        def step() -> None:
+            for t in leaves:
+                t.grad = None
+            U, Y = fn(*leaves, i["iters"])
+            torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
+
+        return step
+
+    def prepare_shape(self, i: dict, timer=None, kinds: Sequence[str] = ("standard",)) -> dict:
+        """Compile for this shape.  With several trials, each function kind the run times (``kinds``: the standard
+        function, the pre handoff, the collapse) is compiled ``trials`` times afresh; one group of training steps
+        (forward + backward) of each compile is timed and the fastest is kept.  The record holds, per kind, every
+        trial's time and the chosen trial (``trial_step_active_us`` / ``chosen_trial`` for the standard function,
+        ``..._handoff`` / ``..._collapse`` for the others).  With one trial each function compiles on its first call."""
+        self._fn = self._fn_handoff = self._fn_collapse = None
         if self.trials == 1 or timer is None:
             self._fn = self._compile()
             return {"compile_trials": 1}
         import torch._inductor.config as inductor_config
 
+        sources = {"standard": _fp32_mhc, "handoff": _fp32_mhc_handoff, "collapse": _fp32_collapse}
+        record: dict = {"compile_trials": self.trials}
         saved = inductor_config.force_disable_caches
         inductor_config.force_disable_caches = True
-        trials = []
         try:
-            for _ in range(self.trials):
-                fn = self._compile()
-                leaves = self.leaves(i)
-
-                def step(fn=fn, leaves=leaves) -> None:
-                    for t in leaves:
-                        t.grad = None
-                    U, Y = fn(*leaves, i["iters"])
-                    torch.autograd.backward([U, Y], [i["dU"], i["dY"]])
-
-                for _ in range(3):
-                    step()
-                torch.cuda.synchronize()
-                samples = timer.times(step, timer.default_calls)
-                trials.append((statistics.median(s["active_us"] for s in samples), fn))
-                del leaves
+            for kind in dict.fromkeys(kinds):
+                trials = []
+                for _ in range(self.trials):
+                    fn = self._compile(sources[kind])
+                    step = self._trial_step(kind, fn, i)
+                    for _ in range(3):
+                        step()
+                    torch.cuda.synchronize()
+                    samples = timer.times(step, timer.default_calls)
+                    trials.append((statistics.median(s["active_us"] for s in samples), fn))
+                    del step
+                best = min(range(len(trials)), key=lambda k: trials[k][0])
+                suffix = "" if kind == "standard" else f"_{kind}"
+                setattr(self, f"_fn{suffix}", trials[best][1])
+                record[f"trial_step_active_us{suffix}"] = [t for t, _ in trials]
+                record[f"chosen_trial{suffix}"] = best
         finally:
             inductor_config.force_disable_caches = saved
-        best = min(range(len(trials)), key=lambda k: trials[k][0])
-        self._fn = trials[best][1]
-        return {"compile_trials": self.trials, "trial_step_active_us": [t for t, _ in trials], "chosen_trial": best}
+        return record
 
 
 class Liger(AutogradArm):
@@ -694,6 +965,28 @@ class Liger(AutogradArm):
         U = LigerMHCPreFunction.apply(X, h_pre)
         Y = LigerMHCPostResFunction.apply(X, B, h_post, h_res.transpose(-1, -2))
         return U, Y
+
+    def forward_handoff(self, leaves, pre_in, iters):
+        """Liger's coefficient function at ``rms_eps`` 1e-20, its pre-mix applied to the incoming ``pre_in``, its post
+        / residual mix; the coefficient function's ``h_pre`` is handed on as ``pre_next``."""
+        from liger_kernel.ops.mhc import (
+            LigerMHCCoeffsFunction,
+            LigerMHCPostResFunction,
+            LigerMHCPreFunction,
+        )
+
+        X, phi, base, s0, s1, s2, B = leaves
+        h_pre, h_post, h_res = LigerMHCCoeffsFunction.apply(
+            X, phi, base, s0, s1, s2, True, iters, HANDOFF_RMS_EPS, HC_EPS, HC_EPS, POST_MULT
+        )
+        U = LigerMHCPreFunction.apply(X, pre_in.to(h_pre.dtype))
+        Y = LigerMHCPostResFunction.apply(X, B, h_post, h_res.transpose(-1, -2))
+        return U, Y, h_pre
+
+    def forward_collapse(self, X, pre_in):
+        from liger_kernel.ops.mhc import LigerMHCPreFunction
+
+        return LigerMHCPreFunction.apply(X, pre_in)
 
 
 class TileKernels(Arm):

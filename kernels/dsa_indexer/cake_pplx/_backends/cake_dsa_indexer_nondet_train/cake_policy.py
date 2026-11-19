@@ -1793,8 +1793,156 @@ def select_fp8_program(
     return plain
 
 
+# ---------------------------------------------------------------------------
+# Candidate blocks (``scan_blocks`` programs)
+# ---------------------------------------------------------------------------
+
+# A ``scan_blocks`` program is a scan program that also writes each query's candidate blocks: ``CB_SLOTS`` int32 slots
+# per row naming blocks of ``CB_BLOCK`` keys (block ``b`` holds the segment-local keys ``8 b .. 8 b + 7``).  Only the
+# unsplit, unpaired BF16 narrow and l6 units carry it, so a call runs the ``scan_blocks`` program of the unit
+# ``CB_KIND_FALLBACK`` maps the decided physical kind to (a wide unit, a CTA pair and a key-range split run their unit
+# geometry's unpaired, unsplit program; a split call runs narrow, the unit of more work units per query), with
+# ``n_split = 1``.  ``top_k`` is at most ``CB_MAX_TOP_K``: then every returned id lies in a returned block.
+CB_ROLE = "scan_blocks"
+CB_SLOTS = 2048
+CB_BLOCK = 8
+CB_MAX_TOP_K = CB_SLOTS - 1
+CB_ENTRY_BYTES = 8
+CB_KIND_FALLBACK = {
+    "narrow": "narrow",
+    "l6": "l6",
+    "wide": "l6",
+    "pair_narrow": "narrow",
+    "pair_l6": "l6",
+    "pair_wide": "l6",
+    "split_narrow": "narrow",
+    "split_l6": "narrow",
+    "split_wide": "narrow",
+}
+_CB_KEY = re.compile(r"scan_blocks:(narrow|l6):u([0-9]+):s0:f([01])")
+
+
+def cb_block_cap(num_keys: int, max_seqlen_k: Optional[int] = None) -> int:
+    """Block entries per query slot of a ``scan_blocks`` launch: ``ceil(W / 8) - 1`` older blocks of the longest key
+    segment ``W`` (``max_seqlen_k`` when given, else ``Tkv``) when ``ceil(W / 8) > CB_SLOTS``, else 0 (every row keeps
+    all its blocks and stores none).  ``max_seqlen_k`` must bound every key segment of the call: a row with more older
+    blocks than this traps on the device."""
+    w = int(num_keys if max_seqlen_k is None else max_seqlen_k)
+    blocks = (w + CB_BLOCK - 1) // CB_BLOCK
+    return blocks - 1 if blocks > CB_SLOTS else 0
+
+
+@dataclass(frozen=True)
+class CandidateBlocksChoice:
+    """The plan of one call that also returns its candidate blocks: ``choice`` runs the ``scan_blocks`` program
+    (``choice.scan_key``) with its workspace (``choice.workspace_bytes``: the candidate buffers and the ticket tail);
+    ``blk_cap`` block entries per query slot follow it (``blk_bytes`` = ``grid_ctas x block_q x blk_cap x 8``), so
+    the call's workspace is ``workspace_bytes`` = ``choice.workspace_bytes + blk_bytes``.  The ``[T, CB_SLOTS]``
+    int32 output is the caller's and not part of it."""
+
+    choice: ProgramChoice
+    blk_cap: int
+    blk_bytes: int
+    workspace_bytes: int
+
+    @property
+    def keys(self) -> tuple:
+        return self.choice.keys
+
+    @property
+    def blocks_at(self) -> int:
+        """Byte offset of the block entries in the workspace (behind the ticket tail)."""
+        return int(self.choice.workspace_bytes)
+
+    def as_dict(self) -> dict:
+        return {
+            **self.choice.as_dict(),
+            "blk_cap": self.blk_cap,
+            "blk_bytes": self.blk_bytes,
+            "cb_workspace_bytes": self.workspace_bytes,
+        }
+
+
+def cb_scan_programs(scan_keys: Collection[str]) -> dict:
+    """The ``scan_blocks`` programs an architecture registers: ``(kind, sample_fit) -> {tile_unroll: key}``."""
+    programs: dict = {}
+    for key in scan_keys:
+        match = _CB_KEY.fullmatch(key)
+        if match is not None:
+            programs.setdefault((match[1], match[3] == "1"), {})[int(match[2])] = key
+    return programs
+
+
+def select_cb_program(
+    policy: DispatchPolicy, *, scan_keys: Collection[str], **call: Any
+) -> CandidateBlocksChoice:
+    """The host dispatch of one call that also returns candidate blocks: the decision procedure of ``select_program``
+    (``call``: its keywords), run by the ``scan_blocks`` program of the decided kind's ``CB_KIND_FALLBACK`` unit,
+    unsplit and unpaired on the requested grid, without the snake and longest-first orders, with that unit's sampled
+    first threshold and check period where the kind changed (``fallback_knobs``), the sample-fit form of its unit and
+    the decided tile unroll where its program is registered, else the smallest registered one.  The block entries
+    follow ``cb_block_cap(num_keys, max_seqlen_k)``.  Raises ``NotImplementedError`` when ``scan_keys`` registers no
+    ``scan_blocks`` program of the unit."""
+    choice = select_program(policy, scan_keys=scan_keys, **call)
+    physical = CB_KIND_FALLBACK[choice.physical_kind]
+    if physical != choice.physical_kind:
+        choice = fallback_knobs(policy, choice, physical, call)
+    T, Tkv, S, r = (
+        choice.num_queries,
+        choice.num_keys,
+        choice.num_segments,
+        choice.ratio,
+    )
+    block_q = policy.block_q_narrow if physical == "narrow" else policy.block_q_l6
+    fit = policy.sample_fit_for(T, Tkv, S, r, choice.cand_cap, physical)
+    programs = cb_scan_programs(scan_keys)
+    unrolls = programs.get((physical, fit))
+    if not unrolls:
+        raise NotImplementedError(
+            f"the candidate-block dispatch selected the {physical!r} unit (sample_fit={int(fit)}), which no registered "
+            f"scan_blocks program serves (registered: {sorted(key for keys in programs.values() for key in keys.values())})"
+        )
+    unroll = choice.tile_unroll if choice.tile_unroll in unrolls else min(unrolls)
+    grid_ctas = int(choice.grid)
+    scan_entries = grid_ctas * block_q * int(choice.cand_cap)
+    choice = replace(
+        choice,
+        grid_ctas=grid_ctas,
+        block_q=block_q,
+        unit=physical,
+        n_split=1,
+        split=False,
+        pair=False,
+        kind=physical,
+        physical_kind=physical,
+        snake=False,
+        tile_unroll=unroll,
+        sample_fit=fit,
+        lsf=False,
+        scan_key=unrolls[unroll],
+        merge_key=None,
+        scan_entries=scan_entries,
+        staging_entries=0,
+        workspace_bytes=scan_entries * policy.candidate_entry_bytes + TICKET_TAIL_BYTES,
+    )
+    blk_cap = cb_block_cap(Tkv, call.get("max_seqlen_k"))
+    blk_bytes = grid_ctas * block_q * blk_cap * CB_ENTRY_BYTES
+    return CandidateBlocksChoice(
+        choice=choice,
+        blk_cap=blk_cap,
+        blk_bytes=blk_bytes,
+        workspace_bytes=int(choice.workspace_bytes) + blk_bytes,
+    )
+
+
 __all__ = [
     "BF16",
+    "CB_BLOCK",
+    "CB_ENTRY_BYTES",
+    "CB_KIND_FALLBACK",
+    "CB_MAX_TOP_K",
+    "CB_ROLE",
+    "CB_SLOTS",
     "FORMS",
     "FP8",
     "FP8_KIND_FALLBACK",
@@ -1803,9 +1951,12 @@ __all__ = [
     "POLICY_FIELDS",
     "SAMPLE_SHIFT_PERMILLE_BOUNDS",
     "UNITS",
+    "CandidateBlocksChoice",
     "DispatchPolicy",
     "ProgramChoice",
     "ScanKeyFields",
+    "cb_block_cap",
+    "cb_scan_programs",
     "fallback_knobs",
     "fp8_policy_record",
     "fp8_program_choice",
@@ -1815,6 +1966,7 @@ __all__ = [
     "scan_key",
     "scan_key_fields",
     "scan_key_form",
+    "select_cb_program",
     "select_fp8_program",
     "select_program",
     "stage_slug",

@@ -23,27 +23,22 @@ both weight dtypes -- the call on the first ``T`` rows of one input, for ``T`` a
 both ends and the middle of the window, gives the same ``dx`` bits on those rows
 as the call on the window's largest ``T`` (backward; the single kernel and the
 deterministic pair alike: ``dx`` has no cross-row reduction), and the same ``y``
-/ ``rstd`` bits (forward).  Where a window claims the deterministic package's
-``dx`` -- a deterministic-pair window running the program the deterministic
-package selects for that ``T``, or a single kernel listed in the backend suite's
-``DX_BITWISE_WITH`` -- and that package serves the call, ``dx`` is bitwise its
-``dx`` at every ``T`` measured in the window.
+/ ``rstd`` bits (forward).
 
 At every window edge ``E`` the calls of ``E`` and ``E + 1`` rows are compared on
 the first ``E`` rows and the edge is classified: ``same`` (bitwise), ``ulp``
 (backward: every ``dx`` difference within one BF16 ulp; forward: ``y`` within
 one BF16 ulp and ``rstd`` within two FP32 ulps, the class the package notes
 document) or larger (backward ``dx``; forward ``y<k>/rstd<m>``, the largest
-differences in ulps).  The classification of ``cake_windows.EDGES`` must hold
-where it is measured (``same`` stays bitwise, ``ulp`` within its ulps); every
-edge it lists as ``unmeasured`` is printed with its measured class
-(``EDGES_MEASURED``) for the exporter to fill.
+differences in ulps).  An edge ``cake_windows.EDGES`` lists as ``same`` must
+stay bitwise; the other classes are reported, with no tolerance (accuracy is
+judged against the naive BF16 tier by the backend suite).  Every edge it lists
+as ``unmeasured`` is printed with its measured class (``EDGES_MEASURED``) for
+the exporter to fill.
 """
 
 from __future__ import annotations
 
-import ast
-from pathlib import Path
 from typing import Optional
 
 import pytest
@@ -64,37 +59,6 @@ W_TOKENS = ("bf16", "f32")
 # The largest token count measured in an unbounded window.
 MAX_TOKENS = 65536
 SEED = 7046
-
-
-def _det_package():
-    """The deterministic package, or ``None`` (a vendored copy without it)."""
-    try:
-        return cake_package("cake_rmsnorm_det_train")
-    except Exception:  # noqa: BLE001 - the det sibling is optional here
-        return None
-
-
-det = _det_package()
-
-
-def _dx_bitwise_with() -> dict[str, str]:
-    """The backend suite's ``DX_BITWISE_WITH`` table (single-kernel library ->
-    the det module whose ``dx`` bits it claims), read from its source."""
-    source = Path(__file__).with_name("test_cake_rmsnorm_nondet_train.py")
-    if not source.exists():
-        return {}
-    for node in ast.parse(source.read_text()).body:
-        if (
-            isinstance(node, ast.Assign)
-            and len(node.targets) == 1
-            and isinstance(node.targets[0], ast.Name)
-            and node.targets[0].id == "DX_BITWISE_WITH"
-        ):
-            return dict(ast.literal_eval(node.value))
-    return {}
-
-
-DX_BITWISE_WITH = _dx_bitwise_with()
 
 
 def _device() -> torch.device:
@@ -128,9 +92,6 @@ def warmup_jit():
     if _supported():
         for spec in loader.specs_for_arch(_arch()):
             spec.build_and_load()
-        if det is not None:
-            for spec in det.cake_jit.specs_for_arch(_arch()):
-                spec.build_and_load()
     yield
 
 
@@ -226,11 +187,10 @@ def _edges(hidden: int, residual: bool, w: str, kind: str) -> dict[int, str]:
     return dict(windows_table.EDGES.get(_arch(), {}).get(key, ()))
 
 
-# The ``ulp`` edge class of a forward edge (the package notes match it):
-# ``rstd`` moves by at most two FP32 ulps (a different reduction order
-# on each side; measured on up to ~30 % of the common rows) and ``y`` by
-# at most one BF16 ulp.  Each edge reports its largest moves and the fraction of
-# the common rows that moved (``EDGE_FWD ... rows_moved=``).
+# The ``ulp`` label of a forward edge in the report (the package notes use it):
+# ``rstd`` moved by at most two FP32 ulps and ``y`` by at most one BF16 ulp.
+# Each edge reports its largest moves and the fraction of the common rows that
+# moved (``EDGE_FWD ... rows_moved=``).
 FWD_EDGE_Y_ULPS = 1
 FWD_EDGE_RSTD_ULPS = 2
 
@@ -253,13 +213,10 @@ def _forward_class(y_diff: int, y_ulps: int, r_diff: int, r_ulps: int) -> str:
 
 
 def _consistent(listed: Optional[str], measured: str) -> bool:
-    """A listed class holds when the measurement is within it: ``same`` stays
-    bitwise, ``ulp`` stays within one ulp; ``dx`` and unmeasured edges admit any."""
-    if listed in (None, "unmeasured", "dx"):
-        return True
+    """A listed ``same`` edge stays bitwise; every other class is reported only."""
     if listed == "same":
         return measured == "same"
-    return measured in ("same", "ulp")
+    return True
 
 
 # --------------------------------------------------------------------------- backward
@@ -291,63 +248,20 @@ class _Backward:
             self.cache[rows] = dx
         return self.cache[rows]
 
-    def det_dx(self, rows: int) -> torch.Tensor:
-        dx, _dw = det.cake_rmsnorm_det_train_backward(
-            self.g[:rows],
-            self.normalized[:rows],
-            self.weight,
-            self.rstd[:rows],
-            g_residual=None if self.g_h is None else self.g_h[:rows],
-        )
-        return dx
-
-
-def _program_id(name: str) -> str:
-    """The program part of a module name (the hex digits after the package
-    prefix, without a ``__<above>_<at_most>`` window suffix)."""
-    return name.split("__", 1)[0].rsplit("_", 1)[1]
-
-
-def _claims_det_dx(records: list[str], hidden: int, residual: bool, w: str, rows: int):
-    """``(claimed, det main module)``: the window runs the det program the det
-    package selects for ``rows`` (a det pair of the same program id), or a single
-    kernel whose library ``DX_BITWISE_WITH`` maps to that det module; ``(False,
-    None)`` when the det package does not serve the call (no det or FP32 weight)."""
-    if det is None or w != "bf16":
-        return False, None
-    arch = det.cake_jit.arch_for_capability(_capability())
-    if det.cake_jit.route_key(hidden, "bwd", residual) not in det.cake_jit.ROUTES.get(
-        arch, {}
-    ):
-        return False, None
-    det_records = list(
-        det.cake_jit.selected_modules(arch, hidden, "bwd", residual, rows=rows)
-    )
-    det_main = next(
-        n for n in det_records if det.cake_jit.MODULES[n]["role"] != "bwd_reduce"
-    )
-    main = next(n for n in records if loader.MODULES[n]["role"] != "bwd_reduce")
-    claim = DX_BITWISE_WITH.get(loader.MODULES[main]["library"])
-    if claim is not None:
-        return _program_id(claim) == _program_id(det_main), det_main
-    return _program_id(main) == _program_id(det_main), det_main
-
 
 @pytest.mark.parametrize(("hidden", "residual", "w"), list(_route_params()))
 def test_backward_dx_is_token_count_invariant_within_each_window(
     hidden: int, residual: bool, w: str
 ) -> None:
     """Per backward window: ``dx`` of the first ``T`` rows is the same bits for
-    ``T`` at both ends and the middle (and the window's records ran each time);
-    a window that claims the det ``dx`` matches it bitwise at every measured
-    ``T`` where the det package serves the call."""
+    ``T`` at both ends and the middle (and the window's records ran each time)."""
     _skip_unless_route(hidden, residual, w, "bwd")
     route_windows = ref.windows(loader, _arch(), hidden, "bwd", residual, w)
     largest = max(
         _window_tokens(above, at_most)[2] for above, at_most, _ in route_windows
     )
     calls = _Backward(hidden, residual, w, largest)
-    lines, claims = [], 0
+    lines = []
     for above, at_most, library in route_windows:
         first, middle, last = _window_tokens(above, at_most)
         expected = ref.window_records(loader, _arch(), hidden, "bwd", residual, w, last)
@@ -365,33 +279,13 @@ def test_backward_dx_is_token_count_invariant_within_each_window(
                 f"T={rows} differs from T={last} on {differing} elements of the common rows "
                 f"(up to {ulps} BF16 ulps)"
             )
-        # The claim is judged per T: the det package has its own windows, so the
-        # det program it selects may change inside this package's window.
-        notes, any_claim = [], False
-        for rows in sorted({first, middle, last}):
-            claimed, det_main = _claims_det_dx(expected, hidden, residual, w, rows)
-            if det_main is None:
-                continue
-            differing, _ulps = ref.bf16_ulp_differences(
-                calls.dx(rows), calls.det_dx(rows)
-            )
-            if claimed:
-                assert differing == 0, (
-                    f"h={hidden} res={residual} window ({above}, {at_most}] claims the det dx "
-                    f"({det_main}) but T={rows} differs on {differing} elements"
-                )
-            any_claim = any_claim or claimed
-            notes.append(f"{rows}:{'claimed' if claimed else 'unclaimed'}:{differing}")
-        claims += int(any_claim)
-        det_note = f"det={','.join(notes)}" if notes else "det=n/a"
         lines.append(
             f"XT_DX {_arch()} {loader.route_key(hidden, 'bwd', residual, w)} ({above}, {at_most}] "
-            f"{form} {library.rsplit('_', 1)[1][:8]} T={first}/{middle}/{last} bitwise=True {det_note}"
+            f"{form} {library.rsplit('_', 1)[1][:8]} T={first}/{middle}/{last} bitwise=True"
         )
     print("\n" + "\n".join(lines))
     print(
-        f"XT_DX_SUMMARY {_arch()} h={hidden} res={residual} w={w} windows={len(route_windows)} "
-        f"det_claimed={claims}"
+        f"XT_DX_SUMMARY {_arch()} h={hidden} res={residual} w={w} windows={len(route_windows)}"
     )
 
 
@@ -400,9 +294,9 @@ def test_backward_window_edges_are_classified(
     hidden: int, residual: bool, w: str
 ) -> None:
     """Every backward edge ``E``: ``dx`` of ``E`` and ``E + 1`` rows on the first
-    ``E`` rows, classified ``same`` / ``ulp`` / ``dx``; the class of
-    ``cake_windows.EDGES`` holds where it is measured; the measured class of an
-    unmeasured edge is printed (``EDGES_MEASURED``)."""
+    ``E`` rows, classified ``same`` / ``ulp`` / ``dx`` and reported; an edge
+    ``cake_windows.EDGES`` lists as ``same`` stays bitwise; the measured class of
+    an unmeasured edge is printed (``EDGES_MEASURED``)."""
     _skip_unless_route(hidden, residual, w, "bwd")
     route_windows = ref.windows(loader, _arch(), hidden, "bwd", residual, w)
     edges = [at_most for _above, at_most, _lib in route_windows if at_most is not None]
@@ -431,7 +325,7 @@ def test_backward_window_edges_are_classified(
             lines.append(f"EDGES_MEASURED {_arch()} {key} ({edge}, {measured!r})")
     print("\n" + "\n".join(lines))
     assert not contradictions, (
-        f"{key}: edges whose measured dx difference exceeds their EDGES class "
+        f"{key}: edges listed 'same' in EDGES whose dx differs "
         f"(edge, listed, measured, differing, max ulps): {contradictions}"
     )
 
@@ -485,10 +379,9 @@ def test_forward_is_token_count_invariant_within_windows_and_edges_are_classifie
 ) -> None:
     """Per forward window: ``y`` / ``rstd`` (and ``h_new``) of the first ``T``
     rows are the same bits at both ends and the middle; per edge: the class
-    (``same`` / ``ulp`` / beyond: ``y<k>/rstd<m>``) holds against
-    ``cake_windows.EDGES`` (``ulp``: ``FWD_EDGE_Y_ULPS`` BF16 ulps of ``y``,
-    ``FWD_EDGE_RSTD_ULPS`` FP32 ulps of ``rstd``); each
-    edge reports its largest moves and the fraction of rows that moved."""
+    (``same`` / ``ulp`` / beyond: ``y<k>/rstd<m>``) is reported, and an edge
+    ``cake_windows.EDGES`` lists as ``same`` stays bitwise; each edge reports
+    its largest moves and the fraction of rows that moved."""
     _skip_unless_route(hidden, residual, w, "fwd")
     route_windows = ref.windows(loader, _arch(), hidden, "fwd", residual, w)
     largest = max(
@@ -538,6 +431,6 @@ def test_forward_is_token_count_invariant_within_windows_and_edges_are_classifie
             lines.append(f"EDGES_MEASURED {_arch()} {key} ({at_most}, {measured!r})")
     print("\n" + "\n".join(lines))
     assert not contradictions, (
-        f"{key}: edges whose measured difference exceeds their EDGES class "
+        f"{key}: edges listed 'same' in EDGES whose outputs differ "
         f"(edge, listed, measured, y differing, y ulps, rstd differing, rstd ulps): {contradictions}"
     )
