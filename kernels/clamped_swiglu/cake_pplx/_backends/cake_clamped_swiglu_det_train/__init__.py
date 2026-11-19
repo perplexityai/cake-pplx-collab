@@ -48,7 +48,13 @@ JIT variables):
   exact dtype and shape on one device, the BF16 ones 16-byte aligned,
   ``0 < R < 2**31 - 256``) is accepted in one pass over each tensor's
   metadata; any other call takes the full checks, which raise every error and
-  mark the inputs to copy.  Both give the same launch.
+  mark the inputs to copy.  Both give the same launch.  A ``limit`` that is a
+  Python float or int equal to the last accepted one reuses its FP32 rounding
+  (one cached pair); any other ``limit`` takes the full limit checks.  The
+  autograd function's backward reuses the forward's FP32 ``L`` and checks the
+  saved operands again (a saved-tensors hook or a ``.data`` assignment can
+  change them after the forward) and the upstream gradient; it has no output
+  buffer to check.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, 2304]`` tensor, or the
   caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout
   of the inputs: two new contiguous ``[R, 2304]`` tensors, or one new
@@ -59,14 +65,16 @@ JIT variables):
   multiple of 8 elements and at least the row width, 16-byte aligned; FP32
   ``[R]`` contiguous for the weight gradient): it is refused with a
   ``ValueError`` otherwise, never copied.  An output must not overlap any
-  input or another output (not checked).
+  input or another output (not checked).  A new output is ``torch.empty`` on
+  the operands' device (one ``torch.device`` per device index for the
+  process): a contiguous plain tensor.
 - Launches.  One kernel per call.  Each stage has two programs
   (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
-  when ``R`` is at least its record's ``min_rows_per_sm`` of the device's
-  architecture times the device's SM count (``cake_jit.route``; the
-  architecture is read once per device and the SM count once per stage and
-  device, and an architecture without a large-R program runs the small-R one
-  at every ``R``).  Both programs of a stage give the same bits for every
+  when ``R`` lies in one of its record's windows of rows per SM on the
+  device's architecture, ``lo * SMs <= R <= hi * SMs`` for a window
+  ``[lo, hi]`` (``cake_jit.route``; the architecture is read once per device
+  and the SM count once per stage and device, and an architecture without a
+  large-R program runs the small-R one at every ``R``).  Both programs of a stage give the same bits for every
   input, so the route changes no output bit.  CTAs of ``threads / lanes``
   rows (32 lanes a row; 128 threads and 4 rows, but 256 threads and 8 rows in
   the large-R forward on SM100 and SM103), one CTA per block of rows on the
@@ -76,9 +84,16 @@ JIT variables):
   operands' device (a tvm-ffi call whose arguments include PyTorch CUDA
   tensors runs on that stream, a CUDA graph's capture stream during capture;
   the binding makes the device current): nothing cooperative, no PDL, no
-  dynamic shared memory.  Nothing here reads device memory, reads an
-  environment variable, synchronizes or keeps state between calls; the checks
-  read dtypes, shapes, strides, devices and data pointers only.
+  dynamic shared memory.  The entry points launch through one launcher per
+  stage and device (``_launcher``), made at the stage's first launch on the
+  device: the route above, the kernel parameters by position in the order
+  every program of the stage takes them (checked once, when the launcher is
+  made), and each program's FFI entry, bound at its first launch.  Nothing
+  here reads device memory, reads an environment variable or synchronizes; the
+  checks read dtypes, shapes, strides, devices and data pointers only.  The
+  host keeps no state between calls but caches of facts a call cannot change
+  (a device's architecture, SM count and launchers, the libraries, the FP32
+  rounding of the last accepted ``limit``, the ignored weight below).
   Under ``torch.use_deterministic_algorithms(True)`` with
   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
   PyTorch fills every tensor it allocates here with NaN before the kernel
@@ -270,26 +285,35 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[int, _Plan, _Plan]:
-    """``(cut_rows, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
-    device's architecture and SM count (``cake_jit.route``): a launch of fewer than ``cut_rows`` rows runs the plan
-    ``small``, any other the plan ``large``.  No library is loaded here: a program's library loads at its first
-    launch."""
+def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Plan]:
+    """``(limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per stage and device
+    from the device's architecture and SM count (``cake_jit.route``).  A launch of ``rows < limit`` rows runs the plan
+    ``large`` when ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it
+    is 0; a launch of more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.
+    ``limit`` is one above the last edge of ``cake_jit.route`` (0 without a window).  The launch looks up one byte
+    instead of searching the edges: on Grace, a search per launch measured 1-3 % more host time per call.  No library
+    is loaded here: a program's library loads at its first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
-    cut_rows, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
-    return cut_rows, (small, *_plan(small)), (large, *_plan(large))
+    edges, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
+    limit = edges[-1] + 1 if edges else 0
+    table = bytearray(limit)
+    for below, last in zip(edges[0::2], edges[1::2]):
+        table[below + 1 : last + 1] = bytes([1]) * (last - below)
+    small, large = (small, *_plan(small)), (large, *_plan(large))
+    return limit, bytes(table), small, large, large if len(edges) % 2 else small
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the small-R program below the cut, the
-    large-R one from it) with its kernel parameters named in ``values``, on the current torch stream of device
-    ``device_index``.
+    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
+    small-R one at every other row count) with its kernel parameters named in ``values``, on the current torch stream
+    of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
-    ``cake_jit.grid(name, rows)`` of the program ``name`` that runs."""
-    cut_rows, small, large = _route(stage, device_index)
-    name, arguments, per_cta = small if rows < cut_rows else large
+    ``cake_jit.grid(name, rows)`` of the program ``name`` that runs.  The entry points launch through
+    :func:`_launcher`, which runs the same program with the same arguments and grid, passed by position."""
+    limit, table, small, large, tail = _route(stage, device_index)
+    name, arguments, per_cta = (large if table[rows] else small) if rows < limit else tail
     try:
         args = arguments(values)
     except KeyError:
@@ -300,6 +324,65 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     if rows < 1:
         cake_jit.grid(name, rows)  # raises: a launch needs at least one row
     _entry(name, device_arch(device_index))(*args, -(-rows // per_cta), 1, 1)
+
+
+# The kernel parameters the entry points pass to the launcher of each stage, in this order (:func:`_launcher`).
+_ARGUMENTS: dict[str, tuple[str, ...]] = {
+    "fwd": ("gate", "up", "w", "h", "rows", "gate_stride", "up_stride", "h_stride", "limit", "weighted"),
+    "bwd": (
+        "gate",
+        "up",
+        "dh",
+        "w",
+        "d_gate",
+        "d_up",
+        "d_weight",
+        "rows",
+        "gate_stride",
+        "up_stride",
+        "dh_stride",
+        "d_gate_stride",
+        "d_up_stride",
+        "limit",
+        "weighted",
+    ),
+}
+
+
+@functools.cache
+def _launcher(stage: str, device_index: int) -> Callable[..., None]:
+    """``launch(rows, *arguments)`` of ``stage`` on device ``device_index``, made once per stage and device: for
+    ``rows >= 1`` rows it runs the program :func:`run_module` runs (:func:`_route`) with ``arguments``, the kernel
+    parameters in the order of ``_ARGUMENTS[stage]``, then the grid ``cake_jit.grid(name, rows)``.  Both programs of
+    the stage are checked to take their parameters in that order when the launcher is made, so a launch builds no dict
+    of the arguments, and it looks up only its program's FFI entry, bound by the launcher at the program's first
+    launch (no library loads when the launcher is made).  The entry points check the device's architecture at every
+    call before they allocate; a launcher is made only for an exported architecture."""
+    limit, table, small, large, tail = _route(stage, device_index)
+    for name in dict.fromkeys((small[0], large[0])):
+        if parameters(name) != _ARGUMENTS[stage]:
+            raise RuntimeError(
+                f"record {name}: kernel parameters {parameters(name)} are not in the order the host passes them, "
+                f"{_ARGUMENTS[stage]}"
+            )
+    arch = device_arch(device_index)
+    entries: dict[str, Any] = {}
+
+    def launch(rows: int, *arguments: Any) -> None:
+        name, _, per_cta = (large if table[rows] else small) if rows < limit else tail
+        entry = entries.get(name)
+        if entry is None:
+            entry = entries[name] = _entry(name, arch)
+        entry(*arguments, -(-rows // per_cta), 1, 1)
+
+    return launch
+
+
+@functools.cache
+def _device(device_index: int) -> torch.device:
+    """CUDA device ``device_index``, one object per device for the process: the device of the new outputs of a common
+    call.  ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``."""
+    return torch.device("cuda", device_index)
 
 
 @functools.cache
@@ -316,9 +399,21 @@ def _ignored_weight(device_index: int) -> torch.Tensor:
 # check returns what it found; the entry points copy and allocate only after every check passed.
 
 
+# The last limit :func:`_limit` accepted, as a Python float, and its FP32 rounding (NaN: none yet).  One pair, replaced
+# whole, so a thread reads a value and its own rounding.
+_last_limit: tuple[float, float] = (math.nan, math.nan)
+
+
 def _limit(limit: Any) -> float:
     """``limit`` rounded to FP32 (the kernels' ``L``): a positive finite Python number.  A tensor is refused, as
-    reading it would synchronize the host."""
+    reading it would synchronize the host.  A ``float`` or ``int`` (exact types: no bool, no subclass) equal to the
+    last accepted limit returns its rounding: an equal float or int has the same Python float value (Python compares an
+    int and a float exactly), so the same rounding.  Any other value takes the checks below."""
+    global _last_limit
+    if type(limit) is float or type(limit) is int:
+        value, rounded = _last_limit
+        if limit == value:
+            return rounded
     if isinstance(limit, (bool, torch.Tensor)) or not isinstance(limit, numbers.Real):
         raise TypeError(
             f"limit must be a Python float (a run-time FP32 scalar of the launch), got {type(limit).__name__}"
@@ -338,6 +433,7 @@ def _limit(limit: Any) -> float:
         raise ValueError(f"limit {value!r} is past the FP32 range") from None
     if rounded <= 0.0:
         raise ValueError(f"limit {value!r} rounds to 0 in FP32")
+    _last_limit = (value, rounded)
     return rounded
 
 
@@ -379,12 +475,6 @@ def _readable(tensor: torch.Tensor) -> bool:
     )
 
 
-def _row_stride(tensor: torch.Tensor, rows: int) -> int:
-    """The row stride the kernels get for one of the call's ``rows``-row tensors: the tensor's, or 0 for a single row
-    (never dereferenced)."""
-    return tensor.stride(0) if rows > 1 else 0
-
-
 def _input(
     tensor: Any, name: str, *, rows: Optional[int], cols: int, device: Optional[torch.device]
 ) -> tuple[torch.Tensor, bool]:
@@ -408,14 +498,16 @@ def _output(
     *,
     rows: int,
     cols: int,
-    device: torch.device,
+    first: torch.Tensor,
     index: int,
 ) -> Optional[torch.Tensor]:
     """A caller's BF16 ``[rows, cols]`` output, checked: the kernels write it in place (rows that do not overlap), it
-    is never copied.  None (a new contiguous output, allocated once every argument is checked) stays None."""
+    is never copied; it must live on the device of ``first``, the call's checked first operand (on CUDA device
+    ``index``).  None (a new contiguous output, allocated once every argument is checked) stays None; the entry
+    points skip the call for None."""
     if tensor is None or (_FAST_CHECKS and _plain(tensor, torch.bfloat16, (rows, cols), index)):
         return tensor
-    tensor = _check_tensor(tensor, name, torch.bfloat16, device)
+    tensor = _check_tensor(tensor, name, torch.bfloat16, first.device)
     if tensor.dim() != 2 or tuple(tensor.shape) != (rows, cols):
         raise ValueError(f"{name} must have shape [{rows}, {cols}], got {tuple(tensor.shape)}")
     if rows and not (_readable(tensor) and (rows <= 1 or tensor.stride(0) >= cols)):
@@ -438,13 +530,13 @@ def _weight(weight: Any, *, rows: int, device: torch.device) -> tuple[Optional[t
 
 
 def _grad_weight(
-    tensor: Optional[torch.Tensor], *, rows: int, device: torch.device, index: int
+    tensor: Optional[torch.Tensor], *, rows: int, first: torch.Tensor, index: int
 ) -> Optional[torch.Tensor]:
-    """A caller's FP32 ``[rows]`` weight gradient, checked (contiguous; never copied).  None (a new one, allocated once
-    every argument is checked) stays None."""
+    """A caller's FP32 ``[rows]`` weight gradient, checked (contiguous; never copied; on the device of ``first``, as
+    for :func:`_output`).  None (a new one, allocated once every argument is checked) stays None."""
     if tensor is None or (_FAST_CHECKS and _plain(tensor, torch.float32, (rows,), index)):
         return tensor
-    tensor = _check_tensor(tensor, "grad_weight", torch.float32, device)
+    tensor = _check_tensor(tensor, "grad_weight", torch.float32, first.device)
     if tuple(tensor.shape) != (rows,) or not tensor.is_contiguous():
         raise ValueError(
             f"grad_weight must be a contiguous FP32 [{rows}] tensor, got shape {tuple(tensor.shape)} and strides "
@@ -455,12 +547,13 @@ def _grad_weight(
 
 def _fast_operands(
     first: Any, up: Any, weight: Any
-) -> Optional[tuple[torch.device, int, int, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]]:
-    """``(device, index, R, first, up, weight)`` of the common call, found in one pass over each operand's metadata:
-    plain contiguous tensors on one CUDA device (the merged BF16 ``[R, 4608]`` input when ``up`` is None, else two
+) -> Optional[tuple[int, int, torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]]:
+    """``(index, R, first, up, weight)`` of the common call, found in one pass over each operand's metadata: plain
+    contiguous tensors on CUDA device ``index`` (the merged BF16 ``[R, 4608]`` input when ``up`` is None, else two
     BF16 ``[R, 2304]`` tensors, both 16-byte aligned; ``weight`` FP32 ``[R]`` or None), ``0 < R < MAX_ROWS``.
     :func:`_operands` accepts such operands with no copy and gives the same tensors.  Any other call (an error, an
-    input to copy, ``R = 0``, a tensor subclass) gives None, and :func:`_operands` runs."""
+    input to copy, ``R = 0``, a tensor subclass) gives None, and :func:`_operands` runs.  No ``torch.device`` is
+    read from a tensor: the caller takes the device's own (:func:`_device`)."""
     if type(first) is not torch.Tensor or not first.is_cuda or first.dtype is not torch.bfloat16:
         return None
     shape = first.shape
@@ -474,7 +567,7 @@ def _fast_operands(
         return None
     if weight is not None and not _plain(weight, torch.float32, (rows,), index):
         return None
-    return first.device, index, rows, first, up, weight
+    return index, rows, first, up, weight
 
 
 def _operands(
@@ -538,11 +631,12 @@ def _forward(
         device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
         index = int(device.index)
     else:
-        device, index, rows, first, second, w = fast
-        copies = None
+        index, rows, first, second, w = fast
+        device, copies = _device(index), None
     L = _limit(limit)
-    h = _output(out, "out", rows=rows, cols=WIDTH, device=device, index=index)
-    device_arch(index)
+    h = out if out is None else _output(out, "out", rows=rows, cols=WIDTH, first=first, index=index)
+    if _arch_of_index(index) is None:
+        device_arch(index)  # raises: not an exported architecture
     if copies:
         first, second, w = _read(first, second, w, copies)
     if h is None:
@@ -550,24 +644,26 @@ def _forward(
     if rows == 0:
         return h, L
     # A merged input is the gate itself (its first 2304 columns, at its own row stride) and a view of its second half.
-    gate_stride = _row_stride(first, rows)
+    # A single row's strides are 0 (never dereferenced).
+    many = rows > 1
+    gate_stride = first.stride(0) if many else 0
     if second is None:
         up_view, up_stride = first.narrow(1, WIDTH, WIDTH), gate_stride
     else:
-        up_view, up_stride = second, _row_stride(second, rows)
-    values = {
-        "gate": first,
-        "up": up_view,
-        "w": _ignored_weight(index) if w is None else w,
-        "h": h,
-        "rows": rows,
-        "gate_stride": gate_stride,
-        "up_stride": up_stride,
-        "h_stride": _row_stride(h, rows),
-        "limit": L,
-        "weighted": 0 if w is None else 1,
-    }
-    run_module("fwd", values, rows=rows, device_index=index)
+        up_view, up_stride = second, second.stride(0) if many else 0
+    _launcher("fwd", index)(
+        rows,
+        first,
+        up_view,
+        _ignored_weight(index) if w is None else w,
+        h,
+        rows,
+        gate_stride,
+        up_stride,
+        h.stride(0) if many else 0,
+        L,
+        0 if w is None else 1,
+    )
     return h, L
 
 
@@ -591,70 +687,71 @@ def _backward(
         device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
         index = int(device.index)
     else:
-        device, index, rows, first, second, w = fast
-        copies = None
+        index, rows, first, second, w = fast
+        device, copies = _device(index), None
     if _FAST_CHECKS and _plain(grad_out, torch.bfloat16, (rows, WIDTH), index):
         dh, copy_dh = grad_out, False
     else:
         dh, copy_dh = _input(grad_out, "grad_out", rows=rows, cols=WIDTH, device=device)
     L = limit if rounded else _limit(limit)
-    if second is None:
-        if grad_up is not None:
-            raise ValueError("grad_up must be None for a merged input: grad_gate_up_or_gate receives both halves")
-        d_first = _output(
-            grad_gate_up_or_gate, "grad_gate_up_or_gate", rows=rows, cols=2 * WIDTH, device=device, index=index
-        )
-        d_second = None
-    else:
-        d_first = _output(
-            grad_gate_up_or_gate, "grad_gate_up_or_gate", rows=rows, cols=WIDTH, device=device, index=index
-        )
-        d_second = _output(grad_up, "grad_up", rows=rows, cols=WIDTH, device=device, index=index)
-    if w is None and grad_weight is not None:
-        raise ValueError("grad_weight needs a weight: an unweighted call has no weight gradient")
-    d_weight = _grad_weight(grad_weight, rows=rows, device=device, index=index)
-    device_arch(index)
+    cols = 2 * WIDTH if second is None else WIDTH
+    if second is None and grad_up is not None:
+        raise ValueError("grad_up must be None for a merged input: grad_gate_up_or_gate receives both halves")
+    d_first = grad_gate_up_or_gate
+    if d_first is not None:
+        d_first = _output(d_first, "grad_gate_up_or_gate", rows=rows, cols=cols, first=first, index=index)
+    d_second = grad_up
+    if d_second is not None:
+        d_second = _output(d_second, "grad_up", rows=rows, cols=WIDTH, first=first, index=index)
+    d_weight = grad_weight
+    if d_weight is not None:
+        if w is None:
+            raise ValueError("grad_weight needs a weight: an unweighted call has no weight gradient")
+        d_weight = _grad_weight(d_weight, rows=rows, first=first, index=index)
+    if _arch_of_index(index) is None:
+        device_arch(index)  # raises: not an exported architecture
     if copies:
         first, second, w = _read(first, second, w, copies)
     if copy_dh:
         dh = _copied(dh)
     if d_first is None:
-        cols = 2 * WIDTH if second is None else WIDTH
         d_first = torch.empty(rows, cols, dtype=torch.bfloat16, device=device)
     if second is not None and d_second is None:
         d_second = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
-    if d_weight is None:
-        d_weight = torch.empty(rows, dtype=torch.float32, device=device)  # an unweighted call drops it
+    if d_weight is None:  # an unweighted call drops it
+        d_weight = torch.empty(rows, dtype=torch.float32, device=device)
     result = (d_first, d_second, None if w is None else d_weight)
     if rows == 0:
         return result
-    # A merged input and its gradient are the gate and d_gate themselves, and views of their second halves.
-    gate_stride = _row_stride(first, rows)
-    d_gate_stride = _row_stride(d_first, rows)
+    # A merged input and its gradient are the gate and d_gate themselves, and views of their second halves.  A single
+    # row's strides are 0 (never dereferenced).
+    many = rows > 1
+    gate_stride = first.stride(0) if many else 0
+    d_gate_stride = d_first.stride(0) if many else 0
     if second is None:
         up_view, up_stride = first.narrow(1, WIDTH, WIDTH), gate_stride
         d_up, d_up_stride = d_first.narrow(1, WIDTH, WIDTH), d_gate_stride
     else:
-        up_view, up_stride = second, _row_stride(second, rows)
-        d_up, d_up_stride = d_second, _row_stride(d_second, rows)
-    values = {
-        "gate": first,
-        "up": up_view,
-        "dh": dh,
-        "w": _ignored_weight(index) if w is None else w,
-        "d_gate": d_first,
-        "d_up": d_up,
-        "d_weight": d_weight,
-        "rows": rows,
-        "gate_stride": gate_stride,
-        "up_stride": up_stride,
-        "dh_stride": _row_stride(dh, rows),
-        "d_gate_stride": d_gate_stride,
-        "d_up_stride": d_up_stride,
-        "limit": L,
-        "weighted": 0 if w is None else 1,
-    }
-    run_module("bwd", values, rows=rows, device_index=index)
+        up_view, up_stride = second, second.stride(0) if many else 0
+        d_up, d_up_stride = d_second, d_second.stride(0) if many else 0
+    _launcher("bwd", index)(
+        rows,
+        first,
+        up_view,
+        dh,
+        _ignored_weight(index) if w is None else w,
+        d_first,
+        d_up,
+        d_weight,
+        rows,
+        gate_stride,
+        up_stride,
+        dh.stride(0) if many else 0,
+        d_gate_stride,
+        d_up_stride,
+        L,
+        0 if w is None else 1,
+    )
     return result
 
 
@@ -709,8 +806,11 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
     ``weight``; no activation, no FP32 intermediate) and recomputes the activation in the backward, so
     ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a
     merged ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked once,
-    in the forward, and its FP32 value is reused by the backward.  No double backward: differentiating gradients
-    computed with ``create_graph=True`` raises ``RuntimeError``."""
+    in the forward, and its FP32 value is reused by the backward.  The backward has no output buffer, ``grad_up`` or
+    ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the saved operands
+    again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their device, shape or
+    layout after the forward without the autograd version check seeing it.  No double backward: differentiating
+    gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
 
     @staticmethod
     def forward(ctx, gate_up_or_gate, up, weight, limit):

@@ -79,7 +79,7 @@ from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
 out = cake_dsa_sparse_attention_nondet(
     q_latent, q_rope, kv_latent, k_rope, indices,
     topk_length=None, softmax_scale=None, return_lse=False,
-    dkv_acc=None, dkv_dst_map=None)
+    dkv_acc=None, dkv_dst_map=None, num_segments=1)
 out = cake_dsa_sparse_attention_nondet_varlen(
     q_latent, q_rope, kv_latent, k_rope, gather_kv_indices,
     cu_seqlens_q, cu_seqlens_k, max_seqlen_q=None, max_seqlen_k=None,
@@ -133,7 +133,11 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   rows; a row whose every slot ends up `-1` gives `out = 0`, `lse = -inf` and
   zero gradients.  The segment count `len(cu_seqlens_k) - 1` is passed on as
   `num_segments`: the backward's whole-row key-range passes apply to
-  one-segment rows only (see "Key-range passes").
+  one-segment rows only (see "Key-range passes").  The flat rope entry and
+  the rope step backward take the count as the keyword `num_segments` (a Python
+  `int`, default 1): a caller that passes the global rows of a packed batch
+  passes `len(cu_seqlens_k) - 1` and gets the varlen entry's plan for the
+  same rows.
 * Forward: `out [T, 64, 512]` BF16 and (with `return_lse=True`) the natural-log
   `lse [T, 64]` FP32 over the valid keys; fully masked rows give `out = 0` and
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
@@ -549,8 +553,9 @@ scratch holds one chunk.  The passes split the whole key row
 into equal ranges, which matches an index row whose keys spread over the whole
 row (one document); in a packed multi-segment row every token's keys lie
 inside its own segment, so the policy applies to one-segment rows only
-(`num_segments > 1`, the varlen entry's `len(cu_seqlens_k) - 1`, plans one
-pass unless `key_passes` overrides).  Since the policy reads only whether the
+(`num_segments > 1` -- the varlen entry's `len(cu_seqlens_k) - 1`, or the
+flat rope entry's keyword -- plans one pass unless `key_passes` overrides).
+Since the policy reads only whether the
 row has more than one segment, the backward binding keys hold that class, not
 the count: a training step with a new document count reuses the backward
 binding of the last one.  The passes add
