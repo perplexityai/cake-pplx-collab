@@ -89,10 +89,8 @@ JIT variables):
   stage and device (``_launcher``), made at the stage's first launch on the
   device: the route above, the kernel parameters by position in the order
   every program of the stage takes them (checked once, when the launcher is
-  made), and each program's FFI entry, bound at its first launch.  An FFI
-  entry keeps the GIL during its call (``release_gil`` off): another Python
-  thread waits for the launch, which takes a few microseconds.  Nothing here
-  reads device memory, reads an environment variable or synchronizes; the
+  made), and each program's FFI entry, bound at its first launch.  Nothing
+  here reads device memory, reads an environment variable or synchronizes; the
   checks read dtypes, shapes, strides, devices and data pointers only.  The
   host keeps no state between calls but caches of facts a call cannot change
   (a device's architecture, SM count and launchers, the libraries, the FP32
@@ -271,12 +269,8 @@ def parameters(name: str) -> tuple[str, ...]:
 
 @functools.cache
 def _entry(name: str, arch: str) -> Any:
-    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process).  Its calls keep the GIL
-    (tvm-ffi's ``Function.release_gil`` off, set here once): a launch takes a few microseconds, and releasing and
-    taking the GIL back around it costs host time on every call."""
-    entry = getattr(load(name, arch), cake_jit.MODULES[name]["ffi_entry"])
-    entry.release_gil = False
-    return entry
+    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process)."""
+    return getattr(load(name, arch), cake_jit.MODULES[name]["ffi_entry"])
 
 
 @functools.cache

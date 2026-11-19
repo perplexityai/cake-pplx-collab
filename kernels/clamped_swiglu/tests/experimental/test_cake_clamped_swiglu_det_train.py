@@ -50,7 +50,7 @@ the same bits at every call, in every layout, at every row count (a row's output
 side stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs, under
 ``torch.use_deterministic_algorithms`` (where every new output, the dropped weight gradient too, holds PyTorch's NaN
 fill when its kernel launches) and with the current device switched to another GPU (each call runs on its operands'
-device); the FFI entries keep the GIL; the autograd function matches the steps bit for bit, saves only its inputs and
+device); the autograd function matches the steps bit for bit, saves only its inputs and
 gives the same bits under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a
 saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with
 ``create_graph=True`` have the steps' bits and raise when differentiated; inputs the kernels can read are read in place,
@@ -929,14 +929,6 @@ def test_the_records_load(device) -> None:
     for name, record in cake_jit.MODULES.items():
         if arch in record["arches"]:
             assert callable(getattr(pkg.load(name, arch), record["ffi_entry"])), name
-
-
-def test_the_ffi_entries_keep_the_gil(device) -> None:
-    """Every FFI entry the launches call keeps the GIL during its call (tvm-ffi's ``release_gil`` off)."""
-    arch = pkg.device_arch(device.index)
-    for name, record in cake_jit.MODULES.items():
-        if arch in record["arches"]:
-            assert pkg._entry(name, arch).release_gil is False, name
 
 
 @pytest.mark.parametrize("program", PROGRAMS)
@@ -1910,18 +1902,20 @@ def test_operands_on_another_device(device) -> None:
         forward(t.first, None, o.weight, limit=L)
 
 
-def test_calls_after_set_device_run_on_their_operands_device(device) -> None:
+@pytest.mark.parametrize("case", [Case(129, "merged"), Case(129, "split", "none")], ids=lambda case: case.id)
+def test_calls_after_set_device_run_on_their_operands_device(case, device) -> None:
     """The launchers are per stage and device, and the current device picks none of them: with the current device
     switched to the other GPU by ``torch.cuda.set_device`` after calls on both, the steps and an autograd step on the
     first GPU's operands run there (new outputs on that device, the bits of the calls before the switch), and the steps
-    on the other GPU's operands run on the other GPU, before and after switching back."""
+    on the other GPU's operands run on the other GPU, before and after switching back.  Weighted and unweighted (the
+    ignored weight of each device)."""
     if torch.cuda.device_count() < 2:
         pytest.skip("needs two GPUs")
     other = torch.device("cuda", 1 if device.index != 1 else 0)
     if not pkg.is_cake_clamped_swiglu_det_train_supported(other):
         pytest.skip(f"{other} is not a supported device")
-    t = make_inputs(Case(129, "merged"), seed=6, device=device)
-    o = make_inputs(Case(129, "merged"), seed=6, device=other)
+    t = make_inputs(case, seed=6, device=device)
+    o = make_inputs(case, seed=6, device=other)
     want = step_outputs(forward, backward, t)
     want_autograd = _autograd_step(t)
     want_other = step_outputs(forward, backward, o)

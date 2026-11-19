@@ -192,8 +192,7 @@ reaches a result.
 - Host caches, none of which changes an output bit: per device, its architecture, its SM count and one launcher per
   stage (the route, and each program's FFI entry bound at its first launch); per process, the loaded libraries and
   the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every call, before any
-  allocation.  A launch keeps the Python GIL during its FFI call (a few microseconds): another Python thread waits for
-  it.
+  allocation.
 
 ## Limitations
 
