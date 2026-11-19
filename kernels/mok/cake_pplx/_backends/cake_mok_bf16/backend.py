@@ -239,8 +239,9 @@ class MoKFunctional:
         needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
         ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
         device. Every unsupported combination raises ``ValueError`` here
-        (``TypeError`` for a non-string position), before any kernel is
-        loaded or launched.
+        (``TypeError`` for a non-string position and, with ``"before_down"``,
+        a top-k that is not an ``int``), before any kernel is loaded or
+        launched.
         """
         check_configuration(
             ep,

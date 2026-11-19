@@ -226,7 +226,8 @@ def prepare_mok_bf16(
     (``"after_down"``), and 384 routed experts at EP 4/8/16/32/64 ((4, 96),
     (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``).
     Any other combination raises ``ValueError`` (``TypeError`` for a
-    non-string position) before any kernel is loaded or launched.
+    non-string position and, with ``"before_down"``, a top-k that is not an
+    ``int``) before any kernel is loaded or launched.
     Tokens, hidden/intermediate widths and per-rank source counts
     remain runtime values subject to the documented alignment constraints.
     This is a synthetic training experiment, with no full-model or optimizer

@@ -79,8 +79,10 @@ def check_configuration(
     ``"after_down"`` keeps the weighted layouts: top-k 2 or 8 on the layouts of
     :data:`SCHEDULER_LAYOUTS` other than the 384-expert ones (the caller's check
     names any other combination). ``"before_down"`` runs the layouts of
-    :data:`BEFORE_DOWN_LAYOUTS` at their top-k, with clamped SwiGLU and FP32
-    weight-gradient accumulation."""
+    :data:`BEFORE_DOWN_LAYOUTS` at their top-k (an ``int``), with clamped
+    SwiGLU and FP32 weight-gradient accumulation. A non-string position, and
+    with ``"before_down"`` a top-k that is not an ``int``, raise ``TypeError``;
+    every other refusal raises ``ValueError``."""
     if not isinstance(router_weight_position, str):
         raise TypeError(
             f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
@@ -94,9 +96,11 @@ def check_configuration(
     layout = (ep, local_experts)
     if router_weight_position == "after_down":
         if topk == 6:
+            layouts = ", ".join(str(key) for key in SCHEDULER_LAYOUTS_384)
             raise ValueError(
                 "top-k 6 is supported only with router_weight_position='before_down' "
-                "(its combine is unweighted)"
+                f"on the 384-expert layouts (EP, local experts) {layouts} (its combine "
+                f"is unweighted); got {layout}"
             )
         if layout in SCHEDULER_LAYOUTS_384:
             raise ValueError(
@@ -104,7 +108,12 @@ def check_configuration(
                 "router_weight_position='before_down' and topk=6"
             )
         return
-    if BEFORE_DOWN_LAYOUTS.get(layout) != topk or type(topk) is not int:
+    if type(topk) is not int:
+        raise TypeError(
+            "router_weight_position='before_down' takes topk as an int, got "
+            f"{type(topk).__name__} {topk!r}"
+        )
+    if BEFORE_DOWN_LAYOUTS.get(layout) != topk:
         supported = ", ".join(
             str((*key, value)) for key, value in BEFORE_DOWN_LAYOUTS.items()
         )

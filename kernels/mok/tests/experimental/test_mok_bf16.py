@@ -19,9 +19,11 @@ Covers the fused forward/backward (ring replay, empty experts, variable widths, 
 FP32 weight-gradient accumulation, 36 and 9 local experts at top-8, context-only recompute, the context-free forward,
 every exported scheduler layout and the epilogues, plus the host-only communication-split tables, resolvers and
 configuration switches.  The router weight before the down projection (``router_weight_position="before_down"``):
-its launchers' arguments against the registry, its refusals before device work (no GPU), and on SM100a / SM103a its
-fused training at top-2 and top-6 (6 to 96 local experts), zero weights, recompute and the context-free forward, the
-384-expert scheduler layouts, and the scheduler and the adapter at the requested worst-case schedule capacity.
+its launchers' arguments against the registry, its refusals before device work (no GPU) and on an SM107a device, and
+on SM100a / SM103a its fused training at top-2 and top-6 (6 to 96 local experts; also with another communication-SM
+split), zero weights, recompute and the context-free forward, the exact limit, the 384-expert scheduler layouts, and
+the scheduler and the adapter at the requested worst-case schedule capacity (the routed weight gradients from ring
+rows past 2^31 bytes exactly).
 Every kernel output is checked against its contract (finite; exact integer and table outputs; documented bitwise
 route forms such as recompute == saved context and graph replay == eager launch) and for run-to-run repeatability
 (five launches on the same inputs give the same bytes).  The accuracy of every floating output against the float64
@@ -38,6 +40,7 @@ import dataclasses
 import pytest
 import torch
 
+from tests.experimental._mok_one_gpu import OneGpuGroup, bound_multiplier, one_gpu_workspace
 from tests.experimental._mok_reference import production_inputs, require_gpu, single_rank_schedule
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -65,11 +68,13 @@ def _same(a, b):
 
 
 def _require_role(role):
-    """Skip on a device whose target has no build of ``role``: the router-weight-before-down kernels, top-k 6 and the
-    384-expert scheduler layouts are SM100a and SM103a builds."""
+    """Skip a role of :data:`BEFORE_DOWN_ROLES` (the router-weight-before-down kernels, top-k 6 and the 384-expert
+    scheduler layouts: SM100a and SM103a builds) on a device whose target has no build of it.  Every other role is
+    built for every target (:func:`test_before_down_roles_are_registry_records`), so a missing build fails at load
+    instead of skipping."""
     require_gpu()
     arch = jit.target_arch()
-    if arch not in jit._registry()[role]["arches"]:
+    if role in BEFORE_DOWN_ROLES and arch not in jit._registry()[role]["arches"]:
         pytest.skip(f"{role} has no {arch} build")
 
 
@@ -1657,13 +1662,6 @@ BOUND_LAYOUTS = [(64, 6), (8, 48)]
 BOUND_IDS = ["ep64-local6", "ep8-local48"]
 
 
-def _bound_multiplier(tokens, topk, ep, experts):
-    """The requester's smallest no-overflow multiplier:
-    ``ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP``."""
-    worst = min(topk, experts) * tokens * ep + experts * 255
-    return -(-worst // (tokens * topk)) / ep
-
-
 def _stub_loader(monkeypatch, loaded=None):
     """``jit.load_kernel`` stand-in: a kernel with its registry record's argument names whose ``run`` records the
     role and the arguments by name; nothing is compiled or launched.  Returns the record list."""
@@ -1690,7 +1688,8 @@ def _stub_loader(monkeypatch, loaded=None):
 def test_before_down_roles_are_registry_records():
     """Every role a launcher of either router-weight position can load is a registry record, with the suffixes in
     the registry's order; the router-weight-before-down, top-k 6 and 384-expert roles are built for exactly
-    SM100a and SM103a, and top-k 6 has no weighted forward epilogue."""
+    SM100a and SM103a, every other such role for exactly SM100a, SM103a and SM107a, and top-k 6 has no weighted
+    forward epilogue."""
     registry = jit._registry()
     role = kernels._role
     assert role("forward", True, noctx=True) == "forward_clamped_noctx"
@@ -1719,6 +1718,8 @@ def test_before_down_roles_are_registry_records():
     assert set(BEFORE_DOWN_ROLES) <= names
     for name in BEFORE_DOWN_ROLES:
         assert registry[name]["arches"] == list(kernels.BEFORE_DOWN_TARGETS), name
+    for name in sorted(names - set(BEFORE_DOWN_ROLES)):
+        assert registry[name]["arches"] == ["sm_100a", "sm_103a", "sm_107a"], name
     assert "epilogue_forward_6" not in registry
     assert set(kernels.BEFORE_DOWN_LAYOUTS) <= set(SCHEDULER_LAYOUTS)
     assert registry["backward_clamped_fp32_wbd"]["arguments"] == registry["backward_clamped_fp32"]["arguments"]
@@ -1923,6 +1924,24 @@ def test_before_down_is_refused_on_sm107a_before_any_kernel_loads(monkeypatch):
     assert loaded == []
 
 
+def test_before_down_is_refused_on_an_sm107a_device():
+    """On an SM107a device (other devices run the mode and skip): ``prepare_mok_bf16`` with
+    ``router_weight_position="before_down"`` on the requester's EP64 top-6 layout, an EP8 384-expert layout and a
+    diagnostic top-2 layout raises the ``ValueError`` that names the missing sm_107a build, and loads no kernel."""
+    require_gpu()
+    if jit.target_arch() != "sm_107a":
+        pytest.skip("checks the refusal on an sm_107a device")
+    before = jit._load.cache_info()
+    for ep, experts, topk in ((64, 6, 6), (8, 48, 6), (1, 4, 2)):
+        with pytest.raises(ValueError, match="has no sm_107a build"):
+            api.prepare_mok_bf16(
+                ep_size=ep, local_experts=experts, topk=topk, clamped_swiglu=True, fp32_wgrad=True,
+                router_weight_position="before_down",
+            )  # fmt: skip
+    after = jit._load.cache_info()
+    assert (after.hits, after.misses) == (before.hits, before.misses)
+
+
 def test_top6_epilogues_have_the_unweighted_sum_only(monkeypatch):
     """Host only: top-k 6 loads the unweighted sum alone and refuses a weighted forward; ``weighted=False`` loads the
     sum alone for every top-k; top-k 2 and 8 still load both."""
@@ -1957,7 +1976,7 @@ def test_capacity_at_the_requested_bound(ep, experts, tokens):
     of the forward, recompute and backward launches fits its 31-bit field (the geometry helpers refuse a divisor
     outside it)."""
     topk, hidden, intermediate, macro, mini, comm = 6, 5120, 2304, 262144, 4096, 40
-    multiplier = _bound_multiplier(tokens, topk, ep, experts)
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
     assert multiplier * ep == ep + 1  # (EP + 1) / EP at these shapes
     capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
     assert capacity == tokens * topk * (ep + 1) and capacity % 256 == 0
@@ -2012,7 +2031,8 @@ def _check_before_down_training(
 ):
     """Contract and repeatability of the router-weight-before-down forward + backward (clamped SwiGLU, FP32
     accumulators from nonzero starts): every output finite, :data:`REPEATS` eager launches and graph replays give
-    the same bytes, a replay gives the eager launch's bytes (also after the weights and the inputs change), a zero
+    the same bytes, a launch with another communication-SM split gives the same bytes, a replay gives the eager
+    launch's bytes (also after the weights and the inputs change), a zero
     router weight gives its route exactly zero combine rows and input gradients, and the router-weight gradient
     reads no weight: zeroing every weight leaves its bits, zeroes every routed output, input gradient and
     routed weight-gradient increment, and leaves the shared expert's outputs."""
@@ -2039,14 +2059,14 @@ def _check_before_down_training(
             ]
             accumulators = [value.clone() for value in initial]
 
-            def sequence():
+            def sequence(split=comm):
                 for accumulator, start in zip(accumulators, initial, strict=True):
                     accumulator.copy_(start)
                 values = forward(
                     x, [x.data_ptr()], combine, [combine.data_ptr()],
                     shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
                     s["peers"], s["schedule"], s["num_tokens"], s["counts"],
-                    topk, limit, comm, macro, mini, weight_ptrs=[scores.data_ptr()],
+                    topk, limit, split, macro, mini, weight_ptrs=[scores.data_ptr()],
                 )  # fmt: skip
                 result = backward(
                     dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
@@ -2054,7 +2074,7 @@ def _check_before_down_training(
                     shared[0], routed[0], shared[1], routed[1], shared[2], routed[2],
                     *values[:7], x, [x.data_ptr()],
                     s["peers"], s["schedule"], s["num_tokens"], s["counts"],
-                    topk, limit, comm, macro, mini,
+                    topk, limit, split, macro, mini,
                     weight_grad_accumulators=accumulators,
                 )  # fmt: skip
                 return result, values
@@ -2074,6 +2094,9 @@ def _check_before_down_training(
             zero_rows = zero.flatten()
             eager = [outputs(sequence()) for _ in range(REPEATS)]
             assert all(_same(eager[0], other) for other in eager[1:])
+            # No bit depends on the communication-SM split; the dispatch's communication CTAs gather the router
+            # weights into the row ring.
+            assert _same(outputs(sequence(comm + 4)), eager[0])
             assert torch.count_nonzero(eager[0][13][zero_rows]).item() == 0  # combine rows of zero weights
             assert torch.count_nonzero(eager[0][10][zero_rows]).item() == 0  # their input gradients
             assert torch.count_nonzero(eager[0][11][zero]).item() > 0  # their weight gradients: no division
@@ -2266,7 +2289,7 @@ def test_scheduler_at_the_capacity_bound(ep, experts):
     _require_role(f"count_{ep}_{experts}")
     tokens, topk = 16384, 6
     capacity = workspace_module.schedule_capacity_for(
-        tokens, topk, ep, _bound_multiplier(tokens, topk, ep, experts)
+        tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts)
     )
     generator = torch.Generator(device="cuda").manual_seed(4409 + ep)
     ids = (
@@ -2302,84 +2325,85 @@ def test_scheduler_at_the_capacity_bound(ep, experts):
     scheduler.release_counts()
 
 
-class _OneGpuGroup:
-    """Single-GPU stand-in of an EP group's communication: every rank's gathered expert ids are this rank's and the
-    barriers launch nothing.  An emulation, not a distributed run: with every peer pointer at this rank's own buffers
-    (:func:`_one_gpu_workspace`) the adapter runs rank 0's launches at the group's geometry, and since every route of
-    the full skew is one of this rank's tokens, the EP writers of a combine row or router-weight gradient write equal
-    bytes."""
-
-    def all_gather_top_experts(self, routes, gathered, multicast_address, rank):
-        gathered.copy_(routes.unsqueeze(0).expand_as(gathered))
-
-    def barrier_all(self, counter, peer_pointers, multicast_address, target):
-        return None
-
-    def barrier_plan(self, counter, peer_pointers, multicast_address, target):
-        return None
+def _exact_outer(gradient, known, copies, known_on_rows):
+    """``gradient`` (FP32 ``[m, n]``) is exactly ``copies`` times the outer product of a BF16 vector with the BF16
+    vector ``known`` (along its columns, or its rows with ``known_on_rows``), checked in float64 (``copies`` a power
+    of 2)."""
+    value = gradient.double() / copies
+    if known_on_rows:
+        value = value.T
+    known = known.double()
+    column = int(known.abs().argmax())
+    vector = value[:, column] / known[column]
+    assert torch.count_nonzero(vector).item() > 0
+    assert torch.equal(vector, vector.bfloat16().double())
+    assert torch.equal(value, torch.outer(vector, known))
 
 
-def _one_gpu_workspace(ep, tokens, hidden, topk, capacity, device):
-    """Rank 0's native workspace of an EP group on one GPU: every peer pointer is this rank's own buffer."""
+def _check_routed_weight_gradients(run, configs, schedule, ids, scores, x, dy, high, macro, copies, experts):
+    """The routed weight gradients of the capacity-bound step, from ring rows past 2^31 bytes, exactly.
 
-    def buffer(*shape, dtype):
-        value = torch.zeros(*shape, dtype=dtype, device=device)
-        return value, None, [value.data_ptr()] * ep
-
-    names = ("x_buffer", "combine_buffer", "d_y_buffer", "d_x_routed_buffer")
-    shapes = ((tokens, hidden), (tokens * topk, hidden), (tokens, hidden), (tokens * topk, hidden))
-    fields = {}
-    for name, shape in zip(names, shapes, strict=True):
-        fields[name], fields[f"{name}_handle"], fields[f"{name}_ptrs"] = buffer(*shape, dtype=torch.bfloat16)
-    for name in ("router_weight_buffer", "d_router_weight_buffer"):
-        fields[name], fields[f"{name}_handle"], fields[f"{name}_ptrs"] = buffer(tokens, topk, dtype=torch.float32)
-    gathered = torch.full((ep, tokens, topk), -1, dtype=torch.int32, device=device)
-    barrier, _, barrier_ptrs = buffer(1, dtype=torch.int32)
-    return workspace_module.MoKWorkspace(
-        group_name="one-gpu",
-        ep_rank=0,
-        ep_size=ep,
-        device=device,
-        num_local_tokens=tokens,
-        hidden_size=hidden,
-        topk=topk,
-        schedule_capacity=capacity,
-        **fields,
-        all_gather_top_experts_buffer=gathered,
-        all_gather_top_experts_buffer_handle=None,
-        all_gather_top_experts_buffer_multicast_ptr=gathered.data_ptr(),
-        barrier_buffer=barrier,
-        barrier_buffer_handle=None,
-        barrier_buffer_ptrs=barrier_ptrs,
-        barrier_buffer_multicast_ptr=barrier.data_ptr(),
-        barrier_target=torch.zeros(1, dtype=torch.int32, device=device),
-    )
+    Only tokens that share no expert keep their router weights; every other weight is 0, so its routes have
+    ``h = BF16(0 * a) = 0`` and ``d_gate = d_up = 0`` and add exactly 0 to every routed weight gradient.  The first
+    chosen token has routes in the resident macrobatch's ring rows from byte offset 2^31 on (``high`` .. ``macro``).
+    Every element of a chosen expert's gradient is then ``copies`` (the EP size: every emulated peer sends the same
+    route) times one BF16 x BF16 product, exact in FP32 in any order and macrobatch split.  ``run(config, router)``
+    returns the routed gate, up and down weight gradients of one step: the two ``configs`` (macrobatches of 262,144
+    and 32,768 rows) give equal values, an expert no chosen token routes to has a zero gradient, and a chosen expert's
+    gradient is exactly ``copies`` times the outer product of a BF16 vector with its token's ``x`` (gate, up) or
+    ``dy`` (down)."""
+    rows = slice(high, macro)
+    above = schedule.peer_token_idx[rows][schedule.peer_rank[rows] >= 0].long() // ids.shape[1]
+    routes = ids.tolist()
+    owner = {}
+    for token in [int(above.min().item()), *range(len(routes))]:
+        if len(owner) == experts:
+            break
+        if not owner.keys() & set(routes[token]):
+            owner.update(dict.fromkeys(routes[token], token))
+    chosen = sorted(set(owner.values()))
+    router = torch.zeros_like(scores)
+    router[chosen] = scores[chosen]
+    gradients = run(configs[0], router)
+    for config in configs[1:]:
+        assert _same(gradients, run(config, router))
+    touched = torch.zeros(experts, dtype=torch.bool)
+    touched[list(owner)] = True
+    for gradient in gradients:
+        assert gradient.shape[0] == experts
+        assert torch.equal(gradient.flatten(1).count_nonzero(-1).cpu() > 0, touched)
+    for expert, token in owner.items():
+        _exact_outer(gradients[0][expert], x[token], copies, False)  # gate: d_gate rows x x rows
+        _exact_outer(gradients[1][expert], x[token], copies, False)  # up
+        _exact_outer(gradients[2][expert], dy[token], copies, True)  # down: dy rows x h rows
 
 
 @pytest.mark.parametrize("ep,experts", BOUND_LAYOUTS, ids=BOUND_IDS)
 def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     """The adapter's router-weight-before-down training step at the requester's worst-case geometry of one rank:
     16,384 source rows, H 5120, I 2304, top-6, macrobatch 262,144, minibatch 4,096, the worst-case multiplier and full
-    skew (every route of the group lands on this rank), emulated on one GPU (:class:`_OneGpuGroup`).  The context
+    skew (every route of the group lands on this rank), emulated on one GPU (:class:`OneGpuGroup`).  The context
     step, the checkpointed step (context-free forward, recompute with the router weights, backward; another router
     weight in the workspace before the recompute and before the backward) and its CUDA Graph replay complete with
     finite outputs and the same bytes, run to run.  The routed x ring's rows at byte offsets of 2^31 and beyond hold
     their tokens' x exactly, and ``y``, ``dx`` and the router-weight gradients are the bytes of the same step with
-    32,768-row macrobatches, whose ring rows all lie below 2^31 bytes (per-row outputs; the weight gradients sum each
-    macrobatch's rows and are not compared).  Accuracy is judged at the smaller shapes."""
+    32,768-row macrobatches, whose ring rows all lie below 2^31 bytes (per-row outputs).  The routed weight gradients,
+    which read the x, dy, gate-gradient and up-gradient rings, are checked exactly on a step where only tokens that
+    share no expert keep their router weights (:func:`_check_routed_weight_gradients`).  Accuracy is judged at the
+    smaller shapes (``test_mok_accuracy.py``, the adapter's top-6 layouts included)."""
     _require_role("forward_clamped_wbd")
     _require_role(f"count_{ep}_{experts}")
     tokens, hidden, intermediate, topk, macro, mini, limit = 16384, 5120, 2304, 6, 262144, 4096, 10.0
     device = torch.device("cuda", torch.cuda.current_device())
-    multiplier = _bound_multiplier(tokens, topk, ep, experts)
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
     capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
     functional = backend.MoKFunctional(
         ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
     )
-    functional.communication = _OneGpuGroup()
+    functional.communication = OneGpuGroup()
     functional.prepare(limit, save_context=False)
     functional.prepare_recompute(limit)
-    workspace = _one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
     config = MoKConfig(
         fwd_num_comm_sms=40,
         bwd_num_comm_sms=40,
@@ -2423,11 +2447,11 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
         assert tokens_of.numel() > 0
         assert torch.equal(context.x_routed[rows][defined], x[tokens_of])
 
-    def step(checkpointed, cfg=config, check=False):
+    def step(checkpointed, cfg=config, check=False, router=scores):
         for accumulator in accumulators:
             accumulator.zero_()
         y, context = functional.forward(
-            cfg, workspace, schedule, x, scores, *weights, swiglu_limit=limit,
+            cfg, workspace, schedule, x, router, *weights, swiglu_limit=limit,
             save_context=not checkpointed,
         )  # fmt: skip
         if check:
@@ -2437,11 +2461,11 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
             workspace.router_weight_buffer.fill_(0.75)
             context = functional.recompute_forward_context(
                 cfg, workspace, schedule, x, weights[0], weights[1], weights[3], weights[4],
-                swiglu_limit=limit, router_weights=scores,
+                swiglu_limit=limit, router_weights=router,
             )  # fmt: skip
             workspace.router_weight_buffer.fill_(0.75)
         grads = functional.backward(
-            cfg, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=limit,
+            cfg, workspace, schedule, context, dy, x, router, *weights, swiglu_limit=limit,
             weight_grad_accumulators=accumulators,
         )  # fmt: skip
         return (y, *grads)
@@ -2460,6 +2484,10 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     small = dataclasses.replace(config, macrobatch_size=32768)
     assert small.macrobatch_size * hidden * 2 < 2**31
     assert _same(first[:3], snapshot(step(False, small))[:3])  # y, dx, router-weight gradients
+    _check_routed_weight_gradients(
+        lambda cfg, router: snapshot(step(False, cfg, router=router)[3:6]),
+        (config, small), schedule, ids, scores, x, dy, high, macro, ep, experts,
+    )  # fmt: skip
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):

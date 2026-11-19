@@ -21,15 +21,17 @@ Workers of the multi-GPU MoK tests (``test_mok_distributed.py``): each runs in e
   changing routes (including empty experts), at two widths.
 * :func:`unequal_sources`: unequal source counts per rank (empty ranks and an all-empty step included), several
   graphs over one workspace, earlier graphs replayed after later ones, same-shape input updates.
-* :func:`training_features`: clamped SwiGLU, context-only recompute and the context-free forward, FP32
-  weight-gradient accumulation and native MXFP8 routed experts over unequal ranks.
+* :func:`training_features`: clamped SwiGLU, context-only recompute (also called with router weights, which the
+  ``"after_down"`` recompute checks and does not read) and the context-free forward, FP32 weight-gradient
+  accumulation and native MXFP8 routed experts over unequal ranks.
 * :func:`source_capacity`, :func:`backward_scratch`: the adapter's source-length guards, the schedule's expert
   layout, context ownership and the backward's scratch lifetime.
 * :func:`before_down_training`: the router weight before the down projection (``router_weight_position=
   "before_down"``, clamped SwiGLU, FP32 weight gradients) through the adapter over changing source counts on one
-  workspace (padded and unpadded staging), recompute and the context-free forward included, the unplanned launches
-  of a schedule without its expert layout, and a test-local autograd function around the checkpointed step that
-  overwrites the workspace's router weights between its launches.
+  workspace (padded and unpadded staging), recompute and the context-free forward included, another
+  communication-SM split on each rank, the unplanned launches of a schedule without its expert layout, and a
+  test-local autograd function around the checkpointed step that overwrites the workspace's router weights between
+  its launches.
 
 Every case checks the contract (shapes, finite values, exact zeros of empty ranks) and repeatability: five eager
 launches, five graph replays and the eager launch give the same bytes, recompute and the context-free forward give
@@ -263,6 +265,9 @@ class TrainingIteration:
     checkpointing); with ``save_context=False`` (BF16 routed experts, needs
     ``recompute``) the forward stores no context at all. ``accumulators`` are
     six FP32 tensors zeroed and filled by an ``fp32_wgrad`` adapter.
+    ``recompute_router_weights`` is passed to the recompute as its
+    ``router_weights``; by default the ``"before_down"`` recompute takes the
+    step's scores and the ``"after_down"`` call has no such argument.
     """
 
     def __init__(
@@ -281,6 +286,7 @@ class TrainingIteration:
         recompute=False,
         accumulators=None,
         save_context=True,
+        recompute_router_weights=None,
     ):
         if not save_context and not recompute:
             raise ValueError(
@@ -316,6 +322,7 @@ class TrainingIteration:
         self.recompute = recompute
         self.save_context = save_context
         self.accumulators = accumulators
+        self.recompute_router_weights = recompute_router_weights
         if mxfp8_weights is None:
             self.forward_weights = self.backward_weights = weights
         else:
@@ -345,9 +352,11 @@ class TrainingIteration:
         if self.recompute:
             self.context = None
             w = self.forward_weights
-            # The router weights are an argument of the "before_down" recompute only; the "after_down" call keeps the
-            # form without them.
-            weighted = self.functional.router_weight_position == "before_down"
+            # The "before_down" recompute takes the router weights; the "after_down" call keeps the form without them
+            # unless the iteration passes some (they are checked and not read).
+            router = self.recompute_router_weights
+            if router is None and self.functional.router_weight_position == "before_down":
+                router = self.scores
             self.context = self.functional.recompute_forward_context(
                 self.config,
                 self.workspace,
@@ -358,7 +367,7 @@ class TrainingIteration:
                 w[3],
                 w[4],
                 swiglu_limit=limit,
-                **(dict(router_weights=self.scores) if weighted else {}),
+                **({} if router is None else dict(router_weights=router)),
             )
         extra = {}
         if self.accumulators is not None:
@@ -634,11 +643,11 @@ def training_features():
         for destination, value in zip((x, ids, scores, dy), (data[k][section] for k in ("x", "expert_ids", "scores", "d_output")), strict=True):
             destination.copy_(value)
 
-        def iteration(recompute, save_context=True):
+        def iteration(recompute, save_context=True, recompute_router_weights=None):
             return TrainingIteration(
                 config, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
                 mxfp8_weights=mxfp8_weights if mxfp8 else None, recompute=recompute, accumulators=accumulators,
-                save_context=save_context,
+                save_context=save_context, recompute_router_weights=recompute_router_weights,
             )  # fmt: skip
 
         saved_context = iteration(False)
@@ -661,6 +670,12 @@ def training_features():
             checkpointed = _snapshot(iteration(True).run())
             differs = [n for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True) if not torch.equal(a, b)]
             assert not differs, (rank, case["name"], "recompute", differs)
+            # "after_down" checks the recompute's router weights and does not read them, so the call form of
+            # "before_down" serves both positions: router weights of another layer give the same bytes.
+            other = torch.full_like(scores, OTHER_LAYER_WEIGHT)
+            weighted_call = _snapshot(iteration(True, recompute_router_weights=other).run())
+            differs = [n for n, a, b in zip(RESULT_NAMES, outputs, weighted_call, strict=True) if not torch.equal(a, b)]
+            assert not differs, (rank, case["name"], "recompute with router weights", differs)
             if not mxfp8:
                 # Context-free forward: y and every gradient keep the saved-context bits, eagerly and under graph
                 # replay.
@@ -1004,7 +1019,8 @@ def before_down_training():
     CUDA Graph replay, recompute and the context-free forward with the saved context's bytes, the unplanned launches
     with the same bytes, a test-local autograd function around the checkpointed step with the same bytes while
     another router weight sits in the workspace between its launches; no count after the first loads a kernel; the
-    first count's graph replays its bytes after the later counts ran; every count judged."""
+    first count's graph replays its bytes after the later counts ran; another communication-SM split per rank gives
+    the same bytes; every count judged."""
     _exact_matmul()
     device = torch.device("cuda", torch.cuda.current_device())
     rank, ep = dist.get_rank(), dist.get_world_size()
@@ -1044,9 +1060,9 @@ def before_down_training():
         x, ids, scores, dy = (data[k][section].clone() for k in ("x", "expert_ids", "scores", "d_output"))
         case = "counts-" + "-".join(map(str, counts))
 
-        def iteration(recompute, save_context=True, x=x, ids=ids, scores=scores, dy=dy):
+        def iteration(recompute, save_context=True, x=x, ids=ids, scores=scores, dy=dy, cfg=config):
             return TrainingIteration(
-                config, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
+                cfg, workspace, x, ids, scores, dy, weights, functional=functional, swiglu_limit=limit,
                 recompute=recompute, accumulators=accumulators, save_context=save_context,
             )  # fmt: skip
 
@@ -1055,6 +1071,16 @@ def before_down_training():
         _contract(outputs, counts[rank], hidden, topk)
         again = [_snapshot(saved_context.run()) for _ in range(REPEATS - 1)]
         assert all(_same(outputs, other) for other in again), (rank, case, "eager repeat")
+        # No bit depends on the communication-SM split (the dispatch's communication CTAs gather the router weights
+        # into the row ring), also with the ranks on different splits in one step.
+        split = dataclasses.replace(
+            config, fwd_num_comm_sms=4 + 2 * (rank % 2), bwd_num_comm_sms=6 - 2 * (rank % 2), imbalance_comm_sms=None
+        )
+        for recompute in (False, True):
+            values = _snapshot(iteration(recompute, cfg=split).run())
+            differs = [n for n, a, b in zip(RESULT_NAMES, outputs, values, strict=True) if not torch.equal(a, b)]
+            assert not differs, (rank, case, "communication split", recompute, differs)
+        dist.barrier()
         for recompute, save_context in ((True, True), (True, False)):
             checkpointed = _snapshot(iteration(recompute, save_context).run())
             differs = [n for n, a, b in zip(RESULT_NAMES, outputs, checkpointed, strict=True) if not torch.equal(a, b)]
