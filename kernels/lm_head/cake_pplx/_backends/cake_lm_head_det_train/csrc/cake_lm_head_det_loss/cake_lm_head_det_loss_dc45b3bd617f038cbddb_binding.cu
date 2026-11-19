@@ -99,6 +99,11 @@ void Run(TensorView a_dx, TensorView a_ws, int64_t a_ws_slab, int64_t a_num_vecs
   config.blockDim = dim3(256, 1, 1);
   config.dynamicSmemBytes = 0;
   config.stream = stream;
+  cudaLaunchAttribute attrs[1] = {};
+  attrs[0].id = cudaLaunchAttributeProgrammaticStreamSerialization;
+  attrs[0].val.programmaticStreamSerializationAllowed = 1;
+  config.attrs = attrs;
+  config.numAttrs = 1;
   CheckCuda(cudaLaunchKernelExC(&config, reinterpret_cast<const void*>(kernel_cake_lm_head_det_loss_dc45b3bd617f038cbddb), kernel_args),
             "cudaLaunchKernelExC");
 }
