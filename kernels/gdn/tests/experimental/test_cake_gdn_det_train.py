@@ -4226,7 +4226,8 @@ def test_a_capture_takes_its_own_workspaces(device, monkeypatch) -> None:
         o = step()
     del pooled
     cake_chain._POOLED.tables.clear()
-    # the eager calls' forward plan holds the pooled buffers it reads
+    # the eager calls' forward plan holds the stream's pool table it takes from (and so the pooled buffers in it, once
+    # the pool lets that table go)
     cake_chain._FWD_PLANS.clear()
     gc.collect()
     with torch.cuda.stream(s):
@@ -6925,22 +6926,33 @@ def test_the_record_gate_schedule(monkeypatch) -> None:
     new = cake_chain._FWD_SEEN[(id(layouts[3]), True)]
     assert new is not old and new[0]() is layouts[3] and new[1] == 1
     assert gate(layouts[3], True) is new
-    # the bound over a random sequence of gated calls, recordings (spends) and replays, in the credit's units
+    # a random sequence of gated calls wired as the forward wires them: an entry with a plan (a planned one, but one
+    # in ten whose plan is no longer ready) replays, any other entry records if the credit holds a recording and is
+    # left unplanned if not.  The credit is, after every call, the one its additions (capped) and spends give, and
+    # the bound holds, in the credit's units
     monkeypatch.setattr(cake_chain, "_FWD_SEEN", {})
     monkeypatch.setattr(cake_chain, "_FWD_CREDIT", full)
     rng = random.Random(0)
     calls = replays = recordings = 0
+    credit = full
     for _ in range(10000):
-        step = rng.randrange(3)
-        if step == 0:
-            gate(rng.choice(layouts), rng.random() < 0.5)
-            calls += 1
-        elif step == 1:
-            recordings += spend()
-        else:
-            replayed()
-            replays += 1
-        assert 0 <= cake_chain._FWD_CREDIT <= full
+        entry = gate(rng.choice(layouts), rng.random() < 0.5)
+        calls += 1
+        credit = min(credit + 4, full)
+        if entry is not None:
+            if entry[2] == cake_chain._PLANNED and rng.random() < 0.9:
+                replayed()
+                replays += 1
+                credit = min(credit + 8, full)
+            elif spend():
+                assert credit >= 32
+                recordings += 1
+                credit -= 32
+                entry[2] = cake_chain._PLANNED
+            else:
+                assert credit < 32
+                entry[2] = cake_chain._UNPLANNED
+        assert cake_chain._FWD_CREDIT == credit
         assert recordings * 4 * 8 <= 2 * 4 * 8 + replays * 8 + calls * 4
     assert recordings > 2 and replays and calls
 
@@ -7035,18 +7047,31 @@ def test_the_recorder_classifies_operands(monkeypatch) -> None:
     pool = cake_chain.Workspaces()
     monkeypatch.setattr(cake_chain, "_POOLED", pool)
     table = pool.tables.setdefault((0, 0), {})
-    t = rec.take(pool.take, table, "role", [2, 3], torch.float32, "cpu")
+    t = rec.take(pool, table, "role", [2, 3], torch.float32, "cpu")
     slot = rec.ops[-1][1]
     take = (cake_chain._OP_TAKE, slot, "role", (2, 3), torch.float32, "cpu")
     assert rec.ops[-1] == (*take, ((2, 3), torch.float32))
     assert t is table["role"][((2, 3), torch.float32)]
     assert rec._ref(t) == slot and rec.why is None
     other = cake_chain.Workspaces()
-    rec.take(other.take, other.tables.setdefault((0, 0), {}), "role", (2, 3), torch.float32, "cpu")  # fmt: skip
+    rec.take(other, other.tables.setdefault((0, 0), {}), "role", (2, 3), torch.float32, "cpu")  # fmt: skip
     assert rec.why is not None and "pool" in rec.why
     # a recording of its own walks the constants again
     again = cake_chain._FwdRecorder(inputs, 0, meta)
     assert again._ref(meta.chunk_len) is None and walks == [meta, meta]
+    # the walk passes over a tuple of ints whole (the sequence lengths of a layout of many sequences): it reads its
+    # first entry only, and finds the tables beside it
+    many = _StandInTables(meta.chunk_start, meta.chunk_len, _UnwalkedInts(range(4096)))
+    found: list = []
+    tensors(many, found)
+    assert [id(t) for t in found] == [id(meta.chunk_start), id(meta.chunk_len)]
+
+
+class _UnwalkedInts(tuple):
+    """A tuple of ints that fails when iterated (:func:`test_the_recorder_classifies_operands`)."""
+
+    def __iter__(self):
+        raise AssertionError("a tuple of ints was walked entry by entry")
 
 
 # the forward's functions that take its executor, and the helpers that hand them pooled workspaces, shapes or their
@@ -7765,7 +7790,7 @@ FWD_PLAN_GLOBAL_CHANGES = ("device_arch", "_device_props", "_available", "FWD_A_
 
 @pytest.mark.parametrize("change", FWD_PLAN_GLOBAL_CHANGES)
 def test_the_forward_plan_follows_the_module_globals(
-    change, device, monkeypatch
+    change, device, monkeypatch, record_property
 ) -> None:
     # a plan replays only while the module globals the forward reads and cake_backend.device_arch are the objects it
     # was recorded with: another object in the place of one (an equal one too) sends the next call to the general path,
@@ -7794,8 +7819,11 @@ def test_the_forward_plan_follows_the_module_globals(
         target, value = cake_backend, _another_object(cake_backend.device_arch)
     else:
         value = _another_object(getattr(cake_chain, change))
-    # a plan holds the global by identity (ready() refuses it under another object)
-    held = change == "device_arch" or change in cake_chain._reached_globals(cake_chain._FWD_PLAN_ROOTS)  # fmt: skip
+    # a plan holds every global of FWD_PLAN_GLOBAL_CHANGES by identity (ready() refuses it under another object) but
+    # FWD_A_SERIAL_KEEP, a setting of the ChunkMeta key alone; the plan's own analysis of its globals agrees
+    held = change != "FWD_A_SERIAL_KEEP"
+    reached = cake_chain._reached_globals(cake_chain._FWD_PLAN_ROOTS)
+    assert held == (change == "device_arch" or change in reached), change
     inputs = _inputs(seq_lens, heads, torch.float32, device, seed=7201)
     replays = _counted_forward_replays(monkeypatch)
     launches = _logged_launches(monkeypatch)
@@ -7835,6 +7863,8 @@ def test_the_forward_plan_follows_the_module_globals(
         records = held or not shared
         assert launches == after, (change, i)
         assert len(replays) == (1 + i if records else 2 + i), (change, i, shared, held)
+    # which of the branches below this architecture runs (a report collects them across the GPUs)
+    record_property("plan_branch", f"shared={shared} held={held} records={records}")
     plans = list(cake_chain._FWD_PLANS.values())
     assert len(plans) == (1 if shared else 2), (change, shared, held)
     assert any(p is old_plan for p in plans) == (not shared or not held), (change, shared, held)  # fmt: skip
@@ -8767,3 +8797,111 @@ def test_the_record_credit_is_spent_and_earned(device, monkeypatch) -> None:
         assert [len(recordings), len(keys), len(replays)] == want, (i, name)
     plans = list(cake_chain._FWD_PLANS.values())
     assert len(plans) == 2 and all(p.ops is not None for p in plans), plans
+
+
+def test_the_record_gate_keeps_a_refused_layout_off_the_plan_key(
+    device, monkeypatch
+) -> None:
+    # under the record gate a kept refusal (here an event a launch wrapper records during the recording) marks its
+    # layout and tape mode refused: the later calls build no plan key and run the general path.  Every call has the
+    # bits of the general path (FWD_PLAN off, without the event)
+    seq_lens, heads = (300, 77, 640), (2, 4)
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=7221)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "FWD_PLAN", False)
+        want = _run(inputs, seq_lens, lpt=False)  # the table caches too
+    launch = cake_backend.launch_stage
+
+    def recording_an_event(stage, grid, values, **kwargs):
+        torch.cuda.Event().record()
+        return launch(stage, grid, values, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "launch_stage", recording_an_event)
+    monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
+    recordings, keys = _counted_plan_steps(monkeypatch)
+    replays = _counted_forward_replays(monkeypatch)
+    # (recordings, plan keys built) after each call: the first forward, the refused recording, two calls with no key
+    for i, counts in enumerate(((0, 0), (1, 1), (1, 1), (1, 1))):
+        _assert_bitwise(_run(inputs, seq_lens, lpt=False), want, OUTPUT_NAMES)
+        assert (len(recordings), len(keys)) == counts, i
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert plan.ops is None and not replays
+    states = [entry[1:] for entry in cake_chain._FWD_SEEN.values()]
+    assert states == [[2, cake_chain._REFUSED]], states
+
+
+def test_the_record_gate_records_again_after_an_overlapped_recording(
+    device, monkeypatch
+) -> None:
+    # under the record gate a recording that another hook overlapped is not kept and leaves its layout and tape mode
+    # unplanned: the next call records (the credit holds a recording) and the call after it replays.  Every call has
+    # the bits of the general path (FWD_PLAN off)
+    seq_lens, heads = (300, 77, 640), (2, 4)
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=7223)
+    # torch.cuda.set_stream as it is now comes back at the end, whatever the test leaves in its place
+    original = torch.cuda.set_stream
+    monkeypatch.setattr(torch.cuda, "set_stream", original)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "FWD_PLAN", False)
+        want = _run(inputs, seq_lens)  # the table caches too
+    launch = cake_backend.launch_stage
+    hooked = []
+
+    def hooking_once(stage, grid, values, **kwargs):
+        if not hooked:  # the other hook, over the recording's own
+            inner = torch.cuda.set_stream
+            hooked.append(inner)
+            torch.cuda.set_stream = lambda stream: inner(stream)
+        return launch(stage, grid, values, **kwargs)
+
+    monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
+    recordings, keys = _counted_plan_steps(monkeypatch)
+    replays = _counted_forward_replays(monkeypatch)
+    runs = [_run(inputs, seq_lens)]  # the layout's first forward: no key
+    with monkeypatch.context() as m:
+        m.setattr(cake_backend, "launch_stage", hooking_once)
+        runs.append(_run(inputs, seq_lens))  # its recording, overlapped
+    assert hooked and hooked[0] is not original, "the hook went in during the recording"
+    assert (len(recordings), len(keys)) == (1, 1) and not cake_chain._FWD_PLANS
+    (entry,) = cake_chain._FWD_SEEN.values()
+    assert entry[1:] == [2, cake_chain._UNPLANNED], entry
+    torch.cuda.set_stream = original  # the other recording ends
+    runs += [_run(inputs, seq_lens) for _ in range(2)]  # a recording, a replay
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert plan.ops is not None and replays == [plan]
+    assert (len(recordings), len(keys)) == (2, 3) and entry[2] == cake_chain._PLANNED
+    for got in runs:
+        _assert_bitwise(got, want, OUTPUT_NAMES)
+
+
+def test_the_record_gate_leaves_an_unready_plan_without_credit(
+    device, monkeypatch
+) -> None:
+    # under the record gate a planned layout and tape mode whose plan is no longer ready (here a new workspace pool),
+    # with less credit than one recording: the call builds its key once, replays nothing, records nothing and leaves
+    # the layout unplanned, so the next call builds no key.  Every call has the bits of the general path (FWD_PLAN
+    # off)
+    seq_lens, heads = (300, 77, 640, 17), (2, 6)
+    inputs = _inputs(seq_lens, heads, torch.bfloat16, device, seed=7225)
+    with monkeypatch.context() as m:
+        m.setattr(cake_chain, "FWD_PLAN", False)
+        want = _run(inputs, seq_lens)
+    monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
+    recordings, keys = _counted_plan_steps(monkeypatch)
+    replays = _counted_forward_replays(monkeypatch)
+    # the first forward, the recording, a replay
+    runs = [_run(inputs, seq_lens) for _ in range(3)]
+    assert (len(recordings), len(keys), len(replays)) == (1, 2, 1)
+    (entry,) = cake_chain._FWD_SEEN.values()
+    assert entry[1:] == [2, cake_chain._PLANNED], entry
+    monkeypatch.setattr(cake_chain, "_POOLED", cake_chain.Workspaces())
+    monkeypatch.setattr(cake_chain, "_FWD_CREDIT", 0)
+    for _ in range(2):  # a key built once, then none
+        runs.append(_run(inputs, seq_lens))
+        assert (len(recordings), len(keys), len(replays)) == (1, 3, 1)
+        assert entry[2] == cake_chain._UNPLANNED
+    assert cake_chain._FWD_CREDIT == 2 * cake_chain.FWD_PLAN_PAYBACK
+    (plan,) = cake_chain._FWD_PLANS.values()
+    assert not plan.ready(plan.meta, plan.stream)
+    for got in runs:
+        _assert_bitwise(got, want, OUTPUT_NAMES)
