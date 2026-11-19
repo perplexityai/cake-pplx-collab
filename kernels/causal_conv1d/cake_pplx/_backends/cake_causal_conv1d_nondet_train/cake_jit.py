@@ -5189,12 +5189,14 @@ def _admits(rule: dict[str, Any], *, arch: str, C: int, S: int | None = None) ->
 # and architecture selects by the rules.
 FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
-        ("bwd", 520, 760): (1, 131072),
+        ("bwd", 520, 608): (1, 24575),
+        ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
     },
     "sm_103a": {
-        ("bwd", 520, 760): (1, 31292),
+        ("bwd", 520, 608): (1, 20479),
+        ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
     },
@@ -5228,7 +5230,26 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # :data:`FALLBACK_ROWS` range.  Rendered from the backward kernel generator's
 # table; every other channel count, route, ``S`` and architecture selects by
 # :data:`FALLBACK_ROWS` and the rules.
-SM_WIDE_ROWS: dict[str, dict[tuple[str, int, int], tuple[tuple[int, int, str], ...]]] = {}
+SM_WIDE_ROWS: dict[str, dict[tuple[str, int, int], tuple[tuple[int, int, str], ...]]] = {
+    "sm_100a": {
+        ("bwd", 520, 608): (
+            (24576, 98303, "cake_causal_conv1d_train_82e874f30406be2334b6"),
+            (98304, 2147483647, "cake_causal_conv1d_train_1ec222b2d908a7d6ea21"),
+        ),
+    },
+    "sm_103a": {
+        ("bwd", 520, 608): (
+            (20480, 31291, "cake_causal_conv1d_train_77692909592ff14be82f"),
+            (31292, 2147483647, "cake_causal_conv1d_train_ccd45ec8667831b67344"),
+        ),
+    },
+    "sm_107a": {
+        ("bwd", 520, 680): (
+            (32768, 131071, "cake_causal_conv1d_train_175b82ccd2309f434dfb"),
+            (131072, 2147483647, "cake_causal_conv1d_train_3293c0e34e70413fb4af"),
+        ),
+    },
+}
 
 
 def sm_wide_segments(
