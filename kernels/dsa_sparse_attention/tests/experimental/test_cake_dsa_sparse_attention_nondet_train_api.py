@@ -1592,7 +1592,8 @@ def test_nope_public_entries_resolve_the_environment_and_reject_other_backends(
 def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
     """What the wrappers hand to ``cake_backend.cake_dsa_sparse_attention_nondet_nope`` / ``_varlen``: every keyword as given,
     ``dkv_direct`` / ``check_dst_map`` resolved from the environment when ``None`` and taken as given otherwise; the
-    flat entry's ``sink`` as given (``None`` by default), and a packed entry refuses a sink before the backend."""
+    flat entry's ``sink`` and ``num_segments`` (1 by default) as given, and the packed entry's ``sink`` as given
+    (``None`` by default)."""
     seen = {}
 
     def flat(q, kv, indices, **kwargs):
@@ -1622,6 +1623,7 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         key_passes=None,
         dkv_acc=None,
         dkv_dst_map=None,
+        num_segments=1,
         dkv_direct=None,
         check_dst_map=False,
         sink=None,
@@ -1629,6 +1631,9 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
     sink = torch.zeros(NUM_HEADS)
     cake_dsa_sparse_attention_nondet_nope(q, kv, idx, sink=sink)
     assert seen["flat"][3]["sink"] is sink
+    cake_dsa_sparse_attention_nondet_nope(q, kv, idx, num_segments=4)
+    assert seen["flat"][3]["num_segments"] == 4
+    assert type(seen["flat"][3]["num_segments"]) is int
     monkeypatch.setenv(public_api.DKV_DIRECT_ENV, "1")
     monkeypatch.setenv(public_api.CHECK_DST_MAP_ENV, "1")
     cake_dsa_sparse_attention_nondet_nope(
@@ -1677,40 +1682,43 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         dkv_direct=False,
         check_dst_map=True,
         check_cu_seqlens=False,
+        sink=None,
     )
     cake_dsa_sparse_attention_nondet_nope_varlen(
         q, kv, idx, cu_q, cu_k, check_cu_seqlens=True
     )
     assert seen["varlen"][7]["check_cu_seqlens"] is True
-    # the packed entry has no sink build: a sink is refused before the backend is reached
-    del seen["varlen"]
-    with pytest.raises(NotImplementedError, match="sink"):
+    # the packed entry hands its sink to the backend as given
+    assert (
         cake_dsa_sparse_attention_nondet_nope_varlen(
             q, kv, idx, cu_q, cu_k, 8, 16, sink=sink
         )
-    assert "varlen" not in seen
+        == "varlen"
+    )
+    assert seen["varlen"][7]["sink"] is sink
 
 
-def test_nope_step_entries_forward_the_sink_and_packed_steps_refuse_it(monkeypatch):
-    """The flat step pair hands ``sink`` to the backend's ``forward_nope`` / ``backward_nope`` as given (``None`` by
-    default, so the step backward's return is the backend's ``(dq, dkv)``); the packed step pair has no sink build and
-    refuses a sink before the backend is reached."""
+def test_nope_step_entries_forward_the_sink(monkeypatch):
+    """The flat and the packed step pairs hand ``sink`` to the backend's ``forward_nope`` / ``forward_nope_varlen``
+    / ``backward_nope`` as given (``None`` by default, so the step backward's return is the backend's ``(dq,
+    dkv)``); the packed step backward hands the documents' segment count (``len(cu_seqlens_k) - 1``) with it."""
     seen = {}
 
     def forward_nope(q, kv, indices, **kwargs):
         seen["forward"] = kwargs
         return "forward"
 
+    def forward_nope_varlen(q, kv, indices, cu_q, cu_k, **kwargs):
+        seen["varlen_forward"] = kwargs
+        return "varlen_forward"
+
     def backward_nope(q, kv, indices, out, o_lo, lse, dout, **kwargs):
         seen["backward"] = kwargs
         return "backward"
 
-    def refuse(*args, **kwargs):
-        raise AssertionError("a packed step with a sink must not reach the backend")
-
     monkeypatch.setattr(cake_backend, "forward_nope", forward_nope)
     monkeypatch.setattr(cake_backend, "backward_nope", backward_nope)
-    monkeypatch.setattr(cake_backend, "forward_nope_varlen", refuse)
+    monkeypatch.setattr(cake_backend, "forward_nope_varlen", forward_nope_varlen)
     q, kv, idx = _nope_host_inputs()
     out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
     lse = torch.zeros(8, NUM_HEADS)
@@ -1728,13 +1736,62 @@ def test_nope_step_entries_forward_the_sink_and_packed_steps_refuse_it(monkeypat
     cu_k = torch.tensor([0, 16], dtype=torch.int32)
     lengths = torch.full((8,), 5, dtype=torch.int32)
     varlen_forward, varlen_backward = _step_entries("nope_varlen")
-    with pytest.raises(NotImplementedError, match="sink"):
-        varlen_forward(q, kv, idx, cu_q, cu_k, sink=sink)
-    with pytest.raises(NotImplementedError, match="sink"):
-        varlen_backward(
-            q, kv, idx, out, out, lse, out, cu_k, topk_length=lengths, sink=sink
-        )
-    assert seen == {}
+    assert varlen_forward(q, kv, idx, cu_q, cu_k) == "varlen_forward"
+    assert seen["varlen_forward"]["sink"] is None
+    varlen_forward(q, kv, idx, cu_q, cu_k, sink=sink)
+    assert seen["varlen_forward"]["sink"] is sink
+    assert (
+        varlen_backward(q, kv, idx, out, out, lse, out, cu_k, topk_length=lengths)
+        == "backward"
+    )
+    assert seen["backward"]["sink"] is None and seen["backward"]["num_segments"] == 1
+    varlen_backward(
+        q, kv, idx, out, out, lse, out, cu_k, topk_length=lengths, sink=sink
+    )
+    assert seen["backward"]["sink"] is sink
+
+
+def test_nope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
+    """The flat NoPE entry and the NoPE step backward hand ``num_segments`` to the backend as a Python ``int``: 1 by
+    default (the one-segment plan), the caller's count when given, with every other keyword as before; a bad count
+    (``bool``, a float, a string, a tensor, below 1) raises ``ValueError`` naming it before the backend."""
+    seen = {}
+
+    def flat(q, kv, indices, **kwargs):
+        seen["flat"] = kwargs
+        return "flat"
+
+    def backward_nope(*args, **kwargs):
+        seen["backward"] = (len(args), kwargs)
+        return "backward"
+
+    monkeypatch.setattr(cake_backend, "cake_dsa_sparse_attention_nondet_nope", flat)
+    monkeypatch.setattr(cake_backend, "backward_nope", backward_nope)
+    monkeypatch.delenv(public_api.DKV_DIRECT_ENV, raising=False)
+    monkeypatch.delenv(public_api.CHECK_DST_MAP_ENV, raising=False)
+    q, kv, idx = _nope_host_inputs()
+    assert cake_dsa_sparse_attention_nondet_nope(q, kv, idx) == "flat"
+    assert seen["flat"]["num_segments"] == 1
+    cake_dsa_sparse_attention_nondet_nope(q, kv, idx, num_segments=8, key_passes=2)
+    flat_kwargs = seen["flat"]
+    assert flat_kwargs["num_segments"] == 8 and flat_kwargs["key_passes"] == 2
+    assert type(flat_kwargs["num_segments"]) is int
+    _, step_backward = _step_entries("nope")
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    assert step_backward(q, kv, idx, out, out, lse, out) == "backward"
+    default = seen["backward"]
+    assert default[0] == 7 and default[1]["num_segments"] == 1
+    step_backward(q, kv, idx, out, out, lse, out, num_segments=3)
+    assert seen["backward"] == (7, dict(default[1], num_segments=3))
+    assert type(seen["backward"][1]["num_segments"]) is int
+    for bad in (0, -1, True, 2.0, "2", torch.tensor(2)):
+        seen.clear()
+        with pytest.raises(ValueError, match="num_segments"):
+            cake_dsa_sparse_attention_nondet_nope(q, kv, idx, num_segments=bad)
+        with pytest.raises(ValueError, match="num_segments"):
+            step_backward(q, kv, idx, out, out, lse, out, num_segments=bad)
+        assert seen == {}
 
 
 def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
@@ -1746,9 +1803,8 @@ def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
     dkv)``."""
     _require_nope_program(backward=True)
     arch = cake_backend.arch_for(torch.device("cuda"))
-    if arch not in cake_jit.stage_arches(
-        cake_jit.NOPE_SINK_FORWARD_STAGE, NOPE_PROGRAM
-    ):
+    served = cake_jit.stage_for(cake_jit.NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM)
+    if arch not in cake_jit.stage_arches(served, NOPE_PROGRAM):
         pytest.skip(f"no sink build for {arch}")
     step_forward, step_backward = _step_entries("nope")
 

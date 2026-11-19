@@ -15,8 +15,9 @@ this package").  The `sm_107a`
 libraries need CUDA 13.5 or newer (`min_cuda` 13.5 in their `build.json`
 entries).  On `sm_100a` the libraries of the stages `fwd`, `bwd_main`,
 `bwd_main_pass`, `bwd_redo` and `bwd_compact`, each with its `nope_` form,
-need CUDA 12.9 or newer (`min_cuda` 12.9); the other `sm_100a` libraries
-need 12.8.  The feature does not participate in automatic backend
+and of the NoPE sink build `nope_fwd_sink` need CUDA 12.9 or newer
+(`min_cuda` 12.9); the other `sm_100a` libraries, the sink-gradient stage
+`nope_bwd_dsink` included, need 12.8.  The feature does not participate in automatic backend
 selection, autotuning or trace-apply.  Its libraries are loaded prebuilt from
 `aot/` when the package ships them and JIT-built through the package's JIT
 shim from `build.json` otherwise (see "Layout of this package").
