@@ -31,7 +31,8 @@ and workspaces:
   of the four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial sums.
 
 The routes exist at hidden 5120 on sm_100a, sm_103a and sm_107a (each token-owner twin on the architectures of its
-base form: sm_107a's backward runs the ``dot_ao8_l2l`` form where the others run ``dot_ao8`` and its group-row form);
+base form: sm_107a's backward runs the ``_iu`` forms of ``ao22_rae7_pd1_ntr`` and ``dot_ao8_l2l`` (the idle-lane
+unit quotient, the same bits) where the others run ``ao22_rae7_pd1_ntr``, ``dot_ao8`` and its group-row form);
 the nondeterministic records are the deterministic ones under the nondeterministic prefix.
 
 On sm_107a the three collapse records are that architecture's own forms (:data:`COLLAPSE_RECORDS`), each the
@@ -90,7 +91,8 @@ TOKEN_FORMS = (
     "dot_ao8",
     "dot_ao8_trows_dyn",
     "rt64",
-    "dot_ao8_l2l",
+    "ao22_rae7_pd1_ntr_iu",
+    "dot_ao8_l2l_iu",
 )
 # The standalone VJP's dynamic shared memory: 8 warps x 6400 bytes of staged dU / X words + 256 bytes of partial sums.
 VJP_SMEM = 8 * 6400 + 256
