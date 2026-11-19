@@ -502,13 +502,25 @@ def test_the_rule_never_grows_the_plan() -> None:
     assert changed > 0
 
 
+def _saved_state_bytes(backend, S: int, H: int, p, save_mode: str) -> int:
+    """Bytes of the segment states in the saved set of plan ``p``: two FP32
+    ``[128, 128]`` blocks per segment and head in the tape set, three in the
+    light set where it saves them."""
+    block = H * backend.D * backend.D * 4
+    if save_mode == "tape":
+        return 2 * p.NSEG * block
+    return 3 * p.NSEG * block if backend.seg_states_saved(S, p.NSEG) else 0
+
+
 @pytest.mark.parametrize("name", PACKAGES, ids=PACKAGE_IDS)
 def test_the_memory_of_the_measured_rows_never_grows(name) -> None:
     """On every measured row (its gate and l2n modes) the token-aware plan needs
     at most the occupancy plan's bytes: the saved set and its segment states
     (light and tape), the tables, the forward-only and the backward arenas, and
     every total of the memory report, whose segment count is the plan's; the
-    rows that change the plan have fewer segment blocks."""
+    rows that change the plan have fewer segment blocks.  Each rule's tables are
+    its own plan's, and its saved set differs from the other rule's by exactly
+    their tables and segment states."""
     backend = BACKEND[name]
     q = {"sm_count": SM, "arch": ARCH}
     occ = {**q, "segment_rule": "occupancy"}
@@ -523,18 +535,33 @@ def test_the_memory_of_the_measured_rows_never_grows(name) -> None:
         "bwd_total",
         "replay_total",
     )
-    smaller = 0
+    smaller = fewer_tables = 0
     for spec, _p_old, arm in MEASURED_ROWS:
         S, N, H, gate, l2n = _row(spec)
         tokens = backend.plan(S, N, H, SM, ARCH, gate=gate, l2n=l2n)
+        occupancy = backend.plan(
+            S, N, H, SM, ARCH, gate=gate, l2n=l2n, segment_rule="occupancy"
+        )
         mode = {"gate": gate, "l2n": l2n}
-        assert backend.tables_bytes(S, N, H, **q) <= backend.tables_bytes(
-            S, N, H, **occ
-        ), spec
+        # each rule's tables are its own plan's (the block table of its NSEG)
+        tables = backend.tables_bytes(S, N, H, **q)
+        tables_occ = backend.tables_bytes(S, N, H, **occ)
+        assert tables == tokens.table_words() * 4, spec
+        assert tables_occ == occupancy.table_words() * 4, spec
+        assert tables <= tables_occ, spec
+        fewer_tables += tables < tables_occ
         for save_mode in backend.SAVE_MODES:
             kw = {"save_mode": save_mode, "l2n": l2n}
             mine = backend.saved_bytes(S, H, N, **kw, **q)
-            assert mine <= backend.saved_bytes(S, H, N, **kw, **occ), (spec, kw)
+            theirs = backend.saved_bytes(S, H, N, **kw, **occ)
+            assert mine <= theirs, (spec, kw)
+            # the two sets differ by their own plans' tables and segment states
+            states = _saved_state_bytes(backend, S, H, tokens, save_mode)
+            states_occ = _saved_state_bytes(backend, S, H, occupancy, save_mode)
+            assert mine - theirs == tables - tables_occ + states - states_occ, (
+                spec,
+                kw,
+            )
             for backward in (False, True):
                 kw = {"backward": backward, "save_mode": save_mode, **mode}
                 mine = backend.workspace_bytes(S, N, H, **kw, **q)
@@ -544,13 +571,14 @@ def test_the_memory_of_the_measured_rows_never_grows(name) -> None:
             mine = backend.memory_report(S, N, H, save_mode, **mode, **q)
             theirs = backend.memory_report(S, N, H, save_mode, **mode, **occ)
             assert mine["num_segments"] == tokens.NSEG, spec
+            assert theirs["num_segments"] == occupancy.NSEG, spec
             assert mine["seg_states_saved"] == theirs["seg_states_saved"], spec
             for key in totals:
                 assert mine[key] <= theirs[key], (spec, save_mode, key)
             if arm != "=":
                 assert mine["num_segments"] < theirs["num_segments"], spec
                 assert mine["seg_block_bytes"] < theirs["seg_block_bytes"], spec
-    assert smaller > 0
+    assert smaller > 0 and fewer_tables > 0
 
 
 @pytest.mark.parametrize("name", PACKAGES, ids=PACKAGE_IDS)
