@@ -15782,27 +15782,36 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
 
 def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     """The FP32 rows of the deterministic package's 212-SM ``sm_107a`` token ranges (its ``ROW_RULE_RANGES_BY_SM``,
-    version 0.3.5), as this package runs them on a 212-SM ``sm_107a`` part: no row of this package's tables
-    (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K, deterministic-program,
-    input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's program at the ends of
-    each range.  The BF16 ranges of that table (the K-major rows of version 0.3.7):
-    test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7."""
+    version 0.3.5, with the ranges of version 0.3.8), as this package runs them on a 212-SM ``sm_107a`` part: no row of
+    this package's tables (``plan_atomic_gemm`` keeps each weight gradient on the deterministic program; no stream-K,
+    deterministic-program, input-gradient or nvjet row), so each row runs the deterministic plan, which is the range's
+    program at the ends of each range (by range: the T 12288 ranges of version 0.3.8 run the 256-row programs).  The
+    BF16 ranges of that table (the K-major rows of version 0.3.7):
+    test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7; the sm_100a and sm_103a parts of that table (version
+    0.3.8): test_k1_rows_follow_the_deterministic_ranges_of_0_3_8."""
     bf16, f32 = torch.bfloat16, torch.float32
     arch, sms = "sm_107a", 212
     l2 = K1_DGRAD_PARTS[(arch, sms)]
     prefix = "dense_proj_det_gemm_"
-    # (d_in, d_out) -> the deterministic program inside the range
+    # (d_in, d_out) -> {the low end of a range: the deterministic program inside that range}
+    sks = "nn_n256_f32_v8_ef_sks_sb2_pro7"
+    v8 = "nn_n256_f32_v8_pro15"
     wgrad_rows = {
-        (12288, 4096): "nn_n256_f32_v8_ef_sks_sb2_pro7",
-        (4096, 12288): "nn_n256_f32_v8_ef_sks_sb2_pro7",
-        (17408, 5120): "nn_n256_f32_v8_pro15",
-        (5120, 17408): "nn_n256_f32_v8_pro15",
-        (16384, 6144): "nn_n256_f32_v8_pro15",
-        (6144, 12288): "nn_n256_f32_v8_pro15",
-        (12288, 6144): "nn_n256_f32_v8_pro15",
+        (12288, 4096): {4096: sks},
+        (4096, 12288): {4096: sks},
+        (17408, 5120): {4096: v8, 12288: "nn_n256_m256_f32_ht_tma1_pro7"},
+        (5120, 17408): {4096: v8, 12288: "nn_n256_m256_f32_ht_tma1_pro7"},
+        (16384, 6144): {4096: v8, 12288: "nn_n256_m256_f32_tma1_pro7"},
+        (6144, 12288): {4096: v8},
+        (12288, 6144): {4096: v8},
     }
-    dgrad_rows = {(16384, 6144): "kn_n256_f32_v8_ht_pro7"}
-    assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {(arch, sms)}
+    dgrad_rows = {(16384, 6144): {8192: "kn_n256_f32_v8_ht_pro7"}}
+    assert set(det_backend.ROW_RULE_RANGES_BY_SM) == {
+        (arch, sms),
+        ("sm_103a", 148),
+        ("sm_103a", 152),
+        ("sm_100a", 152),
+    }
     table = {
         key: ranges
         for key, ranges in det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)].items()
@@ -15813,7 +15822,14 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
     for key, ranges in table.items():
         d_in = key[6]
         d_out = key[8] if key[7] is None else key[7]
-        for T in sorted({t for lo, hi, _ in ranges for t in (lo, hi)}):
+        programs = (wgrad_rows if key[7] is None else dgrad_rows)[(d_in, d_out)]
+        assert sorted(programs) == [lo for lo, _hi, _ in ranges], key
+        # the ends of each range, and on 4096 -> 12288 also the ends of its version 0.3.5 range (8192 - 16231)
+        inner = (8192, 16231) if key[7] is None and (d_in, d_out) == (4096, 12288) else ()
+        assert all(any(lo <= t <= hi for lo, hi, _ in ranges) for t in inner), key
+        ends = {(lo, t) for lo, hi, _ in ranges for t in (lo, hi)}
+        ends |= {(lo, t) for lo, hi, _ in ranges for t in inner if lo <= t <= hi}
+        for lo_of, T in sorted(ends):
             what = (key, T)
             if key[7] is None:
                 G = torch.empty(T, d_out, dtype=bf16)
@@ -15851,7 +15867,7 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
                     transposed_out=False,
                     arch=arch,
                 )[0]
-                assert det_plan.template == prefix + wgrad_rows[(d_in, d_out)], (
+                assert det_plan.template == prefix + programs[lo_of], (
                     what,
                     det_plan.template,
                 )
@@ -15877,10 +15893,281 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
                     == ()
                 ), what
                 det_plan = _plan_of_knobs(G, W, out, arch, sms, ())
-                assert det_plan.template == prefix + dgrad_rows[(d_in, d_out)], (
+                assert det_plan.template == prefix + programs[lo_of], (
                     what,
                     det_plan.template,
                 )
+
+
+#: The FP32 weight-gradient rows of the 212-SM ``sm_107a`` ranges version 0.3.8 of the deterministic package added or
+#: extended, at the token counts that version measured in them, ``(d_in, d_out, T)`` -> the deterministic program there.
+DET_212_F32_WGRAD_038 = {
+    (4096, 12288, 4096): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+    (4096, 12288, 16384): "nn_n256_f32_v8_ef_sks_sb2_pro7",
+    (17408, 5120, 12288): "nn_n256_m256_f32_ht_tma1_pro7",
+    (5120, 17408, 4096): "nn_n256_f32_v8_pro15",
+    (5120, 17408, 12288): "nn_n256_m256_f32_ht_tma1_pro7",
+    (16384, 6144, 6208): "nn_n256_f32_v8_pro15",
+    (16384, 6144, 8128): "nn_n256_f32_v8_pro15",
+    (16384, 6144, 12288): "nn_n256_m256_f32_tma1_pro7",
+    (12288, 6144, 4096): "nn_n256_f32_v8_pro15",
+}
+#: The row of ``DET_212_F32_WGRAD_038`` whose program is the program of the deterministic plan before version 0.3.8:
+#: the o_proj weight gradient at T 12288 splits the K of each of its 26 tail tiles three ways, 78 units of 64 K blocks,
+#: ``(d_in, d_out, T)`` -> ``(tail_tiles, sk_units, iters_per_unit)`` of the plan.
+DET_212_F32_WGRAD_038_SPLIT = {(16384, 6144, 12288): (26, 78, 64)}
+#: The deterministic package's single-CTA program of its sm_100a and sm_103a input-gradient ranges (version 0.3.8).
+DET_DGRAD_RANGE_PROGRAM = "kn_n128_f32_tma2_s4_c1"
+#: The rows of the deterministic package's 148-SM ``sm_100a`` part rules without a range of version 0.3.8 on a part
+#: that has such ranges, ``(arch, SM count) -> ((K, N), ...)``: they keep the deterministic plan of version 0.3.7 there.
+DET_DGRAD_ROWS_WITHOUT_RANGE = {
+    ("sm_103a", 148): ((5120, 128), (8192, 128)),
+    ("sm_100a", 152): ((8192, 128),),
+}
+#: The FP32 entries of :data:`K1_DGRAD_RULES_BY_SM` of the rows of the deterministic package's input-gradient ranges
+#: (version 0.3.8) at a token count outside the row's ranges, ``(arch, SM count, K, N, T)``: there the entry's program
+#: runs and the deterministic plan runs its plan of version 0.3.7.
+K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES = {
+    ("sm_100a", 152, 6144, 128, 16231),
+    ("sm_100a", 152, 6144, 128, 16384),
+    ("sm_100a", 152, 8192, 128, 16172),
+    ("sm_100a", 152, 8192, 128, 16384),
+}
+
+
+def _det_dgrad_before(K, N):
+    """The program of the deterministic plan of the sm_100a / sm_103a FP32 input gradient
+    ``out[T, K] = G[T, N] @ W[N, K]`` outside the ranges of version 0.3.8 (its plan of version 0.3.7)."""
+    return "kn_n128_f32_tma1_pro7" if (K, N) == (6144, 128) else "kn_n256_f32_tma2_pd2_pro15"
+
+
+def test_k1_rows_follow_the_deterministic_ranges_of_0_3_8(monkeypatch):
+    """The ranges version 0.3.8 of the deterministic package added (its ``ROW_RULE_RANGES_BY_SM``), as this package runs
+    them.  The FP32 input gradients of its 148-SM ``sm_103a`` ranges: this package has no input-gradient row on that
+    part (no row of :data:`K1_DGRAD_RULES_BY_SM`, :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` or
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM`, no knobs), so the call binds the deterministic plan: the single-CTA program
+    ``kn_n128_f32_tma2_s4_c1`` at the ends and the middle of each range, the plan of version 0.3.7 one token count
+    outside.  Its 152-SM ``sm_103a`` ranges (16172 to 16384 tokens) and 152-SM ``sm_100a`` ranges (16172 to 16384
+    tokens, ``5120 -> 128`` at 16172 and 16384 alone, ``6144 -> 128`` at 16172 alone): where the row of
+    :data:`K1_DGRAD_RULES_BY_SM` names that program inside a range its plan is the deterministic plan, field for field;
+    at the token counts without such a row (no knobs) the call binds the deterministic plan, that program inside a range
+    and the plan of version 0.3.7 outside.  At the entries outside the ranges
+    (``K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES``) the call runs the entry's program and the deterministic plan the plan of
+    version 0.3.7, as before version 0.3.8; so do the rows without a range on the part
+    (``DET_DGRAD_ROWS_WITHOUT_RANGE``) at 16172, 16231 and 16384 tokens.  The FP32 weight gradients of its 212-SM
+    ``sm_107a`` ranges at the token counts version 0.3.8 measured in the ranges it added or extended
+    (``DET_212_F32_WGRAD_038``): no row of this package's tables (``plan_atomic_gemm`` keeps each on the deterministic
+    program; no stream-K or deterministic-program row), so each runs the deterministic plan, the range's program, and
+    the o_proj weight gradient at T 12288 its three-way K split (``DET_212_F32_WGRAD_038_SPLIT``)."""
+    bf16, f32 = torch.bfloat16, torch.float32
+    prefix = det_backend._TEMPLATE_PREFIX
+    parts = {
+        part: table
+        for part, table in det_backend.ROW_RULE_RANGES_BY_SM.items()
+        if part[0] in ("sm_100a", "sm_103a")
+    }
+    assert {part: len(table) for part, table in parts.items()} == {
+        ("sm_103a", 148): 8,
+        ("sm_103a", 152): 10,
+        ("sm_100a", 152): 9,
+    }
+    assert set(DET_DGRAD_ROWS_WITHOUT_RANGE) <= set(parts)
+    assert ("sm_103a", 148) not in cake_backend.K1_DGRAD_RULES_BY_SM
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+
+    def bound_plan(G, W, out):
+        cake_backend._K1_DET_CACHE.clear()
+        assert (
+            cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+        )
+        ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert key[2][0] == ("dgrad",) and entry.k1 is not None
+        return entry.plan
+
+    checked = 0
+    outside_entries = set()
+    for (arch, sms), table in sorted(parts.items()):
+        rows = cake_backend.K1_DGRAD_RULES_BY_SM.get((arch, sms), {})
+        keyed = []
+        for key, ranges in sorted(table.items()):
+            assert key[:6] == (arch, False, True, True, False, False) and key[8] is None, key
+            keyed.append((key[6], key[7], ranges))  # out[T, K] = G[T, N] @ W[N, K]
+        for K, N in DET_DGRAD_ROWS_WITHOUT_RANGE.get((arch, sms), ()):
+            assert (arch, False, True, True, False, False, K, N, None) not in table, (arch, sms, K, N)
+            keyed.append((K, N, ()))
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            for K, N, ranges in keyed:
+                W = torch.empty(N, K, dtype=bf16)
+                # the ends and the middle of each range, one token count outside each end, the token counts of the
+                # row's entries in K1_DGRAD_RULES_BY_SM, and 16172, 16231 and 16384 on 152 SMs and on a row without a
+                # range
+                tokens = {T for lo, hi, _ in ranges for T in (lo - 1, lo, (lo + hi) // 2, hi, hi + 1)}
+                tokens |= {T for k, n, T, dt in rows if (k, n, dt) == (K, N, "f32")}
+                if sms == 152 or not ranges:
+                    tokens |= set(K1_SCREEN_TOKENS)
+                for T in sorted(tokens):
+                    what = (arch, sms, K, N, T)
+                    inside = any(lo <= T <= hi for lo, hi, _ in ranges)
+                    G = torch.empty(T, N, dtype=bf16)
+                    out = torch.empty(T, K, dtype=f32)
+                    plan, *_, reason = cake_backend.plan_atomic_gemm(
+                        G, W, out, transposed_out=False, arch=arch, sm_count=sms
+                    )
+                    assert plan is None, (what, reason)
+                    row = (K, N, T, "f32")
+                    for rules in (
+                        cake_backend.K1_DGRAD_PROGRAM_RULES_BY_SM,
+                        cake_backend.K1_DGRAD_NVJET_RULES_BY_SM,
+                    ):
+                        assert row not in rules.get((arch, sms), {}), what
+                    knobs = cake_backend.k1_dgrad_knobs(
+                        arch=arch, sm_count=sms, K=K, N=N, T=T, out_f32=True
+                    )
+                    program = rows.get(row)
+                    if program is None:
+                        assert knobs == (), what
+                    else:
+                        assert sms == 152 and program == DET_DGRAD_RANGE_PROGRAM, what
+                        assert knobs == cake_backend.k1_program_knobs(program), what
+                    routed = _plan_of_knobs(G, W, out, arch, sms, knobs)
+                    default = _plan_of_knobs(G, W, out, arch, sms, ())
+                    det_want = DET_DGRAD_RANGE_PROGRAM if inside else _det_dgrad_before(K, N)
+                    assert default.template == prefix + det_want, (what, default.template)
+                    if program is None or inside:
+                        assert routed == default, (what, routed.template, default.template)
+                        want = det_want
+                    else:
+                        # the entry's program outside the deterministic ranges, as before version 0.3.8
+                        assert what in K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES, what
+                        assert routed.template == prefix + program, (what, routed.template)
+                        outside_entries.add(what)
+                        want = program
+                    # the call binds the deterministic package's plan of the row with the row's knobs
+                    bound = bound_plan(G, W, out)
+                    assert bound == det_backend._k1_plan(
+                        G, W, out, transposed_out=False, knobs=dict(knobs)
+                    )[0], what
+                    assert bound.template == prefix + want, (what, bound.template)
+                    checked += 1
+    assert outside_entries == K1_DGRAD_ENTRIES_OUTSIDE_DET_RANGES
+    # five token counts around each range of the 8 + 10 sm_103a rows and the seven sm_100a rows of 16172 to 16384
+    # tokens, and 16231 inside each of those 17 ranges on 152 SMs; on 152-SM sm_100a parts 5120 -> 128 at 16171 to
+    # 16173, 16231 and 16383 to 16385 (7) and 6144 -> 128 at 16171 to 16173, 16231 and 16384 (5); the three rows
+    # without a range at 16172, 16231 and 16384
+    assert checked == 5 * (8 + 10 + 7) + (10 + 7) + 7 + 5 + 3 * 3
+    # the FP32 weight gradients of the 212-SM sm_107a ranges at the token counts version 0.3.8 measured in them
+    arch, sms = "sm_107a", 212
+    l2 = K1_DGRAD_PARTS[(arch, sms)]
+    for (d_in, d_out, T), program in sorted(DET_212_F32_WGRAD_038.items()):
+        what = (d_in, d_out, T)
+        key = (arch, True, True, True, False, False, d_in, None, d_out)
+        assert any(
+            lo <= T <= hi for lo, hi, _ in det_backend.ROW_RULE_RANGES_BY_SM[(arch, sms)][key]
+        ), what
+        G = torch.empty(T, d_out, dtype=bf16)
+        X = torch.empty(T, d_in, dtype=bf16)
+        out = torch.empty(d_out, d_in, dtype=f32)
+        plan, *_, reason = cake_backend.plan_atomic_gemm(
+            X.t(), G, out, transposed_out=True, arch=arch, sm_count=sms
+        )
+        assert plan is None, (what, reason)
+        assert not any(
+            (d_in, d_out, T, "f32") in rows
+            for rows in cake_backend.K1_WGRAD_SK_RULES_BY_SM.values()
+        ), what
+        assert (
+            cake_backend.k1_wgrad_det_knobs(
+                arch=arch, sm_count=sms, d_in=d_in, d_out=d_out, T=T, out_f32=True
+            )
+            == ()
+        ), what
+        A, B, transposed = det_backend.wgrad_views(G, X, arch=arch, out_f32=True)
+        assert not transposed, what
+        det_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+            A, B, out, sm_count=sms, l2_bytes=l2, transposed_out=False, arch=arch
+        )[0]
+        assert det_plan.template == prefix + program, (what, det_plan.template)
+        if what in DET_212_F32_WGRAD_038_SPLIT:
+            split = (det_plan.tail_tiles, det_plan.sk_units, det_plan.iters_per_unit)
+            assert split == DET_212_F32_WGRAD_038_SPLIT[what], (what, split)
+
+
+def test_gpu_k1_rows_follow_the_deterministic_ranges_of_0_3_8(record_property):
+    """On a 148- or 152-SM ``sm_103a`` part, a 152-SM ``sm_100a`` part or a 212-SM ``sm_107a`` part: the rows of the
+    ranges version 0.3.8 of the deterministic package added, through this package's entry points.  On ``sm_103a`` and
+    ``sm_100a`` the FP32 input gradient of each range row at both ends of each of the part's ranges of the row binds the
+    deterministic package's single-CTA program ``kn_n128_f32_tma2_s4_c1``; on the 212-SM ``sm_107a`` part each FP32
+    weight gradient of ``DET_212_F32_WGRAD_038`` binds the deterministic plan (no plan of this package's split tables),
+    the range's program.  Each meets the naive BF16 tier against FP64 over the draws, the first draw launched
+    ``1 + RERUNS`` times into NaN-poisoned outputs.  Another part skips."""
+    device, arch, sms = _part_or_skip()
+    ranges = (
+        det_backend.ROW_RULE_RANGES_BY_SM.get((arch, sms), {})
+        if arch in ("sm_100a", "sm_103a")
+        else {}
+    )
+    if not ranges and (arch, sms) != ("sm_107a", 212):
+        pytest.skip(f"no range of version 0.3.8 of the deterministic package on {arch} with {sms} SMs")
+    prefix = det_backend._TEMPLATE_PREFIX
+    ran = 0
+    for key, bands in sorted(ranges.items()):
+        K, N = key[6], key[7]
+        for T in sorted({t for lo, hi, _rule in bands for t in (lo, hi)}):
+            what = f"dgrad {K} {N} {T} f32"
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            _n5_judge_call(
+                record_property,
+                f"dgrad_{K}_{N}_{T}_f32",
+                SEED + 183,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_projection_dgrad,
+                lambda G, W: G @ W,
+                ((T, N), (N, K)),
+                (T, K),
+                torch.float32,
+            )
+            ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+            assert entry.k1 is not None, what
+            assert entry.plan.template == prefix + DET_DGRAD_RANGE_PROGRAM, (
+                what,
+                entry.plan.template,
+            )
+            ran += 1
+    if (arch, sms) == ("sm_107a", 212):
+        for (d_in, d_out, T), program in sorted(DET_212_F32_WGRAD_038.items()):
+            what = f"wgrad {d_in} {d_out} {T} f32"
+            cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+            _n5_judge_call(
+                record_property,
+                f"wgrad_{d_in}_{d_out}_f32_{T}",
+                SEED + 183,
+                device,
+                cake_backend.cake_dense_gemm_nondet_train_projection_wgrad,
+                lambda G, X: G.t() @ X,
+                ((T, d_out), (T, d_in)),
+                (d_out, d_in),
+                torch.float32,
+            )
+            ((_, entry),) = cake_backend._K1_ATOMIC_CACHE.items()
+            assert entry.plan is None and entry.det_plan is not None, what
+            assert entry.det_plan.template == prefix + program, (
+                what,
+                entry.det_plan.template,
+            )
+            # the three-way split runs the program of the plan before: check the split itself
+            split = DET_212_F32_WGRAD_038_SPLIT.get((d_in, d_out, T))
+            if split is not None:
+                plan = entry.det_plan
+                got = (plan.tail_tiles, plan.sk_units, plan.iters_per_unit)
+                assert got == split, (what, got)
+            ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"DET_RANGES_038 {arch} sm_count={sms}: {ran} rows ran the deterministic plan")
+    assert ran
 
 
 def test_k1_program_knobs_are_planner_keywords(monkeypatch):

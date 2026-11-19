@@ -83,7 +83,8 @@ deterministic package's token tiers and 212-SM ranges of its version 0.3.7 at sm
 in a fixed order.  The K1 forward rows of
 :data:`K1_FORWARD_RULES_BY_SM` (exact token counts on 148-SM ``sm_100a`` and 152-SM ``sm_100a`` / ``sm_103a`` parts)
 run another plan of those programs (the single-CTA program, every tile's whole K in one CTA, or another named
-program), the input-gradient rows of :data:`K1_DGRAD_RULES_BY_SM` another named program of that package and those of
+program), the input-gradient rows of :data:`K1_DGRAD_RULES_BY_SM` a named program of that package (where that package's
+token ranges of its version 0.3.8 cover the row and token count, its own plan runs the same program) and those of
 :data:`K1_DGRAD_PROMO_RANGES_BY_SM` its plan with another TMA L2 promotion (the deterministic plan's bits).  The K1 forward rows of :data:`K1_FORWARD_PROGRAM_RULES_BY_SM` run this package's one-wave
 forward program and the input-gradient rows of :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` this package's input-gradient
 program: both add each output element's whole K in one ascending FP32 chain, with the deterministic plan's bits.  The
@@ -289,7 +290,8 @@ ROUTES: dict[str, str] = {
     "k1_kn": "det",  # input gradient: whole tiles or a fixed-order K split of the tail, two ways or, on some rows
     # with K > 8192, three or four partials per tail tile (the sm_107a rules of the 6144 -> 12288 input gradient
     # wherever the tail admits that split, the deterministic package's tiers and ranges of its version 0.3.7 at small
-    # token counts); the rows of K1_DGRAD_RULES_BY_SM: another program of the deterministic package, of
+    # token counts); the rows of K1_DGRAD_RULES_BY_SM: a named program of the deterministic package (inside that
+    # package's 0.3.8 token ranges, the program of its own plan), of
     # K1_DGRAD_PROMO_RANGES_BY_SM: its plan with another TMA L2 promotion; the same bits
     "k1_nk": "det",
     "k1_nn": "atomic",  # weight gradient: split-K over the ragged token count; the rows of the tables repeat bit for
@@ -1733,8 +1735,10 @@ def k1_program_knobs(program: str) -> tuple:
     return tuple(sorted(knobs.items()))
 
 
-#: The K1 input-gradient rows of this package that run another program of the deterministic package than its own
-#: plan of the row, ``(arch, sm_count) -> {(K, N, T, out_dtype): program}``: on a part of exactly ``sm_count`` SMs,
+#: The K1 input-gradient rows of this package that run a named program of the deterministic package (another than
+#: its own plan of the row, except where that package's part rules of its version 0.3.4 on 148-SM ``sm_100a`` parts or
+#: its token ranges of its version 0.3.8 cover the row and token count: there its own plan runs the same program),
+#: ``(arch, sm_count) -> {(K, N, T, out_dtype): program}``: on a part of exactly ``sm_count`` SMs,
 #: :func:`cake_dense_gemm_nondet_train_projection_dgrad` of ``G[T, N]`` and ``W[N, K]`` (both with a unit stride on
 #: their last axis) into an ``out[T, K]`` of ``out_dtype`` (``"bf16"`` or ``"f32"``) at exactly these ``K``, ``N``
 #: and ``T`` runs the deterministic package's program ``program`` (its template without the ``dense_proj_det_gemm_``
