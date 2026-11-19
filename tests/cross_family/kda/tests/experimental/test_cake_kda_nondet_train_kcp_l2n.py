@@ -1783,9 +1783,12 @@ def test_l2n_stage_order(monkeypatch) -> None:
         c.stage = lambda name, **extra: seq.append((name, extra.get("saved", "-")))
         return c
 
-    # the registry's l2n keys of the records below: a twin serves the fused mode only, whatever its name
-    plain = {"l2n": ["off", "fallback", "fused"]}
-    twin = {"l2n": ["fused"]}
+    # the registry's keys of the records below: a twin serves the fused mode only and reads the raw rows (its logical
+    # names hold q_raw / k_raw), whatever its name; a fused-mode record that reads the rows another program normalized
+    # (the raw gate's kb-once replay prep) is no twin, nor is a plain record
+    plain = {"l2n": ["off", "fallback", "fused"], "logical": dict(NORMALIZED_ROWS)}
+    twin = {"l2n": ["fused"], "logical": dict(RAW_ROWS)}
+    reader = {"l2n": ["fused"], "logical": dict(NORMALIZED_ROWS)}
     monkeypatch.setattr(
         cake_jit,
         "MODULES",
@@ -1795,6 +1798,7 @@ def test_l2n_stage_order(monkeypatch) -> None:
             "fwd_intra_l2n": twin,
             "fwd_intra_v14_l2n": twin,
             "fwd_intra_l2n_v37": twin,
+            KBONCE_PREP: reader,
         },
     )
 
@@ -1818,6 +1822,22 @@ def test_l2n_stage_order(monkeypatch) -> None:
     assert cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_v14_l2n"))
     assert cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_l2n_v37"))
     assert not cake_kcp_plan.qk_l2norm_intra_first(Plan("fwd_intra_v14"))
+    assert cake_kcp_plan.qk_l2norm_twin("fwd_intra_v14_l2n")
+    assert not cake_kcp_plan.qk_l2norm_twin(KBONCE_PREP)
+    assert not cake_kcp_plan.qk_l2norm_twin("fwd_intra")
+
+
+# The fake registries' logical names of q / k: the raw rows (the ``_l2n`` twins, which normalize them) or the
+# normalized rows (every other record), and the raw gate's kb-once replay prep, a fused-mode record of the second kind.
+RAW_ROWS = {
+    "q_raw": "q_raw",
+    "k_raw": "k_raw",
+    "qn": "qn",
+    "kn": "kn",
+    "qk_rstd": "qk_rstd",
+}
+NORMALIZED_ROWS = {"q": "q", "k": "k"}
+KBONCE_PREP = "bwd_prep_g8_replay_kbonce_raw_l2n"
 
 
 def _fake_pick(stage: str, path: str, mode: str, docs: int, heads: int, arch: str):
@@ -1901,11 +1921,15 @@ def _fake_registry(
 
     class Modules(dict):
         def __missing__(self, name):
-            # the l2n key as the real registry's: the twins (``_l2n``, any ``_v<N>`` suffix) serve the fused mode only
-            twin = re.search(r"_l2n(_v\d+)?$", name) is not None
+            # the l2n and logical keys as the real registry's: the ``_l2n`` records (any ``_v<N>`` suffix) serve the
+            # fused mode only; they are the twins, which read the raw rows, but for the kb-once replay prep, which
+            # reads the rows the fused intra program normalized; every other record reads the normalized rows
+            fused = re.search(r"_l2n(_v\d+)?$", name) is not None
+            raw = fused and name != KBONCE_PREP
             return {
                 "arches": list((arches or {}).get(name, cake_jit.ARCHES)),
-                "l2n": ["fused"] if twin else ["off", "fallback", "fused"],
+                "l2n": ["fused"] if fused else ["off", "fallback", "fused"],
+                "logical": dict(RAW_ROWS if raw else NORMALIZED_ROWS),
             }
 
     class Libraries:
@@ -2041,6 +2065,13 @@ def test_l2n_capability_check() -> None:
         # a twin with a version suffix (the registry's l2n key decides, not the name)
         (
             {"pick": _pick_but(lambda s, p, m, *k: s == "fwd_intra" and p == F and m == "fused", "fwd_intra_l2n_v37")},
+            None,
+            None,
+        ),
+        # a fused-mode prep that reads the rows the replay's intra twin normalized (the raw gate's kb-once replay prep
+        # at most 256 documents): one normalizing record
+        (
+            {"pick": _pick_but(lambda s, p, m, d, *k: s == "bwd_prep" and m == "fused" and d <= 256, KBONCE_PREP)},
             None,
             None,
         ),
