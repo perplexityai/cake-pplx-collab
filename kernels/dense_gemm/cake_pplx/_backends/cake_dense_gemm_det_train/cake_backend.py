@@ -2433,7 +2433,25 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * GB200: 4096 -> 48 and 5120 -> 128 at T 16384 (1.019 to 1.061, a paired win in three of the four pairs);
 #   * B300: 4096 -> 48, 8192 -> 128 and indexer_k at T 32768 (1.000 to 1.013);
 #   * GB300: 5120 -> 64 and 8192 -> 128 at every measured T (0.995 to 1.026), and 4096 -> 32 and indexer_k at T 32768
-#     (1.001 to 1.017).
+#     (1.001 to 1.017); 5120 -> 64 at T 16172 and 4096 -> 32 at T 32768 kept their plan up to version 0.3.12 (version
+#     0.3.13 runs both in raster groups of 32 there: below).
+# Version 0.3.13 runs the start-path program ``kn_n256_tma1_w8relf`` in raster groups of 32 or 2 row tiles on three BF16
+# input gradients of the 152-SM parts, each range at one measured T: the rule of version 0.3.12 (``_W8RELF_DGRAD_BF16``)
+# with ``group_m``.  Measured at T 16172, 16231, 16384 and 32768 on two nodes of each part against the plan of version
+# 0.3.12 with the paired rounds and the bar of version 0.3.10 (groups of 32 and 64 on GB300, of 2 and 4 on GB200; of two
+# groups that met the bar the one with the higher lowest node and mode median, the smaller within 0.005); the outputs
+# were equal to that plan's bit for bit at every measured T on both nodes, also where the program changes:
+#   * GB300 (152-SM sm_103a): 4096 -> 32 in groups of 32 at T 16172, 1.019 to 1.029 times faster than the same program
+#     in the default group of 16 (its range of version 0.3.12; T 16173 - 16384 keep it), and at T 32768, 1.040 to
+#     1.050 times faster than the plan of version 0.3.11 (the row's ``ROW_RULES`` rule, a kept cell of version 0.3.12);
+#     5120 -> 64 in groups of 32 at T 16172, 1.018 to 1.023 times faster than the plan of version 0.3.11 (the row had no
+#     range of version 0.3.12 on this part).  4096 -> 32 at T 16231 and 16384 and 5120 -> 64 at T 16231, 16384 and
+#     32768 keep their plan: the group of 32 had medians of 1.002 to 1.029 but a paired win in two or three of the four
+#     node and mode pairs, the group of 64 medians of 0.979 to 1.020 and a paired win in at most one;
+#   * GB200 (152-SM sm_100a): 5120 -> 32 in groups of 2 at T 32768, 1.015 to 1.021 times faster than the same program
+#     in the default group of 16 (its range of version 0.3.12 keeps T 16172 - 32767).  4096 -> 32 and the indexer_hw
+#     input gradient 6144 -> 32 at every measured T and 5120 -> 32 at T 16172, 16231 and 16384 keep their plan: the
+#     groups had medians of 0.999 to 1.023 and a paired win in at most three of the four pairs.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2531,10 +2549,15 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ),
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((16172, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
         ('sm_103a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {"block_n": 128, "slots": 2, "stages": 4, "cta1": True, "group_m": 2}),),
+        ('sm_103a', False, True, False, False, False, 4096, 32, None): (
+            (16172, 16172, {**_W8RELF_DGRAD_BF16, "group_m": 32}),
+            (16173, 16384, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, {**_W8RELF_DGRAD_BF16, "group_m": 32}),
+        ),
+        ('sm_103a', False, True, False, False, False, 5120, 64, None): ((16172, 16172, {**_W8RELF_DGRAD_BF16, "group_m": 32}),),
         **{
             ('sm_103a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
             for N, K, lo, hi in (
-                (4096, 32, 16172, 16384),
                 (4096, 48, 16172, 32768),
                 (4096, 64, 16172, 32768),
                 (4096, 128, 16172, 32768),
@@ -2579,13 +2602,16 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
                 (4096, 32),
                 (4096, 64),
                 (4096, 128),
-                (5120, 32),
                 (5120, 64),
                 (6144, 32),
                 (6144, 128),
                 (8192, 128),
             )
         },
+        ('sm_100a', False, True, False, False, False, 5120, 32, None): (
+            (16172, 32767, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, {**_W8RELF_DGRAD_BF16, "group_m": 2}),
+        ),
         ('sm_100a', False, True, False, False, False, 4096, 48, None): (
             (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
             (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
@@ -3725,9 +3751,12 @@ def cake_dense_gemm_det_train_projection_plan(
     version 0.3.12 the 148- and 152-SM sm_100a and sm_103a ranges also plan the BF16 input gradients
     4096 -> 32 / 48 / 64 / 128, 5120 -> 32 / 48 / 64 / 128, 8192 -> 128 and 6144 -> 32 / 128 with the start-path
     eight-warp program ``kn_n256_tma1_w8relf`` (on 152-SM sm_100a parts 5120 -> 48 at T 32768 with
-    ``kn_n256_tma1_w8rel``; on 152-SM sm_103a parts all but 5120 -> 64 and 8192 -> 128), at T 16172 - 32768 or
-    narrower per row and part (the same bits, measured faster on two nodes of each part); a caller that forces another ``form`` there plans with the row's rule without the part
-    tables."""
+    ``kn_n256_tma1_w8rel``; on 152-SM sm_103a parts all but 5120 -> 64 and 8192 -> 128 up to version 0.3.12), at
+    T 16172 - 32768 or narrower per row and part (the same bits, measured faster on two nodes of each part); a caller
+    that forces another ``form`` there plans with the row's rule without the part tables.  Since version 0.3.13 the
+    152-SM sm_103a ranges run that program in raster groups of 32 on 4096 -> 32 at T 16172 and 32768 and on
+    5120 -> 64 at T 16172, and the 152-SM sm_100a ranges in raster groups of 2 on 5120 -> 32 at T 32768 (the same bits,
+    measured faster on two GB300 and two GB200 nodes)."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
