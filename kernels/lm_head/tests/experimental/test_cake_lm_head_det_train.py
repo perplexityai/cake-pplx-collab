@@ -9141,7 +9141,7 @@ def test_rlab_zero_step_follows_the_producers():
     alone, over chunks that tile its loop rows (the rows of ``rlab``), has no ``rlab_zero`` step: ``row_grad`` writes
     every row of its chunk (+0 on a row with no label column).  A ``dz`` arm among the producers keeps exactly one
     step, right before the first producer; so do chunks that leave a loop row out or start past row 0.  A plan without
-    dX has none."""
+    dX has none.  The opt-in module's loss forward keys follow the same rule."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
     common = dict(
         need_dx=True,
@@ -9180,6 +9180,19 @@ def test_rlab_zero_step_follows_the_producers():
         _problem(8700, 6144, 154880, 4096), **dict(common, need_dx=False)
     )
     assert zero not in cake_backend.forward_keys(no_dx)
+    # the opt-in module's loss forward (with and without the saved per-row scale) takes the same rule: row_grad alone
+    for keep in (False, True):
+        opt = opt_in.make_plan(
+            _problem(8700, 6144, 154880, 4096),
+            valid_rows=8265,
+            keep_row_grad=keep,
+            **common,
+        )
+        ok = opt_in.forward_keys(opt)
+        producers = {
+            stage for stage, _ in ok if stage in cake_backend.DZ_PRODUCER_STAGES
+        }
+        assert producers == {"row_grad"} and zero not in ok, (keep, ok)
     # the predicate over stand-in plans: the chunks must cover [0, rows) in order, each row once
     rg = [
         ("gemm_logits", 0),
