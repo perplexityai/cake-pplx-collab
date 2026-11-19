@@ -22,9 +22,11 @@ runs one training step of its shard through the KCP autograd entry (``cake_kda_d
 ``cake_kda_nondet_kcp``; in the raw gate mode the parameter gradients summed over the ranks by the package's
 ``..._kcp_reduce_gate_param_grads``) and sends its outputs to rank 0.  Rank 0 puts the shards back in the global
 token order and judges ``out`` and every gradient of the whole batch against the FP64 reference of the unsplit
-batch, beside the naive BF16 tier (``cake_kda_naive.py``), with the judge of ``tests/cake_naive.py``.  Rank 0
-writes the verdicts and the failures to a JSON file that the test reads; :func:`judge_kcp_case` records them and
-settles them against the owner-accepted gaps (``cake_kda_known_gaps.py``).  A case is either drawn by
+batch, beside the naive BF16 tier (``cake_kda_naive.py``) and FLA on one GPU over the whole packed batch
+(``cake_kda_fla.py``), with the judge of ``tests/cake_naive.py``: an output passes when it meets the tier or FLA (the
+KDA rule), and is judged against the tier only when FLA does not run the case.  Rank 0 writes the verdicts, the
+failures and its FLA steps to a JSON file that the test reads; :func:`judge_kcp_case` records them and settles the
+verdicts against the owner-accepted gaps (``cake_kda_known_gaps.py``).  A case is either drawn by
 ``cake_kda_naive.draw_case`` (any gate form and the in-kernel norm) or a KCP harness row of ``cake_kda_kcp_shapes``
 (:func:`cake_kda_naive.kcp_row_inputs`), split by a layout of the package or an explicit fragment table.
 """
@@ -148,6 +150,7 @@ def _run_rank(
 ) -> None:
     from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
 
+    from .cake_kda_fla import FlaSteps, fla_of
     from .cake_kda_naive import (
         draw_case,
         kcp_row_inputs,
@@ -177,7 +180,7 @@ def _run_rank(
         else:
             part = api["partition"](cu, W, layout)
         ctx = api["context"](part, dist.group.WORLD, rank, device)
-        judge, failures = TierJudge(DRAWS), []
+        judge, failures, steps = TierJudge(DRAWS), [], FlaSteps()
         for j in range(DRAWS):
             s = draw_seed(seed, j)
             if harness_row is not None:
@@ -200,17 +203,33 @@ def _run_rank(
             on_dev = {n: t.to(device) for n, t in inputs.items()}
             ref = oracle_with_grads(on_dev, scale, lower_bound, l2n)
             nv = naive_of(on_dev, scale, lower_bound, l2n)
+            # FLA on one GPU over the whole packed batch (a single-rank reference of the KCP step)
+            fla = steps.add(fla_of(on_dev, scale, lower_bound, l2n))
             for name, actual in got.items():
                 actual = actual.to(device)
                 if message := contract(name, actual, ref[name]):
                     failures.append(f"draw {j}: {message}")
                     if actual.shape != ref[name].shape:
                         continue
-                judge.add(name, j, actual, ref[name], {"bf16": nv[name]})
+                judge.add(
+                    name,
+                    j,
+                    actual,
+                    ref[name],
+                    {"bf16": nv[name]},
+                    fla=fla.value(name, actual),
+                )
         if rank == 0:
             failures += judge.failures()
             with open(result, "w") as fh:
-                json.dump({"verdicts": judge.verdicts(), "failures": failures}, fh)
+                json.dump(
+                    {
+                        "verdicts": judge.verdicts(),
+                        "failures": failures,
+                        "fla": steps.summary(),
+                    },
+                    fh,
+                )
         dist.barrier()
     except BaseException:
         if rank == 0:
@@ -229,13 +248,15 @@ def judge_kcp(
     *,
     row: str | None = None,
     fragments=None,
+    fla_steps: dict | None = None,
 ) -> tuple[dict, list[str]]:
     """Spawn ``W`` ranks for one case ``(lengths, H, gate, l2n, layout, scale, lower_bound)`` of ``mode`` (``"det"``
     or ``"nondet"``) and return rank 0's ``(verdicts, failures)``.  ``row``: the name of a KCP harness row
     (``cake_kda_kcp_shapes.ROWS``) whose drawn operands (:func:`cake_kda_naive.kcp_row_inputs`) replace
     :func:`cake_kda_naive.draw_case`'s (its lengths and heads replace the case's; the activated gate, no in-kernel
     norm).  ``fragments``: an explicit table, per rank its ``(doc, offset, length)`` fragments, in place of
-    ``layout``.  :func:`judge_kcp_case` records and settles the result."""
+    ``layout``.  ``fla_steps``: a dict that receives rank 0's FLA steps (``cake_kda_fla.FlaSteps.summary``).
+    :func:`judge_kcp_case` records and settles the result."""
     if mode not in MODES:
         raise ValueError(f"mode must be one of {MODES}, got {mode!r}")
     with tempfile.TemporaryDirectory(prefix="cake_kda_kcp_naive_") as tmp:
@@ -254,6 +275,8 @@ def judge_kcp(
                 return {}, [f"{type(exc).__name__}: {exc}"]
         with open(result) as fh:
             report = json.load(fh)
+    if fla_steps is not None:
+        fla_steps.update(report.get("fla") or {})
     return report["verdicts"], report["failures"]
 
 
@@ -267,14 +290,20 @@ def judge_kcp_case(
     row: str | None = None,
     fragments=None,
 ) -> dict:
-    """:func:`judge_kcp`, its verdicts recorded with ``record_property`` (``naive_tier``) and settled against the
-    owner-accepted gaps (``cake_kda_known_gaps.settle``; the scope is the case's document lengths).  A run that judged
-    nothing fails.  Returns the verdicts."""
+    """:func:`judge_kcp`, its verdicts recorded with ``record_property`` (``naive_tier``, and rank 0's FLA steps as
+    ``cake_kda_fla.PROPERTY``) and settled against the owner-accepted gaps (``cake_kda_known_gaps.settle``; the scope
+    is the case's document lengths).  A run that judged nothing fails.  Returns the verdicts."""
+    from .cake_kda_fla import PROPERTY
     from .cake_kda_known_gaps import settle
 
-    verdicts, failures = judge_kcp(mode, case, seed, W, row=row, fragments=fragments)
+    steps: dict = {}
+    verdicts, failures = judge_kcp(
+        mode, case, seed, W, row=row, fragments=fragments, fla_steps=steps
+    )
     for verdict in verdicts.values():
         record_property("naive_tier", verdict)
+    if steps:
+        record_property(PROPERTY, steps)
     assert verdicts, failures
     if row is not None:
         from .cake_kda_kcp_shapes import ROWS

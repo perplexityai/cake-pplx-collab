@@ -13,20 +13,23 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 
-The terminal summary prints one ``TIER`` line per output the tests judged against the naive BF16 tier
-(:mod:`.cake_naive`), passing and xfailed tests included.  A test that passed with owner-accepted gaps within their
-caps is reported as xfailed, its reason naming each gap; a test that passed without judging an output listed as a gap
-for it fails (``experimental/test_helpers/cake_kda_known_gaps.py``).
+The terminal summary prints one ``TIER`` line per output the tests judged against the naive BF16 tier and FLA
+(:mod:`.cake_naive`), passing and xfailed tests included, and one ``FLA`` line per test with the count and seconds
+of its FLA reference steps (``experimental/test_helpers/cake_kda_fla.py``).  A test that passed with owner-accepted
+gaps within their caps is reported as xfailed, its reason naming each gap; a test that passed without judging an
+output listed as a gap for it fails (``experimental/test_helpers/cake_kda_known_gaps.py``).
 """
 
 import pytest
 
 from .cake_naive import summarize_tiers
 from .experimental.test_helpers import cake_kda_known_gaps as known_gaps
+from .experimental.test_helpers.cake_kda_fla import summarize_fla
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
     summarize_tiers(terminalreporter)
+    summarize_fla(terminalreporter)
 
 
 @pytest.hookimpl(wrapper=True)

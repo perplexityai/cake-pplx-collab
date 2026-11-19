@@ -34,13 +34,25 @@ at least half of the draws; and its error is 0 on every draw where the tier's
 error is 0.  An output whose oracle holds at most :data:`PAIRED_EFFECTIVE`
 distinct nonzero finite value on every draw (one effective element: a single
 token's scalar, one value repeated over heads) is judged draw by draw in the L2
-norm too.  It passes
-when it meets the tier and fails when it misses it.  A tier whose naive value
-is not finite where the oracle is finite is not met.  Each test records every
+norm too.  A tier whose naive value is not finite where the oracle is finite
+is not met.
+
+An output can have a second reference (:data:`REFERENCE`, ``"fla"``): the
+value of flash-linear-attention (FLA) for the same output on the same inputs,
+given to :meth:`TierJudge.add` as ``fla``.  FLA's error is taken against the
+same oracle in the same norms on the same draws, on FLA's value as it is (not
+cast), and the output meets FLA by the same rule: :data:`NEAR_TIE`, the norms
+judged draw by draw, the zero rule.  The output passes when it meets the naive
+tier or FLA, and fails only when it misses both.  An output without an FLA
+value on every draw (it has no FLA counterpart, or FLA is not importable or
+does not support the case) is judged against the naive tier only: it passes
+when it meets the tier and fails when it misses it, and its verdict names the
+reason.  Each test records every
 output's verdict with pytest's ``record_property``
 (:meth:`TierJudge.record`), and the family's ``conftest.py`` prints one
 ``TIER`` line per recorded output in the terminal summary, for passing tests
-too::
+too (:func:`tier_line`: the reference met, ``bf16``, ``fla`` or none, and the
+errors and ratios against both references)::
 
     from .cake_naive import summarize_tiers
 
@@ -80,6 +92,10 @@ NORMS = ("l2", "max")
 #: The naive tier, PyTorch BF16, and the dtype it returns.
 TIERS = ("bf16",)
 TIER_DTYPES = {"bf16": torch.bfloat16}
+#: The second reference an output may meet instead of the naive tier: FLA on the same inputs (the KDA rule).
+REFERENCE = "fla"
+#: The reason an output is judged against the naive tier only when no FLA value is given for it.
+NO_FLA_COUNTERPART = "no FLA counterpart"
 #: The independent random inputs each case is judged over, at least.
 DRAWS = 32
 #: How far an output's error may exceed the naive tier's and still meet it: in the L2 norm, its median and its largest
@@ -238,23 +254,34 @@ def effective_elements(expected: torch.Tensor) -> int:
     return 0 if first is None else 1
 
 
+def _no_fla_reason(missing: Mapping[int, str], draws: int) -> str:
+    """Why an output is judged against the naive tier only: the reasons of its draws without an FLA value."""
+    text = "; ".join(dict.fromkeys(missing.values()))
+    if len(missing) < draws:
+        text += f" (no FLA value on draws {sorted(missing)} of {draws})"
+    return text
+
+
 class TierJudge:
     """The accuracy of a case's floating outputs over ``draws`` independent
-    inputs, judged against the naive BF16 tier.
+    inputs, judged against the naive BF16 tier and, where its value is given,
+    FLA (:data:`REFERENCE`): an output passes when it meets either.
 
     Call :meth:`add` once per output and draw, then :meth:`failures` (empty
-    when every output met the tier and every draw was judged), and record the
-    verdicts with :meth:`record` or :meth:`lines`."""
+    when every output met the tier or FLA and every draw was judged), and
+    record the verdicts with :meth:`record` or :meth:`lines`."""
 
     def __init__(self, draws: int = DRAWS) -> None:
         if draws < DRAWS:
             raise ValueError(f"a case is judged over at least {DRAWS} draws, got {draws}")
         self.draws = draws
-        # (output, norm) -> draw -> {"ours": error, tier: error or None}
+        # (output, norm) -> draw -> {"ours": error, tier: error or None, and with FLA's value "fla": error or None}
         self.errors: dict[tuple[str, str], dict[int, dict[str, float | None]]] = {}
         self.prints: dict[int, dict[str, tuple[float, float]]] = {}
         # output -> draw -> the oracle's distinct nonzero finite values, counted up to 2 (effective_elements)
         self.effective: dict[str, dict[int, int]] = {}
+        # output -> draw -> why the draw has no FLA value (NO_FLA_COUNTERPART, or why FLA is unavailable)
+        self.no_fla: dict[str, dict[int, str]] = {}
 
     def add(
         self,
@@ -263,12 +290,16 @@ class TierJudge:
         actual: torch.Tensor,
         expected: torch.Tensor,
         naive: Mapping[str, torch.Tensor],
+        fla: torch.Tensor | str | None = None,
     ) -> None:
         """Record draw ``draw`` of output ``name``: the kernel's ``actual``,
-        the oracle ``expected`` and ``naive[tier]`` for the tier of
-        :data:`TIERS`, in the tier's dtype (:data:`TIER_DTYPES`).  Each naive
-        value is cast to ``actual``'s dtype before it is measured.  A second
-        launch on a recorded draw keeps the larger of the kernel's errors."""
+        the oracle ``expected``, ``naive[tier]`` for the tier of
+        :data:`TIERS`, in the tier's dtype (:data:`TIER_DTYPES`), and ``fla``:
+        FLA's value of the output on the same inputs, measured as it is, or
+        the reason there is none (a string, such as why FLA is unavailable;
+        None is :data:`NO_FLA_COUNTERPART`).  Each naive value is cast to
+        ``actual``'s dtype before it is measured.  A second launch on a
+        recorded draw keeps the larger of the kernel's errors."""
         if not 0 <= draw < self.draws:
             raise ValueError(f"{name}: draw {draw} of a judge over {self.draws} draws")
         if actual.shape != expected.shape:
@@ -290,6 +321,14 @@ class TierJudge:
                     f"expected {tuple(expected.shape)}"
                 )
             tiers[tier] = value.to(actual.dtype)
+        if isinstance(fla, torch.Tensor):
+            if fla.shape != expected.shape:
+                raise ValueError(
+                    f"{name}: FLA's value has shape {tuple(fla.shape)}, expected {tuple(expected.shape)}"
+                )
+            tiers[REFERENCE] = fla
+        else:
+            self.no_fla.setdefault(name, {})[draw] = fla or NO_FLA_COUNTERPART
         for norm in NORMS:
             values, _ = norm_errors(expected, (actual, *tiers.values()), norm)
             ours, theirs = values[0], dict(zip(tiers, values[1:], strict=True))
@@ -304,65 +343,88 @@ class TierJudge:
         self.effective.setdefault(name, {})[draw] = effective_elements(expected)
         self.prints.setdefault(draw, {})[name] = _fingerprint(expected)
 
-    def verdicts(self) -> dict[str, dict]:
-        """Each output's verdict: the tier when it meets it (None when it
-        misses it), the number of draws, per norm the median and largest error
-        of the output and of the tier, the draws where the tier was exact and
-        the output was not, per norm the draws within :data:`NEAR_TIE` of the
-        tier (``wins``), and the norms judged draw by draw (``by_draw``)."""
-        found = {}
-        (tier,) = TIERS
-        for name in dict.fromkeys(name for name, _ in self.errors):
-            norms = {}
-            for norm in NORMS:
-                by_draw = self.errors[(name, norm)]
-                ours = [entry["ours"] for entry in by_draw.values()]
-                theirs = [entry.get(tier) for entry in by_draw.values()]
-                norms[norm] = {
-                    "ours": [statistics.median(ours), max(ours)],
-                    tier: None if None in theirs else [statistics.median(theirs), max(theirs)],
-                }
-            zero = {tier: []}
-            for norm in NORMS:
-                for draw, entry in sorted(self.errors[(name, norm)].items()):
-                    if entry.get(tier) == 0 and entry["ours"] > 0 and draw not in zero[tier]:
-                        zero[tier].append(draw)
-            draws = len(self.errors[(name, NORMS[0])])
-            wins = {
-                norm: sum(
-                    1
-                    for entry in self.errors[(name, norm)].values()
-                    if entry.get(tier) is not None and entry["ours"] <= NEAR_TIE * entry[tier]
-                )
-                for norm in NORMS
-            }
-            paired = max(self.effective[name].values()) <= PAIRED_EFFECTIVE
-            by_draw = NORMS if paired else tuple(n for n in NORMS if n in PAIRED_NORMS)
-            meets = not zero[tier] and all(
-                (bound := norms[norm][tier]) is not None
+    def _against(self, name: str, ref: str, by_draw: tuple[str, ...]) -> tuple[dict, list[int], dict, bool]:
+        """Output ``name`` against the reference ``ref`` (the tier, or :data:`REFERENCE`): per norm the reference's
+        median and largest error (None when one is not finite), the draws where its error is 0 and ours is not, per
+        norm the draws within :data:`NEAR_TIE` of it, and whether the output meets it."""
+        bounds, zero, wins = {}, [], {}
+        draws = len(self.errors[(name, NORMS[0])])
+        meets = True
+        for norm in NORMS:
+            entries = self.errors[(name, norm)]
+            ours = [entry["ours"] for entry in entries.values()]
+            theirs = [entry.get(ref) for entry in entries.values()]
+            bounds[norm] = None if None in theirs else [statistics.median(theirs), max(theirs)]
+            wins[norm] = sum(
+                1
+                for entry in entries.values()
+                if entry.get(ref) is not None and entry["ours"] <= NEAR_TIE * entry[ref]
+            )
+            for draw, entry in sorted(entries.items()):
+                if entry.get(ref) == 0 and entry["ours"] > 0 and draw not in zero:
+                    zero.append(draw)
+            bound = bounds[norm]
+            meets = meets and (
+                bound is not None
                 and (
                     2 * wins[norm] >= draws
                     if norm in by_draw
-                    else norms[norm]["ours"][0] <= NEAR_TIE * bound[0]
-                    and norms[norm]["ours"][1] <= NEAR_TIE * bound[1]
+                    else statistics.median(ours) <= NEAR_TIE * bound[0] and max(ours) <= NEAR_TIE * bound[1]
                 )
-                for norm in NORMS
             )
-            met = tier if meets else None
+        return bounds, zero, wins, meets and not zero
+
+    def verdicts(self) -> dict[str, dict]:
+        """Each output's verdict: the reference it meets (``tier``: the naive
+        tier's name when it meets the tier, else :data:`REFERENCE` when it
+        meets FLA, None when it misses both or misses the tier and has no FLA
+        value), the number of draws, per norm the median and largest error of
+        the output, of the tier and (when judged) of FLA, per reference the
+        draws where its error was 0 and the output's was not (``zero``), per
+        norm the draws within :data:`NEAR_TIE` of the tier (``wins``) and of
+        FLA (``fla_wins``), the norms judged draw by draw (``by_draw``),
+        whether it met each reference (``met``: None for FLA when not judged)
+        and why FLA was not judged (``fla_reason``)."""
+        found = {}
+        (tier,) = TIERS
+        for name in dict.fromkeys(name for name, _ in self.errors):
+            paired = max(self.effective[name].values()) <= PAIRED_EFFECTIVE
+            by_draw = NORMS if paired else tuple(n for n in NORMS if n in PAIRED_NORMS)
+            norms = {}
+            for norm in NORMS:
+                ours = [entry["ours"] for entry in self.errors[(name, norm)].values()]
+                norms[norm] = {"ours": [statistics.median(ours), max(ours)]}
+            bounds, zero, wins, meets = self._against(name, tier, by_draw)
+            for norm in NORMS:
+                norms[norm][tier] = bounds[norm]
+            zeros = {tier: zero}
+            missing = self.no_fla.get(name)
+            draws = len(self.errors[(name, NORMS[0])])
+            fla_meets, fla_wins, fla_reason = None, None, None
+            if missing:
+                fla_reason = _no_fla_reason(missing, draws)
+            else:
+                bounds, zeros[REFERENCE], fla_wins, fla_meets = self._against(name, REFERENCE, by_draw)
+                for norm in NORMS:
+                    norms[norm][REFERENCE] = bounds[norm]
             found[name] = {
                 "output": name,
-                "tier": met,
+                "tier": tier if meets else REFERENCE if fla_meets else None,
                 "draws": draws,
                 "norms": norms,
-                "zero": zero,
+                "zero": zeros,
                 "wins": wins,
                 "by_draw": by_draw,
+                "met": {tier: meets, REFERENCE: fla_meets},
+                "fla_wins": fla_wins,
+                "fla_reason": fla_reason,
             }
         return found
 
     def failures(self) -> list[str]:
-        """One message per output that missed the tier or was not judged on every
-        draw, and one per pair of draws whose oracle values are the same."""
+        """One message per output that missed the tier and FLA (or missed the
+        tier and has no FLA value) or was not judged on every draw, and one
+        per pair of draws whose oracle values are the same."""
         found = []
         for name, verdict in self.verdicts().items():
             recorded = sorted(self.errors[(name, NORMS[0])])
@@ -370,23 +432,34 @@ class TierJudge:
                 found.append(f"{name}: judged on {len(recorded)} of {self.draws} draws")
             if verdict["tier"] is not None:
                 continue
+            judged = verdict["met"][REFERENCE] is not None
+            refs = (*TIERS, REFERENCE) if judged else TIERS
             parts = []
             for norm, errors in verdict["norms"].items():
-                tiers = ", ".join(
-                    f"{tier} {_pair(errors[tier])}{_ratios(errors['ours'], errors[tier])}" for tier in TIERS
+                shown = ", ".join(
+                    f"{ref} {_pair(errors[ref])}{_ratios(errors['ours'], errors[ref])}" for ref in refs
                 )
-                parts.append(f"{norm}: ours {_pair(errors['ours'])}, {tiers}")
+                parts.append(f"{norm}: ours {_pair(errors['ours'])}, {shown}")
             parts += [
-                f"tier {tier}: error 0 on draws {draws}, ours not"
-                for tier, draws in verdict["zero"].items()
+                f"{'tier ' if ref in TIERS else ''}{ref}: error 0 on draws {draws}, ours not"
+                for ref, draws in verdict["zero"].items()
                 if draws
             ]
             counts = ", ".join(f"{norm} {verdict['wins'][norm]}" for norm in verdict["by_draw"])
+            if judged:
+                fla_counts = ", ".join(f"{norm} {verdict['fla_wins'][norm]}" for norm in verdict["by_draw"])
+                what = "the naive tier and FLA"
+                within = (
+                    f"ours within {NEAR_TIE} x the tier on {counts} and within {NEAR_TIE} x FLA on {fla_counts} "
+                    f"of {verdict['draws']} draws"
+                )
+            else:
+                what = "the naive tier"
+                within = f"ours within {NEAR_TIE} x the tier on {counts} of {verdict['draws']} draws"
+                parts.append(f"fla: {verdict['fla_reason']}, so judged against the naive tier only")
             found.append(
-                f"{name}: misses the naive tier over {verdict['draws']} inputs (draw by draw: "
-                f"ours within {NEAR_TIE} x the tier on {counts} of {verdict['draws']} draws, "
-                f"at least {-(-verdict['draws'] // 2)} needed; error against the oracle, "
-                "median / largest): "
+                f"{name}: misses {what} over {verdict['draws']} inputs (draw by draw: {within}, "
+                f"at least {-(-verdict['draws'] // 2)} needed; error against the oracle, median / largest): "
                 + "; ".join(parts)
             )
         seen: dict[tuple, int] = {}
@@ -413,21 +486,35 @@ class TierJudge:
 
 
 def tier_line(test_id: str, verdict: Mapping) -> str:
-    """``TIER <test> <output> bf16|FAIL``, the number of draws, per norm
-    judged draw by draw the draws within :data:`NEAR_TIE` of the tier
-    (``paired max <n>/<draws> |``), and per norm the median and largest error
-    of the output and of the tier."""
+    """``TIER <test> <output> bf16|fla|FAIL met=bf16|fla|none``, whether the
+    output met each reference (``bf16=meets|misses fla=meets|misses|none``),
+    the number of draws, per norm judged draw by draw the draws within
+    :data:`NEAR_TIE` of the tier and of FLA (``paired max <n>/<draws> (fla
+    <n>/<draws>) |``), and per norm the median and largest error of the output
+    and of each reference with the output's ratios to them.  An output judged
+    against the naive tier only ends with ``| fla: <reason>, naive tier only``."""
+    met = verdict.get("met") or {}
+    judged = met.get(REFERENCE) is not None
+    refs = (*TIERS, REFERENCE) if judged else TIERS
     norms = " | ".join(
         f"{norm} ours {_pair(errors['ours'])} "
-        + " ".join(f"{tier} {_pair(errors[tier])}" for tier in TIERS)
+        + " ".join(f"{ref} {_pair(errors[ref])}{_ratios(errors['ours'], errors[ref])}" for ref in refs)
         for norm, errors in verdict["norms"].items()
     )
     if by_draw := verdict.get("by_draw"):
-        wins = " ".join(f"{norm} {verdict['wins'][norm]}/{verdict['draws']}" for norm in by_draw)
+        wins = " ".join(
+            f"{norm} {verdict['wins'][norm]}/{verdict['draws']}"
+            + (f" (fla {verdict['fla_wins'][norm]}/{verdict['draws']})" if judged else "")
+            for norm in by_draw
+        )
         norms = f"paired {wins} | {norms}"
+    shown = " ".join(
+        f"{ref}={'none' if met.get(ref) is None else 'meets' if met[ref] else 'misses'}" for ref in (*TIERS, REFERENCE)
+    )
+    tail = "" if judged else f" | fla: {verdict.get('fla_reason') or NO_FLA_COUNTERPART}, naive tier only"
     return (
-        f"TIER {test_id} {verdict['output']} {verdict['tier'] or 'FAIL'} "
-        f"draws={verdict['draws']} {norms}"
+        f"TIER {test_id} {verdict['output']} {verdict['tier'] or 'FAIL'} met={verdict['tier'] or 'none'} "
+        f"{shown} draws={verdict['draws']} {norms}{tail}"
     )
 
 
@@ -452,7 +539,7 @@ def summarize_tiers(terminalreporter) -> None:
         )
     )
     if lines:
-        terminalreporter.section("training accuracy: each output against the naive bf16 tier")
+        terminalreporter.section("training accuracy: each output against the naive bf16 tier and FLA")
         for line in lines:
             terminalreporter.write_line(line)
 
@@ -474,9 +561,10 @@ def judge_case(
     of every judged output on the same inputs.  Every output is held to its
     :func:`contract` (exact for the names in ``exact``), and each other output
     is recorded in the judge.  The Python, torch CPU and every CUDA device's
-    random state are restored after the last draw.  Returns the judge and
-    every failure: the contract's, then the judge's; record the verdicts with
-    ``judge.record(record_property)``."""
+    random state are restored after the last draw.  No FLA value is given,
+    so every output is judged against the naive tier only.  Returns the judge
+    and every failure: the contract's, then the judge's; record the verdicts
+    with ``judge.record(record_property)``."""
     judge = TierJudge(draws)
     failures = []
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None

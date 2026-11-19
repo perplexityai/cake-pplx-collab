@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The naive tier of the KDA training accuracy tests (``test_cake_kda_*_naive.py``), for the judge of
-``tests/cake_naive.py``: PyTorch BF16.
+``tests/cake_naive.py``: PyTorch BF16, and the judge of the family's accuracy checks (:func:`judge_arms`) with its
+second reference, FLA (``cake_kda_fla.py``).
 
 :func:`naive_with_grads` is the FP64 token recurrence of ``cake_kda_det_train_reference.py``
 (:func:`kda_exact_with_grads`, :func:`kda_exact_raw_with_grads` and their in-kernel Q/K L2 norm forms in
@@ -38,10 +39,15 @@ thousand tokens fits in memory.
 
 :func:`judge_arms` is the judge of every accuracy check of the family's tests: a case's arms (routes, paths, forms,
 repeated launches) on each draw's operands (:func:`draw_case`, or :func:`kcp_row_inputs` for a KCP harness row), each
-output against :func:`oracle_with_grads` beside :func:`naive_of`, its verdicts recorded and settled against the
-owner-accepted gaps (``cake_kda_known_gaps.py``).  There is no tolerance: an output that misses the tier fails, unless
-it is listed there within its gap's scope and caps.  :func:`assert_bitwise` is the deterministic package's run-to-run
-contract; the non-deterministic package has no bit contract, and no output of one package is compared with the other's.
+output against :func:`oracle_with_grads` beside :func:`naive_of` and beside FLA on the same operands
+(``cake_kda_fla.fla_of``), its verdicts recorded and settled against the owner-accepted gaps
+(``cake_kda_known_gaps.py``).  This is the KDA rule: an output passes when it meets the naive BF16 tier or meets FLA
+under the same rule (the same norms, :data:`tests.cake_naive.NEAR_TIE`, the max norm draw by draw, the zero rule), and
+fails only when it misses both.  When FLA does not run a draw (it does not import, or does not support the case) the
+output is judged against the naive tier only, and its verdict says why.  There is no tolerance: an output that misses
+fails, unless it is listed in the gaps within its gap's scope and caps.  :func:`assert_bitwise` is the deterministic
+package's run-to-run contract; the non-deterministic package has no bit contract, and no output of one package is
+compared with the other's.
 """
 
 from __future__ import annotations
@@ -50,6 +56,7 @@ import torch
 from torch.utils.checkpoint import checkpoint
 
 from .cake_kda_det_train_reference import LOWER_BOUND
+from .cake_kda_fla import FlaSteps, fla_of
 
 D = 128
 L2NORM_EPS = 1e-6  # the in-kernel Q/K L2 norm: x / sqrt(sum x^2 + 1e-6)
@@ -351,8 +358,9 @@ def judge_arms(
     lower_bound: float = LOWER_BOUND,
     draws: int | None = None,
 ):
-    """Judge every arm of one case against the FP64 reference beside the naive BF16 tier over the judge's draws
-    (``tests/cake_naive.py``), record the verdicts and settle them against the owner-accepted gaps
+    """Judge every arm of one case against the FP64 reference beside the naive BF16 tier and FLA over the judge's draws
+    (``tests/cake_naive.py``; the KDA rule: an output passes when it meets the tier or FLA), record the verdicts and
+    the FLA steps (``cake_kda_fla.FlaSteps``) and settle the verdicts against the owner-accepted gaps
     (``cake_kda_known_gaps.settle``).
 
     ``draw(j, s)`` makes draw ``j``'s operands from the seed ``s`` (:func:`draw_case` or :func:`kcp_row_inputs`:
@@ -362,8 +370,9 @@ def judge_arms(
     ``{output: tensor}`` with the names of :func:`oracle_with_grads` (``out``, ``dq``, ``dk``, ``dv``, ``dg``,
     ``dbeta`` and in the raw gate mode ``dA_log``, ``ddt_bias``; any subset), or a list of such dicts (launches of the
     arm repeated on the draw: each is judged and the judge keeps the worst).  An output of the arm ``""`` is judged as
-    ``name``, of another arm as ``"<arm>.<name>"``.  The reference (:func:`oracle_with_grads`) and the tier
-    (:func:`naive_of`) are formed once per draw from ``inputs`` and read in each result's shape.  ``l2n``: ``q`` /
+    ``name``, of another arm as ``"<arm>.<name>"``.  The reference (:func:`oracle_with_grads`), the tier
+    (:func:`naive_of`) and FLA (``cake_kda_fla.fla_of``: one forward and backward, the reference of a checkpointed arm
+    too) are formed once per draw from ``inputs`` and read in each result's shape.  ``l2n``: ``q`` /
     ``k`` are the raw rows the kernels normalize; ``scale`` the kernels' scale; ``lower_bound`` the raw gate's.
 
     Every output is held to its contract on every draw; the case's document lengths (of the first draw's
@@ -377,6 +386,7 @@ def judge_arms(
     judge = TierJudge(DRAWS if draws is None else draws)
     failures: list[str] = []
     lengths = None
+    steps = FlaSteps()
     cuda = torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None
     state = (random.getstate(), torch.get_rng_state())
     try:
@@ -389,6 +399,7 @@ def judge_arms(
                 lengths = lengths_of(flat)
             ref = oracle_with_grads(flat, scale, lower_bound, l2n)
             tier = naive_of(flat, scale, lower_bound, l2n)
+            fla = steps.add(fla_of(flat, scale, lower_bound, l2n))
             for arm, results in arms.items():
                 for res in (
                     results if isinstance(results, (list, tuple)) else (results,)
@@ -401,7 +412,12 @@ def judge_arms(
                             if actual.shape != want.shape:
                                 continue
                         judge.add(
-                            key, j, actual, want, {"bf16": _like(tier[name], actual)}
+                            key,
+                            j,
+                            actual,
+                            want,
+                            {"bf16": _like(tier[name], actual)},
+                            fla=fla.value(name, actual),
                         )
     finally:
         random.setstate(state[0])
@@ -410,6 +426,7 @@ def judge_arms(
             torch.cuda.set_rng_state_all(cuda)
     failures += judge.failures()
     judge.record(record_property)
+    steps.record(record_property)
     settle(judge.verdicts(), failures, lengths=lengths)
     return judge
 
@@ -457,6 +474,7 @@ __all__ = [
     "assert_bitwise",
     "cake_step",
     "draw_case",
+    "fla_of",
     "flat_inputs",
     "judge_arms",
     "judge_single_rank",
