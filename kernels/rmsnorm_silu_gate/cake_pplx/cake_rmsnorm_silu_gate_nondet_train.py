@@ -56,12 +56,13 @@ to 128 rows per SM, where 0.2.3 runs 0.2.2's static backward (0.2.2 ran it
 up to 256 rows per SM there).  Version 0.2.4 changes no bits: a call with
 ``compute_grad_weight=False`` runs a program built without the weight
 gradient, whose ``dx`` and ``dz`` are those of 0.2.3.  Version 0.2.5
-changes no bits: in the repeatable band (SM107) packed rows run a 128-thread
-build of the strided program without the weight gradient (8-row blocks:
-twice the CTAs of 16-row blocks at a small row count), other layouts the
-0.2.4 256-thread one; this build and the fused band's strided program read
-packed rows at their linear offsets, and a CTA of theirs with one block
-takes no integer division before its loads.
+changes no bits: in the repeatable band (SM107) packed rows (``grad_out``,
+``x`` and ``z`` of head stride 128 and token stride ``H * 128``, more than
+one token) run a 128-thread build of the strided program without the
+weight gradient (8-row blocks: twice the CTAs of 16-row blocks at a small
+row count), other layouts the 0.2.4 256-thread one; this build and the
+fused band's strided program read packed rows at their linear offsets, and
+a CTA of theirs with one block takes no integer division before its loads.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -160,9 +161,10 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   ``dx``, ``dz`` and weight gradient are the deterministic package's bits,
   the same for the rows and the SM count.  Packed rows (``grad_out``, ``x``
   and ``z`` each with head stride
-  128 and token stride ``H * 128``) run its copy of the deterministic
-  package's look-ahead program, the same build, from 2560 rows per SM on
-  SM100 and SM103 and from 1536 on SM107, with the same bits.
+  128 and token stride ``H * 128``, more than one token) run its copy of
+  the deterministic package's look-ahead program, the same build, from
+  2560 rows per SM on SM100 and SM103 and from 1536 on SM107, with the same
+  bits.
 - Past 512 rows an FP32 weight gradient runs, on every architecture but in
   the static band of SM100 and SM103 (above), the repeatable backward of an
   FP32 weight gradient, this package's copy of the
@@ -186,7 +188,8 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   cluster program without its column sums and cluster synchronization; a
   strided program (CTAs walking their row blocks with no claim, no ticket
   and no workspace: 256-thread CTAs of 16-row blocks, but 128-thread CTAs of
-  8-row blocks on the repeatable band's packed rows) in the fused band up
+  8-row blocks on the repeatable band's packed rows, more than one token)
+  in the fused band up
   to 512 rows per SM on SM100 and 448 on SM103, and in the fused and the
   repeatable bands on SM107; the
   claimed program on the workspace past those cuts and in the repeatable
