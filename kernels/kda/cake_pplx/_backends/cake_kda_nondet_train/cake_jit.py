@@ -488,8 +488,8 @@ SEGMENTS: dict[str, Any] = {
 #   had 8 or fewer segments per document (2-45 % slower); every uniform count
 #   of 12 or more on a short pack was not slower.
 # - ``max_segment_tokens`` 1408 bounds the segments of a document as long as
-#   the pack: the slower skewed rows had segments of 1501 tokens or more, 1334
-#   was not slower.
+#   the pack: on the skewed packs of 16384 tokens the slower rows had segments
+#   of 1501 tokens or more, 1334 was not slower.
 # Host scalars cannot tell a skewed pack from an even one, so every bound is
 # the one measured safe on both.  Outside the envelope (other architectures,
 # SM counts or head counts, the serial route) and without a token count the

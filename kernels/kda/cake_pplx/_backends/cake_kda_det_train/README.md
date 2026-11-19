@@ -529,10 +529,12 @@ below), so the saved set and the arena never grow, the route never changes,
 and every arena option, the batched one included, runs the same plan.  The
 bounds come from GB300 measurements of the forward and backward kernel time
 against the occupancy plan, on even and skewed packs (one document holding
-most of the tokens), with 2k to 262k tokens: uniform tables of 8 or fewer
-segments per document and segments longer than 1408 tokens were slower on
-skewed packs.  Other architectures, SM counts and head counts, and the serial
-route, keep the occupancy rule.  `segment_rule="occupancy"` selects the
+most of the tokens), with 2k to 262k tokens.  Every slower uniform table on a
+skewed pack had 8 or fewer segments per document; on the skewed packs of 16384
+tokens the slower ones had segments of 1501 tokens or more, and 1334 was not
+slower.  So the rule keeps at least 12 segments per document and segments of
+at most 1408 tokens.  Other architectures, SM counts and head counts, and the
+serial route, keep the occupancy rule.  `segment_rule="occupancy"` selects the
 occupancy rule everywhere; the context-parallel package's local plans take
 it.  The records whose rules read the segment count (`walk_ctas_*`,
 `segments_heads_*`) are selected at the plan's count.
