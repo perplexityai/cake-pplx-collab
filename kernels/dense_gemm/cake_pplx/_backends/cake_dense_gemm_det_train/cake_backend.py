@@ -186,8 +186,13 @@ W8_FORMS = (
     "w8r",
     "w8rs",
     "w8",
-)  # the eight-warp CTA form of the input-gradient GEMM (instance_key field 37; ``_w8r`` / ``_w8rs`` / ``_w8`` symbols;
-# ``w8`` = the knob-free program)
+    "w8rel",
+    "w8relf",
+)  # the eight-warp CTA form of the input-gradient GEMM (instance_key field 37; ``_w8r`` / ``_w8rs`` / ``_w8`` /
+# ``_w8rel`` / ``_w8relf`` symbols; ``w8`` = the knob-free program, ``w8rel`` = the ``w8r`` program with the start path,
+# ``w8relf`` = the same with the epilogue's TMEM free)
+# the eight-warp forms with the start path: no batch raster and no store hint
+_W8_START_FORMS = ("w8rel", "w8relf")
 PD_CHOICES = (
     0,
     1,
@@ -720,21 +725,30 @@ def instance_key(
     odd chunks (warp - 2) steps), so each per-item eight-store burst becomes a seven-step ramp; the stores and
     bytes are unchanged.  A step count >= 0 that needs that drain (``slots`` > 0, ``pd`` 2, no fp32 output);
     every other field is unchanged and the OFF form renders byte-identical.  ``form`` (field 37 = LAST, symbol
-    ``_w8r`` / ``_w8rs`` / ``_w8`` directly after ``_pro<n>`` and before the diag tokens; "" = the ten-warp pipeline
+    ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf`` directly after ``_pro<n>`` and before the diag tokens;
+    "" = the ten-warp pipeline
     of every other program) selects the eight-warp CTA form of the same GEMM: ``w8r`` = four epilogue warps, a
     loader, a scheduler and the MMA warp on CTA-pair 256 x 256 tiles over six 32 KiB stages, whole tiles through
     cluster-launch-control items, the BF16 output through the TMA store and the raster quotients resolved by four
     fast divisors the host passes (``fd_tiles_l`` / ``fd_tiles_g`` / ``fd_group`` / ``fd_last``), with the
     accumulator released by every epilogue warp after its last read; ``w8rs`` = the same with the loader's elected
     lane issuing the cluster-launch-control queries (no scheduler warp); ``w8`` = the knob-free program of the form
-    (sm_100a): the scheduler warp issues the queries and the accumulator is released once per tile.  It is refused
+    (sm_100a): the scheduler warp issues the queries and the accumulator is released once per tile; ``w8rel`` = the
+    ``w8r`` program with the start path (sm_100a and sm_103a): the loader's elected lane prefetches the first item's
+    first K-step boxes into L2 in the prologue, the pair's landing barriers are armed and waited on at cluster scope,
+    each role waits on the cluster rendezvous just before its first operation that needs the peer CTA and the MMA
+    warp allocates the pair's TMEM itself at the constant base 0; ``w8relf`` = the same with the epilogue freeing the
+    TMEM under the last item's store drain (both keep every ring, item, MMA and summation order of ``w8r``: its
+    bits).  It is refused
     with every field it cannot
     carry: a layout other than ``kn``, an fp32 or transposed output, the single-CTA form, a tile other than the
     128 x 256 pair tile, an epilogue other than the one-slot TMA store, a narrow B panel, a box cap, any tail or
     raster form (``sk_exact`` / ``sk_first`` / ``sk_sync`` / ``sk_slab`` / ``htail`` / ``cgrp`` / ``batch_group`` /
     ``stt`` / ``ovl`` / ``ovr`` / ``park``) and any pair-program knob off its plain value (``pd`` / ``pro`` / ``lw`` /
     ``mg`` / ``sw`` / a non-default stage count / ``hints`` / ``pf`` / ``sh`` / ``store_hint`` / ``store_ef`` /
-    ``quad_store`` / ``f32_v8``); the OFF form renders byte-identical.  ``kser`` (field 38 = LAST, symbol ``_ks<P>``
+    ``quad_store`` / ``f32_v8``); the head-interleaved batch raster G > 1 and, with it, the ``evict_last`` store hint
+    (the batched MLA programs' knobs) are admitted with the other forms and refused with ``w8rel`` / ``w8relf``;
+    the OFF form renders byte-identical.  ``kser`` (field 38 = LAST, symbol ``_ks<P>``
     directly after ``_sw<n>`` and before ``_pro<n>``; 0 = off) is the serpentine K walk of the pair programs: the load
     warp walks the K blocks of a whole-K item (every K block of its tile in one item) whose item index lies in an odd
     block of P items descending, so a wave of P pairs starts on the K end the previous wave left in L2; the MMA warp is
@@ -1098,6 +1112,7 @@ def instance_key(
         or sh
         or store_hint not in ("none", "evict_last")
         or (store_hint != "none" and batch_group <= 1)
+        or (form in _W8_START_FORMS and (batch_group or store_hint != "none"))
         or store_ef
         or quad_store
         or f32_v8
@@ -1105,11 +1120,12 @@ def instance_key(
         # the eight-warp CTA form is written for the kn bf16 row-major 128 x 256 pair tile with the one-slot TMA-store
         # epilogue, whole tiles and none of the pair programs' pipeline knobs (the kernel's frozen configurations); the
         # head-interleaved batch raster (``batch_group`` G > 1) and, with it, the ``evict_last`` store hint are the
-        # kernel's own knobs (the batched MLA programs)
+        # kernel's own knobs (the batched MLA programs), which the start path of ``w8rel`` / ``w8relf`` excludes
         raise ValueError(
             f"form (the eight-warp CTA form) must be one of {W8_FORMS} on the kn bf16 row-major 128 x 256 pair tile "
             f"with the one-slot TMA-store epilogue, the default stage count, plain hints and no tail, raster (but a "
-            f"batch group G > 1) or pipeline knob (but the evict_last store hint with a batch group); got "
+            f"batch group G > 1 outside {_W8_START_FORMS}) or pipeline knob (but the evict_last store hint with a "
+            f"batch group); got "
             f"form={form!r}, a_mn={a_mn}, b_mn={b_mn}, out_f32={out_f32}, out_t={out_t}, "
             f"cta1={cta1}, block_n={block_n}, cta_rows={cta_rows}, epi={epi!r}, slots={slots}, b_swz={b_swz}, "
             f"box_rows={box_rows}, stages={stages}, hints={hints}, pd={pd}, pro={pro}, lw={lw}, mg={mg}, sw={sw}, "
@@ -1298,8 +1314,8 @@ def instance_symbol(key: tuple) -> str:
     ``_pro`` (``lw``); ``_mg`` directly after ``_lw`` for the whole-tile tile resolve (``mg``); ``_sw<n>`` directly
     after ``_mg`` for the paced output stores (``sw``, absent when 0); ``_ks<P>`` directly after ``_sw<n>`` for the
     serpentine K walk (``kser``, absent when 0); ``_kc<KC>`` directly after ``_ks<P>`` and before ``_pro<n>`` for the
-    promoted chunks (``promote_blocks``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` directly after
-    ``_pro<n>`` and before the diag tokens for the eight-warp CTA form (``form``, absent when "")).
+    promoted chunks (``promote_blocks``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``
+    directly after ``_pro<n>`` and before the diag tokens for the eight-warp CTA form (``form``, absent when "")).
     [Cake ``instance_symbol``]"""
     (
         a_mn,
@@ -3092,11 +3108,12 @@ class CakeDenseGemmDetProjectionPlan:
     # the bf16 TMA-store pd-2 drain delays its bulk tensor store issue - a program knob, no launch argument, no plan
     # arithmetic (0 = off)
     sw: int = 0
-    # the eight-warp CTA form (instance_key field 37, ``_w8r`` / ``_w8rs`` / ``_w8``; "" = the ten-warp pipeline): the
-    # same GEMM through four epilogue warps, a loader, a scheduler (``w8r``; ``w8`` = the knob-free program without the
-    # early accumulator release) or the loader's elected lane in its place (``w8rs``) and the MMA warp, whole kn bf16
-    # TMA-store tiles only; a program knob that adds the raster's four fast divisors to the launch (``_k1_values``) and
-    # changes no plan arithmetic
+    # the eight-warp CTA form (instance_key field 37, ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``; "" =
+    # the ten-warp pipeline): the same GEMM through four epilogue warps, a loader, a scheduler (``w8r``; ``w8`` = the
+    # knob-free program without the early accumulator release; ``w8rel`` / ``w8relf`` = ``w8r`` with the start path,
+    # ``w8relf`` with the epilogue's TMEM free) or the loader's elected lane in its place (``w8rs``) and the MMA warp,
+    # whole kn bf16 TMA-store tiles only; a program knob that adds the raster's four fast divisors to the launch
+    # (``_k1_values``) and changes no plan arithmetic
     form: str = ""
     # the serpentine K walk (instance_key field 38, ``_ks<P>``): the load warp walks the K blocks of a whole-K item in
     # an odd block of P items descending (P = ``sm_pairs``: the wave guard keeps the rule's value on devices with P
@@ -3504,13 +3521,16 @@ def cake_dense_gemm_det_train_projection_plan(
     pd-2 drain (a caller-forced register epilogue or ``slots`` 0, another ``pd``, the fp32 output) or is the
     single-CTA form; a caller-forced ``sw`` is admitted or refused by ``instance_key`` (the kernel's refusal: a step
     count >= 0 on that drain only).  It changes neither a launch argument nor the plan arithmetic.  ``form``
-    (``_w8r`` / ``_w8rs`` / ``_w8``) is the row's eight-warp CTA form - taken from the rule (the six sm_103a
+    (``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``) is the row's eight-warp CTA form - taken from the
+    rule (the six sm_103a
     input-gradient rules that carry it, 4096 -> 48, 4096 -> 512, 4096 -> 1024, 5120 -> 512, 5120 -> 1024 and the
     kv_a 6144 -> 576, and the five sm_100a input-gradient rules, 4096 -> 512, 4096 -> 1024, 5120 -> 512,
-    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows) and dropped where the plan is not
+    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows; no rule names the start-path forms
+    ``w8rel`` / ``w8relf``) and dropped where the plan is not
     whole-tile or a caller forces a pipeline,
     tile, output, epilogue, tail or raster
-    knob (the row's program above the form runs the plan asked for); where it survives, the rule's pair-program knobs
+    knob, or where a start-path form meets the rule's batch raster (the row's program above the form runs the plan
+    asked for); where it survives, the rule's pair-program knobs
     (``pd`` / ``pro`` / ``lw`` / ``mg`` / ``sw`` / ``stages`` / ``hints`` / ``pf`` / ``sh`` / ``store_hint`` /
     ``store_ef`` / ``quad_store`` / ``f32_v8``) are cleared before the key: the eight-warp programs carry none of them.
     A caller-forced ``form`` is admitted or refused by ``instance_key`` and refused on a plan with stream-K units.  It
@@ -3937,9 +3957,9 @@ def cake_dense_gemm_det_train_projection_plan(
     kser = int(rule.get("kser", 0))
     rule_form = form is None
     if form is None:
-        # the eight-warp CTA form of the row's rule (the ``_w8r`` / ``_w8rs`` / ``_w8`` programs): the whole-tile
-        # guard before ``instance_key`` drops it from a plan that is not whole-tile or that a caller shaped with a
-        # tile, output, epilogue, tail, raster or pipeline knob
+        # the eight-warp CTA form of the row's rule (the ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``
+        # programs): the whole-tile guard before ``instance_key`` drops it from a plan that is not whole-tile or that a
+        # caller shaped with a tile, output, epilogue, tail, raster or pipeline knob
         form = rule.get("form", "")
     form = str(form or "")
     if form not in ("", *W8_FORMS):
@@ -4240,10 +4260,11 @@ def cake_dense_gemm_det_train_projection_plan(
     # The whole-tile guard of ``form``: the eight-warp programs run whole kn bf16 128 x 256 pair tiles through the
     # one-slot TMA-store epilogue under the kernel's cluster-tile bound, with none of the pair programs' pipeline knobs.
     # A rule's ``form`` yields where the plan or a caller-forced knob breaks that (stream-K units, the single-CTA form,
-    # another tile, output class or epilogue, a tail or raster form, a forced pipeline knob - ``_W8_FIXED``): the row's
-    # program above the form runs the plan asked for.  Where it survives, the rule-derived pair-program knobs are
-    # cleared: the eight-warp programs carry none of them.  A caller-forced ``form`` reaches ``instance_key`` with the
-    # caller's knobs and is refused there (the stream-K units here).
+    # another tile, output class or epilogue, a tail or raster form, a forced pipeline knob - ``_W8_FIXED`` - or, for
+    # the start-path forms ``w8rel`` / ``w8relf``, the rule's batch raster): the row's program above the form runs the
+    # plan asked for.  Where it survives, the rule-derived pair-program knobs are cleared: the eight-warp programs carry
+    # none of them.  A caller-forced ``form`` reaches ``instance_key`` with the caller's knobs and is refused there
+    # (the stream-K units here).
     if form and rule_form:
         if (
             not whole_tiles
@@ -4263,6 +4284,7 @@ def cake_dense_gemm_det_train_projection_plan(
             or exact_plan is not None
             or sync_plan is not None
             or batch_group == 1
+            or (batch_group and form in _W8_START_FORMS)
             or any(_caller_knobs.get(k) is not None for k in _W8_FIXED)
         ):
             form = ""
@@ -4745,8 +4767,9 @@ def _template_class(tokens: tuple[str, ...]) -> tuple[str, bool, bool]:
 
 
 def _template_form(tokens: tuple[str, ...]) -> str:
-    """The eight-warp CTA form token of a symbol (``w8r`` / ``w8rs`` / ``w8``), "" for the ten-warp programs: a class of its
-    own for the registry fallback (a ten-warp row never falls onto an eight-warp program, nor the reverse)."""
+    """The eight-warp CTA form token of a symbol (``w8r`` / ``w8rs`` / ``w8`` / ``w8rel`` / ``w8relf``), "" for the
+    ten-warp programs: a class of its own for the registry fallback (a ten-warp row never falls onto an eight-warp
+    program, nor the reverse)."""
     return next((token for token in tokens if token in W8_FORMS), "")
 
 
@@ -4763,9 +4786,10 @@ def _template_knobs(
     ``_lw`` = the load-warp prelude form, ``_mg`` = the whole-tile tile resolve, ``_sw<n>`` = the paced output stores,
     ``_ks<P>`` = the serpentine K walk - an ``instance_key`` field the planner reads from the rule only,
     ``_kc128`` = ``promote=True``, the promoted twin, and ``promote=False`` without the token,
-    ``_w8r`` / ``_w8rs`` / ``_w8`` = the eight-warp CTA form); a single-CTA program leaves ``pro`` to
-    the planner (``instance_key`` refuses a forced one).  ``None`` for a symbol outside the family or carrying a token
-    the planner never emits (``_box<rows>``, a promoted chunk other than :data:`K1_PROMOTE_BLOCKS`, diagnostics)."""
+    ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf`` = the eight-warp CTA form); a single-CTA program leaves
+    ``pro`` to the planner (``instance_key`` refuses a forced one).  ``None`` for a symbol outside the family or
+    carrying a token the planner never emits (``_box<rows>``, a promoted chunk other than :data:`K1_PROMOTE_BLOCKS`,
+    diagnostics)."""
     tokens = _template_tokens(template)
     if tokens is None or len(tokens) < 2:
         return None
@@ -4912,7 +4936,10 @@ def _registry_variants(
         if _template_class(tokens) != _template_class(wanted):
             continue
         if bool(_template_form(tokens)) != bool(_template_form(wanted)):
-            continue  # the eight-warp CTA form is a class of its own (its programs fall back onto each other only)
+            # the eight-warp CTA form is a class of its own (its programs fall back onto each other only).  Only a
+            # caller-forced form plans in it (the rule-free base names no form), and the caller's form wins over a
+            # variant's (``_merge_fallback_knobs``): a variant lends its other knobs, never its form
+            continue
         knobs = _template_knobs(candidate, sk_exact_parts=sk_exact_parts)
         if (
             knobs is None

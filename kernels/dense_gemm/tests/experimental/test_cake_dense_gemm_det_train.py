@@ -606,12 +606,15 @@ PACKAGE_TABLE_TEMPLATES = {
 # the SM count of a device of each architecture the planner can target (the two export architectures and
 # compute capability 10.3, whose programs register when the export ships them)
 SM_COUNT_OF_ARCH = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
-# the architectures each eight-warp CTA form token serves: the ``w8r`` / ``w8rs`` programs are sm_100a's and sm_103a's,
-# the knob-free ``w8`` program is sm_100a's (test_registry_records_are_well_formed pins the records' arches to it)
+# the architectures each eight-warp CTA form token serves: the ``w8r`` / ``w8rs`` programs and the start-path
+# ``w8rel`` / ``w8relf`` programs are sm_100a's and sm_103a's, the knob-free ``w8`` program is sm_100a's
+# (test_registry_records_are_well_formed pins the records' arches to it)
 EIGHT_WARP_ARCHES_OF_FORM = {
     "w8r": ("sm_100a", "sm_103a"),
     "w8rs": ("sm_100a", "sm_103a"),
     "w8": ("sm_100a",),
+    "w8rel": ("sm_100a", "sm_103a"),
+    "w8relf": ("sm_100a", "sm_103a"),
 }
 
 
@@ -978,7 +981,8 @@ def test_registry_records_are_well_formed():
             )
             if form:
                 # the eight-warp CTA programs take the raster's four fast divisors and run 256 threads per CTA; the
-                # ``w8r`` / ``w8rs`` programs serve sm_100a and sm_103a and the knob-free ``w8`` program sm_100a alone;
+                # ``w8r`` / ``w8rs`` programs and the start-path ``w8rel`` / ``w8relf`` programs serve sm_100a and
+                # sm_103a and the knob-free ``w8`` program sm_100a alone;
                 # their generator module is not the ten-warp programs'
                 for name_fd in ("fd_tiles_l", "fd_tiles_g", "fd_group", "fd_last"):
                     assert ["parameter", name_fd] in plan_items, (name, name_fd)
@@ -9213,7 +9217,8 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
     with pytest.raises(ValueError, match=r"form"):
         cake_backend.instance_key(a_mn=False, b_mn=True, **key_knobs)
     # the form is a class for the registry fallback: a ten-warp row never falls onto an eight-warp program, nor the
-    # reverse (on sm_103a the eight-warp twin of the ``w8r`` program is the ``w8rs`` program alone)
+    # reverse (on sm_103a the eight-warp twins of the ``w8r`` program are the ``w8rs`` program and the two start-path
+    # programs, all one token away, by name)
     assert all(
         knobs["form"] == ""
         for knobs in cake_backend._registry_variants(
@@ -9225,29 +9230,209 @@ def test_eight_warp_form_rules_plan_their_programs(arch, T, monkeypatch):
         for knobs in cake_backend._registry_variants(
             "dense_proj_det_gemm_kn_n256_tma1_w8r", "sm_103a", False
         )
-    ] == ["w8rs"]
-    # three eight-warp programs on sm_100a: each one's in-class neighbours are the other two (the class never falls
+    ] == ["w8rel", "w8relf", "w8rs"]
+    # five eight-warp programs on sm_100a: each one's in-class neighbours are the other four (the class never falls
     # onto a ten-warp program)
-    for form, others in (
-        ("w8", ["w8r", "w8rs"]),
-        ("w8r", ["w8", "w8rs"]),
-        ("w8rs", ["w8", "w8r"]),
-    ):
-        assert (
-            sorted(
-                knobs["form"]
-                for knobs in cake_backend._registry_variants(
-                    f"dense_proj_det_gemm_kn_n256_tma1_{form}", "sm_100a", False
-                )
+    sm100a_forms = sorted(
+        form
+        for form, arches in EIGHT_WARP_ARCHES_OF_FORM.items()
+        if "sm_100a" in arches
+    )
+    assert sm100a_forms == ["w8", "w8r", "w8rel", "w8relf", "w8rs"]
+    for form in sm100a_forms:
+        assert sorted(
+            knobs["form"]
+            for knobs in cake_backend._registry_variants(
+                f"dense_proj_det_gemm_kn_n256_tma1_{form}", "sm_100a", False
             )
-            == others
-        ), form
+        ) == [other for other in sm100a_forms if other != form], form
     assert "form" not in cake_backend._CTA1_CLEARED
     for key, rule in ROW_RULES.items():
         assert "form" not in rule or (
             rule["form"] in cake_backend.W8_FORMS
             and key[0] in EIGHT_WARP_ARCHES_OF_FORM[rule["form"]]
         ), key
+
+
+# the start-path eight-warp forms: form -> the build keywords of its program, the ``w8r`` program's (``rel_early``) with
+# the start path (``early``, ``lean``) and, for ``w8relf``, the epilogue's TMEM free (``early_free``)
+EIGHT_WARP_START_BUILDS = {
+    "w8rel": {"rel_early": True, "early": True, "lean": True},
+    "w8relf": {"rel_early": True, "early": True, "lean": True, "early_free": True},
+}
+
+
+def test_eight_warp_start_path_forms(monkeypatch):
+    """The start-path eight-warp CTA forms ``w8rel`` / ``w8relf`` (instance-key field 37, ``_w8rel`` / ``_w8relf``
+    directly after ``_pro<n>``): the ``w8r`` program with the start path and, for ``w8relf``, the epilogue's TMEM free,
+    whose rings, items, MMAs and summation order are ``w8r``'s.  Their records build the ``w8r`` record's module with
+    those keywords, on sm_100a and sm_103a only, with its argument plan and launch shape.  The key, the symbol and the
+    decoder round-trip; every field the ``w8r`` form refuses is refused with them, and so are the batch raster and the
+    store hint the other forms take.  A rule that names one plans its program with the plan of the row's ``w8r``
+    program and yields on a batch raster.  The registry fallback never trades a caller's form for another: an
+    in-class variant lends its other knobs, never its form."""
+    w8r = "dense_proj_det_gemm_kn_n256_tma1_w8r"
+    # the records: the w8r record's module and argument plan with the start-path keywords, sm_100a and sm_103a only
+    for arch in ("sm_100a", "sm_103a"):
+        base = cake_jit.MODULES[cake_jit.KERNELS[arch][w8r]]
+        assert base["build"]["kwargs"] == {"rel_early": True}, arch
+        for form, kwargs in EIGHT_WARP_START_BUILDS.items():
+            template = f"dense_proj_det_gemm_kn_n256_tma1_{form}"
+            name = cake_jit.KERNELS[arch].get(template)
+            assert name is not None, (arch, template)
+            record = cake_jit.MODULES[name]
+            assert (
+                record["template"] == template and name != cake_jit.KERNELS[arch][w8r]
+            )
+            assert record["arches"] == list(EIGHT_WARP_ARCHES_OF_FORM[form]), name
+            assert record["build"] == {
+                "module": base["build"]["module"],
+                "kwargs": kwargs,
+            }, name
+            assert record["arg_plan"] == base["arg_plan"], name
+            assert record["launch"] == base["launch"], name
+    for form in EIGHT_WARP_START_BUILDS:
+        assert f"dense_proj_det_gemm_kn_n256_tma1_{form}" not in _registered("sm_107a")
+    # the key, the symbol and the decoder: field 37 alone differs from the w8r key
+    kn = dict(a_mn=False, b_mn=True, epi="tma", slots=1)
+    plain = cake_backend.instance_key(**kn, form="w8r")
+    for form in EIGHT_WARP_START_BUILDS:
+        template = f"dense_proj_det_gemm_kn_n256_tma1_{form}"
+        key = cake_backend.instance_key(**kn, form=form)
+        assert key[36] == form and key[:36] + key[37:] == plain[:36] + plain[37:]
+        assert cake_backend.instance_symbol(key) == template
+        tokens = cake_backend._template_tokens(template)
+        assert cake_backend._template_form(tokens) == form
+        knobs = cake_backend._template_knobs(template)
+        assert knobs is not None and knobs["form"] == form, template
+        assert (knobs["pro"], knobs["batch_group"], knobs["store_hint"]) == (
+            0,
+            0,
+            "none",
+        )
+        assert (
+            cake_backend.instance_symbol(
+                cake_backend.instance_key(a_mn=False, b_mn=True, **_key_knobs(knobs))
+            )
+            == template
+        )
+        # refused with every field the w8r form refuses, and with the batch raster and the store hint
+        for bad in (
+            dict(a_mn=True, b_mn=True),
+            dict(**kn, cta1=True),
+            dict(**kn, out_f32=True),
+            dict(a_mn=False, b_mn=True, block_n=128, epi="tma", slots=1),
+            dict(a_mn=False, b_mn=True, epi="reg"),
+            dict(**kn, stages=5),
+            dict(**kn, hints=("evict_first", "none")),
+            dict(**kn, pd=2),
+            dict(**kn, pro=15),
+            dict(**kn, lw=True, pro=15),
+            dict(**kn, mg=True),
+            dict(**kn, batch_group=1),
+            dict(**kn, batch_group=8),
+            dict(**kn, batch_group=64),
+            dict(**kn, batch_group=8, store_hint="evict_last"),
+            dict(**kn, store_hint="evict_last"),
+        ):
+            with pytest.raises(ValueError, match=r"form"):
+                cake_backend.instance_key(**bad, form=form)
+        decoded = cake_backend._template_knobs(
+            f"dense_proj_det_gemm_kn_n256_tma1_bg8_{form}"
+        )
+        assert decoded is not None and decoded["batch_group"] == 8, form
+        with pytest.raises(ValueError, match=r"form"):
+            cake_backend.instance_key(a_mn=False, b_mn=True, **_key_knobs(decoded))
+    # the form whose loader issues the queries (``w8rs``) takes no start path: there is no ``w8rels`` token
+    with pytest.raises(ValueError, match=r"form"):
+        cake_backend.instance_key(**kn, form="w8rels")
+    assert (
+        cake_backend._template_knobs("dense_proj_det_gemm_kn_n256_tma1_w8rels") is None
+    )
+    # a rule that names a start-path form plans its program with the plan of the row's w8r program (the w8r rows
+    # 4096 -> 48 on sm_103a and 4096 -> 64 on sm_100a at T 16384), served by the registry without a fallback
+    T = 16384
+    for arch, N_layer, K_layer in (("sm_103a", 4096, 48), ("sm_100a", 4096, 64)):
+        kw = dict(sm_count=152, l2_bytes=L2_BYTES, arch=arch)
+        mirror = dict(kw, _fallback=False)
+        key = (arch, False, True, False, False, False, N_layer, K_layer, None)
+        rule = ROW_RULES[key]
+        assert rule["form"] == "w8r", key
+        v = _class_views("kn", False, False, T, N_layer, K_layer)
+        base, *_ = cake_dense_gemm_det_train_projection_plan(
+            v["A"], v["B"], v["out"], **mirror
+        )
+        assert base.template == w8r, (key, base.template)
+        for form in EIGHT_WARP_START_BUILDS:
+            template = f"dense_proj_det_gemm_kn_n256_tma1_{form}"
+            with monkeypatch.context() as m:
+                m.setitem(ROW_RULES, key, {**rule, "form": form})
+                plan, *_ = cake_dense_gemm_det_train_projection_plan(
+                    v["A"], v["B"], v["out"], **mirror
+                )
+                served, *_ = cake_dense_gemm_det_train_projection_plan(
+                    v["A"], v["B"], v["out"], **kw
+                )
+            assert plan.template == template and plan.form == form, (key, form)
+            sig, base_sig = _plan_signature(plan), _plan_signature(base)
+            differs = {name for name in sig if sig[name] != base_sig[name]}
+            assert differs == {"template", "form"}, (key, form, sorted(differs))
+            assert served.template == template and template in _registered(arch)
+            assert not (
+                served.swap_fallback
+                or served.rule_fallback
+                or served.knob_fallback
+                or served.wave_fallback
+            ), (key, form)
+    # a rule's start-path form yields on the rule's batch raster: the batched absorbed-query forward (64 heads) plans
+    # the rule without the form, the ten-warp program with the rule's raster
+    mla_key = ("sm_100a", False, True, False, False, True, 512, 192, None)
+    mla_rule = ROW_RULES[mla_key]
+    assert mla_rule == {"form": "w8rs", "batch_group": 64, "group_m": 2}
+    v = _views("mla", "qabs", "fwd", "bf16", 1001)
+    mla_kw = dict(sm_count=148, l2_bytes=L2_BYTES, arch="sm_100a", _fallback=False)
+    with monkeypatch.context() as m:
+        m.setitem(ROW_RULES, mla_key, {"batch_group": 64, "group_m": 2})
+        no_form, *_ = cake_dense_gemm_det_train_projection_plan(
+            v["A"], v["B"], v["out"], **mla_kw
+        )
+    assert no_form.form == "" and no_form.batch_group == 64, no_form.template
+    for form in EIGHT_WARP_START_BUILDS:
+        with monkeypatch.context() as m:
+            m.setitem(ROW_RULES, mla_key, {**mla_rule, "form": form})
+            plan, *_ = cake_dense_gemm_det_train_projection_plan(
+                v["A"], v["B"], v["out"], **mla_kw
+            )
+        assert _plan_signature(plan) == _plan_signature(no_form), (form, plan.template)
+    # the registry fallback keeps a caller's form: with the w8r program unregistered, a plan that forces it keeps it
+    # (every in-class variant, the start-path programs included, lends its other knobs, never its form)
+    forced_knobs = cake_backend._template_knobs(w8r)
+    assert forced_knobs is not None and forced_knobs.pop("kser") == 0
+    for arch, N_layer, K_layer in (("sm_103a", 4096, 48), ("sm_100a", 4096, 64)):
+        v = _class_views("kn", False, False, T, N_layer, K_layer)
+        table = {t: n for t, n in cake_jit.KERNELS[arch].items() if t != w8r}
+        with monkeypatch.context() as m:
+            m.setitem(cake_jit.KERNELS, arch, table)
+            assert [
+                knobs["form"]
+                for knobs in cake_backend._registry_variants(w8r, arch, False)
+            ] == sorted(
+                f
+                for f, arches in EIGHT_WARP_ARCHES_OF_FORM.items()
+                if arch in arches and f != "w8r"
+            ), arch
+            forced, *_ = cake_dense_gemm_det_train_projection_plan(
+                v["A"],
+                v["B"],
+                v["out"],
+                sk=False,
+                sm_count=152,
+                l2_bytes=L2_BYTES,
+                arch=arch,
+                **forced_knobs,
+            )
+        assert forced.template == w8r and forced.form == "w8r", (arch, forced.template)
+        assert not forced.knob_fallback, arch
 
 
 # The GB T-exact forward / input-gradient rules: (arch, B MN-major, N, K) -> (the T of the exact keys, the program).
