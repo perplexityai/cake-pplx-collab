@@ -28,7 +28,9 @@ terminal summary); no output has an error bound of its own, and no test
 compares this package with the deterministic one.  ``y``, ``dx``, ``dz`` and an
 FP32 weight gradient (accumulated or not) must be the same bits on every
 launch and on every path: streams, CUDA Graph replays, autograd,
-``compute_grad_weight`` (``False`` the bits of the BF16 bands' module), grids
+``compute_grad_weight`` (``False`` the bits of the BF16 bands' module, but
+on the packed rows of the build of packed rows only, the repeatable
+backward's), grids
 smaller than the work (the static backward of an FP32 weight gradient on
 sm_100a and sm_103a, the fused backward and the repeatable backwards of
 both weight-gradient dtypes and their long roles at 1, 3 and 7
@@ -87,7 +89,13 @@ the ``dx`` and ``dz`` bits of the BF16 call around the cut
 on packed and strided rows, in the small-row bands and at grids of 1, 3 and
 7 CTAs; the strided and the one-cluster ones with no stream or reserve
 workspace, also in CUDA Graph capture, and a caller workspace left as it is;
-the claimed ones leaving the workspace zero), and the mode
+the claimed ones leaving the workspace zero; on packed rows, and one token
+of head stride 128, up to ``PACKED_SMALL_ROWS_PER_SM`` rows per SM the
+repeatable band's build of packed rows only in every band's place, around
+its cut, at grids of 1, 3 and 7 CTAs, never on other layouts, with the
+``dx`` and ``dz`` bits of the BF16 call on the repeatable backward
+(``bwd_bf16_rep`` forced) and judged against the naive implementation; the
+plans ``nodw_module`` reads, read once at import, those of the tables), and the mode
 policy: the mode is in the name, so no entry point takes a ``deterministic``
 keyword (passing one, of any value, is a ``TypeError`` before any launch); under
 ``torch.use_deterministic_algorithms(True)`` a backward that computes the
@@ -250,6 +258,7 @@ NODW_TWINS = {
     "bwd_bf16_rep_nodw": "bwd_bf16_rep",
     "bwd_bf16_rep_nodw_strided": "bwd_bf16_rep",
     "bwd_bf16_rep_nodw_strided_packed": "bwd_bf16_rep",
+    "bwd_bf16_rep_nodw_strided_packed_small": "bwd_bf16_rep",
     "bwd_bf16_rep_nodw_long": "bwd_bf16_rep_long",
 }
 NODW_STRIDED_GRID_RULES = {
@@ -268,11 +277,31 @@ NODW_STRIDED_GRID_RULES = {
         "kind": "strided_row_blocks",
         "rows_per_block": 8,
     },
+    "bwd_bf16_rep_nodw_strided_packed_small": {
+        "ctas_per_sm": 8,
+        "kind": "strided_row_blocks",
+        "rows_per_block": 8,
+    },
 }
 NODW_STRIDED_THREADS = {
     "bwd_bf16_fused_nodw_strided": 256,
     "bwd_bf16_rep_nodw_strided": 256,
     "bwd_bf16_rep_nodw_strided_packed": 128,
+    "bwd_bf16_rep_nodw_strided_packed_small": 128,
+}
+# The repeatable band's build of packed rows only (``PACKED_SMALL_ROLE``),
+# which a call with ``compute_grad_weight=False`` runs on packed rows (and
+# one token of head stride 128) up to ``PACKED_SMALL_ROWS_PER_SM`` rows per
+# SM in the place of the program without the weight gradient of every band
+# that routes one: the ``dx`` and ``dz`` bits of the repeatable backward,
+# not of the band's module; and its shipped cuts, rows per SM by
+# architecture (the BF16 bands' role), none on sm_107a, where no
+# measurement backs one.
+NODW_SMALL = "bwd_bf16_rep_nodw_strided_packed_small"
+SMALL_ROWS_PER_SM = {
+    "sm_100a": {"bwd_bf16": 128},
+    "sm_103a": {"bwd_bf16": 128},
+    "sm_107a": {},
 }
 # The bands with a strided program, which has a cut
 # (``NODW_STRIDED_ROWS_PER_SM``) where the band's architecture routes both
@@ -422,6 +451,86 @@ def _nodw_module(name: str, rows: int, *, packed: bool = True) -> str:
         loader.device_sm_count(device_index),
         packed=packed,
     )
+
+
+def _one_token_packed(arch: str) -> bool:
+    """Whether a call without the weight gradient on ``arch`` passes one
+    token of head stride 128 as packed rows (token stride ``H * 128``): where
+    the build of packed rows only has a cut (``PACKED_SMALL_ROWS_PER_SM``);
+    elsewhere (sm_107a) its token stride stays 0 and it runs as other layouts
+    do."""
+    return loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0) > 0
+
+
+def _nodw_packed(T: int, H: int, layout: str = "contiguous") -> bool:
+    """Whether a call with ``compute_grad_weight=False`` on ``make(T, H,
+    layout=layout)`` tells ``nodw_module`` that its rows are packed: the
+    backward's test (:func:`_backward_packed`), and also one token (of the
+    flat layout, one row) whose heads have stride 128 on an architecture
+    where :func:`_one_token_packed` holds (``make``'s contiguous, flat,
+    misaligned and projection inputs; head-major ``x`` and ``z`` of one token
+    too, whose heads lie 128 apart)."""
+    tokens = T * H if layout == "flat" else T
+    arch = loader.device_arch(torch.cuda.current_device())
+    if tokens == 1 and _one_token_packed(arch):
+        return True
+    return _backward_packed(T, H, layout)
+
+
+def _small_cut_rows() -> int:
+    """The most packed rows the build of packed rows only runs on this
+    device (``PACKED_SMALL_ROWS_PER_SM * SMs``; 0 where it has no cut or is
+    not routed)."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    if NODW_SMALL not in loader.ROUTES[arch]:
+        return 0
+    per_sm = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
+    return per_sm * loader.device_sm_count(device_index)
+
+
+def _past_small_cut(T: int, H: int) -> int:
+    """``T``, or the fewest tokens of ``H`` heads whose packed rows lie past
+    this device's cut of the build of packed rows only where that is more
+    (:func:`_small_cut_rows`)."""
+    return max(T, _small_cut_rows() // H + 1)
+
+
+def _is_small(name: str) -> bool:
+    """Whether module ``name`` is the build of packed rows only."""
+    return loader.MODULES[name]["role"] == NODW_SMALL
+
+
+def _rep_bits(dy, x, z, w, *, workspace=None) -> tuple[torch.Tensor, torch.Tensor]:
+    """``dx`` and ``dz`` of the BF16 call on the repeatable backward
+    (``bwd_bf16_rep`` forced through ``module_for_rows``, :func:`_forcing`)
+    on the same inputs: the bits the build of packed rows only gives at any
+    grid (the repeatable backward's ``dx`` and ``dz`` do not depend on the
+    grid)."""
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(pkg, "module_for_rows", _forcing("bwd_bf16_rep"))
+        dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
+    return dx, dz
+
+
+def _nodw_bits(nodw: str, dy, x, z, w, *, workspace=None):
+    """``dx`` and ``dz`` whose bits a call with ``compute_grad_weight=False``
+    that runs ``nodw`` gives: the repeatable backward's for the build of
+    packed rows only (:func:`_rep_bits`), else the BF16 call's on the same
+    inputs (the band's module)."""
+    if _is_small(nodw):
+        return _rep_bits(dy, x, z, w, workspace=workspace)
+    dx, dz, _ = backward(dy, x, z, w, EPS, workspace=workspace)
+    return dx, dz
+
+
+def _patch_routes(patch, arch: str, table: dict[str, str]) -> None:
+    """``ROUTES[arch]`` set to ``table`` for the ``patch`` context, with the
+    plans :func:`nodw_module` reads for ``arch`` (``_NODW_PLANS``, read once
+    at import) read again from it."""
+    patch.setitem(loader.ROUTES, arch, table)
+    plans = {name: loader._nodw_plan(arch, name) for name in loader.MODULES}
+    patch.setitem(loader._NODW_PLANS, arch, plans)
 
 
 def _chunks(rows: int) -> int:
@@ -1020,22 +1129,30 @@ def _nodw_claimed_rows() -> int | None:
     return rows if loader.workspace_bytes(nodw) else None
 
 
-@pytest.mark.parametrize("program", ["strided", "claimed"])
+@pytest.mark.parametrize("program", ["small", "strided", "claimed"])
 def test_compute_grad_weight_false_touches_no_weight_state(
     program, monkeypatch, launches
 ):
     """``compute_grad_weight=False`` returns ``None`` for the weight gradient,
     leaves ``grad_weight`` as it is and runs the program ``nodw_module``
     names, whose ``dx`` and ``dz`` are the bits of the BF16 call that
-    computes it.  At 257 x 48 rows (up to the strided cut of the band on
-    every product that has one) the strided program, which makes no stream
-    workspace and leaves a caller workspace zero; a row past the largest cut
+    computes it (of the BF16 call on the repeatable backward for the build of
+    packed rows only, :func:`_nodw_bits`).  At 257 x 48 packed rows the build
+    of packed rows only where its cut holds them (sm_100a and sm_103a), which
+    makes no stream workspace and leaves a caller workspace zero; at the
+    fewest tokens of 48 heads past that cut, at least 257 (up to the strided
+    cut of the band on every product that has one), the strided program,
+    which does the same; a row past the largest cut
     (:func:`_nodw_claimed_rows`) a claimed program, which takes the arrival
     ticket and claims row blocks on the stream's workspace of its own (its
     buffers, left zero) and leaves a caller workspace zero.  Autograd with a
     weight that needs no gradient gives the same ``dx`` and ``dz``."""
-    if program == "strided":
+    if program == "small":
         T, H = 257, 48
+        if T * H > _small_cut_rows():
+            pytest.skip("no build of packed rows only runs 257 x 48 rows here")
+    elif program == "strided":
+        T, H = _past_small_cut(257, 48), 48
     else:
         rows = _nodw_claimed_rows()
         if rows is None:
@@ -1044,9 +1161,10 @@ def test_compute_grad_weight_false_touches_no_weight_state(
     rows = T * H
     nodw = _nodw_module(_backward_module(rows), rows)
     assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, nodw
+    assert _is_small(nodw) == (program == "small"), nodw
     assert bool(loader.workspace_bytes(nodw)) == (program == "claimed"), nodw
     x, z, w, dy = make(T, H, seed=12)
-    dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+    dx_d, dz_d = _nodw_bits(nodw, dy, x, z, w)
     ws = workspace_for(rows, x.device)
     main = torch.full((D,), 3.0, dtype=torch.float32, device="cuda")
     launches.clear()
@@ -1064,7 +1182,7 @@ def test_compute_grad_weight_false_touches_no_weight_state(
     assert dw is None
     assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
     torch.cuda.synchronize()
-    if program == "strided":
+    if program != "claimed":
         assert pkg._STREAM_WORKSPACES == {}
     else:
         key = (
@@ -1086,14 +1204,18 @@ def test_compute_grad_weight_false_touches_no_weight_state(
 
 
 # Shapes and ``make`` layouts whose BF16 bands run a program without the
-# weight gradient that takes no workspace: a strided program at 257 x 48
-# rows, on packed rows and on a gate and ``grad_out`` sliced from
-# projections (on sm_107a the 128-thread and the 256-thread strided
-# program), one cluster at 5 x 48 (a small-row band on every product).
+# weight gradient that takes no workspace: at 257 x 48 rows on packed rows
+# the build of packed rows only (sm_100a and sm_103a; on sm_107a the
+# 128-thread strided program) and on a gate and ``grad_out`` sliced from
+# projections a strided program (on sm_107a the 256-thread one); at 5 x 48
+# rows (a small-row band on every product) on packed rows the build of
+# packed rows only (sm_100a and sm_103a; on sm_107a one cluster) and on
+# projections one cluster.
 NODW_WORKSPACE_FREE_SHAPES = [
     (257, 48, "contiguous"),
     (257, 48, "projection"),
     (5, 48, "contiguous"),
+    (5, 48, "projection"),
 ]
 
 
@@ -1106,15 +1228,18 @@ def test_programs_without_a_workspace_make_none(T, H, layout, monkeypatch, launc
     capture, whose graph holds its one kernel (no fill kernel, memset or
     event wait); a caller workspace filled with 7 is checked and left as it
     is.  Every call and every replay gives the ``dx`` and ``dz`` bits of the
-    BF16 call that computes the weight gradient."""
+    BF16 call that computes the weight gradient (of the BF16 call on the
+    repeatable backward for the build of packed rows only, :func:`_nodw_bits`)."""
     pytest.importorskip("cuda.bindings.runtime")
     rows = T * H
     packed = _backward_packed(T, H, layout)
-    nodw = _nodw_module(_backward_module(rows, packed=packed), rows, packed=packed)
+    nodw = _nodw_module(
+        _backward_module(rows, packed=packed), rows, packed=_nodw_packed(T, H, layout)
+    )
     assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, nodw
     assert loader.workspace_bytes(nodw) == 0, nodw
     x, z, w, dy = make(T, H, layout=layout, seed=13)
-    dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+    dx_d, dz_d = _nodw_bits(nodw, dy, x, z, w)
     ws = workspace_for(rows, x.device)
     ws.fill_(7)
     torch.cuda.synchronize()
@@ -1228,14 +1353,16 @@ def test_programs_without_the_weight_gradient_give_the_bits_at_the_cut(
 
 
 # The programs without the weight gradient that run at a forced grid:
-# ``(band, program, layout)``, the strided one (on packed rows, contiguous,
-# its strided program of packed rows where routed; on a gate and
+# ``(band, program, layout)``, the build of packed rows only (packed rows,
+# contiguous, up to its cut), the strided one (on packed rows past that cut,
+# contiguous, its strided program of packed rows where routed; on a gate and
 # ``grad_out`` sliced from projections the strided one) or (the strided ones
-# unrouted) the claimed one of the band.
+# and the build of packed rows only unrouted) the claimed one of the band.
 NODW_GRID_CASES = [
     pytest.param(band, program, layout, id=f"{band}-{program}-{layout}")
     for band in NODW_CUT_BANDS
     for program, layout in (
+        ("small", "contiguous"),
         ("strided", "contiguous"),
         ("strided", "projection"),
         ("claimed", "contiguous"),
@@ -1249,37 +1376,48 @@ def test_programs_without_the_weight_gradient_at_forced_grids(
     band, program, layout, ctas, launches, monkeypatch
 ):
     """On grids of ``ctas`` CTAs (``backward_ctas`` patched), fewer than the
-    row blocks of 257 x 48 rows, the band's strided program (on packed rows
-    its strided program of packed rows where routed, on a gate and
-    ``grad_out`` sliced from projections the strided one) and its claimed
-    program (the strided ones unrouted, ``ROUTES`` patched), the band's
-    module forced through ``module_for_rows`` (:func:`_forcing`), give the
-    ``dx`` and ``dz`` bits of the BF16 call on the band's module at the
-    host's grid; the claimed program leaves a caller workspace zero after
-    back-to-back calls, and the strided ones do not touch it."""
+    row blocks of 257 x 48 rows (of the fewest tokens of 48 heads past the
+    cut of the build of packed rows only, at least 257, for the strided
+    program on packed rows), the build of packed rows only (packed rows up to
+    its cut, where routed), the band's strided program (on packed rows its
+    strided program of packed rows where routed, on a gate and ``grad_out``
+    sliced from projections the strided one) and its claimed program (the
+    strided ones and the build of packed rows only unrouted, ``ROUTES``
+    patched), the band's module forced through ``module_for_rows``
+    (:func:`_forcing`), give the ``dx`` and ``dz`` bits of the BF16 call on
+    the band's module at the host's grid (on the repeatable backward for the
+    build of packed rows only, :func:`_rep_bits`); the claimed program leaves
+    a caller workspace zero after back-to-back calls, and the strided ones do
+    not touch it."""
     arch = loader.device_arch(torch.cuda.current_device())
     routes = loader.ROUTES[arch]
     strided = band + loader.NODW + loader.STRIDED
     strided_packed = strided + loader.PACKED
     claimed = band + loader.NODW
-    if program == "claimed":
+    T, H = 257, 48
+    if program == "small":
+        own = strided in routes or claimed in routes
+        want = routes.get(NODW_SMALL) if own and T * H <= _small_cut_rows() else None
+    elif program == "claimed":
         want = routes.get(claimed)
     elif layout == "contiguous" and strided in routes:
+        T = _past_small_cut(T, H)
         want = routes.get(strided_packed, routes[strided])
     else:
         want = routes.get(strided)
     if want is None:
-        pytest.skip(f"{arch} routes no {program} program of {band}")
-    T, H = 257, 48
+        pytest.skip(f"{arch} routes no {program} program of {band} at these rows")
     x, z, w, dy = make(T, H, layout=layout, seed=15)
     ws = workspace_for(T * H, x.device)
+    if program == "small":
+        dx_d, dz_d = _rep_bits(dy, x, z, w)
     monkeypatch.setattr(pkg, "module_for_rows", _forcing(band))
-    dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+    if program != "small":
+        dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
     if program == "claimed":
-        table = {
-            r: name for r, name in routes.items() if r not in (strided, strided_packed)
-        }
-        monkeypatch.setitem(loader.ROUTES, arch, table)
+        drop = (strided, strided_packed, NODW_SMALL)
+        table = {r: name for r, name in routes.items() if r not in drop}
+        _patch_routes(monkeypatch, arch, table)
     monkeypatch.setattr(pkg, "backward_ctas", lambda name, rows, sm_count: ctas)
     launches.clear()
     for i in range(3):
@@ -1297,19 +1435,22 @@ def test_programs_without_the_weight_gradient_at_forced_grids(
 @pytest.mark.parametrize("band", ["bwd_bf16_short", "bwd_bf16_t512"])
 def test_one_cluster_programs_without_the_weight_gradient(band, launches):
     """In each small-row band of this device (the first, a middle and the
-    last rows of the band, as one head; skipped where this device routes no
-    such band or no program without the weight gradient for it), a call with
-    ``compute_grad_weight=False`` runs the band's one-cluster program without
-    the weight gradient and gives the ``dx`` and ``dz`` bits of the BF16 call
-    on the band's one-cluster module."""
+    last rows of the band, as tokens of one head, at least 2: one token runs
+    as packed rows; skipped where this device routes no such band or no
+    program without the weight gradient for it), on a gate and ``grad_out``
+    sliced from projections (rows that are not packed, which the build of
+    packed rows only never runs), a call with ``compute_grad_weight=False``
+    runs the band's one-cluster program without the weight gradient and
+    gives the ``dx`` and ``dz`` bits of the BF16 call on the band's
+    one-cluster module."""
     found = _device_band(band)
     nodw = _routes().get(band + loader.NODW)
     if found is None or nodw is None:
         pytest.skip(f"this device routes no {band} band without the weight gradient")
     first, last = found
     name = _routes()[band]
-    for rows in sorted({first, (first + last) // 2, last}):
-        x, z, w, dy = make(rows, 1, layout="flat", seed=17)
+    for rows in sorted({max(2, first), (first + last) // 2, last}):
+        x, z, w, dy = make(rows, 1, layout="projection", seed=17)
         launches.clear()
         dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
         dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
@@ -1357,14 +1498,20 @@ def _nodw_layout_shape(band: str, layout: str) -> tuple[int, int, str] | None:
 def _check_nodw_layout(band: str, T: int, H: int, layout: str, nodw: str, launches):
     """A call with ``compute_grad_weight=False`` on ``make(T, H,
     layout=layout)`` runs ``nodw`` after the BF16 call on the band's module
-    (``launches``), gives that call's ``dx`` and ``dz`` bits and leaves a
-    caller workspace zero."""
+    (``launches``), gives that call's ``dx`` and ``dz`` bits (the BF16 call's
+    on the repeatable backward for the build of packed rows only,
+    :func:`_rep_bits`) and leaves a caller workspace zero."""
     rows = T * H
     name = _routes()[band]
     x, z, w, dy = make(T, H, layout=layout, seed=91)
     ws = workspace_for(rows, x.device)
+    if _is_small(nodw):
+        # the build of packed rows only: the repeatable backward's bits
+        dx_r, dz_r = _rep_bits(dy, x, z, w, workspace=ws)
     launches.clear()
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS, workspace=ws)
+    if _is_small(nodw):
+        dx_d, dz_d = dx_r, dz_r
     dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False, workspace=ws)
     what = f"{band} ({layout}, {T} x {H})"
     assert launches == [name, nodw], (what, launches)
@@ -1383,10 +1530,12 @@ def test_programs_without_the_weight_gradient_on_strided_layouts(
     of at least 64 heads) on this device: a call with
     ``compute_grad_weight=False`` runs the program ``nodw_module`` names for
     the band's module (one cluster, strided, claimed or look-ahead; the
-    strided program of packed rows on the contiguous ones where routed;
+    strided program of packed rows on the contiguous ones where routed; the
+    build of packed rows only on packed rows and one token up to its cut;
     skipped where this device routes no such band or shape), gives the
     ``dx`` and ``dz`` bits of the BF16 call on the band's module on the same
-    inputs and leaves a caller workspace zero."""
+    inputs (on the repeatable backward for the build of packed rows only)
+    and leaves a caller workspace zero."""
     shape = _nodw_layout_shape(band, layout)
     if shape is None:
         pytest.skip(f"this device routes no {band} band with a {layout} input")
@@ -1395,7 +1544,7 @@ def test_programs_without_the_weight_gradient_on_strided_layouts(
     packed = _backward_packed(T, H, layout)
     name = _backward_module(rows, packed=packed)
     assert name == _routes()[band], (rows, name)
-    nodw = _nodw_module(name, rows, packed=packed)
+    nodw = _nodw_module(name, rows, packed=_nodw_packed(T, H, layout))
     assert loader.MODULES[nodw]["role"] in loader.NODW_ROLES, (band, nodw)
     _check_nodw_layout(band, T, H, layout, nodw, launches)
 
@@ -1427,7 +1576,7 @@ def test_claimed_programs_without_the_weight_gradient_on_strided_layouts(
         packed = _backward_packed(T, H, make_layout)
         name = _backward_module(rows, packed=packed)
         assert name == _routes()[band], (band, rows, name)
-        nodw = _nodw_module(name, rows, packed=packed)
+        nodw = _nodw_module(name, rows, packed=_nodw_packed(T, H, make_layout))
         assert nodw == _routes()[band + loader.NODW], (band, rows, nodw)
         assert loader.workspace_bytes(nodw), (band, nodw)
         _check_nodw_layout(band, T, H, make_layout, nodw, launches)
@@ -1489,12 +1638,13 @@ def test_backward_at_grids_smaller_than_the_chunks(
     backward(dy, x, z, w, EPS, grad_weight=main_d, accumulate_grad_weight=True)
     # compute_grad_weight=False runs the program without the weight gradient
     # of the BF16 bands' module, whose dx and dz are another program's where
-    # that is not the band's module (an FP32 band's rows in the fused band):
-    # the bits of its call at the host's grid
-    dx_n, dz_n = dx_d, dz_d
-    if _backward_module(rows) != name:
-        dx_n, dz_n, _ = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+    # that is not the band's module (an FP32 band's rows in the fused band)
+    # or where it is the build of packed rows only (the repeatable
+    # backward's): the bits of its call at the host's grid
     nodw = _nodw_module(_backward_module(rows), rows)
+    dx_n, dz_n = dx_d, dz_d
+    if _backward_module(rows) != name or _is_small(nodw):
+        dx_n, dz_n, _ = backward(dy, x, z, w, EPS, compute_grad_weight=False)
     ws = workspace_for(rows, x.device)
     monkeypatch.setattr(pkg, "backward_ctas", lambda name, rows, sm_count: ctas)
     launches.clear()
@@ -2589,10 +2739,23 @@ def test_registry_records_reference_the_build_manifest():
     cuts (``NODW_STRIDED_ROWS_PER_SM``) of an architecture name exactly the
     bands of ``NODW_CUT_BANDS`` whose strided and claimed programs it both
     routes, and an architecture routes a band's strided program of packed
-    rows only where it routes the band's strided program."""
+    rows only where it routes the band's strided program.  The repeatable
+    band's build of packed rows only (``PACKED_SMALL_ROLE``, ``NODW_SMALL``)
+    is routed exactly where ``PACKED_SMALL_ROWS_PER_SM`` (the pinned
+    ``SMALL_ROWS_PER_SM``) has a cut."""
     assert loader.NODW == "_nodw" and loader.STRIDED == "_strided"
-    assert loader.PACKED == "_packed"
+    assert loader.PACKED == "_packed" and loader.SMALL == "_small"
     assert set(loader.NODW_ROLES) == set(NODW_TWINS), loader.NODW_ROLES
+    assert loader.PACKED_SMALL_ROLE == NODW_SMALL
+    small = "bwd_bf16_rep" + loader.NODW + loader.STRIDED + loader.PACKED
+    assert NODW_SMALL == small + loader.SMALL
+    assert loader.PACKED_SMALL_ROWS_PER_SM == SMALL_ROWS_PER_SM
+    assert set(loader.PACKED_SMALL_ROWS_PER_SM) == set(loader.ARCHES)
+    for arch, cuts in loader.PACKED_SMALL_ROWS_PER_SM.items():
+        assert set(cuts) <= {"bwd_bf16"}, (arch, cuts)
+        assert all(isinstance(v, int) and v >= 1 for v in cuts.values()), arch
+        routed = NODW_SMALL in loader.ROUTES[arch]
+        assert routed == bool(cuts.get("bwd_bf16")), (arch, cuts)
     assert "strided_row_blocks" in loader.GRID_KINDS
     assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
     for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
@@ -4440,9 +4603,11 @@ def test_short_backward_accumulates_and_skips_the_weight_gradient(
     tiny backward): ``accumulate_grad_weight`` adds
     to the accumulator before the one rounding (the same bits on every
     launch; on the inputs of every draw of ``judge`` judged against the naive
-    implementation's BF16 sum), ``compute_grad_weight=False`` leaves
-    ``grad_weight`` as it is, and ``dx`` and ``dz`` are the same bits either
-    way."""
+    implementation's BF16 sum), ``compute_grad_weight=False`` (on a gate and
+    ``grad_out`` sliced from projections, rows that are not packed: on packed
+    rows of sm_100a and sm_103a the build of packed rows only runs instead)
+    leaves ``grad_weight`` as it is, and ``dx`` and ``dz`` are the same bits
+    either way."""
     _name, short = _short_backward(5 * 48, dw_dtype)
     if short is None:
         pytest.skip("this architecture routes no small-row backward at 240 rows")
@@ -4472,7 +4637,7 @@ def test_short_backward_accumulates_and_skips_the_weight_gradient(
         )
 
     judge(record_property, run, seed=81)
-    x, z, w, dy = make(5, 48, seed=81)
+    x, z, w, dy = make(5, 48, layout="projection", seed=81)
     dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
     main = torch.full((D,), 3.0, dtype=dw_dtype, device="cuda")
     dx, dz, dw = backward(dy, x, z, w, EPS, grad_weight=main, compute_grad_weight=False)
@@ -4650,7 +4815,11 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     every long role's packed rows (:func:`_range_shape`) an FP32 weight
     gradient (accumulation included),
     ``compute_grad_weight=False`` (the program without the weight gradient
-    of the BF16 bands' module, the fused backward's included) and the
+    of the BF16 bands' module, the fused backward's included, or the build
+    of packed rows only on its packed rows; where that build runs and the
+    band's BF16 weight gradient may vary, also on ``dy`` and ``z`` as the
+    gate columns of wider projections, rows that are not packed, which run
+    the band's own program without the weight gradient) and the
     autograd backward of a weight that needs no gradient, and where the band
     repeats a BF16 weight gradient (:func:`_dw_varies`) the BF16 weight
     gradient (caller workspace and none)
@@ -4671,6 +4840,16 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     cases = [make(T, H, seed=69 + i) for i, (T, H) in enumerate(shapes)]
     repeats = [not _dw_varies(T * H) for T, H in shapes]
     assert any(repeats), shapes
+    # where the build of packed rows only runs these packed rows and no BF16
+    # call launches the band's module (its weight gradient may vary), the
+    # same rows as gate columns (not packed) launch the band's own program
+    # without the weight gradient (several tokens: one token of head stride
+    # 128 is passed as packed rows)
+    gates = []
+    for (T, H), bf16 in zip(shapes, repeats, strict=True):
+        nodw = _nodw_module(_backward_module(T * H), T * H, packed=_nodw_packed(T, H))
+        gates.append(not bf16 and _is_small(nodw))
+    assert all(T > 1 for (T, _), gate in zip(shapes, gates, strict=True) if gate)
     empty = torch.empty(0, 48, D, dtype=torch.bfloat16, device="cuda")
     inputs = [
         make(rows, 1, layout="contiguous" if packed else "projection", seed=72)
@@ -4687,7 +4866,7 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
 
     def run(nodes):
         out = [forward(x, z, w, EPS) for x, z, w, _ in inputs]
-        for (x, z, w, dy), bf16 in zip(cases, repeats, strict=True):
+        for (x, z, w, dy), bf16, gate in zip(cases, repeats, gates, strict=True):
             if bf16:
                 out += backward(dy, x, z, w, EPS)
             out += backward(dy, x, z, w, EPS, grad_weight=torch.empty(D, device="cuda"))
@@ -4696,6 +4875,15 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
                 dy, x, z, w, EPS, grad_weight=main, accumulate_grad_weight=True
             )
             out += backward(dy, x, z, w, EPS, compute_grad_weight=False)[:2]
+            if gate:
+                out += backward(
+                    _gate_columns(dy),
+                    x,
+                    _gate_columns(z),
+                    w,
+                    EPS,
+                    compute_grad_weight=False,
+                )[:2]
             if bf16:
                 out += backward(dy, x, z, w, EPS, workspace=ws)
         out += backward(empty, empty, empty, cases[0][2], EPS)
@@ -4744,12 +4932,14 @@ def test_no_entry_point_alerts_under_deterministic_algorithms(warn_only, launche
     assert launches == want_launches, launches
     modules = set(launches)
     assert set(forward_rows) <= modules, forward_rows
-    for T, H in shapes:
-        packed = _backward_packed(T, H)
-        assert {
-            _nodw_module(_backward_module(T * H), T * H, packed=packed),
-            _backward_module(T * H, torch.float32),
-        } <= modules, (T, H)
+    for (T, H), gate in zip(shapes, gates, strict=True):
+        nodw = _nodw_module(_backward_module(T * H), T * H, packed=_nodw_packed(T, H))
+        assert {nodw, _backward_module(T * H, torch.float32)} <= modules, (T, H)
+        if gate:
+            own = _nodw_module(
+                _backward_module(T * H, packed=False), T * H, packed=False
+            )
+            assert own in modules and not _is_small(own), (T, H, own)
     roles = {loader.MODULES[name]["role"] for name in modules}
     roles = {NODW_TWINS.get(role, role) for role in roles}
     assert set(bands) <= roles, (bands, roles)
@@ -4878,6 +5068,9 @@ def test_backward_alerts_under_deterministic_algorithms(band, edge, launches):
     assert name == _routes()[band] and _varies(name), (rows, name)
     x, z, w, dy = make(rows, 1, seed=65)
     dx_d, dz_d, dw_d = backward(dy, x, z, w, EPS)
+    # the bits of compute_grad_weight=False (the repeatable backward's where
+    # the build of packed rows only runs these packed rows)
+    dx_n, dz_n = _nodw_bits(_nodw_module(name, rows), dy, x, z, w)
     ws = workspace_for(1, x.device)
 
     def leaves(weight_grad=True):
@@ -4897,7 +5090,7 @@ def test_backward_alerts_under_deterministic_algorithms(band, edge, launches):
         assert pkg.is_cake_rmsnorm_silu_gate_nondet_train_supported(x.device)
         dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
         assert dw is None
-        assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d)
+        assert torch.equal(dx, dx_n) and torch.equal(dz, dz_n)
         f32 = torch.empty(D, dtype=torch.float32, device="cuda")
         backward(dy, x, z, w, EPS, grad_weight=f32, workspace=ws)
         xa, za, wa = leaves(weight_grad=False)
@@ -5023,7 +5216,10 @@ def test_graph_capture_alerts_at_capture_and_replays_without_a_check(
     without a warning, three on the inputs of each draw of ``judge`` (the
     first draw's the captured ones, the others' copied into them): ``dx`` and
     ``dz`` the bits of the eager call (the eager call without the weight
-    gradient, which runs the same module and alerts not), the workspace zero
+    gradient on ``dy`` and ``z`` as the gate columns of wider projections,
+    which runs the band's program without the weight gradient on rows that
+    are not packed, the same bits, and alerts not; on packed rows the build
+    of packed rows only would run), the workspace zero
     after each, every replay's ``dx``, ``dz`` and ``dw`` judged against the
     naive implementation."""
     shape = _band_shape("bwd_bf16_fused")
@@ -5062,7 +5258,9 @@ def test_graph_capture_alerts_at_capture_and_replays_without_a_check(
         if j:
             for captured, new in zip((x, z, w, dy), make(T, H, seed=s), strict=True):
                 captured.copy_(new)
-        want = backward(dy, x, z, w, EPS, compute_grad_weight=False)[:2]
+        want = backward(
+            _gate_columns(dy), x, _gate_columns(z), w, EPS, compute_grad_weight=False
+        )[:2]
         if not j:
             assert torch.equal(want[0], dx_e) and torch.equal(want[1], dz_e)
         launched = []
@@ -5249,6 +5447,9 @@ def _force_route(monkeypatch: pytest.MonkeyPatch, role: str, name: str) -> None:
     assert routes[arch].get(role, name) == name, (arch, role, routes[arch][role])
     routes[arch][role] = name
     monkeypatch.setattr(loader, "ROUTES", routes)
+    # the plans nodw_module reads (read once at import), read again
+    plans = {a: {n: loader._nodw_plan(a, n) for n in loader.MODULES} for a in routes}
+    monkeypatch.setattr(loader, "_NODW_PLANS", plans)
     if role.startswith("fwd"):
         for table in ("FORWARD_BANDS", "STRIDED_FORWARD_BANDS"):
             bands = dict(getattr(loader, table))
@@ -5470,24 +5671,32 @@ NODW_SM_COUNTS = (1, 2, 7, 14, 16, 24, 33, 66, 148, 152, 160, 212, 216)
 def test_nodw_module_and_the_strided_ctas(sm_count):
     """``nodw_module`` and the strided programs' CTAs (host only), the
     programs without the weight gradient of a band unrouted in turn
-    (``ROUTES`` patched): for the module of a band with a strided program
-    (``NODW_CUT_BANDS``) the strided program up to
-    ``NODW_STRIDED_ROWS_PER_SM * SMs`` rows where routed (at every row count
-    where the band has no cut), else the claimed program where routed, else
-    the strided one, else the module itself; for a small-row band's module
-    its one-cluster program where routed, else the module; for the long
-    role's module the long program where routed, else the long role's module
-    (run with ``weight_grad`` 0); for any other module the module itself;
-    for packed rows (``packed``; omitted, not packed) the band's strided
-    program of packed rows in the strided program's place where both are
-    routed.  A strided program launches ``min(ceil(rows / rows_per_block),
-    ctas_per_sm * SMs)`` CTAs of its ``NODW_STRIDED_GRID_RULES`` rule at
-    every row count: the 256-thread ones ``min(ceil(rows / 16), 4 * SMs)``,
-    their twin's count, the repeatable band's of packed rows
+    (``ROUTES`` patched, the plans read again, :func:`_patch_routes`): for
+    packed rows (``packed``; omitted, not packed) up to
+    ``PACKED_SMALL_ROWS_PER_SM * SMs`` the build of packed rows only where
+    routed and the band routes a program without the weight gradient (a
+    strided or a claimed one, a small-row band its one-cluster one); else for
+    the module of a band with a strided program (``NODW_CUT_BANDS``) the
+    strided program up to ``NODW_STRIDED_ROWS_PER_SM * SMs`` rows where
+    routed (at every row count where the band has no cut), else the claimed
+    program where routed, else the strided one, else the module itself; for
+    a small-row band's module its one-cluster program where routed, else the
+    module; for the long role's module the long program where routed, else
+    the long role's module (run with ``weight_grad`` 0), packed or not; for
+    any other module the module itself, packed or not; for packed rows past
+    the build of packed rows only the band's strided program of packed rows
+    in the strided program's place where both are routed.  A strided program
+    launches ``min(ceil(rows / rows_per_block), ctas_per_sm * SMs)`` CTAs of
+    its ``NODW_STRIDED_GRID_RULES`` rule at every row count: the 256-thread
+    ones ``min(ceil(rows / 16), 4 * SMs)``, their twin's count, the
+    repeatable band's of packed rows and its build of packed rows only
     ``min(ceil(rows / 8), 8 * SMs)``."""
     wave = 4 * sm_count
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
+        small_per_sm = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
+        small_cut = small_per_sm * sm_count
+        small_edges = {small_cut - 1, small_cut, small_cut + 1} if small_per_sm else set()
         for band in NODW_CUT_BANDS:
             name = routes[band]
             per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get(band)
@@ -5496,26 +5705,34 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
             packed_role = strided_role + loader.PACKED
             claimed_role = band + loader.NODW
             edges = {1, 7, 8, 9, 15, 16, 17, 16 * wave - 1, 16 * wave, 16 * wave + 1}
+            edges |= small_edges
             if cut is not None:
                 edges |= {cut - 1, cut, cut + 1}
             rows_list = sorted(r for r in edges | {2**31 - 1} if r >= 1)
             for drop in (
                 (),
+                (NODW_SMALL,),
                 (packed_role,),
                 (strided_role,),
                 (claimed_role,),
                 (strided_role, claimed_role),
+                (NODW_SMALL, strided_role, claimed_role),
             ):
                 table = {r: n for r, n in routes.items() if r not in drop}
                 claimed = table.get(claimed_role)
+                small = None
+                if table.get(strided_role) or claimed:
+                    small = table.get(NODW_SMALL)
                 with pytest.MonkeyPatch.context() as patch:
-                    patch.setitem(loader.ROUTES, arch, table)
+                    _patch_routes(patch, arch, table)
                     for packed in (False, True):
                         strided = table.get(strided_role)
                         if packed and strided is not None:
                             strided = table.get(packed_role, strided)
                         for rows in rows_list:
-                            if strided is not None and cut is not None and rows <= cut:
+                            if packed and small is not None and rows <= small_cut:
+                                want = small
+                            elif strided is not None and cut is not None and rows <= cut:
                                 want = strided
                             else:
                                 want = claimed or strided or name
@@ -5545,6 +5762,18 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
                         record, rows=rows, sm_count=sm_count, ctas=got
                     )
                     assert grid == (want, 1, 1), (arch, strided, rows, grid)
+        if NODW_SMALL in routes:
+            small = routes[NODW_SMALL]
+            record = loader.MODULES[small]
+            rule = NODW_STRIDED_GRID_RULES[NODW_SMALL]
+            rows_list = sorted(r for r in small_edges | {1, 7, 8, 9, 16, 17} if r >= 1)
+            for rows in rows_list:
+                blocks = -(-rows // rule["rows_per_block"])
+                got = loader.backward_ctas(small, rows, sm_count)
+                want = min(blocks, rule["ctas_per_sm"] * sm_count)
+                assert got == want, (arch, small, rows, got)
+                grid = loader.launch_grid(record, rows=rows, sm_count=sm_count, ctas=got)
+                assert grid == (want, 1, 1), (arch, small, rows, grid)
         long_role = "bwd_bf16_rep" + loader.LONG
         nodw_long_role = "bwd_bf16_rep" + loader.NODW + loader.LONG
         long = routes[long_role]
@@ -5554,9 +5783,10 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
             (without, long),
         ):
             with pytest.MonkeyPatch.context() as patch:
-                patch.setitem(loader.ROUTES, arch, table)
+                _patch_routes(patch, arch, table)
                 for rows in (1, 2560 * sm_count, 2**31 - 1):
-                    # the long role runs packed rows only
+                    # the long role runs packed rows only (and so is never
+                    # the build of packed rows only)
                     got = loader.nodw_module(arch, long, rows, sm_count, packed=True)
                     assert got == want, (arch, rows, got)
         for band in ("bwd_bf16_short", "bwd_bf16_t512"):
@@ -5566,17 +5796,29 @@ def test_nodw_module_and_the_strided_ctas(sm_count):
             own = band + loader.NODW
             without = {r: n for r, n in routes.items() if r != own}
             for table, want in ((dict(routes), routes.get(own, name)), (without, name)):
+                small = table.get(NODW_SMALL) if own in table else None
                 with pytest.MonkeyPatch.context() as patch:
-                    patch.setitem(loader.ROUTES, arch, table)
-                    for rows in (1, 256, 512):
+                    _patch_routes(patch, arch, table)
+                    for rows in sorted({1, 256, 512} | small_edges):
+                        if rows < 1:
+                            continue
                         got = loader.nodw_module(arch, name, rows, sm_count)
                         assert got == want, (arch, band, rows, got)
+                        got = loader.nodw_module(arch, name, rows, sm_count, True)
+                        packed_want = want
+                        if small is not None and rows <= small_cut:
+                            packed_want = small
+                        assert got == packed_want, (arch, band, rows, got)
         others = ("bwd_bf16", "bwd_bf16_rc", "bwd_bf16_rc_mid", "bwd_bf16_mid")
         others += ("bwd_f32", "bwd_f32_rep", "bwd_f32_rep_long", "bwd_f32_t512")
         for role in others:
             if role in routes:
-                got = loader.nodw_module(arch, routes[role], 4096, sm_count)
-                assert got == routes[role], (arch, role, got)
+                for rows in (1, 4096):
+                    for packed in (False, True):
+                        got = loader.nodw_module(
+                            arch, routes[role], rows, sm_count, packed=packed
+                        )
+                        assert got == routes[role], (arch, role, rows, packed, got)
 
 
 # The strides (in elements) of ``dy``, ``x`` and ``z`` of 48 heads as
@@ -5608,12 +5850,15 @@ def test_strided_programs_follow_the_layout(sm_count):
     ``nodw_module`` as the backward calls them), a call without the weight
     gradient in a band with a strided program (``NODW_CUT_BANDS``, the
     band's module) below the band's strided cut (where the band has none, up
-    to a row short of the long role's first rows) runs on packed rows the
-    band's strided program of packed rows where routed (sm_107a routes the
+    to a row short of the long role's first rows) runs on packed rows up to
+    ``PACKED_SMALL_ROWS_PER_SM * SMs`` the build of packed rows only where
+    routed (sm_100a and sm_103a, 128-thread CTAs), past it the band's
+    strided program of packed rows where routed (sm_107a routes the
     repeatable band's, 128-thread CTAs, and no other architecture or band
-    routes one) and the band's strided program (256-thread CTAs) on each of
-    ``OTHER_STRIDES``, which without a cut runs them at every row count;
-    past a cut both run the band's claimed program."""
+    routes one), and the band's strided program (256-thread CTAs) on each of
+    ``OTHER_STRIDES`` at every row count below the cut (which without a cut
+    runs them at every row count), never the build of packed rows only; past
+    a cut both run the band's claimed program."""
     for arch in loader.ARCHES:
         routes = loader.ROUTES[arch]
         packed_roles = {
@@ -5625,6 +5870,11 @@ def test_strided_programs_follow_the_layout(sm_count):
         if arch == "sm_107a":
             want_roles = {"bwd_bf16_rep_nodw_strided_packed"}
         assert packed_roles == want_roles, (arch, packed_roles)
+        small = routes.get(NODW_SMALL)
+        small_cut = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0) * sm_count
+        assert (small is not None) == (arch != "sm_107a"), arch
+        if small is not None:
+            assert loader.MODULES[small]["launch"]["block"] == (128, 1, 1)
         start = LONG_ROWS_PER_SM[arch] * sm_count
         for band in NODW_CUT_BANDS:
             strided_role = band + loader.NODW + loader.STRIDED
@@ -5634,7 +5884,8 @@ def test_strided_programs_follow_the_layout(sm_count):
             per_sm = loader.NODW_STRIDED_ROWS_PER_SM[arch].get(band)
             last = start - 1 if per_sm is None else per_sm * sm_count
             below = {1, 7, 8, 9, 16, 17, ROUTE_H, 65 * ROUTE_H, last // 2, last}
-            below = {rows for rows in below if rows <= last}
+            below |= {small_cut - 1, small_cut, small_cut + 1}
+            below = {rows for rows in below if 1 <= rows <= last}
             packed_role = strided_role + loader.PACKED
             if packed_role not in routes:
                 packed_role = strided_role
@@ -5650,8 +5901,205 @@ def test_strided_programs_follow_the_layout(sm_count):
                     rows_list |= {start, start + 1, 2**31 - 1}
                 for rows in sorted(rows_list):
                     got = loader.nodw_module(arch, name, rows, sm_count, packed=packed)
-                    assert got == want, (arch, band, rows, strides, got)
+                    if packed and small is not None and rows <= small_cut:
+                        assert got == small, (arch, band, rows, strides, got)
+                    else:
+                        assert got == want, (arch, band, rows, strides, got)
                 if per_sm is not None:
                     rows = per_sm * sm_count + 1
                     got = loader.nodw_module(arch, name, rows, sm_count, packed=packed)
-                    assert got == routes[band + loader.NODW], (arch, band, rows, got)
+                    claimed = routes[band + loader.NODW]
+                    if packed and small is not None and rows <= small_cut:
+                        claimed = small
+                    assert got == claimed, (arch, band, rows, got)
+
+
+def test_nodw_plans_read_at_import_are_the_tables():
+    """The plans ``nodw_module`` reads (``_NODW_PLANS``, read once at import
+    for every routed architecture and module) are the ones ``_nodw_plan``
+    reads from ``ROUTES`` and the cut tables now: on sm_100a and sm_103a the
+    fused and the repeatable band's carry the build of packed rows only and
+    its cut (``PACKED_SMALL_ROWS_PER_SM``), on sm_107a none (cut -1, which no
+    row count is at most); an architecture without plans (none routed) gets
+    one read on the call, the module itself."""
+    assert set(loader._NODW_PLANS) == set(loader.ROUTES)
+    for arch, plans in loader._NODW_PLANS.items():
+        assert set(plans) == set(loader.MODULES), arch
+        for name, plan in plans.items():
+            assert plan == loader._nodw_plan(arch, name), (arch, name, plan)
+        routes = loader.ROUTES[arch]
+        per_sm = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
+        for band in NODW_CUT_BANDS:
+            _, small, small_cut, *_ = plans[routes[band]]
+            if per_sm:
+                assert (small, small_cut) == (routes[NODW_SMALL], per_sm), arch
+            else:
+                assert (small, small_cut) == (None, -1), arch
+    name = loader.ROUTES["sm_100a"]["bwd_bf16_fused"]
+    assert loader.nodw_module("sm_90a", name, 1, 132, packed=True) == name
+
+
+# SM counts of grids (``device_sm_count`` patched) on which the cut of the
+# build of packed rows only is crossed, besides this device's: on one SM its
+# cut of 128 rows lies in the small-row band, on 16 and 66 SMs in the fused
+# band.
+SMALL_CUT_SM_COUNTS = (1, 16, 66)
+
+
+@pytest.mark.parametrize("edge", [-1, 0, 1], ids=["cut-1", "cut", "cut+1"])
+def test_small_program_runs_packed_rows_up_to_its_cut(edge, launches):
+    """On this device's grid and on the grids of ``SMALL_CUT_SM_COUNTS`` SMs
+    (``device_sm_count`` patched: the cut follows the SMs), a call with
+    ``compute_grad_weight=False`` on packed rows a row below, at and a row
+    above the cut of the build of packed rows only
+    (``PACKED_SMALL_ROWS_PER_SM * SMs`` flat rows) runs that build up to the
+    cut and a row past it the program the band of the rows runs without the
+    weight gradient (``nodw_module``), and gives up to the cut the ``dx``
+    and ``dz`` bits of the repeatable backward (:func:`_rep_bits`), past it
+    those of the BF16 call on the band's module; skipped where this device
+    routes no such build (sm_107a)."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    per_sm = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
+    if NODW_SMALL not in loader.ROUTES[arch] or not per_sm:
+        pytest.skip(f"{arch} routes no build of packed rows only")
+    small = loader.ROUTES[arch][NODW_SMALL]
+    for sm_count in (loader.device_sm_count(device_index), *SMALL_CUT_SM_COUNTS):
+        rows = per_sm * sm_count + edge
+        x, z, w, dy = make(rows, 1, layout="flat", seed=47)
+        what = f"{rows} rows on the grids of {sm_count} SMs"
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(pkg, "device_sm_count", lambda index, count=sm_count: count)
+            name = loader.module_for_rows(arch, "bwd_bf16", rows, sm_count, packed=True)
+            nodw = loader.nodw_module(arch, name, rows, sm_count, packed=True)
+            assert (nodw == small) == (edge <= 0), (what, name, nodw)
+            if edge <= 0:
+                dx_d, dz_d = _rep_bits(dy, x, z, w)
+            else:
+                dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+            launches.clear()
+            dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+            assert launches == [nodw], (what, launches)
+        assert dw is None, what
+        assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), what
+
+
+# ``make`` layouts of one token whose heads lie 128 elements apart in ``dy``,
+# ``x`` and ``z``: a misaligned one the host copies to packed rows.
+ONE_TOKEN_LAYOUTS = ("contiguous", "projection", "head_major", "misaligned")
+STRIDE_KEYS = ("dy_tok", "dy_head", "x_tok", "x_head", "z_tok", "z_head")
+
+
+@pytest.mark.parametrize("layout", ONE_TOKEN_LAYOUTS)
+@pytest.mark.parametrize("H", [1, 48])
+def test_one_token_runs_as_packed_rows_without_the_weight_gradient(
+    H, layout, monkeypatch
+):
+    """A call with ``compute_grad_weight=False`` on one token of ``H`` heads
+    (``make``'s ``layout``) passes the token as packed rows where the build
+    of packed rows only has a cut (sm_100a and sm_103a,
+    :func:`_one_token_packed`): token strides ``H * 128`` of ``dy``, ``x``
+    and ``z`` and head strides 128 (the same addresses), that build (the
+    program ``nodw_module`` names for packed rows) and the repeatable
+    backward's ``dx`` and ``dz`` bits; elsewhere (sm_107a) token strides 0
+    and the program for rows that are not packed, with the bits of the BF16
+    call on the band's module.  The call that computes the weight gradient
+    keeps token stride 0 and the band's module."""
+    arch = loader.device_arch(torch.cuda.current_device())
+    seen = []
+    run_module = loader.run_module
+
+    def spy(name, values, *, rows, device_index):
+        seen.append((name, tuple(int(values[k]) for k in STRIDE_KEYS)))
+        return run_module(name, values, rows=rows, device_index=device_index)
+
+    monkeypatch.setattr(loader, "run_module", spy)
+    x, z, w, dy = make(1, H, layout=layout, seed=48)
+    one = _one_token_packed(arch)
+    assert _nodw_packed(1, H, layout) == one
+    name = _backward_module(H, packed=False)
+    nodw = _nodw_module(name, H, packed=one)
+    assert _is_small(nodw) == one, (arch, nodw)
+    dx_d, dz_d = _nodw_bits(nodw, dy, x, z, w)
+    seen.clear()
+    dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+    assert dw is None
+    tok = H * D if one else 0
+    assert seen == [(nodw, (tok, D, tok, D, tok, D))], (layout, seen)
+    assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), layout
+    seen.clear()
+    backward(dy, x, z, w, EPS)
+    assert seen == [(name, (0, D, 0, D, 0, D))], (layout, seen)
+
+
+@pytest.mark.parametrize("layout", ["projection", "head_major"])
+def test_small_program_never_runs_rows_that_are_not_packed(layout, launches):
+    """At 2 x 48 and 257 x 48 rows on a gate and ``grad_out`` sliced from
+    projections and on head-major ``x`` and ``z`` (rows that are not packed,
+    :func:`_backward_packed`), a call with ``compute_grad_weight=False``
+    runs the program ``nodw_module`` names for rows that are not packed,
+    never the build of packed rows only, and gives the ``dx`` and ``dz`` bits
+    of the BF16 call on the band's module."""
+    for T, H in ((2, 48), (257, 48)):
+        rows = T * H
+        assert not _nodw_packed(T, H, layout), (T, H, layout)
+        name = _backward_module(rows, packed=False)
+        nodw = _nodw_module(name, rows, packed=False)
+        assert not _is_small(nodw), (T, H, layout, nodw)
+        x, z, w, dy = make(T, H, layout=layout, seed=49)
+        dx_d, dz_d, _ = backward(dy, x, z, w, EPS)
+        launches.clear()
+        dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+        assert dw is None
+        assert launches == [nodw], (T, H, layout, launches)
+        assert torch.equal(dx, dx_d) and torch.equal(dz, dz_d), (T, H, layout)
+
+
+# Packed shapes ``(T, H)`` the build of packed rows only runs on sm_100a and
+# sm_103a (at most ``PACKED_SMALL_ROWS_PER_SM * SMs`` rows), judged against
+# the naive implementation: one token, few rows of 7, 16 and 48 heads, one
+# head of 256 and 512 rows, and 257 x 48.
+SMALL_ACCURACY_SHAPES = (
+    (1, 16),
+    (1, 48),
+    (3, 48),
+    (10, 48),
+    (21, 48),
+    (64, 7),
+    (256, 1),
+    (512, 1),
+    (257, 48),
+)
+
+
+@pytest.mark.parametrize("T,H", SMALL_ACCURACY_SHAPES)
+def test_small_program_is_judged_against_the_naive_implementation(
+    T, H, record_property, launches
+):
+    """Over the draws of ``judge``, a call with ``compute_grad_weight=False``
+    on ``make(T, H)`` runs the build of packed rows only (skipped where it
+    does not run these rows), twice with the same ``dx`` and ``dz`` bits, and
+    both launches' ``dx`` and ``dz`` are judged against the naive
+    implementation (the error versus the FP64 oracle within the naive
+    budget)."""
+    rows = T * H
+    name = _backward_module(rows, packed=_backward_packed(T, H))
+    nodw = _nodw_module(name, rows, packed=_nodw_packed(T, H))
+    if not _is_small(nodw):
+        pytest.skip(f"the build of packed rows only does not run {T} x {H} here")
+
+    def run(j, s):
+        x, z, w, dy = make(T, H, seed=s)
+        launches.clear()
+        launched = []
+        for _ in range(2):
+            dx, dz, dw = backward(dy, x, z, w, EPS, compute_grad_weight=False)
+            assert dw is None
+            launched.append({"dx": dx, "dz": dz})
+        assert launches == [nodw, nodw], (j, launches)
+        first, second = launched
+        assert torch.equal(first["dx"], second["dx"]), (T, H, j)
+        assert torch.equal(first["dz"], second["dz"]), (T, H, j)
+        return silu_draw(x, z, w, dy, EPS, launched, {"dx": "dx", "dz": "dz"})
+
+    judge(record_property, run, seed=50)

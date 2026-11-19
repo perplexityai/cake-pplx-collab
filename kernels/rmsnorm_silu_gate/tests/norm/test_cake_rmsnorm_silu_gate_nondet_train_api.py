@@ -718,9 +718,10 @@ def test_autograd_backward_alerts_once_deterministic_algorithms_are_enabled(
         want = module(shape)
         if not weight_grad:
             # the band's program without the weight gradient (contiguous
-            # inputs: packed rows but for a single token)
+            # inputs: packed rows, and a single token too where the build of
+            # packed rows only has a cut)
             rows = shape[0] * shape[1]
-            packed = suite._backward_packed(*shape)
+            packed = suite._nodw_packed(*shape)
             want = loader.nodw_module(arch, want, rows, _sm_count(), packed=packed)
         assert launched == [want], (shape, weight_grad, launched)
 
@@ -1088,7 +1089,10 @@ def test_compute_grad_weight_false_meets_the_naive_tier(
 ) -> None:
     """Without the weight gradient (with this package's workspace or none,
     and through autograd with a weight that needs no gradient), ``dx`` and
-    ``dz`` are the bits of a backward with the weight gradient, at 257 tokens
+    ``dz`` are the bits of a backward with the weight gradient (of the
+    repeatable backward where the build of packed rows only runs the rows:
+    packed rows up to its cut on sm_100a and sm_103a, ``suite._nodw_bits``),
+    at 257 tokens
     of 48 heads and, for ``band``, at the fewest whole tokens of 48 heads in
     that BF16 band, the fused, the repeatable or the long role's packed rows
     (``suite._band_shape``; a call without the weight gradient takes the
@@ -1099,10 +1103,14 @@ def test_compute_grad_weight_false_meets_the_naive_tier(
     if shape is None:
         pytest.skip(f"this device routes no {band} band")
     T, H = shape
+    rows = T * H
+    nodw = suite._nodw_module(
+        suite._backward_module(rows), rows, packed=suite._nodw_packed(T, H)
+    )
 
     def run(j, s):
         x, z, w, dy = suite.make(T, H, seed=s)
-        want_dx, want_dz, _ = nd_backward(dy, x, z, w, EPS)
+        want_dx, want_dz = suite._nodw_bits(nodw, dy, x, z, w)
         ws = nd_workspace(T * H, x.device)
         launches = [{"dx": want_dx, "dz": want_dz}]
         for workspace in (ws, None):
@@ -2634,6 +2642,126 @@ def test_kernel_view_strides(shape, strides, want) -> None:
         t = torch.empty_strided(shape, strides, dtype=torch.bfloat16)
     _, tok, head = backend._kernel_view(t, "x", shape=t.shape, device=t.device)
     assert (tok, head) == want
+
+
+def _view_layout(layout: str, device: torch.device) -> torch.Tensor:
+    """A ``[5, 3, 128]`` input of ``layout`` (any dtype other than BF16 by
+    name: ``float32``) on ``device``."""
+    T, H = 5, 3
+    if layout == "contiguous":
+        return torch.randn(T, H, D, device=device).bfloat16()
+    if layout == "projection":
+        return torch.randn(T, H, 2 * D, device=device).bfloat16()[:, :, :D]
+    if layout == "head_major":
+        return torch.randn(H, T, D, device=device).bfloat16().transpose(0, 1)
+    if layout == "one_token":
+        return torch.randn(1, H, D, device=device).bfloat16()
+    if layout == "one_head":
+        return torch.randn(T, 2, D, device=device).bfloat16()[:, :1]
+    if layout == "offset_16":
+        return torch.randn(T * H * D + 16, device=device).bfloat16()[16:].view(T, H, D)
+    if layout == "misaligned":
+        return torch.randn(T * H * D + 8, device=device).bfloat16()[8:].view(T, H, D)
+    if layout == "token_stride_8":
+        return (
+            torch.randn(T, H * D + 8, device=device)
+            .bfloat16()[:, : H * D]
+            .view(T, H, D)
+        )
+    if layout == "last_stride_2":
+        return torch.randn(T, H, 2 * D, device=device).bfloat16()[:, :, ::2]
+    if layout == "flat":
+        return torch.randn(T * H, D, device=device).bfloat16()
+    if layout == "float32":
+        return torch.randn(T, H, D, device=device)
+    raise ValueError(layout)
+
+
+@requires_device
+@pytest.mark.parametrize(
+    "layout",
+    [
+        "contiguous",
+        "projection",
+        "head_major",
+        "one_token",
+        "one_head",
+        "offset_16",
+        "misaligned",
+        "token_stride_8",
+        "last_stride_2",
+        "flat",
+    ],
+)
+def test_kernel_view_short_path_matches_every_check(layout) -> None:
+    """The short path of ``_kernel_view`` (a plain BF16 ``[T, H, 128]`` tensor
+    on its device, read in place) returns what every check
+    (``_kernel_view_checked``) returns: the same tensor read in place, or a
+    copy with the same values, and the same strides."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    t = _view_layout(layout, device)
+    view, tok, head = backend._kernel_view(t, "x", shape=t.shape, device=device)
+    want, want_tok, want_head = backend._kernel_view_checked(
+        t, "x", shape=t.shape, device=device
+    )
+    assert (tok, head) == (want_tok, want_head)
+    assert (view.data_ptr() == t.data_ptr()) == (want.data_ptr() == t.data_ptr())
+    assert view.shape == want.shape and view.stride() == want.stride()
+    assert torch.equal(view, want)
+
+
+@requires_device
+@pytest.mark.parametrize(
+    "case", ["float32", "other_shape", "cpu", "one_dim_short", "subclass"]
+)
+def test_kernel_view_short_path_refuses_as_every_check(case) -> None:
+    """An input the short path does not take reaches every check: the same
+    error as ``_kernel_view_checked`` (or the same result for a subclass)."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    t = _view_layout("contiguous", device)
+    shape = t.shape
+    if case == "float32":
+        t = _view_layout("float32", device)
+    elif case == "other_shape":
+        shape = torch.Size((5, 4, D))
+    elif case == "cpu":
+        t = t.cpu()
+    elif case == "one_dim_short":
+        t = t[:, :, : D // 2]
+        shape = t.shape
+    elif case == "subclass":
+        t = torch.nn.Parameter(t, requires_grad=False)
+    outcomes = []
+    for view_of in (backend._kernel_view, backend._kernel_view_checked):
+        try:
+            view, tok, head = view_of(t, "x", shape=shape, device=device)
+        except (TypeError, ValueError) as error:
+            outcomes.append((type(error), str(error)))
+        else:
+            outcomes.append((view.data_ptr() == t.data_ptr(), tok, head))
+    assert outcomes[0] == outcomes[1]
+    if case != "subclass":
+        assert outcomes[0][0] is ValueError
+
+
+@requires_device
+@pytest.mark.parametrize("like", ["bfloat16", "float32", "none", "projection"])
+def test_new_output_buffer_is_contiguous_and_aligned(like) -> None:
+    """A new output buffer is a contiguous 32-byte aligned BF16 tensor of the
+    input's shape on its device, whatever ``like`` is."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    x = _view_layout("contiguous", device)
+    ref = {
+        "bfloat16": x,
+        "float32": x.float(),
+        "none": None,
+        "projection": _view_layout("projection", device),
+    }[like]
+    out, user = backend._output(None, "grad_x", shape=x.shape, device=device, like=ref)
+    assert user is None
+    assert type(out) is torch.Tensor and out.dtype == torch.bfloat16
+    assert out.shape == x.shape and out.device == device and out.is_contiguous()
+    assert out.data_ptr() % (2 * loader.ALIGNMENT_ELEMENTS) == 0
 
 
 # The modules that warm rows in L2, by role: the mid and the extra-long
