@@ -144,8 +144,9 @@ def make_p8949_inputs(nope, device, t=16384, s=65536):
 
 
 class ArmDet(nb.ArmCake):
-    """The deterministic package on a RoPE row (the runner in the default layout, the public varlen entry through
-    autograd in the trainer layout); the backward of :class:`nb.ArmCake` serves both."""
+    """The deterministic package on a RoPE row (the runner in the default layout, with the row's segment count as
+    :class:`nb.ArmCake` passes it; the public varlen entry through autograd in the trainer layout); the backward of
+    :class:`nb.ArmCake` serves both."""
 
     name = "det"
     deterministic = True
@@ -158,6 +159,7 @@ class ArmDet(nb.ArmCake):
         )
         self.runner = None
         if not layout.trainer:
+            self.num_segments = int(inp.cu_seqlens_k.numel()) - 1
             self.runner = cake_backend.prepare_dsa_train(
                 inp.q_latent,
                 inp.q_rope,
@@ -169,6 +171,7 @@ class ArmDet(nb.ArmCake):
                 softmax_scale=DEFAULT_SCALE,
                 backward=self.backward_available,
                 o_lo_scratch=self.o_lo_scratch,
+                num_segments=self.num_segments,
             )
             return
         self.q_latent = layout.q_latent.detach().requires_grad_()
@@ -199,6 +202,9 @@ class ArmDet(nb.ArmCake):
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
                 storage=self.runner.storage,
+                num_segments=self.num_segments,
+                key_passes=self.runner.key_passes,
+                backward_launches=len(self.runner.backward_order),
             )
         module_name, _record = cake_backend.record_for(self.inp.q_latent.device)
         return dict(
