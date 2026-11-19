@@ -1474,6 +1474,18 @@ def _small_s_rows(arch: str, kind: str) -> list[tuple[int, int, int, int]]:
     return sorted(rows)
 
 
+def _small_s_docs(S: int):
+    """The documents of a small-S row: the ``"perf"`` packing where it fits ``S`` (every document at least one
+    token), else ONE document (``None``: ``cu_seqlens`` [0, S]), so the rows below the packing's minimum (S = 1 at a
+    static range's start) keep their token count."""
+
+    try:
+        doc_lengths(S, "perf")
+    except AssertionError:
+        return None
+    return "perf"
+
+
 @pytest.mark.parametrize(
     "kind, taps", tuple(FORWARD_SETTINGS), ids=[f"{k}-{t}" for k, t in FORWARD_SETTINGS]
 )
@@ -1487,7 +1499,8 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     program on the same inputs (one key over every token count of the key's channel counts), a launch with
     ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured
     after one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture
-    fallback."""
+    fallback.  A row packs the ``"perf"`` documents, or one document below the packing's minimum
+    (:func:`_small_s_docs`)."""
 
     _require_route(kind)
     arch, device = _arch(), _device()
@@ -1519,7 +1532,10 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
         form = "direct" if name == direct else "static" if name == static else "dynamic"
         forms.add(form)
         no_work = form != "dynamic"
-        label = f"{arch} {kind} taps={taps} S={S} C={C} {form} {name}"
+        docs = _small_s_docs(S)
+        label = (
+            f"{arch} {kind} taps={taps} S={S} C={C} docs={docs or 'one'} {form} {name}"
+        )
         workspace = pkg.cake_causal_conv1d_nondet_train_forward_workspace(S, C, device)
 
         def call(
@@ -1577,7 +1593,7 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
         _judge(
             S,
             C,
-            "perf",
+            docs,
             call,
             weight_dtype=weight_dtype,
             bias_dtype=bias_dtype,
@@ -1585,7 +1601,7 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
             label=label,
         )
         # CUDA Graph capture after one eager warm-up, its replays on each draw's inputs judged
-        x, w, cu, _ = _inputs(S, C, "perf", key=59, weight_dtype=weight_dtype)
+        x, w, cu, _ = _inputs(S, C, docs, key=59, weight_dtype=weight_dtype)
         b = None if bias_dtype is None else _bias_input(C, bias_dtype, key=59)
         out = torch.empty_like(x)
         cap = _capture(
@@ -1602,9 +1618,11 @@ def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
             )
             assert "fwd" not in cap["buffers"], (label, cap["buffers"])
 
-        def replay(_draw, seed, x=x, w=w, b=b, out=out, graph=cap["graph"], S=S, C=C):
+        def replay(
+            _draw, seed, x=x, w=w, b=b, out=out, graph=cap["graph"], S=S, C=C, docs=docs
+        ):
             fx, fw, fcu, fdy = _inputs(
-                S, C, "perf", key=59, weight_dtype=weight_dtype, seed=seed
+                S, C, docs, key=59, weight_dtype=weight_dtype, seed=seed
             )
             fb = (
                 None
