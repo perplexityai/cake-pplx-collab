@@ -2353,6 +2353,14 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     5120 -> 128 at T 16172 and at T 16384 (two ranges of one token count each), 6144 -> 128 at T 16172 alone;
 #     1.021 to 1.063 times faster.  6144 -> 128 missed the bar at T 16231 and 16384 (it met it in three of the four
 #     node and mode pairs) and 8192 -> 128 at T 16172 and 16384: they keep their plan there.
+# Version 0.3.9 runs two GB300 (152-SM sm_103a) FP32 input gradients of that program in raster groups of 2 row tiles,
+# measured on two GB300 nodes against the plan of version 0.3.8 (the same program in raster groups of 16) with the
+# paired rounds above: the indexer_hw input gradient 6144 -> 32 (whose plan before is its ``ROW_RULES`` rule of
+# sm_100a, read through ``RULE_PARENT``) at T 16172 - 32768, 1.016 to 1.022 times faster (measured at T 8192, 16172,
+# 16231, 16384 and 32768; at T 8192 the group met the bar in three of the four node and mode pairs and the row keeps its
+# plan there), and 8192 -> 128 at T 16231 - 16384, 1.063 to 1.071 times faster (at T 16172 the plan before was more
+# than 1% off a second copy of itself in three of the four pairs, so T 16172 - 16230 keep the group of 16).  The raster
+# group changes which tiles run side by side, not the sum of any tile: the outputs were equal bit for bit.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2422,10 +2430,14 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
                 (5120, 48),
                 (5120, 64),
                 (5120, 128),
-                (8192, 128),
             )
         },
+        ('sm_103a', False, True, True, False, False, 8192, 128, None): (
+            (16172, 16230, dict(_SM100A_148_DGRAD_F32)),
+            (16231, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+        ),
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((16172, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_103a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {"block_n": 128, "slots": 2, "stages": 4, "cta1": True, "group_m": 2}),),
     },
     ("sm_100a", 152): {
         **{
@@ -3528,7 +3540,9 @@ def cake_dense_gemm_det_train_projection_plan(
     at T 16172 - 16384; on 152-SM sm_100a parts all but 8192 -> 128, at T 16172 - 16384, 5120 -> 128 at T 16172 and
     16384 alone and 6144 -> 128 at T 16172 alone) with the single-CTA program of those part rules, the bits of the plan
     before, measured faster on two B300, two GB300 and two GB200 nodes; on every other part and token count these rows
-    plan as before."""
+    plan as before.  Since version 0.3.9 the 152-SM sm_103a ranges run that program in raster groups of 2 on 8192 -> 128
+    at T 16231 - 16384 and on the indexer_hw input gradient 6144 -> 32 at T 16172 - 32768 (the same bits, measured
+    faster on two GB300 nodes)."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
