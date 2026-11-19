@@ -156,8 +156,8 @@ architecture serves every call.
   subnormal `2^t`) and the approximate reciprocal plus one round-to-nearest Newton step, which is the IEEE `rcp.rn` of
   every `1 <= d < 2^126`.  A warp with a clamped gate at or below -87 in a run of its loads computes that run with a
   scaled reciprocal: the Newton reciprocal of `d 2^-126`, times `2^-126` with one rounding.  That is `RN(1 / d)`
-  where the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.2 rounded it exactly, with
-  four more instructions per element), +0 for an infinite `d`.
+  where the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.3 and earlier rounded it exactly,
+  with four more instructions per element), +0 for an infinite `d`.
 - `silu = g' s`, `a = silu u'`, `h = bf16(w a)`: one rounding.
 - `d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])` (one FMA for `silu (1 - s) + s`) and
   `d_up = bf16((dh w) silu [-L <= u <= L])`, each mask a factor of 1 or 0, each output rounded once.
@@ -193,8 +193,8 @@ reaches a result.
   a saved-tensors hook or a `.data` assignment can change them after the forward.
 - Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
   and one launcher per stage (the route, and each program's FFI entry bound at its first launch); per process, the
-  loaded libraries and the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every call, before any
-  allocation.
+  loaded libraries and the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every
+  call, before any allocation.
 
 ## Limitations
 
