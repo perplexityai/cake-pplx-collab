@@ -50,7 +50,9 @@ The roles, in launch order:
   both write the same bytes.  A forward launches a pair table only for
   ``S > fuse_docs`` (:func:`fuse_docs`); an explicit backward without a table
   launches one for every ``S``.
-* ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
+* ``fwd`` and ``fwd_unfused``: the forward.  A launch of ``S <= fuse_docs``
+  documents runs ``fwd``, of more ``fwd_unfused``; both write the same bytes.
+  ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
   of ``r`` by a binary search of ``cu_pairs``, the tokens
   ``t0 = cu_seqlens[s] + 2 (r - cu_pairs[s])`` and ``t1 = t0 + 1``, and
   ``out[r] = BF16(softmax-weighted sum of C[t0], C[t1])`` in FP32.  A row
@@ -60,13 +62,15 @@ The roles, in launch order:
   search: row ``r``'s ``t0`` is ``cu_seqlens[0] + 2 r`` plus the number of
   odd-length documents before ``r``'s document, counted from ``cu_seqlens``.
   It reads no entry of ``cu_pairs``, and CTA 0 writes all ``S + 1`` entries,
-  the bytes ``pair_table`` writes, for the backward.  A launch of more
-  documents searches the table ``pair_table`` wrote.  The role has two
-  records, one kernel with two schedules, each the faster on its
-  architectures: ``fwd`` on ``sm_100a`` and ``sm_103a`` reads ``C`` and ``Z``
-  in 128-bit lanes (4 FP32 channels, 128 lanes a row); ``fwd_sm_107a`` on
-  ``sm_107a`` reads them in 256-bit lanes (8 channels, 64 lanes a row), with
-  the same FP32 operations per element.
+  the bytes ``pair_table`` writes, for the backward.  ``fwd_unfused`` is the
+  same forward without the table build: it searches the table the pair table
+  wrote, a declared read-only input, and is no slower for a pack of more
+  than ``fuse_docs`` documents.  Each forward role has two records, one
+  kernel with two schedules, each the faster on its architectures: ``fwd``
+  and ``fwd_unfused`` on ``sm_100a`` and ``sm_103a`` read ``C`` and ``Z`` in
+  128-bit lanes (4 FP32 channels, 128 lanes a row); ``fwd_sm_107a`` and
+  ``fwd_unfused_sm_107a`` on ``sm_107a`` read them in 256-bit lanes (8
+  channels, 64 lanes a row), with the same FP32 operations per element.
 * ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
   the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
   ``v >= cu_pairs[S]``), its document ``s`` by a binary search of
@@ -104,9 +108,10 @@ LIBRARY_PREFIX = "cake_gated_kv_compression_det_train"
 MANIFEST = "build.json"
 
 # The roles of the package's programs, in launch order (a pair table first, ``pair_table_small`` for at most
-# ``small_docs`` documents and ``pair_table`` for more, then the forward or the backward).  Every role is served on
-# every architecture by exactly one record of MODULES (``role_record``).
-ROLES = ("pair_table", "pair_table_small", "fwd", "bwd")
+# ``small_docs`` documents and ``pair_table`` for more, then the forward, ``fwd`` for at most ``fuse_docs`` documents
+# and ``fwd_unfused`` for more, or the backward).  Every role is served on every architecture by exactly one record of
+# MODULES (``role_record``).
+ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd")
 GRID_KINDS = ("one_cta", "rows")
 
 # Columns of C, Z, dC, dZ, out and dout; ``cz`` holds C in columns [0, 512) and Z in [512, 1024).
@@ -141,7 +146,7 @@ MAX_TOKENS = INT32_MAX
 
 # The derived leaves of every record (``library``, ``kernel_symbol``, ``launch.block``, ``launch.cluster``,
 # ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``), the ``fuse_docs`` of
-# the forward records (the most documents a forward launch builds the pair table for) and the ``small_docs`` of
+# the ``fwd`` records (the most documents a forward launch builds the pair table for) and the ``small_docs`` of
 # ``pair_table_small`` (the most documents a pair-table launch runs it for) are rewritten by the generator; every other
 # field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
@@ -255,6 +260,66 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
         "role": "fwd",
+    },
+    "fwd_unfused": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "role": "fwd_unfused",
+    },
+    "fwd_unfused_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "role": "fwd_unfused",
     },
     "bwd": {
         "arches": ["sm_100a", "sm_103a"],
@@ -371,8 +436,8 @@ def small_docs(arch: str) -> int:
 @functools.cache
 def fuse_docs(arch: str) -> int:
     """The most documents a forward launch on ``arch`` builds the pair table for itself (the ``fuse_docs`` leaf of the
-    ``fwd`` record serving ``arch``; 0 when the record has none): the host launches ``pair_table`` before the forward
-    only for more documents.  Cached per architecture."""
+    ``fwd`` record serving ``arch``; 0 when the record has none): the host launches ``fwd`` for at most that many
+    documents, and for more a pair table then ``fwd_unfused``.  Cached per architecture."""
     return int(record(role_record("fwd", arch)).get("fuse_docs", 0))
 
 
@@ -481,9 +546,10 @@ def _tvm_device(device_index: int) -> Any:
 
 @functools.cache
 def _libraries(arch: str) -> None:
-    """Load the library of every role of :data:`ROLES` on ``arch``, once per process.  The pair table of a launch
-    depends on its document count, so loading only the records a first call launched would leave ``pair_table`` to
-    load (or build) at the first pack of more than ``small_docs`` documents, possibly inside a CUDA graph capture."""
+    """Load the library of every role of :data:`ROLES` on ``arch``, once per process.  The pair table and the forward
+    of a launch depend on its document count, so loading only the records a first call launched would leave
+    ``pair_table`` or ``fwd_unfused`` to load (or build) at the first pack of more than ``small_docs`` or ``fuse_docs``
+    documents, possibly inside a CUDA graph capture."""
     for role in ROLES:
         load(role_record(role, arch), arch)
 

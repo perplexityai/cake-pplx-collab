@@ -1215,7 +1215,7 @@ cake_gated_kv_compression_det_train_backward(torch.randn_like(out), c, z, cu_seq
 
 - The host never reads `cu_seqlens`. The caller keeps its contract (non-decreasing, last bound `T`) and passes `G`. A `G` below the pair count gives the first `G` rows in the forward and leaves the gradient rows of the later pairs unwritten in the backward. The autograd entries need `num_pairs` at least the pair count: their gradient buffers are not zero-filled, so with a smaller `num_pairs` the gradient rows of the tokens of the later pairs are uninitialized.
 - A layout the kernels cannot read or write in place raises `ValueError`, and no call copies an operand silently. The autograd backward copies a non-contiguous or misaligned incoming gradient once.
-- Capture a call in a CUDA graph only after one eager call on the device. That call loads every program of the architecture, both pair tables included, so a later pack of any size loads none.
+- Capture a call in a CUDA graph only after one eager call on the device. That call loads every program of the architecture, both pair tables and both forward programs included, so a later pack of any size loads none.
 - Only ratio 2 and width 512 are supported.
 
 ---

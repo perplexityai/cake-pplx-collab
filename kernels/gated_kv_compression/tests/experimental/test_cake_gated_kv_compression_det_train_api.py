@@ -625,10 +625,10 @@ BOUND_PACKS = tuple(Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}") for n 
 
 @pytest.mark.parametrize("pack", BOUND_PACKS, ids=[p.id for p in BOUND_PACKS])
 def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launches) -> None:
-    """A forward of at most ``fuse_docs`` (256) documents launches the forward kernel alone, which writes the pair
+    """A forward of at most ``fuse_docs`` (256) documents launches the ``fwd`` kernel alone, which writes the pair
     table the autograd node saves; a forward of more launches a pair table first, ``pair_table_small`` for at most
-    ``small_docs`` (512) documents and ``pair_table`` for more.  The saved table is the prefix of the pair counts every
-    way, and the explicit forward gives the bits of the autograd one."""
+    ``small_docs`` (512) documents and ``pair_table`` for more, then ``fwd_unfused``, which reads it.  The saved table
+    is the prefix of the pair counts every way, and the explicit forward gives the bits of the autograd one."""
     device = _device_or_skip()
     jit = _jit()
     arch = jit.device_arch(device.index)
@@ -639,7 +639,7 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
     with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t) or t, lambda t: t):
         out = api.cake_gated_kv_compression_det(c, x.z, x.cu, x.G)
     table = "pair_table_small" if pack.S <= 512 else "pair_table"
-    assert launches == (["fwd"] if pack.S <= 256 else [table, "fwd"]), pack.id
+    assert launches == (["fwd"] if pack.S <= 256 else [table, "fwd_unfused"]), pack.id
     tables = [t for t in saved if t.dtype == torch.int32 and t.data_ptr() != x.cu.data_ptr()]
     assert len(tables) == 1
     assert torch.equal(tables[0], pair_table_of(pack.lengths, device)), f"{pack.id}: saved pair table"
@@ -730,8 +730,8 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: ``build.json`` holds an ``sm_107a``
-    library for every record that serves it, one per role, the forward's being ``fwd_sm_107a`` and the backward's
-    ``bwd_sm_107a`` (nothing is built or launched here)."""
+    library for every record that serves it, one per role, the forwards' being ``fwd_sm_107a`` and
+    ``fwd_unfused_sm_107a`` and the backward's ``bwd_sm_107a`` (nothing is built or launched here)."""
     jit = _jit()
     path = Path(jit.__file__).parent / "build.json"
     if not path.is_file():
@@ -748,6 +748,7 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in jit.ROLES
     )
     assert jit.role_record("fwd", "sm_107a") == "fwd_sm_107a"
+    assert jit.role_record("fwd_unfused", "sm_107a") == "fwd_unfused_sm_107a"
     assert jit.role_record("bwd", "sm_107a") == "bwd_sm_107a"
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 

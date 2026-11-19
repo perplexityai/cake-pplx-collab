@@ -23,8 +23,8 @@ backend objects it forwards to (``cake_pplx._backends.cake_gated_kv_compression_
 every family are checked with ``tests.cake.test_helpers.cake_mode_names``; the checks here are this family's own.
 Build identities (program and library stems ``cake_gated_kv_compression_det_train_<hex>``, kernel symbols, csrc file
 names) keep their names.  The package serves capabilities (10, 0), (10, 3) and (10, 7) only; each role has one record
-per architecture, and the forward's record follows the architecture (``fwd``, 128-bit lanes, on sm_100a / sm_103a;
-``fwd_sm_107a``, 256-bit lanes, on sm_107a).
+per architecture, and the forwards' records follow the architecture (``fwd`` and ``fwd_unfused``, 128-bit lanes, on
+sm_100a / sm_103a; ``fwd_sm_107a`` and ``fwd_unfused_sm_107a``, 256-bit lanes, on sm_107a).
 """
 
 import importlib
@@ -271,17 +271,26 @@ def test_package_identity_and_build_identity():
 # The forward record of each architecture and the width of its C / Z loads: 128-bit (4 FP32 channels a lane, 128 lanes
 # a row) on sm_100a and sm_103a, 256-bit (8 channels, 64 lanes) on sm_107a, the faster schedule of each.
 FORWARD = {"sm_100a": ("fwd", 128, "v4"), "sm_103a": ("fwd", 128, "v4"), "sm_107a": ("fwd_sm_107a", 64, "v8")}
+# The same for the forward of more than fuse_docs documents, which builds no pair table.
+UNFUSED = {
+    "sm_100a": ("fwd_unfused", 128, "v4"),
+    "sm_103a": ("fwd_unfused", 128, "v4"),
+    "sm_107a": ("fwd_unfused_sm_107a", 64, "v8"),
+}
 
 
 def test_the_forward_record_follows_the_architecture(monkeypatch):
     """The ``fwd`` role resolves to ``fwd`` on sm_100a and sm_103a and to ``fwd_sm_107a`` on sm_107a (also from the
-    device capability); the two are distinct programs whose rendered kernels read ``C`` and ``Z`` with 128-bit and
-    256-bit loads, and whose grid rules give a row 128 and 64 lanes."""
+    device capability), and the ``fwd_unfused`` role to ``fwd_unfused`` and ``fwd_unfused_sm_107a``; each pair is two
+    distinct programs whose rendered kernels read ``C`` and ``Z`` with 128-bit and 256-bit loads, and whose grid rules
+    give a row 128 and 64 lanes."""
     jit = _backend("cake_jit")
-    for arch, (name, lanes, _) in FORWARD.items():
-        assert jit.role_record("fwd", arch) == name, arch
-        assert jit.MODULES[name]["grid_rule"] == {"kind": "rows", "lanes_per_row": lanes, "rows_per_lane_group": 1}
+    for role, records in (("fwd", FORWARD), ("fwd_unfused", UNFUSED)):
+        for arch, (name, lanes, _) in records.items():
+            assert jit.role_record(role, arch) == name, (role, arch)
+            assert jit.MODULES[name]["grid_rule"] == {"kind": "rows", "lanes_per_row": lanes, "rows_per_lane_group": 1}
     assert jit.MODULES["fwd"]["library"] != jit.MODULES["fwd_sm_107a"]["library"]
+    assert jit.MODULES["fwd_unfused"]["library"] != jit.MODULES["fwd_unfused_sm_107a"]["library"]
     for capability, arch in ARCH_BY_CAPABILITY.items():
         monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None, capability=capability: capability)
         jit.device_arch.cache_clear()
@@ -293,7 +302,7 @@ def test_the_forward_record_follows_the_architecture(monkeypatch):
     csrc = Path(jit.__file__).resolve().parent / "csrc"
     if not (csrc.parent / "build.json").is_file():
         pytest.skip("the package's programs are not rendered in this checkout")
-    for arch, (name, _, width) in FORWARD.items():
+    for arch, (name, _, width) in (*FORWARD.items(), *UNFUSED.items()):
         source = (csrc / f"{jit.MODULES[name]['library']}_kernel.cu").read_text()
         loads = set(re.findall(r"ld\.global[\w:.]*\.(v[48])\.b32", source))
         assert loads == {width}, (arch, name, loads)
