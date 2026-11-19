@@ -7406,6 +7406,16 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
     def new_ws():
         return cake_kcp.CakeKDANondetKcpWorkspace(state_dtype=dt["state"], local=True)
 
+    def high_water(before) -> tuple[int, int]:
+        """The ``(requested, allocated)`` peak bytes since the last peak reset above the bytes held at ``before`` (a
+        ``torch.cuda.memory_stats``), as :func:`_call_high_water` measures them."""
+        after = torch.cuda.memory_stats(device)
+        return tuple(
+            int(after[f"{kind}_bytes.all.peak"])
+            - int(before[f"{kind}_bytes.all.current"])
+            for kind in ("requested", "allocated")
+        )
+
     def draw(j, s):
         part = _small_partition(1, lengths=lengths, layout="contiguous")
         ctx = kp.cake_kda_nondet_train_kcp_build_context(part, None, 0, device)
@@ -7526,16 +7536,21 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
         autograd.update(zip(LEAF_GRADS, (t.grad for t in leaves), strict=True))
         del saved_0, leaves, out_a
         # the first training step on an empty workspace peaks no higher than a later step; the first step's results
-        # move to the host before the later step's window, which then holds what the original form held
+        # move to the host before the later step's window, which then holds what the original form held.  The peaks
+        # compared are requested bytes (the bytes the calls asked for, :func:`_call_high_water`), which carry no block
+        # rounding, so no allowance: the allocated peak (``max_memory_allocated``: block sizes, a reused larger cached
+        # block with its unsplit tail of up to 1 MiB) of one and the same step differs between draws with the blocks
+        # the allocator has cached (the previous draw's results stay held by the judge), by more than 1 MiB, so it is
+        # in the message only
         ws_s = new_ws()
         gc.collect()
         torch.cuda.synchronize(device)
-        base0 = torch.cuda.memory_allocated(device)
+        base0 = torch.cuda.memory_stats(device)
         torch.cuda.reset_peak_memory_stats(device)
         o1, s1 = fwd(ws_s)
         g1 = bwd(ws_s, s1)
         torch.cuda.synchronize(device)
-        hw_first = torch.cuda.max_memory_allocated(device) - base0
+        hw_first = high_water(base0)
         first_step = {n: t.cpu() for n, t in _named(o1, g1).items()}
         del o1, s1, g1
         gc.collect()
@@ -7544,8 +7559,8 @@ def test_gpu_forward_only_layout_is_lean_and_judged(
         o2, s2 = fwd(ws_s)
         g2 = bwd(ws_s, s2)
         torch.cuda.synchronize(device)
-        hw_second = torch.cuda.max_memory_allocated(device) - base0
-        assert hw_first <= hw_second + (1 << 20), (row, hw_first, hw_second)
+        hw_second = high_water(base0)
+        assert hw_first[0] <= hw_second[0], (row, hw_first, hw_second)
         arms = {
             "backward_ws": _named(out_b, grads_b),
             "forward_only": _named(out_f, grads_f),
