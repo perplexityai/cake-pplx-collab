@@ -76,9 +76,11 @@ The module selects the mode: no entry point takes a mode argument.  Every entry 
   other forward row and token count runs the deterministic program.
 
 Every other operation -- the K1 forward and input gradient, the BF16x3 split -- runs the deterministic programs: a
-recomputed forward must reproduce its result, and where the deterministic plan of a K1 forward or input gradient
-splits K across CTAs (two ways, or three or four partials per tail tile on some rows with K > 8192 at small token
-counts), it adds the partials in a fixed order.  The K1 forward rows of
+recomputed forward must reproduce its result, and where the deterministic plan of a K1 forward or input gradient splits
+K across CTAs (two ways, or three or four partials per tail tile on some rows with K > 8192: the ``sm_107a`` rules of
+the 12288 -> 6144 forward and the 6144 -> 12288 input gradient wherever the tail admits that split, and the
+deterministic package's token tiers and 212-SM ranges of its version 0.3.7 at small token counts), it adds the partials
+in a fixed order.  The K1 forward rows of
 :data:`K1_FORWARD_RULES_BY_SM` (exact token counts on 148-SM ``sm_100a`` and 152-SM ``sm_100a`` / ``sm_103a`` parts)
 run another plan of those programs (the single-CTA program, every tile's whole K in one CTA, or another named
 program), the input-gradient rows of :data:`K1_DGRAD_RULES_BY_SM` another named program of that package and those of
@@ -280,12 +282,15 @@ def _k2_launch_text(plan: Any) -> str:
 #: weight gradient; ``nk`` has no training use), K2 by the layout class of ``router_layout_class``.
 ROUTES: dict[str, str] = {
     "k1_kk": "det",  # forward: feeds the recompute of checkpointing; whole tiles or a fixed-order K split of the tail,
-    # two ways or, on some rows with K > 8192 at small token counts, three or four partials per tail tile (the rows of
-    # K1_FORWARD_RULES_BY_SM: another plan of the deterministic programs, whole K per tile)
+    # two ways or, on some rows with K > 8192, three or four partials per tail tile (the sm_107a rule of the 12288 ->
+    # 6144 forward wherever the tail admits that split, the deterministic package's tiers and ranges of its version
+    # 0.3.7 at small token counts); the rows of K1_FORWARD_RULES_BY_SM: another plan of the deterministic programs,
+    # whole K per tile
     "k1_kn": "det",  # input gradient: whole tiles or a fixed-order K split of the tail, two ways or, on some rows
-    # with K > 8192 at small token counts, three or four partials per tail tile (the rows of K1_DGRAD_RULES_BY_SM:
-    # another program of the deterministic package, of K1_DGRAD_PROMO_RANGES_BY_SM: its plan with another TMA L2
-    # promotion; the same bits)
+    # with K > 8192, three or four partials per tail tile (the sm_107a rules of the 6144 -> 12288 input gradient
+    # wherever the tail admits that split, the deterministic package's tiers and ranges of its version 0.3.7 at small
+    # token counts); the rows of K1_DGRAD_RULES_BY_SM: another program of the deterministic package, of
+    # K1_DGRAD_PROMO_RANGES_BY_SM: its plan with another TMA L2 promotion; the same bits
     "k1_nk": "det",
     "k1_nn": "atomic",  # weight gradient: split-K over the ragged token count; the rows of the tables repeat bit for
     # bit (two splits, the cluster program, one split, a fixed split order) but the four-split arrival-order rows of
@@ -7381,16 +7386,17 @@ def cake_dense_gemm_nondet_train_projection_dgrad(
     out_dtype=None,
     enable_pdl: Optional[bool] = None,
 ) -> torch.Tensor:
-    """``out[T, K] = G[T, N] @ W[N, K]``.  The deterministic program (whole output tiles, or a fixed-order K split
-    of the tail: two ways, or three or four partials per tail tile on some rows with K > 8192 at small token counts)
-    through this package's binding of it (:func:`_det_k1`: the same plan, program and bits), except on a row of
-    :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` for the device, which runs this package's input-gradient program (the same
-    bits), on a row of :data:`K1_DGRAD_NVJET_RULES_BY_SM`, which runs this package's nvjet program on the deterministic
-    package's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM` (the same bits), and on a row of
-    :data:`K1_DGRAD_RULES_BY_SM` for the device, which runs the table's program of the deterministic package, and in a
-    range of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`, which runs the deterministic plan with the range's TMA L2 promotion
-    (:func:`k1_dgrad_knobs`; the same bits as the deterministic plan, every run).  ``enable_pdl`` as for
-    :func:`cake_dense_gemm_nondet_train_projection`."""
+    """``out[T, K] = G[T, N] @ W[N, K]``.  The deterministic program (whole output tiles, or a fixed-order split of the
+    tail's sum over ``N``: two ways, or three or four partials per tail tile on some rows with ``N`` > 8192 -- the
+    ``sm_107a`` rules of the 6144 -> 12288 input gradient wherever the tail admits that split, the deterministic
+    package's tiers and ranges of its version 0.3.7 at small token counts) through this package's binding of it
+    (:func:`_det_k1`: the same plan, program and bits), except on a row of :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` for the
+    device, which runs this package's input-gradient program (the same bits), on a row of
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM`, which runs this package's nvjet program on the deterministic package's plan of
+    :data:`K1_DGRAD_NVJET_DET_PROGRAM` (the same bits), and on a row of :data:`K1_DGRAD_RULES_BY_SM` for the device,
+    which runs the table's program of the deterministic package, and in a range of :data:`K1_DGRAD_PROMO_RANGES_BY_SM`,
+    which runs the deterministic plan with the range's TMA L2 promotion (:func:`k1_dgrad_knobs`; the same bits as the
+    deterministic plan, every run).  ``enable_pdl`` as for :func:`cake_dense_gemm_nondet_train_projection`."""
     if out is None:
         out = torch.empty(
             G.shape[0],

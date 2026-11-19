@@ -17668,7 +17668,7 @@ def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
 
 
 #: The cells of ``K_MAJOR_MISSED_CELLS`` of the deterministic package's tests, restated: the BF16 forward and input
-#: gradient cells with K > 8192 that missed the naive BF16 tier on that package's plans of version 0.3.6 (a tile's 136
+#: gradient cells with K > 8192 that missed the naive BF16 tier on that package's plans of version 0.3.6 (a tile's 192
 #: to 272 K blocks in one FP32 accumulator), per device class: (arch, SM count) -> ``((op, d_in, d_out, T, seeds),
 #: ...)``: a row at one token count with the seeds it missed on, one cell per seed (``K_MAJOR_SEED``: the seed of that
 #: package's tests).  This package runs the deterministic plan on these rows: since that package's version 0.3.7 a plan
@@ -17690,6 +17690,16 @@ K_MAJOR_MISSED_CELLS = {
         ("dgrad", 5120, 17408, 97, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 128, (K_MAJOR_SEED,)),
         ("dgrad", 5120, 17408, 129, (K_MAJOR_SEED,)), ("dgrad", 5120, 17408, 192, (K_MAJOR_SEED,)),
         ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_100a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (K_MAJOR_SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (K_MAJOR_SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (K_MAJOR_SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
     ),
     ("sm_103a", 148): (
         ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
@@ -17793,6 +17803,7 @@ def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7(monkeypatch):
         for part, cells in K_MAJOR_MISSED_CELLS.items()
     } == {
         ("sm_100a", 148): 49,
+        ("sm_100a", 152): 35,
         ("sm_103a", 148): 47,
         ("sm_103a", 152): 35,
         ("sm_107a", 212): 4,

@@ -2129,30 +2129,33 @@ RULE_PARENT: dict[str, str] = {"sm_103a": "sm_100a"}
 # B300 (148 SMs, T 8192 - 32768); below it the rows plan without it, as before.  An exact (N, K, M) key has no tiers.
 # Version 0.3.7 adds tiers to the ragged BF16 forward (both operands K-major) and input-gradient keys with K > 8192 of
 # sm_100a and to the four such keys of sm_103a; sm_103a reads the sm_100a tiers through ``RULE_PARENT`` on the rows it
-# has no rule of its own for (the o_proj and dense_down forwards, the q_b and dense_gate_up input gradients).  At small
-# token counts the rules of these rows (256-row tiles with the half-height tail wave) sum a tile's whole K, 192 to
+# has no ragged rule of its own for (the o_proj and dense_down forwards, the q_b and dense_gate_up input gradients).  At
+# small token counts the rules of these rows (256-row tiles with the half-height tail wave) sum a tile's whole K, 192 to
 # 272 K blocks, in one FP32 accumulator, and that plan missed the naive BF16 tier on some cells (a cell: a row at one
 # token count on one seed of 32 draws; errors up to 1.0089 times the tier's, the tests allow 1.005): 49 of the 840 cells
-# at T 1 - 2049 (8 rows x 21 token counts x 5 seeds) on B200 (sm_100a, 148 SMs), 47 of 840 on B300 (sm_103a, 148 SMs)
-# and 35 of 840 on GB300 (sm_103a, 152 SMs), all at T 1 - 513; later passes judged that plan at more token counts and
-# found no other miss.  That plan met the tier on every judged cell of the 12288 -> 4096 and dense_down forwards and of
-# the 4096 -> 12288 input gradient, and on each other row above the token counts listed with its key: there the tiers
-# are taken for speed alone, in another summation order.  Up to T 256 a tier splits the tail's K steps into three units
-# per tail tile (four up to T 512 on the q_b input gradient): with K 12288 or 16384 each tail tile sums three (four)
-# partials of 64 K blocks; with K 17408 the units, of 91 K blocks, are laid in one line over the tail's K steps, so a
-# tile of 272 K blocks sums three or four partials of 1 to 91 K blocks.  Above that, and on the o_proj forward from T 1,
-# it plans the 128-row program without the row's rule (whole tiles, or the two-way K split of a single partial wave),
-# with the column-grouped raster of the row's rule on the two forwards whose rule carries it.  Wherever the plan before
-# missed the tier, the tier's plan holds segments of at most 128 K blocks.  Every tier plan met the tier on every judged
-# seed and ran faster than the row's rule at every measured T of its band; the ratios below are the row's rule's time
-# over the tier plan's (geometric mean of eager launches and CUDA graph replays, cold L2).  A key's floor (its last
-# bound) is one above the highest measured T of its band: at the next measured T (769, 1024, 1536 or 3072) the tier plan
-# was no longer faster than the row's rule on every measured part, and the unmeasured T from the floor up to that T keep
-# the row's rule.  The sm_100a keys of the 12288 -> 4096 and 17408 -> 5120 forwards and the 4096 -> 12288 and
-# 5120 -> 17408 input gradients were timed on B200 alone and the sm_103a keys of these rows on B300 and GB300; both keys
-# of a row take the same bounds, the lowest over the three parts.  GB200 (sm_100a, 152 SMs) and 160-SM sm_103a parts are
-# not measured; they take the tiers of their architecture.  The tier plans that split K sum in another order than the
-# plans before them; every tier plan gives the same bits on every run.
+# at T 1 - 2049 (8 rows x 21 token counts x 5 seeds) on B200 (sm_100a, 148 SMs), 47 of 840 on B300 (sm_103a, 148 SMs),
+# 35 of 840 on GB300 (sm_103a, 152 SMs) and the same 35 cells on GB200 (sm_100a, 152 SMs), all at T 1 - 513; later
+# passes judged that plan at more token counts and found no other miss.  That plan met the tier on every judged cell of
+# the 12288 -> 4096 and dense_down forwards and of the 4096 -> 12288 input gradient, and on each other row above the
+# token counts listed with its key: there the tiers are taken for speed alone, in another summation order.  Up to T 256
+# a tier splits the tail's K steps into three units per tail tile (four up to T 512 on the q_b input gradient): with K
+# 12288 or 16384 each tail tile sums three (four) partials of 64 K blocks; with K 17408 the units, of 91 K blocks, are
+# laid in one line over the tail's K steps, so a tile of 272 K blocks sums three or four partials of 1 to 91 K blocks.
+# Above that, and on the o_proj forward from T 1, it plans the 128-row program without the row's rule (whole tiles, or
+# the two-way K split of a single partial wave), with the column-grouped raster of the row's rule on the two forwards
+# whose rule carries it.  Wherever the plan before missed the tier, the tier's plan holds segments of at most 128 K
+# blocks.  Every tier plan met the tier on every judged seed and ran faster than the row's rule at every measured T of
+# its band; the ratios below are the row's rule's time over the tier plan's (geometric mean of eager launches and CUDA
+# graph replays, cold L2).  A key's floor (its last bound) is one above the highest measured T of its band: at the next
+# measured T (769, 1024, 1536 or 3072) the tier plan was no longer faster than the row's rule on every measured part,
+# and the unmeasured T from the floor up to that T keep the row's rule.  The bounds come from B200, B300 and GB300: the
+# sm_100a keys of the 12288 -> 4096 and 17408 -> 5120 forwards and the 4096 -> 12288 and 5120 -> 17408 input gradients
+# were timed on B200 alone and the sm_103a keys of these rows on B300 and GB300; both keys of a row take the same
+# bounds, the lowest over the three parts.  GB200 (sm_100a, 152 SMs), measured after the bounds were set, planned every
+# tier plan as B200 did; each met the tier on every judged seed, ran 1.04 to 2.34 times as fast as the row's rule at
+# every measured T of its band and slower at the next measured T above the key's floor.  160-SM sm_103a parts are not
+# measured; they take the tiers of their architecture.  The tier plans that split K sum in another order than the plans
+# before them; every tier plan gives the same bits on every run.
 # fmt: off
 ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
     # q_b 2048 x 16384 input gradient: slower at 11, flat at 3, faster at 1 of the 15 measured T 1 - 1025; faster at
@@ -2319,10 +2322,10 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     (8-column-tile groups), 1.59 to 1.67 times faster up to T 512 (a two-way K split of the single partial wave,
 #     128-block segments) and 1.17 to 1.22 from T 513 (whole tiles);
 #   * the 17408 -> 5120 forward and the 5120 -> 17408 input gradient (rows without a ``ROW_RULES`` entry on sm_107a; the
-#     range key is the ragged key all the same): a four-way K split of the tail tiles at T 2 - 256 (68-block segments),
-#     1.08 to 1.13 and 1.14 to 1.21 times faster at the measured T 16 - 256; at T 1 the split was slower (0.94 and 0.97
-#     times as fast), so the rows keep their plan there.  The plan before met the tier on every judged cell of these two
-#     rows: their ranges are taken for speed alone;
+#     range key is the ragged key all the same): a four-way K split of the tail tiles at T 16 - 256 (68-block segments),
+#     1.08 to 1.13 and 1.14 to 1.21 times faster; at T 1 the split was slower (0.94 and 0.97 times as fast), so the rows
+#     keep their plan at T 1 and at the unmeasured T 2 - 15 between it and the range.  The plan before met the tier on
+#     every judged cell of these two rows: their ranges are taken for speed alone;
 #   * the 4096 -> 12288 input gradient: a four-way K split of the tail tiles at T 1 - 256 (48-block segments), 1.05 to
 #     1.17 times faster from T 16 and 0.89 times as fast at T 1, where the plan before missed the tier.
 # The 208-, 216- and 224-SM sm_107a parts are not measured and plan these rows as before.
@@ -2341,8 +2344,8 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ('sm_107a', True, True, True, False, False, 12288, None, 6144): ((8192, 8192, _SM107A_212_F32_V8),),
         ('sm_107a', False, True, True, False, False, 16384, 6144, None): ((8192, 8192, {"epi": 'reg', "f32_v8": True, "htail": True, "pro": 7}),),
         ('sm_107a', False, False, False, False, False, 6144, 16384, None): ((1, 256, {"pro": 15, "sk_parts": 4}), (257, 1024, {"cgrp": True, "pro": 15, "group_m": 8})),
-        ('sm_107a', False, False, False, False, False, 5120, 17408, None): ((2, 256, {"pro": 15, "sk_parts": 4}),),
-        ('sm_107a', False, True, False, False, False, 5120, 17408, None): ((2, 256, {"pro": 7, "sk_parts": 4}),),
+        ('sm_107a', False, False, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 15, "sk_parts": 4}),),
+        ('sm_107a', False, True, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 7, "sk_parts": 4}),),
         ('sm_107a', False, True, False, False, False, 4096, 12288, None): ((1, 256, {"pro": 7, "sk_parts": 4}),),
     },
 }
@@ -3418,7 +3421,12 @@ def cake_dense_gemm_det_train_projection_plan(
     key) at the token counts of the range, as an exact key at that token count would.  The 212-SM sm_107a ranges plan
     FP32 weight gradients of 4096 to 17408 features at T 4096 - 16384 (the synchronised split of the tail, or whole
     128-row tiles, or a two-way K split of the tail) and the o_proj FP32 input gradient at T 8192 (the half-height tail
-    wave), each measured faster on two VR200 nodes; on every other part and token count these rows plan as before."""
+    wave), each measured faster on two VR200 nodes, and since version 0.3.7 four BF16 K-major rows at small token
+    counts, measured on VR200: the o_proj forward (a four-way K split of the tail tiles at T 1 - 256, the 128-row
+    program with the row's column-grouped raster at T 257 - 1024), the 17408 -> 5120 forward and the 5120 -> 17408 input
+    gradient (a four-way split at T 16 - 256) and the 4096 -> 12288 input gradient (a four-way split at T 1 - 256; 0.89
+    times as fast at T 1, where the plan before missed the naive tier); on every other part and token count these rows
+    plan as before."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,

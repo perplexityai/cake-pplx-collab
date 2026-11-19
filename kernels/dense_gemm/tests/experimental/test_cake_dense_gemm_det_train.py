@@ -14276,8 +14276,8 @@ K_MAJOR_TIERS = {
 #: on sm_107a: their range key is the ragged key all the same.
 K_MAJOR_RANGES_212 = {
     ("sm_107a", False, False, False, False, False, 6144, 16384, None): ((1, 256, {"pro": 15, "sk_parts": 4}), (257, 1024, {"cgrp": True, "pro": 15, "group_m": 8})),
-    ("sm_107a", False, False, False, False, False, 5120, 17408, None): ((2, 256, {"pro": 15, "sk_parts": 4}),),
-    ("sm_107a", False, True, False, False, False, 5120, 17408, None): ((2, 256, _K_SPLIT4),),
+    ("sm_107a", False, False, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 15, "sk_parts": 4}),),
+    ("sm_107a", False, True, False, False, False, 5120, 17408, None): ((16, 256, _K_SPLIT4),),
     ("sm_107a", False, True, False, False, False, 4096, 12288, None): ((1, 256, _K_SPLIT4),),
 }
 #: The ranged keys without a ``ROW_RULES`` entry.
@@ -14287,6 +14287,7 @@ K_MAJOR_RULELESS_212 = frozenset(
 #: The measured plans of each band: key -> (the device classes measured, ((lo, hi, program, {longest segment in K
 #: blocks: the measured token counts}), ...)).  Every measured class of a key planned the same program and segment at
 #: each measured token count, with the band's rule injected as an exact ``ROW_RULES`` key of the row at that count.
+#: GB200 (a 152-SM sm_100a part) was measured after the bounds were set, at the token counts of B200.
 _KK_PRO7 = "dense_proj_det_gemm_kk_n256_pro7"
 _KK_CG_PRO7 = "dense_proj_det_gemm_kk_n256_cg_pro7"
 _KN_PRO7 = "dense_proj_det_gemm_kn_n256_pro7"
@@ -14294,32 +14295,34 @@ _KK_PRO15 = "dense_proj_det_gemm_kk_n256_pro15"
 _KK_CG_PRO15 = "dense_proj_det_gemm_kk_n256_cg_pro15"
 _SMALL_T = (1, 16, 33, 64, 97, 128, 129, 192, 256)
 _B200 = (("sm_100a", 148),)
+_B200_GB200 = _B200 + (("sm_100a", 152),)
 _B300_GB300 = (("sm_103a", 148), ("sm_103a", 152))
-_GB_ALL = _B200 + _B300_GB300
+_GB_ALL = _B200_GB200 + _B300_GB300
 _VR200 = (("sm_107a", 212),)
 K_MAJOR_BAND_PLANS = {
-    ("sm_100a", False, False, False, False, False, 4096, 12288, None): (_B200, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
-    ("sm_100a", False, False, False, False, False, 5120, 17408, None): (_B200, ((1, 256, _KK_PRO7, {91: _SMALL_T}), (257, 768, _KK_CG_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_100a", False, False, False, False, False, 4096, 12288, None): (_B200_GB200, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_100a", False, False, False, False, False, 5120, 17408, None): (_B200_GB200, ((1, 256, _KK_PRO7, {91: _SMALL_T}), (257, 768, _KK_CG_PRO7, {272: (257, 384, 512, 640, 768)}))),
     ("sm_100a", False, False, False, False, False, 6144, 16384, None): (_GB_ALL, ((1, 768, _KK_PRO7, {128: _SMALL_T, 256: (257, 384, 512, 640, 768)}),)),
     ("sm_100a", False, False, False, False, False, 6144, 12288, None): (_GB_ALL, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 768, _KK_PRO7, {192: (257, 384, 512, 768)}))),
     ("sm_100a", False, True, False, False, False, 2048, 16384, None): (_GB_ALL, ((1, 512, _KN_PRO7, {64: (*_SMALL_T, 257, 384, 512)}), (513, 2048, _KN_PRO7, {128: (513, 768, 769, 1001, 1024), 256: (1536, 2048)}))),
-    ("sm_100a", False, True, False, False, False, 4096, 12288, None): (_B200, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 1024, _KN_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
-    ("sm_100a", False, True, False, False, False, 5120, 17408, None): (_B200, ((1, 256, _KN_PRO7, {91: _SMALL_T}), (257, 768, _KN_PRO7, {272: (257, 384, 512, 640, 768)}))),
+    ("sm_100a", False, True, False, False, False, 4096, 12288, None): (_B200_GB200, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 1024, _KN_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
+    ("sm_100a", False, True, False, False, False, 5120, 17408, None): (_B200_GB200, ((1, 256, _KN_PRO7, {91: _SMALL_T}), (257, 768, _KN_PRO7, {272: (257, 384, 512, 640, 768)}))),
     ("sm_100a", False, True, False, False, False, 6144, 12288, None): (_GB_ALL, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 768, _KN_PRO7, {192: (257, 384, 512, 768)}))),
     ("sm_103a", False, False, False, False, False, 4096, 12288, None): (_B300_GB300, ((1, 256, _KK_PRO7, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
     ("sm_103a", False, False, False, False, False, 5120, 17408, None): (_B300_GB300, ((1, 256, _KK_PRO7, {91: _SMALL_T}), (257, 768, _KK_CG_PRO7, {272: (257, 384, 512, 640, 768)}))),
     ("sm_103a", False, True, False, False, False, 4096, 12288, None): (_B300_GB300, ((1, 256, _KN_PRO7, {64: _SMALL_T}), (257, 1024, _KN_PRO7, {96: (257, 384, 512), 192: (513, 768, 1024)}))),
     ("sm_103a", False, True, False, False, False, 5120, 17408, None): (_B300_GB300, ((1, 256, _KN_PRO7, {91: _SMALL_T}), (257, 768, _KN_PRO7, {272: (257, 384, 512, 640, 768)}))),
     ("sm_107a", False, False, False, False, False, 6144, 16384, None): (_VR200, ((1, 256, _KK_PRO15, {64: _SMALL_T}), (257, 1024, _KK_CG_PRO15, {128: (257, 384, 512), 256: (513, 768, 769, 1001, 1024)}))),
-    ("sm_107a", False, False, False, False, False, 5120, 17408, None): (_VR200, ((2, 256, _KK_PRO15, {68: _SMALL_T[1:]}),)),
-    ("sm_107a", False, True, False, False, False, 5120, 17408, None): (_VR200, ((2, 256, _KN_PRO7, {68: _SMALL_T[1:]}),)),
+    ("sm_107a", False, False, False, False, False, 5120, 17408, None): (_VR200, ((16, 256, _KK_PRO15, {68: _SMALL_T[1:]}),)),
+    ("sm_107a", False, True, False, False, False, 5120, 17408, None): (_VR200, ((16, 256, _KN_PRO7, {68: _SMALL_T[1:]}),)),
     ("sm_107a", False, True, False, False, False, 4096, 12288, None): (_VR200, ((1, 256, _KN_PRO7, {48: _SMALL_T}),)),
 }
 #: The cells the plans of version 0.3.6 missed the naive BF16 tier on (judged on ``SEED``, 758, 1, 2 and 3, 32 draws
 #: each), per device class: (arch, SM count) -> ``((op, d_in, d_out, T, seeds), ...)``: a row at one token count with
-#: the seeds it missed on, one cell per seed.  B200 (a 148-SM sm_100a part): 49 cells, B300 (a 148-SM sm_103a part):
-#: 47, GB300 (a 152-SM sm_103a part): 35, VR200 (a 212-SM sm_107a part): 4.  Those plans summed 136 to 272 K blocks of
-#: a tile in one FP32 accumulator there; the plans of version 0.3.7 hold at most 128.
+#: the seeds it missed on, one cell per seed.  B200 (a 148-SM sm_100a part): 49 cells, B300 (a 148-SM sm_103a part): 47,
+#: GB300 (a 152-SM sm_103a part): 35, GB200 (a 152-SM sm_100a part): the same 35, VR200 (a 212-SM sm_107a part): 4.
+#: Those plans summed 192 to 272 K blocks of a tile in one FP32 accumulator there; the plans of version 0.3.7 hold at
+#: most 128.
 K_MAJOR_MISSED_CELLS = {
     ("sm_100a", 148): (
         ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
@@ -14333,6 +14336,16 @@ K_MAJOR_MISSED_CELLS = {
         ("dgrad", 2048, 16384, 513, (2,)), ("dgrad", 5120, 17408, 1, (2,)), ("dgrad", 5120, 17408, 16, (SEED, 1, 2)),
         ("dgrad", 5120, 17408, 64, (SEED,)), ("dgrad", 5120, 17408, 97, (SEED,)), ("dgrad", 5120, 17408, 128, (SEED,)),
         ("dgrad", 5120, 17408, 129, (SEED,)), ("dgrad", 5120, 17408, 192, (SEED,)), ("dgrad", 6144, 12288, 1, (3,)),
+    ),
+    ("sm_100a", 152): (
+        ("fwd", 16384, 6144, 64, (3,)), ("fwd", 17408, 5120, 1, (1, 758)), ("fwd", 17408, 5120, 33, (2,)),
+        ("fwd", 17408, 5120, 64, (SEED, 2)), ("fwd", 17408, 5120, 128, (758,)), ("fwd", 17408, 5120, 129, (758,)),
+        ("dgrad", 2048, 16384, 1, (SEED,)), ("dgrad", 2048, 16384, 16, (1, 2, 758)), ("dgrad", 2048, 16384, 33, (1,)),
+        ("dgrad", 2048, 16384, 64, (2, 3, 758)), ("dgrad", 2048, 16384, 97, (2,)),
+        ("dgrad", 2048, 16384, 128, (2, 758)), ("dgrad", 2048, 16384, 192, (3,)), ("dgrad", 2048, 16384, 256, (3, 758)),
+        ("dgrad", 2048, 16384, 257, (3, 758)), ("dgrad", 2048, 16384, 384, (1, 3, 758)),
+        ("dgrad", 2048, 16384, 513, (1, 3, 758)), ("dgrad", 5120, 17408, 1, (SEED, 2)),
+        ("dgrad", 5120, 17408, 16, (2, 758)), ("dgrad", 6144, 12288, 1, (3,)),
     ),
     ("sm_103a", 148): (
         ("fwd", 16384, 6144, 64, (1,)), ("fwd", 16384, 6144, 97, (1,)), ("fwd", 16384, 6144, 128, (1,)),
@@ -14524,7 +14537,7 @@ def test_k_major_tier_and_range_tables():
         assert (key in ROW_RULES) == (key not in K_MAJOR_RULELESS_212), key
         rules = _k_major_rules(key)
         assert [(lo, hi) for lo, hi, _ in rules] == [(lo, hi) for lo, hi, *_ in bands], key
-        assert rules[0][0] in (1, 2) and all(
+        assert rules[0][0] in (1, 16) and all(
             lo <= hi < nxt for (lo, hi, _), (nxt, *_) in zip(rules, rules[1:])
         ), key
         if key in K_MAJOR_TIERS:
@@ -14663,6 +14676,7 @@ def test_k_major_missed_cells_plan_short_segments(monkeypatch):
     differs from that plan."""
     assert {part: len([s for *_, seeds in cells for s in seeds]) for part, cells in K_MAJOR_MISSED_CELLS.items()} == {
         ("sm_100a", 148): 49,
+        ("sm_100a", 152): 35,
         ("sm_103a", 148): 47,
         ("sm_103a", 152): 35,
         ("sm_107a", 212): 4,
@@ -14686,9 +14700,9 @@ def test_routing_037_changes_exactly_the_k_major_bands(monkeypatch):
     """Byte for byte against the tables of version 0.3.6 (``_pre_037_tables``), over the K-major rows (BF16, and the
     FP32 output of the input gradients) at ``K_MAJOR_SWEEP_TOKENS`` on every class of ``K_MAJOR_CLASSES``: a BF16 plan
     changes exactly inside a band of ``_k_major_band`` (every part of sm_100a and sm_103a, the 212-SM sm_107a part) and
-    runs the band's program there, a program the architecture registers; every other plan (the FP32 outputs, the
-    token counts above each band, T 1 of the K 17408 rows and every token count on the 208-, 216- and 224-SM sm_107a
-    parts) is the plan of version 0.3.6."""
+    runs the band's program there, a program the architecture registers; every other plan (the FP32 outputs, the token
+    counts above each band, T 1 - 15 of the K 17408 rows on the 212-SM sm_107a part and every token count on the 208-,
+    216- and 224-SM sm_107a parts) is the plan of version 0.3.6."""
     changed = {}
     for op, d_in, d_out in K_MAJOR_ROWS:
         for out_dtype in ("bf16", "f32") if op == "dgrad" else ("bf16",):
@@ -14717,8 +14731,8 @@ def test_routing_037_changes_exactly_the_k_major_bands(monkeypatch):
                     assert band[4] in _registered(arch), where
     # 8 rows on 2 sm_100a and 3 sm_103a classes: 13 token counts on the rows with a floor of 1025, 17 on q_b (floor
     # 2049), 11 on the others (floor 769), 98 per class; the 212-SM sm_107a part: 13 on the o_proj forward, 7 on the
-    # 4096 -> 12288 input gradient, 6 on each K 17408 row (from T 2)
-    assert changed == {"sm_100a": 2 * 98, "sm_103a": 3 * 98, "sm_107a": 13 + 7 + 6 + 6}
+    # 4096 -> 12288 input gradient, 5 on each K 17408 row (from T 16)
+    assert changed == {"sm_100a": 2 * 98, "sm_103a": 3 * 98, "sm_107a": 13 + 7 + 5 + 5}
 
 
 def _k_major_operands(T, d_in, d_out, seed, device):
