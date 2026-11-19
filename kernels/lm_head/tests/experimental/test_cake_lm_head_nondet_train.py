@@ -17676,9 +17676,13 @@ def test_cast_fold_plan_keys():
     store, whose slab sum is the fold alone) -- the scatter cast folds those rows -- and keeps it on every other chunk.
     Without ``cast_fold``, without the finalize, uncompacted, or on a log-probability plan that casts dX itself, every
     chunk keeps its slab sum."""
-    g = cake_backend.Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+    g = cake_backend.Geometry.from_record(
+        {"geometry": {"hidden": 6144, "vocab": 154880}}
+    )
 
-    def plan_of(entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True):
+    def plan_of(
+        entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True
+    ):
         plan = cake_backend.make_plan(
             _problem(4096, 6144, 154880, 1024, entry=entry),
             need_dx=True,
@@ -17729,6 +17733,10 @@ def test_cast_fold_plan_keys():
     t = dict(labels=object(), rlab=object(), W=object())
     fold = cake_backend.cast_fold_operands(mixed, t)
     assert fold == dict(
-        labels=t["labels"], rlab=t["rlab"], W=t["W"], lo=int(plan.chunks[2][0]), hi=plan.rows
+        labels=t["labels"],
+        rlab=t["rlab"],
+        W=t["W"],
+        lo=int(plan.chunks[2][0]),
+        hi=plan.rows,
     )
     assert cake_backend.cast_fold_operands(plan_of(cast_fold=False), t) is None

@@ -5550,7 +5550,9 @@ def test_cast_fold_plan_keys():
     uncompacted, or on a log-probability plan that casts dX itself, every chunk keeps its slab sum."""
     g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
 
-    def plan_of(entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True):
+    def plan_of(
+        entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True
+    ):
         plan = cake_backend.make_plan(
             _problem(4096, 6144, 154880, 1024, entry=entry),
             need_dx=True,
@@ -5600,8 +5602,15 @@ def test_cast_fold_plan_keys():
     # the fold operands handed to the cast: the call's compact labels, residuals and head for those rows
     t = dict(labels=object(), rlab=object(), W=object())
     fold = cake_backend.cast_fold_operands(mixed, t)
-    assert fold == dict(labels=t["labels"], rlab=t["rlab"], W=t["W"], lo=int(plan.chunks[2][0]), hi=plan.rows)
+    assert fold == dict(
+        labels=t["labels"],
+        rlab=t["rlab"],
+        W=t["W"],
+        lo=int(plan.chunks[2][0]),
+        hi=plan.rows,
+    )
     assert cake_backend.cast_fold_operands(plan_of(cast_fold=False), t) is None
+
 
 def test_dx_finalize_plan_keys():
     """Every chunk's dX rows end with the ``slab_sum`` kernel, which folds the rows' FP32 label residuals: right behind

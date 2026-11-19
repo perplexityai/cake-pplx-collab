@@ -6273,10 +6273,14 @@ def scale_cast_scatter(
     )
     fold_lo, fold_hi = (0, 0) if fold is None else (int(fold["lo"]), int(fold["hi"]))
     if not 0 <= fold_lo <= fold_hi <= T_v:
-        raise ValueError(f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})")
+        raise ValueError(
+            f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
+        )
     if backend == "reference":
         if fold_hi > fold_lo:
-            raise NotImplementedError("the reference backend folds the label residuals in the slab sum")
+            raise NotImplementedError(
+                "the reference backend folds the label residuals in the slab sum"
+            )
         out.zero_()
         out.index_copy_(0, row_index, (acc * g).to(torch.bfloat16))
         return out
@@ -6316,13 +6320,22 @@ def scale_cast_scatter(
             or rlab_f.numel() < fold_hi
             or W_f.ndim != 2
             or int(W_f.shape[1]) != H
-            or not (labels_f.is_contiguous() and rlab_f.is_contiguous() and W_f.is_contiguous())
+            or not (
+                labels_f.is_contiguous()
+                and rlab_f.is_contiguous()
+                and W_f.is_contiguous()
+            )
         ):
             raise ValueError(
                 "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
             )
         values.update(
-            labels=labels_f, rlab=rlab_f, W=W_f, V=int(W_f.shape[0]), fold_lo=fold_lo, fold_hi=fold_hi
+            labels=labels_f,
+            rlab=rlab_f,
+            W=W_f,
+            V=int(W_f.shape[0]),
+            fold_lo=fold_lo,
+            fold_hi=fold_hi,
         )
     else:
         # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
