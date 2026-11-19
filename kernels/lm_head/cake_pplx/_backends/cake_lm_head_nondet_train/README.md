@@ -727,7 +727,10 @@ stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   compacted plan under the fused dX finalize whose `dX` goes through
   `scale_cast_scatter_bf16` hands the longest run of adjacent one-slice
   chunks (`cake_backend.cast_fold_rows`) to the cast, which folds those rows
-  with the same `fma` and predicate before its scale.
+  with the same `fma` and predicate before its scale.  The autograd loss
+  entry holds those rows' labels and `rlab` from the forward to its
+  backward's dX finalize; a backward that frees the graph drops them there,
+  before the weight gradient's buffers exist.
 * A chunk split into `S > 1` K slices (along the vocabulary, the GEMM's K) is
   one launch of a `gemm_dx_red*` stage and, right behind it, one launch of
   the slab sum `dx_slab_sum` (`dx_slab_sum_dcnt` after a counted GEMM).  The
