@@ -1143,7 +1143,8 @@ def _fp32_case(
 # and dw reduce are the BF16 twins of the FP32-weight window's}.  The twin records share the FP32-weight records' grid
 # and workspace rules; a twin window the BF16 route no longer runs keeps its records in the registry under no route.
 RECUT_FP32_BACKWARD_TWINS: dict[
-    tuple[str, int], dict[tuple[int, int], tuple[tuple[int, int], str]]
+    tuple[str, int],
+    dict[tuple[int, int | None], tuple[tuple[int, int | None], str]],
 ] = {
     ("sm_100a", 2048): {
         (768, 1024): ((288, 768), "caf6978e"),
@@ -1157,11 +1158,7 @@ RECUT_FP32_BACKWARD_TWINS: dict[
         (0, 1): ((0, 20), "44508df7"),
         (256, 4096): ((256, 767), "5c804aed"),
     },
-    ("sm_100a", 1024): {
-        (1, 1024): ((1, 64), "89fa3e96"),
-        (1024, 4096): ((1024, 8192), "0c581a13"),
-        (4096, 8192): ((12288, 24576), "5e32dd88"),
-    },
+    ("sm_100a", 1024): {(1, 1024): ((1, 64), "89fa3e96")},
     ("sm_103a", 1280): {
         (512, 4096): ((512, 2048), "12bbedff"),
         (4096, None): ((2048, None), "c646e097"),
@@ -1175,11 +1172,6 @@ RECUT_FP32_BACKWARD_TWINS: dict[
     ("sm_107a", 1280): {
         (512, 4096): ((512, 8192), "12bbedff"),
         (4096, 16384): ((8192, 16384), "c646e097"),
-    },
-    ("sm_107a", 1024): {
-        (1536, 4096): ((1536, 2048), "0c581a13"),
-        (4096, 32768): ((2048, 24576), "5e32dd88"),
-        (32768, None): ((24576, None), "4294c01f"),
     },
 }
 
@@ -1262,7 +1254,7 @@ def _fp32_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ..
     arch = loader.arch_for_capability(_capability())
     recut = {} if residual else RECUT_FP32_BACKWARD_TWINS.get((arch, hidden), {})
     for (above, at_most), (twin, program) in recut.items():
-        if above < rows <= at_most:
+        if above < rows and (at_most is None or rows <= at_most):
             names = _twin_records(
                 loader.route_modules(arch, hidden, "bwd", False), twin, program
             ) or _twin_records(

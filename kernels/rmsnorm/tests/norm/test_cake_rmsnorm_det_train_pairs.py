@@ -551,7 +551,7 @@ RECUT_FP32_ROUTES: dict[
         (32768, None),
     ),
     ("sm_107a", 128, "fwd", False): ((4096, 16384), (16384, 32768)),
-    ("sm_100a", 1024, "bwd", False): ((1, 1024), (1024, 4096), (4096, 8192)),
+    ("sm_100a", 1024, "bwd", False): ((1, 1024),),
     ("sm_103a", 1280, "bwd", False): ((512, 4096), (4096, None)),
     ("sm_103a", 1024, "bwd", False): (
         (1, 1024),
@@ -561,7 +561,6 @@ RECUT_FP32_ROUTES: dict[
         (16384, 24576),
     ),
     ("sm_107a", 1280, "bwd", False): ((512, 4096), (4096, 16384)),
-    ("sm_107a", 1024, "bwd", False): ((1536, 4096), (4096, 32768), (32768, None)),
 }
 
 
@@ -1107,7 +1106,17 @@ def test_workspace_puts_the_counters_first_and_grows_with_the_rows(hidden: int) 
         assert sizes[0] == loader.COUNTERS_BYTES
     else:
         assert sizes[0] > loader.COUNTERS_BYTES
-    assert sizes[-1] > loader.COUNTERS_BYTES
+    # the most rows size the partial rows of the route's pairs; a route of column-task
+    # programs alone keeps the counters alone at every row count
+    pairs = [
+        name
+        for name in loader.route_modules(arch, hidden, "bwd", False)
+        if (loader.MODULES[name]["workspace_rule"] or {}).get("kind") == PAIR_WORKSPACE
+    ]
+    if pairs:
+        assert sizes[-1] > loader.COUNTERS_BYTES
+    else:
+        assert sizes == [loader.COUNTERS_BYTES] * len(sizes)
     for name in loader.route_modules(arch, hidden, "bwd", False):
         record = loader.MODULES[name]
         if record.get("workspace_rule") is None:
