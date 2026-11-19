@@ -9302,7 +9302,8 @@ def test_device_logprob_graph_rlab(glm_weight):
     edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
     default = cake_backend.cake_lm_head_det_train_logprob
     keep = cake_backend.cake_lm_head_det_train_logprob_keep
-    auto = opt_in.cake_lm_head_det_train_logprob  # the automatic memory form: here its one-chunk kept logits
+    # the automatic memory form: here its one-chunk kept logits
+    auto = opt_in.cake_lm_head_det_train_logprob
     # (entry, T, chunk_size, compact): T = 1500 stays below the zero-gradient row skip's floor; 768-row chunks: two
     cases = (
         (default, 1500, 4096, True),
