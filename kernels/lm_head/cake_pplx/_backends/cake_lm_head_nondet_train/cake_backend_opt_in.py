@@ -4922,6 +4922,7 @@ def scale_cast_scatter(
     num_rows: int,
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """``scatter_rows(bf16(g * acc), row_index, num_rows)`` as ONE new BF16 ``[num_rows, H]`` tensor written in one
     pass: ``bf16(g * acc[compact row])`` on the valid rows, exact zeros elsewhere.  ``acc`` is the compact FP32
@@ -4930,7 +4931,13 @@ def scale_cast_scatter(
     ``r``, which the kernel validates through ``row_index[scan[r] - 1] == r``), ``g`` = ``grad`` (``None`` = 1).  The
     same FP32 multiply and BF16 rounding as :func:`scale_cast`, so the valid rows are bitwise the flat cast's; every
     output element is written exactly once.  ``T_v == 0`` (every row ignored) is one zero fill: the kernel reads a
-    candidate compact row for every output row and would have none."""
+    candidate compact row for every output row and would have none.
+
+    ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
+    residuals no slab sum folded (:func:`cast_fold_rows`).  The cast reads such a row's ``acc``, folds
+    ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a nonzero residual -- the fold-alone
+    slab sum's arithmetic and predicate -- and then scales and rounds it: the bits of the slab sum's FP32 store cast
+    as before.  ``None``: no row folds (the kernel reads no fold operand)."""
     if acc.dtype != torch.float32 or acc.ndim != 2 or not acc.is_contiguous():
         raise ValueError("the accumulator must be a contiguous FP32 [T_v, H] tensor")
     T_v, H = (int(s) for s in acc.shape)
@@ -4968,7 +4975,12 @@ def scale_cast_scatter(
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
+    fold_lo, fold_hi = (0, 0) if fold is None else (int(fold["lo"]), int(fold["hi"]))
+    if not 0 <= fold_lo <= fold_hi <= T_v:
+        raise ValueError(f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})")
     if backend == "reference":
+        if fold_hi > fold_lo:
+            raise NotImplementedError("the reference backend folds the label residuals in the slab sum")
         out.zero_()
         out.index_copy_(0, row_index, (acc * g).to(torch.bfloat16))
         return out
@@ -4998,6 +5010,27 @@ def scale_cast_scatter(
         num_rows=num_rows,
         loss_div=1.0,
     )
+    if fold_hi > fold_lo:
+        labels_f, rlab_f, W_f = fold["labels"], fold["rlab"], fold["W"]
+        if (
+            labels_f.dtype != torch.int64
+            or rlab_f.dtype != torch.float32
+            or W_f.dtype != torch.bfloat16
+            or labels_f.numel() < fold_hi
+            or rlab_f.numel() < fold_hi
+            or W_f.ndim != 2
+            or int(W_f.shape[1]) != H
+            or not (labels_f.is_contiguous() and rlab_f.is_contiguous() and W_f.is_contiguous())
+        ):
+            raise ValueError(
+                "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
+            )
+        values.update(
+            labels=labels_f, rlab=rlab_f, W=W_f, V=int(W_f.shape[0]), fold_lo=fold_lo, fold_hi=fold_hi
+        )
+    else:
+        # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
+        values.update(labels=row_index, rlab=acc, W=out, V=0, fold_lo=0, fold_hi=0)
     launch, arguments = _eager_launch(
         record, module_name, stage, values, acc.device, geometry
     )
@@ -5021,13 +5054,18 @@ def finalize_dx(
     num_rows: Optional[int],
     *,
     backend: str = "cake",
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """The dX output boundary: ``bf16(g * acc)`` restored to the caller's ``[num_rows, H]`` rows.  Every row valid
     (``row_index`` None): :func:`scale_cast`, already one pass over every row.  Compacted rows with the forward's
     valid-row mask (``row_valid``: the fused dX finalize): the inclusive int32 scan -- one ``cumsum``, issued here
     behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
-    (zero fill + ``index_copy_``).  All three produce the same bits."""
+    (zero fill + ``index_copy_``).  All three produce the same bits.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
+    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    if fold is not None and int(fold["hi"]) > int(fold["lo"]):
+        if row_index is None or row_valid is None:
+            raise ValueError("only the compact scatter cast folds label residuals")
     if row_index is None:
         return scale_cast(acc, grad, torch.bfloat16, backend=backend)
     if num_rows is None:
@@ -5042,7 +5080,7 @@ def finalize_dx(
         raise ValueError(f"row_valid must be the bool [{int(num_rows)}] valid-row mask")
     scan = torch.cumsum(row_valid, 0, dtype=torch.int32)
     return scale_cast_scatter(
-        acc, grad, row_index, scan, int(num_rows), backend=backend
+        acc, grad, row_index, scan, int(num_rows), backend=backend, fold=fold
     )
 
 

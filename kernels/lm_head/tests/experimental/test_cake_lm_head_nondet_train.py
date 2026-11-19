@@ -17667,3 +17667,68 @@ def test_device_one_pass_cuda_graph(glm_weight):
     graph.replay()
     torch.cuda.synchronize()
     contract_lm_head(dict(zip(names, captured)), new)
+
+
+def test_cast_fold_plan_keys():
+    """The label residual fold in the compact dX cast (:func:`cake_backend.cast_fold_rows`, :attr:`Plan.cast_fold`): a
+    compacted plan under the fused dX finalize whose dX the scatter cast finalizes (a loss plan, or a log-probability
+    plan with ``dx_cast=False``) launches no slab sum on the longest run of adjacent one-slice chunks (the plain
+    store, whose slab sum is the fold alone) -- the scatter cast folds those rows -- and keeps it on every other chunk.
+    Without ``cast_fold``, without the finalize, uncompacted, or on a log-probability plan that casts dX itself, every
+    chunk keeps its slab sum."""
+    g = cake_backend.Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+
+    def plan_of(entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True):
+        plan = cake_backend.make_plan(
+            _problem(4096, 6144, 154880, 1024, entry=entry),
+            need_dx=True,
+            need_dw=True,
+            geometry=g,
+            num_sms=148,
+            valid_rows=valid,
+            fuse_dw_cast=True,
+            arch="sm_100a",
+            dx_finalize=finalize,
+            dx_cast=dx_cast,
+            tail_fold=False,
+        )
+        return dataclasses.replace(plan, cast_fold=cast_fold)
+
+    def slab_chunks(plan):
+        keys = (
+            cake_backend.forward_keys(plan)
+            if plan.problem.entry == "loss"
+            else cake_backend.recompute_keys(plan)
+        )
+        dx = [i for s, i in keys if isinstance(i, int) and s == plan.dx_stage_of(i)]
+        assert dx == list(range(plan.num_chunks))
+        return [i for s, i in keys if s in cake_backend.DX_SLAB_SUM_STAGES]
+
+    plan = plan_of()
+    n = plan.num_chunks
+    assert n == 4 and all(plan.dx_slices_of(i) == 1 for i in range(n))
+    assert cake_backend.cast_fold_rows(plan) == (0, plan.rows)
+    assert slab_chunks(plan) == []
+    every = list(range(n))
+    for other in (
+        plan_of(cast_fold=False),
+        plan_of(finalize=False),
+        plan_of(valid=None),
+        plan_of("logprob"),
+    ):
+        assert cake_backend.cast_fold_rows(other) == (0, 0)
+        assert slab_chunks(other) == every
+    logprob = plan_of("logprob", dx_cast=False)
+    assert cake_backend.cast_fold_rows(logprob) == (0, logprob.rows)
+    assert slab_chunks(logprob) == []
+    # a K-sliced chunk keeps its slab sum (the slab adds) and splits the one-slice chunks: the longer run folds in the
+    # cast, the other keeps its fold-alone slab sum
+    mixed = dataclasses.replace(plan, dx_slices=(1, 2) + (1,) * (n - 2))
+    assert cake_backend.cast_fold_rows(mixed) == (int(plan.chunks[2][0]), plan.rows)
+    assert slab_chunks(mixed) == [0, 1]
+    t = dict(labels=object(), rlab=object(), W=object())
+    fold = cake_backend.cast_fold_operands(mixed, t)
+    assert fold == dict(
+        labels=t["labels"], rlab=t["rlab"], W=t["W"], lo=int(plan.chunks[2][0]), hi=plan.rows
+    )
+    assert cake_backend.cast_fold_operands(plan_of(cast_fold=False), t) is None
