@@ -13950,13 +13950,14 @@ def test_routing_034_rows_meet_the_naive_tier_and_repeat_bitwise(
 
 
 def _run_routing_gpu_case(
-    case, monkeypatch, record_property, before_tables, version, plan_changes=False
+    case, monkeypatch, record_property, before_tables, version, plan_changes=False, raster=False
 ):
     """The body of the routing GPU tests: ``case`` (a ``_Routing034Case``) on the device; ``before_tables(m)`` puts
     the tables of the plan before in place (``m``: a monkeypatch context); ``version`` names the change in a skip.
     With ``plan_changes``, or for a ``same_bits`` case, the device's plan on a listed device class also differs from
     the plan of ``before_tables`` in a planned field (``_plan_signature``): the program, or the split of the same
-    program."""
+    program.  A ``same_bits`` case compares the output with that of another program, or with ``raster`` with that of
+    the same program in another raster group."""
     if not _device_supported():
         pytest.skip(
             "requires a device with a registered generated instance "
@@ -14035,7 +14036,11 @@ def _run_routing_gpu_case(
             prepared.template,
         )
         if same_bits:
-            assert before.template != prepared.template, before.template
+            if raster:
+                assert before.template == prepared.template, before.template
+                assert before.plan.group_m != prepared.plan.group_m, before.plan.group_m
+            else:
+                assert before.template != prepared.template, before.template
             before.launch()
             torch.cuda.synchronize()
             assert torch.equal(before_out.view(bits), first.view(bits)), case
@@ -15909,6 +15914,7 @@ def test_raster_039_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, r
         _tables_038,
         "version 0.3.9",
         plan_changes=True,
+        raster=True,
     )
 
 

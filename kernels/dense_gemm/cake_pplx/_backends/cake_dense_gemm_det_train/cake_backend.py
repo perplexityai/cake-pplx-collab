@@ -2254,14 +2254,15 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # ``(arch, sm_count) -> {key: rule}`` (keys as ``ROW_RULES``).  Such a rule replaces the row's rule on that part alone:
 # the architecture's other parts, its child architectures (``RULE_PARENT``) and every other token count keep the row's
 # ``ROW_RULES`` entry.  The 148-SM sm_100a entries are the fp32 input gradients 4096 -> 32 / 48 / 64 / 128,
-# 5120 -> 32 / 48 / 64 / 128 and 8192 -> 128 and the fp32 6144 -> 128 input gradient, at the token counts measured on
-# B200: the single-CTA program with 128-column tiles, two TMA-store slots and four stages, over the raster group of the
-# row's rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output
-# equal to that plan's bit for bit at every measured key.  Since version 0.3.8 the 148- and 152-SM sm_103a parts and
-# the 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and
-# 8192 -> 128, on 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below).
-# Since version 0.3.10 8192 -> 128 runs over a token range of the 148-SM sm_100a part (below) in raster groups of 2,
-# instead of its two keys here (T 16231 and 16384, raster groups of 16).
+# 5120 -> 32 / 48 / 64 / 128 and the fp32 6144 -> 128 input gradient, at the token counts measured on B200: the
+# single-CTA program with 128-column tiles, two TMA-store slots and four stages, over the raster group of the row's
+# rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output equal
+# to that plan's bit for bit at every measured key.  Since version 0.3.8 the 148- and 152-SM sm_103a parts and the
+# 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and 8192 -> 128, on
+# 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below); since version 0.3.9
+# the 152-SM sm_103a part runs it in raster groups of 2 on 8192 -> 128 at T 16231 - 16384.  Version 0.3.10 runs it in
+# small raster groups over token ranges of the 148-SM parts (below): on 148-SM sm_103a parts also on 8192 -> 128, and
+# on 148-SM sm_100a parts on 8192 -> 128 instead of its two keys here (T 16231 and 16384, raster groups of 16).
 # fmt: off
 _SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
 ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {

@@ -1736,8 +1736,9 @@ def k1_program_knobs(program: str) -> tuple:
 
 
 #: The K1 input-gradient rows of this package that run a named program of the deterministic package (another than
-#: its own plan of the row, except where that package's token ranges of its version 0.3.8 cover the row and token count:
-#: there its own plan runs the same program), ``(arch, sm_count) -> {(K, N, T, out_dtype): program}``: on a part of exactly ``sm_count`` SMs,
+#: its own plan of the row, except where that package's part rules of its version 0.3.4 on 148-SM ``sm_100a`` parts or
+#: its token ranges of its version 0.3.8 cover the row and token count: there its own plan runs the same program),
+#: ``(arch, sm_count) -> {(K, N, T, out_dtype): program}``: on a part of exactly ``sm_count`` SMs,
 #: :func:`cake_dense_gemm_nondet_train_projection_dgrad` of ``G[T, N]`` and ``W[N, K]`` (both with a unit stride on
 #: their last axis) into an ``out[T, K]`` of ``out_dtype`` (``"bf16"`` or ``"f32"``) at exactly these ``K``, ``N``
 #: and ``T`` runs the deterministic package's program ``program`` (its template without the ``dense_proj_det_gemm_``
