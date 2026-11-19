@@ -35,6 +35,16 @@ slot has ``out = 0``, ``lse = -inf`` and ``dq = 0``; a key row no valid slot nam
 go in blocks of at most :data:`BLOCK_SLOTS` (row, slot) pairs: each row's quantities stay inside its block and each
 slot's key gradient is its own ``index_add_`` term, so the blocks bound the memory and do not change the values.
 
+A NoPE problem may carry a trainable per-head sink, FP32 ``sink [64]``: the sink column ``sink[h]`` (not scaled) is
+appended to every row's scores of head ``h`` -- in the dtype of the scores, ``sink.to(dtype)`` -- before
+``logsumexp`` and ``softmax``, and its probability is dropped before ``P v`` (the sink has no value).  ``lse`` then
+includes the sink, a row without a valid slot has ``out = 0``, ``dq = 0`` and ``lse = sink[h]`` (``-inf`` for a
+``-inf`` sink), and the gradients above use the key part of that softmax.  The sink gradient ``dsink [64]`` is, in
+float64 (the oracle), ``-sum_t exp(sink - lse[t]) * delta[t]`` with ``delta = rowsum(dout * out)`` (0 where ``lse``
+is ``-inf``); in the naive tier it is torch's autograd of the same BF16 forward with respect to the sink column, one
+term per row (0 on a row whose scores and sink are all ``-inf``, as its ``P``), summed over all rows by one BF16
+``sum`` (the reduction of the broadcast sink's gradient), so the blocks do not change it either.
+
 :func:`judged` holds the outputs of one or several calls on a problem to their contract (:func:`assert_contract`:
 shapes, dtypes, finite values, the exact zeros) and pairs each with the oracle and the tier of the same draw.  The
 forward's ``o_lo`` (the BF16 residual of the FP32 output) is judged as ``o_sum = out + o_lo`` in FP32.  An
@@ -82,6 +92,8 @@ class Problem:
     topk_length: Optional[torch.Tensor] = None
     dout: Optional[torch.Tensor] = None
     scale: Optional[float] = None
+    #: NoPE only: the FP32 ``[64]`` trainable per-head sink (``None``: no sink).
+    sink: Optional[torch.Tensor] = None
 
     @property
     def nope(self) -> bool:
@@ -163,11 +175,18 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
     k_all = kv if p.nope else torch.cat([kv, p.k_rope.reshape(total_k, D_ROPE).to(dtype)], -1)
     d_k = int(k_all.shape[-1])
     want_grad = backward and p.dout is not None
+    sink = None if p.sink is None else p.sink.to(device=device, dtype=dtype)
     out = torch.zeros(total_q, NUM_HEADS, D_LATENT, **on)
+    # a row without a valid slot: lse = -inf, or the sink (logsumexp of the sink column alone)
     lse = torch.full((total_q, NUM_HEADS), -math.inf, **on)
+    if sink is not None:
+        lse = lse.copy_(sink.expand(total_q, NUM_HEADS))
     if want_grad:
         dq = torch.zeros(total_q, NUM_HEADS, d_k, **on)
         dk = torch.zeros(total_k, d_k, **on)
+        if sink is not None:
+            # each row's sink-gradient term
+            dsink_rows = torch.zeros(total_q, NUM_HEADS, **on)
     if total_q and width and total_k:
         valid_all = p.valid()
         rows_per_block = max(1, BLOCK_SLOTS // width)
@@ -182,13 +201,19 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
             vg = kg[..., :D_LATENT]
             s = _bmm(q, kg.transpose(1, 2)) * scale  # [rows, 64, K]
             s = s.masked_fill(~valid[:, None, :], -math.inf)
-            row_lse = torch.logsumexp(s, -1)
-            prob = torch.softmax(s, -1).nan_to_num(0.0)  # a row without a valid slot: NaN -> 0
-            o = _bmm(prob, vg)
+            g = p.dout[r0:r1].to(dtype) if want_grad else None
+            if sink is None:
+                row_lse = torch.logsumexp(s, -1)
+                # a row without a valid slot: NaN -> 0
+                prob = torch.softmax(s, -1).nan_to_num(0.0)
+                o = _bmm(prob, vg)
+            else:
+                row_lse, prob, o, term = _sink_rows(s, sink, vg, g, dtype)
+                if want_grad:
+                    dsink_rows[r0:r1] = term
             out[r0:r1], lse[r0:r1] = o, row_lse
             if not want_grad:
                 continue
-            g = p.dout[r0:r1].to(dtype)
             dp = _bmm(g, vg.transpose(1, 2))
             ds = prob * (dp - (g * o).sum(-1, keepdim=True)) * scale
             dq[r0:r1] = _bmm(ds, kg)
@@ -200,6 +225,8 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
     if want_grad:
         if p.nope:
             found.update(dq=dq, dkv=dk)
+            if sink is not None:
+                found["dsink"] = dsink_rows.sum(0)
         else:
             found.update(
                 dq_latent=dq[..., :D_LATENT],
@@ -210,10 +237,51 @@ def outputs(p: Problem, dtype: torch.dtype, *, backward: bool = True) -> dict[st
     return found
 
 
+def _sink_rows(
+    s: torch.Tensor,
+    sink: torch.Tensor,
+    vg: torch.Tensor,
+    g: Optional[torch.Tensor],
+    dtype: torch.dtype,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
+    """``(lse, P, out, dsink term)`` of a block of rows with the sink column: the scores ``s [rows, 64, K]`` (``-inf``
+    on invalid slots) and ``sink[h]`` side by side, ``lse = logsumexp``, ``P`` the softmax's key part, ``out = P v``.
+    The sink term of each row (``None`` without ``g``): in float64 ``-exp(sink - lse) * rowsum(g * out)`` (0 where
+    ``lse`` is ``-inf``), otherwise the autograd of this forward in ``dtype`` with respect to the row's own copy of
+    the sink column."""
+    rows = int(s.shape[0])
+    column = sink[None, :, None].expand(rows, NUM_HEADS, 1)
+    if g is not None and dtype != torch.float64:
+        column = column.clone().requires_grad_(True)
+    with torch.enable_grad():
+        logits = torch.cat([s, column], -1)
+        row_lse = torch.logsumexp(logits, -1)
+        full = torch.softmax(logits, -1)
+        # a row whose scores and sink are all -inf: NaN -> 0 (its key part; the sink part has no value)
+        prob = torch.where(torch.isnan(full[..., :-1]), 0.0, full[..., :-1])
+        o = _bmm(prob, vg)
+        term = None
+        if g is not None:
+            if dtype == torch.float64:
+                live = torch.isfinite(row_lse)
+                p_sink = torch.where(
+                    live,
+                    torch.exp(sink[None, :] - torch.where(live, row_lse, 0.0)),
+                    0.0,
+                )
+                term = -p_sink * (g * o).sum(-1)
+            else:
+                # a row whose scores and sink are all -inf has no softmax (NaN -> 0, as P above)
+                (grad,) = torch.autograd.grad(o, column, g)
+                term = grad[..., 0].nan_to_num(0.0)
+    return row_lse.detach(), prob.detach(), o.detach(), term
+
+
 FORWARD = ("out", "lse", "o_lo")
-#: Every output name a call may report, by form (``o_lo`` is judged as ``o_sum``; ``dkv_acc`` by its increment).
+#: Every output name a call may report, by form (``o_lo`` is judged as ``o_sum``; ``dkv_acc`` by its increment;
+#: ``dsink`` only for a problem with a sink).
 OUTPUTS_ROPE = FORWARD + ("dq_latent", "dq_rope", "dkv_latent", "dk_rope", "dkv_acc")
-OUTPUTS_NOPE = FORWARD + ("dq", "dkv", "dkv_acc")
+OUTPUTS_NOPE = FORWARD + ("dq", "dkv", "dkv_acc", "dsink")
 _KEY_GRADS = ("dkv_latent", "dk_rope", "dkv")
 _DTYPES = {
     "out": (torch.bfloat16,),
@@ -225,6 +293,7 @@ _DTYPES = {
     "dkv_latent": (torch.bfloat16, torch.float32),
     "dk_rope": (torch.bfloat16, torch.float32),
     "dkv": (torch.float32, torch.bfloat16),
+    "dsink": (torch.float32,),
 }
 
 
@@ -260,10 +329,13 @@ def _acc_parts(p: Problem, acc: Acc) -> tuple[int, torch.Tensor]:
 
 def assert_contract(label: str, p: Problem, got: Mapping) -> None:
     """The contract of one call's outputs ``got`` on ``p``: each has its shape and dtype and is finite (``lse`` is
-    exactly ``-inf`` on the rows without a valid slot); ``out``, ``o_lo`` and ``dq*`` are exactly 0 on those rows;
-    the fresh key gradients are exactly 0 on the key rows no valid slot names; an accumulating call keeps the bits
-    of every destination row no key row maps to and of every column past the gradient width."""
+    exactly ``-inf`` on the rows without a valid slot -- with a sink, exactly the sink there, ``-inf`` for a ``-inf``
+    head); ``out``, ``o_lo`` and ``dq*`` are exactly 0 on those rows; the fresh key gradients are exactly 0 on the
+    key rows no valid slot names; ``dsink`` is finite and exactly 0 on every ``-inf`` head; an accumulating call
+    keeps the bits of every destination row no key row maps to and of every column past the gradient width."""
     names = OUTPUTS_NOPE if p.nope else OUTPUTS_ROPE
+    if p.sink is None:
+        names = tuple(name for name in names if name != "dsink")
     unknown = set(got) - set(names)
     assert not unknown, f"{label}: outputs {sorted(unknown)} are not outputs of the {'NoPE' if p.nope else 'RoPE'} form"
     valid = p.valid()
@@ -281,6 +353,7 @@ def assert_contract(label: str, p: Problem, got: Mapping) -> None:
         "dkv_latent": (t_k, D_LATENT),
         "dk_rope": (t_k, D_ROPE),
         "dkv": (t_k, D_LATENT),
+        "dsink": (NUM_HEADS,),
     }
     for name, value in got.items():
         if name == "dkv_acc":
@@ -305,8 +378,26 @@ def assert_contract(label: str, p: Problem, got: Mapping) -> None:
         assert shape == want, f"{label}: {name} has shape {tuple(value.shape)}, expected {want}"
         assert value.dtype in _DTYPES[name], f"{label}: {name} is {value.dtype}, expected one of {_DTYPES[name]}"
         if name == "lse":
-            assert bool((value[no_slot] == -math.inf).all()), f"{label}: lse of a row without a valid slot is not -inf"
-            assert bool(torch.isfinite(value[~no_slot]).all()), f"{label}: non-finite lse"
+            if p.sink is None:
+                assert bool((value[no_slot] == -math.inf).all()), (
+                    f"{label}: lse of a row without a valid slot is not -inf"
+                )
+                assert bool(torch.isfinite(value[~no_slot]).all()), (
+                    f"{label}: non-finite lse"
+                )
+                continue
+            sink = p.sink.to(device=value.device, dtype=value.dtype)
+            empty = value[no_slot]
+            assert torch.equal(empty, sink.expand_as(empty)), (
+                f"{label}: lse of a row without a valid slot is not the sink"
+            )
+            finite = ~no_slot[:, None] | torch.isfinite(sink)[None, :]
+            assert bool(torch.isfinite(value[finite]).all()), f"{label}: non-finite lse"
+            continue
+        if name == "dsink":
+            assert bool(torch.isfinite(value).all()), f"{label}: non-finite dsink"
+            dead = ~torch.isfinite(p.sink.to(value.device))
+            assert _zero(value[dead]), f"{label}: dsink of a -inf sink head is not 0"
             continue
         assert bool(torch.isfinite(value).all()), f"{label}: non-finite {name}"
         if name in _KEY_GRADS:

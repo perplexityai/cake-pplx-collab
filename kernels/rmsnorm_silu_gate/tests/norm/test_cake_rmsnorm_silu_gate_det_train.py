@@ -57,7 +57,9 @@ backward's workspace is zero after every call (``compute_grad_weight=False``
 and accumulation included), serves every shape and both weight-gradient
 dtypes, is zeroed by ``cake_rmsnorm_silu_gate_det_train_reset_workspace``, and
 the non-deterministic package's workspace (``uint8``) and unfit buffers (FP32
-ones, FP16, FP64) are refused; a call without a workspace uses its stream's and, during
+ones, FP16, FP64) are refused; a caller workspace's checked buffers serve its
+later calls, are checked and made again once its storage was freed in place
+and the tensor rebound, and go with the tensor; a call without a workspace uses its stream's and, during
 CUDA Graph capture, one of the device's reserve (or one the graph zero-fills).
 Without a device, the registry's records and grids are checked at several SM
 counts.
@@ -69,6 +71,7 @@ covered by
 ``test_cake_rmsnorm_silu_gate_det_train_api.py``.
 """
 
+import gc
 import inspect
 import warnings
 from pathlib import Path
@@ -1712,6 +1715,52 @@ def test_workspace_is_zero_after_every_call_and_serves_every_shape():
         if compute:
             assert got[2].dtype == dtype
 
+
+def test_caller_workspace_buffers_follow_the_tensor():
+    """A caller workspace is checked and viewed by its first call and its
+    buffers serve its later calls; once its storage is freed in place and the
+    tensor rebound to a new zero-filled workspace (the allocator may give it
+    the old address), the next call checks it and makes new buffers, gives the
+    bits of a call on a fresh workspace and leaves the new storage zero.
+    Rebound to a buffer one element short, it is refused and keeps no entry;
+    an entry goes with its tensor."""
+    x, z, w, dy = make(1031, 48, seed=31)
+    want = backward(dy, x, z, w, EPS, workspace=workspace_for(1, x.device))
+    ws = workspace_for(1, x.device)
+    for i in range(2):
+        got = backward(dy, x, z, w, EPS, workspace=ws)
+        for a, b, name in zip(got, want, ("dx", "dz", "dw"), strict=True):
+            assert_same_bits(a, b, f"call {i}: {name}")
+    held = pkg._CALLER_WORKSPACES[id(ws)]
+    assert held[0]() is ws and held[4].data_ptr() == ws.data_ptr()
+    backward(dy, x, z, w, EPS, workspace=ws)
+    assert pkg._CALLER_WORKSPACES[id(ws)] is held
+    torch.cuda.synchronize()
+    ws.untyped_storage().resize_(0)
+    ws.set_(workspace_for(1, x.device))
+    got = backward(dy, x, z, w, EPS, workspace=ws)
+    torch.cuda.synchronize()
+    again = pkg._CALLER_WORKSPACES[id(ws)]
+    assert again is not held and again[4].data_ptr() == ws.data_ptr()
+    for a, b, name in zip(got, want, ("dx", "dz", "dw"), strict=True):
+        assert_same_bits(a, b, f"rebound: {name}")
+    assert_zero(ws, "the rebound workspace")
+    del held, again
+    elements = ws.numel()
+    ws.set_(torch.ones(elements - 1, dtype=torch.float32, device=x.device))
+    with pytest.raises(ValueError) as info:
+        backward(dy, x, z, w, EPS, workspace=ws)
+    assert str(info.value) == unfit(x.device, elements), str(info.value)
+    del info  # its traceback holds this frame: no cycle keeping the tensors
+    assert id(ws) not in pkg._CALLER_WORKSPACES
+    assert bool(ws.eq(1).all())
+    ws = workspace_for(1, x.device)
+    backward(dy, x, z, w, EPS, workspace=ws)
+    key = id(ws)
+    assert pkg._CALLER_WORKSPACES[key][0]() is ws
+    del ws
+    gc.collect()
+    assert key not in pkg._CALLER_WORKSPACES
 
 def test_calls_without_workspace_share_one_buffer_per_stream():
     """Calls without a caller workspace (both weight-gradient dtypes) share the

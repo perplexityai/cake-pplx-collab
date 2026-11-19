@@ -62,11 +62,11 @@ JIT variables):
   input or another output (not checked).
 - Launches.  One kernel per call.  Each stage has two programs
   (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
-  when ``R`` is at least its record's ``min_rows_per_sm`` of the device's
-  architecture times the device's SM count (``cake_jit.route``; the
-  architecture is read once per device and the SM count once per stage and
-  device, and an architecture without a large-R program runs the small-R one
-  at every ``R``).  Both programs of a stage give the same bits for every
+  when ``R`` lies in one of its record's windows of rows per SM on the
+  device's architecture, ``lo * SMs <= R <= hi * SMs`` for a window
+  ``[lo, hi]`` (``cake_jit.route``; the architecture is read once per device
+  and the SM count once per stage and device, and an architecture without a
+  large-R program runs the small-R one at every ``R``).  Both programs of a stage give the same bits for every
   input, so the route changes no output bit.  CTAs of ``threads / lanes``
   rows (32 lanes a row; 128 threads and 4 rows, but 256 threads and 8 rows in
   the large-R forward on SM100 and SM103), one CTA per block of rows on the
@@ -270,26 +270,34 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[int, _Plan, _Plan]:
-    """``(cut_rows, small, large)`` of ``stage`` on device ``device_index``, made once per stage and device from the
-    device's architecture and SM count (``cake_jit.route``): a launch of fewer than ``cut_rows`` rows runs the plan
-    ``small``, any other the plan ``large``.  No library is loaded here: a program's library loads at its first
-    launch."""
+def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Plan]:
+    """``(limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per stage and device
+    from the device's architecture and SM count (``cake_jit.route``).  A launch of ``rows < limit`` rows runs the plan
+    ``large`` when ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it
+    is 0; a launch of more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.
+    ``limit`` is one above the last edge of ``cake_jit.route`` (0 without a window).  The launch looks up one byte
+    instead of searching the edges: on Grace, a search per launch measured 1-3 % more host time per call.  No library
+    is loaded here: a program's library loads at its first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
-    cut_rows, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
-    return cut_rows, (small, *_plan(small)), (large, *_plan(large))
+    edges, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
+    limit = edges[-1] + 1 if edges else 0
+    table = bytearray(limit)
+    for below, last in zip(edges[0::2], edges[1::2]):
+        table[below + 1 : last + 1] = bytes([1]) * (last - below)
+    small, large = (small, *_plan(small)), (large, *_plan(large))
+    return limit, bytes(table), small, large, large if len(edges) % 2 else small
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the small-R program below the cut, the
-    large-R one from it) with its kernel parameters named in ``values``, on the current torch stream of device
-    ``device_index``.
+    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
+    small-R one at every other row count) with its kernel parameters named in ``values``, on the current torch stream
+    of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs."""
-    cut_rows, small, large = _route(stage, device_index)
-    name, arguments, per_cta = small if rows < cut_rows else large
+    limit, table, small, large, tail = _route(stage, device_index)
+    name, arguments, per_cta = (large if table[rows] else small) if rows < limit else tail
     try:
         args = arguments(values)
     except KeyError:

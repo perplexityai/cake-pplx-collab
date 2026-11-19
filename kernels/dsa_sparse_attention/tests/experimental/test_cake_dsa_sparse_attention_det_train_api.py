@@ -24,6 +24,7 @@ is 0), with the packed forward's global rows and lengths compared exactly and th
 """
 
 import importlib
+import inspect
 import subprocess
 import sys
 from pathlib import Path
@@ -124,6 +125,43 @@ def test_readme_states_every_output():
         assert name in text, name
     assert "repeats bit for bit" in text
     assert "use_deterministic_algorithms(True)" in text
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "cake_dsa_sparse_attention_det_nope",
+        "cake_dsa_sparse_attention_det_nope_varlen",
+        "cake_dsa_sparse_attention_det_train_nope_forward",
+        "cake_dsa_sparse_attention_det_train_nope_backward",
+        "cake_dsa_sparse_attention_det_train_nope_varlen_forward",
+        "cake_dsa_sparse_attention_det_train_nope_varlen_backward",
+    ],
+)
+def test_nope_entries_refuse_a_sink(name, monkeypatch):
+    """The NoPE entries take the ``sink`` keyword of the non-deterministic entries with ``None`` only: this package
+    has no sink build, so a sink raises ``NotImplementedError`` before any argument is read or the backend is
+    reached."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a call with a sink must not reach the backend")
+
+    monkeypatch.setattr(public_api, "_backend", refuse)
+    entry = getattr(public_api, name)
+    parameters = inspect.signature(entry).parameters.values()
+    positional = [
+        p for p in parameters if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+    ]
+    # the required keyword-only arguments (the packed backward's ``topk_length``) stand as ``None`` as well
+    required = {
+        p.name: None
+        for p in parameters
+        if p.kind is inspect.Parameter.KEYWORD_ONLY
+        and p.default is inspect.Parameter.empty
+    }
+    with pytest.raises(NotImplementedError, match="sink"):
+        entry(*([None] * len(positional)), **required, sink=torch.zeros(64))
+    assert inspect.signature(entry).parameters["sink"].default is None
 
 
 # ---------------------------------------------------------------------------
