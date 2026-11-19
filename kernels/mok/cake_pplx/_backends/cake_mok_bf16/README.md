@@ -89,13 +89,19 @@ grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *w
 
 # Router weight before the down projection: 384 experts at EP64 (6 local
 # experts), top-6, on a workspace of its own at the worst-case schedule
-# capacity (n source rows per rank; see Contract). ids: int64 [n, 6] expert
-# IDs; router_w: FP32 [n, 6] router weights; weights: BF16, 6 routed experts.
+# capacity (see Contract). n: this rank's source rows; ids: int64 [n, 6]
+# expert IDs; router_w: FP32 [n, 6] router weights; weights: BF16, 6 routed
+# experts. Every rank must pass the same configuration, so the multiplier
+# comes from max_rows, a bound on every rank's n that all ranks agree on (for
+# example the training configuration's tokens per rank), reserved as
+# source_capacity.
 ep, local, k = 64, 6, 6
-m = math.ceil((min(k, local) * n * ep + local * 255) / (n * k)) / ep
+worst = min(k, local) * max_rows * ep + local * 255  # routed rows, padded
+m = math.ceil(worst / (max_rows * k)) / ep
 config, workspace = create_mok_bf16_workspace(
     group=group, device=device, num_local_tokens=n, hidden_size=5120, topk=k,
-    minibatch_size=4096, macrobatch_size=262144, schedule_capacity_multiplier=m,
+    source_capacity=max_rows, minibatch_size=4096, macrobatch_size=262144,
+    schedule_capacity_multiplier=m,
 )
 backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, clamped_swiglu=True,
                            fp32_wgrad=True, router_weight_position="before_down")
@@ -348,10 +354,12 @@ across communication-SM splits and under CUDA Graph replay.
   settings; 256 routed experts at EP 4/8/16/32/64 (`(4, 64)`, `(8, 32)`,
   `(16, 16)`, `(32, 8)`, `(64, 4)`); 288 routed experts at EP8
   and EP32 (`(8, 36)`, `(32, 9)`). Top-k is 2 or 8.
-- Router-weight positions (`router_weight_position`; any other combination
-  raises `ValueError`, a non-string position and, with `"before_down"`, a
-  top-k that is not an `int` `TypeError`, before any kernel is loaded or
-  launched):
+- Router-weight positions (`router_weight_position`): the table below. A
+  combination outside it raises before any kernel is loaded or launched:
+  `TypeError` for a position that is not a `str`, an `ep_size`,
+  `local_experts` or `topk` that is not an `int` (a `bool` included) and a
+  `clamped_swiglu` or `fp32_wgrad` that is not a `bool`, in both positions;
+  `ValueError` for every other value.
 
   | Position | Layouts (EP, local experts) | Top-k | SwiGLU | Weight gradients | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- |
@@ -470,11 +478,16 @@ across communication-SM splits and under CUDA Graph replay.
   spread at most 1.2 %); Rubin BF16 had no consistent gain at EP8.
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
-  The capacity is `num_local_tokens * topk * max(2, ceil(EP * m))` rows for
-  `schedule_capacity_multiplier` `m`; every routing fits when
+  The capacity is `T * topk * max(2, ceil(EP * m))` rows for
+  `schedule_capacity_multiplier` `m` and the workspace's physical source rows
+  `T` (the largest rank's source rows, or `source_capacity`, rounded up to the
+  256-row tile, at least 512); every routing fits when
   `m >= ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local
-  experts, `T` source rows per rank), about `(EP + 1) / EP`. No upper bound is
-  enforced. The 384-expert layouts at this bound (`(64, 6)` and `(8, 48)` at
+  experts), about `(EP + 1) / EP`. The bound decreases as `T` grows, so a
+  multiplier computed from any `T` up to the physical rows also holds; every
+  rank must pass the same `m` (the ranks' configurations are compared at
+  workspace creation), so compute it from a row bound all ranks agree on, such
+  as `source_capacity`. No upper bound is enforced. The 384-expert layouts at this bound (`(64, 6)` and `(8, 48)` at
   16,384 rows, macrobatch 262,144, minibatch 4,096, every route on one rank)
   run on one GPU with emulated peers: finite outputs, the same bytes run to
   run, routed x ring rows past 2^31 bytes checked exactly, `y`, `dx` and the

@@ -76,18 +76,30 @@ def check_configuration(
 ):
     """Refuse a configuration the package has no kernels for, before any device work.
 
-    ``"after_down"`` keeps the weighted layouts: top-k 2 or 8 on the layouts of
-    :data:`SCHEDULER_LAYOUTS` other than the 384-expert ones (the caller's check
-    names any other combination). ``"before_down"`` runs the layouts of
-    :data:`BEFORE_DOWN_LAYOUTS` at their top-k (an ``int``), with clamped
-    SwiGLU and FP32 weight-gradient accumulation. A non-string position, and
-    with ``"before_down"`` a top-k that is not an ``int``, raise ``TypeError``;
-    every other refusal raises ``ValueError``."""
+    The types come first, the same in both positions: a position that is not a
+    ``str``, an EP size, local expert count or top-k that is not an ``int`` (a
+    ``bool`` included) and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
+    ``bool`` raise ``TypeError``. Every other refusal raises ``ValueError``. ``"after_down"`` keeps the weighted layouts: top-k 2 or 8
+    on the layouts of :data:`SCHEDULER_LAYOUTS` other than the 384-expert ones
+    (the caller's check names any other combination). ``"before_down"`` runs
+    the layouts of :data:`BEFORE_DOWN_LAYOUTS` at their top-k, with clamped
+    SwiGLU and FP32 weight-gradient accumulation."""
     if not isinstance(router_weight_position, str):
         raise TypeError(
             f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
             f"got {router_weight_position!r}"
         )
+    for name, value in (
+        ("ep_size", ep),
+        ("local_experts", local_experts),
+        ("topk", topk),
+    ):
+        if type(value) is not int:
+            raise TypeError(
+                f"{name} must be an int, got {type(value).__name__} {value!r}"
+            )
+    if type(clamped_swiglu) is not bool or type(fp32_wgrad) is not bool:
+        raise TypeError("clamped_swiglu and fp32_wgrad must be booleans")
     if router_weight_position not in ROUTER_WEIGHT_POSITIONS:
         raise ValueError(
             f"router_weight_position must be one of {ROUTER_WEIGHT_POSITIONS}, "
@@ -108,11 +120,6 @@ def check_configuration(
                 "router_weight_position='before_down' and topk=6"
             )
         return
-    if type(topk) is not int:
-        raise TypeError(
-            "router_weight_position='before_down' takes topk as an int, got "
-            f"{type(topk).__name__} {topk!r}"
-        )
     if BEFORE_DOWN_LAYOUTS.get(layout) != topk:
         supported = ", ".join(
             str((*key, value)) for key, value in BEFORE_DOWN_LAYOUTS.items()

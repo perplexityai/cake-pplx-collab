@@ -238,10 +238,11 @@ class MoKFunctional:
         gradient of ``h``; a zero weight is allowed and has its gradient); it
         needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
         ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
-        device. Every unsupported combination raises ``ValueError`` here
-        (``TypeError`` for a non-string position and, with ``"before_down"``,
-        a top-k that is not an ``int``), before any kernel is loaded or
-        launched.
+        device. Every unsupported combination raises here, before any kernel
+        is loaded or launched: ``TypeError`` for a position that is not a
+        ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
+        ``int`` and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
+        ``bool`` (in both positions), ``ValueError`` for every other value.
         """
         check_configuration(
             ep,
@@ -253,8 +254,6 @@ class MoKFunctional:
         )
         if (ep, local_experts) not in SCHEDULER_LAYOUTS or topk not in EPILOGUE_TOPKS:
             raise ValueError("Unsupported exported (EP, local experts, top-k) layout")
-        if type(clamped_swiglu) is not bool or type(fp32_wgrad) is not bool:
-            raise TypeError("clamped_swiglu and fp32_wgrad must be booleans")
         self.ep, self.local_experts, self.topk = ep, local_experts, topk
         self.router_weight_position = router_weight_position
         self.weight_before_down = router_weight_position == "before_down"

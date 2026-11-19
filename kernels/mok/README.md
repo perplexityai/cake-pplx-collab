@@ -43,7 +43,7 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
 | EP sizes | 1, 4, 8, 16, 32, 64 (EP1 uses plain tensors) |
 | Scheduler layouts `(EP, local experts)` | `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2 |
-| Schedule capacity | `schedule_capacity_multiplier` at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` holds every routing (`E` local experts, `T` source rows per rank); no upper bound |
+| Schedule capacity | `schedule_capacity_multiplier` at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` holds every routing (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`); the same multiplier on every rank, computed from a row bound all ranks agree on (the bound decreases as `T` grows); no upper bound |
 
 ## Builds
 

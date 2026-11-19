@@ -118,14 +118,25 @@ def test_argument_errors_of_the_package_surface_unchanged():
         ("after_down", 3, 4, 2, False, False, ValueError, "Unsupported"),
         ("before_down", 8, 32, 8, True, True, ValueError, r"supports \(EP, local experts, top-k\)"),
         ("before_down", 64, 6, 2, True, True, ValueError, r"got \(64, 6, 2\)"),
-        ("before_down", 64, 6, 6.0, True, True, TypeError, "takes topk as an int, got float 6.0"),
+        ("before_down", 64, 6, 6.0, True, True, TypeError, "topk must be an int, got float 6.0"),
         ("before_down", 64, 6, 6, False, True, ValueError, "clamped SwiGLU only"),
         ("before_down", 8, 48, 6, True, False, ValueError, "weight gradients in FP32 only"),
+        ("after_down", 16, 16, 8.0, False, False, TypeError, "topk must be an int, got float 8.0"),
+        ("after_down", 4, 4, 2.0, False, False, TypeError, "topk must be an int, got float 2.0"),
+        ("after_down", 64.0, 4, 8, False, False, TypeError, "ep_size must be an int, got float 64.0"),
+        ("after_down", 64, 4.0, 8, False, False, TypeError, "local_experts must be an int, got float 4.0"),
+        ("after_down", True, 4, 2, False, False, TypeError, "ep_size must be an int, got bool True"),
+        ("after_down", 16, 16, 8, 1, False, TypeError, "clamped_swiglu and fp32_wgrad must be booleans"),
+        ("before_down", 64.0, 6, 6, True, True, TypeError, "ep_size must be an int, got float 64.0"),
+        ("before_down", 64, 6.0, 6, True, True, TypeError, "local_experts must be an int, got float 6.0"),
+        ("before_down", 64, 6, 6, True, 1, TypeError, "clamped_swiglu and fp32_wgrad must be booleans"),
     ],
     ids=[
         "unknown-position", "position-type", "top6-after-down", "top6-other-layout", "layout-64-6-top8",
         "layout-8-48-top2", "unsupported-layout", "before-down-layout", "before-down-topk", "before-down-topk-type",
-        "before-down-plain", "before-down-bf16-wgrad",
+        "before-down-plain", "before-down-bf16-wgrad", "after-down-topk-type", "after-down-top2-type",
+        "after-down-ep-type", "after-down-experts-type", "after-down-ep-bool", "after-down-flag-type",
+        "before-down-ep-type", "before-down-experts-type", "before-down-flag-type",
     ],
 )
 def test_prepare_refuses_unsupported_router_weight_combinations(
@@ -133,8 +144,9 @@ def test_prepare_refuses_unsupported_router_weight_combinations(
 ):
     """``prepare_mok_bf16`` refuses every unsupported (router-weight position, EP, local experts, top-k, SwiGLU form,
     weight-gradient accumulation) combination with a message naming it, before any device work (no GPU needed): top-k
-    6 with ``"after_down"`` names the 384-expert layouts it runs on, and ``"before_down"`` refuses a top-k that is not
-    an ``int`` by its type."""
+    6 with ``"after_down"`` names the 384-expert layouts it runs on.  The types are checked first, the same in both
+    positions: an EP size, local expert count or top-k that is not an ``int`` (a float equal to a supported value, or a
+    ``bool``) and a SwiGLU or weight-gradient flag that is not a ``bool`` raise ``TypeError``."""
     with pytest.raises(error, match=match):
         mok.prepare_mok_bf16(
             ep_size=ep,

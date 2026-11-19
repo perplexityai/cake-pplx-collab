@@ -225,9 +225,11 @@ def prepare_mok_bf16(
     4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
     (``"after_down"``), and 384 routed experts at EP 4/8/16/32/64 ((4, 96),
     (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``).
-    Any other combination raises ``ValueError`` (``TypeError`` for a
-    non-string position and, with ``"before_down"``, a top-k that is not an
-    ``int``) before any kernel is loaded or launched.
+    Any other combination raises before any kernel is loaded or launched:
+    ``TypeError`` for a position that is not a ``str``, an ``ep_size``,
+    ``local_experts`` or ``topk`` that is not an ``int`` (a ``bool``
+    included) and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
+    ``bool``, in both positions; ``ValueError`` for every other value.
     Tokens, hidden/intermediate widths and per-rank source counts
     remain runtime values subject to the documented alignment constraints.
     This is a synthetic training experiment, with no full-model or optimizer
@@ -274,9 +276,12 @@ def create_mok_bf16_workspace(
     Call outside CUDA Graph capture; retain the workspace for every replay.
     A routed-row overflow traps the kernel: a ``schedule_capacity_multiplier``
     of at least ``ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP``
-    (``E`` local experts, ``T`` the physical source rows, ``EP`` the group
+    (``E`` local experts, ``T`` the physical source rows, at least the
+    largest rank's source rows or ``source_capacity``, ``EP`` the group
     size; about ``(EP + 1) / EP``) holds every routing; any positive
-    multiplier is accepted.
+    multiplier is accepted. Every rank passes the same configuration, so
+    compute the multiplier from a row bound all ranks agree on, such as
+    ``source_capacity`` (the bound decreases as ``T`` grows).
 
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)
