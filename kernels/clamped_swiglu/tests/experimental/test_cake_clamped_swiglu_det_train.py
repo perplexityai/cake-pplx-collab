@@ -18,11 +18,12 @@ Backend suite of the Cake deterministic routed-expert clamped SwiGLU training pa
 ``h = bf16(w silu(min(g, L)) clamp(u, -L, L))``, its gradients ``d_gate`` and ``d_up`` with the inclusive clamp masks,
 and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2304, on SM100, SM103 and SM107.
 
-Without a device: the registry (per stage a small-R program on every architecture and a large-R program with its rows
-per SM on some, each record delivered for its architectures and for no other, the launch facts, the argument plans), the
-route of a launch by its rows per SM (1 row, one row below, at and above the cut and the most rows, on the SM counts of
-the delivered GPUs; the small-R program at every row count on an architecture without a large-R one; the SM count read
-once per stage and device, no library loaded), the launch grid of each program and the arguments of a launch in its
+Without a device: the registry (per stage a small-R program on every architecture and a large-R program with its windows
+of rows per SM on some, each record delivered for its architectures and for no other, the launch facts, the argument
+plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the windows and the
+most rows, on the SM counts of the delivered GPUs; windows that are not ascending, untouching lists of integers refused;
+the small-R program at every row count on an architecture without a large-R one; the SM count read once per stage and
+device, no library loaded), the launch grid of each program and the arguments of a launch in its
 plan's order, the build manifest (every record's library, the recorded source digests), the capability map, the required
 ``limit`` keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
 
@@ -39,10 +40,10 @@ exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other
 by a warp's run of loads with a clamped gate at or below -87) gives the bits of its fast path wherever the clamped gate
 is above -87, in each program; ``d_weight`` sums the FP32 ``a``, and ``h`` is the FP32 product ``w a`` rounded once to
 BF16; ``R = 0`` returns empty outputs and launches nothing; one library per program serves every row count, limit,
-weight flag and layout; the small-R and the large-R programs of a stage give the same bits one row below, at and one row
-above the device's cut, where the route runs the small-R program below the cut and the large-R one from it; the same
-bits at every call, in every layout, at every row count (a row's outputs do not depend on the other rows), on a side
-stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs and under
+weight flag and layout; the small-R and the large-R programs of a stage give the same bits at and one row above each
+edge of the device's windows, where the route runs the large-R program inside the windows and the small-R one outside;
+the same bits at every call, in every layout, at every row count (a row's outputs do not depend on the other rows), on a
+side stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs and under
 ``torch.use_deterministic_algorithms``; the autograd function matches the steps bit for bit, saves only its inputs and
 gives the same bits under non-reentrant checkpointing, and gradients computed with ``create_graph=True`` have the steps'
 bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit outputs,
@@ -106,11 +107,16 @@ LARGE = "_large"
 ROLES = ("fwd", "fwd_large", "bwd", "bwd_large")
 # The SM counts of the delivered GPUs the routes are checked on.
 SM_COUNTS = (148, 152, 212)
-# The rows per SM from which each stage's large-R program runs (the measured cuts), and the lane layout every program
-# keeps: literal copies, so a record that drifts from them fails here, and the route tests expect these cuts.
-MIN_ROWS_PER_SM = {
-    "fwd_large": {"sm_100a": 96, "sm_103a": 192, "sm_107a": 384},
-    "bwd_large": {"sm_100a": 12, "sm_103a": 12, "sm_107a": 12},
+# The windows of rows per SM in which each stage's large-R program runs (the measured routes; ``None``: no upper
+# bound), and the lane layout every program keeps: literal copies, so a record that drifts from them fails here, and
+# the route tests expect these windows.
+WINDOWS = {
+    "fwd_large": {"sm_100a": [[112, None]], "sm_103a": [[208, None]], "sm_107a": [[384, None]]},
+    "bwd_large": {
+        "sm_100a": [[12, 21], [32, 41], [48, None]],
+        "sm_103a": [[12, 21], [32, 41], [48, None]],
+        "sm_107a": [[12, 21], [35, 41], [48, None]],
+    },
 }
 LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
 # The program a forced launch runs: the small-R or the large-R program of its stage (:func:`_force`).
@@ -242,35 +248,63 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
 
 def _force(patch: pytest.MonkeyPatch, program: str) -> None:
     """Every launch runs the ``program`` (``"small"`` or ``"large"``) of its stage on its device, whatever its row
-    count: the route's cut moves past every row count or to 0.  An architecture without a large-R program of a stage
-    runs the small-R one either way."""
+    count: the route's limit becomes 0, so every launch runs its tail, the small-R or the large-R plan.  An
+    architecture without a large-R program of a stage runs the small-R one either way."""
     route = pkg._route
-    cut = cake_jit.MAX_ROWS if program == "small" else 0
-    patch.setattr(pkg, "_route", lambda stage, device_index: (cut, *route(stage, device_index)[1:]))
+
+    def forced(stage: str, device_index: int) -> tuple:
+        _, _, small, large, _ = route(stage, device_index)
+        return 0, b"", small, large, large if program == "large" else small
+
+    patch.setattr(pkg, "_route", forced)
+
+
+def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bool:
+    """Whether ``rows`` lies in one of ``windows`` of rows per SM: ``lo * sm_count <= rows <= hi * sm_count``."""
+    return any(lo * sm_count <= rows and (hi is None or rows <= hi * sm_count) for lo, hi in windows)
 
 
 def _routed(stage: str, rows: int, device_index: int) -> str:
     """The program a launch of ``stage`` for ``rows`` rows runs on device ``device_index``."""
-    cut, small, large = pkg._route(stage, device_index)
-    return (small if rows < cut else large)[0]
+    limit, table, small, large, tail = pkg._route(stage, device_index)
+    return ((large if table[rows] else small) if rows < limit else tail)[0]
 
 
-def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[int, str, str]:
-    """``(cut_rows, small, large)`` of ``stage`` on ``arch`` with ``sm_count`` SMs: the record of the stage's role,
-    and the one of its large-R role from ``MIN_ROWS_PER_SM`` of that role and ``arch`` times ``sm_count`` rows (none:
-    ``MAX_ROWS`` and the small-R record)."""
+def _program(stage: str, device_index: int, program: str) -> str:
+    """The ``program`` (``"small"`` or ``"large"``) of ``stage`` on device ``device_index``."""
+    _, _, small, large, _ = pkg._route(stage, device_index)
+    return (small if program == "small" else large)[0]
+
+
+def _device_edges(stage: str, device_index: int) -> tuple[int, ...]:
+    """The edges of the windows of ``stage`` on device ``device_index`` (:func:`cake_jit.route`)."""
+    sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
+    return cake_jit.route(stage, pkg.device_arch(device_index), sm_count)[0]
+
+
+def _expected_route(stage: str, arch: str, sm_count: int) -> tuple[list[list[int | None]], str, str]:
+    """``(windows, small, large)`` of ``stage`` on ``arch``: the windows of rows per SM of its large-R role on ``arch``
+    (``WINDOWS``), the record of the stage's role and the one of its large-R role (none: no window and the small-R
+    record)."""
     on_arch = {name: record["role"] for name, record in cake_jit.MODULES.items() if arch in record["arches"]}
     small = [name for name, role in on_arch.items() if role == stage]
     large = [name for name, role in on_arch.items() if role == stage + LARGE]
     assert len(small) == 1 and len(large) <= 1, (stage, arch, small, large)
     if not large:
-        return cake_jit.MAX_ROWS, small[0], small[0]
-    return MIN_ROWS_PER_SM[stage + LARGE][arch] * sm_count, small[0], large[0]
+        return [], small[0], small[0]
+    return WINDOWS[stage + LARGE][arch], small[0], large[0]
 
 
-def _edge_rows(cut: int) -> list[int]:
-    """1 row, one row below, at and above ``cut``, and the most rows a launch takes: those that are launches."""
-    return sorted({rows for rows in (1, cut - 1, cut, cut + 1, cake_jit.MAX_ROWS - 1) if 1 <= rows < cake_jit.MAX_ROWS})
+def _edges(windows: list[list[int | None]], sm_count: int) -> list[int]:
+    """The last row count of each run of one program on ``sm_count`` SMs, ascending: ``lo * sm_count - 1`` and
+    ``hi * sm_count`` of each window (an open window's ``lo * sm_count - 1`` alone)."""
+    return [bound * sm_count - (k == 0) for window in windows for k, bound in enumerate(window) if bound is not None]
+
+
+def _edge_rows(edges: list[int]) -> list[int]:
+    """1 row, one row below, at and above each edge, and the most rows a launch takes: those that are launches."""
+    near = {edge + step for edge in edges for step in (-1, 0, 1)}
+    return sorted({rows for rows in {1, cake_jit.MAX_ROWS - 1} | near if 1 <= rows < cake_jit.MAX_ROWS})
 
 
 def assert_same_bits(got: torch.Tensor, want: torch.Tensor, what: str) -> None:
@@ -393,11 +427,17 @@ def test_registry_records_are_well_formed() -> None:
             assert arch not in programs[role], (name, role, arch)
             programs[role][arch] = name
         if role.endswith(LARGE):
-            cuts = record["min_rows_per_sm"]
-            assert set(cuts) == set(arches), name
-            assert all(type(rows) is int and rows >= 1 for rows in cuts.values()), name
+            windows = record["rows_per_sm_windows"]
+            assert set(windows) == set(arches), name
+            for arch, row in windows.items():
+                bounds = [bound for window in row for bound in window]
+                assert row and all(type(window) is list and len(window) == 2 for window in row), (name, arch)
+                assert all(type(bound) is int for bound in bounds[:-1]), (name, arch)
+                assert bounds[-1] is None or type(bounds[-1]) is int, (name, arch)
+                bounds = [bound for bound in bounds if bound is not None]
+                assert bounds[0] >= 1 and bounds == sorted(set(bounds)), (name, arch)
         else:
-            assert "min_rows_per_sm" not in record, name
+            assert "rows_per_sm_windows" not in record, name
     for stage in STAGES:
         assert set(programs[stage]) == set(ARCHES), stage
     assert cake_jit.PROGRAM_OF == programs
@@ -422,14 +462,14 @@ def test_registry_records_are_well_formed() -> None:
     assert cake_jit.VECTOR_ELEMENTS == widest // 16 and cake_jit.ALIGNMENT_BYTES == widest // 8
 
 
-def test_the_cuts_and_the_lane_layout_are_the_measured_ones() -> None:
-    cuts: dict = {role: {} for role in MIN_ROWS_PER_SM}
+def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
+    windows: dict = {role: {} for role in WINDOWS}
     for name, record in cake_jit.MODULES.items():
-        if record["role"] in cuts:
-            for arch, rows in record["min_rows_per_sm"].items():
-                assert arch not in cuts[record["role"]], (name, arch)
-                cuts[record["role"]][arch] = rows
-    assert cuts == MIN_ROWS_PER_SM
+        if record["role"] in windows:
+            for arch, row in record["rows_per_sm_windows"].items():
+                assert arch not in windows[record["role"]], (name, arch)
+                windows[record["role"]][arch] = row
+    assert windows == WINDOWS
     layouts = {stage: dict(build) for stage, build in cake_jit.BUILD_OF.items()}
     assert layouts == {stage: LANE_LAYOUT for stage in STAGES}
 
@@ -466,10 +506,10 @@ def test_launches_pass_the_argument_plan_and_the_grid(host_device) -> None:
     host_device.place("sm_100a", 148)
     calls = host_device.calls
     for stage in STAGES:
-        cut, small, large = cake_jit.route(stage, "sm_100a", 148)
+        windows, small, large = _expected_route(stage, "sm_100a", 148)
         values = {key: f"<{key}>" for key in PARAMETERS[stage]}
-        for rows in (1, 2, 3, 4, 5, 7, 8, 9, 129, 4097, cake_jit.MAX_ROWS - 1):
-            name = small if rows < cut else large
+        for rows in (1, 2, 3, 4, 5, 7, 8, 9, 129, 1777, 4097, cake_jit.MAX_ROWS - 1):
+            name = large if _in_windows(windows, 148, rows) else small
             calls.clear()
             pkg.run_module(stage, values, rows=rows, device_index=0)
             want = (*(values[key] for key in PARAMETERS[stage]), *cake_jit.grid(name, rows))
@@ -487,41 +527,77 @@ def test_launches_pass_the_argument_plan_and_the_grid(host_device) -> None:
 @pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_rows_route_to_the_small_or_the_large_program(stage, arch, sm_count, host_device) -> None:
-    """A launch of fewer rows than the cut (the large-R record's ``min_rows_per_sm`` of the architecture times the SM
-    count) runs the stage's small-R program, any other its large-R program, on that program's grid: 1 row, one row
-    below, at and above the cut, and ``MAX_ROWS - 1`` rows."""
-    cut, small, large = _expected_route(stage, arch, sm_count)
-    assert cake_jit.route(stage, arch, sm_count) == (cut, small, large)
+    """A launch whose rows lie in a window of the large-R record (``lo * SMs <= rows <= hi * SMs`` for a window
+    ``[lo, hi]`` of its ``rows_per_sm_windows`` on the architecture) runs the stage's large-R program, any other its
+    small-R program, on that program's grid: 1 row, one row below, at and above each edge of the windows, and
+    ``MAX_ROWS - 1`` rows.  The package's route holds a byte per row count below one above the last edge, 1 exactly
+    in a window, and runs the large-R program above it when the last window has no upper bound."""
+    windows, small, large = _expected_route(stage, arch, sm_count)
+    edges = _edges(windows, sm_count)
+    assert cake_jit.route(stage, arch, sm_count) == (tuple(edges), small, large)
     host_device.place(arch, sm_count)
-    got = pkg._route(stage, 0)
-    assert (got[0], got[1][0], got[2][0]) == (cut, small, large)
+    limit, table, got_small, got_large, tail = pkg._route(stage, 0)
+    assert (got_small[0], got_large[0]) == (small, large)
+    assert limit == (edges[-1] + 1 if edges else 0)
+    assert table == bytes(_in_windows(windows, sm_count, rows) for rows in range(limit))
+    assert tail[0] == (large if windows and windows[-1][1] is None else small)
     values = {key: f"<{key}>" for key in PARAMETERS[stage]}
-    for rows in _edge_rows(cut):
-        name = small if rows < cut else large
+    ran = set()
+    for rows in _edge_rows(edges):
+        name = large if _in_windows(windows, sm_count, rows) else small
+        ran.add(name)
         host_device.calls.clear()
         pkg.run_module(stage, values, rows=rows, device_index=0)
         want = (*(values[key] for key in PARAMETERS[stage]), *cake_jit.grid(name, rows))
-        assert host_device.calls == [(name, arch, want)], (rows, cut)
+        assert host_device.calls == [(name, arch, want)], (rows, windows)
+    assert ran == {small, large}
 
 
 @pytest.mark.parametrize("arch", ARCHES)
 @pytest.mark.parametrize("stage", STAGES)
 def test_an_architecture_without_a_large_program_runs_the_small_one(stage, arch, host_device, monkeypatch) -> None:
     """With no large-R program of the stage on the architecture (the registry's table without it), every row count
-    runs the small-R program: the cut is ``MAX_ROWS``."""
+    runs the small-R program: the route has no edge."""
     sm_count = SM_COUNTS[-1]
-    cut, small, _ = _expected_route(stage, arch, sm_count)
+    windows, small, _ = _expected_route(stage, arch, sm_count)
     table = {role: dict(programs) for role, programs in cake_jit.PROGRAM_OF.items()}
     table[stage + LARGE].pop(arch, None)
     monkeypatch.setattr(cake_jit, "PROGRAM_OF", table)
-    assert cake_jit.route(stage, arch, sm_count) == (cake_jit.MAX_ROWS, small, small)
+    assert cake_jit.route(stage, arch, sm_count) == ((), small, small)
     host_device.place(arch, sm_count)
     values = {key: f"<{key}>" for key in PARAMETERS[stage]}
-    for rows in _edge_rows(cut):
+    for rows in _edge_rows(_edges(windows, sm_count)):
         host_device.calls.clear()
         pkg.run_module(stage, values, rows=rows, device_index=0)
         want = (*(values[key] for key in PARAMETERS[stage]), *cake_jit.grid(small, rows))
         assert host_device.calls == [(small, arch, want)], rows
+
+
+@pytest.mark.parametrize(
+    ("row", "message"),
+    [
+        ([], "are not \\[lo, hi\\] lists of integers"),
+        ([[12]], "are not \\[lo, hi\\] lists of integers"),
+        ([[12, 20, 30]], "are not \\[lo, hi\\] lists of integers"),
+        ([[None, 20]], "are not \\[lo, hi\\] lists of integers"),
+        ([[12, None], [36, 40]], "are not \\[lo, hi\\] lists of integers"),
+        ([[12.0, 20]], "are not \\[lo, hi\\] lists of integers"),
+        ([[True, 20]], "are not \\[lo, hi\\] lists of integers"),
+        ([[-1, 20]], "are not \\[lo, hi\\] lists of integers"),
+        ([[12, 12]], "do not ascend without touching"),
+        ([[20, 12]], "do not ascend without touching"),
+        ([[12, 20], [20, 40]], "do not ascend without touching"),
+        ([[36, 40], [12, 20]], "do not ascend without touching"),
+    ],
+)
+def test_the_route_refuses_windows_that_are_no_route(row, message, monkeypatch) -> None:
+    """A large-R record's windows on an architecture must be ascending ``[lo, hi]`` lists of integers that do not
+    touch, ``0 <= lo``, only the last ``hi`` None: any other row is a ``RuntimeError`` naming the record."""
+    large = cake_jit.PROGRAM_OF["bwd_large"]["sm_100a"]
+    record = {**cake_jit.MODULES[large], "rows_per_sm_windows": {"sm_100a": row}}
+    monkeypatch.setitem(cake_jit.MODULES, large, record)
+    with pytest.raises(RuntimeError, match=f"{large}: rows_per_sm_windows\\['sm_100a'\\] .* {message}"):
+        cake_jit.route("bwd", "sm_100a", 148)
 
 
 def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monkeypatch) -> None:
@@ -861,12 +937,12 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
 
 
 def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
-    """Row counts 1 to 4097 and the device's cut of each stage, both layouts, a strided layout, weighted and unweighted
-    calls and three limits load one library per program they run, once: no recompilation (``rows``, ``limit``, the
-    weight flag and the strides are launch arguments)."""
-    cuts = sorted({pkg._route(stage, device.index)[0] for stage in STAGES} - {cake_jit.MAX_ROWS})
+    """Row counts 1 to 4097 and each edge of the device's windows of each stage and one row past it, both layouts, a
+    strided layout, weighted and unweighted calls and three limits load one library per program they run, once: no
+    recompilation (``rows``, ``limit``, the weight flag and the strides are launch arguments)."""
+    edges = sorted({edge for stage in STAGES for edge in _device_edges(stage, device.index)})
     cases = [Case(1), Case(4097), Case(3, "merged", "none", L=7.3), Case(129, "strided", L=1.5), Case(2)]
-    cases += [Case(cut, "merged") for cut in cuts]
+    cases += [Case(rows, "merged") for edge in edges for rows in (edge, edge + 1)]
     cake_build = cake_package("cake_clamped_swiglu_det_train", "cake_build")
     loaded: list[str] = []
     load_library = cake_build.load_library
@@ -889,31 +965,36 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     assert sorted(loaded) == sorted(pkg.library_name(name, arch) for name in run)
 
 
-@pytest.mark.parametrize("edge", [-1, 0, 1], ids=["cut-1", "cut", "cut+1"])
+@pytest.mark.parametrize("step", [0, 1], ids=["edge", "edge+1"])
 @pytest.mark.parametrize("stage", STAGES)
-def test_the_programs_of_a_stage_give_the_same_bits(stage, edge, device, programs_run, monkeypatch) -> None:
-    """One row below, at and one row above this device's cut of ``stage`` (the rows from which its large-R program
-    runs), weighted on rows at the edge of the FP32 sigmoid and unweighted on gates of -88 beside boundary values: the
-    routed launches run the small-R program of ``stage`` below the cut and its large-R program from it, and every
-    launch forced to the small-R programs and every launch forced to the large-R programs give the routed call's bits
-    of ``h``, ``d_gate``, ``d_up`` and ``d_weight``."""
-    cut, small, large = pkg._route(stage, device.index)
-    if cut >= cake_jit.MAX_ROWS:
+def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, programs_run, monkeypatch) -> None:
+    """At and one row above each edge of this device's windows of ``stage`` (the row counts where its route changes
+    program), weighted on rows at the edge of the FP32 sigmoid and unweighted on gates of -88 beside boundary values:
+    the routed launches run the large-R program of ``stage`` inside its windows (one row above the edge below a window,
+    at its ``hi`` edge) and the small-R program outside, and every launch forced to the small-R programs and every
+    launch forced to the large-R programs give the routed call's bits of ``h``, ``d_gate``, ``d_up`` and
+    ``d_weight``."""
+    edges = _device_edges(stage, device.index)
+    small, large = (_program(stage, device.index, program) for program in PROGRAMS)
+    if not edges:
         pytest.skip(f"no large-R {stage} program on {pkg.device_arch(device.index)}")
-    rows = cut + edge
-    for w, data in (("random", "mixed"), ("none", "slow_mixed")):
-        t = make_inputs(Case(rows, "merged", w, data=data), seed=43, device=device)
-        programs_run.clear()
-        want = step_outputs(forward, backward, t)
-        assert programs_run == [_routed(s, rows, device.index) for s in STAGES], (rows, w)
-        assert programs_run[STAGES.index(stage)] == (small if edge < 0 else large)[0], (rows, w)
-        for k, program in enumerate(PROGRAMS):
-            with monkeypatch.context() as patch:
-                _force(patch, program)
-                programs_run.clear()
-                got = step_outputs(forward, backward, t)
-            assert programs_run == [pkg._route(s, device.index)[1 + k][0] for s in STAGES], (program, rows, w)
-            assert_same_outputs(got, want, f"{program} programs, {rows} rows, w={w}")
+    for index, edge in enumerate(edges):
+        rows = edge + step
+        # an even edge is the last row below a window (which starts one row above it), an odd edge the last row in it
+        inside = (index % 2 == 0) == (step == 1)
+        for w, data in (("random", "mixed"), ("none", "slow_mixed")):
+            t = make_inputs(Case(rows, "merged", w, data=data), seed=43, device=device)
+            programs_run.clear()
+            want = step_outputs(forward, backward, t)
+            assert programs_run == [_routed(s, rows, device.index) for s in STAGES], (rows, w)
+            assert programs_run[STAGES.index(stage)] == (large if inside else small), (rows, w)
+            for program in PROGRAMS:
+                with monkeypatch.context() as patch:
+                    _force(patch, program)
+                    programs_run.clear()
+                    got = step_outputs(forward, backward, t)
+                assert programs_run == [_program(s, device.index, program) for s in STAGES], (program, rows, w)
+                assert_same_outputs(got, want, f"{program} programs, {rows} rows, w={w}")
 
 
 @pytest.mark.parametrize(
@@ -1177,8 +1258,7 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
-    chosen = 1 + PROGRAMS.index(program)
-    assert programs_run == [pkg._route(stage, device.index)[chosen][0] for stage in STAGES] * 2, program
+    assert programs_run == [_program(stage, device.index, program) for stage in STAGES] * 2, program
     for k in range(3):
         na = make_inputs(Case(R, "merged"), seed=50 + k, device=device)
         nb = make_inputs(Case(R, "split", "none", L=7.3), seed=60 + k, device=device)
