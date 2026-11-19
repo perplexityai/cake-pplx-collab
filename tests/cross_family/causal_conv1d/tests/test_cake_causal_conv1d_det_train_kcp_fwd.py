@@ -47,8 +47,13 @@ exchanges).  Per row of the single-GPU suites:
 - a steady round of every two-launch form (single and multi entry) issues no host-to-device copy, no synchronizing
   operation and no device allocation, bitwise its first round;
 - the single-rank main program is the record ``cake_jit.selected_modules`` picks for the call, on both host paths:
-  rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are the three programs of the
-  route, and a row of ``C`` = 640 above every architecture's token floor of the narrow forward's whole tiles.
+  rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are three programs of the
+  route, a row of ``C`` = 640 above every architecture's token floor of the narrow forward's whole tiles, and rows of
+  ``C`` = 576 at the rank's token counts of a static range (every architecture) and of a direct range (every
+  architecture with one there; ``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``), where the main program takes no
+  counters;
+- the multi entry with tensors of the static or the direct program beside a dynamic one: one counter buffer per
+  call (the dynamic program's), bitwise one single call per tensor.
 """
 
 from __future__ import annotations
@@ -85,14 +90,27 @@ REPEATS = 3
 # overlapped, the single-rank main program overlapped
 FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
 # The rows of the zero-history fwd route's programs on sm_107a: C = 2048 (the c_band program), C = 256 from 65536
-# tokens (the two-stage program) and below (the route's fallback); on sm_100a and sm_103a the fallback serves all three.
-# C = 640 from 40003 tokens is above every architecture's floor of the whole 40-vector tiles of the narrow forward
-# plan, so the main program's plan names the architecture as the single-rank forward's does.
+# tokens (the two-stage program) and below (the one-stage program); on sm_100a and sm_103a the one-stage program serves
+# all three.  C = 640 from 40003 tokens is above every architecture's floor of the whole 40-vector tiles of the narrow
+# forward plan, so the main program's plan names the architecture as the single-rank forward's does.
+# C = 576 at 2000 tokens lies in the fwd route's static range of every architecture (the route's fallback, no
+# counters) and at 6003 tokens in its direct range on every architecture with one there (``SMALL_S_ROUTE_ROWS``).
+SMALL_S_ROUTE_ROWS = [
+    ("c576-s2000", (1500, 500), (1, 2, 1497, 500), 576),
+    ("c576-s6003", (5000, 1003), (1, 2, 4997, 1003), 576),
+]
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),
     ("c256-s6003", (5000, 1003), (1, 2, 4997, 1003), 256),
     ("c640-s40003", (30000, 10003), (1, 2, 29997, 10003), 640),
+    *SMALL_S_ROUTE_ROWS,
+]
+# Multi-entry rows whose C = 576 tensor runs the static program (2000 tokens) or, where the architecture has one
+# there, the direct program (6003 tokens) beside tensors of the dynamic programs.
+SMALL_S_MROWS = [
+    ("small-s-static-mixed", (1500, 500), (1, 2, 1497, 500), (576, 512, 640)),
+    ("small-s-direct-mixed", (5000, 1003), (1, 2, 4997, 1003), (576, 512, 640)),
 ]
 
 pytestmark = pytest.mark.skipif(
@@ -244,7 +262,11 @@ def test_main_program_alone_is_the_fragments_zero_history_forward(
 
 @pytest.mark.parametrize("main_in", [False, True], ids=["f", "sr"])
 @pytest.mark.parametrize("overlap_in", [False, True], ids=["wait", "pair"])
-@pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
+@pytest.mark.parametrize(
+    "name,lens,cuts,Cs",
+    MROWS + SMALL_S_MROWS,
+    ids=[r[0] for r in MROWS + SMALL_S_MROWS],
+)
 def test_multi_forward_forms_order_and_bits(
     monkeypatch, name, lens, cuts, Cs, main_in, overlap_in
 ) -> None:
@@ -604,7 +626,7 @@ def test_two_launch_forward_steady_round_does_not_block_or_allocate(
 
 
 def test_route_rows_select_every_sm107a_program() -> None:
-    """The rows of ``ROUTE_ROWS`` select the three programs of sm_107a's zero-history ``fwd`` route (a route with
+    """The rows of ``ROUTE_ROWS`` select every program of sm_107a's zero-history ``fwd`` route (a route with
     another program set needs rows of its own here)."""
     chosen = {
         cake_jit.selected_modules("sm_107a", conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens))[
@@ -613,6 +635,38 @@ def test_route_rows_select_every_sm107a_program() -> None:
         for _name, lens, _cuts, C in ROUTE_ROWS
     }
     assert chosen == set(cake_jit.route_modules("sm_107a", conv_kcp.FWD_MAIN_ROUTE))
+
+
+def test_small_s_rows_select_the_static_and_the_direct_program() -> None:
+    """On every architecture the rows of ``SMALL_S_ROUTE_ROWS`` select the ``fwd`` route's static program (the
+    route's fallback) and, where the architecture's route has one, its direct program (the record of kind
+    ``rows``), neither of which takes counters; so do the C = 576 tensors of ``SMALL_S_MROWS``."""
+    route = conv_kcp.FWD_MAIN_ROUTE
+    for arch in cake_jit.ARCHES:
+        names = cake_jit.route_modules(arch, route)
+        rules = {name: cake_jit.select_rule(cake_jit.MODULES[name]) for name in names}
+        static = [name for name, rule in rules.items() if rule is None]
+        direct = [
+            name
+            for name, rule in rules.items()
+            if rule is not None and rule["kind"] == cake_jit.ROWS_KIND
+        ]
+        for rows in (
+            SMALL_S_ROUTE_ROWS,
+            [(n, ls, cs, Cs[0]) for n, ls, cs, Cs in SMALL_S_MROWS],
+        ):
+            chosen = [
+                cake_jit.selected_modules(arch, route, C=C, S=sum(lens))[0]
+                for _name, lens, _cuts, C in rows
+            ]
+            assert chosen[0] == static[0], (arch, chosen)
+            assert chosen[1] == (direct[0] if direct else chosen[1]), (arch, chosen)
+            if direct:
+                assert cake_jit.MODULES[chosen[1]]["workspace_rule"] is None, (
+                    arch,
+                    chosen,
+                )
+            assert cake_jit.MODULES[chosen[0]]["workspace_rule"] is None, (arch, chosen)
 
 
 @pytest.mark.parametrize("name,lens,cuts,C", ROUTE_ROWS, ids=[r[0] for r in ROUTE_ROWS])

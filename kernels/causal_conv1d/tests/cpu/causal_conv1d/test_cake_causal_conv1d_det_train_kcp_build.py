@@ -403,9 +403,10 @@ def test_two_launch_forward_programs() -> None:
     """The two-launch forward's programs (``kcp`` module docstring): the history-row program is the ``kcp_fwd_halo``
     route's one record and takes the arguments the host passes (``kcp._fwd_repair``); the single-rank main program is
     a record of the zero-history registry's ``fwd`` route (``kcp.FWD_MAIN_ROUTE``) on every architecture, each record
-    of that route takes only ``x``, ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``) and the plan
-    scalars (``kcp._fwd_main``), and launches the co-resident grid (no reserved SM), so the host can launch whichever
-    record ``cake_jit.selected_modules`` picks for the call's ``C`` and token count."""
+    of that route takes only ``x``, ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``; none for the static
+    and the direct program of the small-S rows) and the plan scalars (``kcp._fwd_main``), and launches the co-resident
+    grid (no reserved SM; the direct program's capped at its token blocks), so the host can launch whichever record
+    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count."""
 
     kcp = cake_package("cake_causal_conv1d_det_train", "kcp")
     assert kcp.KCP_FWD_HALO == "kcp_fwd_halo" and kcp.FWD_MAIN_ROUTE == "fwd"
@@ -420,10 +421,25 @@ def test_two_launch_forward_programs() -> None:
             record = cake_jit.MODULES[name]
             assert record["role"] == "fwd" and arch in record["arches"], (arch, name)
             assert set(record["logical"].values()) <= main_values, (arch, name)
-            assert record["workspace_rule"]["kind"] == "tile_counters", (arch, name)
+            rule = record["workspace_rule"]
+            takes_work = "work" in record["logical"].values()
+            assert (rule is None) == (not takes_work), (arch, name)
+            assert rule is None or rule["kind"] == "tile_counters", (arch, name)
             assert record["grid_rule"]["kind"] == "co_resident", (arch, name)
+            # Only a direct program caps its grid, at its token blocks.
+            select_kind = (cake_jit.select_rule(record) or {}).get("kind")
+            cap = "token_blocks" if select_kind == cake_jit.ROWS_KIND else None
+            assert record["grid_rule"].get("cap") == cap, (arch, name)
             assert "reserve_sms" not in record["grid_rule"], (arch, name)
             assert not record["grid_rule"]["cooperative"], (arch, name)
-        for C, S in ((256, 1), (256, 65536), (2048, 1), (8192, 32768), (10240, 32768)):
+        for C, S in (
+            (256, 1),
+            (256, 65536),
+            (2048, 1),
+            (8192, 32768),
+            (10240, 32768),
+            (576, 2000),
+            (576, 6003),
+        ):
             (name,) = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)
             assert name in names, (arch, C, S)

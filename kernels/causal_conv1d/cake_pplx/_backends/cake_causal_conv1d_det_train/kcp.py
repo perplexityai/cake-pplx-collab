@@ -118,8 +118,10 @@ Two-launch forward: the forward can run as a main program that reads no received
 history-row program.  The main program writes every row, a continuing fragment's first rows as at a document start:
 either the zero-history registry's single-rank ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C,
 S=S)``, the program the single-rank forward runs) on the rank's fragments, each a document of its own (``cu =
-ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's full co-resident grid and token-chunk counters as in the
-single-rank forward), or, in the overlapped form only, the ``kcp_fwd`` program with every ``hist_row_off`` entry
+ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's plan, grid and token-chunk counters as in the
+single-rank forward: at a rank's token count of a small-S row, ``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``, the
+static or the direct program, which takes no counters; the multi entry's one counter buffer then serves its other
+tensors), or, in the overlapped form only, the ``kcp_fwd`` program with every ``hist_row_off`` entry
 ``-1``.  The history-row program then writes ``y`` of the first ``min(3, len)`` rows of every fragment with a history
 row again from the received pool, with the ``kcp_fwd`` program's instructions, so ``y`` is bitwise the one-launch
 forward's; it runs only when the rank receives history rows.  With an exchange in flight (more than one rank) the
