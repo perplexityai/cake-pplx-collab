@@ -23,12 +23,13 @@ their sum in microseconds plus the achieved GB/s over the logical byte volume
 (forward ``4TH + 4T``, backward ``6TH + 4T + 4 * n_chunks * H``; the residual
 routes add ``4TH`` / ``2TH``).  Timing uses CUPTI device activity records
 (through ``torch.profiler``) with a cold L2 (a buffer of twice the L2 size is
-rewritten before every call).  A call's time is its span: the start of its
-first device record to the end of its last one, between the boundary kernels
+rewritten before every call).  A call's time is its busy time: the length of
+the union of its device records' intervals, between the boundary kernels
 around the call (the L2 flush is not counted).  Kernels that overlap, such as
 the backward's dw reduction launched with programmatic dependent launch while
-the main kernel still runs, count once; the span of a multi-kernel comparator
-includes the device idle time between its kernels.
+the main kernel still runs, count once, and the device idle time between
+kernels (the host launching the next one) does not count: without overlap a
+call's time is the sum of its kernels' durations.
 
 Example::
 
@@ -42,6 +43,7 @@ import argparse
 import inspect
 import json
 import statistics
+from collections.abc import Iterable
 from typing import Callable, Optional
 
 import torch
@@ -76,12 +78,27 @@ def _is_sentinel(name: str) -> bool:
     return "::spin_kernel(" in name
 
 
-def _cupti_call_spans_ms(
+def _union_length(intervals: Iterable[tuple[float, float]]) -> float:
+    """Length of the union of the ``(start, end)`` intervals: a stretch covered
+    by several intervals counts once and a gap between intervals not at all, so
+    intervals that do not overlap give the sum of their lengths."""
+
+    merged: list[list[float]] = []
+    for start, end in sorted(intervals):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    return sum((end - start for start, end in merged), 0.0)
+
+
+def _cupti_call_busy_ms(
     fn: Callable[[], object], *, warmup: int = WARMUP_CALLS, calls: int = TIMED_CALLS
 ) -> list[float]:
-    """GPU span (ms) of each timed call of ``fn``: the start of its first CUDA
-    activity record (kernel, memset, memcpy) to the end of its last one, with L2
-    flushed before each call.  Overlapping records count once.
+    """GPU busy time (ms) of each timed call of ``fn``: the length of the union
+    of its CUDA activity records' intervals (kernels, memsets, memcpys), with L2
+    flushed before each call.  Overlapping records count once; the device idle
+    time between records does not count.
 
     Every call runs between two sentinel kernels; the first record after a
     sentinel is the L2 flush and is not counted.
@@ -115,14 +132,10 @@ def _cupti_call_spans_ms(
     for event in records:
         if _is_sentinel(event.name):
             if current is not None:
-                call = current[1:]
-                times.append(
-                    (
-                        max(e.time_range.end for e in call)
-                        - min(e.time_range.start for e in call)
-                    )
-                    / 1e3
+                busy_us = _union_length(
+                    (e.time_range.start, e.time_range.end) for e in current[1:]
                 )
+                times.append(busy_us / 1e3)
             current = []
         elif current is not None:
             current.append(event)
@@ -135,9 +148,9 @@ def _cupti_call_spans_ms(
 
 
 def _time(fn: Callable[[], object]) -> float:
-    """Median GPU span (ms) of ``fn``'s calls, cold L2, CUPTI."""
+    """Median GPU busy time (ms) of ``fn``'s calls, cold L2, CUPTI."""
 
-    return _median_ms(_cupti_call_spans_ms(fn))
+    return _median_ms(_cupti_call_busy_ms(fn))
 
 
 def _rmsnorm_fp32(x: torch.Tensor, w: torch.Tensor, eps: float) -> torch.Tensor:
