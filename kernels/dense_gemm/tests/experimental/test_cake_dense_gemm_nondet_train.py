@@ -15824,7 +15824,12 @@ def test_k1_rows_follow_the_deterministic_212_sm_ranges_of_0_3_5():
         d_out = key[8] if key[7] is None else key[7]
         programs = (wgrad_rows if key[7] is None else dgrad_rows)[(d_in, d_out)]
         assert sorted(programs) == [lo for lo, _hi, _ in ranges], key
-        for lo_of, T in sorted({(lo, t) for lo, hi, _ in ranges for t in (lo, hi)}):
+        # the ends of each range, and on 4096 -> 12288 also the ends of its version 0.3.5 range (8192 - 16231)
+        inner = (8192, 16231) if key[7] is None and (d_in, d_out) == (4096, 12288) else ()
+        assert all(any(lo <= t <= hi for lo, hi, _ in ranges) for t in inner), key
+        ends = {(lo, t) for lo, hi, _ in ranges for t in (lo, hi)}
+        ends |= {(lo, t) for lo, hi, _ in ranges for t in inner if lo <= t <= hi}
+        for lo_of, T in sorted(ends):
             what = (key, T)
             if key[7] is None:
                 G = torch.empty(T, d_out, dtype=bf16)
