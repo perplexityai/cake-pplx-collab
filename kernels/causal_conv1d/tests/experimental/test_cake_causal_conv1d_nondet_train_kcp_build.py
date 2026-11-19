@@ -162,10 +162,12 @@ def test_two_launch_forward_programs() -> None:
     route's one record and takes the arguments the host passes (``kcp._fwd_repair``); the single-rank main program is
     a record of this package's zero-history registry's ``fwd`` route (``kcp.FWD_MAIN_ROUTE``) on every architecture,
     the det package's zero-history record of the same route position, each record of that route takes only ``x``,
-    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``), the plan scalars and, exactly when its
-    ``launch.use_pdl`` is ``"runtime"``, the ``enable_pdl`` launch scalar (``kcp._fwd_main`` passes 0), and launches
-    the co-resident grid (no reserved SM), so the host can launch whichever record ``cake_jit.selected_modules``
-    picks for the call's ``C`` and token count."""
+    ``w``, ``cu``, ``y``, its ``work`` counters (``tile_counters``; none, and no ``workspace_rule``, for the static and
+    the direct program of the small-S rows), the plan scalars and, exactly when its ``launch.use_pdl`` is
+    ``"runtime"``, the ``enable_pdl`` launch scalar (``kcp._fwd_main`` passes 0), and launches the co-resident grid
+    (no reserved SM; the direct program's capped at its token blocks), so the host can launch whichever record
+    ``cake_jit.selected_modules`` picks for the call's ``C`` and token count, the small-S rows (C = 640 at 3003 and
+    12003 tokens) included."""
 
     kcp = cake_package(KEY, "kcp")
     det_cake_jit = cake_package("cake_causal_conv1d_det_train", "cake_jit")
@@ -185,11 +187,13 @@ def test_two_launch_forward_programs() -> None:
             logical = set(record["logical"].values())
             assert logical <= main_values | ({"enable_pdl"} if runtime_pdl else set()), (arch, name)
             assert ("enable_pdl" in logical) == runtime_pdl, (arch, name)
-            assert record["workspace_rule"]["kind"] == "tile_counters", (arch, name)
+            rule = record["workspace_rule"]
+            assert rule is None or rule["kind"] == "tile_counters", (arch, name)
+            assert (rule is None) == ("work" not in logical), (arch, name)
             assert record["grid_rule"]["kind"] == "co_resident", (arch, name)
             assert "reserve_sms" not in record["grid_rule"], (arch, name)
             assert not record["grid_rule"]["cooperative"], (arch, name)
-        for C, S in ((256, 1), (256, 65536), (2048, 1), (8192, 32768), (10240, 32768)):
+        for C, S in ((256, 1), (256, 65536), (2048, 1), (8192, 32768), (10240, 32768), (640, 3003), (640, 12003)):
             (name,) = cake_jit.selected_modules(arch, kcp.FWD_MAIN_ROUTE, C=C, S=S)
             assert name in names, (arch, C, S)
             # the det package's single-rank main program for the same call: the same program (twenty hex digits)

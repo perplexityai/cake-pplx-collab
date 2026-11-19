@@ -66,6 +66,16 @@ varies run to run.  The inputs,
 output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
+The forward programs (each the deterministic package's program of the same row):
+at C = 576 to 768 below the token ceilings of the backend's
+``cake_jit.FALLBACK_ROWS`` and ``cake_jit.DIRECT_ROWS`` (by architecture,
+route, ``C`` and ``S``) the static program (a fixed token range per CTA) or
+the direct program (the next token blocks per CTA, no shared memory) runs,
+neither with ``work`` counters: a passed forward ``workspace`` is accepted
+and not read, and such a call zeroes no package buffer; every other call runs
+the dynamic program, which takes its token chunks from zeroed int32 counters.
+The forward workspace size is the same in every case.
+
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
 returns it zeroed; size depends on ``C`` and the route, not on ``S``; never
@@ -78,9 +88,11 @@ graph records no fill node for it (the graph holds it until the graph and
 its instantiations are destroyed and their launches have completed; it
 returns to the package, zero again, at the package's next refill).  The
 replays of one graph must not overlap.  Only eager calls without
-``workspace=`` zero these buffers, the forward's and the backward's
-separately, sized to the largest need of such a call whose zeroing succeeded
-(one that runs out of memory keeps no new buffer and keeps their size).
+``workspace=`` that take counters zero these buffers (a forward at a row of
+``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the forward's and the
+backward's separately, sized to the largest need of such a call whose
+zeroing succeeded (one that runs out of memory keeps no new buffer and keeps
+their size).
 When none is ready (no such eager call of the kind before the capture, all
 taken by earlier captures, too small, or their zero fills not complete yet:
 a ``CUDAGraph.capture_begin`` right after such an eager call with no

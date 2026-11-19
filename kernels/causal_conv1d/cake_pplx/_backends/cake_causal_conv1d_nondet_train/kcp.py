@@ -93,8 +93,9 @@ Two-launch forward (the deterministic KCP package's forward): the forward can ru
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,
 a continuing fragment's first rows as at a document start: either this package's zero-history registry's single-rank
 ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C, S=S)``, the program the single-rank forward
-runs) on the rank's fragments, each a document of its own (``cu = ctx.cu_seqlens_local``, ``num_docs = n_frag``; the
-record's full co-resident grid and token-chunk counters as in the single-rank forward), or, in the overlapped form
+runs, by the rank's local token count: below the forward token ceilings the route's static or direct program) on the
+rank's fragments, each a document of its own (``cu = ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's grid
+and token-chunk counters as in the single-rank forward), or, in the overlapped form
 only, the ``kcp_fwd`` program with every ``hist_row_off`` entry ``-1``.  The history-row program then writes ``y`` of
 the first ``min(3, len)`` rows of every fragment with a history row again from the received pool, with the
 ``kcp_fwd`` program's instructions, so ``y`` is bitwise the one-launch forward's; it runs only when the rank receives
@@ -261,9 +262,9 @@ FWD_MAIN_ROUTE = "fwd"
 # measured about 0.3% faster there than the full co-resident grid (R200, 212 SMs, world 4, 16384 tokens x 8192
 # channels x 3 tensors per rank; within noise at 32768 x 10240).  sm_100a and sm_103a keep the full grid, which
 # measured faster than the reserved one there.  The single-rank main program of the two-launch forward
-# (``FWD_MAIN_ARCHS``) is the zero-history registry's record and launches its full co-resident grid, as the
-# single-rank forward does; the history-row program launches the head program's grid.  ``y`` does not depend on the
-# grid.
+# (``FWD_MAIN_ARCHS``) is the zero-history registry's record and launches its grid for the call (the full
+# co-resident grid; a direct program's capped at its token blocks), as the single-rank forward does; the history-row
+# program launches the head program's grid.  ``y`` does not depend on the grid.
 FWD_RESERVE_SMS = {"sm_107a": 1}
 GRAPH_MODES = (
     "off",
@@ -1477,9 +1478,12 @@ def _sr_main(
 ) -> tuple[str, dict[str, int], tuple[int, int, int], int]:
     """The two-launch forward's single-rank main program of a call: ``(record name, plan scalars, grid, counter
     words)`` of the zero-history registry's ``fwd`` route record ``cake_jit.selected_modules`` picks for ``C`` and
-    ``S`` -- the single-rank forward's plan (its role, route and architecture) over the rank's ``n_frag`` fragments as
-    documents, its record's full co-resident grid and its token-chunk counter words; a ``ValueError`` when ``C`` spans
-    more channel tiles than that grid holds."""
+    ``S`` (the rank's local token count: at a row of ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` the
+    route's static or direct program) -- the single-rank forward's plan (its role, route and architecture, so a
+    direct row runs the route's ``cake_jit.DIRECT_PLANS`` tiles) over the rank's ``n_frag`` fragments as documents,
+    its record's grid for the call (the full co-resident grid; a direct program's capped at its token blocks) and its
+    token-chunk counter words (0 for the static and direct programs, which take no counters); a ``ValueError`` when
+    ``C`` spans more channel tiles than that grid holds."""
     (name,) = _zero_history.selected_modules(arch, FWD_MAIN_ROUTE, C=C, S=S)
     record = _zero_history.MODULES[name]
     scalars = plan(

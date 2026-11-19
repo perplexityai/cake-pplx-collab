@@ -92,10 +92,12 @@ Host design (the knobs are keywords; no environment variable):
   and their launches have completed, the buffer, zero again, returns to the
   package at its next refill (below).  The replays of one graph must not
   overlap (they share the graph's buffers, as they share its other memory).
-  Only eager calls that omit ``workspace=`` zero these buffers, the forward's
-  and the backward's separately: per device and kind up to ``_POOL_DEPTH``
-  buffers of the largest need of such a call so far, refilled by the next such
-  call after a capture took one or when a call needs more.  A captured call
+  Only eager calls that omit ``workspace=`` and take counters zero these
+  buffers, the forward's and the backward's separately: per device and kind up
+  to ``_POOL_DEPTH`` buffers of the largest need of such a call so far,
+  refilled by the next such call after a capture took one or when a call needs
+  more (a forward at a row of ``cake_jit.FALLBACK_ROWS`` or
+  ``cake_jit.DIRECT_ROWS`` takes no counters and zeroes none).  A captured call
   finds none ready when no such eager call of its kind ran before the capture,
   when the captures since the last one took them all, when it needs more than
   that eager need, or when their zero fills have not completed yet (a
@@ -156,6 +158,15 @@ Host design (the knobs are keywords; no environment variable):
   rules and size, which cover every plan; at C = 520 to 568 it is larger
   than 0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for
   those rows is refused (``ValueError``) from the row's token floor.
+- Below the forward token ceilings at C = 576 to 768 the forward runs two
+  other det programs of its route: the static program in the forward ranges
+  of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token range of its channel
+  tile, on the route's plan above) and the direct program in the ranges of
+  ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of its channel
+  tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at most one CTA per
+  token block).  Neither takes counters: a passed ``workspace`` is accepted
+  and not read, and the workspace size is unchanged.  ``y`` is the same bits
+  on every forward program and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
@@ -811,9 +822,9 @@ def _call_plan(
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
     ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error; ``bf16_taps`` (the
     forward's taps are BF16; ``False`` for every backward call) is part of the row.  A row a
-    :data:`cake_jit.SM_WIDE_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is planned for every side of
-    :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of ``S`` with the sides'
-    ranges."""
+    :data:`cake_jit.SM_WIDE_ROWS`, :data:`cake_jit.DIRECT_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is
+    planned for every side of :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of
+    ``S`` with the sides' ranges."""
 
     key = (arch, kind, C, device_index, bwd_grid_mult, bf16_taps)
     sides = _ROW_PLANS.get(key)
@@ -874,10 +885,11 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, the forward's ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``,
-    ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``, ``FORWARD_NARROW_WIDTHS`` and
-    ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or ``device_arch``.  The programmatic
-    dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is read by every call, not planned."""
+    ``SM_WIDE_ROWS``, ``DIRECT_ROWS``, ``DIRECT_PLANS``, the forward's ``FORWARD_NARROW_MIN_S``,
+    ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``,
+    ``FORWARD_NARROW_WIDTHS`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or
+    ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is
+    read by every call, not planned."""
 
     n = len(_ROW_PLANS)
     _ROW_PLANS.clear()
