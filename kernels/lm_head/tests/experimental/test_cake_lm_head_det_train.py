@@ -16154,13 +16154,22 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     torch.cuda.empty_cache()
     _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)  # binds
     fast, _, _ = _budget_step(inp, C, entry, memory_mode="fast", **tau_kw)
+    # both remembered-binding plain steps start from one allocator state: no earlier pass's result alive (``fast``
+    # aside) and every free cached block released.  A result left alive pins the segment it lies in, and the free blocks
+    # the steps before leave cached depend on the tests run before this one, so either can let one step's request take
+    # a free block less than 1 MiB larger than the other step's identical request
+    gc.collect()
+    torch.cuda.empty_cache()
     # the explicit fast form's plain step through the same step as the default passes (the log-probability entry's
     # upstream product included)
     _, fast_peak = _default_pass(inp, C, entry, "plain", tau, memory_mode="fast")
+    del _
     expected = "opt_in" if entry == "loss" else "cake_backend"
     begun = _record_every_hidden_count(monkeypatch)
     host_counts = _record_host_counts(monkeypatch)
     _default_pass(inp, C, entry, "plain", tau)  # binds
+    gc.collect()
+    torch.cuda.empty_cache()
     for kind in ("plain", "nograd", "nonreentrant", "reentrant"):
         begun.clear()
         host_counts.clear()
@@ -16181,7 +16190,6 @@ def test_device_default_fast_kept_calls_keep_the_hidden_count(
     # 1 MiB larger serves takes the whole block (the caching allocator splits no smaller remainder off), so a result
     # left alive (pinning a partly free segment) or blocks cached before one miss only can add such a remainder to one
     # peak at the same requested bytes
-    del _
     _clear_binding_caches()
     gc.collect()
     torch.cuda.empty_cache()
