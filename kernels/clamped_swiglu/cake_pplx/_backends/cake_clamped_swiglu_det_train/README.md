@@ -81,22 +81,27 @@ of a stage runs the small-R one at every `R`.
 | `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
 | `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
 
-Outside its windows, the small-R program measures at least as fast as the large-R one on that architecture (weighted and
-unweighted, merged and split, warm and cold L2, the stage alone and in a forward + backward or checkpointed step);
-inside, the large-R one measures faster in one of them.  A bound runs the large-R program.  Both backward programs run 4
-rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows an SM a wave), the large-R one 5 (20 rows).  From 12 to 20
-rows per SM and from 36 to 40, the small-R program runs twice the waves of the large-R one and is slower.  Just above 20
-and 40 rows per SM, the large-R program's last wave holds a few CTAs and costs little, so those windows end at 21 and
-41.  At 36 rows per SM the large-R program's unweighted backward already measures as fast or faster with warm L2
-(small/large 1.003 on B200, 1.016 on GB300), and the sweeps have no point between 32 and 36, so on `sm_100a` and
-`sm_103a` that window starts at 32.  On `sm_107a` the small-R program stays faster up to 35 rows per SM, and right after
-a forward the large-R one turns faster between 35 and 36, so that window starts at 35.  From 48 rows per SM on, the
-small-R backward alone measures 0.92 to 1.05 times the large-R one's time (by GPU, input and timer), and up to 1.5 %
-slower right after a forward over the same rows (the checkpointed step, unweighted), so the large-R program runs there.
-In the forward, the small-R program measures faster with a merged input up to 384 rows per SM on GB300, but with a split
-input it is no longer faster from 224 on (small/large up to 1.008 at 384), so on `sm_103a` the forward window starts at
-208.  On `sm_100a` the small-R forward stays faster in both layouts up to 112 rows per SM, and on `sm_107a` the two
-forward programs measure within 0.5 % of each other at 384, so those windows start at 112 and 384.
+A window changes 0.1.1's route only where the other program measured not slower by more than 0.5 % on that architecture
+(weighted and unweighted, merged and split, warm and cold L2, the stage alone and in a forward + backward or
+checkpointed step).  The bounds are whole numbers of rows per SM, and a bound runs the large-R program, as in 0.1.1.  So
+a window can hold rows where the small-R program measures faster: the backward alone at the bounds 12, 32, 35 and 48
+rows per SM, the forward at 112 and 208, and every measured case from about 20.25 to 21 and from 40.5 to 41 rows per SM.
+Below 384 rows per SM on `sm_107a` the small-R forward runs, as in 0.1.1, and measures up to 0.5 % slower with a merged
+input and cold L2.  Both backward programs run 4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows an SM a
+wave), the large-R one 5 (20 rows).  Above 12 and up to 20 rows per SM, and above 36 and up to 40, the small-R program
+runs twice the waves of the large-R one and is slower.  Just above 20 rows per SM the small-R program measured up to
+3.5 % slower in a forward + backward or checkpointed step, and just above 40 it measured 1 to 3 % slower, but from about
+20.25 and 40.5 rows per SM on it measures as fast or faster, so those windows end at 21 and 41.  At 36 rows per SM the
+large-R program's unweighted backward already measures as fast or faster with warm L2 (small/large 1.003 on B200, 1.016
+on GB300), and the sweeps have no point between 32 and 36, so on `sm_100a` and `sm_103a` that window starts at 32.  On
+`sm_107a` the small-R program stays faster up to 35 rows per SM, and right after a forward the large-R one turns faster
+between 35 and 36, so that window starts at 35.  From 48 rows per SM on, the small-R backward alone measures 0.92 to
+1.05 times the large-R one's time (by GPU, input and timer), and up to 1.5 % slower right after a forward over the same
+rows (the checkpointed step, unweighted), so the large-R program runs there.  In the forward, the small-R program
+measures faster with a merged input up to 384 rows per SM on GB300, but with a split input it is no longer faster from
+224 on (small/large up to 1.008 at 384), so on `sm_103a` the forward window starts at 208.  On `sm_100a` the small-R
+forward stays faster in both layouts up to 112 rows per SM, and on `sm_107a` the two forward programs measure within
+0.5 % of each other at 384, so those windows start at 112 and 384.
 
 Every program is one kernel: 32 lanes own a row and a thread owns one row.  Each lane makes 9 loads of 8 BF16 values
 of the gate and as many of the up (and of `dh` in the backward), at columns `(p * 32 + lane) * 8`, so every load of a
