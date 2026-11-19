@@ -5569,11 +5569,18 @@ SPLIT_ROLES = ("fwd", "bwd")
 # the forward, the training step and the checkpointed step; eager and under
 # CUDA Graph replay -- ran slower with the narrower tiles than with the single
 # tile beyond the timing noise (and at least one ran faster); untimed token
-# counts below it keep the single tile.  The slower cells next below the
-# floors: on GB200 and GB300 C = 520 and 544 at 12288 and C = 528 and 560 at
-# 16384; on the VR200 C = 568 at 12288 and C = 520, 528, 544, 552 and 560 at
-# 16384 (C = 520 at 20480 ran neither faster nor slower).  The width floor of
-# a row below 72 vectors is its row floor.
+# counts below it keep the single tile.  The measured cells are the tile
+# probes and the release timing (this package's forward against the 0.2.3
+# package's on the same GPU); GB200 and GB300 cells are pooled for sm_100a and
+# sm_103a.  The slower cells next below the floors: on GB200 and GB300 C =
+# 520, 528, 544 and 560 at 16384; on the VR200 C = 568 at 12288, C = 528, 552
+# and 560 at 16384, C = 544 at 20480 and C = 520 at 24576.  At C = 520 and
+# 544 the release timing set the floor: with FP32 taps and bias the 0.2.3
+# forward took 0.9684 / 0.9743 (C = 520) and 0.9801 / 0.9754 (C = 544) times
+# this package's time on a GB200 at 16384, and 0.9876 / 0.9732 (C = 520 at
+# 24576) and 0.9862 / 0.9775 (C = 544 at 20480) times it on the VR200, eager /
+# under CUDA Graph replay.  The width floor of a row below 72 vectors is its
+# row floor.
 # On sm_103a the ``fwd_bias`` rows of 89 to 96 vectors (C = 712 to 768) read
 # the dtype of the call's taps (``bf16_taps``; the ``fwd`` route's taps are
 # FP32 and the ``fwd_dt`` route's BF16): with FP32 taps they take 20480 (on a
@@ -5607,18 +5614,18 @@ FORWARD_NARROW_ROUTES: tuple[str, ...] = ("fwd", "fwd_dt", "fwd_bias")
 FORWARD_NARROW_THREADS = 128
 FORWARD_NARROW_WIDTHS: dict[int, int] = {65: 13, 66: 11, 68: 17, 69: 23, 70: 14, 72: 18, 80: 40}
 FORWARD_WIDTH_FLOORS: dict[str, dict[int, int]] = {
-    "sm_100a": {65: 16384, 66: 24576, 68: 16384, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
-    "sm_103a": {65: 16384, 66: 24576, 68: 16384, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
-    "sm_107a": {65: 24576, 66: 24576, 68: 20480, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
+    "sm_100a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
+    "sm_103a": {65: 20480, 66: 24576, 68: 20480, 69: 16384, 70: 24576, 72: 32768, 80: 24576},
+    "sm_107a": {65: 31292, 66: 24576, 68: 24576, 69: 24576, 70: 24576, 72: 40960, 80: 36864},
 }
 # ``{arch: {cv: S}}``: on ``arch`` the narrow forward row of ``cv`` channel
 # vectors below 72 (C = 520 to 568) plans as the deterministic forward from
 # ``S`` tokens, on every forward route; a row of fewer than 72 vectors that
 # the architecture does not list keeps the single tile at every ``S``.
 FORWARD_NARROW_ROW_FLOORS: dict[str, dict[int, int]] = {
-    "sm_100a": {65: 16384, 66: 24576, 67: 16384, 68: 16384, 69: 16384, 70: 24576, 71: 12288},
-    "sm_103a": {65: 16384, 66: 24576, 67: 16384, 68: 16384, 69: 16384, 70: 24576, 71: 12288},
-    "sm_107a": {65: 24576, 66: 24576, 67: 16384, 68: 20480, 69: 24576, 70: 24576, 71: 16384},
+    "sm_100a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
+    "sm_103a": {65: 20480, 66: 24576, 67: 16384, 68: 20480, 69: 16384, 70: 24576, 71: 12288},
+    "sm_107a": {65: 31292, 66: 24576, 67: 16384, 68: 24576, 69: 24576, 70: 24576, 71: 16384},
 }
 # The rows below this many channel vectors take :data:`FORWARD_NARROW_ROW_FLOORS`.
 FORWARD_ROW_FLOOR_VECTORS = 72
