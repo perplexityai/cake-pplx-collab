@@ -94,6 +94,12 @@ mode (outside / inside a CUDA Graph capture; the backend's
 ``cake_jit.PDL_EAGER`` / ``PDL_GRAPH``): with it a launch may begin while the
 stream's preceding kernel finishes, and every program waits for that kernel
 before it reads or writes global memory, so the outputs do not depend on it.
+The backward launches without it, in both modes, at the rows of the backend's
+``cake_jit.PDL_OFF_ROWS`` (by route, ``C`` and ``S``: the default backward
+route at C = 1000 to 1008 from S = 187755 and at C = 1016 from S = 155648 on
+sm_100a, and at C = 1000 to 1008 from S = 131073 and at C = 1016 from
+S = 125171 on sm_103a), from where the measured training step was not slower
+without it; the forward keeps it at every row.
 
 The backward entry points and the backward workspace helpers take the
 deterministic package's opt-in ``bwd_grid_mult: int = 1`` (one of
