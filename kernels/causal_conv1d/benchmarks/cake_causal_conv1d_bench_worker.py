@@ -43,6 +43,7 @@ import collections
 import hashlib
 import importlib
 import importlib.metadata
+import inspect
 import json
 import os
 import re
@@ -185,13 +186,19 @@ def _capture_debug(fn, stream: torch.cuda.Stream) -> torch.cuda.CUDAGraph:
     return graph
 
 
-def _pdl(cj, arch: str, use_pdl, capturing: bool):
+def _pdl(cj, arch: str, use_pdl, capturing: bool, row: tuple | None = None):
     """The PDL value a launch of a record with ``launch.use_pdl`` passes: ``"runtime"`` asks the package's
-    ``pdl_enabled`` for the mode, a bool is the record's fixed value."""
+    ``pdl_enabled`` for the mode (with the call's ``row``, ``(kind, C, S)``, where the package's ``pdl_enabled``
+    takes one and the package passes it: the backward), a bool is the record's fixed value."""
 
     if use_pdl == "runtime":
         fn = getattr(cj, "pdl_enabled", None)
-        return None if fn is None else int(fn(arch, capturing=capturing))
+        if fn is None:
+            return None
+        if row is not None and "kind" in inspect.signature(fn).parameters:
+            kind, C, S = row
+            return int(fn(arch, capturing=capturing, kind=kind, C=C, S=S))
+        return int(fn(arch, capturing=capturing))
     return int(bool(use_pdl))
 
 
@@ -228,7 +235,10 @@ def _plan_provenance(mode: str, S: int, C: int, num_docs: int, route: dict, devi
                 "split": [int(sc["ct_vec"]), int(sc["n_sub"]), int(sc["n_ch_tiles"])],
                 "grid": [int(g) for g in grid],
                 "use_pdl": use_pdl if isinstance(use_pdl, (bool, str)) or use_pdl is None else str(use_pdl),
-                "enable_pdl": {m: _pdl(cj, arch, use_pdl, m == "graph") for m in ("eager", "graph")},
+                "enable_pdl": {
+                    m: _pdl(cj, arch, use_pdl, m == "graph", (kind, C, S) if role == "bwd" else None)
+                    for m in ("eager", "graph")
+                },
             }
         return out
     except Exception as exc:  # noqa: BLE001 -- provenance only

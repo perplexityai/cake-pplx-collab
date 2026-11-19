@@ -19,7 +19,8 @@ per-call programmatic dependent launch scalar differ), every backward route keep
 and selection (but where a channel-band program takes the lowest channel counts of its twin, the program of the route
 it shares a body with, and at the rows of ``FALLBACK_ROWS``, where the route's fallback runs), every program but the
 opt-in pair routes' takes the per-call PDL scalar (its kernels wait for the preceding grid before touching global
-memory), each backward program is ONE
+memory; the host's policy tables, and the backward rows of ``PDL_OFF_ROWS`` that launch without it, which the
+backward entry finds by passing its route, ``C`` and ``S``), each backward program is ONE
 ordinary launch (no reduce program) that owns an ``accumulators`` workspace (one FP32 word per sum and accumulator
 copy on every route, :data:`ACC_SLOTS` copies; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per
 channel tile), and the workspace byte
@@ -487,6 +488,21 @@ def test_own_copies_take_the_deterministic_band_rows() -> None:
 # capture.
 PDL_EAGER_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 PDL_GRAPH_OF_RECORD = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+# The backward rows that launch without programmatic dependent launch in both modes, whatever the two tables say
+# (``PDL_OFF_ROWS``): arch -> (route, C_lo, C_hi) -> (S_min, S_max), every multiple of 8 from C_lo to C_hi.  On sm_100a
+# and sm_103a the ``bwd`` route at C 1016 from the first measured token count at which its launch with the attribute,
+# right after the forward, made the training step and the checkpointed step slower, up to every token count the
+# package takes.
+PDL_OFF_ROWS_OF_RECORD = {
+    "sm_100a": {("bwd", 1016, 1016): (187755, 2147483647)},
+    "sm_103a": {("bwd", 1016, 1016): (131073, 2147483647)},
+}
+# The program the calls of the :data:`PDL_OFF_ROWS_OF_RECORD` rows launch (the one the rows were measured with): the
+# ``bwd`` program the channel thresholds pick there on both architectures.
+PDL_OFF_PROGRAMS_OF_RECORD = {
+    "sm_100a": frozenset({"cake_causal_conv1d_train_461d358d7090642c65de"}),
+    "sm_103a": frozenset({"cake_causal_conv1d_train_461d358d7090642c65de"}),
+}
 
 
 def _pair_programs() -> set[str]:
@@ -547,6 +563,118 @@ def test_pdl_policy_tables(monkeypatch) -> None:
         monkeypatch.setitem(cake_jit.PDL_GRAPH, "sm_103a", not value)
         assert cake_jit.pdl_enabled("sm_103a", capturing=False) == int(value)
         assert cake_jit.pdl_enabled("sm_103a", capturing=True) == int(not value)
+
+
+@pytest.mark.cpu_only
+def test_pdl_off_rows_are_the_literal_rows() -> None:
+    """``PDL_OFF_ROWS`` is the literal :data:`PDL_OFF_ROWS_OF_RECORD`.  Every key names an exported architecture, one
+    of its backward routes other than a pair route (whose programs launch without PDL), a closed range of channel
+    counts (multiples of 8) and a closed range of token counts from one token on; the keys of one architecture and
+    route are disjoint; and at each corner of a key the call selects a program of
+    :data:`PDL_OFF_PROGRAMS_OF_RECORD` that takes the per-call PDL scalar."""
+
+    assert cake_jit.PDL_OFF_ROWS == PDL_OFF_ROWS_OF_RECORD
+    assert set(cake_jit.PDL_OFF_ROWS) == set(PDL_OFF_PROGRAMS_OF_RECORD)
+    for arch, rows in cake_jit.PDL_OFF_ROWS.items():
+        assert arch in ARCHES and rows, arch
+        spans: dict[str, list[tuple[int, int]]] = {}
+        for (route, c_lo, c_hi), (s_min, s_max) in rows.items():
+            label = (arch, route, c_lo, c_hi)
+            assert route in cake_jit.backward_kinds(arch) and route not in cake_jit.PAIR_ROUTES, label
+            assert 0 < c_lo <= c_hi and c_lo % 8 == 0 and c_hi % 8 == 0, label
+            assert type(s_min) is int and type(s_max) is int, label
+            assert 1 <= s_min <= s_max <= cake_jit.INT32_MAX, label
+            for C in (c_lo, c_hi):
+                for S in (s_min, s_max):
+                    (name,) = cake_jit.selected_modules(arch, route, C=C, S=S)
+                    assert name in PDL_OFF_PROGRAMS_OF_RECORD[arch], (label, C, S, name)
+                    assert cake_jit.MODULES[name]["launch"]["use_pdl"] == "runtime", (label, name)
+            spans.setdefault(route, []).append((c_lo, c_hi))
+        for route, ranges in spans.items():
+            ranges.sort()
+            for (_, hi), (lo, _) in itertools.pairwise(ranges):
+                assert hi < lo, (arch, route, ranges)
+
+
+def _pdl_off_expected(arch: str, kind: str, C: int, S: int, capturing: bool) -> int:
+    """The ``enable_pdl`` value of a call of route ``kind`` with ``C`` channels and ``S`` tokens on ``arch``, from
+    :data:`PDL_OFF_ROWS_OF_RECORD` and the live ``PDL_EAGER`` / ``PDL_GRAPH`` (written apart from ``pdl_enabled``)."""
+
+    for (route, c_lo, c_hi), (s_min, s_max) in PDL_OFF_ROWS_OF_RECORD.get(arch, {}).items():
+        if route == kind and c_lo <= C <= c_hi and C % 8 == 0 and s_min <= S <= s_max:
+            return 0
+    return int((cake_jit.PDL_GRAPH if capturing else cake_jit.PDL_EAGER)[arch])
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_pdl_enabled_is_off_inside_the_pdl_off_rows(arch, monkeypatch) -> None:
+    """With a call's row (``kind``, ``C`` and ``S``) ``pdl_enabled`` is 0 inside a :data:`PDL_OFF_ROWS_OF_RECORD` key
+    (at both channel and both token bounds), eagerly and inside a capture, whatever ``PDL_EAGER`` / ``PDL_GRAPH``
+    say; outside every key it is the tables' value, as without a row: one token below a key, a channel count off the
+    8-channel grid, every other route (``bwd_bias``, ``bwd_dt`` and the forward routes among them) at a key's row,
+    and every row on an architecture without keys (sm_107a); one channel step below and above a key and one token
+    above it unless another key covers them.
+    ``pdl_off_row_range`` holds the key's token range at its channel counts only.  The row is ``kind``, ``C`` and
+    ``S`` together: a ``kind`` outside ``KINDS``, or a part of the row alone, is a ``ValueError``."""
+
+    rows = PDL_OFF_ROWS_OF_RECORD.get(arch, {})
+    assert cake_jit.PDL_EAGER[arch] and cake_jit.PDL_GRAPH[arch], arch
+    for (route, c_lo, c_hi), (s_min, s_max) in rows.items():
+        for capturing in (False, True):
+            for C in (c_lo, c_hi):
+                for S in (s_min, s_max):
+                    assert cake_jit.pdl_enabled(arch, capturing=capturing, kind=route, C=C, S=S) == 0, (C, S)
+            # one token below the key, the key's row on another route (forward included), the key's row on sm_107a
+            outside = [(route, c_lo, s_min - 1), (route, c_hi, s_min - 1)]
+            outside += [
+                (kind, C, s_min) for kind in ("bwd_bias", "bwd_dt", "fwd") if kind != route for C in (c_lo, c_hi)
+            ]
+            for kind, C, S in outside:
+                got = cake_jit.pdl_enabled(arch, capturing=capturing, kind=kind, C=C, S=S)
+                assert got == 1, (kind, C, S, capturing)
+            assert cake_jit.pdl_enabled("sm_107a", capturing=capturing, kind=route, C=c_hi, S=s_min) == 1
+            # next to the key (another key of the route may cover these): the tables' value unless a key covers it
+            near = [(c_lo - 8, s_min), (c_hi + 8, s_min), (c_lo + 4, s_min), (c_hi, s_max + 1)]
+            for C, S in near:
+                got = cake_jit.pdl_enabled(arch, capturing=capturing, kind=route, C=C, S=S)
+                assert got == _pdl_off_expected(arch, route, C, S, capturing), (route, C, S, capturing)
+            assert cake_jit.pdl_enabled(arch, capturing=capturing, kind=route, C=c_lo + 4, S=s_min) == 1
+    channels = {512, 1016, 1024}
+    tokens = {1, 1000, 125170, 131072, 131073, 187754, 187755, 250340, cake_jit.INT32_MAX}
+    for (_, c_lo, c_hi), (s_min, s_max) in rows.items():
+        channels |= {c_lo - 8, c_lo, c_lo + 4, (c_lo + c_hi) // 16 * 8, c_hi, c_hi + 8}
+        tokens |= {s_min - 1, s_min, s_max, s_max + 1}
+    turned_off = 0
+    for eager_on, graph_on in ((True, True), (False, True), (True, False), (False, False)):
+        monkeypatch.setitem(cake_jit.PDL_EAGER, arch, eager_on)
+        monkeypatch.setitem(cake_jit.PDL_GRAPH, arch, graph_on)
+        for capturing in (False, True):
+            table = int(graph_on if capturing else eager_on)
+            assert cake_jit.pdl_enabled(arch, capturing=capturing) == table
+            for kind in cake_jit.KINDS:
+                for C in sorted(c for c in channels if c > 0):
+                    keys = [b for (r, lo, hi), b in rows.items() if r == kind and lo <= C <= hi and C % 8 == 0]
+                    assert cake_jit.pdl_off_row_range(arch, kind, C) == (keys[0] if keys else None), (kind, C)
+                    for S in sorted(s for s in tokens if s > 0):
+                        want = _pdl_off_expected(arch, kind, C, S, capturing)
+                        got = cake_jit.pdl_enabled(arch, capturing=capturing, kind=kind, C=C, S=S)
+                        assert type(got) is int and got == want, (kind, C, S, capturing, eager_on, graph_on)
+                        turned_off += want == 0 and table == 1
+    assert bool(turned_off) is bool(rows), (arch, turned_off)
+    for row in (
+        dict(kind="bwd"),
+        dict(C=1016),
+        dict(S=187755),
+        dict(kind="bwd", C=1016),
+        dict(kind="bwd", S=187755),
+        dict(C=1016, S=187755),
+        dict(kind="bwd_unknown", C=1016, S=187755),
+    ):
+        with pytest.raises(ValueError):
+            cake_jit.pdl_enabled(arch, capturing=False, **row)
+    with pytest.raises(ValueError):
+        cake_jit.pdl_enabled("sm_90a", capturing=False, kind="bwd", C=1016, S=187755)
 
 
 _KERNEL_SIGNATURE = re.compile(r"__global__[^;{]*?\b(kernel_\w+)\s*\(")
@@ -2163,6 +2291,65 @@ def test_backward_entries_alert_before_any_device_work(monkeypatch) -> None:
     finally:
         torch.use_deterministic_algorithms(prev, warn_only=prev_warn)
     assert launched == []
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_backward_entry_passes_its_row_to_pdl_enabled(arch, fake_device, monkeypatch) -> None:
+    """The backward entry passes its route, ``C`` and ``S`` to ``pdl_enabled``: its launch takes ``enable_pdl`` 0 at
+    the rows of :data:`PDL_OFF_ROWS_OF_RECORD`, eagerly and inside a capture, and the tables' value elsewhere (one
+    token below a key, every row of an architecture without keys); a call of the bias route at a key's row and every
+    forward launch at those rows take the tables' value.  Checked without a device: meta tensors, a fake device of
+    the architecture, the capture query, the device index, the dweight alignment check and the workspace helpers
+    stubbed, and each launch's ``enable_pdl`` recorded at ``run_module`` (nothing launches)."""
+
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    monkeypatch.setattr(pkg, "_device_arch", lambda device: arch)
+    monkeypatch.setattr(pkg, "_device_index", lambda device: FAKE_DEVICE)
+    monkeypatch.setattr(pkg, "_dweight_aligned", lambda dw: dw)
+    monkeypatch.setattr(pkg, "_forward_work", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pkg, "_backward_accumulators", lambda *args, **kwargs: (None, None))
+    launched = []
+    monkeypatch.setattr(
+        pkg, "run_module", lambda name, values, **kwargs: launched.append((name, values["enable_pdl"]))
+    )
+    capture = {"on": False}
+    monkeypatch.setattr(torch.cuda, "is_current_stream_capturing", lambda: capture["on"])
+    meta = torch.device("meta")
+    rows = PDL_OFF_ROWS_OF_RECORD.get(arch, {})
+    cases = {(250340, 1016)}
+    for (route, c_lo, c_hi), (s_min, _s_max) in rows.items():
+        assert route == "bwd", route
+        cases |= {(S, C) for C in (c_lo, c_hi) for S in (s_min - 1, s_min, max(s_min, 250340))}
+    turned_off = 0
+    for S, C in sorted(cases):
+        x = torch.empty((S, C), dtype=torch.bfloat16, device=meta)
+        w = torch.empty((C, 4), dtype=torch.float32, device=meta)
+        b = torch.empty((C,), dtype=torch.float32, device=meta)
+        cu = torch.empty((2,), dtype=torch.int32, device=meta)
+        for capturing in (False, True):
+            capture["on"] = capturing
+            table = int((cake_jit.PDL_GRAPH if capturing else cake_jit.PDL_EAGER)[arch])
+            want = _pdl_off_expected(arch, "bwd", C, S, capturing)
+            assert want == cake_jit.pdl_enabled(arch, capturing=capturing, kind="bwd", C=C, S=S)
+            label = (S, C, capturing)
+            launched.clear()
+            pkg.cake_causal_conv1d_nondet_train_forward(x, w, cu)
+            forward = list(launched)
+            assert forward and all(name in cake_jit.route_modules(arch, "fwd") for name, _ in forward), label
+            assert all(value == table for _, value in forward), (label, forward)
+            launched.clear()
+            pkg.cake_causal_conv1d_nondet_train_backward(x, w, cu, x)
+            ((name, value),) = launched
+            assert name in cake_jit.route_modules(arch, "bwd"), (label, name)
+            assert value == want, (label, name, value, want)
+            launched.clear()
+            pkg.cake_causal_conv1d_nondet_train_backward(x, w, cu, x, bias=b)
+            ((name, value),) = launched
+            assert name in cake_jit.route_modules(arch, "bwd_bias"), (label, name)
+            assert value == table, (label, name, value, table)
+            turned_off += want != table
+    assert bool(turned_off) is bool(rows), (arch, turned_off)
 
 
 @pytest.mark.cpu_only

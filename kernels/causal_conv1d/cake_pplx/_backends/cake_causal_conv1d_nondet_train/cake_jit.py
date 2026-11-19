@@ -85,7 +85,9 @@ Every program but the pair routes' launches with ``launch.use_pdl`` of
 ``"runtime"``: its binding takes the ``enable_pdl`` launch scalar and sets the
 programmatic dependent launch attribute when it is 1, which the host chooses
 per architecture and per mode (outside or inside a CUDA Graph capture;
-:data:`PDL_EAGER`, :data:`PDL_GRAPH`, :func:`pdl_enabled`).  Each program
+:data:`PDL_EAGER`, :data:`PDL_GRAPH`), except that a backward call at a row
+of :data:`PDL_OFF_ROWS` (its route, ``C`` and ``S``) passes 0 in both modes
+(:func:`pdl_enabled`).  Each program
 waits for the stream's preceding kernel (``griddepcontrol.wait``) before it
 reads or writes global memory, so the attribute changes only when a launch may
 start, never what it computes.  The det package's forward programs, which this
@@ -6179,20 +6181,74 @@ def _stream_context(device_index: int) -> Any:
 
 # The programmatic dependent launch policy of the records whose ``launch.use_pdl`` is ``"runtime"`` (their binding
 # takes the ``enable_pdl`` launch scalar, :data:`LOGICAL_SCALARS`), per architecture: ``PDL_EAGER[arch]`` for a call
-# outside a CUDA Graph capture, ``PDL_GRAPH[arch]`` for a call inside one (read through :func:`pdl_enabled`).  With
-# the attribute the launch may start while the stream's preceding kernel finishes; every program waits for that
-# kernel (``griddepcontrol.wait``) before it reads or writes global memory, so the results are the same either way.
+# outside a CUDA Graph capture, ``PDL_GRAPH[arch]`` for a call inside one (read through :func:`pdl_enabled`), except
+# at the backward rows of :data:`PDL_OFF_ROWS`.  With the attribute the launch may start while the stream's
+# preceding kernel finishes; every program waits for that kernel (``griddepcontrol.wait``) before it reads or writes
+# global memory, so the results are the same either way.
 PDL_EAGER: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
 PDL_GRAPH: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+# The backward rows that launch without programmatic dependent launch, outside and inside a CUDA Graph capture,
+# whatever :data:`PDL_EAGER` and :data:`PDL_GRAPH` say: ``{arch: {(route, C_lo, C_hi): (S_min, S_max)}}`` (the form
+# of :data:`FALLBACK_ROWS`), a backward call of ``route`` on ``arch`` with ``C_lo <= C <= C_hi`` channels (a
+# multiple of 8) and ``S_min <= S <= S_max`` tokens passes ``enable_pdl`` 0 (:func:`pdl_off_row_range`,
+# :func:`pdl_enabled`).  The keys of one ``(arch, route)`` are disjoint.  Measured on sm_100a (GB200) and sm_103a
+# (GB300) in the training step and the checkpointed step (on one stream, the backward right after a forward): at these
+# rows the ``bwd`` program, launched with the attribute, starts before the forward ends and then runs longer, and the
+# step is slower than when only that backward launch goes without the attribute.  ``S_max`` is
+# ``INT32_MAX``: a row runs from its measured first token count to the largest call the package takes.  Every other
+# route, row and architecture (sm_107a has no rows), and every forward launch, keep the two tables.
+PDL_OFF_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("bwd", 1016, 1016): (187755, 2147483647),
+    },
+    "sm_103a": {
+        ("bwd", 1016, 1016): (131073, 2147483647),
+    },
+}
 
 
-def pdl_enabled(arch: str, *, capturing: bool) -> int:
+def pdl_off_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
+    """The ``(S_min, S_max)`` of the :data:`PDL_OFF_ROWS` key of ``arch`` on
+    route ``kind`` covering ``C`` (``C_lo <= C <= C_hi``, ``C`` a multiple of
+    8), ``None`` without one: inside that token range (both bounds included)
+    the call launches without programmatic dependent launch."""
+
+    C = int(C)
+    if C % CHANNEL_MULTIPLE:
+        return None
+    for (route, c_lo, c_hi), (s_min, s_max) in PDL_OFF_ROWS.get(arch, {}).items():
+        if route == kind and int(c_lo) <= C <= int(c_hi):
+            return int(s_min), int(s_max)
+    return None
+
+
+def pdl_enabled(
+    arch: str,
+    *,
+    capturing: bool,
+    kind: str | None = None,
+    C: int | None = None,
+    S: int | None = None,
+) -> int:
     """The ``enable_pdl`` value, 0 or 1, of a launch on ``arch`` (one of :data:`ARCHES`, a ``ValueError``
-    otherwise): :data:`PDL_GRAPH` inside a CUDA Graph capture (``capturing``), else :data:`PDL_EAGER`.  A record
-    whose ``launch.use_pdl`` is not ``"runtime"`` binds no ``enable_pdl`` and ignores the value."""
+    otherwise): 0 for a call of route ``kind`` with ``C`` channels and ``S`` tokens inside a :data:`PDL_OFF_ROWS`
+    key (:func:`pdl_off_row_range` holds ``S``), in both modes; else :data:`PDL_GRAPH` inside a CUDA Graph capture
+    (``capturing``) and :data:`PDL_EAGER` outside one.  The row is ``kind`` (one of :data:`KINDS`), ``C`` and ``S``
+    together, or none of them (the two tables' value): a ``kind`` outside :data:`KINDS`, or one or two of the three
+    alone, is a ``ValueError``.  The call reads the tables and the rows every time (nothing is planned or cached).
+    A record whose ``launch.use_pdl`` is not ``"runtime"`` binds no ``enable_pdl`` and ignores the value."""
 
     if arch not in ARCHES:
         raise ValueError(f"arch must be one of {ARCHES}, got {arch!r}")
+    if kind is not None or C is not None or S is not None:
+        if kind not in KINDS or C is None or S is None:
+            raise ValueError(
+                f"the row of pdl_enabled is kind (one of {KINDS}), C and S together, got "
+                f"kind={kind!r}, C={C!r}, S={S!r}"
+            )
+        bounds = pdl_off_row_range(arch, kind, C)
+        if bounds is not None and bounds[0] <= int(S) <= bounds[1]:
+            return 0
     return int(bool((PDL_GRAPH if capturing else PDL_EAGER)[arch]))
 
 
@@ -6249,9 +6305,10 @@ def run_module(
     the call, as the public entry points pass it), else the module's
     :func:`launch_grid` on ``device_index`` for the call's ``C`` and ``S``,
     and the kernel runs on the current torch stream; a
-    module whose launch record enables programmatic dependent launch
-    (``use_pdl``) overlaps its launch with the preceding kernel of that stream
-    and waits for it in-kernel.
+    module whose launch record takes the programmatic dependent launch scalar
+    (``use_pdl`` ``"runtime"``), launched with ``enable_pdl`` 1, overlaps its
+    launch with the preceding kernel of that stream and waits for it
+    in-kernel.
     """
 
     run_modules(((name, grid),), values, device_index=device_index)
@@ -6277,6 +6334,7 @@ __all__ = [
     "PAIR_ROUTES",
     "PDL_EAGER",
     "PDL_GRAPH",
+    "PDL_OFF_ROWS",
     "PLAN_SCALARS",
     "REQUIRED_KINDS",
     "ROLES",
@@ -6314,6 +6372,7 @@ __all__ = [
     "load",
     "main_grid",
     "pdl_enabled",
+    "pdl_off_row_range",
     "plan",
     "record_route",
     "route_applies",
