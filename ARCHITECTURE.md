@@ -47,7 +47,7 @@ tools/              # check_isolation.py, templates/ (JIT shim and API decorator
 
 Each `kernels/<family>/` directory is an independent Python distribution named `cake-pplx-<family>`. It has its own `pyproject.toml`, `VERSION`, `README.md`, tests and benchmarks. mok has no `benchmarks/` directory.
 
-The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row.
+The `det`, `nondet` and KCP variants of one family ship together. They share tests and reference code. `det` is the reference for `nondet`. fmha has no `det` module; its tests use an FP64 oracle beside the same math in BF16. act_qdq has no `nondet` and no KCP module: no step of the op has an order to relax, and the op works on each token alone; its tests compare every output bit for bit with an FP64 oracle. clamped_swiglu, like gated_act_mxfp8, has no `nondet` module: every output is elementwise or a sum within one row. gated_kv_compression has a `det` module only, because each of its outputs depends on one token pair and no non-deterministic step exists; its tests also use an FP64 oracle beside the same math in BF16.
 
 ## Overview
 
@@ -75,7 +75,7 @@ flowchart LR
 
 ## Family index
 
-The repository has 20 families and 38 backend packages, about 273 MB in total. Most of this is generated CUDA in `csrc/`.
+The repository has 21 families and 39 backend packages, about 274 MB in total. Most of this is generated CUDA in `csrc/`.
 
 | Family | Backend packages | Distribution |
 |---|---|---|
@@ -90,6 +90,7 @@ The repository has 20 families and 38 backend packages, about 273 MB in total. M
 | `lm_head` | det, nondet | `cake-pplx-lm-head` |
 | `moe_grouped_gemm` | det, nondet | `cake-pplx-moe-grouped-gemm` |
 | `dense_gemm` | det, nondet | `cake-pplx-dense-gemm` |
+| `gated_kv_compression` | det | `cake-pplx-gated-kv-compression` |
 | `dsa_indexer` | det, nondet | `cake-pplx-dsa-indexer` |
 | `dsa_sparse_attention` | det, nondet | `cake-pplx-dsa-sparse-attention` |
 | `gqa` | det, nondet | `cake-pplx-gqa` |
@@ -226,6 +227,6 @@ Run the tests of `tests/cross_family/<family>/` the same way, in an environment 
 ## Open items
 
 - **GPU CI.** The GPU CI runners are not yet configured, and no CI lane runs `tests/cross_family/` yet.
-- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc, mhc_head, mok and rmsnorm are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`), and act_qdq, clamped_swiglu and engram_lookup on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
+- **Architecture coverage.** The kernels are validated on GB300 (`sm_103a`) only. `sm_100a` and `sm_107a` are not validated yet. Exceptions: fmha, causal_conv1d, mhc, mhc_head, mok and rmsnorm are validated on GB200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`), and act_qdq, clamped_swiglu, engram_lookup and gated_kv_compression on B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`).
 - **Wheel publication.** We have not decided whether to publish wheels to a package index.
 - **KCP context protocol.** Add the `KCP_CONTEXT_PROTOCOL` version check for the `causal_conv1d`/KDA/GDN KCP context, starting at version 1.
