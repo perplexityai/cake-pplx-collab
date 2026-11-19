@@ -274,6 +274,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``token_blocks``).
     "cake_causal_conv1d_train_a81632301ba92a887c46": {
         "arches": [
+            "sm_100a",
             "sm_103a",
             "sm_107a",
         ],
@@ -1225,6 +1226,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # cap ``token_blocks``).
     "cake_causal_conv1d_train_21b9be3d1093abe38406": {
         "arches": [
+            "sm_100a",
             "sm_103a",
             "sm_107a",
         ],
@@ -1451,6 +1453,7 @@ MODULES: dict[str, dict[str, Any]] = {
     # most one CTA per token block (grid cap ``token_blocks``).
     "cake_causal_conv1d_train_8ed855b04178bc5d90f9": {
         "arches": [
+            "sm_100a",
             "sm_103a",
             "sm_107a",
         ],
@@ -5188,14 +5191,17 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "fwd": [
             "cake_causal_conv1d_train_f193c5247980992f4f81",
             "cake_causal_conv1d_train_f5497330bfd286211643",
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
         ],
         "fwd_bias": [
             "cake_causal_conv1d_train_62cb38eb8aa667d46bc1",
             "cake_causal_conv1d_train_08880ca12e4064bc8cdb",
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ],
         "fwd_dt": [
             "cake_causal_conv1d_train_0f3982a5518f5a8696f6",
             "cake_causal_conv1d_train_9c1e7ee9f37e3102660e",
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ],
     },
     "sm_103a": {
@@ -5672,17 +5678,21 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
-        ("fwd", 576, 632): (1, 8192),
-        ("fwd", 640, 640): (24576, 24576),
-        ("fwd", 648, 696): (1, 12288),
-        ("fwd", 704, 768): (1, 16384),
-        ("fwd_bias", 576, 632): (1, 8192),
-        ("fwd_bias", 640, 640): (24576, 24576),
-        ("fwd_bias", 648, 696): (1, 12288),
-        ("fwd_bias", 704, 768): (1, 16384),
-        ("fwd_dt", 576, 576): (1, 16384),
-        ("fwd_dt", 584, 696): (1, 12288),
-        ("fwd_dt", 704, 768): (1, 16384),
+        ("fwd", 576, 576): (1, 4096),
+        ("fwd", 584, 640): (1, 8192),
+        ("fwd", 648, 704): (1, 12288),
+        ("fwd", 712, 712): (1, 12288),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 4096),
+        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 648, 696): (1, 8192),
+        ("fwd_bias", 704, 704): (1, 16384),
+        ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_dt", 576, 576): (1, 4096),
+        ("fwd_dt", 584, 640): (1, 8192),
+        ("fwd_dt", 648, 696): (1, 8192),
+        ("fwd_dt", 704, 704): (1, 12288),
+        ("fwd_dt", 712, 768): (1, 16384),
     },
     "sm_103a": {
         ("bwd", 520, 608): (1, 20479),
@@ -5748,6 +5758,22 @@ def fallback_row_range(arch: str, kind: str, C: int) -> tuple[int, int] | None:
 # :data:`FALLBACK_ROWS` ends where the direct range starts.  Rendered from the
 # forward kernel generator's table; above ``S_hi`` the rules select.
 DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
+    "sm_100a": {
+        ("fwd", 576, 576): (4097, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
+        ("fwd", 584, 640): (8193, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
+        ("fwd", 648, 704): (12289, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
+        ("fwd", 712, 712): (12289, 20480, "cake_causal_conv1d_train_a81632301ba92a887c46"),
+        ("fwd", 720, 768): (8193, 20480, "cake_causal_conv1d_train_a81632301ba92a887c46"),
+        ("fwd_bias", 576, 576): (4097, 24576, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
+        ("fwd_bias", 584, 632): (4097, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
+        ("fwd_bias", 648, 696): (8193, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
+        ("fwd_bias", 704, 704): (16385, 20480, "cake_causal_conv1d_train_8ed855b04178bc5d90f9"),
+        ("fwd_dt", 576, 576): (4097, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd_dt", 584, 640): (8193, 24576, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd_dt", 648, 696): (8193, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd_dt", 704, 704): (12289, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+        ("fwd_dt", 712, 768): (16385, 20480, "cake_causal_conv1d_train_21b9be3d1093abe38406"),
+    },
     "sm_103a": {
         ("fwd", 576, 632): (2049, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
         ("fwd", 640, 696): (4097, 24576, "cake_causal_conv1d_train_a81632301ba92a887c46"),
@@ -5778,6 +5804,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
 # a call of ``C`` channels runs ``ceil(C / vec / ct_vec)`` tiles; the tiles each
 # route's direct program was timed on, one form per architecture and route.
 DIRECT_PLANS: dict[str, dict[str, tuple[int, int]]] = {
+    "sm_100a": {"fwd": (8, 16), "fwd_dt": (8, 16), "fwd_bias": (8, 16)},
     "sm_103a": {"fwd": (8, 16), "fwd_dt": (16, 8), "fwd_bias": (8, 16)},
     "sm_107a": {"fwd": (8, 16), "fwd_dt": (16, 8), "fwd_bias": (8, 16)},
 }
