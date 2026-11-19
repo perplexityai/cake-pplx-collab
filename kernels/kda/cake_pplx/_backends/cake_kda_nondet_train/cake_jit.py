@@ -465,6 +465,44 @@ SEGMENTS: dict[str, Any] = {
     "prop_max_chains": 4,
     "plan_heads_by_arch": {"sm_103a": [16], "sm_107a": [16]},
 }
+# The token-aware segment rule (:func:`segment_route` given ``num_tokens``, the
+# pack's token count S; the backend's plans pass it by default).  The rule
+# above reads the occupancy alone and gives P_old segments per document.  On
+# the measured envelope (an architecture of ``sm_counts_by_arch`` with one of
+# its SM counts: GB300, ``sm_103a`` with 152 SMs; a head count of ``heads``;
+# the segmented route) a pack too short for the occupancy plan to save the
+# segment states takes fewer segments: ``P_ns = S // (save_min_tokens_per_seg
+# * N) + 1`` segments per document save no state either, and the plan takes
+# ``P_u = max(P_ns, min_uniform_segments, ceil(S / max_segment_tokens))`` when
+# ``P_u < P_old``.  Elsewhere P_old stays.  The block table keeps the occupancy
+# rule's form: uniform above ``SEGMENTS["prop_max_chains"]`` (document, head)
+# chains, proportional at or below it.  So the count never exceeds P_old, the
+# saved set and the arena never grow, the route never changes, and above
+# ``prop_max_chains`` chains every document keeps the same count in a group of
+# documents (the batched arena option) as in the whole pack.
+#
+# Why each bound (GB300, CUDA kernel time of the forward and the backward
+# against the occupancy plan, on even and skewed packs: one document holding
+# most of the tokens; memory at or below it on every measured row):
+# - ``min_uniform_segments`` 12: every slower uniform table on a skewed pack
+#   had 8 or fewer segments per document (2-45 % slower); every uniform count
+#   of 12 or more on a short pack was not slower.
+# - ``max_segment_tokens`` 1408 bounds the segments of a document as long as
+#   the pack: the slower skewed rows had segments of 1501 tokens or more, 1334
+#   was not slower.
+# Host scalars cannot tell a skewed pack from an even one, so every bound is
+# the one measured safe on both.  Outside the envelope (other architectures,
+# SM counts or head counts, the serial route) and without a token count the
+# occupancy rule alone decides: the constants were fitted on GB300 only.
+# ``save_min_tokens_per_seg`` is the backend's ``SEG_SAVE_MIN_TOKENS_PER_SEG``
+# (a test holds the two equal).
+TOKEN_SEGMENTS: dict[str, Any] = {
+    "sm_counts_by_arch": {"sm_103a": [152]},
+    "heads": [4, 8, 16],
+    "save_min_tokens_per_seg": 384,
+    "min_uniform_segments": 12,
+    "max_segment_tokens": 1408,
+}
 # The two-level segment carry (``seg_carry_v8``: the segments of each
 # document's chain in groups of ``gsize``, the groups' products formed in
 # parallel and chained, the CTAs handing over through release-flag words
@@ -11129,27 +11167,11 @@ def _admits(
     raise ValueError(f"unknown Cake KDA training selection rule: {kind!r}")
 
 
-def segment_plan(
-    num_seqs: int, num_heads: int, sm_count: int, arch: str | None = None
+def _occupancy_segments(
+    n: int, h: int, sm: int, arch: str | None
 ) -> tuple[str, int, int]:
-    """``(route, segments, num_segments)`` of the state recurrences: ``("seg", P,
-    num_seqs * P)`` with ``P = clamp(ceil(slot_factor * sm_count / (num_seqs *
-    num_heads)), 1, max_segments)``, at most ``sm_count // num_heads`` (and at
-    least one: one document's walk CTAs fit one wave), capped at the few-chain
-    count when ``num_seqs * num_heads <= small_max_chains`` (``arch``'s entry of
-    ``small_segments_by_arch``, else ``small_segments``; ``arch=None`` is the
-    architecture-independent count), when ``num_heads <= SEGMENTS["max_heads"]``
-    or ``num_heads`` is in ``arch``'s entry of ``SEGMENTS["plan_heads_by_arch"]``
-    (the 16-head rows of ``sm_103a`` / ``sm_107a``; ``arch=None`` has no entry),
-    else the serial walk ``("serial", 1, 0)``.  A pure function of the scalars:
-    the route the ``route_in`` rules of the records read.
-    """
-    n, h, sm = int(num_seqs), int(num_heads), int(sm_count)
-    if n < 1 or h < 1 or sm < 1:
-        raise ValueError(
-            f"segment_plan: num_seqs={num_seqs}, num_heads={num_heads}, "
-            f"sm_count={sm_count} must all be >= 1"
-        )
+    """The occupancy rule of :data:`SEGMENTS` (:func:`segment_plan` without a
+    token count) on validated scalars: ``(route, segments, num_segments)``."""
     plan_heads = SEGMENTS["plan_heads_by_arch"].get(arch, ()) if arch else ()
     if h > int(SEGMENTS["max_heads"]) and h not in plan_heads:
         return ("serial", 1, 0)
@@ -11163,20 +11185,115 @@ def segment_plan(
     return ("seg", segments, n * segments)
 
 
+def _token_rule_serves(h: int, sm: int, arch: str | None) -> bool:
+    """Whether the token-aware rule (:data:`TOKEN_SEGMENTS`) decides a segmented
+    problem of ``h`` heads on ``arch`` with ``sm`` SMs: its measured envelope
+    (``arch=None`` has no entry)."""
+    sms = TOKEN_SEGMENTS["sm_counts_by_arch"].get(arch, ()) if arch else ()
+    return sm in sms and h in TOKEN_SEGMENTS["heads"]
+
+
+def segment_route(
+    num_seqs: int,
+    num_heads: int,
+    sm_count: int,
+    arch: str | None = None,
+    *,
+    num_tokens: int | None = None,
+) -> tuple[str, int, int, int]:
+    """``(route, segments, num_segments, proportional)`` of the state
+    recurrences: :func:`segment_plan`'s triple and the block table's form
+    (:func:`segment_args`).
+
+    Without ``num_tokens`` (``None``) the occupancy rule of :data:`SEGMENTS`
+    decides: ``("seg", P_old, num_seqs * P_old, proportional)``, the table
+    proportional at most ``SEGMENTS["prop_max_chains"]`` (document, head)
+    chains, or the serial walk ``("serial", 1, 0, 0)``.  With the pack's token
+    count ``num_tokens`` the token-aware rule of :data:`TOKEN_SEGMENTS` decides
+    on its envelope (an architecture and SM count of ``sm_counts_by_arch``, a
+    head count of ``heads``, the segmented route): a pack too short to save the
+    segment states takes ``P_u < P_old`` segments per document, in the table
+    form of the occupancy rule; elsewhere the occupancy rule stays.  So
+    ``num_segments`` never exceeds the occupancy rule's, and neither the route
+    nor the table form changes.  A pure function of the scalars.
+    """
+    n, h, sm = int(num_seqs), int(num_heads), int(sm_count)
+    if n < 1 or h < 1 or sm < 1:
+        raise ValueError(
+            f"segment_plan: num_seqs={num_seqs}, num_heads={num_heads}, "
+            f"sm_count={sm_count} must all be >= 1"
+        )
+    if num_tokens is not None and int(num_tokens) < 0:
+        raise ValueError(f"segment_plan: num_tokens={num_tokens} must be >= 0")
+    route, p_old, nseg_old = _occupancy_segments(n, h, sm, arch)
+    few = n * h <= int(SEGMENTS["prop_max_chains"])
+    occupancy = (route, p_old, nseg_old, int(route == "seg" and few))
+    if num_tokens is None or route != "seg" or not _token_rule_serves(h, sm, arch):
+        return occupancy
+    s = int(num_tokens)
+    # P_ns or more segments per document save no state (the backend's size rule)
+    p_ns = s // (int(TOKEN_SEGMENTS["save_min_tokens_per_seg"]) * n) + 1
+    p_u = max(
+        p_ns,
+        int(TOKEN_SEGMENTS["min_uniform_segments"]),
+        -(-s // int(TOKEN_SEGMENTS["max_segment_tokens"])),
+    )
+    # P_u < P_old implies P_ns < P_old: the occupancy plan saves no state either
+    if p_u >= p_old:
+        return occupancy
+    return ("seg", p_u, n * p_u, occupancy[3])
+
+
+def segment_plan(
+    num_seqs: int,
+    num_heads: int,
+    sm_count: int,
+    arch: str | None = None,
+    *,
+    num_tokens: int | None = None,
+) -> tuple[str, int, int]:
+    """``(route, segments, num_segments)`` of the state recurrences.
+
+    The occupancy rule (``num_tokens=None``): ``("seg", P, num_seqs * P)`` with
+    ``P = clamp(ceil(slot_factor * sm_count / (num_seqs * num_heads)), 1,
+    max_segments)``, at most ``sm_count // num_heads`` (and at least one: one
+    document's walk CTAs fit one wave), capped at the few-chain count when
+    ``num_seqs * num_heads <= small_max_chains`` (``arch``'s entry of
+    ``small_segments_by_arch``, else ``small_segments``; ``arch=None`` is the
+    architecture-independent count), when ``num_heads <= SEGMENTS["max_heads"]``
+    or ``num_heads`` is in ``arch``'s entry of ``SEGMENTS["plan_heads_by_arch"]``
+    (the 16-head rows of ``sm_103a`` / ``sm_107a``; ``arch=None`` has no entry),
+    else the serial walk ``("serial", 1, 0)``.  Given the pack's token count
+    ``num_tokens`` the token-aware rule of :data:`TOKEN_SEGMENTS` decides on its
+    envelope (:func:`segment_route`; at most the occupancy count, the same
+    route).  A pure function of the scalars: the route the ``route_in`` rules of
+    the records read.
+    """
+    route, segments, num_segments, _proportional = segment_route(
+        num_seqs, num_heads, sm_count, arch, num_tokens=num_tokens
+    )
+    return (route, segments, num_segments)
+
+
 def segment_args(
-    num_seqs: int, num_heads: int, sm_count: int, arch: str | None = None
+    num_seqs: int,
+    num_heads: int,
+    sm_count: int,
+    arch: str | None = None,
+    *,
+    num_tokens: int | None = None,
 ) -> tuple[int, int]:
-    """``(proportional, seg_arg)`` of the segmented route's programs: with at most
-    ``SEGMENTS["prop_max_chains"]`` (document, head) chains ``seg_table`` gives the
-    documents proportional segment counts (``proportional = 1``) and the walk
-    programs take ``seg_arg = -num_seqs`` (the chains' bounds come from the
-    table); otherwise ``(0, segments)``, every document ``segments`` long.  On
-    the serial route ``(0, 1)`` (no program reads them).  ``arch`` selects the
-    few-chain segment count (:func:`segment_plan`)."""
-    route, segments, _num_segments = segment_plan(num_seqs, num_heads, sm_count, arch)
-    proportional = int(
-        route == "seg"
-        and int(num_seqs) * int(num_heads) <= int(SEGMENTS["prop_max_chains"])
+    """``(proportional, seg_arg)`` of the segmented route's programs.  With
+    ``proportional = 1`` ``seg_table`` gives the documents proportional segment
+    counts and the walk programs take ``seg_arg = -num_seqs`` (the chains'
+    bounds come from the table); otherwise ``(0, segments)``, every document
+    ``segments`` long.  Both rules (:func:`segment_route`) take the
+    proportional table with at most ``SEGMENTS["prop_max_chains"]`` (document,
+    head) chains.  On the serial route ``(0, 1)`` (no program reads them).
+    ``arch`` selects the few-chain segment count and, with ``num_tokens``, the
+    token-aware rule's envelope (:func:`segment_plan`)."""
+    _route, segments, _num_segments, proportional = segment_route(
+        num_seqs, num_heads, sm_count, arch, num_tokens=num_tokens
     )
     return proportional, (-int(num_seqs) if proportional else segments)
 
@@ -11268,6 +11385,7 @@ def select_record(
     path: str,
     gate: str = "g",
     l2n: str = "off",
+    num_tokens: int | None = None,
 ) -> str | None:
     """The one record of ``stage`` the host scalars select (``None`` for an
     optional stage no record of which admits the problem), among the records
@@ -11296,7 +11414,8 @@ def select_record(
     * slices`` against ``sm_count * ctas_per_sm``) and on the segmented walk's
     CTA count (``walk_ctas_below`` / ``_at_most`` / ``_at_least`` / ``_above``:
     ``num_segments * num_heads`` against ``waves * sm_count``, ``num_segments``
-    from :func:`segment_plan`) and on whether the two-level segment carry's host
+    from :func:`segment_plan`, given ``num_tokens``: the pack's token count S
+    under the token-aware rule) and on whether the two-level segment carry's host
     rule accepts the problem (``carry_two_level`` / ``carry_chain``:
     :func:`carry_choice` with the rule's ``s_hops``); ``arch_in`` reads the device architecture and
     ``path_in`` the call's path (``PATHS``); ``all_of`` conjoins rules and
@@ -11311,7 +11430,9 @@ def select_record(
         raise ValueError(f"path {path!r} is not one of {PATHS}")
     if l2n not in L2N_MODES:
         raise ValueError(f"l2n {l2n!r} is not one of {L2N_MODES}")
-    num_segments = segment_plan(num_seqs, num_heads, sm_count, arch)[2]
+    num_segments = segment_plan(
+        num_seqs, num_heads, sm_count, arch, num_tokens=num_tokens
+    )[2]
     candidates = tuple(
         name
         for name in records_of_stage(stage, gate)
@@ -11653,6 +11774,7 @@ __all__ = [
     "STAGES_BWD",
     "STAGES_FWD",
     "TAPE_TWINS",
+    "TOKEN_SEGMENTS",
     "arch_for_capability",
     "carry_choice",
     "carry_grid",
@@ -11666,6 +11788,7 @@ __all__ = [
     "run_module",
     "segment_args",
     "segment_plan",
+    "segment_route",
     "select_record",
     "sm_count",
     "specs_for_arch",
