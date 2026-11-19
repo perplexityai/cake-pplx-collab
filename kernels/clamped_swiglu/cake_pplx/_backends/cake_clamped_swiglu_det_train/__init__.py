@@ -65,10 +65,9 @@ JIT variables):
   multiple of 8 elements and at least the row width, 16-byte aligned; FP32
   ``[R]`` contiguous for the weight gradient): it is refused with a
   ``ValueError`` otherwise, never copied.  An output must not overlap any
-  input or another output (not checked).  The common call allocates through
-  its first operand (``new_empty``, no device object built); any other call
-  through ``torch.empty`` on the operands' device.  Both are PyTorch's
-  ``empty`` on that device: a contiguous plain tensor.
+  input or another output (not checked).  A new output is ``torch.empty`` on
+  the operands' device (one ``torch.device`` per device index for the
+  process): a contiguous plain tensor.
 - Launches.  One kernel per call.  Each stage has two programs
   (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
   when ``R`` lies in one of its record's windows of rows per SM on the
@@ -380,6 +379,13 @@ def _launcher(stage: str, device_index: int) -> Callable[..., None]:
 
 
 @functools.cache
+def _device(device_index: int) -> torch.device:
+    """CUDA device ``device_index``, one object per device for the process: the device of the new outputs of a common
+    call.  ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``."""
+    return torch.device("cuda", device_index)
+
+
+@functools.cache
 def _ignored_weight(device_index: int) -> torch.Tensor:
     """The ``w`` of an unweighted launch (``weighted`` 0: the kernels read its one element and ignore it): one
     one-element FP32 buffer per device for the process, set to 1, made by the first unweighted call on the device.
@@ -547,7 +553,7 @@ def _fast_operands(
     BF16 ``[R, 2304]`` tensors, both 16-byte aligned; ``weight`` FP32 ``[R]`` or None), ``0 < R < MAX_ROWS``.
     :func:`_operands` accepts such operands with no copy and gives the same tensors.  Any other call (an error, an
     input to copy, ``R = 0``, a tensor subclass) gives None, and :func:`_operands` runs.  No ``torch.device`` is
-    built: the device index is all the common call needs."""
+    read from a tensor: the caller takes the device's own (:func:`_device`)."""
     if type(first) is not torch.Tensor or not first.is_cuda or first.dtype is not torch.bfloat16:
         return None
     shape = first.shape
@@ -626,7 +632,7 @@ def _forward(
         index = int(device.index)
     else:
         index, rows, first, second, w = fast
-        device = copies = None
+        device, copies = _device(index), None
     L = _limit(limit)
     h = out if out is None else _output(out, "out", rows=rows, cols=WIDTH, first=first, index=index)
     if _arch_of_index(index) is None:
@@ -634,11 +640,7 @@ def _forward(
     if copies:
         first, second, w = _read(first, second, w, copies)
     if h is None:
-        # The common call's first operand is a plain BF16 tensor of the device: its new_empty is h.
-        if device is None:
-            h = first.new_empty((rows, WIDTH))
-        else:
-            h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
     if rows == 0:
         return h, L
     # A merged input is the gate itself (its first 2304 columns, at its own row stride) and a view of its second half.
@@ -686,11 +688,11 @@ def _backward(
         index = int(device.index)
     else:
         index, rows, first, second, w = fast
-        device = copies = None
+        device, copies = _device(index), None
     if _FAST_CHECKS and _plain(grad_out, torch.bfloat16, (rows, WIDTH), index):
         dh, copy_dh = grad_out, False
     else:
-        dh, copy_dh = _input(grad_out, "grad_out", rows=rows, cols=WIDTH, device=first.device)
+        dh, copy_dh = _input(grad_out, "grad_out", rows=rows, cols=WIDTH, device=device)
     L = limit if rounded else _limit(limit)
     cols = 2 * WIDTH if second is None else WIDTH
     if second is None and grad_up is not None:
@@ -712,22 +714,12 @@ def _backward(
         first, second, w = _read(first, second, w, copies)
     if copy_dh:
         dh = _copied(dh)
-    # The common call's first operand is a plain BF16 tensor of the device: its new_empty gives the new outputs.
     if d_first is None:
-        if device is None:
-            d_first = first.new_empty((rows, cols))
-        else:
-            d_first = torch.empty(rows, cols, dtype=torch.bfloat16, device=device)
+        d_first = torch.empty(rows, cols, dtype=torch.bfloat16, device=device)
     if second is not None and d_second is None:
-        if device is None:
-            d_second = first.new_empty((rows, WIDTH))
-        else:
-            d_second = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        d_second = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
     if d_weight is None:  # an unweighted call drops it
-        if device is None:
-            d_weight = first.new_empty((rows,), dtype=torch.float32)
-        else:
-            d_weight = torch.empty(rows, dtype=torch.float32, device=device)
+        d_weight = torch.empty(rows, dtype=torch.float32, device=device)
     result = (d_first, d_second, None if w is None else d_weight)
     if rows == 0:
         return result
