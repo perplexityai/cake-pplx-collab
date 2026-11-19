@@ -1887,7 +1887,7 @@ This family has a det module only. The backend package is `cake_pplx._backends.c
 
 | Name | Signature | Returns / notes |
 |---|---|---|
-| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down")` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. With `router_weight_position="before_down"`, `recompute_forward_context` takes `router_weights` (the forward's). An unsupported combination raises `ValueError` before any device work. |
+| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down")` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. With `router_weight_position="before_down"`, `recompute_forward_context` takes `router_weights` (the forward's). An unsupported combination raises `ValueError` (`TypeError` for a non-string position) before any kernel is loaded or launched. |
 | `create_mok_bf16_workspace` | `(*, group, device, num_local_tokens, hidden_size, topk, source_capacity=None, fwd_num_comm_sms="auto", bwd_num_comm_sms="auto", minibatch_size=4096, macrobatch_size=32768, schedule_capacity_multiplier=3/16, precision="bf16", imbalance_comm_sms="auto", imbalance_threshold="auto")` | Collective. Returns `(config, workspace)`. Call it outside CUDA Graph capture. |
 | `quantize_mok_mxfp8_weights` | `(gate, up, down)` | `(forward_weights, backward_weights)` of BF16 routed weights `gate`/`up [E_local, I, H]`, `down [E_local, H, I]` in the MXFP8 recipe. PyTorch operations; requantize after every weight update. |
 
@@ -1923,6 +1923,7 @@ grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *w
 - Prepare and warm up before CUDA Graph capture. Pass the matching context and schedule to `backward`.
 - The MXFP8 forward always saves its context and rejects `save_context=False`.
 - Schedule capacity must hold every padded route; an overflow traps.
+- A context serves one `backward`: when the routed rows exceed one macrobatch, `backward` replays the later macrobatches into the context's routed ring tensors, in either router-weight position. Do not read a context after its `backward`; call `recompute_forward_context` again before another `backward`.
 - `router_weight_position="before_down"` has no `sm_107a` build, no plain SwiGLU, no MXFP8 routed weights and no BF16 weight-gradient accumulation; the package ships no autograd wrapper (a checkpointing caller wraps forward, recompute and backward in its own `torch.autograd.Function`).
 
 ---

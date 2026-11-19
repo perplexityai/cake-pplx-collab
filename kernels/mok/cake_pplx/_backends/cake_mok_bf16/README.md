@@ -125,7 +125,7 @@ to backward; retain both while any captured graph uses them.
 
 With `router_weight_position="before_down"` the workspace is unchanged and
 `scores` are the router weights `w` (FP32 `[tokens, topk]`, each `>= 0`; a zero
-weight is allowed). `prepare_mok_bf16` refuses, before any device work, a
+weight is allowed). `prepare_mok_bf16` refuses, before it loads a kernel, a
 layout or top-k the mode does not run, `clamped_swiglu=False`,
 `fp32_wgrad=False` and an SM107a device; `forward`, `recompute_forward_context`,
 `backward`, `prepare` and `prepare_recompute` refuse `swiglu_limit=None` and
@@ -151,6 +151,13 @@ SwiGLU activation), with no division: it is defined at a zero weight, whose
 route has zero output and zero input gradient. The weights are gathered at
 dispatch into an FP32 row ring, and `d_a = w * dh` before the SwiGLU backward. A
 larger macrobatch ring uses more memory and replays less in backward.
+
+A context serves one `backward`. When the routed rows exceed one macrobatch,
+`backward` replays the later macrobatches into the context's routed ring
+tensors (gate, up and hidden; with three or more macrobatches also the routed
+x), in either router-weight position. Do not read a context after its
+`backward`; call `recompute_forward_context` again before another `backward`
+of the same step.
 
 `backward` returns `dx`, `dscores` and the six weight gradients. The fused
 kernel's routed and shared scratch is released as soon as the launch is
@@ -326,8 +333,9 @@ across communication-SM splits and under CUDA Graph replay.
   settings; 256 routed experts at EP 4/8/16/32/64 (`(4, 64)`, `(8, 32)`,
   `(16, 16)`, `(32, 8)`, `(64, 4)`); 288 routed experts at EP8
   and EP32 (`(8, 36)`, `(32, 9)`). Top-k is 2 or 8.
-- Router-weight positions (`router_weight_position`, any other combination
-  raises `ValueError` before any device work):
+- Router-weight positions (`router_weight_position`; any other combination
+  raises `ValueError`, a non-string position `TypeError`, before any kernel is
+  loaded or launched):
 
   | Position | Layouts (EP, local experts) | Top-k | SwiGLU | Weight gradients | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- |
@@ -450,8 +458,12 @@ across communication-SM splits and under CUDA Graph replay.
   `schedule_capacity_multiplier` `m`; every routing fits when
   `m >= ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local
   experts, `T` source rows per rank), about `(EP + 1) / EP`. No upper bound is
-  enforced: the 384-expert layouts at this bound (for example `(64, 6)` and
-  `(8, 48)` at 16,384 rows, macrobatch 262,144, minibatch 4,096) are tested.
+  enforced. The 384-expert layouts at this bound (`(64, 6)` and `(8, 48)` at
+  16,384 rows, macrobatch 262,144, minibatch 4,096, every route on one rank)
+  run on one GPU with emulated peers: finite outputs, the same bytes run to
+  run, routed x ring rows past 2^31 bytes checked exactly, and `y`, `dx` and the
+  router-weight gradients equal to a 32,768-row macrobatch run. Multi-GPU runs
+  at these layouts are a separate test.
 - Routed weight gradients are summed across macrobatches in BF16 (or in the
   FP32 accumulators). MXFP8 adds quantization error to the routed outputs and
   gradients; the shared expert path is unchanged.

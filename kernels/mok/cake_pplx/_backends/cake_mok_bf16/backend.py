@@ -238,8 +238,9 @@ class MoKFunctional:
         gradient of ``h``; a zero weight is allowed and has its gradient); it
         needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
         ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
-        device. Every unsupported combination raises ``ValueError`` here,
-        before any device work.
+        device. Every unsupported combination raises ``ValueError`` here
+        (``TypeError`` for a non-string position), before any kernel is
+        loaded or launched.
         """
         check_configuration(
             ep,
