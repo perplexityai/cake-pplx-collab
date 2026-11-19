@@ -20,13 +20,19 @@ Every record of ``MODULES`` is one generated program: a CUDA device
 translation unit plus a tvm-ffi binding, compiled once per architecture.  A
 record is keyed by its route: the format (``fp4_e4m3_g16``,
 ``mxfp4_e8m0_g32`` or ``mxfp8_e8m0_g32``), with the suffix ``_scales`` for
-the build that also stores the FP32 scale of each group.  The host plan of a
-record is ``format``, ``scale_out``, ``group`` (the elements of one scale
-group), ``arches``, ``ffi_entry`` and ``grid_rule``.  The derived leaves (``library``, ``kernel_symbol``, ``launch``
-and ``arg_plan``) are written from the rendered program each time the package
-is generated; ``library`` is the program identity (``cake_act_qdq_<20 hex>``),
-so a kernel change renames it.  ``MODULES`` and ``ROUTES`` are literal tables
-(they are read with ``ast.literal_eval``).
+the build that also stores the FP32 scale of each group, and the suffix
+``_small`` for the route's small build or ``_wide`` for its wide build.  The
+host plan of a record is ``format``, ``scale_out``, ``group`` (the elements
+of one scale group), ``arches``, ``ffi_entry``, ``grid_rule`` and, for a
+ranged record (small or wide) only, ``vectors``: per architecture and kind of
+call (``out_of_place`` or ``in_place``), the inclusive ``n_vecs`` range its
+route runs it for, or ``None`` for no size.  The derived leaves (``library``, ``kernel_symbol``,
+``launch`` and ``arg_plan``) are written from the rendered program each time
+the package is generated; ``library`` is the program identity
+(``cake_act_qdq_<20 hex>``, over the kernel's module and build options), so it
+names the same program across revisions of the kernel, and ``build.json``
+records the digests of the sources it is compiled from.  ``MODULES`` and
+``ROUTES`` are literal tables (they are read with ``ast.literal_eval``).
 
 What to compile (sources, digests, nvcc flags) is recorded once in
 ``build.json`` next to this file.  :mod:`.cake_build` serves the library
@@ -39,8 +45,25 @@ trip of a CTA-uniform grid-stride loop, each thread loading its two (four)
 vectors before it computes any, so any grid of at least one CTA is correct.
 The host launches one CTA per tile once the tiles pass 2.5 waves of the CTAs
 the SMs hold (32 per SM, 16 on SM107), else that many CTAs, at most one per
-tile (:func:`launch_grid`).  ``n_vecs`` is a run-time scalar, so a new shape
-never recompiles.  Build every library of the architecture (:func:`specs_for_arch`)
+tile (:func:`launch_grid`).  A small program is the same kernel with CTAs of
+256 threads, two vectors each (tiles of 512 vectors, 8 CTAs per SM, 4 on
+SM107).  A call runs the small record of its route when ``n_vecs`` lies in
+the record's ``vectors`` range for the call's kind, where the problem fills
+at most about one wave and the larger tiles need fewer CTAs: out of place
+65,537 to 524,288 on SM100 and SM103 (to 131,072 for MXFP8 without the
+scales) and 1 to 262,144 on SM107, in place 1 to 262,144 on SM107 only (in
+place on SM100 and SM103 the small program measured no faster).  The wide
+program, MXFP8 without the scales on SM100 and SM103 only, is the same kernel
+with CTAs of 128 threads, four vectors each (tiles of 512 vectors), launched
+one CTA per tile at every size, and with 48 registers per thread, so 10 CTAs
+fit on an SM.  A call runs it above the main and small programs' sizes: out
+of place from 131,073 vectors and in place from 262,145, both to
+2,147,483,136 (``2**31 - 512``, as it forms ``n_vecs + 511``; the main
+program runs above that), where it measured up to 5 % faster than the main
+program.  Every other call runs the main
+record (:func:`selected_module`).  Every program gives the same bytes.  ``n_vecs`` is a run-time scalar, so a library
+serves every shape; a call builds or loads only its own program's library on
+first use.  Build every library of the architecture (:func:`specs_for_arch`)
 before a CUDA graph capture, to keep the JIT out of the capture.
 """
 
@@ -205,34 +228,242 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_act_qdq_e51efb4c536c4e1ed3a3",
         "scale_out": True,
     },
+    # The small build of each route: 256-thread CTAs, two vectors per thread, for the n_vecs of its ``vectors``.
+    "fp4_e4m3_g16_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "fp4_e4m3_g16",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 16,
+        "kernel_symbol": "kernel_cake_act_qdq_31fe4b142ec4ef695bc0",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_31fe4b142ec4ef695bc0",
+        "scale_out": False,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    "fp4_e4m3_g16_scales_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "fp4_e4m3_g16",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 16,
+        "kernel_symbol": "kernel_cake_act_qdq_2023c9ed5353480a0770",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_2023c9ed5353480a0770",
+        "scale_out": True,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    "mxfp4_e8m0_g32_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_fd1904d6eabe30c83dd8",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_fd1904d6eabe30c83dd8",
+        "scale_out": False,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    "mxfp4_e8m0_g32_scales_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp4_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_fcf58c212757a8738714",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_fcf58c212757a8738714",
+        "scale_out": True,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    "mxfp8_e8m0_g32_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_d71450a083590e4d0ab9",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_d71450a083590e4d0ab9",
+        "scale_out": False,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 131072)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 131072)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    "mxfp8_e8m0_g32_scales_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["buffer", "scales"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+            "kind": "tiles",
+            "persist_waves": 2.5,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_bd4ec0bb720b07117a05",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_bd4ec0bb720b07117a05",
+        "scale_out": True,
+        "vectors": {
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+            "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+        },
+    },
+    # The wide build of MXFP8 without the scales, SM100 and SM103 only:
+    # 128-thread CTAs, four vectors per thread, one CTA per tile, for the
+    # n_vecs of its ``vectors``.
+    "mxfp8_e8m0_g32_wide": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [["buffer", "x"], ["buffer", "y"], ["parameter", "n_vecs"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "format": "mxfp8_e8m0_g32",
+        "grid_rule": {
+            "ctas_per_sm": {"sm_100a": 10, "sm_103a": 10},
+            "kind": "tiles",
+            "persist_waves": 0,
+            "tile_vectors": {"sm_100a": 512, "sm_103a": 512},
+            "vector_elements": 8,
+        },
+        "group": 32,
+        "kernel_symbol": "kernel_cake_act_qdq_9b71c6472447855ead3b",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_act_qdq_9b71c6472447855ead3b",
+        "scale_out": False,
+        "vectors": {
+            "sm_100a": {"in_place": (262145, 2147483136), "out_of_place": (131073, 2147483136)},
+            "sm_103a": {"in_place": (262145, 2147483136), "out_of_place": (131073, 2147483136)},
+        },
+    },
 }
 
-# Per architecture, the record each route runs.  A route has exactly one
-# program: the op has no size-dependent choice.
+# Per architecture, the records of each route: its main record and its ranged
+# records (its small record, and on SM100 and SM103 MXFP8's wide record),
+# which a call runs for the ``n_vecs`` of their disjoint ``vectors`` ranges
+# for the call's kind (:func:`selected_module`).
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
-        "fp4_e4m3_g16": ["fp4_e4m3_g16"],
-        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales"],
-        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32"],
-        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales"],
-        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32"],
-        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales"],
+        "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
+        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales", "fp4_e4m3_g16_scales_small"],
+        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_small"],
+        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales", "mxfp4_e8m0_g32_scales_small"],
+        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_small", "mxfp8_e8m0_g32_wide"],
+        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales", "mxfp8_e8m0_g32_scales_small"],
     },
     "sm_103a": {
-        "fp4_e4m3_g16": ["fp4_e4m3_g16"],
-        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales"],
-        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32"],
-        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales"],
-        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32"],
-        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales"],
+        "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
+        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales", "fp4_e4m3_g16_scales_small"],
+        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_small"],
+        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales", "mxfp4_e8m0_g32_scales_small"],
+        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_small", "mxfp8_e8m0_g32_wide"],
+        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales", "mxfp8_e8m0_g32_scales_small"],
     },
     "sm_107a": {
-        "fp4_e4m3_g16": ["fp4_e4m3_g16"],
-        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales"],
-        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32"],
-        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales"],
-        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32"],
-        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales"],
+        "fp4_e4m3_g16": ["fp4_e4m3_g16", "fp4_e4m3_g16_small"],
+        "fp4_e4m3_g16_scales": ["fp4_e4m3_g16_scales", "fp4_e4m3_g16_scales_small"],
+        "mxfp4_e8m0_g32": ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_small"],
+        "mxfp4_e8m0_g32_scales": ["mxfp4_e8m0_g32_scales", "mxfp4_e8m0_g32_scales_small"],
+        "mxfp8_e8m0_g32": ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_small"],
+        "mxfp8_e8m0_g32_scales": ["mxfp8_e8m0_g32_scales", "mxfp8_e8m0_g32_scales_small"],
     },
 }
 
@@ -271,7 +502,8 @@ ALIGNMENT_BYTES = 16
 INT32_MAX = 2**31 - 1
 # ``n_vecs`` is a signed 32-bit kernel argument, and the kernel forms
 # ``n_vecs + 255`` (its tile count on SM107, ``+ 127`` on SM100 / SM103) and
-# its vector indices below that in signed 32 bits.
+# its vector indices below that in signed 32 bits.  A small or wide program
+# forms ``n_vecs + 511``; a call runs it only inside its ``vectors`` range.
 MAX_VECTORS = INT32_MAX - 255
 
 
@@ -305,32 +537,54 @@ def route_modules(arch: str, kind: str) -> tuple[str, ...]:
     return tuple(names)
 
 
-def selected_module(arch: str, format: str, *, scale_out: bool) -> str:
-    """The record a call of ``format`` runs on ``arch``.
+def selected_module(
+    arch: str, format: str, *, scale_out: bool, n_vecs: int, in_place: bool
+) -> str:
+    """The record a call of ``format`` with ``n_vecs`` vectors runs on ``arch``,
+    in place (the output is the input) or out of place.
 
-    A route has exactly one record, and that record must serve the route's
-    format, its scale output and ``arch``; anything else is a registry error
-    (``RuntimeError``).
+    A route lists one main record and its ranged records (the records with
+    ``vectors``: a small record, and a wide one).  The call runs the ranged
+    record whose inclusive ``vectors[arch]`` range for the call's kind
+    (``"in_place"`` or ``"out_of_place"``; ``None`` is no size) holds
+    ``n_vecs``, and the main record when none does.
+    Every record of the route must serve the route's format, its scale output
+    and ``arch``, and at most one range may hold ``n_vecs``; anything else is a
+    registry error (``RuntimeError``).
     """
 
     kind = route_name(format, scale_out=scale_out)
     names = route_modules(arch, kind)
-    if len(names) != 1:
+    main = [name for name in names if "vectors" not in MODULES[name]]
+    ranged = [name for name in names if "vectors" in MODULES[name]]
+    if len(main) != 1:
         raise RuntimeError(
-            f"the route {kind!r} on {arch} lists {len(names)} programs; expected one"
+            f"the route {kind!r} on {arch} lists {list(names)}; expected one main "
+            f"record and its ranged records"
         )
-    name = names[0]
-    record = MODULES[name]
-    if (
-        record["format"] != format
-        or bool(record["scale_out"]) != bool(scale_out)
-        or record["group"] != GROUP_SIZES[format]
-        or arch not in record["arches"]
-    ):
+    for name in names:
+        record = MODULES[name]
+        if (
+            record["format"] != format
+            or bool(record["scale_out"]) != bool(scale_out)
+            or record["group"] != GROUP_SIZES[format]
+            or arch not in record["arches"]
+        ):
+            raise RuntimeError(
+                f"the record {name} of route {kind!r} on {arch} does not serve that route"
+            )
+    call = "in_place" if in_place else "out_of_place"
+    held = []
+    for name in ranged:
+        span = MODULES[name]["vectors"].get(arch, {}).get(call)
+        if span is not None and int(span[0]) <= int(n_vecs) <= int(span[1]):
+            held.append(name)
+    if len(held) > 1:
         raise RuntimeError(
-            f"the record {name} of route {kind!r} on {arch} does not serve that route"
+            f"the ranges of {held} of route {kind!r} on {arch} all hold "
+            f"n_vecs={n_vecs} for a {call} call"
         )
-    return name
+    return held[0] if held else main[0]
 
 
 @functools.cache

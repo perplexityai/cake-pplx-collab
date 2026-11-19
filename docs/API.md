@@ -2054,7 +2054,7 @@ logp2.sum().backward()
 | `"mxfp4_e8m0_g32"` | E2M1 | 32 | `2^ceil(log2(max(amax, 6*2^-126) / 6))` | `6*2^-126` | 6 |
 | `"mxfp8_e8m0_g32"` | E4M3 | 32 | `2^ceil(log2(max(amax, fp32(1e-4)) / 448))` | `fp32(1e-4)` | 448 |
 
-- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 steps give the rule's outputs.
+- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 and BF16 steps give the rule's outputs.
 - The optional second output is the FP32 scale of each group, `[..., D/G]`.
 - One kernel per call reads `x` once and writes `y` (and the scales) once, on the current stream. The input may be any rank; the groups run along the flat buffer.
 
@@ -2075,7 +2075,7 @@ Other public names:
 - `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
 - `is_cake_act_qdq_det_train_supported(device)`.
 
-**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output in 64-thread CTAs. The grid is one CTA per tile of 128 vectors (256 on `sm_107a`) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on `sm_107a`), else the resident CTAs walk the tiles; a new shape or row count never recompiles. The facade reads no environment variable.
+**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs one program of its format and scale output, chosen by `n_vecs = numel / 8` and by whether the call is in place: the small program (256-thread CTAs, tiles of 512 vectors, 8 resident CTAs per SM, 4 on `sm_107a`) out of place for 65,537 to 524,288 vectors on `sm_100a` and `sm_103a` (to 131,072 for MXFP8 without scales) and for 1 to 262,144 on `sm_107a`, and in place for 1 to 262,144 on `sm_107a` only; for MXFP8 without scales on `sm_100a` and `sm_103a`, the wide program (128-thread CTAs, tiles of 512 vectors) out of place from 131,073 vectors and in place from 262,145, both to 2,147,483,136; else the main program (64-thread CTAs, tiles of 128 vectors, 256 on `sm_107a`, 32 resident CTAs per SM, 16 on `sm_107a`). Every program gives the same bytes. The grid is one CTA per tile once the tiles pass 2.5 waves of resident CTAs, else the resident CTAs, at most one per tile, walk the tiles; the wide program always launches one CTA per tile. Every library serves any shape or row count; a call builds or loads its program's library on first use, so before a CUDA graph capture build the architecture's libraries (`cake_jit.specs_for_arch`) or make one eager call per program the capture uses. The facade reads no environment variable.
 
 **Cross-family.** None.
 
