@@ -1739,7 +1739,7 @@ drow, dcol, drow_scales, dcol_scales = cake_gated_act_mxfp8_det_train_backward(
 - **Forward:** `g' = min(g, L)`, `u' = clamp(u, -L, L)`, `a = silu(g') * u'` in FP32, and `h = BF16(w * a)`, the only rounding.
 - **Backward:** with `s = sigmoid(g')`, `d_gate = BF16(dh * w * u' * s * (1 + g' (1 - s)) * [g <= L])`, `d_up = BF16(dh * w * silu(g') * [-L <= u <= L])` and the FP32 `d_weight = sum_c dh * a`. The masks are inclusive: the gradient passes at `g = L` and `u = ±L`. `d_weight` uses the unweighted `a` (no division by `w`), so a zero-weight row gets exactly 0 in `h`, `d_gate` and `d_up` and keeps its `d_weight`.
 - One kernel per call (PyTorch's NaN fills under deterministic algorithms aside; see Caveats). The backward needs only `gate`, `up`, `weight` and `dh`; it recomputes the activation.
-- The sigmoid uses the approximate FP32 base-2 exponential and the approximate reciprocal with one round-to-nearest Newton step (exact below the flushed reciprocal's range, subnormal results kept). Every product rounds to nearest without flushing subnormals; nothing is FP64.
+- The sigmoid uses the approximate FP32 base-2 exponential and the approximate reciprocal with one round-to-nearest Newton step (below the flushed reciprocal's range a scaled reciprocal, within one subnormal ulp). Every product rounds to nearest without flushing subnormals; nothing is FP64.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Other devices raise `RuntimeError`, also for `R = 0`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
 
