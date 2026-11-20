@@ -6736,8 +6736,10 @@ def _cast_fold_range(plan: Plan) -> tuple[int, int]:
 def _flat_cast_folds(plan: Plan) -> bool:
     """Whether ``plan``'s flat dX cast folds the rows of :func:`cast_fold_rows` (an uncompacted plan with a fold
     range): the in-loop cast's key is :data:`DX_CAST_FOLD_STAGE`."""
-    lo, hi = cast_fold_rows(plan)
-    return hi > lo and not plan.compact
+    if plan.compact or not plan.cast_fold:
+        return False
+    lo, hi = plan.cast_fold_range
+    return hi > lo
 
 
 def _flat_fold_values(plan: Plan, t: dict[str, Any]) -> dict[str, Any]:
@@ -6759,9 +6761,11 @@ def _flat_fold_values(plan: Plan, t: dict[str, Any]) -> dict[str, Any]:
 def cast_fold_operands(plan: Plan, t: dict[str, Any]) -> Optional[dict[str, Any]]:
     """The fold operands :func:`finalize_dx` takes from a call's tensors ``t`` (its compact ``labels``, FP32 ``rlab``
     and head ``W``) for the rows :func:`cast_fold_rows` names; ``None`` when the plan folds no row in the cast."""
-    lo, hi = cast_fold_rows(plan)
-    if hi <= lo or not plan.compact:
+    if not (plan.cast_fold and plan.compact):
         return None  # no fold, or the in-loop flat cast's (:data:`DX_CAST_FOLD_STAGE`)
+    lo, hi = plan.cast_fold_range
+    if hi <= lo:
+        return None
     return dict(labels=t["labels"], rlab=t["rlab"], W=t["W"], lo=lo, hi=hi)
 
 
@@ -6771,11 +6775,12 @@ def _dx_keys(plan: Plan, index: int) -> list:
     the fold of the rows' FP32 label residuals (the fold alone after the plain store).  A chunk inside
     :func:`cast_fold_rows` has no slab sum: the compact dX cast folds its rows."""
     keys = [(plan.dx_stage_of(index), index)]
-    lo, hi = cast_fold_rows(plan)
-    if hi > lo:
-        row0, rows_c = plan.chunks[index]
-        if lo <= int(row0) and int(row0) + int(rows_c) <= hi:
-            return keys
+    if plan.cast_fold:  # cast_fold_rows(plan), read where the plan has the fold
+        lo, hi = plan.cast_fold_range
+        if hi > lo:
+            row0, rows_c = plan.chunks[index]
+            if lo <= int(row0) and int(row0) + int(rows_c) <= hi:
+                return keys
     keys.append((plan.dx_slab_sum_stage_of(index), index))
     return keys
 
@@ -6830,17 +6835,18 @@ def _without_rlab_zero(keys: tuple) -> tuple[tuple, bool]:
     return keys[:pos] + keys[pos + 1 :], True
 
 
-def _rlab_filled(plan: Plan, keys: tuple) -> bool:
+def _rlab_filled(plan: Plan, keys: tuple, tiles: Optional[bool] = None) -> bool:
     """Whether the launch keys ``keys`` store every row of ``rlab``: they have row-gradient producers, all of them
-    ``row_grad`` (+0 on a row with no label column), over chunks that tile the rows (:func:`_rlab_zero_needed`).
-    One pass over the keys, ending at the first producer that is not ``row_grad``."""
+    ``row_grad`` (+0 on a row with no label column), over chunks that tile the rows (:func:`_rlab_zero_needed`;
+    ``tiles``: :func:`_chunks_tile_rows` of the plan when the caller has it).  One pass over the keys, ending at the
+    first producer that is not ``row_grad``."""
     producers = False
     for stage, _ in keys:
         if stage in DZ_PRODUCER_STAGES:
             if stage != "row_grad":
                 return False
             producers = True
-    return producers and _chunks_tile_rows(plan)
+    return producers and (_chunks_tile_rows(plan) if tiles is None else tiles)
 
 
 class _GraphRlab:
@@ -9212,6 +9218,9 @@ class _Binding:
     backward_rlab_zero: bool = False
     # the backward sequence stores every row of ``rlab`` (:func:`_rlab_filled`)
     backward_rlab_filled: bool = False
+    # the plan is not counted and its chunks tile its rows (:func:`_chunks_tile_rows`): a call binds the autograd
+    # graph's label residuals (:meth:`_call_rlab`); formed once, with the binding
+    rlab_graph: bool = False
 
     @classmethod
     def from_runner(
@@ -9247,8 +9256,9 @@ class _Binding:
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        tiles = _chunks_tile_rows(plan)
         # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        filled = not backward_zero and _rlab_filled(plan, backward_order)
+        filled = not backward_zero and _rlab_filled(plan, backward_order, tiles)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9302,6 +9312,7 @@ class _Binding:
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
             backward_rlab_filled=filled,
+            rlab_graph=tiles and not plan.dcnt,
         )
 
     def holds_no_tensor(self) -> bool:
@@ -9421,7 +9432,8 @@ class _Binding:
         :func:`_without_rlab_zero`): allocated zero-filled, on the call's stream ahead of all its launches (the step
         ran right before the first row-gradient producer; nothing ahead of it reads or writes ``rlab``), so the same
         rows hold +0.  ``graph`` (the log-probability autograd graph's, :class:`_GraphRlab`): a plan that is not
-        counted, over chunks that tile its rows, takes the graph's tensor when it is clean or the call stores every row
+        counted, over chunks that tile its rows (:attr:`rlab_graph`), takes the graph's tensor when it is clean or the
+        call stores every row
         (``filled``, :func:`_rlab_filled`) -- no allocation and no fill: the producers store the same rows they store in
         a fresh zero-filled tensor, and every other row already holds +0 -- else it takes one for the graph
         (zero-filled as above): while the graph owns no buffer (its forward takes none), from
@@ -9429,7 +9441,7 @@ class _Binding:
         (:func:`_graph_rlab_tensor`), else an ordinary allocation; a counted plan allocates its own
         and leaves the graph's."""
         plan = self.plan
-        if graph is not None and not plan.dcnt and _chunks_tile_rows(plan):
+        if graph is not None and self.rlab_graph:
             held, graph.tensor = graph.tensor, None  # taken until the call returns
             if (
                 held is not None
@@ -9697,8 +9709,9 @@ class _TemperatureBinding(_Binding):
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        tiles = _chunks_tile_rows(plan)
         # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        filled = not backward_zero and _rlab_filled(plan, backward_order)
+        filled = not backward_zero and _rlab_filled(plan, backward_order, tiles)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9769,6 +9782,7 @@ class _TemperatureBinding(_Binding):
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
             backward_rlab_filled=filled,
+            rlab_graph=tiles and not plan.dcnt,
         )
 
     # the rows of the call in progress, per thread (set and cleared around the inherited sequence)
@@ -12184,6 +12198,14 @@ _CUDA_GET_STREAM = getattr(torch._C, "_cuda_getCurrentStream", None)
 _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
 
 
+def _rlab_default(index: int) -> tuple:
+    """The default stream's ``(stream_id, device_index, device_type)`` on device ``index``, kept in
+    :data:`_RLAB_DEFAULT` on first use."""
+    s = torch.cuda.default_stream(index)
+    default = _RLAB_DEFAULT[index] = (s.stream_id, s.device_index, s.device_type)
+    return default
+
+
 def _rlab_stream(
     streams: dict[int, torch.cuda.Stream], index: int
 ) -> torch.cuda.Stream:
@@ -12231,15 +12253,7 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
         and _CUDA_GET_DEVICE() == index
     ):
         caller = _CUDA_GET_STREAM(index)
-        default = _RLAB_DEFAULT.get(index)
-        if default is None:
-            s = torch.cuda.default_stream(index)
-            default = _RLAB_DEFAULT[index] = (
-                s.stream_id,
-                s.device_index,
-                s.device_type,
-            )
-        if caller == default:
+        if caller == (_RLAB_DEFAULT.get(index) or _rlab_default(index)):
             stream = _rlab_stream(_RLAB_STREAMS, index)
             _CUDA_SET_STREAM(
                 stream_id=stream.stream_id,
@@ -12294,15 +12308,19 @@ def _graph_rlab(rows: int, zero: bool, device: torch.device) -> Optional[tuple]:
 
     Liveness: an entry is in one free list or owned by one holder, so two live holders never share a buffer.  The
     graph's work on it runs on the caller's stream (its backward on its forward's stream), and the list is that
-    stream's, so the next graph to take the buffer works on it behind all of that work."""
+    stream's, so the next graph to take the buffer works on it behind all of that work.
+
+    A call on the device's default stream makes no capture query: a CUDA graph is captured on another stream (torch's
+    capture refuses the default stream, and CUDA refuses a capture of the legacy default stream), so the default
+    stream is never capturing."""
     index = device.index
-    if (
-        _RLAB_POOL_ON
-        and rows <= _RLAB_POOL_ROWS
-        and _CUDA_GET_DEVICE() == index
-        and not _CUDA_IS_CAPTURING()
-    ):
+    if _RLAB_POOL_ON and rows <= _RLAB_POOL_ROWS and _CUDA_GET_DEVICE() == index:
         key = _CUDA_GET_STREAM(index)
+        if (
+            key != (_RLAB_DEFAULT.get(index) or _rlab_default(index))
+            and _CUDA_IS_CAPTURING()
+        ):
+            return None
         free = _RLAB_POOL.get(key)
         if free is None and len(_RLAB_POOL) < _RLAB_POOL_STREAMS:
             free = _RLAB_POOL.setdefault(key, [])
