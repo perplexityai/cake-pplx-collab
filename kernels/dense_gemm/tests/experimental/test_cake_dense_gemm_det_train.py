@@ -17626,9 +17626,9 @@ TILE_0314_PROGRAMS = {
 }
 #: The token counts the 128-column programs are measured at on the rows of ``TILE_0314_BANDS_0313``.
 TILE_0314_MEASURED = (16172, 16231, 16384, 32768)
-#: The raster groups the checks plan the 128-column programs in (the default 16, the groups of 32 and 2 the 256-column
-#: start-path program runs in on these parts, and 8, the group of the ``w8r`` rule the 148-SM sm_100a 4096 -> 64 row
-#: plans at T 16172).
+#: The raster groups the checks plan the 128-column programs in (the default 16; up to version 0.3.13, the groups of 32
+#: and 2 the 256-column start-path program ran in on these parts, and 8, the group of the ``w8r`` rule the 148-SM
+#: sm_100a 4096 -> 64 row planned at T 16172).
 TILE_0314_GROUPS = (2, 8, 16, 32)
 
 

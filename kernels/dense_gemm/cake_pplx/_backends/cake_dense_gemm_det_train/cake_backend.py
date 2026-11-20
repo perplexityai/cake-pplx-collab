@@ -2507,10 +2507,10 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     of 1.002 to 1.029 but a paired win in two or three of the four node and mode pairs, the group of 64 medians of
 #     0.979 to 1.020 and a paired win in at most one;
 #   * GB200 (152-SM sm_100a): 5120 -> 32 in groups of 2 at T 32768, 1.015 to 1.021 times faster than the same program
-#     in the default group of 16 (its range of version 0.3.12 keeps T 16172 - 32767 up to version 0.3.13).  4096 -> 32
-#     and the indexer_hw input gradient 6144 -> 32 at every measured T and 5120 -> 32 at T 16172, 16231 and 16384 keep
-#     their plan (all but 4096 -> 32 at T 16231 up to version 0.3.13: below): the groups had medians of 0.999 to 1.023
-#     and a paired win in at most three of the four pairs.
+#     in the default group of 16 (its range of version 0.3.12 keeps T 16172 - 32767 up to version 0.3.13,
+#     T 16385 - 32767 since).  4096 -> 32 and the indexer_hw input gradient 6144 -> 32 at every measured T and
+#     5120 -> 32 at T 16172, 16231 and 16384 keep their plan (all but 4096 -> 32 at T 16231 up to version 0.3.13:
+#     below): the groups had medians of 0.999 to 1.023 and a paired win in at most three of the four pairs.
 # Version 0.3.14 runs the start-path program on its 128-column tile on BF16 input gradients of the 148- and 152-SM
 # parts: ``kn_n128_tma1_w8relf`` (``_W8RELF_N128_DGRAD_BF16``, the 128 x 128 pair tile in 64-element K steps) on
 # 4096 -> 64 and 5120 -> 64, ``kn_n128_k32_tma1_w8relf`` (``_W8RELF_N128_K32_DGRAD_BF16``, the same tile in 32-element K
