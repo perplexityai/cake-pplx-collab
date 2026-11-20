@@ -18350,6 +18350,13 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         assert h.tensor.numel() == g["rows"] <= h.own[1][2] and h.own[1][2] % 128 == 0
         return _pool_span(h)
 
+    # the first backward of a call key runs the runner's own path (its own residuals, no holder bound) and remembers
+    # the binding: one step per key first, so that every backward below binds its graph's holder
+    for entry, T in ((default, 16), (default, 300), (keep, 16)):
+        backward(forward(entry, T))
+    gc.collect()
+    be._RLAB_POOL.clear()
+    gc.collect()
     # two live (retained) graphs: two buffers, disjoint, each owned by one holder; the stream's list is empty while
     # both live
     a, b = forward(default, 16), forward(default, 16)
@@ -18530,7 +18537,8 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
     ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA graph capture takes no
     buffer and changes no list; no forward takes one (a plain call, a call without a gradient, a checkpoint's first pass
     or recomputation), the binding backward does, with the plain step's bits; another device takes its own stream's
-    list, and no buffer comes from another current device."""
+    list, and no buffer comes from another current device.  Each call key runs one step first: a key's first backward
+    runs the runner's own path, which binds no holder."""
     _check_graph_rlab_pool(
         cake_backend,
         cake_backend.cake_lm_head_nondet_train_logprob,
@@ -18588,6 +18596,11 @@ for T in (32, 16, 256, 32, 1, 300, 16):
     inp = make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
     X = inp.X.detach().requires_grad_(True)
     Wg = inp.W.detach().requires_grad_(True)
+    # the first backward of a call key (new tensors: a new key) runs the runner's own path (its own residuals, no
+    # holder bound) and remembers the binding: one call first, so that both logged graphs' backwards bind their holders
+    warm = be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake")
+    torch.autograd.backward([warm], [inp.dlogp])
+    del warm
     with Log():
         lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
         hs = [holder(lp) for lp in lps]
@@ -18672,14 +18685,15 @@ def _check_graph_rlab_pool_placement(package, entry):
 
 
 def test_device_graph_rlab_pool_placement(glm_weight):
-    """The graphs' label residual buffers taken from the free lists (``_graph_rlab``) leave every other block where
-    the per-call request puts it: two fresh processes run the same log-probability forwards (two graphs alive at a
-    time) and backwards at 32, 16, 256, 32, 1, 300 and 16 rows, one with the free lists on and one with them off
-    (``_RLAB_POOL_ON``), and every CUDA tensor an operator returns on the default stream's segments -- the compact
-    rows, the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the
-    same offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request two
-    buffers only where a step's rows pass the capacity the steps before left (rows rounded up to 128), where the
-    per-call path requests one per graph."""
+    """The graphs' label residual buffers taken from the free lists (``_graph_rlab``) leave every other block where the
+    per-call request puts it: two fresh processes run the same log-probability forwards (two graphs alive at a time) and
+    backwards at 32, 16, 256, 32, 1, 300 and 16 rows, one with the free lists on and one with them off
+    (``_RLAB_POOL_ON``), and every CUDA tensor an operator returns on the default stream's segments -- the compact rows,
+    the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the same
+    offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request two buffers
+    only where a step's rows pass the capacity the steps before left (rows rounded up to 128), where the per-call path
+    requests one per graph.  Each step runs one call first: a key's first backward runs the runner's own path, which
+    binds no holder."""
     _check_graph_rlab_pool_placement(
         "cake_lm_head_nondet_train", "cake_lm_head_nondet_train_logprob"
     )
