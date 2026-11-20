@@ -12135,17 +12135,28 @@ def _logprob_vm_eligible(
     return need <= set(stages)
 
 
-# the streams the graphs' label residuals are allocated on (:func:`_graph_rlab_tensor`), one per device
+# the streams the graphs' label residuals are allocated on (:func:`_graph_rlab_tensor`), one pair per device: the holding
+# stream of the calls on the device's default stream, and the side holding stream of the calls on any other stream
 _RLAB_STREAMS: dict[int, torch.cuda.Stream] = {}
+_RLAB_SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+# per device, the default stream's ``(stream_id, device_index, device_type)``
+_RLAB_DEFAULT: dict[int, tuple] = {}
 _SMALL_BLOCK_BYTES = 1 << 20  # the caching allocator's small-pool request limit
 # torch's own current-device and current-stream accessors under ``torch.cuda.current_stream`` / ``torch.cuda.stream``,
 # without their Python stream objects and device lookups (:func:`_graph_rlab_tensor`); ``None`` on a build without them
 _CUDA_GET_DEVICE = getattr(torch._C, "_cuda_getDevice", None)
 _CUDA_GET_STREAM = getattr(torch._C, "_cuda_getCurrentStream", None)
 _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
-# per device, the caller's stream of the last graph allocation: its ``(stream_id, device_index, device_type)`` and its
-# stream object (``record_stream`` takes one)
-_RLAB_CALLERS: dict[int, tuple[tuple, torch.cuda.Stream]] = {}
+
+
+def _rlab_stream(streams: dict[int, torch.cuda.Stream], index: int) -> torch.cuda.Stream:
+    """The holding stream of ``streams`` on device ``index``, created on first use."""
+    stream = streams.get(index)
+    if stream is None:
+        stream = streams.setdefault(
+            index, torch.cuda.Stream(device=torch.device("cuda", index))
+        )
+    return stream
 
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:
@@ -12154,16 +12165,19 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
     while a graph is alive would find the caching allocator's small blocks split by them and place its own buffers
     elsewhere.  A request the small pool serves is therefore made with a per-device holding stream current: its block
     lies in that stream's segment, never among the blocks the calls on the caller's stream reuse, and the forward's
-    buffers keep the placement they have without the held tensor.  The tensor is marked as used on the caller's
-    stream (``record_stream``), so its block is reused only after that stream's work on it, and the zero fill runs on
-    the caller's stream as before.  Same values, same launches; the holding stream runs no work.  Under a CUDA graph
-    capture, or above the small-pool limit, it is an ordinary allocation on the caller's stream.
+    buffers keep the placement they have without the held tensor.  The stream switch is torch's ``set_stream`` call
+    itself (:data:`_CUDA_SET_STREAM`) around the one request, so the allocator sees the request of the
+    ``torch.cuda.stream`` context; the zero fill runs on the caller's stream.  Same values, same launches; the holding
+    streams run no work.
 
-    On the tensor's own current device the stream switch is torch's ``set_stream`` call itself
-    (:data:`_CUDA_SET_STREAM`), around the one request, and the caller's stream object is the one kept from the
-    previous call on that stream: the allocator sees the same request on the same stream as under
-    ``torch.cuda.stream``, so the block -- and every later block -- is placed as before.  Another current device takes
-    the ``torch.cuda.stream`` context."""
+    A call on the device's default stream takes the default holding stream (:data:`_RLAB_STREAMS`) and marks no other
+    stream on the tensor: every block of that stream's segment serves calls on the default stream only, and the graph's
+    launches run on it (its backward on its forward's stream), so a block handed out again is used behind all the
+    default stream's earlier work on it -- the order ``record_stream`` would give, without the allocator's events at
+    the free and their queries in the requests after it.  A call on any other stream, or from another current device,
+    takes the side holding stream (:data:`_RLAB_SIDE_STREAMS`) and marks the tensor as used on the caller's stream
+    (``record_stream``), so its block is reused only after that stream's work on it.  Under a CUDA graph capture, or
+    above the small-pool limit, it is an ordinary allocation on the caller's stream."""
     if (
         rows * 4 > _SMALL_BLOCK_BYTES
         or device.type != "cuda"
@@ -12173,42 +12187,40 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
             (rows,), dtype=torch.float32, device=device
         )
     index = torch.cuda.current_device() if device.index is None else int(device.index)
-    stream = _RLAB_STREAMS.get(index)
-    if stream is None:
-        stream = _RLAB_STREAMS.setdefault(
-            index, torch.cuda.Stream(device=torch.device("cuda", index))
-        )
     if (
-        _CUDA_SET_STREAM is None
-        or _CUDA_GET_STREAM is None
-        or _CUDA_GET_DEVICE is None
-        or _CUDA_GET_DEVICE() != index
+        _CUDA_SET_STREAM is not None
+        and _CUDA_GET_STREAM is not None
+        and _CUDA_GET_DEVICE is not None
+        and _CUDA_GET_DEVICE() == index
     ):
-        current = torch.cuda.current_stream(index)
-        with torch.cuda.stream(stream):
-            held = torch.empty((rows,), dtype=torch.float32, device=device)
-    else:
         caller = _CUDA_GET_STREAM(index)
-        _CUDA_SET_STREAM(
-            stream_id=stream.stream_id,
-            device_index=index,
-            device_type=stream.device_type,
-        )
-        try:
-            held = torch.empty((rows,), dtype=torch.float32, device=device)
-        finally:
+        default = _RLAB_DEFAULT.get(index)
+        if default is None:
+            s = torch.cuda.default_stream(index)
+            default = _RLAB_DEFAULT[index] = (
+                s.stream_id,
+                s.device_index,
+                s.device_type,
+            )
+        if caller == default:
+            stream = _rlab_stream(_RLAB_STREAMS, index)
             _CUDA_SET_STREAM(
-                stream_id=caller[0], device_index=caller[1], device_type=caller[2]
+                stream_id=stream.stream_id,
+                device_index=index,
+                device_type=stream.device_type,
             )
-        kept = _RLAB_CALLERS.get(index)
-        if kept is None or kept[0] != caller:
-            kept = _RLAB_CALLERS[index] = (
-                caller,
-                torch.cuda.Stream(
+            try:
+                held = torch.empty((rows,), dtype=torch.float32, device=device)
+            finally:
+                _CUDA_SET_STREAM(
                     stream_id=caller[0], device_index=caller[1], device_type=caller[2]
-                ),
-            )
-        current = kept[1]
+                )
+            if zero:
+                held.zero_()
+            return held
+    current = torch.cuda.current_stream(index)
+    with torch.cuda.stream(_rlab_stream(_RLAB_SIDE_STREAMS, index)):
+        held = torch.empty((rows,), dtype=torch.float32, device=device)
     held.record_stream(current)
     if zero:
         held.zero_()

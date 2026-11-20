@@ -17041,12 +17041,13 @@ def test_device_eager_default_forward_is_the_fast_form(glm_weight):
             assert mplan is None, (mode, mplan)
 
 
-def test_device_graph_rlab_fast_switch_restores_the_stream(monkeypatch):
-    """The graphs' label residuals (``_graph_rlab_tensor``) switch to the holding stream with torch's own
-    ``set_stream`` call on the tensor's current device: the caller's current device and stream are the same after the
-    call, the block lies in the holding stream's segment, the tensor is zero-filled when asked, and the caller's stream
-    object kept for ``record_stream`` is the caller's stream.  Another current device takes the ``torch.cuda.stream``
-    context, with the same segment."""
+def test_device_graph_rlab_holding_streams(monkeypatch):
+    """The graphs' label residuals (``_graph_rlab_tensor``) switch to a holding stream with torch's own ``set_stream``
+    call on the tensor's current device, and the caller's current device and stream are the same after the call.  A
+    call on the device's default stream lies in the default holding stream's segment and marks no stream on the tensor
+    (``record_stream``): that segment serves calls on the default stream only.  A call on another stream, and a call
+    from another current device, lie in the side holding stream's segment and mark the tensor as used on the caller's
+    stream.  The tensor is zero-filled when asked."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     index = torch.cuda.current_device()
@@ -17059,24 +17060,41 @@ def test_device_graph_rlab_fast_switch_restores_the_stream(monkeypatch):
                 return seg["stream"]
         raise AssertionError(f"no segment holds {ptr:#x}")
 
+    marked = []
+    real_record = torch.Tensor.record_stream
+
+    def record(self, stream):
+        marked.append(stream)
+        return real_record(self, stream)
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", record)
+    default = torch.cuda.default_stream(index)
     caller = torch.cuda.Stream(device=device)
-    held = []
-    for zero, other_device in ((True, False), (False, False), (True, True)):
+    held = {}
+    for name, stream, zero, other_device in (
+        ("default", default, True, False),
+        ("default_empty", default, False, False),
+        ("caller", caller, True, False),
+        ("other_device", default, False, True),
+    ):
         if other_device:
             monkeypatch.setattr(cake_backend, "_CUDA_GET_DEVICE", lambda: index + 1)
-        with torch.cuda.stream(caller):
+        marked.clear()
+        with torch.cuda.stream(stream):
             t = cake_backend._graph_rlab_tensor(300, zero, device)
             assert torch.cuda.current_device() == index
-            assert torch.cuda.current_stream(index) == caller
+            assert torch.cuda.current_stream(index) == stream
             if zero:
                 assert int(torch.count_nonzero(t)) == 0
-        held.append(t)
-    caller.synchronize()
+        assert marked == ([] if name.startswith("default") else [stream]), name
+        held[name] = t
+    torch.cuda.synchronize()
     holding = cake_backend._RLAB_STREAMS[index]
-    assert all(segment_stream(t) == holding.cuda_stream for t in held)
-    kept = cake_backend._RLAB_CALLERS[index]
-    assert kept[0] == (caller.stream_id, caller.device_index, caller.device_type)
-    assert kept[1] == caller
+    side = cake_backend._RLAB_SIDE_STREAMS[index]
+    assert holding.cuda_stream != side.cuda_stream
+    for name, t in held.items():
+        want = holding if name.startswith("default") else side
+        assert segment_stream(t) == want.cuda_stream, name
 
 
 _RLAB_PLACEMENT_SCRIPT = """
@@ -17086,9 +17104,21 @@ from torch.utils._python_dispatch import TorchDispatchMode
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
 from tests.cake.test_helpers.cake_package import cake_package
 be = cake_package("cake.{package}", "cake_backend")
-if {context!r}:
-    be._CUDA_SET_STREAM = None  # the torch.cuda.stream context
 real, held, rows = be._graph_rlab_tensor, [], []
+if {context!r}:
+    # the round-8 request: the torch.cuda.stream context on the holding stream, the tensor marked as used on the
+    # caller's stream
+    def real(n, zero, device):
+        if n * 4 > be._SMALL_BLOCK_BYTES or torch.cuda.is_current_stream_capturing():
+            return (torch.zeros if zero else torch.empty)((n,), dtype=torch.float32, device=device)
+        index = torch.cuda.current_device() if device.index is None else int(device.index)
+        current = torch.cuda.current_stream(index)
+        with torch.cuda.stream(be._rlab_stream(be._RLAB_STREAMS, index)):
+            t = torch.empty((n,), dtype=torch.float32, device=device)
+        t.record_stream(current)
+        if zero:
+            t.zero_()
+        return t
 
 
 def logged(n, zero, device):
@@ -17140,13 +17170,14 @@ print("PLACEMENT " + json.dumps(dict(rows=rows, held=held)))
 """
 
 
-def test_device_graph_rlab_fast_switch_placement(glm_weight, tmp_path):
-    """The fast holding-stream switch places every block as the ``torch.cuda.stream`` context does: two fresh
-    processes run the same log-probability forwards (two graphs alive at a time) and backwards at 32, 16, 256, 32 and
-    1 rows, one with each switch, and every CUDA tensor an operator returns -- the compact rows, the logits, the
-    statistics, every buffer of the forward and the backward -- and every graph's label residuals lie in the same
-    caching-allocator segment at the same offset in both (a device address itself differs between processes), the
-    residuals in a segment of the holding stream."""
+def test_device_graph_rlab_holding_placement(glm_weight, tmp_path):
+    """The default-stream request of the graphs' label residuals (the holding stream switched with ``set_stream``, no
+    ``record_stream``) places every block as the round-8 request (the ``torch.cuda.stream`` context, the tensor marked
+    as used on the caller's stream) does: two fresh processes run the same log-probability forwards (two graphs alive
+    at a time) and backwards at 32, 16, 256, 32 and 1 rows, one with each request, and every CUDA tensor an operator
+    returns -- the compact rows, the logits, the statistics, every buffer of the forward and the backward -- and every
+    graph's label residuals lie in the same caching-allocator segment at the same offset in both (a device address
+    itself differs between processes), the residuals in a segment of the holding stream."""
     _require_program(entry="logprob")
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env = dict(
