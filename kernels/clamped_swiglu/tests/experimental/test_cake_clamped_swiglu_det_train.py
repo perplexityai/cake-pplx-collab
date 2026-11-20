@@ -1881,20 +1881,24 @@ def test_a_cuda_graph_of_a_checkpointed_step_captures_the_recompute_only_when_ne
         "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), False, 0),
         "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), True, 1),
     }
-    for what, (region, whole, recomputes) in regions.items():
+
+    def fresh(whole: bool) -> list:
+        """New leaves of the region's operands (the eager reference and the captured step each take their own: a leaf
+        used on the default stream before the capture cannot be captured)."""
         if whole:
             leaves = [None if x is None else x.detach().clone().requires_grad_(True) for x in (p.x, p.wg, p.wu)]
-            leaves = [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
-            plain = block
-        else:
-            leaves = [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
+            return [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
+        return [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
 
-            def plain(f, s, w, wd):
-                return _down(op(f, s, w), wd)
+    def op_down(f, s, w, wd):
+        return _down(op(f, s, w), wd)
 
+    for what, (region, whole, recomputes) in regions.items():
+        reference = fresh(whole)
+        y = (block if whole else op_down)(*reference)
+        want = [y.detach(), *torch.autograd.grad(y, [x for x in reference if x is not None], p.dy)]
+        leaves = fresh(whole)
         wants = [leaf for leaf in leaves if leaf is not None]
-        y = plain(*leaves)
-        want = [y.detach(), *torch.autograd.grad(y, wants, p.dy)]
         marks: list = []
 
         def step(mark=lambda: None):
@@ -2637,7 +2641,9 @@ def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device
         assert not checked, (rows, "autograd step", checked)
         _autograd_step(t, checkpoint=True)
         assert not checked, (rows, "checkpointed autograd step", checked)
-        assert len(launches) == 2 + 2 + 2 + 3, (rows, [stage for stage, _, _ in launches])
+        # The checkpointed step launches no recompute: the op alone is the region (the forward runs after autograd
+        # saved the inputs, so the recomputation stops before it).
+        assert len(launches) == 2 + 2 + 2 + 2, (rows, [stage for stage, _, _ in launches])
         for stage, launched_rows, values in launches:
             assert launched_rows == rows
             strides = {key: value for key, value in values.items() if key.endswith("_stride")}
