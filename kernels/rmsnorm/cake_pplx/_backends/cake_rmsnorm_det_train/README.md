@@ -267,13 +267,14 @@ first eight hex digits of the program name.
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |
-| `bwd_h1536` | (1024, 16384] | 6a428da2 | plain | tail_div 12, max_halving 2 | db5c0b67 (tree) |
+| `bwd_h1536` | (1024, 12288] | 88510c60 | plain | row-strided slots | db5c0b67 (tree) |
+| `bwd_h1536` | (12288, 16384] | 6a428da2 | plain | tail_div 12, max_halving 2 | db5c0b67 (tree) |
 | `bwd_h1536` | (16384, 45056] | 56d26996 | plain | tail_div 12, max_halving 5 | db5c0b67 (tree) |
 | `bwd_h1536` | (45056, inf) | 411e270c | 4-row blocks | tail_div 12, max_halving 5 | db5c0b67 (tree) |
 | `bwd_h2048` | (0, 1] | 92def3f9 | column task | - | - |
 | `bwd_h2048` | (1, 256] | 6720b4a1 | column task | - | - |
 | `bwd_h2048` | (256, 1024] | 845cdcd8 | plain | tail_div 12, max_halving 5 | 271082c5 (tree) |
-| `bwd_h2048` | (1024, 16384] | 81c3d8ab | plain | tail_div 12, max_halving 2 | c4d8be67 (tree) |
+| `bwd_h2048` | (1024, 16384] | cc26e316 | plain | row-strided slots | c4d8be67 (tree) |
 | `bwd_h2048` | (16384, 50688] | 845cdcd8 | plain | tail_div 12, max_halving 5 | c4d8be67 (tree) |
 | `bwd_h2048` | (50688, inf) | 21ee6fc9 | 8-row blocks | tail_div 12, max_halving 5 | c4d8be67 (tree) |
 | `bwd_h256` | (0, 1572864] | a385ae16 | plain | tail_div 4, max_halving 5 | 312bbe08 (tree) |
@@ -305,7 +306,8 @@ first eight hex digits of the program name.
 | `bwd_h6144` | (0, 1] | 0dafdf09 | column task | - | - |
 | `bwd_h6144` | (1, 256] | dffe53d5 | column task | - | - |
 | `bwd_h6144` | (256, 1664] | 0dafdf09 | column task | - | - |
-| `bwd_h6144` | (1664, 19456] | 5d292172 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
+| `bwd_h6144` | (1664, 3072] | af220b26 | plain | row-strided slots | fb3f2a96 (tree) |
+| `bwd_h6144` | (3072, 19456] | 5d292172 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
 | `bwd_h6144` | (19456, inf) | 9cc51adf | 8-row blocks | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
 | `bwd_residual_h6144` | (0, 368] | ee1be07a | column task | - | - |
 | `bwd_residual_h6144` | (368, 19456] | 36cad444 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
