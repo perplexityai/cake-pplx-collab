@@ -61,8 +61,8 @@ rows to copy: the steps' bits; one row short: ``ValueError``), and gradients com
 the steps' bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit
 outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call
 give the launches of the full checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to
-1, as its ignored weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the
-L2 error against the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16
+1, as its ignored weight, also when the process's first unweighted forward is a CUDA graph capture.  On one fixed draw,
+the L2 error against the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16
 rounding of each output, and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
