@@ -63,7 +63,7 @@ gradient passed as both halves' tensors with the up's column offset 2304, no vie
 refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
 refused, before any copy, allocation or launch; the one-pass checks of the common call give the launches of the full
 checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to 1, as its ignored weight,
-also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against the
+also when the process's first unweighted forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
 FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output,
 and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 

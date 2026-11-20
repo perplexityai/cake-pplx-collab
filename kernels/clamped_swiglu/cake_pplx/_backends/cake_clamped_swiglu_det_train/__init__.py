@@ -59,19 +59,19 @@ JIT variables):
   change them after the forward) and the upstream gradient; it has no output
   buffer to check.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, 2304]`` tensor, or the
-  caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout
-  of the inputs: two new contiguous ``[R, 2304]`` tensors, or one new
-  contiguous ``[R, 4608]`` gradient for a merged input (passed as both
-  ``d_gate`` and ``d_up``, with the column offset 2304).  ``d_weight`` is FP32
-  ``[R]`` for a weighted call; an unweighted backward has none, and its
-  program writes none, so it allocates none.  A caller's output buffer must
-  already be a layout the kernels write (2-D, unit last stride, a row stride that is a
-  multiple of 8 elements and at least the row width, 16-byte aligned; FP32
-  ``[R]`` contiguous for the weight gradient): it is refused with a
-  ``ValueError`` otherwise, never copied.  An output must not overlap any
-  input or another output (not checked).  A new output is ``torch.empty`` on
-  the operands' device (one ``torch.device`` per device index for the
-  process): a contiguous plain tensor.
+  caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout of
+  the inputs: two new contiguous ``[R, 2304]`` tensors, or one new contiguous
+  ``[R, 4608]`` gradient for a merged input (passed as both ``d_gate`` and
+  ``d_up``, with the column offset 2304).  ``d_weight`` is FP32 ``[R]`` for a
+  weighted call; an unweighted backward has none, and its program writes none,
+  so it allocates none.  A caller's output buffer must already be a layout the
+  kernels write (2-D, unit last stride, a row stride that is a multiple of 8
+  elements and at least the row width, 16-byte aligned; FP32 ``[R]``
+  contiguous for the weight gradient): it is refused with a ``ValueError``
+  otherwise, never copied.  An output must not overlap any input or another
+  output (not checked).  A new output is ``torch.empty`` on the operands'
+  device (one ``torch.device`` per device index for the process): a contiguous
+  plain tensor.
 - Launches.  One kernel per call: the forward runs stage ``fwd``, a weighted
   backward ``bwd`` and an unweighted backward ``bwd_unweighted``
   (``cake_jit.MODULES``).  ``fwd`` and ``bwd`` each have two programs: a
@@ -90,23 +90,22 @@ JIT variables):
   ``bwd_unweighted``, a warp per (row, run of 768 columns) task, 4 tasks a
   CTA of 128 threads, ``ceil(3 R / 4)`` CTAs (``cake_jit.grid``).  ``R == 0``
   launches nothing and loads no library; a program's library loads at its
-  first launch.  Every launch
-  is a plain stream-ordered launch on the current torch stream of the
-  operands' device (a tvm-ffi call whose arguments include PyTorch CUDA
-  tensors runs on that stream, a CUDA graph's capture stream during capture;
-  the binding makes the device current): nothing cooperative, no PDL, no
-  dynamic shared memory.  The entry points launch through one launcher per
-  stage and device (``_launcher``), made at the stage's first launch on the
-  device: the route above, the kernel parameters and the column offsets of
-  ``up`` (and ``d_up``) by position in the order every program of the stage
-  takes them (checked once, when the launcher is made), and each program's
-  FFI entry, bound at its first launch.  Nothing
-  here reads device memory, reads an environment variable or synchronizes; the
-  checks read dtypes, shapes, strides, devices and data pointers only.  The
-  host keeps no state between calls but caches of facts a call cannot change
-  (a device's architecture, SM count and launchers, the libraries, the FP32
-  rounding of the last accepted ``limit``, the forward's ignored weight).
-  Under ``torch.use_deterministic_algorithms(True)`` with
+  first launch.  Every launch is a plain stream-ordered launch on the current
+  torch stream of the operands' device (a tvm-ffi call whose arguments include
+  PyTorch CUDA tensors runs on that stream, a CUDA graph's capture stream
+  during capture; the binding makes the device current): nothing cooperative,
+  no PDL, no dynamic shared memory.  The entry points launch through one
+  launcher per stage and device (``_launcher``), made at the stage's first
+  launch on the device: the route above, the kernel parameters and the column
+  offsets of ``up`` (and ``d_up``) by position in the order every program of
+  the stage takes them (checked once, when the launcher is made), and each
+  program's FFI entry, bound at its first launch.  Nothing here reads device
+  memory, reads an environment variable or synchronizes; the checks read
+  dtypes, shapes, strides, devices and data pointers only.  The host keeps no
+  state between calls but caches of facts a call cannot change (a device's
+  architecture, SM count and launchers, the libraries, the FP32 rounding of
+  the last accepted ``limit``, the forward's ignored weight).  Under
+  ``torch.use_deterministic_algorithms(True)`` with
   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
   PyTorch fills every tensor it allocates here with NaN before the kernel
   writes it: one more fill launch per new output (``h``; ``d_gate_up``, or
