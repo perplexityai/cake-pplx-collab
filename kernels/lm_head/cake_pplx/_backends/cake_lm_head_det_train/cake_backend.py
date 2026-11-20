@@ -3526,7 +3526,7 @@ def _logprob_graph_rlab(
     fills a buffer -- a call that records no graph (no gradient, a reentrant checkpoint's first pass) and a checkpoint's
     recomputation (whose graph runs no backward) included -- and the later backwards of a retained graph bind the held
     tensor."""
-    if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
+    if backend != "cake" or not (need_dx or need_dw) or not X.is_cuda:
         return None
     rows = (
         (int(X.shape[0]) if X.ndim else 0)
@@ -3570,6 +3570,7 @@ def _rlab_zero(values: dict[str, Any]) -> None:
 
 # The host step of :func:`_rlab_zero` (key ``("rlab_zero", None)``, one per call that computes dX).
 RLAB_ZERO_STAGE = "rlab_zero"
+_RLAB_ZERO_KEY = (RLAB_ZERO_STAGE, None)
 
 # Host-side steps of the chunk loop (torch operators over the bound tensors, no kernel of the program, no allocation).
 HOST_STAGES: dict[str, Callable[[dict[str, Any]], None]] = {
@@ -6371,27 +6372,32 @@ def _with_rlab_zero(plan: Plan, keys: list) -> list:
         return keys
     for pos, (stage, _) in enumerate(keys):
         if stage in DZ_PRODUCER_STAGES:
-            return keys[:pos] + [(RLAB_ZERO_STAGE, None)] + keys[pos:]
+            return keys[:pos] + [_RLAB_ZERO_KEY] + keys[pos:]
     return keys
 
 
 def _without_rlab_zero(keys: tuple) -> tuple[tuple, bool]:
     """``(keys without the host step ("rlab_zero", None), whether it was there)``: a remembered binding fills each
     call's ``rlab`` with zeros where it allocates it (:meth:`_Binding._call_rlab`), ahead of every launch of the call,
-    instead of running the step (:func:`_with_rlab_zero`) inside its launch sequence."""
-    rest = tuple(key for key in keys if key[0] != RLAB_ZERO_STAGE)
-    return rest, len(rest) != len(keys)
+    instead of running the step (:func:`_with_rlab_zero`) inside its launch sequence.  The step is the one key
+    :func:`_with_rlab_zero` adds, at most once a sequence: one membership test, and one cut where it is there."""
+    if _RLAB_ZERO_KEY not in keys:
+        return keys, False
+    pos = keys.index(_RLAB_ZERO_KEY)
+    return keys[:pos] + keys[pos + 1 :], True
 
 
 def _rlab_filled(plan: Plan, keys: tuple) -> bool:
     """Whether the launch keys ``keys`` store every row of ``rlab``: they have row-gradient producers, all of them
-    ``row_grad`` (+0 on a row with no label column), over chunks that tile the rows (:func:`_rlab_zero_needed`)."""
-    producers = [stage for stage, _ in keys if stage in DZ_PRODUCER_STAGES]
-    return (
-        bool(producers)
-        and all(stage == "row_grad" for stage in producers)
-        and _chunks_tile_rows(plan)
-    )
+    ``row_grad`` (+0 on a row with no label column), over chunks that tile the rows (:func:`_rlab_zero_needed`).
+    One pass over the keys, ending at the first producer that is not ``row_grad``."""
+    producers = False
+    for stage, _ in keys:
+        if stage in DZ_PRODUCER_STAGES:
+            if stage != "row_grad":
+                return False
+            producers = True
+    return producers and _chunks_tile_rows(plan)
 
 
 class _GraphRlab:
@@ -8418,6 +8424,8 @@ class _Binding:
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
+        filled = not backward_zero and _rlab_filled(plan, backward_order)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -8457,7 +8465,7 @@ class _Binding:
             memory=memory,
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
-            backward_rlab_filled=_rlab_filled(plan, backward_order),
+            backward_rlab_filled=filled,
         )
 
     def holds_no_tensor(self) -> bool:
@@ -8862,6 +8870,8 @@ class _TemperatureBinding(_Binding):
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
+        # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
+        filled = not backward_zero and _rlab_filled(plan, backward_order)
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -8919,7 +8929,7 @@ class _TemperatureBinding(_Binding):
             memory=memory,
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
-            backward_rlab_filled=_rlab_filled(plan, backward_order),
+            backward_rlab_filled=filled,
         )
 
     # the rows of the call in progress, per thread (set and cleared around the inherited sequence)
