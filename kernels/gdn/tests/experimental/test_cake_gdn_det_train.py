@@ -9061,13 +9061,14 @@ def test_a_layout_used_once_never_builds_a_plan_key(mode, device, monkeypatch) -
     assert not (recordings or keys or replays)
 
 
-def test_cycling_layouts_past_the_pool_replay(device, monkeypatch) -> None:
-    # layouts called in turn, more of them than a pooled role holds shapes (the segmented forward's segment state, flags
-    # and start states take a shape per segment count): every call takes the roles the previous calls evicted.  Under
-    # the record gate each layout records at its second call and replays from its third, the replays' take steps
-    # allocating and evicting as the general path's takes do; an evicted workspace is freed (no plan holds one), and
-    # after the run the device memory is that of the same run on the general path (FWD_PLAN off), which runs first.
-    # Every call has the bits of that run
+def _cycle_layouts_past_the_pool(device, monkeypatch, gated: bool) -> tuple[int, int]:
+    """Layouts called in turn, more of them than a pooled role holds shapes (the segmented forward's segment state,
+    flags and start states take a shape per segment count): every call takes the roles the previous calls evicted.
+    Five rounds of them run on the general path (FWD_PLAN off), then five more under the record gate (``gated``) or on
+    the general path again; every call of the second run has the bits of its call in the first.  Under the record gate
+    each layout records at its second call and replays from its third, the replays' take steps allocating and evicting
+    as the general path's takes do, and an evicted workspace is freed.  Returns the requested bytes of the live
+    allocations (:func:`_allocator_bytes`) after the first run and after the second."""
     count = cake_chain.WORKSPACE_SHAPES_PER_ROLE + 3
     rounds = 5
     heads, pins = (2, 6), {"scan_config": (64, 1), "segment_chunks": 4}
@@ -9100,8 +9101,11 @@ def test_cycling_layouts_past_the_pool_replay(device, monkeypatch) -> None:
                 assert "f_seg_state" in misses, (n, misses)
     gc.collect()
     torch.cuda.synchronize()
-    allocated = torch.cuda.memory_allocated(device)
-    monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
+    general = _allocator_bytes(device)[0]
+    if gated:
+        monkeypatch.setattr(cake_chain, "FWD_PLAN_GATE", True)
+    else:
+        monkeypatch.setattr(cake_chain, "FWD_PLAN", False)
     replays = _counted_forward_replays(monkeypatch)
     table = cake_chain._POOLED.table(cake_chain._device_index(device))
     evicted = None
@@ -9112,22 +9116,59 @@ def test_cycling_layouts_past_the_pool_replay(device, monkeypatch) -> None:
             got = _run(data[n], layouts[n], **pins)
             _assert_bitwise(got, want[r][n], OUTPUT_NAMES)
             del got
-            if r < 2:  # the first call (no key), the recording
+            if gated and r < 2:  # the first call (no key), the recording
                 assert len(replays) == done, (r, n)
                 continue
-            assert len(replays) == done + 1, (r, n)
+            assert len(replays) == done + (1 if gated else 0), (r, n)
             assert "f_seg_state" in misses, (r, n, misses)
-            # the segment state the first replay took (a miss: the newest shape of its role)
+            # the segment state the first replay (or general call) took (a miss: the newest shape of its role)
             if evicted is None:
                 evicted = weakref.ref(list(table["f_seg_state"].values())[-1])
-    assert len(cake_chain._FWD_PLANS) == count
-    assert len(replays) == count * (rounds - 2)
+    assert len(cake_chain._FWD_PLANS) == (count if gated else 0)
+    assert len(replays) == (count * (rounds - 2) if gated else 0)
     gc.collect()
     torch.cuda.synchronize()
     assert evicted is not None and evicted() is None, (
         "an evicted workspace outlived its eviction"
     )
-    assert torch.cuda.memory_allocated(device) == allocated
+    return general, _allocator_bytes(device)[0]
+
+
+def test_cycling_layouts_past_the_pool_replay(device, monkeypatch) -> None:
+    # layouts called in turn past the pool's shapes per role (_cycle_layouts_past_the_pool): after the record gate's
+    # rounds (each layout's first call, its recording, then replays) the live tensors hold the bytes they held after
+    # the same rounds on the general path (FWD_PLAN off), which run first: no plan or pool keeps device memory that the
+    # general path frees.  The check reads the requested bytes of the live allocations.  Their block bytes
+    # (memory_allocated) also count how the caching allocator rounded the cached blocks it reused, which follows the
+    # order of frees and takes: the same rounds on the general path run twice (the next test) move them as well, with
+    # every pooled role, shape and requested byte equal
+    general, gated = _cycle_layouts_past_the_pool(device, monkeypatch, gated=True)
+    assert gated == general, gated - general
+
+
+def test_cycling_layouts_on_the_general_path_twice(device, monkeypatch) -> None:
+    # the control of the check above: the same rounds on the general path again hold the requested bytes of the first
+    first, second = _cycle_layouts_past_the_pool(device, monkeypatch, gated=False)
+    assert second == first, second - first
+
+
+def test_the_pool_replay_check_sees_what_a_plan_holds(device, monkeypatch) -> None:
+    # the check of test_cycling_layouts_past_the_pool_replay fails when a plan keeps device memory: every forward plan
+    # here keeps a 1 MiB tensor of its own, and the gated rounds end with that many requested bytes more per plan
+    mib = 1 << 20
+
+    class HoldingPlan(cake_chain._ForwardPlan):
+        __slots__ = ("held",)
+
+        def __init__(self, *args) -> None:
+            super().__init__(*args)
+            self.held = torch.empty(mib, dtype=torch.uint8, device=device)
+
+    monkeypatch.setattr(cake_chain, "_ForwardPlan", HoldingPlan)
+    general, gated = _cycle_layouts_past_the_pool(device, monkeypatch, gated=True)
+    plans = list(cake_chain._FWD_PLANS.values())
+    assert plans and all(type(plan) is HoldingPlan for plan in plans), plans
+    assert gated - general == len(plans) * mib, (gated - general, len(plans))
 
 
 def test_the_record_credit_is_spent_and_earned(device, monkeypatch) -> None:
