@@ -17214,6 +17214,363 @@ def test_device_graph_rlab_holding_placement(glm_weight, tmp_path):
         assert a == b
 
 
+def _pool_free(be, stream=None):
+    """The free list of ``stream``'s graph label residual buffers (the current stream when ``None``), [] when none."""
+    index = torch.cuda.current_device()
+    key = (
+        be._CUDA_GET_STREAM(index)
+        if stream is None
+        else (stream.stream_id, stream.device_index, stream.device_type)
+    )
+    return be._RLAB_POOL.get(key, [])
+
+
+def _pool_same(a, b):
+    """Equal bits of two sequences of tensors (bit views, :func:`_bits`)."""
+    return len(a) == len(b) and all(torch.equal(x, y) for x, y in zip(a, b))
+
+
+def _pool_span(holder):
+    """The device byte range ``[start, end)`` of a holder's buffer (its owned entry's ``[capacity]`` tensor)."""
+    buffer = holder.own[1][3]
+    return buffer.data_ptr(), buffer.data_ptr() + buffer.numel() * 4
+
+
+def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
+    """Shared body of the det / nondet pool tests (see ``test_device_graph_rlab_pool``)."""
+    _require_program(entry="logprob")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    be._RLAB_POOL.clear()
+    gc.collect()
+    inputs = {
+        T: make_inputs(T, seed=seed + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
+        for T in (16, 300)
+    }
+
+    def forward(entry, T, **kw):
+        inp = inputs[T]
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        lp = entry(X, W, inp.labels, chunk_size=4096, **kw)
+        node = _graph_rlab_node(lp)
+        saved = node.saved_tensors
+        rows = int(saved[2].numel() if saved[4] is None else saved[4].numel())
+        return dict(X=X, W=W, lp=lp, dlogp=inp.dlogp, holder=node.rlab, rows=rows)
+
+    def backward(g, retain=False):
+        g["X"].grad = g["W"].grad = None
+        g["lp"].backward(g["dlogp"], retain_graph=retain)
+        torch.cuda.synchronize()
+        return _bits(g["X"].grad).clone(), _bits(g["W"].grad).clone()
+
+    # two live graphs: two buffers, disjoint, each owned by one holder; the stream's list is empty while both live
+    a, b = forward(default, 16), forward(default, 16)
+    ha, hb = a["holder"], b["holder"]
+    for g in (a, b):
+        h = g["holder"]
+        assert h.own is not None and h.tensor is h.own[1][1]
+        assert h.tensor.numel() == g["rows"]
+        assert h.own[1][2] == -(-g["rows"] // 128) * 128
+    del g, h
+    (a0, a1), (b0, b1) = _pool_span(ha), _pool_span(hb)
+    assert a1 <= b0 or b1 <= a0
+    assert _pool_free(be) == []
+    # a freed graph puts its buffer back; the next forward on the stream takes that buffer
+    a_ptr = a0
+    ref_a = backward(a)
+    del a, ha
+    gc.collect()
+    free = _pool_free(be)
+    assert len(free) == 1 and free[0][3].data_ptr() == a_ptr
+    # a stale buffer (NaN everywhere) is never read: the next graph's outputs are the bits of a fresh buffer's
+    free[0][3].fill_(float("nan"))
+    c = forward(default, 16)
+    assert _pool_span(c["holder"])[0] == a_ptr and _pool_free(be) == []
+    # a retained graph keeps its buffer through every backward; a forward meanwhile takes another buffer
+    got_c = [backward(c, retain=True), backward(c, retain=True)]
+    assert c["holder"].tensor is c["holder"].own[1][1]
+    d = forward(default, 16)
+    assert _pool_span(d["holder"])[0] not in (a_ptr, b0)
+    # every holder owns an ordinary tensor
+    monkeypatch.setattr(be, "_RLAB_POOL_ON", False)
+    e = forward(default, 16)
+    assert e["holder"].own is None
+    ref_c = [backward(e, retain=True), backward(e, retain=True)]
+    monkeypatch.undo()
+    assert all(_pool_same(x, y) for x, y in zip(got_c, ref_c))
+    assert _pool_same(got_c[0], ref_a)
+    del b, hb, c, d, e
+    gc.collect()
+    # the kept form (no zero fill) on a poisoned buffer; rows past a buffer's capacity take a new, larger one, and a
+    # smaller call then binds the [rows] view of the larger buffer
+    for buf in _pool_free(be):
+        buf[3].fill_(float("nan"))
+    k = forward(keep, 16)
+    assert k["holder"].own is not None and not k["holder"].clean
+    got_k = backward(k)
+    del k
+    big = forward(default, 300)
+    rows = big["rows"]
+    assert rows > 128 and big["holder"].own[1][2] == -(-rows // 128) * 128
+    assert big["holder"].tensor.numel() == rows
+    big_ptr = _pool_span(big["holder"])[0]
+    # two bindings' graphs alive at once: disjoint buffers
+    mid = forward(default, 16)
+    (m0, m1), (g0, g1) = _pool_span(mid["holder"]), _pool_span(big["holder"])
+    assert m1 <= g0 or g1 <= m0
+    got_big = backward(big)
+    del mid
+    gc.collect()
+    del big
+    gc.collect()
+    small = forward(default, 16)
+    assert _pool_span(small["holder"])[0] == big_ptr
+    assert small["holder"].tensor.data_ptr() == big_ptr
+    assert small["holder"].tensor.numel() == small["rows"]
+    got_small = backward(small)
+    del small
+    gc.collect()
+    monkeypatch.setattr(be, "_RLAB_POOL_ON", False)
+    assert _pool_same(backward(forward(keep, 16)), got_k)
+    assert _pool_same(backward(forward(default, 300)), got_big)
+    assert _pool_same(backward(forward(default, 16)), got_small)
+    assert _pool_same(got_small, ref_a)
+    monkeypatch.undo()
+    # at most _RLAB_POOL_MAX free buffers per stream
+    live = [forward(default, 16) for _ in range(be._RLAB_POOL_MAX + 2)]
+    del live
+    gc.collect()
+    assert len(_pool_free(be)) == be._RLAB_POOL_MAX
+    # another stream takes from its own list, never the default stream's
+    side = torch.cuda.Stream(device=device)
+    before = [e[3].data_ptr() for e in _pool_free(be)]
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        s = forward(default, 16)
+        assert s["holder"].own[0] is _pool_free(be, side)
+        got_s = backward(s)
+        del s
+    gc.collect()
+    torch.cuda.current_stream().wait_stream(side)
+    assert [e[3].data_ptr() for e in _pool_free(be)] == before
+    assert len(_pool_free(be, side)) == 1 and _pool_same(got_s, ref_a)
+    # under a CUDA graph capture a holder owns an ordinary tensor of the capture's pool and no list changes
+    sizes = {k: len(v) for k, v in be._RLAB_POOL.items()}
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        captured = be._graph_rlab(16, True, device)
+    assert captured.own is None and captured.tensor.numel() == 16
+    del captured
+    gc.collect()
+    assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
+    del graph
+    # a non-reentrant checkpoint's recomputation takes no holder (the checkpointed call's backward binds its own);
+    # a reentrant one's recomputation does (its graph runs the backward); the bits are the plain step's
+    calls = []
+    phase = ["forward"]
+    real = be._graph_rlab
+
+    def counted(rows, zero, dev):
+        calls.append(phase[0])
+        return real(rows, zero, dev)
+
+    monkeypatch.setattr(be, "_graph_rlab", counted)
+    for entry in (default, keep):
+        inp = inputs[16]
+        plain = None
+        for kind in ("plain", "nonreentrant", "reentrant"):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+
+            def call(x, w, entry=entry, inp=inp):
+                return entry(x, w, inp.labels, chunk_size=4096)
+
+            del calls[:]
+            phase[0] = "forward"
+            if kind == "plain":
+                lp = call(X, W)
+            else:
+                lp = torch.utils.checkpoint.checkpoint(
+                    call, X, W, use_reentrant=kind == "reentrant"
+                )
+            phase[0] = "backward"
+            lp.backward(inp.dlogp)
+            torch.cuda.synchronize()
+            if kind == "reentrant":
+                # the recomputation's graph runs the backward: it holds one (the no-grad first pass needs none)
+                assert calls.count("backward") == 1, (entry.__name__, kind, calls)
+            else:
+                assert calls == ["forward"], (entry.__name__, kind, calls)
+            out = (_bits(lp.detach()), _bits(X.grad), _bits(W.grad))
+            if plain is None:
+                plain = out
+            same = all(torch.equal(x, y) for x, y in zip(out, plain))
+            assert same, (entry.__name__, kind)
+            del lp
+    monkeypatch.undo()
+    # another device: its current stream's list while it is the current device; from another current device an
+    # ordinary tensor
+    if torch.cuda.device_count() > 1:
+        other = (index + 1) % torch.cuda.device_count()
+        with torch.cuda.device(other):
+            h = be._graph_rlab(16, True, torch.device("cuda", other))
+            assert h.own is not None and h.tensor.device.index == other
+            assert h.own[0] is be._RLAB_POOL[be._CUDA_GET_STREAM(other)]
+            assert int(torch.count_nonzero(h.tensor)) == 0
+            del h
+            gc.collect()
+            assert len(_pool_free(be)) == 1
+        h = be._graph_rlab(16, True, torch.device("cuda", other))
+        assert h.own is None and h.tensor.device.index == other
+        del h
+    be._RLAB_POOL.clear()
+    gc.collect()
+
+
+def test_device_graph_rlab_pool(glm_weight, monkeypatch):
+    """The graphs' label residual buffers come from the free list of the caller's stream (``_graph_rlab``,
+    ``_RLAB_POOL``) and go back when the graph is freed: two live graphs hold disjoint buffers; a freed graph's buffer
+    is the next forward's; a retained graph keeps its buffer through every backward while a forward meanwhile takes
+    another; a buffer left with NaN on every row (the default entry's form, the kept form without a fill) gives the
+    bits of an ordinary tensor (``_RLAB_POOL_ON`` off); a call past a buffer's capacity takes a larger one and a
+    smaller call then binds its view; at most ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes
+    its own list; a CUDA graph capture takes an ordinary tensor and changes no list; a non-reentrant checkpoint's
+    recomputation takes no holder (a reentrant one's does) with the plain step's bits; another device takes its own
+    stream's list, and an ordinary tensor from another current device."""
+    _check_graph_rlab_pool(
+        cake_backend,
+        cake_backend.cake_lm_head_det_train_logprob,
+        cake_backend.cake_lm_head_det_train_logprob_keep,
+        glm_weight,
+        monkeypatch,
+        SEED + 73,
+    )
+
+
+_RLAB_POOL_PLACEMENT_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from torch.utils._python_dispatch import TorchDispatchMode
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+be._RLAB_POOL_ON = {pool!r}
+rows, held = [], []
+
+
+class Log(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        r = func(*args, **(kwargs or {{}}))
+        for t in r if isinstance(r, (tuple, list)) else (r,):
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                rows.append([str(func), list(t.shape), t.data_ptr()])
+        return r
+
+
+def holder(lp):
+    pending, seen = [lp.grad_fn], set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if hasattr(node, "rlab"):
+            return node.rlab
+        pending.extend(n for n, _ in node.next_functions)
+    return None
+
+
+W = make_inputs(1, seed={seed}, device="cuda", ignore_frac=0.0).W
+for T in (32, 16, 256, 32, 1, 300, 16):
+    inp = make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
+    with Log():
+        lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
+        for lp in lps:
+            h = holder(lp)
+            if h is not None and h.tensor is not None:
+                held.append(h.tensor.data_ptr())
+        del h, lp
+        torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
+        del lps
+    torch.cuda.synchronize()
+# the placement: per segment kind (the holding stream's, the default stream's, another's), the segment's number in the
+# order the log first reaches a segment of that kind, and the offset in it (a device address differs between processes)
+segs = torch.cuda.memory_snapshot()
+stream = be._RLAB_STREAMS[torch.cuda.current_device()].cuda_stream
+order = {{}}
+
+
+def where(p):
+    for s in segs:
+        if 0 <= p - s["address"] < s["total_size"]:
+            kind = "holding" if s["stream"] == stream else "default" if s["stream"] == 0 else "other"
+            n = order.setdefault((kind, s["address"]), sum(k == kind for k, _ in order))
+            return [kind, n, p - s["address"], s["total_size"]]
+    return None
+
+
+rows = [[op, shape, where(p)] for op, shape, p in rows]
+held = [where(p) for p in held]
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held)))
+"""
+
+
+def _check_graph_rlab_pool_placement(package, entry):
+    """Shared body of the det / nondet pool placement tests (see ``test_device_graph_rlab_pool_placement``)."""
+    _require_program(entry="logprob")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(
+        os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    got = {}
+    for pool in (False, True):
+        script = _RLAB_POOL_PLACEMENT_SCRIPT.format(
+            root=root, package=package, entry=entry, seed=SEED, pool=pool
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert proc.returncode == 0, (
+            f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("PLACEMENT ")][-1]
+        got[pool] = json.loads(line[len("PLACEMENT ") :])
+    for pool, g in got.items():
+        held = g["held"]
+        assert held and all(h is not None and h[0] == "holding" for h in held), pool
+        assert all(w is not None for _, _, w in g["rows"]), pool
+    # the free lists make no request on another stream's segments: every block outside the holding stream's is the
+    # per-call path's
+    on = [r for r in got[True]["rows"] if r[2][0] != "holding"]
+    off = [r for r in got[False]["rows"] if r[2][0] != "holding"]
+    assert on and len(on) == len(off)
+    for a, b in zip(on, off, strict=True):
+        assert a == b
+    # two graphs alive at a time: two holding buffers, reused at every later row count but 300 (a larger one)
+    assert len({tuple(h) for h in got[True]["held"]}) < len(got[True]["held"])
+
+
+def test_device_graph_rlab_pool_placement(glm_weight):
+    """The graphs' label residual buffers taken from the free lists (``_graph_rlab``) leave every other block where
+    the per-call request puts it: two fresh processes run the same log-probability forwards (two graphs alive at a
+    time) and backwards at 32, 16, 256, 32, 1, 300 and 16 rows, one with the free lists on and one with them off
+    (``_RLAB_POOL_ON``), and every CUDA tensor an operator returns on the default stream's segments -- the compact
+    rows, the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the
+    same offset in both; every graph's residuals lie in a segment of the holding stream, and the free lists reuse
+    them."""
+    _check_graph_rlab_pool_placement(
+        "cake_lm_head_det_train", "cake_lm_head_det_train_logprob"
+    )
+
+
 @pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
 def test_eager_launch_formed_key_reuse(monkeypatch, module):
     """An eager launch of the output boundary keyed by its caller (``form``: ``_EAGER_FORMED``, the module, the stage,

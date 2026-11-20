@@ -3450,6 +3450,64 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
     return held
 
 
+# the graphs' label residual buffers free for another graph (:func:`_graph_rlab`), per caller stream
+# ``(stream_id, device_index, device_type)``: entries ``(rows, tensor, capacity, buffer)`` -- ``buffer`` the ``[capacity]``
+# FP32 tensor of one holding-stream request, ``tensor`` its ``[rows]`` view the last graph held
+_RLAB_POOL: dict[tuple, list] = {}
+_RLAB_POOL_MAX = 4  # free buffers kept per caller stream
+_RLAB_POOL_STREAMS = 64  # caller streams with a free list
+# the largest buffer: the small pool's request limit
+_RLAB_POOL_ROWS = _SMALL_BLOCK_BYTES // 4
+_RLAB_POOL_ALIGN = 128  # FP32 rows per 512-byte allocator block: a capacity rounded up to it takes the same block
+# torch's own capture query under ``torch.cuda.is_current_stream_capturing``; ``None`` on a build without it
+_CUDA_IS_CAPTURING = getattr(torch._C, "_cuda_isCurrentStreamCapturing", None)
+_RLAB_POOL_ON = None not in (_CUDA_GET_DEVICE, _CUDA_GET_STREAM, _CUDA_IS_CAPTURING)
+
+
+def _graph_rlab(rows: int, zero: bool, device: torch.device) -> "_GraphRlab":
+    """The holder of a log-probability graph's ``[rows]`` FP32 label residuals (:func:`_logprob_graph_rlab`),
+    zero-filled when ``zero``.  The buffer comes from the free list of the caller's stream (:data:`_RLAB_POOL`): the
+    graph owns it until the holder is freed (:meth:`_GraphRlab.__del__`), which puts it back.  So a forward makes no
+    request, no stream switch and no stream mark, and the free makes no allocator event.  A list that holds no buffer
+    of at least ``rows`` rows takes a new one through :func:`_graph_rlab_tensor` (the holding stream's segment, so the
+    forward's own blocks keep their placement), its capacity rounded up to the allocator's 512-byte block (the same
+    block).  Same values, same launches: the zero fill runs on the caller's stream over the ``[rows]`` view, and a
+    buffer that is not filled is written row by row by the backward that binds it, as a fresh one.
+
+    Liveness: an entry is in one free list or owned by one holder, so two live holders never share a buffer.  The
+    graph's work on it runs on the caller's stream (its backward on its forward's stream), and the list is that
+    stream's, so the next graph to take the buffer works on it behind all of that work.  Under a CUDA graph capture,
+    from another current device, above the small-pool limit, or past :data:`_RLAB_POOL_STREAMS` streams, the holder
+    owns an ordinary :func:`_graph_rlab_tensor` that is freed with it."""
+    index = device.index
+    if (
+        _RLAB_POOL_ON
+        and rows <= _RLAB_POOL_ROWS
+        and _CUDA_GET_DEVICE() == index
+        and not _CUDA_IS_CAPTURING()
+    ):
+        key = _CUDA_GET_STREAM(index)
+        free = _RLAB_POOL.get(key)
+        if free is None and len(_RLAB_POOL) < _RLAB_POOL_STREAMS:
+            free = _RLAB_POOL.setdefault(key, [])
+        if free is not None:
+            try:
+                entry = free.pop()
+            except IndexError:  # none free (another thread may take the last one)
+                entry = None
+            if entry is None or entry[2] < rows:
+                capacity = -(-rows // _RLAB_POOL_ALIGN) * _RLAB_POOL_ALIGN
+                buffer = _graph_rlab_tensor(capacity, False, device)
+                entry = (capacity, buffer, capacity, buffer)
+            if entry[0] != rows:
+                entry = (rows, entry[3][:rows], entry[2], entry[3])
+            held = entry[1]
+            if zero:
+                held.zero_()
+            return _GraphRlab(held, zero, (free, entry))
+    return _GraphRlab(_graph_rlab_tensor(rows, zero, device), zero)
+
+
 def _logprob_graph_rlab(
     X: torch.Tensor,
     row_index: Optional[torch.Tensor],
@@ -3460,6 +3518,7 @@ def _logprob_graph_rlab(
     dz_arm: bool,
     fused_dx: bool,
     kept: bool = False,
+    recompute: Optional[bool] = None,
 ) -> Optional["_GraphRlab"]:
     """The label residuals a log-probability autograd forward allocates for its graph's backwards
     (:class:`_GraphRlab`): ``None`` when no backward can bind them (no gradient, another backend, no rows).  Allocated
@@ -3468,8 +3527,16 @@ def _logprob_graph_rlab(
     backward whose ``row_grad`` stores every row (``kept``: the kept logits; or no ``dz`` arm), zero-filled (clean)
     for the ``dz`` arm's recompute.  A backward under the zero-gradient row skip (:func:`_zero_dlogp_skip`: its
     counted plan) binds its own, so the holder starts empty there.  The forward's pick is a placement only: each
-    backward checks the held tensor (:meth:`_Binding._call_rlab`)."""
+    backward checks the held tensor (:meth:`_Binding._call_rlab`).  ``None`` also in a non-reentrant
+    ``torch.utils.checkpoint``'s recomputation (``recompute``; ``None``: read from the saved-tensor hooks,
+    :func:`_checkpoint_pass`): its graph only hands its saved tensors to the checkpointed call's backward, which binds
+    that call's holder, and runs no backward of its own."""
     if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
+        return None
+    if recompute is None:
+        ckpt = _checkpoint_pass() if _TOP_SAVED_HOOKS(False) is not None else None
+        recompute = ckpt is not None and not ckpt.first
+    if recompute:
         return None
     rows = (
         (int(X.shape[0]) if X.ndim else 0)
@@ -3483,7 +3550,7 @@ def _logprob_graph_rlab(
     ):
         return _GraphRlab()
     zero = dz_arm and not kept
-    return _GraphRlab(_graph_rlab_tensor(rows, zero, X.device), zero)
+    return _graph_rlab(rows, zero, X.device)
 
 
 def scatter_rows(
@@ -6351,12 +6418,28 @@ class _GraphRlab:
     and every backward of the graph has the same labels in the same row order).  A counted plan (the zero-gradient row
     skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows past its count unwritten: it never binds the
     held tensor.  A call takes the tensor until it returns, so a concurrent backward of the same graph allocates its
-    own; a call that fails leaves none."""
+    own; a call that fails leaves none.  ``own``: the free-list entry the holder owns (:func:`_graph_rlab`) and its
+    list, put back when the holder is freed (the entry stays the holder's while a backward hands back another tensor).
+    """
 
-    __slots__ = ("tensor", "clean")
+    __slots__ = ("tensor", "clean", "own")
 
-    def __init__(self, tensor: Optional[torch.Tensor] = None, clean: bool = False):
-        self.tensor, self.clean = tensor, clean
+    def __init__(
+        self,
+        tensor: Optional[torch.Tensor] = None,
+        clean: bool = False,
+        own: Optional[tuple] = None,
+    ):
+        self.tensor, self.clean, self.own = tensor, clean, own
+
+    def __del__(self):
+        own = self.own
+        if own is not None:
+            try:
+                if len(own[0]) < _RLAB_POOL_MAX:
+                    own[0].append(own[1])
+            except Exception:  # interpreter shutdown: the module globals may be gone
+                pass
 
 
 def recompute_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
@@ -12654,6 +12737,7 @@ class CakeLMHeadDetLogprobFunction(torch.autograd.Function):
                 need_dw=bool(ctx.needs_input_grad[1]),
                 dz_arm=dz_arm,
                 fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
+                recompute=ckpt is not None and not ckpt.first,
             )
         )
         return logp
@@ -12833,6 +12917,7 @@ class CakeLMHeadDetLogprobTemperatureFunction(torch.autograd.Function):
                 need_dw=bool(ctx.needs_input_grad[1]),
                 dz_arm=dz_arm,
                 fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
+                recompute=ckpt is not None and not ckpt.first,
             )
         )
         return logp
