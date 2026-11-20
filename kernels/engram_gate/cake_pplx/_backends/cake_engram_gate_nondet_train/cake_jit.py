@@ -80,9 +80,9 @@ ACC_MODES: dict[str, tuple[str, ...]] = {"fwd": ("f32", "dot2"), "bwd": ("dot2",
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_dot2": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_acc"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_train_a8cb26cf619ca16fe4c9",
+        "kernel_symbol": "kernel_cake_engram_gate_train_638509badcd8ffb2085c",
         "launch": {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
@@ -90,7 +90,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 43520,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_train_a8cb26cf619ca16fe4c9",
+        "library": "cake_engram_gate_train_638509badcd8ffb2085c",
         "stage": "bwd",
     },
     "dw_reduce": {
