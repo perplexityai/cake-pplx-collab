@@ -130,7 +130,7 @@ The tests are in `tests/experimental/` of the family: the backend
 distribution as [`ARCHITECTURE.md`](../../../../../ARCHITECTURE.md)
 describes; without a supported device the device tests skip.
 
-Eighteen tests observe the kernels that one backward call launches through
+Twenty-eight tests observe the kernels that one backward call launches through
 `torch.profiler`: `test_the_backward_launches_the_records_of_its_variant`
 and `test_the_backward_without_run_launches_the_same_records`.  The profiler
 records kernels only with a CUPTI that supports the device.  On `sm_107a`,
