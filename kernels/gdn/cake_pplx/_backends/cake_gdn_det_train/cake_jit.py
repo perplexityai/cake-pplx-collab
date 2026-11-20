@@ -77,7 +77,8 @@ the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the
 whole map), writing the pre-scan's ``seg_state`` /
 ``seg_flag``; ``dhu_tc2``'s arguments, then ``seg_index``, ``seg_mode``,
 ``warmup_thresh_log2`` and ``seg_flag``), ``dqkwg``, ``wy_bwd`` /
-``wy_bwd_bf16``, ``finalize`` /
+``wy_bwd_bf16``, ``dhu_tc2_dvl32_gm2`` (``dhu_tc2_dvl32_gm`` over two CTAs per (entry, value head), grid z 2: ``B`` on
+z 0, ``M`` on z 1; ``dhu_tc2_dvl32_gm``'s arguments and bits), ``finalize`` /
 ``finalize_mlp``, ``tail_g2`` / ``tail_g2_bf16`` (``dqkwg``, the WY pullback
 and the finalize of a value-head group of two in one tcgen05 cluster kernel),
 ``tail_g3`` / ``tail_g3_bf16`` (the same for a value-head group of three,
@@ -159,6 +160,7 @@ STAGES = (
     "dhu_tc2_wavefront_split",
     "dhu_tc2_dvl32",
     "dhu_tc2_dvl32_gm",
+    "dhu_tc2_dvl32_gm2",
     "dqkwg",
     "wy_bwd",
     "wy_bwd_bf16",
@@ -1676,6 +1678,49 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gdn_det_train_214243f9cfaf2e16a782",
         "stage": "dhu_tc2_dvl32_gm",
+    },
+    "dhu_tc2_dvl32_gm2": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "qn_tma"],
+            ["buffer", "kn_tma"],
+            ["buffer", "w_tma"],
+            ["buffer", "do_tma"],
+            ["buffer", "g_cs"],
+            ["buffer", "dht"],
+            ["buffer", "dh_out"],
+            ["buffer", "dv2"],
+            ["buffer", "dh0"],
+            ["buffer", "seg_state"],
+            ["buffer", "chunk_start"],
+            ["buffer", "chunk_len"],
+            ["buffer", "seg_chunk_start"],
+            ["buffer", "seg_seq"],
+            ["buffer", "seq_chunk_start"],
+            ["parameter", "num_heads"],
+            ["parameter", "num_v_heads"],
+            ["parameter", "use_final_state_grad"],
+            ["parameter", "store_initial_state_grad"],
+            ["parameter", "scale"],
+            ["buffer", "seg_index"],
+            ["buffer", "seg_mode"],
+            ["parameter", "warmup_thresh_log2"],
+            ["buffer", "seg_flag"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_gdn_det_train_8e4cbeb215641bdc650f",
+        "launch": {
+            "block": (320, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 223104,
+            "use_pdl": False,
+        },
+        "library": "cake_gdn_det_train_8e4cbeb215641bdc650f",
+        "stage": "dhu_tc2_dvl32_gm2",
     },
     "dqkwg": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],

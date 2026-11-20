@@ -127,6 +127,7 @@ nothing here reads an environment variable.
 from __future__ import annotations
 
 import math
+import os
 import warnings
 from collections.abc import Mapping
 from contextvars import ContextVar
@@ -141,6 +142,7 @@ from . import cake_backend, cake_jit, cake_plan
 
 __all__ = [
     "ADJOINT_MAP_ARCHS",
+    "ADJOINT_MAP_SPLIT_STAGE",
     "ADJOINT_MAP_STAGE",
     "CHAIN_PLAN",
     "CHUNK",
@@ -196,6 +198,7 @@ __all__ = [
     "sdt_pricing",
     "serial_scan_pricing",
     "sequence_groups",
+    "split_map_halves",
     "split_map_stage",
     "split_summary_entries",
     "stage_set",
@@ -323,6 +326,7 @@ LAUNCH_ARGS: dict[str, tuple[str, ...]] = {
     "dhu_tc2": _DHU_TC2_ARGS,
     "dhu_tc2_dvl32": _DHU_TC2_ARGS,
     "dhu_tc2_dvl32_gm": _DHU_TC2_GM_ARGS,
+    "dhu_tc2_dvl32_gm2": _DHU_TC2_GM_ARGS,
     "dhu_tc2_wavefront": _DHU_TC2_WAVEFRONT_ARGS,
     "dhu_tc2_wavefront_split": _DHU_TC2_WAVEFRONT_ARGS,
     "dqkwg": _DQKWG_ARGS,
@@ -1570,8 +1574,21 @@ def _sdt_selected(meta: ChunkMeta, segs: SegmentTable, num_v_heads: int, device_
 # pre-scan's does.
 ADJOINT_MAP_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 ADJOINT_MAP_STAGE = "dhu_tc2_dvl32_gm"
+# The same maps over two CTAs per (entry, value head) (``dhu_tc2_dvl32_gm2``, grid z 2: ``B`` on z 0, ``M`` on z 1),
+# the same bits; :func:`split_map_halves` names it where its grid fits one wave of the SMs.
+ADJOINT_MAP_SPLIT_STAGE = "dhu_tc2_dvl32_gm2"
 # the mode bit of a map entry: bound the map by the warm-up threshold and write its seg_flag
 SPLIT_WARM = 16
+
+
+def split_map_halves(arch: str, num_summary: int, num_v_heads: int, sm_count: int) -> bool:
+    """Do the segment maps of ``ADJOINT_MAP_STAGE`` run as ``ADJOINT_MAP_SPLIT_STAGE`` (B and M on two CTAs)?  Where
+    the registry delivers it and its ``2 x num_summary x num_v_heads`` CTAs fit one wave (one CTA per SM).  Research
+    switch ``CAKE_GDN_GM2``: ``rule`` (default), ``always``, ``never``."""
+    mode = os.environ.get("CAKE_GDN_GM2", "rule")
+    if mode == "never" or not _available(ADJOINT_MAP_SPLIT_STAGE, arch):
+        return False
+    return mode == "always" or 2 * num_summary * num_v_heads <= sm_count
 
 
 def split_map_stage(arch: str, num_heads: int, num_v_heads: int) -> str:
@@ -3934,7 +3951,9 @@ def cake_gdn_det_train_backward(
             # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, with
             # the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the whole map; the same
             # seg_state / seg_flag; a sequence's first map is never read)
-            _launch(ADJOINT_MAP_STAGE, segs.num_summary, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
+            halves = split_map_halves(arch, segs.num_summary, num_v_heads, _device_props(index)[0])
+            _launch(ADJOINT_MAP_SPLIT_STAGE if halves else ADJOINT_MAP_STAGE, segs.num_summary, num_v_heads,
+                    2 if halves else 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
                     seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
                     meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.summary[0], segs.summary[1],
                     warmup_thresh_log2(options), seg_flag)  # fmt: skip
