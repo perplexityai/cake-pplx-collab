@@ -3529,13 +3529,12 @@ def _logprob_graph_rlab(
     counted plan) binds its own, so the holder starts empty there.  The forward's pick is a placement only: each
     backward checks the held tensor (:meth:`_Binding._call_rlab`).  ``None`` also in a non-reentrant
     ``torch.utils.checkpoint``'s recomputation (``recompute``; ``None``: read from the saved-tensor hooks,
-    :func:`_checkpoint_pass`): its graph only hands its saved tensors to the checkpointed call's backward, which binds
-    that call's holder, and runs no backward of its own."""
+    :func:`_checkpoint_recomputation`): its graph only hands its saved tensors to the checkpointed call's backward,
+    which binds that call's holder, and runs no backward of its own."""
     if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
         return None
     if recompute is None:
-        ckpt = _checkpoint_pass() if _TOP_SAVED_HOOKS(False) is not None else None
-        recompute = ckpt is not None and not ckpt.first
+        recompute = _TOP_SAVED_HOOKS(False) is not None and _checkpoint_recomputation()
     if recompute:
         return None
     rows = (
@@ -12115,6 +12114,20 @@ def _checkpoint_pass() -> Optional[_CheckpointPass]:
     frame = ref() if isinstance(ref, weakref.ReferenceType) else None
     return _CheckpointPass(
         False, frame if isinstance(frame, frame_type) else None, graph
+    )
+
+
+def _checkpoint_recomputation() -> bool:
+    """Whether this call runs in a non-reentrant ``torch.utils.checkpoint``'s recomputation (in a backward): the answer
+    of :func:`_checkpoint_pass` (not ``None``, not ``first``) from the top saved-tensor hooks' pack function name alone,
+    without the frame and graph reads."""
+    hooks = _TOP_SAVED_HOOKS(False)
+    if hooks is None or not _checkpoint_supported():
+        return False
+    pack = inspect.unwrap(hooks[0])
+    return (
+        getattr(pack, "__qualname__", None) == _CHECKPOINT_RECOMPUTE
+        and getattr(pack, "__module__", None) == _torch_checkpoint.__name__
     )
 
 

@@ -18519,6 +18519,51 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
     )
 
 
+def test_checkpoint_recomputation_matches_the_checkpoint_pass(monkeypatch):
+    """The graph label residuals' recomputation check (``_checkpoint_recomputation``, read by ``_logprob_graph_rlab``
+    when its caller passes no ``recompute``) gives the answer of ``_checkpoint_pass`` (not ``None`` and not ``first``)
+    everywhere: outside a checkpoint, in a non-reentrant checkpoint's forward and its recomputation, under other
+    saved-tensor hooks on top (outside and inside the checkpointed function), in a reentrant checkpoint, in nested
+    checkpoints, and on a torch without the hook structure (both ``False``)."""
+    seen = []
+
+    def probe():
+        ckpt = cake_backend._checkpoint_pass()
+        seen.append(
+            (
+                cake_backend._checkpoint_recomputation(),
+                ckpt is not None and not ckpt.first,
+            )
+        )
+
+    def fn(x):
+        probe()
+        with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+            probe()
+        return x.sin()
+
+    def outer(x):
+        probe()
+        return torch.utils.checkpoint.checkpoint(fn, x.cos(), use_reentrant=False)
+
+    x = torch.ones(3, requires_grad=True)
+    probe()
+    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
+    assert [a for a, _ in seen] == [False, False, False, True, False]
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+        probe()
+        torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
+    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=True).sum().backward()
+    torch.utils.checkpoint.checkpoint(outer, x, use_reentrant=False).sum().backward()
+    monkeypatch.setitem(cake_backend._CHECKPOINT_SUPPORT, "ok", False)
+    n = len(seen)
+    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
+    monkeypatch.undo()
+    assert seen[n:] and not any(a or b for a, b in seen[n:])
+    assert all(a == b for a, b in seen), seen
+    assert sum(a for a, _ in seen) >= 3
+
+
 _RLAB_POOL_PLACEMENT_SCRIPT = """
 import json, sys, torch
 sys.path.insert(0, {root!r})
