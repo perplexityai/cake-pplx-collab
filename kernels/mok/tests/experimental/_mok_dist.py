@@ -1516,17 +1516,18 @@ def before_down_placement(local_experts, macro):
     ]  # fmt: skip
 
 
-def before_down_full_skew(local_experts, target):
+def before_down_full_skew(local_experts, target, macro=768):
     """The requester's inputs at a 384-expert layout with every route of the group on rank ``target``'s experts,
-    padded the most (:func:`_skew_ids`; :data:`SKEW_TOKENS` source rows per rank, macrobatch 768), at the no-overflow
-    multiplier: the target rank's schedule holds exactly the padded rows, the other ranks' none; as
+    padded the most (:func:`_skew_ids`; :data:`SKEW_TOKENS` source rows per rank), at the no-overflow multiplier and
+    macrobatch ``macro`` (None: one resident macrobatch, so the recompute's context is checked over the whole
+    schedule): the target rank's schedule holds exactly the padded rows, the other ranks' none; as
     :func:`_before_down_case`."""
     _exact_matmul()
     device = torch.device("cuda", torch.cuda.current_device())
     rank, ep = dist.get_rank(), dist.get_world_size()
     topk = kernels.BEFORE_DOWN_LAYOUTS[(ep, local_experts)]
     counts = [SKEW_TOKENS] * ep
-    functional, config, workspace = _before_down_group(local_experts, counts)
+    functional, config, workspace = _before_down_group(local_experts, counts, macro)
     ids, padded = _skew_ids(counts, local_experts, topk, target, device)
 
     def checks(outputs, schedule):
@@ -1543,9 +1544,10 @@ def before_down_full_skew(local_experts, target):
 def before_down_overflow(local_experts, target):
     """The full skew of :func:`before_down_full_skew` on a workspace at the package's default multiplier, whose
     schedule capacity is below the target rank's padded rows (checked on the host): the target rank's rows kernel
-    traps, and its synchronization right after ``build_schedule`` raises (:data:`SCHEDULE_TRAPPED`); the other ranks
-    go on to the forward and wait there for the target rank until the caller stops them.  A rank that gets past the
-    step returns the digests of its outputs."""
+    traps, and the next CUDA call raises: one of the later launches or copies of ``build_schedule``, or the
+    synchronization right after it (which one depends on timing); that error is raised again as
+    :data:`SCHEDULE_TRAPPED`.  The other ranks go on to the forward and wait there for the target rank until the
+    caller stops them.  A rank that gets past the step returns the digests of its outputs."""
     _exact_matmul()
     device = torch.device("cuda", torch.cuda.current_device())
     rank, ep = dist.get_rank(), dist.get_world_size()
@@ -1560,8 +1562,8 @@ def before_down_overflow(local_experts, target):
     torch.manual_seed(4700 + target)
     data = _r8_data(counts, BEFORE_DOWN_HIDDEN, topk, ep * local_experts, device, ids=ids, pinned=pinned)
     x, local_ids, scores, dy = _section(data, counts)
-    schedule = functional.build_schedule(workspace, config, local_ids, num_local_experts=local_experts)
     try:
+        schedule = functional.build_schedule(workspace, config, local_ids, num_local_experts=local_experts)
         torch.cuda.synchronize()
     except RuntimeError as error:
         raise RuntimeError(f"{SCHEDULE_TRAPPED} on rank {rank}: {error}") from error

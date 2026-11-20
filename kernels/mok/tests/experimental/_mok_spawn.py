@@ -66,7 +66,6 @@ def _rank_main(rank, world, port, out, target, args):
     import torch.distributed as dist
 
     torch.cuda.set_device(rank)
-    status = ("error", "init")
     try:
         dist.init_process_group(
             "nccl", device_id=torch.device("cuda", rank), timeout=datetime.timedelta(seconds=900)
@@ -75,10 +74,11 @@ def _rank_main(rank, world, port, out, target, args):
         torch.cuda.synchronize()
         dist.barrier()
     except BaseException:  # noqa: BLE001 - reported to the parent
-        status = ("error", traceback.format_exc())
-    Path(out, f"rank{rank}.pkl").write_bytes(pickle.dumps(status))
-    if status[0] == "error":
+        # Report and leave while the traceback still holds the failing frames: leaving this block releases their
+        # objects, and after a kernel trap the destructors of device or pinned memory abort the process.
+        Path(out, f"rank{rank}.pkl").write_bytes(pickle.dumps(("error", traceback.format_exc())))
         os._exit(1)  # the peers may wait in a collective; the parent stops them
+    Path(out, f"rank{rank}.pkl").write_bytes(pickle.dumps(status))
     dist.destroy_process_group()
 
 

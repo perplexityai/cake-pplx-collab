@@ -134,8 +134,9 @@ def test_backward_releases_launcher_scratch_before_epilogue_ep8():
 #: The 384-expert layouts (EP, local experts) of the router weight before the down projection with peers on one node,
 #: by id: top-6 over 96 local experts at EP4, over 48 at EP8.
 TOP6_LAYOUTS = {"ep4-local96": (4, 96), "ep8-local48": (8, 48)}
-#: The error a CUDA kernel trap raises at the next synchronization.
-TRAP_ERROR = "CUDA error: unspecified launch failure"
+#: The part of the error text a CUDA kernel trap raises at the next CUDA call that torch's form ("CUDA error: ...") and
+#: the launchers' form ("<kernel>: cudaLaunchKernelExC failed: ...") share.
+TRAP_ERROR = "unspecified launch failure"
 #: Seconds the trapping group may run before its processes are stopped.
 OVERFLOW_TIMEOUT = 600
 
@@ -180,11 +181,13 @@ PLACEMENT_CASES = [
     for name, (world, local) in TOP6_LAYOUTS.items()
     for ident, macro in (("m768", 768), ("m1", None))
 ]
-#: ``(world, local_experts, target)`` of the full-skew items: every route to rank 0's experts, or to the last rank's.
+#: ``(world, local_experts, target, macro)`` of the full-skew items: every route to rank 0's experts, or to the last
+#: rank's; 768-row macrobatches, or one resident macrobatch (None, ``m1``).
 SKEW_CASES = [
-    pytest.param(world, local, target, id=f"{name}-rank{target}")
+    pytest.param(world, local, target, macro, id=f"{name}-rank{target}{suffix}")
     for name, (world, local) in TOP6_LAYOUTS.items()
     for target in (0, world - 1)
+    for suffix, macro in (("", 768), ("-m1", None))
 ]
 
 
@@ -207,14 +210,15 @@ def test_before_down_placement(record_property, world, local_experts, macro):
     _record(results, record_property)
 
 
-@pytest.mark.parametrize("world,local_experts,target", SKEW_CASES)
-def test_before_down_full_skew(record_property, world, local_experts, target):
+@pytest.mark.parametrize("world,local_experts,target,macro", SKEW_CASES)
+def test_before_down_full_skew(record_property, world, local_experts, target, macro):
     """Every route of the group on one rank's experts (rank 0 or the last), with the route counts per expert that pad
     the most, at the requester's no-overflow multiplier (the capacity holds the worst case, checked on the host): the
     target rank's schedule holds exactly the padded rows, no trap; contract, repeatability, graph replay, the
-    recompute's context against the saved one; judged."""
+    recompute's context against the saved one (on the resident macrobatch: the first 768 rows, or with one resident
+    macrobatch, ``m1``, the whole schedule); judged."""
     _require_before_down(world)
-    results = _run(world, workers.before_down_full_skew, local_experts, target)
+    results = _run(world, workers.before_down_full_skew, local_experts, target, macro)
     (record,) = results[0]
     assert record["case"] == f"bf16-clamped-before-down-full-skew-rank{target}"
     assert results[target][0]["num_tokens"] == record["padded_rows"]
@@ -226,8 +230,9 @@ def test_before_down_full_skew(record_property, world, local_experts, target):
 def test_before_down_overflow_traps(record_property, world, local_experts):
     """The full skew to the last rank on a workspace at the package's default multiplier (capacity below the target's
     padded rows, checked on the host), in a process session of its own: the group fails before the timeout, the
-    target rank with the kernel trap raised at its synchronization right after ``build_schedule``, no rank returns
-    outputs, and the processes left waiting are stopped.  Then a new group step on the same GPUs passes."""
+    target rank with the kernel trap raised at the next CUDA call (inside ``build_schedule`` or at the synchronization
+    after it; the text is recorded as ``trap_error``), no rank returns outputs, and the processes left waiting are
+    stopped.  Then a new group step on the same GPUs passes."""
     _require_before_down(world)
     target = world - 1
     run = run_ranks_isolated(world, workers.before_down_overflow, local_experts, target, timeout=OVERFLOW_TIMEOUT)
@@ -238,8 +243,9 @@ def test_before_down_overflow_traps(record_property, world, local_experts):
     assert not [rank for rank, kind in reports.items() if kind == "ok"], (reports, "a rank returned outputs")
     kind, text = run["records"][target] or (None, run["log"][-4000:])
     assert kind == "error" and workers.SCHEDULE_TRAPPED in text, text
-    record_property("trap_error", next(line for line in text.splitlines() if workers.SCHEDULE_TRAPPED in line))
-    assert TRAP_ERROR in text, text
+    trap = text[text.rindex(workers.SCHEDULE_TRAPPED) :].strip()
+    record_property("trap_error", trap)
+    assert TRAP_ERROR in trap, text
     run_ranks(world, workers.before_down_small_step, local_experts)
 
 
