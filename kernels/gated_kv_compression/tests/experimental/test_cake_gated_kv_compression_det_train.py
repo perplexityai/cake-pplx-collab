@@ -121,17 +121,17 @@ SMALL_DOCS = 512
 FUSE_DOCS = 256
 # The most documents a backward launch runs ``bwd_small`` for below ``bwd`` (the rendered ``bwd_small_docs`` of the
 # record serving the role); a backward of more runs ``bwd``, up to ``BWD_MAX_DOCS``.
-BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 97}
+BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 125}
 # The most documents a backward launch runs ``bwd`` for (the rendered ``bwd_max_docs`` of the record serving the role;
 # ``None``: the record has no such leaf, no bound); a backward of more runs ``bwd_small``.
 BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
-# Backward packs on either side of the documents bounds and of the forward's fused bound: 1, 16, 26, 27, 96, 97, 98,
-# 256 and 257 documents.
-BWD_BOUND_DOCS = (1, 16, 26, 27, 96, 97, 98, FUSE_DOCS, FUSE_DOCS + 1)
+# Backward packs on either side of the documents bounds and of the forward's fused bound: 1, 16, 26, 27, 124, 125,
+# 126, 256 and 257 documents.
+BWD_BOUND_DOCS = (1, 16, 26, 27, 124, 125, 126, FUSE_DOCS, FUSE_DOCS + 1)
 # The backward's role at each of these documents, a letter a document count: ``s`` ``bwd_small``, ``b`` ``bwd``.  The
 # role does not depend on the tokens: each count is checked at every token count of ``ROUTING_TOKENS``.
 ROUTING_TOKENS = (16384, 32768, 65536)
-ROUTING_DOCS = (26, 27, 96, 97, 98, 16384, 16385, 32769)
+ROUTING_DOCS = (26, 27, 124, 125, 126, 16384, 16385, 32769)
 ROUTING = {
     "sm_100a": "sbbbbbbb",
     "sm_103a": "sbbbbbbb",
@@ -318,7 +318,7 @@ def test_registry_records_are_well_formed() -> None:
 
 
 def test_the_backward_records_carry_their_bounds() -> None:
-    """The ``bwd_small`` records carry ``bwd_small_docs`` (the rendered bounds: 26 on sm_100a / sm_103a, 97 on
+    """The ``bwd_small`` records carry ``bwd_small_docs`` (the rendered bounds: 26 on sm_100a / sm_103a, 125 on
     sm_107a), and :func:`cake_jit.bwd_small_docs` reads the one of the record serving each architecture; the
     ``bwd_sm_107a`` record carries ``bwd_max_docs`` (16384), and :func:`cake_jit.bwd_max_docs` reads it, ``None`` (no
     bound) on sm_100a / sm_103a, whose ``bwd`` record has no such leaf.  No other record carries these leaves.  The two
@@ -481,7 +481,7 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     rows of ``out`` / ``dout`` as ``G``, the strides it was given and the rows of its grid; the pair table of at most
     512 documents is the ``pair_table_small`` role, of more the ``pair_table`` role; the forward of at most 256
     documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the backward of 23
-    tokens and at most ``bwd_small_docs`` documents (26 on sm_100a / sm_103a, 97 on sm_107a) is the ``bwd_small``
+    tokens and at most ``bwd_small_docs`` documents (26 on sm_100a / sm_103a, 125 on sm_107a) is the ``bwd_small``
     role, of more the ``bwd`` role, and of the documents of ``ROUTING``, at each token count of ``ROUTING_TOKENS``, its
     role there (``bwd_small`` above ``bwd_max_docs``, 16384, on sm_107a); every launcher passes the architecture it
     looked up to ``run_module``, and a device index, an architecture (and a forward or backward role) a caller gives as
@@ -657,8 +657,8 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     (four rows a CTA) on sm_107a; the pair tables run their one record everywhere, ``pair_table_small`` for 5 and 512
     documents and ``pair_table`` for 513; the forward of 256 documents runs ``fwd`` / ``fwd_sm_107a``, of 257, 512,
     513 and 8193 ``fwd_unfused`` / ``fwd_unfused_sm_107a``; the backward of 23 tokens in 5 and 26 documents runs
-    ``bwd_small`` / ``bwd_small_sm_107a``, of 27, 96 and 97 ``bwd`` on sm_100a / sm_103a and ``bwd_small_sm_107a`` on
-    sm_107a, of 98 and 16384 ``bwd`` / ``bwd_sm_107a``, and of 16385 ``bwd`` on sm_100a / sm_103a and
+    ``bwd_small`` / ``bwd_small_sm_107a``, of 27, 124 and 125 ``bwd`` on sm_100a / sm_103a and ``bwd_small_sm_107a``
+    on sm_107a, of 126 and 16384 ``bwd`` / ``bwd_sm_107a``, and of 16385 ``bwd`` on sm_100a / sm_103a and
     ``bwd_small_sm_107a`` on sm_107a (no device: the architecture is given and the binding entry is a recorder)."""
     if not all(rec["arg_plan"] for rec in cake_jit.MODULES.values()):
         pytest.skip("the records' argument plans are not rendered yet")
@@ -688,7 +688,7 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
     fused_edge = torch.zeros(FUSE_DOCS + 1, dtype=torch.int32)
     fused_past = torch.zeros(FUSE_DOCS + 2, dtype=torch.int32)
     tiny = torch.zeros(8193 + 1, dtype=torch.int32)
-    backward_docs = [torch.zeros(docs + 1, dtype=torch.int32) for docs in (26, 27, 96, 97, 98, 16384, 16385)]
+    backward_docs = [torch.zeros(docs + 1, dtype=torch.int32) for docs in (26, 27, 124, 125, 126, 16384, 16385)]
     for arch in ARCHES:
         monkeypatch.setattr(cake_jit, "device_arch", lambda index, arch=arch: arch)
         cake_backend.launch_pair_table(cu_seqlens=cu, cu_pairs=table)
@@ -717,7 +717,7 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
         unfused = "fwd_unfused_sm_107a" if arch == "sm_107a" else "fwd_unfused"
         backward = "bwd_sm_107a" if arch == "sm_107a" else "bwd"
         small = "bwd_small_sm_107a" if arch == "sm_107a" else "bwd_small"
-        # 27, 96 and 97 documents: bwd_small on sm_107a (at most 97 documents), bwd on sm_100a / sm_103a (more than 26);
+        # 27, 124 and 125 documents: bwd_small on sm_107a (at most 125), bwd on sm_100a / sm_103a (more than 26);
         # 16385 documents: bwd_small on sm_107a (more than 16384), bwd on sm_100a / sm_103a (no upper bound)
         middle = small if arch == "sm_107a" else backward
         tables = (("pair_table_small", 1), ("pair_table_small", 1), ("pair_table", 1))
@@ -726,9 +726,9 @@ def test_each_role_launches_the_record_of_the_device_architecture(monkeypatch) -
             (small, G + S),
             (small, G + 26),
             (middle, G + 27),
-            (middle, G + 96),
-            (middle, G + 97),
-            (backward, G + 98),
+            (middle, G + 124),
+            (middle, G + 125),
+            (backward, G + 126),
             (backward, G + 16384),
             (middle, G + 16385),
         )
@@ -1499,7 +1499,7 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     ``bwd_small_docs`` documents a pair table then ``bwd_small`` (``bwd_small`` on sm_100a / sm_103a,
     ``bwd_small_sm_107a`` on sm_107a), or the backward alone with ``pair_offsets``; the backward of 16384 tokens in 27
     documents a pair table then ``bwd`` on sm_100a / sm_103a (more than 26 documents) and ``bwd_small_sm_107a`` on
-    sm_107a (at most 97); the autograd entries launch no pair table in the backward and the same backward role.  The
+    sm_107a (at most 125); the autograd entries launch no pair table in the backward and the same backward role.  The
     pair table of at most ``small_docs`` (512) documents is ``pair_table_small``, of 513 ``pair_table``, in the forward
     and in the backward.  A call looks up the device's architecture, ``fuse_docs``, ``small_docs``, ``bwd_max_docs``
     and ``bwd_small_docs`` at most once each and passes the device index and the architecture to its launches.  No

@@ -85,7 +85,7 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 | `fwd` | per output row `r < G`: the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  Launched for `S <= fuse_docs` (256): the launch builds the pair table itself and does not search: row `r`'s first token is `cu_seqlens[0] + 2 r` plus the number of odd-length documents before its document, counted from `cu_seqlens`, and CTA 0 writes `cu_pairs` | rows `G` |
 | `fwd_unfused` | the same forward without the table build: the document of row `r` by a search of the `cu_pairs` the pair-table launch wrote, by the 32 lanes of a warp (one probe a lane in each of `ceil(log2(S) / 5)` rounds, no shared memory and no barrier); launched for `S > fuse_docs` | rows `G` |
 | `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  With `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd.  Launched for `bwd_small_docs < S <= bwd_max_docs` (no upper bound on SM100 / SM103, 16384 on SM107) | rows `G + S` |
-| `bwd_small` | the same backward with the search of all of `cu_pairs` in one level; launched for `S <= bwd_small_docs` (26 on SM100 / SM103, 97 on SM107) and on SM107 for `S > bwd_max_docs` | rows `G + S` |
+| `bwd_small` | the same backward with the search of all of `cu_pairs` in one level; launched for `S <= bwd_small_docs` (26 on SM100 / SM103, 125 on SM107) and on SM107 for `S > bwd_max_docs` | rows `G + S` |
 
 Each role has one registry record per architecture it serves.  Each forward role has two,
 one kernel in two schedules, each the faster on its architectures: records `fwd` and
@@ -109,9 +109,9 @@ packs.  Both forwards write the same bytes.  A backward call launches a pair tab
 `bwd_max_docs` documents (`cake_jit.bwd_max_docs`; no bound on SM100 / SM103), `bwd_small`
 for the others.  At 26 documents and fewer the two-level search was slower than the
 one-level one in some packs on B200 or GB300, and above 26 in none measured.  On VR200 the
-one-level search was the faster up to 96 documents, and the two-level search was slower in a
-pack of 97 and above 16384 documents, where its shared-memory level covers no more and it
-searches the whole table in one level.  Both backwards write the same bytes.  The pair table is
+two-level search was slower in some packs of 125 documents and fewer, in none of 126 to 128
+documents measured, and above 16384 documents, where its shared-memory level covers no more
+and it searches the whole table in one level.  Both backwards write the same bytes.  The pair table is
 `pair_table_small` for at most `small_docs` documents (512; `cake_jit.small_docs`), the
 faster there, and `pair_table` for more; both write the same bytes.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device; nothing

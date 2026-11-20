@@ -91,7 +91,7 @@ The roles, in launch order:
   all of ``cu_pairs`` in one level; both read ``C`` and ``Z`` in 256-bit
   lanes.  A backward launch of ``S`` documents runs ``bwd`` for
   ``bwd_small_docs < S <= bwd_max_docs`` and ``bwd_small`` otherwise
-  (:func:`bwd_small_docs`: 26 on ``sm_100a`` and ``sm_103a``, 97 on
+  (:func:`bwd_small_docs`: 26 on ``sm_100a`` and ``sm_103a``, 125 on
   ``sm_107a``; :func:`bwd_max_docs`: 16384 on ``sm_107a``, no bound on
   ``sm_100a`` and ``sm_103a``; the leaves of the records serving the roles
   on the architecture).  Both searches find the same document for every
@@ -464,7 +464,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
-        "bwd_small_docs": 97,
+        "bwd_small_docs": 125,
         "ffi_entry": "run",
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
         "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
