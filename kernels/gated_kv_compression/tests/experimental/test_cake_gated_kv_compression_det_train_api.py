@@ -29,10 +29,12 @@ On SM100 / SM103 / SM107: the entries' ``out``, ``dC`` and ``dZ`` meet the naive
 caller outputs (the gradients in the halves of one buffer); every documented ``ValueError`` and ``TypeError``; the
 empty problems launch nothing and return empty or zero-filled outputs; the launches run on the current stream without
 synchronizing; a captured CUDA graph replays to the bits of the eager call; ``torch.use_deterministic_algorithms(True)``
-changes nothing; the autograd nodes save their inputs and the pair table only, compute only the requested gradients,
-read an incoming gradient of any layout, and replay bit for bit under ``torch.utils.checkpoint(...,
-use_reentrant=False)``; a device outside the delivered architectures is a ``RuntimeError`` and a device of capability
-(10, 7) is served; with two devices, operands on the device that is not current give results there.
+changes nothing; a forward launches the pair table only past 256 documents (its kernel builds the table of fewer); on
+SM100 / SM103 every backward path of at most 26 documents launches ``bwd_small``, of more ``bwd``, with the same bits;
+the autograd nodes save their inputs and the pair table only, compute only the requested gradients, read an incoming
+gradient of any layout, and replay bit for bit under ``torch.utils.checkpoint(..., use_reentrant=False)``; a device
+outside the delivered architectures is a ``RuntimeError`` and a device of capability (10, 7) is served; with two
+devices, operands on the device that is not current give results there.
 """
 
 from __future__ import annotations
@@ -467,9 +469,9 @@ def launches(monkeypatch):
     found = []
     original = jit.run_module
 
-    def spy(role, values, *, rows, device_index):
+    def spy(role, values, *, rows, device_index, **options):
         found.append(role)
-        return original(role, values, rows=rows, device_index=device_index)
+        return original(role, values, rows=rows, device_index=device_index, **options)
 
     monkeypatch.setattr(jit, "run_module", spy)
     return found
@@ -617,6 +619,99 @@ def test_the_autograd_node_saves_its_inputs_and_the_pair_table_only(form) -> Non
     out.backward(x.dout)
 
 
+# Packs at the forward's fused bound (256 documents), past it, and on either side of the small pair table's bound (512
+# documents): one document, 256, 257, 512 and 513 documents of 0 to 6 tokens.
+BOUND_PACKS = tuple(Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}") for n in (1, 256, 257, 512, 513))
+
+
+@pytest.mark.parametrize("pack", BOUND_PACKS, ids=[p.id for p in BOUND_PACKS])
+def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launches) -> None:
+    """A forward of at most ``fuse_docs`` (256) documents launches the ``fwd`` kernel alone, which writes the pair
+    table the autograd node saves; a forward of more launches a pair table first, ``pair_table_small`` for at most
+    ``small_docs`` (512) documents and ``pair_table`` for more, then ``fwd_unfused``, which reads it.  The saved table
+    is the prefix of the pair counts every way, and the explicit forward gives the bits of the autograd one."""
+    device = _device_or_skip()
+    jit = _jit()
+    arch = jit.device_arch(device.index)
+    assert jit.fuse_docs(arch) == 256 and jit.small_docs(arch) == 512
+    x = make_inputs(pack, seed=53, device=device, layout="halves")
+    saved = []
+    c = x.c.detach().clone().requires_grad_(True)
+    with torch.autograd.graph.saved_tensors_hooks(lambda t: saved.append(t) or t, lambda t: t):
+        out = api.cake_gated_kv_compression_det(c, x.z, x.cu, x.G)
+    table = "pair_table_small" if pack.S <= 512 else "pair_table"
+    assert launches == (["fwd"] if pack.S <= 256 else [table, "fwd_unfused"]), pack.id
+    tables = [t for t in saved if t.dtype == torch.int32 and t.data_ptr() != x.cu.data_ptr()]
+    assert len(tables) == 1
+    assert torch.equal(tables[0], pair_table_of(pack.lengths, device)), f"{pack.id}: saved pair table"
+    explicit = api.cake_gated_kv_compression_det_train_forward(x.c, x.z, x.cu, x.G)
+    assert_bitwise(explicit, out.detach(), f"{pack.id}: out")
+
+
+# Packs on either side of the small backward's bound (26 documents) and of the forward's fused bound (256 documents):
+# one document, 16, 26, 27, 256 and 257 documents of 0 to 6 tokens.
+BWD_BOUND_PACKS = tuple(Pack((2, *(i * 5 % 7 for i in range(1, n))), f"S{n}") for n in (1, 16, 26, 27, 256, 257))
+
+
+@pytest.mark.parametrize("pack", BWD_BOUND_PACKS, ids=[p.id for p in BWD_BOUND_PACKS])
+def test_every_backward_runs_bwd_small_for_at_most_26_documents(pack, launches) -> None:
+    """On sm_100a and sm_103a a backward of at most ``bwd_small_docs`` (26) documents launches ``bwd_small``, of more
+    ``bwd``; on sm_107a, where no record serves ``bwd_small``, every backward launches ``bwd``.  The rule holds on the
+    three backward paths: the explicit backward without ``pair_offsets`` (after ``pair_table_small``), with them
+    (alone), and the autograd backward (alone, on its forward's table).  The three give the same ``dC`` and ``dZ``
+    bits, and on sm_100a and sm_103a so does a launch of the other backward role on the same table."""
+    device = _device_or_skip()
+    jit = _jit()
+    arch = jit.device_arch(device.index)
+    bound = 0 if arch == "sm_107a" else 26
+    assert jit.bwd_small_docs(arch) == bound
+    role = "bwd_small" if pack.S <= bound else "bwd"
+    forward = ["fwd"] if pack.S <= 256 else ["pair_table_small", "fwd_unfused"]
+    x = make_inputs(pack, seed=59, device=device, layout="halves")
+    table = pair_table_of(pack.lengths, device)
+    _, dc, dz = nan_halves(x.T, device)
+    launches.clear()
+    api.cake_gated_kv_compression_det_train_backward(x.dout, x.c, x.z, x.cu, dc=dc, dz=dz)
+    assert launches == ["pair_table_small", role], pack.id
+    _, given_dc, given_dz = nan_halves(x.T, device)
+    launches.clear()
+    api.cake_gated_kv_compression_det_train_backward(
+        x.dout, x.c, x.z, x.cu, dc=given_dc, dz=given_dz, pair_offsets=table
+    )
+    assert launches == [role], pack.id
+    launches.clear()
+    _, auto_dc, auto_dz = _autograd(x, "cz")
+    assert launches == [*forward, role], pack.id
+    for name, got, want in (
+        ("dc with pair_offsets", given_dc, dc),
+        ("dz with pair_offsets", given_dz, dz),
+        ("autograd dc", auto_dc, dc),
+        ("autograd dz", auto_dz, dz),
+    ):
+        assert_bitwise(got, want, f"{pack.id}: {name}")
+    if arch != "sm_107a":
+        other = "bwd" if role == "bwd_small" else "bwd_small"
+        _, other_dc, other_dz = nan_halves(x.T, device)
+        launches.clear()
+        _backend().launch_bwd(
+            dout=x.dout,
+            c=x.c,
+            z=x.z,
+            cu_seqlens=x.cu,
+            cu_pairs=table,
+            dc=other_dc,
+            dz=other_dz,
+            c_ld=x.c.stride(0),
+            z_ld=x.z.stride(0),
+            dc_ld=other_dc.stride(0),
+            dz_ld=other_dz.stride(0),
+            role=other,
+        )
+        assert launches == [other], pack.id
+        assert_bitwise(other_dc, dc, f"{pack.id}: dc of {other}")
+        assert_bitwise(other_dz, dz, f"{pack.id}: dz of {other}")
+
+
 def test_only_the_requested_gradients_are_returned() -> None:
     """With only ``c`` requiring a gradient, ``z.grad`` stays None and ``c.grad`` has the bits of the explicit
     ``dc``."""
@@ -700,8 +795,9 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: ``build.json`` holds an ``sm_107a``
-    library for every record that serves it, one per role, the forward's being ``fwd_sm_107a`` (nothing is built or
-    launched here)."""
+    library for every record that serves it, one per role served there, the forwards' being ``fwd_sm_107a`` and
+    ``fwd_unfused_sm_107a`` and the backward's ``bwd_sm_107a``; no record serves ``bwd_small`` there (nothing is built
+    or launched here)."""
     jit = _jit()
     path = Path(jit.__file__).parent / "build.json"
     if not path.is_file():
@@ -714,10 +810,17 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         monkeypatch.undo()
         jit.device_arch.cache_clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
+    roles = [role for role in jit.ROLES if "sm_107a" in jit.ROLE_ARCHES.get(role, jit.ARCHES)]
+    assert roles == ["pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd"]
     assert sorted(entry["name"] for entry in entries) == sorted(
-        f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in jit.ROLES
+        f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in roles
     )
     assert jit.role_record("fwd", "sm_107a") == "fwd_sm_107a"
+    assert jit.role_record("fwd_unfused", "sm_107a") == "fwd_unfused_sm_107a"
+    assert jit.role_record("bwd", "sm_107a") == "bwd_sm_107a"
+    with pytest.raises(KeyError):
+        jit.role_record("bwd_small", "sm_107a")
+    assert jit.bwd_small_docs("sm_107a") == 0
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 
