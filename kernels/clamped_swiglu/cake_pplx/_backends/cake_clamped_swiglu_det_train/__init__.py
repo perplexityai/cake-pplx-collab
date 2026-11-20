@@ -39,9 +39,10 @@ JIT variables):
   one-element FP32 buffer of the device, set to 1, and read its one element
   and ignore it, and the backward runs the unweighted program, which takes no
   weight).  ``limit`` is ``L``, a positive finite Python number rounded to
-  FP32; it is a launch argument, as are ``R``, the weight flag, the
-  strides and the column offsets, so one library per program and
-  architecture serves every call (the row count picks the program).
+  FP32; it is a launch argument, as are ``R``, the weight flag, the strides
+  and the column offsets, so one library per program and architecture serves
+  every call (the row count picks the program, and in the backward so does
+  whether a weight is given).
 - Checks.  An entry point checks every argument (the limit, the operands'
   types, dtypes, shapes and devices, the output buffers, the ``grad_up`` and
   ``grad_weight`` rules, ``R`` and the device's architecture) before it
@@ -120,7 +121,8 @@ JIT variables):
   every ``1 <= 1 + e < 2^126``); a warp with a clamped gate at or below -87
   in a run of its loads computes that run with a scaled reciprocal that keeps
   the subnormal sigmoid (``RN(1 / (1 + e))`` where it is normal, within one
-  subnormal ulp of it where it is subnormal, +0 for an infinite ``e``).  ``silu = g' s`` and ``a = silu u'``; ``h = bf16(w a)``, one rounding.
+  subnormal ulp of it where it is subnormal, +0 for an infinite ``e``).
+  ``silu = g' s`` and ``a = silu u'``; ``h = bf16(w a)``, one rounding.
   The backward: ``d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])``
   and ``d_up = bf16((dh w) silu [-L <= u <= L])``, the masks inclusive and
   taken on the raw inputs, each output rounded once from FP32 (the unweighted

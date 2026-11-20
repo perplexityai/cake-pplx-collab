@@ -1412,7 +1412,7 @@ def test_large_row_counts(rows, w, device) -> None:
 @pytest.mark.parametrize("program", PROGRAMS)
 @pytest.mark.parametrize("layout", ["split", "merged"])
 @pytest.mark.parametrize("w", ["random", "none"])
-def test_the_exact_sigmoid_gives_the_bits_of_the_fast_one(layout, w, program, device, monkeypatch) -> None:
+def test_the_deep_sigmoid_gives_the_bits_of_the_fast_one(layout, w, program, device, monkeypatch) -> None:
     """In each stage's small-R and large-R program (forced through the route), on ordinary and boundary values whose
     clamped gates are all above -87 (the sigmoid's fast path everywhere), a gate of -88 at columns 0, 768 and 1536 of
     every row (one in each third: every run takes the deep path, the row of a one-run program and each run of 768
@@ -1686,11 +1686,11 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
 
 
 @pytest.mark.parametrize("layout", ["merged", "split"])
-def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, device, launches) -> None:
-    """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted call
-    in the process before (only a weighted call and an unweighted backward, which load the libraries; the ignored
-    weight's cache is cleared): the capture makes the device's cached FP32 buffer, the captured forward passes it as
-    its ignored weight and the captured backward runs ``bwd_unweighted``, which takes no weight, weight flag or weight
+def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout, device, launches) -> None:
+    """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted forward
+    in the process before (only a weighted call and an eager unweighted backward, which load the libraries; the ignored
+    weight's cache is cleared): the capture makes the device's cached FP32 buffer, the captured forward passes it as its
+    ignored weight and the captured backward runs ``bwd_unweighted``, which takes no weight, weight flag or weight
     gradient; later eager unweighted forwards pass the same buffer, and each replay on new inputs copied into the
     captured tensors gives the bits of eager calls."""
     R = 129
