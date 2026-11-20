@@ -107,8 +107,8 @@ def test_det_entry_points_take_no_mode_keyword(namespace: str, name: str) -> Non
 @pytest.mark.parametrize("mode", [True, False, None], ids=["true", "false", "none"])
 def test_a_mode_keyword_is_a_type_error(mode) -> None:
     """Every entry point of both namespaces raises ``TypeError`` for a ``deterministic`` keyword before it reads any
-    argument (no device needed), and the autograd function takes no fifth input but its internal launch slot: a mode
-    there raises ``TypeError`` before any argument is read."""
+    argument (no device needed), and the autograd function takes no fifth input: a mode there raises ``TypeError``
+    before any argument is read."""
     x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
     dh = torch.zeros(4, I, dtype=torch.bfloat16)
     for module in NAMESPACES.values():
@@ -124,11 +124,9 @@ def test_a_mode_keyword_is_a_type_error(mode) -> None:
             with pytest.raises(TypeError, match="deterministic"):
                 run()
     forward_params = list(inspect.signature(CakeClampedSwiGLUDetFunction.forward).parameters)
-    assert forward_params == ["ctx", "gate_up_or_gate", "up", "weight", "limit", "_launch"]
-    assert inspect.signature(CakeClampedSwiGLUDetFunction.forward).parameters["_launch"].default is None
-    if mode is not None:
-        with pytest.raises(TypeError, match="fifth argument"):
-            CakeClampedSwiGLUDetFunction.apply(x, None, None, L, mode)
+    assert forward_params == ["ctx", "gate_up_or_gate", "up", "weight", "limit"]
+    with pytest.raises(TypeError, match="positional argument"):
+        CakeClampedSwiGLUDetFunction.apply(x, None, None, L, mode)
 
 
 def test_limit_is_required_everywhere() -> None:
