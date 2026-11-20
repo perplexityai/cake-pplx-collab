@@ -310,7 +310,7 @@ PAIR_REGIONS: dict[str, dict[bool, tuple[tuple[int, int | None, int], ...]]] = {
     "sm_100a": {False: ((1, 1, 4096), (1, 4, 8192), (128, None, 8192)), True: ()},
     "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048),)},
     "sm_107a": {
-        False: ((4, 4, 1024), (1, 4, 2048), (1, None, 4096)),
+        False: ((1, 4, 2048), (1, None, 4096)),
         True: ((1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
     },
 }

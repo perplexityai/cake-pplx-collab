@@ -120,8 +120,9 @@ LAUNCHER_KEYWORDS = {
 # length on it).  This is the decision taken from the crossover run, not a measurement: a call is on the pair route
 # where it was FASTER than 0.1.4 in every counted round, beyond the identical-kernel controls' single-round noise, and
 # so was every longer call of its ``B * H``.  On ``sm_107a`` one-head causal calls (``B * H`` 1) with 1024 keys stay on
-# the 1-CTA route, because the final measurement found the pair route slower there than 0.1.4.  ``PAIR_REGIONS`` must
-# reproduce it.
+# the 1-CTA route, because the final measurement found the pair route slower there than 0.1.4.  On ``sm_107a`` four-head
+# non-causal calls (``B * H`` 4) under 2048 keys stay on the 1-CTA route, because the final measurement found the pair
+# route slower than 0.1.4 there in eager calls.  ``PAIR_REGIONS`` must reproduce it.
 MEASURED_COUNTS = (1, 4, 16, 32, 128)
 MEASURED_LENGTHS = (256, 512, 1024, 2048, 4096, 8192)
 DECIDED_LEAST = {
@@ -134,7 +135,7 @@ DECIDED_LEAST = {
         True: {1: 2048, 4: 2048, 16: None, 32: None, 128: None},
     },
     "sm_107a": {
-        False: {1: 2048, 4: 1024, 16: 4096, 32: 4096, 128: 4096},
+        False: {1: 2048, 4: 2048, 16: 4096, 32: 4096, 128: 4096},
         True: {1: 2048, 4: 2048, 16: 4096, 32: 8192, 128: 8192},
     },
 }
