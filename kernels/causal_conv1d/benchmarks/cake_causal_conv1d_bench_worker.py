@@ -221,8 +221,12 @@ def _plan_provenance(mode: str, S: int, C: int, num_docs: int, route: dict, devi
         out: dict = {"arch": arch}
         for role, kind in kinds.items():
             if hasattr(be, "_call_plan"):
+                # The forward plans by its taps dtype; 0.2.3's ``_call_plan`` has no ``bf16_taps``.
+                takes_taps = "bf16_taps" in inspect.signature(be._call_plan).parameters
+                taps = {"bf16_taps": bf16} if role == "fwd" and takes_taps else {}
                 names, record, sc, grid, _ = be._call_plan(
-                    arch, kind, S, C, num_docs, device_index=index, policy=None if role == "fwd" else policy
+                    arch, kind, S, C, num_docs, device_index=index, policy=None if role == "fwd" else policy,
+                    **taps,
                 )
             else:
                 names = be._route(arch, kind, needs="the benchmark provenance", C=C, S=S)
