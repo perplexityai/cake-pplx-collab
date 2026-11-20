@@ -414,6 +414,7 @@ import warnings
 from typing import Any, Optional
 
 import torch
+import torch.utils.dlpack
 import tvm_ffi
 
 from . import cake_jit as _loader
@@ -581,18 +582,20 @@ def _kernel_view(
     stride is 128 passes the kernels' packed-rows test (head stride 128 and
     token stride ``H * 128``) as a ``[T, H, 128]`` input with packed rows does.
 
-    A plain BF16 ``[T, H, 128]`` tensor on ``device`` takes a shorter path to
-    the same result (fewer tensor calls per launch): read in place, or copied
-    once; every other input goes through :func:`_kernel_view_checked`.
+    A plain BF16 ``[T, H, 128]`` CUDA tensor on ``device`` takes a shorter
+    path to the same result (fewer tensor calls per launch): read in place,
+    or copied once unless it has dimension names; every other input goes
+    through :func:`_kernel_view_checked`.
     """
 
     if (
         type(tensor) is torch.Tensor
+        and tensor.is_cuda
+        and tensor.get_device() == device.index
         and tensor.dtype is torch.bfloat16
         and len(shape) == 3
         and shape[2] == HEAD_DIM
         and tensor.shape == shape
-        and tensor.get_device() == device.index
     ):
         tokens, heads, _ = shape
         token_stride, head_stride, last_stride = tensor.stride()
@@ -605,11 +608,12 @@ def _kernel_view(
             and tensor.data_ptr() % _ALIGNMENT_BYTES == 0
         ):
             return tensor, tok, head
-        return (
-            tensor.clone(memory_format=torch.contiguous_format),
-            heads * HEAD_DIM if tokens > 1 else 0,
-            HEAD_DIM,
-        )
+        if not tensor.has_names():
+            return (
+                tensor.clone(memory_format=torch.contiguous_format),
+                heads * HEAD_DIM if tokens > 1 else 0,
+                HEAD_DIM,
+            )
     return _kernel_view_checked(tensor, name, shape=shape, device=device)
 
 
@@ -686,15 +690,17 @@ def _output(
     """``(kernel buffer, caller's tensor to copy into or None)``: the kernels
     write contiguous 32-byte aligned rows; a caller's tensor of another layout
     receives a copy after the launch.  ``like``: an input of ``shape`` on
-    ``device``; when it is a plain strided ``dtype`` tensor, a new buffer is
-    ``torch.empty_like(like)`` in the contiguous format (the buffer of
-    ``torch.empty(shape, dtype=dtype, device=device)`` with less host work)."""
+    ``device``; when it is a plain strided ``dtype`` tensor without dimension
+    names, a new buffer is ``torch.empty_like(like)`` in the contiguous format
+    (the buffer of ``torch.empty(shape, dtype=dtype, device=device)`` with
+    less host work)."""
 
     if tensor is None:
         if (
             type(like) is torch.Tensor
             and like.dtype is dtype
             and like.layout is torch.strided
+            and not like.has_names()
         ):
             return torch.empty_like(like, memory_format=torch.contiguous_format), None
         return torch.empty(shape, dtype=dtype, device=device), None
@@ -917,10 +923,13 @@ def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
 @functools.cache
 def _launch_placeholder(device_index: int, dtype: torch.dtype) -> Any:
     """:func:`_placeholder` converted once to a ``tvm_ffi.Tensor`` (the same
-    empty tensor): a launch passes it as it is, without converting a torch
+    empty tensor) through a legacy DLPack capsule, with no stream exchange in
+    any torch version: a launch passes it as it is, without converting a torch
     tensor on every call."""
 
-    return tvm_ffi.from_dlpack(_placeholder(device_index, dtype))
+    return tvm_ffi.from_dlpack(
+        torch.utils.dlpack.to_dlpack(_placeholder(device_index, dtype))
+    )
 
 
 @functools.cache
