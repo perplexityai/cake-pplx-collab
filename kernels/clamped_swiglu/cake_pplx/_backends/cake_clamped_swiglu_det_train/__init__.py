@@ -855,16 +855,18 @@ def _backward(
 
 # The common call of a step, checked and launched by the step itself (:func:`_forward_step`, :func:`_backward_step`):
 # plain contiguous operands of the exact dtypes and shapes on one CUDA device (the BF16 ones 16-byte aligned), the
-# merged BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None or
-# plain contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  The first operand,
-# the weight and ``dh`` are checked in the step's own frame, the ``up`` of two tensors and each output buffer by one
-# :func:`_plain` call each, so only a merged input with new outputs is checked and launched in exactly one frame.  The
-# checks keep the order of the full checks: the operands and ``dh``, then ``limit``, then the output buffers and their
-# rules, then the device's architecture; an output buffer that is not plain sends the call, its limit checked, to the
-# full checks.  A contiguous tensor of more than one row has the row stride of its row width, so its row stride is
-# that constant and is not read; a single row's strides are 0 (never dereferenced).  Any other call runs
-# :func:`_forward` or :func:`_backward`, whose checks raise every error and mark the inputs to copy; both give the
-# same launch.
+# merged BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None
+# or plain contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  The first
+# operand, the weight and ``dh`` are checked in the step's own frame, the ``up`` of two tensors and each output buffer
+# by one :func:`_plain` call each, so only a merged input with new outputs, whose limit is the last accepted Python
+# float or int, is checked and launched in exactly one Python frame per step once the host caches are filled (any
+# other limit adds one :func:`_limit` call; a call that fills a host cache, such as the first launch of a program on a
+# device, adds the calls that fill it).  The checks keep the order of the full checks: the operands and ``dh``, then
+# ``limit``, then the output buffers and their rules, then the device's architecture; an output buffer that is not
+# plain sends the call, its limit checked, to the full checks.  A contiguous tensor of more than one row has the row
+# stride of its row width, so its row stride is that constant and is not read; a single row's strides are 0 (never
+# dereferenced).  Any other call runs :func:`_forward` or :func:`_backward`, whose checks raise every error and mark
+# the inputs to copy; both give the same launch.
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
 _MERGED_WIDTH = 2 * WIDTH
