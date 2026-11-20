@@ -1074,7 +1074,9 @@ def _check_with_o_lo(with_o_lo: Any) -> None:
         raise ValueError(f"with_o_lo must be a Python bool, got {shown}")
 
 
-def _check_o_lo_mode(q_latent: Any, o_lo: Optional[torch.Tensor], with_o_lo: bool) -> None:
+def _check_o_lo_mode(
+    q_latent: Any, o_lo: Optional[torch.Tensor], with_o_lo: bool
+) -> None:
     """The pairing of a step backward's ``o_lo`` with its ``with_o_lo``, checked before anything else of the call (no
     plan, no allocation, no launch): ``o_lo`` is ``None`` exactly when ``with_o_lo`` is ``False``.  A
     ``with_o_lo=False`` call refuses a tensor (its forward returned none, and the delta of this mode reads ``out``
@@ -5203,7 +5205,9 @@ def _prepare_forward_nope(
     sink=None,
     *,
     with_o_lo: bool,
-) -> tuple[tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], Callable[[], None]]:
+) -> tuple[
+    tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], Callable[[], None]
+]:
     """:func:`forward_nope` before its launch: ``((out, lse, o_lo), launch)`` with the outputs allocated and the
     launch values bound (:meth:`_NopeBinding.prepared_forward`); ``launch()`` issues the forward stage (the sink
     build with a ``sink``; its ``with_o_lo=False`` twin under ``with_o_lo=False``, ``o_lo`` then ``None``)."""

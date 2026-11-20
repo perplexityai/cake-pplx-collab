@@ -453,7 +453,9 @@ def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
         )
 
 
-def test_dkv_direct_environment_selects_the_backward_path(with_o_lo, monkeypatch, record_property):
+def test_dkv_direct_environment_selects_the_backward_path(
+    with_o_lo, monkeypatch, record_property
+):
     """Through the public entry with ``dkv_acc`` at S / T = 8, top-k 128: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the
     cast path, ``1`` the direct path, ``auto`` (and the variable unset) the record's rule of the device's
     architecture (the direct path from 4 keys per query on every architecture: on sm_107a T * K_eff = 32,768 stays
@@ -706,7 +708,9 @@ def test_varlen_multi_document_forward_and_the_flat_forward(with_o_lo, record_pr
     nv.judge_draws(record_property, case, seed=SEED + 4)
 
 
-def test_backward_whole_row_policy_two_passes_through_public_entry(with_o_lo, record_property):
+def test_backward_whole_row_policy_two_passes_through_public_entry(
+    with_o_lo, record_property
+):
     """The registered policy takes two passes at T = 4096 x S = 65,536 (top-k 2048) under the R1
     rule (the sm_100a / sm_103a records; the sm_107a rule keeps that row single-pass, so the test
     forces two there), through the public entry; the 4k x 4k row stays single-pass and every row
@@ -804,7 +808,9 @@ def test_backward_whole_row_policy_two_passes_through_public_entry(with_o_lo, re
     nv.judge_draws(record_property, case, seed=SEED + 17)
 
 
-def test_public_entry_derives_row_lengths_beside_full_length_rows(with_o_lo, record_property):
+def test_public_entry_derives_row_lengths_beside_full_length_rows(
+    with_o_lo, record_property
+):
     """Without ``topk_length`` the public entry derives the per-row length (last valid slot + 1) and the kernels skip
     the trailing invalid blocks on documents shorter than top-k (most slots ``-1``); the derived-length step and the
     explicit full-length step (``out``, ``lse`` and every gradient) are judged on the same draw."""
@@ -1191,7 +1197,9 @@ def test_autograd_lse_gradient_is_rejected_and_unused_out_gives_no_grad():
     )
 
 
-def test_forward_backward_read_q_rope_as_a_q256_channel_slice(with_o_lo, record_property):
+def test_forward_backward_read_q_rope_as_a_q256_channel_slice(
+    with_o_lo, record_property
+):
     """``q_rope`` as the ``192:256`` channel slice of a ``[T, 64, 256]`` query (head stride 256, token stride 16384,
     384 B storage offset) with a contiguous ``q_latent``: the TMA descriptor takes the view's strides, the view is
     consumed in place, the remembered binding serves it, and the autograd path puts the rope gradient into channels
@@ -1374,7 +1382,9 @@ def test_varlen_causal_tail_of_prefix(with_o_lo, record_property):
     nv.judge_draws(record_property, case, seed=SEED + 758)
 
 
-def test_varlen_segment_with_every_slot_masked_gives_zero_outputs(with_o_lo, record_property):
+def test_varlen_segment_with_every_slot_masked_gives_zero_outputs(
+    with_o_lo, record_property
+):
     """A packed segment whose gather rows are all ``-1``: ``out = 0``, ``lse = -inf``, ``dq = 0`` for its rows and
     exact zeros in dK / dV for its keys.  The varlen step and the flat step on the unmasked rows are judged on the
     same draw."""
@@ -1810,7 +1820,8 @@ def test_nope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
 
 
 def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """The flat step pair with a sink on the rows of the sink's model (width 640, scale ``512 ** -0.5``): the forward's
     ``lse`` includes the sink, the backward returns ``(dq, dkv, dsink)`` (``dkv`` ``None`` with ``dkv_acc``), and every
@@ -2261,7 +2272,9 @@ def test_rope_varlen_launch_count_is_the_stage_and_the_forward():
         assert len(flat) == 1 and names[-1] == flat[0], (names, flat)
 
 
-def test_public_rope_entries_take_a_head_major_dout_through_autograd(with_o_lo, record_property):
+def test_public_rope_entries_take_a_head_major_dout_through_autograd(
+    with_o_lo, record_property
+):
     """A head-major ``dout`` (``[512, T * 512, 1]`` strides, the layout an output projection hands back) and its
     dense copy through the public rope entry's autograd and the public varlen entry's: every step's ``out`` and
     gradients are judged on the same draw."""
@@ -2836,7 +2849,9 @@ _STEP_BACKENDS = {
 
 
 def _refuse(*args, **kwargs):
-    raise AssertionError("this call must not reach the backend's planning, loading or launching")
+    raise AssertionError(
+        "this call must not reach the backend's planning, loading or launching"
+    )
 
 
 @pytest.mark.cpu_only
@@ -3027,7 +3042,12 @@ def test_no_olo_zero_query_rows_return_none_without_binding(monkeypatch):
     packed step forward also its empty rows and lengths), the step backwards take that ``None`` and return the empty
     gradients of a default call, the autograd entries return empty outputs and zero leaf gradients -- and nothing
     consults the registry, loads a module, binds or launches."""
-    for name in ("prepare_dsa_train", "prepare_dsa_nope_train", "_binding", "record_for"):
+    for name in (
+        "prepare_dsa_train",
+        "prepare_dsa_nope_train",
+        "_binding",
+        "record_for",
+    ):
         monkeypatch.setattr(cake_backend, name, _refuse)
     monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", _refuse)
     q, kv, idx = _host_inputs(total_q=0, total_k=16, topk=5)
@@ -3052,10 +3072,14 @@ def test_no_olo_zero_query_rows_return_none_without_binding(monkeypatch):
         assert [tuple(g.shape) for g in got] == grads
         assert torch.all(got[-1] == 0)
     varlen_fwd, varlen_bwd = _step_entries("nope_varlen")
-    out, lse, o_lo, rows, lengths = varlen_fwd(nq, nkv, nidx, no_rows, cu_k, with_o_lo=False)
+    out, lse, o_lo, rows, lengths = varlen_fwd(
+        nq, nkv, nidx, no_rows, cu_k, with_o_lo=False
+    )
     assert o_lo is None and tuple(out.shape) == empty
     assert tuple(rows.shape) == (0, 5) and tuple(lengths.shape) == (0,)
-    dq, dkv = varlen_bwd(nq, nkv, rows, out, None, lse, dout, cu_k, topk_length=lengths, with_o_lo=False)
+    dq, dkv = varlen_bwd(
+        nq, nkv, rows, out, None, lse, dout, cu_k, topk_length=lengths, with_o_lo=False
+    )
     assert tuple(dq.shape) == empty and tuple(dkv.shape) == (16, D_LATENT)
     assert torch.all(dkv == 0)
     # the autograd entries

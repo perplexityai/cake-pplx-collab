@@ -1765,7 +1765,9 @@ def test_runner_launches_without_allocation():
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
 
 
-def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(with_o_lo, record_property):
+def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(
+    with_o_lo, record_property
+):
     """Repeated eager calls of one geometry share one cached plan (no new entry, no
     re-validation) and still return distinct output tensors; every call's outputs are judged."""
     _require_program(backward=True)
@@ -1888,7 +1890,8 @@ def test_binding_cache_is_bounded():
 
 
 def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """A forward captured into a CUDA graph plans privately (the cache keeps the eager entry only); the eager call,
     the two warm-up calls on the capture stream and the captured outputs after two replays are judged."""
@@ -2140,7 +2143,8 @@ def test_backward_forced_passes_over_two_token_chunks(with_o_lo, record_property
 
 
 def test_forward_derives_row_lengths_in_kernel_and_binding_key_covers_it(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """``forward(..., topk_length=buf, derive_topk_length=True)`` fills ``buf`` with the row lengths (exactly
     :func:`derive_topk_length`), through the remembered binding on every call and on the prepared runner; the
@@ -3081,7 +3085,8 @@ def test_bwd_cast_accumulates_without_map(with_o_lo, record_property):
 
 
 def test_backward_dkv_acc_destination_map_with_duplicates_matches_index_add(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """A many-to-few map (512 source rows into 300 destination rows) sums the key gradients like ``index_add_``
     (the oracle's gradients added through the map); a permutation lands every source row on its own destination
@@ -3187,7 +3192,8 @@ def test_binding_cache_serves_dkv_acc_bindings_per_buffer(with_o_lo, record_prop
 
 
 def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """Through the autograd function with ``dkv_acc`` (no map, then a permutation map) the key leaves get no
     gradient and the buffer receives the key gradients: each call's out, lse, dq and buffer increment are
@@ -3208,7 +3214,15 @@ def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
         out, lse = function.apply(
             *_apply_args(
                 function,
-                (*leaves, inp.idx_global, None, default_softmax_scale(), None, acc, None),
+                (
+                    *leaves,
+                    inp.idx_global,
+                    None,
+                    default_softmax_scale(),
+                    None,
+                    acc,
+                    None,
+                ),
                 with_o_lo,
             )
         )
@@ -3232,7 +3246,15 @@ def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
         out2, lse2 = function.apply(
             *_apply_args(
                 function,
-                (*leaves, inp.idx_global, None, default_softmax_scale(), None, acc_p, perm),
+                (
+                    *leaves,
+                    inp.idx_global,
+                    None,
+                    default_softmax_scale(),
+                    None,
+                    acc_p,
+                    perm,
+                ),
                 with_o_lo,
             )
         )
@@ -5208,7 +5230,15 @@ def test_nope_varlen_index_mode_follows_the_table_size(monkeypatch):
     for name in ("kernel", "mask"):
         with pytest.raises(ValueError, match=f"{name} mode"):
             cake_backend._packed_forward_nope(
-                q, kv, small, cu_q, cu_k, True, cu_q.new_zeros(1024), 1 / 16, name,
+                q,
+                kv,
+                small,
+                cu_q,
+                cu_k,
+                True,
+                cu_q.new_zeros(1024),
+                1 / 16,
+                name,
                 with_o_lo=True,
             )
     with pytest.raises(ValueError, match="unknown NoPE index mode"):
@@ -5573,7 +5603,8 @@ def test_nope_backward_key_is_settled_at_forward_unless_a_callable_gives_the_acc
 
 
 def test_nope_varlen_step_makes_no_capture_query_once_its_bindings_are_cached(
-    with_o_lo, monkeypatch,
+    with_o_lo,
+    monkeypatch,
 ):
     """The NoPE varlen entry hands its own lengths to the forward and the backward binding, so neither owns a
     ``topk_length`` vector: a first step under capture plans both privately (one capture query each) and stores
@@ -6163,7 +6194,15 @@ def test_nope_packed_entry_route_when_the_forward_program_converts(monkeypatch):
     # the compacting one-launch mode by name: the same operands with convert = 1
     del calls[:]
     cake_backend._packed_forward_nope(
-        q, kv, wide[:, 3 : 3 + K], cu_q, cu_k, True, None, 1 / 16, "kernel",
+        q,
+        kv,
+        wide[:, 3 : 3 + K],
+        cu_q,
+        cu_k,
+        True,
+        None,
+        1 / 16,
+        "kernel",
         with_o_lo=True,
     )
     assert [c[0] for c in calls] == ["nope_fwd"]
@@ -7123,7 +7162,8 @@ def test_nope_backward_repeat_calls(with_o_lo, record_property):
 
 
 def test_nope_backward_destination_map_with_duplicates_matches_index_add(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """A random destination map with repeated rows into a wider FP32 buffer, on the record's route, forced through
     the natural-layout main stage and forced through the cast: each accumulation is judged against the oracle's key
@@ -7420,7 +7460,8 @@ def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(with_o_lo, record_pro
 
 
 def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """The forward captures into a CUDA graph over the cached plan (no new cache entry); the eager call and the
     replayed capture are both judged."""
@@ -8280,7 +8321,9 @@ def test_nope_hole_rows_below_the_limit_take_the_position_preserving_forward(
 
 
 @pytest.mark.parametrize("name", ["interleaved", "k2177_runs", "repro_small"])
-def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(with_o_lo, name, record_property):
+def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(
+    with_o_lo, name, record_property
+):
     """A caller ``topk_length`` is a position cut applied before the compaction: ``nope_compact_indices(glob, S,
     topk_length=L)`` == ``compact_rows(glob, S, L)``; ``cake_backend.forward_nope_varlen(..., topk_length=L)``
     returns those rows and counts.  The varlen entry with ``L`` on hole rows, the flat entry on the cut compaction
@@ -8454,7 +8497,9 @@ def test_nope_flat_entry_hole_variants_on_every_slot_width(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 820 + topk)
 
 
-def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(with_o_lo, record_property):
+def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(
+    with_o_lo, record_property
+):
     """The compacting one-launch mode (``"kernel"``, ``convert = 1``; never selected by size, so the route
     function is replaced here) and the stage route (the limit set to 0) return the same global rows (the stable
     compaction) and lengths (the valid counts) through ``forward_nope_varlen``: the forward's scan lanes write the
@@ -8553,7 +8598,9 @@ def _graph_capture(fn):
     return eager, captured
 
 
-def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(with_o_lo, record_property):
+def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(
+    with_o_lo, record_property
+):
     """Forward + backward of the public NoPE entries (the varlen entry on hole rows, the flat entry on hole rows
     without lengths) and the kernel-level ``forward_nope_varlen`` capture into a CUDA graph and replay: the stage
     route allocates before its launches and nothing synchronizes with the device.  The replayed rows and lengths
@@ -8593,9 +8640,7 @@ def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(with_o_lo, r
             eager, captured = _graph_capture(fn)
             for a, b in zip(eager[3:], captured[3:], strict=True):
                 assert torch.equal(a, b)  # the kernel-level rows and lengths
-            replayed = (
-                None if t is None else t.detach().clone() for t in captured[:3]
-            )
+            replayed = (None if t is None else t.detach().clone() for t in captured[:3])
             runs[f"{label} eager"] = dict(zip(names, eager[:3], strict=True))
             runs[f"{label} graph"] = dict(zip(names, replayed, strict=True))
         return nv.judged(nv.nope_problem(c, indices=c.glob), runs)
@@ -8932,7 +8977,9 @@ def test_validate_dsa_train_inputs_admits_a_head_major_dout_and_rejects_odd_stri
         )
 
 
-def test_rope_backward_reads_a_head_major_dout_without_a_copy(with_o_lo, record_property):
+def test_rope_backward_reads_a_head_major_dout_without_a_copy(
+    with_o_lo, record_property
+):
     """A head-major ``dout`` through the eager rope backward, the prepared runner and autograd: the runner binds the
     view in place (its ``dout`` pointer is the caller's); the head-major backward's peak memory above the inputs is
     not larger than the contiguous backward's (no contiguous copy of ``dout``: the backward allocates its gradients,
@@ -9708,7 +9755,8 @@ def test_rope_accumulator_errors_follow_the_forward_launches(monkeypatch):
 
 
 def test_rope_varlen_binding_serves_captured_calls_and_a_capture_miss_stays_private(
-    with_o_lo, monkeypatch,
+    with_o_lo,
+    monkeypatch,
 ):
     """The rope varlen binding owns no storage: during capture a hit serves the call without the capture query
     (stage and forward launched as in eager mode), and a miss is planned privately and not stored.  The flat entry's
@@ -9741,11 +9789,17 @@ def test_rope_varlen_binding_serves_captured_calls_and_a_capture_miss_stays_priv
     varlen(*args, causal=True)
     assert queries == [] and len(cache) == 1
     assert next(iter(cache._entries.values())) is binding
-    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, _mode_stage("fwd", with_o_lo)]
+    assert [c[0] for c in calls] == [
+        NOPE_INDEX_PREP_STAGE,
+        _mode_stage("fwd", with_o_lo),
+    ]
     del queries[:], calls[:]
     varlen(*args, causal=False)
     assert queries == [True] and len(cache) == 1
-    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, _mode_stage("fwd", with_o_lo)]
+    assert [c[0] for c in calls] == [
+        NOPE_INDEX_PREP_STAGE,
+        _mode_stage("fwd", with_o_lo),
+    ]
     assert calls[0][1]["causal"] == 0
     capturing[0] = False
     del queries[:]
@@ -9814,7 +9868,8 @@ def test_rope_varlen_routes_return_the_flat_function_with_its_saved_list(monkeyp
 
 
 def test_rope_varlen_repeated_calls_reuse_the_binding_and_pin_nothing(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """Repeated steps of the rope varlen entry on the stage route reuse one forward and one backward binding and
     leave nothing allocated once their results are released: neither binding owns a tensor (not even a ``[T]``
@@ -11496,7 +11551,9 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
 
 
 @pytest.mark.parametrize("total_q", [1, 64, 65, 1024])
-def test_nope_sink_gradient_meets_the_tier_on_every_grid(with_o_lo, total_q, record_property):
+def test_nope_sink_gradient_meets_the_tier_on_every_grid(
+    with_o_lo, total_q, record_property
+):
     """The sink-gradient stage on any grid: the backward of one forward with the stage's grid set to 1, 7, one CTA
     per chunk and two CTAs per chunk (a fresh binding each) is judged beside the eager backward of the shipped grid,
     every gradient against the FP64 oracle and the BF16 naive tier.  ``T = 1`` and ``64`` / ``65`` put one and two
@@ -11581,7 +11638,9 @@ def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
             assert torch.equal(got, torch.zeros(NUM_HEADS, device="cuda")), fill
 
 
-def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(with_o_lo, record_property):
+def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(
+    with_o_lo, record_property
+):
     """``torch.utils.checkpoint(..., use_reentrant=False)`` over the flat entry with a sink: the recomputed forward
     meets the same sink, and ``out``, ``dq``, the accumulator's increment and ``dsink`` are judged.  An eager call with
     a sink saves the seven tensors of a call without one plus the reference to the caller's ``sink``, and a
@@ -11635,7 +11694,8 @@ def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(with_o_lo
 
 
 def test_nope_sink_step_captures_into_a_cuda_graph_and_does_not_synchronize(
-    with_o_lo, record_property,
+    with_o_lo,
+    record_property,
 ):
     """A step of the flat entry with a sink (forward and ``autograd.grad`` to ``q`` and ``sink``, the accumulator
     through a destination map with repeated rows) captures into a CUDA graph and replays, judged beside the eager
@@ -11712,7 +11772,9 @@ def test_nope_sink_step_captures_into_a_cuda_graph_and_does_not_synchronize(
     assert c["device_alloc"] == 0, summary(c)
 
 
-def test_nope_sink_new_token_and_key_counts_load_no_new_module(with_o_lo, record_property):
+def test_nope_sink_new_token_and_key_counts_load_no_new_module(
+    with_o_lo, record_property
+):
     """New ``T`` and ``S`` values run on the modules already loaded (one library per stage and architecture, no
     shape in its build): after a warm-up step, the step of every draw -- each with its own ``T`` and hence its own
     ``S``, all on the one-launch route of the flat entry -- adds no entry and no miss to the module loader's cache,
@@ -11868,7 +11930,9 @@ def test_no_olo_twins_are_registered(program):
                 continue
             assert entry["arch"] == arch and entry["entry"] == record[twin]["ffi_entry"]
     rope, nope = cake_jit.record(), cake_jit.record(NOPE_PROGRAM)
-    assert rope["bwd_delta_no_olo"]["library"] == nope["nope_bwd_delta_no_olo"]["library"]
+    assert (
+        rope["bwd_delta_no_olo"]["library"] == nope["nope_bwd_delta_no_olo"]["library"]
+    )
     assert rope["bwd_delta"]["library"] == nope["nope_bwd_delta"]["library"]
     assert not missing, f"build.json lacks {missing}"
 
@@ -11897,9 +11961,11 @@ def test_no_olo_twins_use_the_default_launchers():
             got, want = _Recorder(), _Recorder()
             cake_launch.LAUNCH[twin](got, values, (7, 1, 1))
             cake_launch.LAUNCH[default](want, values, (7, 1, 1))
-            assert got.calls == want.calls == [
-                tuple(values[name] for name in names[:-3]) + (7, 1, 1)
-            ], twin
+            assert (
+                got.calls
+                == want.calls
+                == [tuple(values[name] for name in names[:-3]) + (7, 1, 1)]
+            ), twin
             if default.startswith("nope_fwd"):
                 assert all(
                     name in names for name in cake_backend.NOPE_FWD_CONVERT_ARGS
@@ -11913,7 +11979,12 @@ def test_binding_keys_tag_the_no_olo_mode():
     other slot keeps its position, so the NoPE backward's ``key[:7]`` (after the tag), ``key[8:12]`` and the sink's
     ``key[-1]`` keep their meaning, and the default keys are the keys they were."""
     q, kv, idx = _host_inputs()
-    ql, qr, kl, kr = q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:]
+    ql, qr, kl, kr = (
+        q[..., :D_LATENT],
+        q[..., D_LATENT:],
+        kv[:, :D_LATENT],
+        kv[:, D_LATENT:],
+    )
     scale = default_softmax_scale()
     out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
     lse = torch.zeros(8, NUM_HEADS)
@@ -12228,7 +12299,11 @@ def test_no_olo_reaches_every_route(route, with_o_lo, monkeypatch):
     torch.cuda.synchronize()
     assert all(bool(torch.isfinite(g).all()) for g in grads)
     program = NOPE_PROGRAM if nope else cake_jit.PROGRAM
-    fwd = NOPE_SINK_FORWARD_STAGE if sink is not None else cake_jit.stage_name("fwd", program)
+    fwd = (
+        NOPE_SINK_FORWARD_STAGE
+        if sink is not None
+        else cake_jit.stage_name("fwd", program)
+    )
     delta = cake_jit.stage_name("bwd_delta", program)
     assert {_mode_stage(fwd, with_o_lo), _mode_stage(delta, with_o_lo)} <= set(
         resolved
@@ -12565,7 +12640,9 @@ def test_default_forward_writes_every_o_lo_element(form):
     out, lse, got = runner.forward()
     torch.cuda.synchronize()
     assert got.data_ptr() == o_lo.data_ptr()
-    assert bool(problem.valid().any(-1).logical_not().any()), "the case needs rows without a valid slot"
+    assert bool(problem.valid().any(-1).logical_not().any()), (
+        "the case needs rows without a valid slot"
+    )
     nv.assert_contract(form, problem, dict(out=out, lse=lse, o_lo=o_lo))
 
 

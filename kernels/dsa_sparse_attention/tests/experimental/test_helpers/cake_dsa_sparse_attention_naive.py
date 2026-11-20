@@ -469,9 +469,7 @@ def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules):
                 if defaults is not None and defaults.get("with_o_lo") is True:
                     monkeypatch.setitem(defaults, "with_o_lo", False)
     yield with_o_lo
-    other = (
-        set(jit.NO_OLO_STAGES.values()) if with_o_lo else set(jit.NO_OLO_STAGES)
-    )
+    other = set(jit.NO_OLO_STAGES.values()) if with_o_lo else set(jit.NO_OLO_STAGES)
     wrong = sorted(other.intersection(resolved))
     assert not wrong, (
         f"a with_o_lo={with_o_lo} case planned the stages {wrong} of the other mode"
@@ -484,7 +482,9 @@ def _o_lo_slot(label: str, got: Mapping) -> Mapping:
     if "o_lo" not in got:
         return got
     if WITH_O_LO:
-        assert got["o_lo"] is not None, f"{label}: a with_o_lo=True call returned no o_lo"
+        assert got["o_lo"] is not None, (
+            f"{label}: a with_o_lo=True call returned no o_lo"
+        )
         return got
     assert got["o_lo"] is None, f"{label}: a with_o_lo=False call returned an o_lo"
     return {name: value for name, value in got.items() if name != "o_lo"}
