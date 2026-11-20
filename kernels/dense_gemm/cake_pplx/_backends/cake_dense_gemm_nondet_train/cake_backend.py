@@ -2144,7 +2144,11 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
 #:   * 152-SM ``sm_100a`` (GB200), since version 0.3.18: ``4096 -> 32`` (1.049 to 1.077) and ``4096 -> 64`` (1.021 to
 #:     1.065) at 16172, 16231 and 16384 tokens, and ``4096 -> 128`` (1.022 to 1.028), ``5120 -> 32`` (1.051 to 1.064),
 #:     ``5120 -> 64`` (1.045 to 1.059) and the indexer_hw ``6144 -> 32`` (1.048 to 1.053) at 16231; with them 13 keys
-#:     that only :data:`K1_DGRAD_RULES_BY_SM` held run the deterministic plan (that table's notes), 23 in all.
+#:     that only :data:`K1_DGRAD_RULES_BY_SM` held run the deterministic plan (that table's notes), 23 in all.  The
+#:     medians are against the deterministic package's plan of version 0.3.18; since its version 0.3.19 that plan runs
+#:     ``4096 -> 64`` at 16231 tokens (and 16173 to 16383) on its 128-column start-path program
+#:     ``kn_n128_tma1_w8relf`` in raster groups of 16 instead of ``kn_n256_tma1_w8relf``, with the same bits, measured
+#:     1.029 to 1.039 times faster than its plan of version 0.3.18 there, and the call runs that program.
 #: The other measured keys of these parts (18 on GB300, 27 on B200, 5 on VR200, 7 on GB200) missed the bar and keep
 #: their programs.  A key names one token count: the token counts next to it keep their routes.  Up to version 0.3.17
 #: 152-SM ``sm_100a`` parts kept every entry (an empty set); a part's set holds the rows it leaves, with their entries

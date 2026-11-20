@@ -2542,13 +2542,15 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     T 16172 (1.044 to 1.057; the plan before is the row's ``ROW_RULES`` rule, the ``w8r`` program in groups of 8);
 #     in groups of 16 5120 -> 32 at T 16172 - 32768 (1.018 to 1.031) and indexer_hw at T 16172 (1.017 to 1.019) and
 #     T 16384 - 32768 (1.017 to 1.027).
-# No group met the bar at these, which keep their plan of version 0.3.13 (six of them up to version 0.3.14: below):
+# No group met the bar at these, which keep their plan of version 0.3.13 (six of them up to version 0.3.14, one more up
+# to version 0.3.18: below):
 #   * GB300: 4096 -> 32 at T 16231 (medians 1.053 to 1.063, a paired win in two of the four node and mode pairs) and
 #     4096 -> 64 at T 16231 and 16384 (1.029 to 1.044, a paired win in two or three; version 0.3.15 runs all three in
 #     the 128-column programs);
 #   * GB200: 4096 -> 32 at T 16231 (1.046 to 1.064, a paired win in two), 4096 -> 64 at T 16231 and 16384 (1.000 to
 #     1.040, in at most three) and 5120 -> 64 at T 32768 (1.007 to 1.019, in at most two; version 0.3.15 runs
-#     4096 -> 32 at T 16231 and 4096 -> 64 at T 16384 in the 128-column programs);
+#     4096 -> 32 at T 16231 and 4096 -> 64 at T 16384 in the 128-column programs, version 0.3.19 4096 -> 64 at
+#     T 16231);
 #   * B300: 4096 -> 32 at T 16172 and 16231 and indexer_hw at T 16172 (1.009 to 1.020, a paired win in at most two),
 #     and 4096 -> 64 and 5120 -> 64 at every measured T (0.956 to 1.009, no paired win);
 #   * B200: 4096 -> 32 at T 16172, 16231 and 16384 (0.996 to 1.022, a paired win in at most two), indexer_hw at
@@ -2575,8 +2577,8 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # program.  The joined ranges: GB300 4096 -> 32 in groups of 32 at T 16172 - 16231 and 4096 -> 64 in groups of 32 at
 # T 16172 - 32768; GB200 4096 -> 32 in groups of 2 at T 16172 - 32768 and 4096 -> 64 in groups of 16 at
 # T 16384 - 32768; B200 4096 -> 64 in groups of 2 at T 16172 - 16231.  The other token counts of these rows plan as in
-# version 0.3.14: GB300 4096 -> 32 at T 16232 - 16383 and GB200 4096 -> 64 at T 16173 - 16383 the 256-column program,
-# B200 4096 -> 64 at T 16232 - 16383 the row's ``ROW_RULES`` rule.
+# version 0.3.14: GB300 4096 -> 32 at T 16232 - 16383 and GB200 4096 -> 64 at T 16173 - 16383 the 256-column program
+# (the GB200 row up to version 0.3.18: below), B200 4096 -> 64 at T 16232 - 16383 the row's ``ROW_RULES`` rule.
 # Version 0.3.17 runs the 128-column start-path programs on five BF16 input gradients of the 212-SM sm_107a part
 # (VR200), which planned the ten-warp programs before (``kn_n256_ht_tma2_lw_pro15`` on 4096 -> 32 and 5120 -> 32,
 # ``kn_n256_tma2_pd3_c1`` on the indexer_hw input gradient 6144 -> 32, 4096 -> 64 and 5120 -> 64): the 32-element
@@ -2595,6 +2597,21 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     to 1.098).
 # The unmeasured token counts inside a range run its program; 5120 -> 64 at T 16232 - 16383 and the other token counts
 # of these rows keep their plan of version 0.3.16.
+# Version 0.3.19 runs the 128-column program in 64-element K steps in raster groups of 16 on the GB200 (152-SM sm_100a)
+# BF16 input gradient 4096 -> 64 at T 16173 - 16383 too, where version 0.3.18 ran the 256-column program
+# ``kn_n256_tma1_w8relf`` in the default group of 16 (the rule of version 0.3.12): the row's three ranges become one,
+# T 16172 - 32768 in groups of 16.  The two programs give the same bits (every output element sums its K in one FP32
+# accumulator in K order).  Measured at T 16231 with cold L2 in eager launches and CUDA graph replays, 21 paired
+# rounds per node and mode against the plan of version 0.3.18 and a second prepared copy of it in the same rounds
+# (driver 580.126.20, CUDA 13.5, PyTorch 2.14.1+cu130): on two GB200 nodes the 128-column program was faster than the
+# plan in all 21 rounds of each of the four node and mode pairs (than its copy in 21, 20, 21 and 21), medians 1.011 to
+# 1.028; a confirmation round on two other GB200 nodes, with its bar fixed before timing, found it faster in all 21
+# rounds of every node and mode pair against each copy, medians 1.029 to 1.039 against the plan and 1.026 to 1.032
+# against its copy, and its outputs equal to that plan's bit for bit.  Median times there: the plan of version 0.3.18
+# 23.06 to 23.33 us, the 128-column program 22.38 to 22.56 us, cuBLASLt 22.80 to 22.93 us and the cuDNN frontend 23.36
+# to 23.47 us (the faster library takes 1.016 to 1.019 times the time of the new plan, 0.980 to 0.989 times that of
+# the plan before).  T 16172 and T 16384 ran this rule already (versions 0.3.14 and 0.3.15); the unmeasured
+# T 16173 - 16230 and 16232 - 16383 run it with T 16231.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2768,11 +2785,7 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             )
         },
         ('sm_100a', False, True, False, False, False, 4096, 32, None): ((16172, 32768, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 2}),),
-        ('sm_100a', False, True, False, False, False, 4096, 64, None): (
-            (16172, 16172, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),
-            (16173, 16383, dict(_W8RELF_DGRAD_BF16)),
-            (16384, 32768, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),
-        ),
+        ('sm_100a', False, True, False, False, False, 4096, 64, None): ((16172, 32768, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),),
         ('sm_100a', False, True, False, False, False, 5120, 32, None): (
             (16172, 16384, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 16}),
             (16385, 32767, dict(_W8RELF_DGRAD_BF16)),
@@ -3969,7 +3982,9 @@ def cake_dense_gemm_det_train_projection_plan(
     it (the same bits, measured faster than the plan of version 0.3.14 on two nodes of each part): on 152-SM sm_103a
     parts 4096 -> 32 at T 16172 - 16231 and 4096 -> 64 at T 16172 - 32768 in groups of 32, on 152-SM sm_100a parts
     4096 -> 32 at T 16172 - 32768 in groups of 2 and 4096 -> 64 at T 16384 - 32768 in groups of 16, and on 148-SM
-    sm_100a parts 4096 -> 64 at T 16172 - 16231 in groups of 2."""
+    sm_100a parts 4096 -> 64 at T 16172 - 16231 in groups of 2.  Since version 0.3.19 the 152-SM sm_100a range of
+    4096 -> 64 runs the 128-column program in groups of 16 at T 16173 - 16383 too, one range at T 16172 - 32768 (the
+    same bits, measured faster than the plan of version 0.3.18 at T 16231 on four GB200 nodes)."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
