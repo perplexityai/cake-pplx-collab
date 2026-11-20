@@ -16,7 +16,8 @@ limitations under the License.
 Tests of the public surface of the Cake routed-expert clamped SwiGLU training kernels (SM100 / SM103 / SM107): the
 ``cake_pplx.cake_clamped_swiglu_det_train`` facade.  The facade's entry points are pass-throughs to
 ``cake_pplx._backends.cake_clamped_swiglu_det_train``: the same signatures (``limit`` a required keyword everywhere)
-and the same bits as the backend; its autograd class and constants are the backend's objects.  The mode rules of the
+and the same bits as the backend; its autograd class and constants are the backend's objects, and its entries call the
+backend's step functions and autograd ``apply``, bound at their first call.  The mode rules of the
 deterministic package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked without a device), and
 ``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns in any call.  The facade
 reads no environment variable.  The numerical contract is ``test_cake_clamped_swiglu_det_train.py``'s.
@@ -165,6 +166,24 @@ def test_facade_refuses_what_the_backend_refuses(name: str) -> None:
                 calls[name](module, operand)
             raised.append((type(info.value), str(info.value)))
         assert raised[0] == raised[1], (name, raised)
+
+
+def test_the_facade_binds_the_backend_functions_at_their_first_call() -> None:
+    """Without a device: after a first call of each facade entry (each refused for a CPU operand), the facade's steps
+    and autograd entry call the backend's own step functions and autograd ``apply``, bound to globals of the facade
+    (no cache lookup per call)."""
+    dh = torch.zeros(4, I, dtype=torch.bfloat16)
+    x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
+    for call in (
+        lambda: facade.cake_clamped_swiglu_det_train_forward(x, limit=L),
+        lambda: facade.cake_clamped_swiglu_det_train_backward(dh, x, limit=L),
+        lambda: facade.cake_clamped_swiglu_det(x, limit=L),
+    ):
+        with pytest.raises(ValueError):
+            call()
+    assert facade._step_forward is backend._forward_step
+    assert facade._step_backward is backend._backward_step
+    assert facade._apply == backend.CakeClampedSwiGLUDetFunction.apply
 
 
 def test_the_facade_reads_no_environment_variable() -> None:

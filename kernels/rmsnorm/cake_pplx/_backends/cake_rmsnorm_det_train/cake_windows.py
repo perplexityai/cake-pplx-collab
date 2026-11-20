@@ -718,7 +718,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_c3b1b46a2c6d1f9b3724"),
             (1, 576, "cake_rmsnorm_det_train_1207b05663ed2b4de14b"),
             (576, 1024, "cake_rmsnorm_det_train_7dc29629ff21625607f8"),
-            (1024, 16384, "cake_rmsnorm_det_train_6a428da2227972ae18ae"),
+            (1024, 12288, "cake_rmsnorm_det_train_88510c609fd688aab969"),
+            (12288, 16384, "cake_rmsnorm_det_train_6a428da2227972ae18ae"),
             (16384, 45056, "cake_rmsnorm_det_train_56d26996239835327501"),
             (45056, None, "cake_rmsnorm_det_train_411e270c0575d26a77f4"),
         ),
@@ -726,7 +727,8 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_45057834f9e0e017b6ef"),
             (1, 576, "cake_rmsnorm_det_train_137ba5328176fb07b37d"),
             (576, 1024, "cake_rmsnorm_det_train_baff9ecbafe7de1e6030"),
-            (1024, 16384, "cake_rmsnorm_det_train_e63beae98c236ce26335"),
+            (1024, 12288, "cake_rmsnorm_det_train_6f2c9e90f551f35e99e6"),
+            (12288, 16384, "cake_rmsnorm_det_train_e63beae98c236ce26335"),
             (16384, 45056, "cake_rmsnorm_det_train_de8e07d4cb312b06dbc4"),
             (45056, None, "cake_rmsnorm_det_train_64ffe19b041f5bfa34fb"),
         ),
@@ -734,7 +736,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_92def3f97ddcec9165f0"),
             (1, 256, "cake_rmsnorm_det_train_6720b4a159be2b84b325"),
             (256, 1024, "cake_rmsnorm_det_train_845cdcd8145ada631461"),
-            (1024, 16384, "cake_rmsnorm_det_train_81c3d8ab0a482e3af043"),
+            (1024, 16384, "cake_rmsnorm_det_train_cc26e316ae40d683a118"),
             (16384, 50688, "cake_rmsnorm_det_train_845cdcd8145ada631461"),
             (50688, None, "cake_rmsnorm_det_train_21ee6fc93139c5e0cd41"),
         ),
@@ -742,7 +744,7 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_5e3034bbb4032d8b7ad9"),
             (1, 256, "cake_rmsnorm_det_train_23c900134dc889302136"),
             (256, 1024, "cake_rmsnorm_det_train_838a9a4054731f7942af"),
-            (1024, 16384, "cake_rmsnorm_det_train_9e5ec75a15ac2bff0e4b"),
+            (1024, 16384, "cake_rmsnorm_det_train_c83c314c6dcf28ad7369"),
             (16384, 50688, "cake_rmsnorm_det_train_838a9a4054731f7942af"),
             (50688, None, "cake_rmsnorm_det_train_3f270477a248188afe2a"),
         ),
@@ -806,14 +808,16 @@ PROGRAM_WINDOWS: dict[str, dict[str, tuple[tuple[int, int | None, str], ...]]] =
             (0, 1, "cake_rmsnorm_det_train_0dafdf094615d080fcc9"),
             (1, 256, "cake_rmsnorm_det_train_dffe53d5aae62879b794"),
             (256, 1664, "cake_rmsnorm_det_train_0dafdf094615d080fcc9"),
-            (1664, 19456, "cake_rmsnorm_det_train_5d292172df772adb17ae"),
+            (1664, 3072, "cake_rmsnorm_det_train_af220b26c5465e3f8b94"),
+            (3072, 19456, "cake_rmsnorm_det_train_5d292172df772adb17ae"),
             (19456, None, "cake_rmsnorm_det_train_9cc51adfe9826056658b"),
         ),
         "bwd_w32_h6144": (
             (0, 1, "cake_rmsnorm_det_train_5cca2d0fa4553f992406"),
             (1, 256, "cake_rmsnorm_det_train_276474ee04bad8d3d764"),
             (256, 1664, "cake_rmsnorm_det_train_5cca2d0fa4553f992406"),
-            (1664, 19456, "cake_rmsnorm_det_train_7d2f6707bfa3d2cd60bb"),
+            (1664, 3072, "cake_rmsnorm_det_train_ac531ff9353aad7a17c6"),
+            (3072, 19456, "cake_rmsnorm_det_train_7d2f6707bfa3d2cd60bb"),
             (19456, None, "cake_rmsnorm_det_train_bdfba721a43e0d093668"),
         ),
         "bwd_residual_h6144": (
@@ -1472,6 +1476,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (1, "unmeasured"),
             (576, "unmeasured"),
             (1024, "same"),
+            (12288, "same"),
             (16384, "same"),
             (45056, "same"),
         ),
@@ -1479,6 +1484,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (1, "unmeasured"),
             (576, "unmeasured"),
             (1024, "same"),
+            (12288, "same"),
             (16384, "same"),
             (45056, "same"),
         ),
@@ -1543,13 +1549,15 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
         "bwd_h6144": (
             (1, "unmeasured"),
             (256, "unmeasured"),
-            (1664, "unmeasured"),
+            (1664, "dx"),
+            (3072, "dx"),
             (19456, "same"),
         ),
         "bwd_w32_h6144": (
             (1, "unmeasured"),
             (256, "unmeasured"),
-            (1664, "unmeasured"),
+            (1664, "dx"),
+            (3072, "dx"),
             (19456, "same"),
         ),
         "bwd_residual_h6144": ((368, "unmeasured"), (19456, "unmeasured")),
@@ -1698,10 +1706,18 @@ weights: on B200 (sm_100a) at most two ulps on up to 18.0 % of the rows (27.3 % 
 residual route), ``y`` on up to 2.03 % (2.83 %); on GB300 (sm_103a) at most two ulps on
 up to 17.3 % (27.8 %), ``y`` on up to 2.03 % (2.34 %); on R200 (sm_107a, 212- and 216-SM
 boards) at most three ulps on up to 18.2 % (31.6 %), ``y`` on up to 2.34 % (4.30 %).
-Across a measured backward-only edge ``dx`` is bitwise identical: the H = 6144 route,
-which switched between the base backward kernel and the bulk-copy one with ``dx``
-differing on about 1-2 % of the rows, now runs the bulk-copy kernel at every ``T`` on
-every architecture.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
+Across a measured backward-only edge ``dx`` is bitwise identical but at the sm_107a
+H = 6144 edges at 1664 and 3072 tokens, where the programs on the two sides (the
+column-task and the one-row-per-stage program at 1664, the one-row-per-stage and the
+bulk-copy program at 3072) reduce a row in different orders: ``dx`` differs on 23 of
+the 1664 and on 69 of the 3072 common rows of the input measured, by at most two and
+six BF16 bit-pattern steps, while ``y`` and ``rstd`` are identical.  The H = 6144
+route, which switched between the base backward kernel and the bulk-copy one with
+``dx`` differing on about 1-2 % of the rows, now runs column-task programs up to 384
+tokens on sm_100a, 256 on sm_103a and 1664 on sm_107a, one-row-per-stage programs over
+(384, 4096] on sm_100a and (256, 4096] on sm_103a (BF16 weight; the FP32-weight route
+runs the bulk-copy kernel there) and over (1664, 3072] on sm_107a, and the bulk-copy
+kernel above.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
 2048) fold the row's dot product in their own fixed order, so ``dx`` may change bits at
 their edge; ``EDGES`` marks the edges not yet measured, every edge of the H = 1280, 1024
 and 128 routes among them. ``dw`` sums every row and depends on ``T``
@@ -1748,10 +1764,18 @@ weights: on B200 (sm_100a) at most two ulps on up to 18.0 % of the rows (27.3 % 
 residual route), ``y`` on up to 2.03 % (2.83 %); on GB300 (sm_103a) at most two ulps on
 up to 17.3 % (27.8 %), ``y`` on up to 2.03 % (2.34 %); on R200 (sm_107a, 212- and 216-SM
 boards) at most three ulps on up to 18.2 % (31.6 %), ``y`` on up to 2.34 % (4.30 %).
-Across a measured backward-only edge ``dx`` is bitwise identical: the H = 6144 route,
-which switched between the base backward kernel and the bulk-copy one with ``dx``
-differing on about 1-2 % of the rows, now runs the bulk-copy kernel at every ``T`` on
-every architecture.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
+Across a measured backward-only edge ``dx`` is bitwise identical but at the sm_107a
+H = 6144 edges at 1664 and 3072 tokens, where the programs on the two sides (the
+column-task and the one-row-per-stage program at 1664, the one-row-per-stage and the
+bulk-copy program at 3072) reduce a row in different orders: ``dx`` differs on 23 of
+the 1664 and on 69 of the 3072 common rows of the input measured, by at most two and
+six BF16 bit-pattern steps, while ``y`` and ``rstd`` are identical.  The H = 6144
+route, which switched between the base backward kernel and the bulk-copy one with
+``dx`` differing on about 1-2 % of the rows, now runs column-task programs up to 384
+tokens on sm_100a, 256 on sm_103a and 1664 on sm_107a, one-row-per-stage programs over
+(384, 4096] on sm_100a and (256, 4096] on sm_103a (BF16 weight; the FP32-weight route
+runs the bulk-copy kernel there) and over (1664, 3072] on sm_107a, and the bulk-copy
+kernel above.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
 2048) fold the row's dot product in their own fixed order, so ``dx`` may change bits at
 their edge; ``EDGES`` marks the edges not yet measured, every edge of the H = 1280, 1024
 and 128 routes among them. ``dw`` sums every row and depends on ``T``
@@ -1926,10 +1950,18 @@ weights: on B200 (sm_100a) at most two ulps on up to 18.0 % of the rows (27.3 % 
 residual route), ``y`` on up to 2.03 % (2.83 %); on GB300 (sm_103a) at most two ulps on
 up to 17.3 % (27.8 %), ``y`` on up to 2.03 % (2.34 %); on R200 (sm_107a, 212- and 216-SM
 boards) at most three ulps on up to 18.2 % (31.6 %), ``y`` on up to 2.34 % (4.30 %).
-Across a measured backward-only edge ``dx`` is bitwise identical: the H = 6144 route,
-which switched between the base backward kernel and the bulk-copy one with ``dx``
-differing on about 1-2 % of the rows, now runs the bulk-copy kernel at every ``T`` on
-every architecture.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
+Across a measured backward-only edge ``dx`` is bitwise identical but at the sm_107a
+H = 6144 edges at 1664 and 3072 tokens, where the programs on the two sides (the
+column-task and the one-row-per-stage program at 1664, the one-row-per-stage and the
+bulk-copy program at 3072) reduce a row in different orders: ``dx`` differs on 23 of
+the 1664 and on 69 of the 3072 common rows of the input measured, by at most two and
+six BF16 bit-pattern steps, while ``y`` and ``rstd`` are identical.  The H = 6144
+route, which switched between the base backward kernel and the bulk-copy one with
+``dx`` differing on about 1-2 % of the rows, now runs column-task programs up to 384
+tokens on sm_100a, 256 on sm_103a and 1664 on sm_107a, one-row-per-stage programs over
+(384, 4096] on sm_100a and (256, 4096] on sm_103a (BF16 weight; the FP32-weight route
+runs the bulk-copy kernel there) and over (1664, 3072] on sm_107a, and the bulk-copy
+kernel above.  The one-row programs at ``T`` = 1 (H = 512, 1024, 1280, 1536 and
 2048) fold the row's dot product in their own fixed order, so ``dx`` may change bits at
 their edge; ``EDGES`` marks the edges not yet measured, every edge of the H = 1280, 1024
 and 128 routes among them. ``dw`` sums every row and depends on ``T``
@@ -2045,9 +2077,10 @@ its own windows.
   (128, 512] e476d0b2 ? (512, 4096] 80956d25 ? (4096, 16384] c66b8cbd ?
   (16384, inf) c66b8cbd
 * ``sm_107a`` ``bwd_h1536``: (0, 1] c3b1b46a ? (1, 576] 1207b056 ? (576, 1024] 7dc29629
-  = (1024, 16384] 6a428da2 = (16384, 45056] 56d26996 = (45056, inf) 411e270c
+  = (1024, 12288] 88510c60 = (12288, 16384] 6a428da2 = (16384, 45056] 56d26996 =
+  (45056, inf) 411e270c
 * ``sm_107a`` ``bwd_h2048``: (0, 1] 92def3f9 ? (1, 256] 6720b4a1 ? (256, 1024] 845cdcd8
-  ~ (1024, 16384] 81c3d8ab = (16384, 50688] 845cdcd8 = (50688, inf) 21ee6fc9
+  ~ (1024, 16384] cc26e316 = (16384, 50688] 845cdcd8 = (50688, inf) 21ee6fc9
 * ``sm_107a`` ``bwd_h256``: (0, 1572864] a385ae16 = (1572864, inf) a385ae16
 * ``sm_107a`` ``bwd_h4096``: (0, 256] c1de7e41 ? (256, 1024] a647fccc =
   (1024, 4096] d41a514f = (4096, 24064] ee4a9053 ? (24064, 50176] a647fccc ?
@@ -2060,7 +2093,7 @@ its own windows.
 * ``sm_107a`` ``bwd_h5120``: (0, 1] 080e0a6c ? (1, 256] dd3a3573 ? (256, 1280] 080e0a6c
   ? (1280, 4096] 838c077d ? (4096, 19968] 6816fb80 ? (19968, inf) 47da668e
 * ``sm_107a`` ``bwd_h6144``: (0, 1] 0dafdf09 ? (1, 256] dffe53d5 ? (256, 1664] 0dafdf09
-  ? (1664, 19456] 5d292172 = (19456, inf) 9cc51adf
+  dx (1664, 3072] af220b26 dx (3072, 19456] 5d292172 = (19456, inf) 9cc51adf
 * ``sm_107a`` ``bwd_residual_h6144``: (0, 368] ee1be07a ? (368, 19456] 36cad444 ?
   (19456, inf) 2f149999
 """
