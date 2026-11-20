@@ -4038,9 +4038,12 @@ def plan_chunks(num_rows: int, chunk: int) -> tuple[tuple[int, int], ...]:
 def _kept_property(fn: Callable[[Any], Any]) -> property:
     """A read-only property of a frozen plan, formed on first use and kept on the instance under the key of the
     defining class's function (``_kept_<qualname>``), so an override that reads ``super()``'s value reads the base
-    class's own kept value: one forming per plan and class, the same value (a plan's fields never change)."""
+    class's own kept value: one forming per plan and class, the same value (a plan's fields never change).  The
+    getter wraps ``fn`` (:func:`functools.wraps`): its name, docstring and ``__wrapped__`` are ``fn``'s, so
+    :func:`inspect.getsource` of the property's ``fget`` reads ``fn``'s body."""
     key = f"_kept_{fn.__qualname__}"
 
+    @functools.wraps(fn)
     def get(self):
         state = self.__dict__
         value = state.get(key)
