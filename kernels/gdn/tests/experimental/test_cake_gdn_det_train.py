@@ -6594,8 +6594,10 @@ def test_a_pool_eviction_keeps_the_forward_plans(monkeypatch) -> None:
     assert plans == {"key": "plan"}
 
 
-# the module globals a forward plan holds by identity (beside cake_backend.device_arch): helpers its steps call (the
-# direct executor's rows and eager steps among them), the route switches and tape words they read, and its caches
+# the module globals a forward plan holds by identity (beside cake_backend.device_arch): helpers its steps call, the
+# route switches and tape words they read, and its caches.  The helpers of the executor's steps (the rows, the
+# workspace pool, the split forward's index copy) are held as forward functions (cake_chain._FWD_PLAN_ROOTS): the
+# forward reaches them only through its executor and reads none of them by name.  The others are reads
 FWD_PLAN_HELD = ("_device_props", "_available", "wy_stage", "use_prep_tma", "FWD_A_ARCHS", "FWD_SPLIT_A_MIN_PIECE",
                  "VIEWS_TAKE_PREP_TMA", "WY_TC2_ARCHS", "FWD_HO_VH2_ARCHS", "_POOLED", "_WALKS", "_SIDE_STREAMS",
                  "_GRAPH_TABLES", "LAUNCH_ARGS", "FWD_A_TAPE", "FWD_FUSED_TAPE", "_index_copy_heads", "_aligned",
@@ -6623,18 +6625,22 @@ def _another_object(value):
 
 
 def test_the_forward_plan_holds_the_module_globals_by_identity(monkeypatch) -> None:
-    # a plan replays only while cake_backend.device_arch, the forward's functions (the direct executor's _launch among
-    # them) and every module global they read are the objects it was recorded with: each of FWD_PLAN_HELD is among
-    # them, and another object in its place (an equal one too) is a mismatch.  The switches, caches and state of the
-    # plan and its record gate (FWD_PLAN_NOT_HELD) are not among them
+    # a plan replays only while cake_backend.device_arch, the forward's functions (the direct executor's _launch and
+    # the five helpers of the executor's steps among them) and every module global they read are the objects it was
+    # recorded with: each of FWD_PLAN_HELD is among them (those five helpers as forward functions that no forward
+    # function reads by name, every other one as a read), and another object in its place (an equal one too) is a
+    # mismatch.  The switches, caches and state of the plan and its record gate (FWD_PLAN_NOT_HELD) are not among them
     held = cake_chain._fwd_plan_globals()
     assert held[0] is cake_backend.device_arch
     assert any(x is cake_chain._launch for x in held)
     for name in FWD_PLAN_HELD:
         assert any(x is getattr(cake_chain, name) for x in held), name
     reached = cake_chain._reached_globals(cake_chain._FWD_PLAN_ROOTS)
-    assert set(FWD_PLAN_HELD) <= reached, set(FWD_PLAN_HELD) - reached
-    assert not set(FWD_PLAN_NOT_HELD) & reached, set(FWD_PLAN_NOT_HELD) & reached
+    named = reached | set(cake_chain._FWD_PLAN_ROOTS)
+    assert set(FWD_PLAN_HELD) <= named, set(FWD_PLAN_HELD) - named
+    assert set(FWD_PLAN_HELD) - reached == {"_aligned", "_caller_rows", "_index_copy_heads", "_table_rows",
+                                            "_workspaces"}  # fmt: skip
+    assert not set(FWD_PLAN_NOT_HELD) & named, set(FWD_PLAN_NOT_HELD) & named
     for name in ("device_arch", *FWD_PLAN_HELD):
         owner = cake_backend if name == "device_arch" else cake_chain
         with monkeypatch.context() as m:
