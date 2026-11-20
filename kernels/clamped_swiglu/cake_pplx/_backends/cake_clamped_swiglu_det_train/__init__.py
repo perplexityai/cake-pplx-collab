@@ -84,21 +84,28 @@ JIT variables):
   plain tensor.
 - Launches.  One kernel per call: the forward runs stage ``fwd``, a weighted
   backward ``bwd`` and an unweighted backward ``bwd_unweighted``
-  (``cake_jit.MODULES``).  ``fwd`` and ``bwd`` each have two programs: a
-  small-R program and a large-R program, which runs when ``R`` lies in one
-  of its record's windows of rows per SM on the device's architecture,
-  ``lo * SMs <= R <= hi * SMs`` for a window ``[lo, hi]``
-  (``cake_jit.route``; the architecture is read once per device and the SM
-  count once per stage and device, and an architecture without a large-R
-  program runs the small-R one at every ``R``).  ``bwd_unweighted`` has one
-  program, which runs at every ``R``.  Both programs of a stage give the
-  same bits for every input, so the route changes no output bit, and the
-  unweighted program gives the bits of ``bwd`` with the weight flag 0.  In
-  ``fwd`` and ``bwd``, CTAs of ``threads / lanes`` rows (32 lanes a row; 128
-  threads and 4 rows, but 256 threads and 8 rows in the large-R forward on
-  SM100 and SM103), one CTA per block of rows on the grid's x axis; in
-  ``bwd_unweighted``, a warp per (row, run of 768 columns) task, 4 tasks a
-  CTA of 128 threads, ``ceil(3 R / 4)`` CTAs (``cake_jit.grid``).  ``R == 0``
+  (``cake_jit.MODULES``).  Each stage has a small-R program and a fine
+  program, and ``fwd`` and ``bwd`` also have a large-R program.  The fine
+  program runs when ``R <= hi * SMs`` for its record's one window
+  ``[0, hi]`` of rows per SM on the device's architecture
+  (``cake_jit.fine``).  At more rows the large-R program runs when ``R``
+  lies in one of its record's windows, ``lo * SMs <= R <= hi * SMs`` for a
+  window ``[lo, hi]`` (``cake_jit.route``), and the small-R program runs at
+  every other ``R``.  The architecture is read once per device and the SM
+  count once per stage and device; an architecture without a fine or a
+  large-R program runs the small-R one in its place.  The programs of a
+  stage give the same bits for every input, so the route changes no output
+  bit, and the unweighted programs give the bits of ``bwd`` with the weight
+  flag 0.  In the small-R and large-R ``fwd`` and ``bwd`` programs, CTAs of
+  ``threads / lanes`` rows (32 lanes a row; 128 threads and 4 rows, but 256
+  threads and 8 rows in the large-R forward on SM100 and SM103), one CTA per
+  block of rows on the grid's x axis; in the small-R ``bwd_unweighted``
+  program, a warp per (row, run of 768 columns) task, 4 tasks a CTA of 128
+  threads, ``ceil(3 R / 4)`` CTAs.  The fine programs run a row as 9 tasks,
+  one load of 256 columns of each input a task: a warp per task, 4 tasks a
+  CTA of 128 threads, ``ceil(9 R / 4)`` CTAs, in ``fwd`` and
+  ``bwd_unweighted``, and a CTA of 9 warps per row, ``R`` CTAs, in ``bwd``
+  (``cake_jit.grid``).  ``R == 0``
   launches nothing and loads no library; a program's library loads at its
   first launch.  Every launch is a plain stream-ordered launch on the current
   torch stream of the operands' device (a tvm-ffi call whose arguments include
@@ -344,35 +351,42 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int, int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Plan]:
-    """``(limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per stage and device
-    from the device's architecture and SM count (``cake_jit.route``).  A launch of ``rows < limit`` rows runs the plan
-    ``large`` when ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it
-    is 0; a launch of more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.
-    ``limit`` is one above the last edge of ``cake_jit.route`` (0 without a window).  The launch looks up one byte
-    instead of searching the edges: on Grace, a search per launch measured 1-3 % more host time per call.  No library
-    is loaded here: a program's library loads at its first launch."""
+def _route(stage: str, device_index: int) -> tuple[int, _Plan, int, bytes, _Plan, _Plan, _Plan]:
+    """``(fine_rows, fine, limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per
+    stage and device from the device's architecture and SM count (``cake_jit.fine`` and ``cake_jit.route``).  A launch
+    of ``rows <= fine_rows`` rows runs the plan ``fine``, the stage's fine program (``fine_rows`` 0 without one on the
+    architecture, so no launch runs it).  A launch of more rows, below ``limit``, runs the plan ``large`` when
+    ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it is 0; a launch of
+    more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.  ``limit`` is one above
+    the last edge of ``cake_jit.route`` (0 without a window), and ``fine_rows`` is below its first edge.  The launch
+    compares the row count with one integer and looks up one byte instead of searching the edges: on Grace, a search
+    per launch measured 1-3 % more host time per call.  No library is loaded here: a program's library loads at its
+    first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
-    edges, small, large = cake_jit.route(stage, device_arch(device_index), sm_count)
+    arch = device_arch(device_index)
+    edges, small, large = cake_jit.route(stage, arch, sm_count)
+    fine_rows, fine = cake_jit.fine(stage, arch, sm_count)
     limit = edges[-1] + 1 if edges else 0
     table = bytearray(limit)
     for below, last in zip(edges[0::2], edges[1::2]):
         table[below + 1 : last + 1] = bytes([1]) * (last - below)
-    small, large = (small, *_plan(small)), (large, *_plan(large))
-    return limit, bytes(table), small, large, large if len(edges) % 2 else small
+    small, large, fine = (small, *_plan(small)), (large, *_plan(large)), (fine, *_plan(fine))
+    return fine_rows, fine, limit, bytes(table), small, large, large if len(edges) % 2 else small
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
-    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
-    small-R one at every other row count; ``bwd_unweighted`` has one program) with its parameters (the kernel's, then
-    the column offsets) named in ``values``, on the current torch stream of device ``device_index``.
+    """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the fine program up to its last row count,
+    the large-R program in its windows, the small-R one at every other row count) with its parameters (the kernel's,
+    then the column offsets) named in ``values``, on the current torch stream of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs.  The entry points launch through
     :func:`_launcher`, which runs the same program with the same arguments and grid, passed by position."""
-    limit, table, small, large, tail = _route(stage, device_index)
-    name, arguments, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
+    fine_rows, fine, limit, table, small, large, tail = _route(stage, device_index)
+    name, arguments, per_row, per_cta = (
+        fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit else tail
+    )
     try:
         args = arguments(values)
     except KeyError:
@@ -435,7 +449,7 @@ class _Launcher:
     ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``); ``route``, :func:`_route` of
     the stage and device; ``entries``, each program's FFI entry, bound through :func:`_entry` at the program's first
     launch (:meth:`entry`; no library loads when the launcher is made); and ``weight``, the ignored weight of the
-    unweighted forward launches on the device (:meth:`ignored_weight`; ``fwd`` only, None until the first one).  Both
+    unweighted forward launches on the device (:meth:`ignored_weight`; ``fwd`` only, None until the first one).  The
     programs of the stage are checked to take their parameters in that order when the launcher is made, so a launch
     builds no dict of the arguments.  The common calls of the entry points read these fields and launch in their own
     frame (:func:`_forward_step`, :func:`_backward_step`), as ``launch`` does; the autograd forward of a checkpoint's
@@ -445,8 +459,8 @@ class _Launcher:
 
     def __init__(self, stage: str, device_index: int) -> None:
         self.route = _route(stage, device_index)
-        _, _, small, large, _ = self.route
-        for name in dict.fromkeys((small[0], large[0])):
+        _, fine, _, _, small, large, _ = self.route
+        for name in dict.fromkeys((small[0], large[0], fine[0])):
             if parameters(name) != _ARGUMENTS[stage]:
                 raise RuntimeError(
                     f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
@@ -476,8 +490,10 @@ class _Launcher:
         return weight
 
     def __call__(self, rows: int, *arguments: Any) -> None:
-        limit, table, small, large, tail = self.route
-        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
+        fine_rows, fine, limit, table, small, large, tail = self.route
+        name, _, per_row, per_cta = (
+            fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit else tail
+        )
         entry = self.entries.get(name)
         if entry is None:
             entry = self.entry(name)
@@ -972,8 +988,10 @@ def _forward_step(
                     # The gate and the up share the row stride: the merged tensor's (passed as both, the up from
                     # column 2304) or the two tensors' 2304.
                     stride, out_stride = (shape[1], WIDTH) if rows > 1 else (0, 0)
-                    limit_rows, table, small, large, tail = launch.route
-                    name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit_rows else tail
+                    fine_rows, fine, limit_rows, table, small, large, tail = launch.route
+                    name, _, per_row, per_cta = (
+                        fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit_rows else tail
+                    )
                     entry = launch.entries.get(name)
                     if entry is None:
                         entry = launch.entry(name)
@@ -1103,8 +1121,14 @@ def _backward_step(
                             up, d_up, col = first, d_first, WIDTH
                         else:
                             col = 0
-                        limit_rows, table, small, large, tail = launch.route
-                        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit_rows else tail
+                        fine_rows, fine, limit_rows, table, small, large, tail = launch.route
+                        name, _, per_row, per_cta = (
+                            fine
+                            if rows <= fine_rows
+                            else (large if table[rows] else small)
+                            if rows < limit_rows
+                            else tail
+                        )
                         entry = launch.entries.get(name)
                         if entry is None:
                             entry = launch.entry(name)
