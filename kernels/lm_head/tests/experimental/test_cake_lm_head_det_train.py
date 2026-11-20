@@ -17405,13 +17405,14 @@ def test_cast_fold_programs_are_registered():
 
 
 def test_flat_cast_fold_plan_keys():
-    """An uncompacted plan with ``cast_fold`` whose flat BF16 cast reads every row -- the loss entry's
-    :func:`cake_backend.finalize_dx` or a log-probability plan's in-loop cast -- folds the label residuals of the
-    longest run of adjacent one-slice chunks in the cast's fold program: those chunks launch no fold-alone slab sum,
-    the in-loop cast's key is ``scale_cast_fold_bf16`` with the call's labels, residuals and head, the head's rows, the
-    fold rows and the row width as its host values, and the plan's stages carry the program.  A log-probability plan
-    whose caller finalizes the FP32 accumulator itself (``dx_cast=False``: no BF16 cast) and a plan without
-    ``cast_fold`` keep every fold-alone slab sum and the flat cast without a fold operand."""
+    """An uncompacted log-probability plan with ``cast_fold`` whose in-loop flat BF16 cast reads every row folds the
+    label residuals of the longest run of adjacent one-slice chunks in the cast's fold program: those chunks launch no
+    fold-alone slab sum, the in-loop cast's key is ``scale_cast_fold_bf16`` with the call's labels, residuals and head,
+    the head's rows, the fold rows and the row width as its host values, the plan's stages carry the program, and
+    :func:`cake_backend.finalize_dx` gets no fold operand.  An uncompacted loss plan folds none, with or without
+    ``cast_fold`` (its forward's slab sums leave ``dx_acc`` final: its backward reads neither the caller's labels nor
+    the head); a log-probability plan whose caller finalizes the FP32 accumulator itself (``dx_cast=False``: no BF16
+    cast) and a plan without ``cast_fold`` keep every fold-alone slab sum and the flat cast without a fold operand."""
     from dataclasses import replace as _replace
 
     g = cake_backend.Geometry.from_record(
@@ -17446,29 +17447,26 @@ def test_flat_cast_fold_plan_keys():
         return [i for s, i in loop if s in slab_stages], cake_backend.cast_keys(plan)
 
     t = dict(labels=object(), rlab=object(), W=object())
-    for entry in ("loss", "logprob"):
-        plan = plan_of(entry)
-        assert not plan.compact and plan.num_chunks == 4
-        assert all(plan.dx_slices_of(i) == 1 for i in range(4))
-        assert cake_backend.cast_fold_rows(plan) == (0, plan.rows) == (0, 4096)
-        slabs, cast = keys_of(plan)
-        assert slabs == [] and cast[0] == (fold_stage, "dx")
-        assert ("scale_cast_bf16", "dx") not in cast and fold_stage in plan.stages
-        # the loss entry hands the fold operands to finalize_dx; a log-probability plan's in-loop cast takes its own
-        fold = cake_backend.cast_fold_operands(plan, t)
-        if entry == "loss":
-            assert fold == dict(
-                labels=t["labels"], rlab=t["rlab"], W=t["W"], lo=0, hi=4096
-            )
-        else:
-            assert fold is None
+    plan = plan_of("logprob")
+    assert not plan.compact and plan.num_chunks == 4
+    assert all(plan.dx_slices_of(i) == 1 for i in range(4))
+    assert cake_backend.cast_fold_rows(plan) == (0, plan.rows) == (0, 4096)
+    slabs, cast = keys_of(plan)
+    assert slabs == [] and cast[0] == (fold_stage, "dx")
+    assert ("scale_cast_bf16", "dx") not in cast and fold_stage in plan.stages
+    # the in-loop cast takes its own operands: finalize_dx gets none
+    assert cake_backend.cast_fold_operands(plan, t) is None
     every = list(range(4))
     for other in (
+        plan_of(),  # the loss entry: the same one-slice chunks, folded by their slab sums
+        plan_of(dx_cast=False),
         plan_of("logprob", dx_cast=False),
         plan_of(cast_fold=False),
         plan_of("logprob", cast_fold=False),
     ):
+        assert not other.compact and all(other.dx_slices_of(i) == 1 for i in range(4))
         assert cake_backend.cast_fold_rows(other) == (0, 0)
+        assert cake_backend.cast_fold_operands(other, t) is None
         slabs, cast = keys_of(other)
         assert slabs == every
         assert all(s != fold_stage for s, _ in cast) and fold_stage not in other.stages
@@ -17524,9 +17522,10 @@ def _launch_eager(mod, stage, values):
 def test_device_cast_fold_programs_without_a_folded_row(monkeypatch):
     """The casts' fold programs fold no row outside ``[fold_lo, fold_hi)``, on a row of residual 0 or of a label
     outside ``[0, V)``: with an empty range they give bitwise the outputs of the programs without a fold operand, and
-    with a range the rows of that predicate keep those bits while the folded rows change.  ``scale_cast`` /
-    ``scale_cast_scatter`` with no fold or an empty range launch the programs without a fold operand (the main and
-    the opt-in module's scatter), with a range the fold programs."""
+    with a range the rows of that predicate keep those bits while the folded rows change.  ``scale_cast_scatter`` with
+    no fold or an empty range launches the program without a fold operand (the main and the opt-in module's), with a
+    range the fold program; ``scale_cast`` takes no fold operand (the flat cast's fold program is the in-loop cast of
+    an uncompacted log-probability backward)."""
     _require_program(entry="loss")
     bound = []
     for mod in (cake_backend, opt_in):
@@ -17612,20 +17611,8 @@ def test_device_cast_fold_programs_without_a_folded_row(monkeypatch):
         assert torch.equal(_bits(folded), _bits(scatter_fold(0, T_v)))
     bound.clear()
     plain_flat = cake_backend.scale_cast(acc, g, torch.bfloat16, backend="cake")
-    same_flat = cake_backend.scale_cast(
-        acc, g, torch.bfloat16, backend="cake", fold=dict(empty, lo=9, hi=9)
-    )
-    folded_flat = cake_backend.scale_cast(
-        acc, g, torch.bfloat16, backend="cake", fold=dict(empty, lo=0, hi=T_v)
-    )
     torch.cuda.synchronize()
-    assert bound == [
-        "scale_cast_bf16",
-        "scale_cast_bf16",
-        cake_backend.DX_CAST_FOLD_STAGE,
-    ]
-    assert torch.equal(_bits(same_flat), _bits(plain_flat))
-    assert torch.equal(_bits(folded_flat), _bits(flat_fold(0, T_v)))
+    assert bound == ["scale_cast_bf16"]
     # the fold programs with an empty range are the programs without a fold operand
     for lo in (0, 11, T_v):
         assert torch.equal(_bits(scatter_fold(lo, lo)), _bits(plain_scatter))
@@ -17648,13 +17635,13 @@ def test_device_cast_fold_programs_without_a_folded_row(monkeypatch):
     assert torch.all(scattered[~valid.to(CUDA)] == 0)
 
 
-@pytest.mark.parametrize("entry", ["loss", "logprob"])
-def test_device_flat_cast_fold_is_bitwise(monkeypatch, entry):
-    """An uncompacted call (every row valid) of the autograd entries folds the label residuals of its one-slice chunks
-    in the flat BF16 dX cast's fold program -- in the loss entry's dX finalize, in the log-probability backward's
-    in-loop cast -- and launches no fold-alone slab sum on those chunks: bitwise the ``loss``, ``logp``, ``dX`` and
-    ``dW`` of the same call with the fold left to the slab sums (the cast-fold range forced empty: the previous
-    launches).  A device whose slice rule gives the shape no one-slice chunk skips."""
+def test_device_flat_cast_fold_is_bitwise(monkeypatch):
+    """An uncompacted call (every row valid) of the log-probability autograd entry folds the label residuals of its
+    one-slice chunks in its backward's in-loop flat BF16 dX cast (the cast's fold program) and launches no fold-alone
+    slab sum on those chunks: bitwise the ``loss``, ``logp``, ``dX`` and ``dW`` of the same call with the fold left to
+    the slab sums (the cast-fold range forced empty: the previous launches).  A device whose slice rule gives the
+    shape no one-slice chunk skips."""
+    entry = "logprob"
     _require_program(entry=entry)
     # H 8192 at 4096 rows in one chunk: a one-slice dX chunk under the B200 slice rule
     inp = make_inputs(4096, seed=SEED + 97, device=CUDA, H=8192, ignore_frac=0.0)
@@ -17672,8 +17659,6 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch, entry):
         off.configure(enabled=False)
         monkeypatch.setattr(mod, "BINDING_CACHE", off)
     kw = dict(entry=entry, backend="cake")
-    if entry == "loss":  # the opt-in module's loss form, whose dX finalize folds
-        kw.update(memory_mode="budget")
     ranges = []
     real_range = cake_backend._cast_fold_range
 
@@ -17701,3 +17686,71 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch, entry):
     )
     for key in ("loss", "logp", "dX", "dW"):
         assert torch.equal(_bits(folded[key]), _bits(plain[key])), key
+
+
+@pytest.mark.parametrize("write", ["labels", "head"])
+def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, write):
+    """An uncompacted loss call (every row valid) folds its label residuals in its forward's slab sums, also on
+    one-slice dX chunks: an uncompacted loss plan has no cast-fold range, the flat dX cast's fold program never runs,
+    and the backward reads neither the caller's labels nor the head.  Writing either in place between the forward and
+    the backward (a labels buffer refilled with the next micro-batch, a head updated in place) leaves ``dX`` and ``dW``
+    bitwise those of the same call without the write."""
+    _require_program(entry="loss")
+    # H 8192 at 4096 rows in one chunk: a one-slice dX chunk under the B200 slice rule
+    inp = make_inputs(4096, seed=SEED + 97, device=CUDA, H=8192, ignore_frac=0.0)
+    assert bool(inp.valid.all())
+    bound = []
+    for mod in (cake_backend, opt_in):
+        real = mod._bind_all
+
+        def spy(record, module_name, keys, *args, _real=real, **kwargs):
+            bound.extend(key[0] for key in keys)
+            return _real(record, module_name, keys, *args, **kwargs)
+
+        monkeypatch.setattr(mod, "_bind_all", spy)
+        off = type(mod.BINDING_CACHE)()
+        off.configure(enabled=False)
+        monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    ranges = []
+    real_range = cake_backend._cast_fold_range
+
+    def range_spy(plan):
+        out = real_range(plan)
+        if not plan.compact:
+            ranges.append(out)
+        return out
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
+
+    def step(written: bool):
+        X = inp.X.detach().clone().requires_grad_(True)
+        W = inp.W.detach().clone().requires_grad_(True)
+        labels = inp.labels.clone()
+        loss, _ = cake_backend.cake_lm_head_det_train_loss(
+            X,
+            W,
+            labels,
+            objective=inp.objective,
+            loss_div=inp.loss_div if inp.objective == "ce" else None,
+            infer_logp=inp.infer_logp,
+            loss_weights=inp.loss_weights,
+            chunk_size=4096,
+            return_logp=True,
+            backend="cake",
+        )
+        if written:
+            with torch.no_grad():
+                if write == "labels":
+                    labels.copy_(torch.roll(labels, 1))
+                else:
+                    W.neg_()
+        loss.backward()
+        torch.cuda.synchronize()
+        return X.grad, W.grad
+
+    dX, dW = step(False)
+    assert cake_backend.DX_CAST_FOLD_STAGE not in bound
+    assert "slab_sum" in bound and all(hi <= lo for lo, hi in ranges)
+    dX_w, dW_w = step(True)
+    assert torch.equal(_bits(dX_w), _bits(dX))
+    assert torch.equal(_bits(dW_w), _bits(dW))
