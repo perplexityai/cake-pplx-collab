@@ -27,7 +27,9 @@ routes ``fwd_prepare_handoff`` (the standard forward with the collapse
 it) and ``bwd_finish_handoff`` (the standard backward with the token-owner
 forms ``bwd_token__<form>_ho``), and the standalone collapse routes
 ``collapse_forward`` / ``collapse_backward`` (no workspace); every output
-repeats bit for bit for a given token count on a given device.
+repeats bit for bit for a given token count on a given device.  On SM107 the
+three collapse records are that architecture's own forms with the same bits
+(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``).
 """
 
 from __future__ import annotations

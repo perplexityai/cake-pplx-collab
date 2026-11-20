@@ -54,7 +54,7 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 extern "C" {
 
 __global__ __launch_bounds__(256, LAUNCH_MIN_BLOCKS) void
-kernel_cake_dsa_h64_nope_train_cf51de6f7c115ad9def7(float* __restrict__ lse, float* __restrict__ delta, float* __restrict__ sink, float* __restrict__ dsink, float* __restrict__ partials, unsigned int* __restrict__ counter, int num_tokens)
+kernel_cake_dsa_h64_nope_train_36d862698eea1ea770ef(float* __restrict__ lse, float* __restrict__ delta, float* __restrict__ sink, float* __restrict__ dsink, float* __restrict__ partials, unsigned int* __restrict__ counter, int num_tokens)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);

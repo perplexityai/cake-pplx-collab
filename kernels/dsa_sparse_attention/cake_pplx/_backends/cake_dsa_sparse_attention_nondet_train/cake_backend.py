@@ -59,14 +59,15 @@ limitations under the License.
 #   into the caller's ``dkv_acc``.  The RoPE entry points below are untouched;
 #   the NoPE entries share every rope-independent helper (key-range passes,
 #   direct accumulation, workspace carving, index offsetting, the plan cache).
-# * The flat NoPE entries take an optional trainable per-head sink, FP32
-#   ``sink [64]``: it adds ``exp(sink[h])`` (unscaled) to the softmax
-#   denominator of every row of head ``h`` and contributes no value.  The
-#   forward's sink build writes the sink-aware ``out`` / ``o_lo`` / ``lse``
-#   (``lse`` includes the sink; a row without a valid slot gives ``out = 0`` and
-#   ``lse = sink``), the main backward stages read that ``lse`` unchanged, and the
-#   sink-gradient stage writes ``dsink [64] = -sum_t exp(sink - lse) * delta``
-#   over all rows of the call.  ``sm_100a`` / ``sm_103a`` only.
+# * The NoPE entries (flat and packed) take an optional trainable per-head
+#   sink, FP32 ``sink [64]``: it adds ``exp(sink[h])`` (unscaled) to the
+#   softmax denominator of every row of head ``h`` and contributes no value.
+#   The forward's sink build (on ``sm_107a`` its scanner-warp build) writes the
+#   sink-aware ``out`` / ``o_lo`` / ``lse`` (``lse`` includes the sink; a row
+#   without a valid slot gives ``out = 0`` and ``lse = sink``), the main
+#   backward stages read that ``lse`` unchanged, and the sink-gradient stage
+#   writes ``dsink [64] = -sum_t exp(sink - lse) * delta`` over all rows of the
+#   call.  ``sm_100a``, ``sm_103a`` and ``sm_107a``.
 # * This is the non-deterministic package (``cake_pplx.cake_dsa_sparse_attention_nondet_train``): the module name
 #   chooses it and no entry point takes a mode keyword.  Under ``torch.use_deterministic_algorithms(True)`` every
 #   backward launch sequence raises PyTorch's alert before it allocates its backward buffers and launches its first
@@ -4222,8 +4223,9 @@ def _plan_nope(
 
 def _require_nope_sink_stages(arch: Optional[str], *, backward: bool) -> None:
     """``NotImplementedError`` unless the NoPE record ships the sink stages a call with a sink needs on ``arch``:
-    the forward's sink build and, for a backward, the sink-gradient stage (their entries' ``arches``; ``sm_100a`` /
-    ``sm_103a``: no scanner-warp sink build ships for ``sm_107a``)."""
+    the forward's sink build -- or its scanner-warp build where that ships for ``arch`` (``cake_jit.stage_for``,
+    ``sm_107a``), the stage that serves the sink forward there -- and, for a backward, the sink-gradient stage (their
+    entries' ``arches``)."""
     program = cake_jit.NOPE_PROGRAM
     record = cake_jit.record(program)
     needed = (cake_jit.NOPE_SINK_FORWARD_STAGE,)
@@ -4234,10 +4236,11 @@ def _require_nope_sink_stages(arch: Optional[str], *, backward: bool) -> None:
             raise NotImplementedError(
                 f"a trainable sink needs the NoPE stage {stage!r}, which this checkout does not register"
             )
-        arches = cake_jit.stage_arches(stage, program)
+        served = cake_jit.stage_for(stage, arch, program)
+        arches = cake_jit.stage_arches(served, program)
         if arch not in arches:
             raise NotImplementedError(
-                f"a trainable sink is not supported on {arch}: the NoPE stage {stage!r} ships for "
+                f"a trainable sink is not supported on {arch}: the NoPE stage {served!r} ships for "
                 f"{list(arches)} only (no sink build for {arch} in this package)"
             )
 
@@ -4918,8 +4921,8 @@ def forward_nope(
     ``softmax_scale`` defaults to 1/16.  A fully masked row gives ``out = 0`` and ``lse = -inf``.  Allocates the
     outputs and launches over the remembered plan of the input geometry; a call without query rows returns empty
     outputs without launching.  ``topk_length`` / ``derive_topk_length`` as in :func:`forward`.  ``sink``: an
-    optional trainable per-head sink, FP32 ``[64]`` on the device of ``q_latent`` (:func:`_check_sink`; ``sm_100a``
-    / ``sm_103a``), added unscaled to every row's softmax denominator as ``exp(sink[h])`` with no value: ``lse``
+    optional trainable per-head sink, FP32 ``[64]`` on the device of ``q_latent`` (:func:`_check_sink`; on
+    ``sm_107a`` the sink build's scanner-warp build serves the call), added unscaled to every row's softmax denominator as ``exp(sink[h])`` with no value: ``lse``
     includes it, ``out`` / ``o_lo`` come from the sink-aware FP32 sum, and a fully masked row gives ``out = 0`` and
     ``lse = sink[h]`` (``-inf`` for a ``-inf`` sink).
     """
@@ -6166,6 +6169,7 @@ def _packed_forward_nope(
     topk_length,
     softmax_scale,
     mode,
+    sink=None,
 ):
     """The packed forward over per-document index rows, ``(out, lse, o_lo, indices, lengths)``: the plan, the
     outputs and the launch values are settled before the first launch.  ``mode == "index_prep"`` issues the
@@ -6179,7 +6183,8 @@ def _packed_forward_nope(
     last valid slot + 1 to ``lengths``; no caller cut.  ``mode == "kernel"`` is the compacting single launch
     (``convert = NOPE_CONVERT_COMPACT``): the scan lanes write the same stable compaction and valid counts as the
     stage (bitwise); no caller cut, never selected by size.  ``indices`` (global key rows in the order the forward
-    processed them) and ``lengths`` are what the backward reads on every route."""
+    processed them) and ``lengths`` are what the backward reads on every route.  ``sink``: the forward of every route
+    is the sink build (:func:`_plan_nope`), whose per-document conversion is the plain build's."""
     results, issue = _prepare_packed_forward_nope(
         q_latent,
         kv_latent,
@@ -6190,6 +6195,7 @@ def _packed_forward_nope(
         topk_length,
         softmax_scale,
         mode,
+        sink,
     )
     issue()
     return results
@@ -6205,11 +6211,13 @@ def _prepare_packed_forward_nope(
     topk_length,
     softmax_scale,
     mode,
+    sink=None,
 ) -> tuple[tuple[torch.Tensor, ...], Callable[[], None]]:
     """:func:`_packed_forward_nope` before its first launch: ``((out, lse, o_lo, indices, lengths), issue)`` with
     every buffer allocated and every launch value bound; ``issue()`` issues the route's launches (the forward, or the
     index-preparation stage and the pre-bound forward back to back).  The autograd entry validates its accumulator
-    arguments between the two calls and settles its backward after ``issue()``."""
+    arguments between the two calls and settles its backward after ``issue()``.  With a ``sink`` the binding key ends
+    with its geometry and the forward of every route is the sink build."""
     arch = _nope_arch(gather_kv_indices)
     num_rows, topk = int(q_latent.shape[0]), int(gather_kv_indices.shape[1])
     device = q_latent.device
@@ -6254,7 +6262,7 @@ def _prepare_packed_forward_nope(
         )
     lengths = derived
     key = forward_binding_key_nope(
-        q_latent, kv_latent, plan_indices, lengths, scale, derive
+        q_latent, kv_latent, plan_indices, lengths, scale, derive, sink
     )
     binding = _binding(
         key,
@@ -6269,19 +6277,20 @@ def _prepare_packed_forward_nope(
             backward=False,
             key_passes=None,
             derive_topk_length=derive,
+            sink=sink,
         ),
         _NopeBinding,
     )
     if extra is not None:  # the one-launch modes
         (out, lse, o_lo), launch = binding.prepared_forward(
-            q_latent, kv_latent, plan_indices, lengths, extra
+            q_latent, kv_latent, plan_indices, lengths, extra, sink
         )
         return (out, lse, o_lo, indices, lengths), launch
     # the preparation route: every allocation, launch value and operand conversion of both launches first, then
     # -- inside one stream context -- the stage launch and the pre-bound forward launch with nothing in between
     # (the forward's binding call is all that separates them, so it hides behind the stage's kernel)
     (out, lse, o_lo), launches = binding.prebound_forward(
-        q_latent, kv_latent, indices, lengths
+        q_latent, kv_latent, indices, lengths, sink=sink
     )
     prep = _index_prep_launch(
         arch,
@@ -6385,9 +6394,10 @@ def _prepare_flat_forward_nope(
 class CakeDSASparseAttentionNondetNopeVarlenFunction(torch.autograd.Function):
     """Autograd wrapper of the packed NoPE form with on-device index preparation.
 
-    Fifteen forward inputs ``(q_latent, kv_latent, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, causal,
+    Sixteen forward inputs ``(q_latent, kv_latent, gather_kv_indices, cu_seqlens_q, cu_seqlens_k, causal,
     topk_length, softmax_scale, key_passes, dkv_acc, dkv_dst_map, num_segments, dkv_direct, check_dst_map,
-    mode)``; returns ``(out, lse)``.  The forward turns the per-document rows into global key rows on device --
+    mode, sink)`` -- ``sink`` last and optional, so a fifteen-argument ``apply`` stays valid; returns ``(out, lse)``.
+    The forward turns the per-document rows into global key rows on device --
     ``mode == "mask"`` (below :data:`NOPE_CONVERT_SLOT_LIMIT` slots without caller lengths): the forward kernel
     alone, in one launch, writes the position-preserving global rows (the global key or ``-1`` at the slot it
     came from) to a fresh ``indices [T, K_slots]`` and the last valid slot + 1 to the lengths; ``mode ==
@@ -6403,7 +6413,9 @@ class CakeDSASparseAttentionNondetNopeVarlenFunction(torch.autograd.Function):
     ``"index_prep"`` route, also with caller lengths): every produced
     operand of the backward goes through ``ctx.save_for_backward`` and a tensor ``dkv_acc`` stays caller-owned on
     the node, so a checkpointed forward retains nothing; ``dkv_acc`` may be a callable resolved at backward time
-    (:data:`DkvAccSource`).
+    (:data:`DkvAccSource`).  With a ``sink`` (FP32 ``[64]``) the forward of every route is the sink build, the
+    caller's ``sink`` is saved as the eighth tensor, and the backward returns ``dsink`` (summed over all packed rows of
+    the call) as its gradient, as in :class:`CakeDSASparseAttentionNondetNopeFunction`.
     """
 
     @staticmethod
@@ -6424,6 +6436,7 @@ class CakeDSASparseAttentionNondetNopeVarlenFunction(torch.autograd.Function):
         dkv_direct=None,
         check_dst_map=False,
         mode="index_prep",
+        sink=None,
     ):
         # allocate and bind first, validate the accumulator arguments, launch (``issue``), then settle the
         # backward: an invalid argument launches nothing, and the settlement overlaps the forward kernel
@@ -6437,6 +6450,7 @@ class CakeDSASparseAttentionNondetNopeVarlenFunction(torch.autograd.Function):
             topk_length,
             softmax_scale,
             mode,
+            sink,
         )
         prep = _NopeBackwardPrep(
             kv_latent,
@@ -6451,18 +6465,22 @@ class CakeDSASparseAttentionNondetNopeVarlenFunction(torch.autograd.Function):
         issue()
         ctx.set_materialize_grads(False)
         ctx.nope_prep = prep
-        prep.settle(ctx, q_latent, kv_latent, indices, out, o_lo, lse, lengths)
+        prep.settle(ctx, q_latent, kv_latent, indices, out, o_lo, lse, lengths, sink)
         return out, lse
 
     @staticmethod
     def backward(ctx, dout, dlse=None):
+        # one gradient per input ``apply`` received: fifteen, or sixteen with the trailing ``sink`` argument
+        inputs = len(ctx.needs_input_grad)
         if dlse is not None:
             raise NotImplementedError(
                 "gradients through lse are not supported; only out is differentiable"
             )
         if dout is None:  # out unused downstream
-            return (None,) * 15
-        return _nope_backward_from_ctx(ctx, dout) + (None,) * 13
+            return (None,) * inputs
+        grads = _nope_backward_from_ctx(ctx, dout)
+        dsink = grads[2] if len(grads) > 2 else None
+        return grads[:2] + (None,) * 13 + (dsink,) * (inputs - 15)
 
 
 def cake_dsa_sparse_attention_nondet_nope_varlen(
@@ -6484,6 +6502,7 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
     dkv_direct: Optional[bool] = None,
     check_dst_map: bool = False,
     check_cu_seqlens: bool = False,
+    sink: Optional[torch.Tensor] = None,
 ):
     """Packed multi-document NoPE form: per-document key indices are turned into global key rows on device and
     the flat kernels run over the packed rows.  The route follows the table size (:func:`nope_varlen_index_mode`).
@@ -6506,7 +6525,10 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
     also checks their values (:func:`validate_cu_seqlens`: start at 0, non-decreasing, ``cu_seqlens_q[-1] == T``,
     ``cu_seqlens_k[-1] == S``, ``seqlen_q <= seqlen_k`` per document) at the cost of one blocking device-to-host
     copy before any launch (skipped during CUDA-graph capture); the default leaves those invariants to the caller,
-    as a violation is otherwise not detected on device.  Other arguments as in :func:`cake_dsa_sparse_attention_nondet_nope`.
+    as a violation is otherwise not detected on device.  ``sink``: an optional trainable per-head sink, FP32 ``[64]``,
+    as in :func:`cake_dsa_sparse_attention_nondet_nope`: the forward of every route runs the sink build, a row whose
+    every slot is invalid gives ``out = 0`` and ``lse = sink[h]``, and the backward returns ``dsink`` summed over all
+    packed rows of the call.  Other arguments as in :func:`cake_dsa_sparse_attention_nondet_nope`.
     """
     del max_seqlen_q, max_seqlen_k
     kv_latent = _kv_latent_rows(kv_latent)
@@ -6538,8 +6560,10 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
             num_segments=num_segments,
             dkv_direct=dkv_direct,
             check_dst_map=check_dst_map,
+            sink=sink,
         )
     mode = varlen_index_mode(gather_kv_indices, caller_lengths=topk_length is not None)
+    # ``sink`` is the sixteenth input only when given, so a call without one keeps the fifteen-input signature
     out, lse = CakeDSASparseAttentionNondetNopeVarlenFunction.apply(
         q_latent,
         kv_latent,
@@ -6556,6 +6580,7 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         dkv_direct,
         check_dst_map,
         mode,
+        *((sink,) if sink is not None else ()),
     )
     return (out, lse) if return_lse else out
 
@@ -6571,6 +6596,7 @@ def forward_nope_varlen(
     softmax_scale: Optional[float] = None,
     topk_length: Optional[torch.Tensor] = None,
     check_cu_seqlens: bool = False,
+    sink: Optional[torch.Tensor] = None,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     """Kernel-level packed NoPE forward without autograd: the validation and the index route of
     :func:`cake_dsa_sparse_attention_nondet_nope_varlen` (:func:`nope_varlen_index_mode`), returning
@@ -6585,7 +6611,9 @@ def forward_nope_varlen(
                               num_segments=cu_seqlens_k.numel() - 1)
 
     with ``dkv_acc`` an FP32 ``[S, 512]`` buffer the caller allocates and zero-fills (or ``dkv_acc=None`` for a fresh
-    ``dkv``).  A call without query rows returns empty outputs and the (empty) rows without launching."""
+    ``dkv``).  With a ``sink`` the forward of every route is the sink build; pass the same ``sink`` to
+    :func:`backward_nope`, which then also returns ``dsink``.  A call without query rows returns empty outputs and the
+    (empty) rows without launching."""
     kv_latent = _kv_latent_rows(kv_latent)
     num_queries = int(q_latent.shape[0])
     validate_cu_seqlens(
@@ -6604,6 +6632,7 @@ def forward_nope_varlen(
             gather_kv_indices,
             topk_length=topk_length,
             softmax_scale=scale,
+            sink=sink,
         )
         lengths = (
             topk_length
@@ -6622,4 +6651,5 @@ def forward_nope_varlen(
         topk_length,
         scale,
         mode,
+        sink,
     )
