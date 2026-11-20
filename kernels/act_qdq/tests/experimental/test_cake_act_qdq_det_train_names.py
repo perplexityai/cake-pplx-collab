@@ -173,9 +173,11 @@ def test_modules_sit_at_their_places() -> None:
     for submodule in ("cake_build", "cake_jit"):
         loaded = importlib.import_module(f"{BACKEND}.{submodule}")
         assert Path(loaded.__file__).parent == package, submodule
-    # the registry keys are the routes; the library names are build identities
+    # the registry keys are the programs the routes name; the library names are build identities
     cake_jit = importlib.import_module(f"{BACKEND}.cake_jit")
-    assert set(cake_jit.MODULES) == set(cake_jit.KINDS)
+    routed = {name for routes in cake_jit.ROUTES.values() for names in routes.values() for name in names}
+    assert set(cake_jit.MODULES) == routed
+    assert set(cake_jit.KINDS) <= routed
     assert all(
         re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]) for record in cake_jit.MODULES.values()
     )

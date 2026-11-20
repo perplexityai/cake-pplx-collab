@@ -22,9 +22,9 @@ single-rank).  The public names are the facade's ``__all__`` and the backend obj
 op, and no entry point takes a ``deterministic`` keyword.  The rules shared by every family are checked with
 ``tests.cake.test_helpers.cake_mode_names``; the checks here are this family's own: the backend never reads torch's
 deterministic-algorithms setting, the package serves capabilities (10, 0), (10, 3) and (10, 7) only (every other
-capability a ``RuntimeError``), and the build manifest names the package, one ``cake_engram_lookup_det_train_<hex>``
-library per architecture, the minimum CUDA toolkit of each architecture and numerics flags that keep FP32
-subnormals (no fast math, ``--ftz=false``).  Build identities (program and library stems, kernel symbols, csrc file
+capability a ``RuntimeError``), and the build manifest names the package, two ``cake_engram_lookup_det_train_<hex>``
+libraries per architecture (the main program and the small one), the minimum CUDA toolkit of each architecture and
+numerics flags that keep FP32 subnormals (no fast math, ``--ftz=false``).  Build identities (program and library stems, kernel symbols, csrc file
 names) keep their names.
 """
 
@@ -269,8 +269,9 @@ def test_an_unsupported_capability_is_refused(capability, monkeypatch):
 
 
 def test_package_identity_and_build_identity():
-    """``build.json`` and the registry name the package; the registry's library is a ``cake_engram_lookup_det_train``
-    program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and its names are the stems of ``build.json``."""
+    """``build.json`` and the registry name the package; each of the registry's two libraries is a
+    ``cake_engram_lookup_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and their names are
+    the stems of ``build.json``."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_engram_lookup_det_train"
@@ -281,7 +282,8 @@ def test_package_identity_and_build_identity():
     pattern = r"cake_engram_lookup_det_train_[0-9a-f]{20}_sm_10[037]a"
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
-    assert len(names) == len(jit.MODULES) * len(ARCHES) == len(ARCHES)
+    assert len({rec["library"] for rec in jit.MODULES.values()}) == len(jit.MODULES) == 2
+    assert len(names) == len(jit.MODULES) * len(ARCHES) == 2 * len(ARCHES)
 
 
 def test_manifest_min_cuda():

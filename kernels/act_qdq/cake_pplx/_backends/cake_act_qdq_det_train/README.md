@@ -55,21 +55,36 @@ outputs of the right shapes.
 
 ## Programs
 
-The package has six programs: one per format, each with and without the scale output.  Each is built for `sm_100a`,
-`sm_103a` and `sm_107a`, with the exact `-gencode` flag of the architecture, so `build.json` lists 18 libraries.  A
-call runs the one program of its route (`cake_jit.selected_module(arch, format, scale_out=...)`).
+The package has thirteen programs: per format, with and without the scale output, a main program and a small one, and
+a wide program for MXFP8 without the scale output.  The wide program is built for `sm_100a` and `sm_103a`, every other
+program for `sm_100a`, `sm_103a` and `sm_107a`, each with the exact `-gencode` flag of the architecture, so
+`build.json` lists 38 libraries.  A call runs one program of its route (`cake_jit.selected_module(arch, format,
+scale_out=..., n_vecs=..., in_place=...)`): the small or the wide program when `n_vecs` lies in its `vectors` range for
+the call's kind, and the main program otherwise.  The small program's range out of place is 65,537 to 524,288 on
+`sm_100a` and `sm_103a` (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1
+to 262,144 on `sm_107a`, and `sm_100a` and `sm_103a` have none, since the small program measured no faster there in
+place.  The wide program's range starts above the main and small programs' sizes: from 131,073 vectors out of place and
+from 262,145 in place, both to 2,147,483,136 (2^31 - 512, since it forms `n_vecs + 511`); the main program runs above
+that.
 
-A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8`
-adjacent threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128
-vectors (256 on `sm_107a`) per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its
-whole warp and any grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_107a`) before it
-computes or stores any of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per
-tile once the tiles pass 2.5 waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many
-CTAs, at most one per tile; the SM count is read once per device.  Neither the last dimension, nor the rank, nor
-the row count enters the kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of
-its own format and scale output, so build every library of the architecture before a CUDA graph capture: call
-`build_and_load()` on each spec of `cake_jit.specs_for_arch(arch)`, or make one eager call for each format and scale
-output that the capture uses.
+A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
+threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
+on `sm_107a`) per trip of a grid-stride loop that is uniform across the CTA, so every shuffle has its whole warp and any
+grid of at least one CTA is correct.  Each thread loads its 2 vectors (4 on `sm_107a`) before it computes or stores any
+of them, which keeps about 64 KiB of loads in flight per SM.  The host launches one CTA per tile once the tiles pass 2.5
+waves of the CTAs the SMs hold (32 per SM, 16 on `sm_107a`), and otherwise that many CTAs, at most one per tile; the SM
+count is read once per device.  The small program is the same kernel with 256-thread CTAs that take 2 vectors per thread
+on every architecture (tiles of 512 vectors, 8 CTAs per SM, 4 on `sm_107a`).  Its sizes fill at most about one wave,
+where each CTA start costs time (the GPU starts about 1,850 CTAs per microsecond) and its larger tiles need fewer CTAs:
+at 524,288 vectors on `sm_100a` and `sm_103a` the main program launches 4,096 CTAs and the small one 1,024.  The wide
+program is the same kernel with 128-thread CTAs that take 4 vectors per thread (tiles of 512 vectors), launched one CTA
+per tile at every size, and its launch bounds hold it to 48 registers per thread, so 10 CTAs fit on an SM.  It measured
+up to 5 % faster than the main program in its range on B200 and GB300, and up to 9 % slower below it.  Every program
+gives the same bytes at every size.  Neither the last dimension, nor the rank, nor the row count enters the
+kernel, so a new shape never rebuilds a library.  A call builds or loads only the library of its own program, so build
+every library of the architecture before a CUDA graph capture: call `build_and_load()` on each spec of
+`cake_jit.specs_for_arch(arch)`, or make one eager call for each format, scale output and program (size range and kind
+of call) that the capture uses.
 
 ## Numerics
 
@@ -83,8 +98,8 @@ For each group of `G` elements, with `amax` the largest magnitude in the group:
 
 Then `u = clamp(x / s, -Q, Q)` with the exact quotient, `q` is the element format's round-to-nearest-even value of
 `u` with the sign of zero kept, and `y = bf16_rne(q * s)`.  The E4M3 scale saturates at 448.  The outputs equal this
-rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64, and the FP32 steps below
-give the rule's outputs:
+rule evaluated in FP64, bit for bit, including the sign of zero.  The kernels use no FP64, and the FP32 and BF16 steps
+below give the rule's outputs:
 
 - **E8M0 scale.**  Write `amax = m * 2^e` with `m` in [1, 2), and `Q = mq * 2^c` (`6 = 1.5 * 2^2`,
   `448 = 1.75 * 2^8`).  Then `ceil(log2(amax / Q)) = e - c + [m > mq]`, read from the IEEE fields of `amax`.
@@ -92,6 +107,8 @@ give the rule's outputs:
   `2^-22` for MXFP8.
 - **E8M0 quotient.**  `s` is a power of two, so `x * 2^-k` and the IEEE quotient `x / s` are the same correctly
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
+  A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
+  lane rounds as it would alone.
 - **E4M3 scale.**  `max(amax, 6 * 2^-9) / 6` is an IEEE round-to-nearest division, and the conversion to E4M3
   rounds to nearest even and saturates at 448.  `amax` has 8 significant bits, so `amax / 3` is either exact or a
   repeating binary fraction far from every 5-bit value: the FP32 quotient is an E4M3 rounding midpoint only when the
@@ -106,10 +123,13 @@ give the rule's outputs:
   way.  The exact quotient is at least `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so
   rounding it to FP32 first never moves it across a midpoint.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
-- **Dequantize.**  `q` has at most 2 (E2M1) or 4 (E4M3) significant bits and `s` at most 4, so `q * s` in FP32 and
-  its BF16 rounding are exact, down to the MXFP4 subnormal `2^-127`.  Above the BF16 range the product is `±inf`, as
-  the rule's own BF16 rounding gives: an element with `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120` (MXFP4)
-  becomes `±inf`, although `x` is finite.
+- **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by
+  `s`.  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant
+  bits, so the BF16 product `q * s` is exact, down to the MXFP4 subnormal `2^-127`, which the multiply keeps.  The
+  `sm_107a` main programs of `mxfp8_e8m0_g32`, with and without the scale output, decode each pair to two FP16 values
+  instead and multiply each by `s` in FP32; that product has at most 8 significant bits, so it and its BF16 rounding
+  are exact too.  Above the BF16 range the product is `±inf`, as the rule's own BF16 rounding gives: an element with
+  `|x| >= 248 * 2^120` (MXFP8) or `|x| >= 224 * 2^120` (MXFP4) becomes `±inf`, although `x` is finite.
 
 The programs are compiled with IEEE division and square root and without flush to zero (`--prec-div=true`,
 `--prec-sqrt=true`, `--ftz=false`, no `--use_fast_math`), as `build.json` records.

@@ -919,7 +919,7 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
 - `dot_sum="compensated"` (the default): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end.
-- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 5-10% less time, depending on the GPU (`T = 16384`, FP32 weights: 0.313 ms against 0.329 ms on GB300, 0.197 ms against 0.218 ms on VR200). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
+- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 5-15% less time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: 0.313 ms against 0.329 ms on GB300, 0.174 ms against 0.205 ms on VR200). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
@@ -1827,7 +1827,7 @@ This family has a det module only, with no nondet or KCP module: a gather has no
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_engram_lookup_det_train_forward` | `(weight, scale, row_ids)` | As above. | Returns a new contiguous BF16 `[*row_ids.shape, 256]` that does not require a gradient. Not autograd; it works inside `torch.utils.checkpoint(..., use_reentrant=False)`. An empty `row_ids` (`T == 0` or `M == 0`) returns an empty output without a launch. Workspace: none. The call allocates only the output (`row_ids.numel() * 512` bytes) and retains no state. One program per architecture serves every `R`, `T` and `M` and both layouts, with no recompilation and no host synchronization. A malformed call raises `ValueError` before any launch. |
+| `cake_engram_lookup_det_train_forward` | `(weight, scale, row_ids)` | As above. | Returns a new contiguous BF16 `[*row_ids.shape, 256]` that does not require a gradient. Not autograd; it works inside `torch.utils.checkpoint(..., use_reentrant=False)`. An empty `row_ids` (`T == 0` or `M == 0`) returns an empty output without a launch. Workspace: none. The call allocates only the output (`row_ids.numel() * 512` bytes) and retains no state. Two programs per architecture serve every `R`, `T` and `M` and both layouts, with no recompilation and no host synchronization: a call of at most `SMALL_MAX_POSITIONS` looked-up rows (the backend's `cake_jit.py`) launches the small one, a larger call the main one, and both write the same bytes. The first call on each device loads both programs and launches both on its operands (the one its row count does not pick first), so that a CUDA graph capture after it loads nothing, whichever program the captured call takes; make that first call outside a capture (a call captured before it launches its own program only, and the next call outside a capture loads both). A malformed call raises `ValueError` before any launch. |
 | `cake_engram_lookup_det_train_split_packed` | `(buf)` | `buf`: `uint8 [R, 264]` with a unit column stride, on any device | Returns `(weight, scale)`: `buf[:, :256]` as `float8_e4m3fn` and `buf[:, 256:]` as `float8_e8m0fnu`. Views that share `buf`'s storage and row stride; nothing is copied. Another dtype, rank, width or column stride raises `ValueError`. |
 
 **Options and environment.** The entries take no keyword argument. The facade reads no environment variable.
@@ -2053,7 +2053,7 @@ logp2.sum().backward()
 | `"mxfp4_e8m0_g32"` | E2M1 | 32 | `2^ceil(log2(max(amax, 6*2^-126) / 6))` | `6*2^-126` | 6 |
 | `"mxfp8_e8m0_g32"` | E4M3 | 32 | `2^ceil(log2(max(amax, fp32(1e-4)) / 448))` | `fp32(1e-4)` | 448 |
 
-- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 steps give the rule's outputs.
+- The outputs equal this rule evaluated in FP64, bit for bit, signed zeros included. The rule's quotient is a true division; the kernels correct the product with a rounded reciprocal by one FMA residual step instead of using the plain product. The kernels use no FP64; the backend README gives the argument that their FP32 and BF16 steps give the rule's outputs.
 - The optional second output is the FP32 scale of each group, `[..., D/G]`.
 - One kernel per call reads `x` once and writes `y` (and the scales) once, on the current stream. The input may be any rank; the groups run along the flat buffer.
 
@@ -2074,7 +2074,7 @@ Other public names:
 - `FORMATS = ("fp4_e4m3_g16", "mxfp4_e8m0_g32", "mxfp8_e8m0_g32")`, `GROUP_SIZES` (format to `G`).
 - `is_cake_act_qdq_det_train_supported(device)`.
 
-**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs the one program of its format and scale output in 64-thread CTAs. The grid is one CTA per tile of 128 vectors (256 on `sm_107a`) once the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on `sm_107a`), else the resident CTAs walk the tiles; a new shape or row count never recompiles. The facade reads no environment variable.
+**Options and environment.** `format`, `out`, `scales` and `return_scales` are the only keywords. A call runs one program of its format and scale output, chosen by `n_vecs = numel / 8` and by whether the call is in place: the small program (256-thread CTAs, tiles of 512 vectors, 8 resident CTAs per SM, 4 on `sm_107a`) out of place for 65,537 to 524,288 vectors on `sm_100a` and `sm_103a` (to 131,072 for MXFP8 without scales) and for 1 to 262,144 on `sm_107a`, and in place for 1 to 262,144 on `sm_107a` only; for MXFP8 without scales on `sm_100a` and `sm_103a`, the wide program (128-thread CTAs, tiles of 512 vectors) out of place from 131,073 vectors and in place from 262,145, both to 2,147,483,136; else the main program (64-thread CTAs, tiles of 128 vectors, 256 on `sm_107a`, 32 resident CTAs per SM, 16 on `sm_107a`). Every program gives the same bytes. The grid is one CTA per tile once the tiles pass 2.5 waves of resident CTAs, else the resident CTAs, at most one per tile, walk the tiles; the wide program always launches one CTA per tile. Every library serves any shape or row count; a call builds or loads its program's library on first use, so before a CUDA graph capture build the architecture's libraries (`cake_jit.specs_for_arch`) or make one eager call per program the capture uses. The facade reads no environment variable.
 
 **Cross-family.** None.
 
