@@ -469,7 +469,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "vector_elements": 8,
         },
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_LARGEHASH_mxfp4_e8m0_g32_large",
+        "kernel_symbol": "kernel_cake_act_qdq_4bdefd2badefabe8d780",
         "launch": {
             "block": (1024, 1, 1),
             "cluster": (1, 1, 1),
@@ -477,7 +477,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_LARGEHASH_mxfp4_e8m0_g32_large",
+        "library": "cake_act_qdq_4bdefd2badefabe8d780",
         "scale_out": False,
         "vectors": {
             "sm_100a": {"in_place": (4194304, 2147481600), "out_of_place": None},
@@ -500,7 +500,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "vector_elements": 8,
         },
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_LARGEHASH_mxfp4_e8m0_g32_scales_large",
+        "kernel_symbol": "kernel_cake_act_qdq_26369f0d3a4d2e709630",
         "launch": {
             "block": (1024, 1, 1),
             "cluster": (1, 1, 1),
@@ -508,7 +508,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_LARGEHASH_mxfp4_e8m0_g32_scales_large",
+        "library": "cake_act_qdq_26369f0d3a4d2e709630",
         "scale_out": True,
         "vectors": {
             "sm_100a": {"in_place": (4194304, 2147481600), "out_of_place": None},
@@ -531,7 +531,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "vector_elements": 8,
         },
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_LARGEHASH_mxfp8_e8m0_g32_large",
+        "kernel_symbol": "kernel_cake_act_qdq_bcbfc5f217bc58e7c8a9",
         "launch": {
             "block": (1024, 1, 1),
             "cluster": (1, 1, 1),
@@ -539,7 +539,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_LARGEHASH_mxfp8_e8m0_g32_large",
+        "library": "cake_act_qdq_bcbfc5f217bc58e7c8a9",
         "scale_out": False,
         "vectors": {
             "sm_100a": {"in_place": (33554432, 2147481600), "out_of_place": None},
@@ -562,7 +562,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "vector_elements": 8,
         },
         "group": 32,
-        "kernel_symbol": "kernel_cake_act_qdq_LARGEHASH_mxfp8_e8m0_g32_scales_large",
+        "kernel_symbol": "kernel_cake_act_qdq_a1b2f2c224d421a29e22",
         "launch": {
             "block": (1024, 1, 1),
             "cluster": (1, 1, 1),
@@ -570,7 +570,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": False,
         },
-        "library": "cake_act_qdq_LARGEHASH_mxfp8_e8m0_g32_scales_large",
+        "library": "cake_act_qdq_a1b2f2c224d421a29e22",
         "scale_out": True,
         "vectors": {
             "sm_100a": {"in_place": (4194304, 2147481600), "out_of_place": (8388608, 2147481600)},
