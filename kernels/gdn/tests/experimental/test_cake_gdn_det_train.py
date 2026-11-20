@@ -77,7 +77,12 @@ beside it with every output but the ones the change rounds differently the same 
 writing into the caller's dq / dk / dv (and refusing dq / dk at two strides before the tail), and the packed row: one
 gradient row the tail writes (CakeGDNDetPackedFunction), the bits of the head views and of the contiguous call, a
 non-leaf row with another consumer, a row without a gradient, and a checkpoint (non-reentrant and reentrant) with the
-eager call's bits.
+eager call's bits.  The segment maps of a split pass 2 on ``dhu_tc2_dvl32`` (``dhu_tc2_dvl32_gm`` in place of the
+register pre-scan, :func:`cake_chain.split_map_stage`, switch ``ADJOINT_MAP_ARCHS``): without a device the rule, its
+switch, the record and the host entry tables; on a device, under slowly decaying gates where the maps carry state
+across segment boundaries (per-head rates from 1e-4 to 1 per token, and a uniform 1e-2), the maps against the pre-scan
+(the launches, o / dq / final state bitwise, both judged) with five run-to-run repeats, and a CUDA graph capture with
+the eager bits.
 
 Accuracy has no tolerance.  Each judged output is measured against the FP64 recurrence (:func:`_reference`) beside
 the naive BF16 recurrence on the same inputs (``token_recurrence`` of ``test_helpers/cake_gdn_naive.py``) over the
@@ -667,6 +672,21 @@ def _tc2(heads) -> str:
     return cake_chain.dhu_tc2_stage(_current_arch(), *heads)
 
 
+def _split_maps(heads) -> str:
+    """The stage that forms the segment maps of a split pass 2 of ``heads`` on the tcgen05 scan on this device
+    (:func:`cake_chain.split_map_stage`): dhu_tc2_dvl32_gm for a value-head group of three on dhu_tc2_dvl32 on the
+    architectures of ``ADJOINT_MAP_ARCHS``, where the registry must deliver it; else the fused pre-scan."""
+    arch = _current_arch()
+    stage = cake_chain.split_map_stage(arch, *heads)
+    if (
+        heads[1] == 3 * heads[0]
+        and arch in cake_chain.ADJOINT_MAP_ARCHS
+        and _tc2(heads) == "dhu_tc2_dvl32"
+    ):
+        assert stage == "dhu_tc2_dvl32_gm", (arch, heads, stage)
+    return stage
+
+
 # The package exports the mode-word names only; the former names (with and without det) are
 # removed (no alias), and the planner and table helpers stay public in ``cake_chain`` only.
 DET_NAMES = (
@@ -776,7 +796,7 @@ FWD_A_RECORDS = ("wy_a", "fwd_ho_a", "fwd_fused", "fwd_summary", "fwd_summary_a"
 
 
 def test_registry_records_are_well_formed() -> None:
-    assert len(cake_jit.STAGES) == 45 and len(set(cake_jit.STAGES)) == 45
+    assert len(cake_jit.STAGES) == 46 and len(set(cake_jit.STAGES)) == 46
     assert set(FWD_A_RECORDS) <= set(cake_jit.STAGES)
     assert set(cake_chain.LAUNCH_ARGS) == set(cake_jit.STAGES)
     for arch in ARCHES:
@@ -995,6 +1015,112 @@ def test_the_round_once_switches_are_set_by_name() -> None:
     ):
         assert name in cake_chain.__all__ and hasattr(cake_chain, name), name
     assert cake_chain.PACKED_ROW is True
+
+
+# --------------------------------------------------------------------------- the split pass 2's maps (no device)
+
+# the two stages that form the segment maps of a split pass 2 on the tcgen05 scan (cake_chain.split_map_stage)
+SPLIT_MAPS = ("dhu_pre_dvl_r64k1", "dhu_tc2_dvl32_gm")
+
+
+def test_split_map_record_is_well_formed() -> None:
+    # dhu_tc2_dvl32_gm: dhu_tc2's call site, then the entry table, the warm-up threshold and the segment flags.  One
+    # record on every architecture of the package, one CTA per cluster, no PDL, a program of its own
+    assert cake_chain.ADJOINT_MAP_STAGE == "dhu_tc2_dvl32_gm" == SPLIT_MAPS[1]
+    assert cake_chain.LAUNCH_ARGS["dhu_tc2_dvl32_gm"] == (
+        *cake_chain.LAUNCH_ARGS["dhu_tc2"],
+        "seg_index",
+        "seg_mode",
+        "warmup_thresh_log2",
+        "seg_flag",
+    )
+    assert "dhu_tc2_dvl32_gm" in cake_jit.STAGES
+    serving = [
+        name
+        for name, rec in cake_jit.MODULES.items()
+        if rec["stage"] == "dhu_tc2_dvl32_gm"
+    ]
+    assert serving == ["dhu_tc2_dvl32_gm"], serving
+    rec = cake_jit.MODULES["dhu_tc2_dvl32_gm"]
+    assert sorted(rec["arches"]) == sorted(ARCHES), rec["arches"]
+    launch = rec["launch"]
+    assert launch["cluster"] == (1, 1, 1) and launch["use_pdl"] is False
+    assert launch["cooperative"] is False
+    sharing = [
+        name
+        for name, other in cake_jit.MODULES.items()
+        if other["library"] == rec["library"]
+    ]
+    assert sharing == ["dhu_tc2_dvl32_gm"], sharing
+
+
+def test_the_split_map_rule(monkeypatch) -> None:
+    # a split pass 2 on dhu_tc2_dvl32 (a value-head group of three on DVL32_ARCHS) forms its segment maps with
+    # dhu_tc2_dvl32_gm on the architectures of ADJOINT_MAP_ARCHS (every architecture of the package); every other
+    # group, the switch off, DVL32_ARCHS off or a registry without the record keeps the fused pre-scan
+    assert set(cake_chain.ADJOINT_MAP_ARCHS) == set(ARCHES)
+    assert cake_chain.SPLIT_WARM == 16
+    for name in (
+        "ADJOINT_MAP_ARCHS",
+        "ADJOINT_MAP_STAGE",
+        "SPLIT_WARM",
+        "split_map_stage",
+        "split_summary_entries",
+    ):
+        assert name in cake_chain.__all__ and hasattr(cake_chain, name), name
+    rule = cake_chain.split_map_stage
+    monkeypatch.setattr(cake_chain, "_available", lambda _stage, _arch: True)
+    for arch in ARCHES:
+        for heads in ((2, 6), (1, 3), (16, 48)):
+            assert rule(arch, *heads) == "dhu_tc2_dvl32_gm", (arch, heads)
+        for heads in ((2, 4), (2, 2), (1, 4), (1, 1), (2, 8)):
+            assert rule(arch, *heads) == "dhu_pre_dvl_r64k1", (arch, heads)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "ADJOINT_MAP_ARCHS", ())
+            assert rule(arch, 2, 6) == "dhu_pre_dvl_r64k1"
+        with monkeypatch.context() as m:
+            _round_once_off(m, ("DVL32_ARCHS",))
+            assert rule(arch, 2, 6) == "dhu_pre_dvl_r64k1"
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_available", lambda stage, _arch: stage != "dhu_tc2_dvl32_gm")  # fmt: skip
+            assert rule(arch, 2, 6) == "dhu_pre_dvl_r64k1"
+        # a value-head group of three whose tcgen05 scan is dhu_tc2 (a registry without dhu_tc2_dvl32)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "_available", lambda stage, _arch: stage != "dhu_tc2_dvl32")  # fmt: skip
+            assert rule(arch, 2, 6) == "dhu_pre_dvl_r64k1"
+
+
+def test_host_tables_carry_the_map_entries() -> None:
+    # every segment but each sequence's first, in table order, mode SPLIT_WARM, in the adjoint table that splits a
+    # sequence (the forward table and a serial adjoint table carry none), in the chunk tables' one allocation; with
+    # lpt the entries follow the table order
+    assert cake_chain.split_summary_entries([0, 1, 4, 5, 6]) == [2, 3]
+    assert cake_chain.split_summary_entries([0, 1, 2, 3]) == []
+    assert cake_chain.split_summary_entries([0, 3, 3, 5]) == [1, 2, 4]
+    seq_lens = (100, 640, 1, 64, 2000, 640)
+    for fwd_len, bwd_len in ((0, 4), (4, 6), (4, 0)):
+        plans = (
+            cake_chain.ScanPlan((32, 2), fwd_len),
+            cake_chain.ScanPlan((64, 1), bwd_len),
+        )
+        for lpt in (False, True):
+            meta = cake_chain.build_chunk_meta(
+                seq_lens, "cpu", scan_plans=plans, lpt=lpt
+            )
+            fwd, bwd = meta.fwd_segments, meta.bwd_segments
+            assert fwd.summary is None and fwd.num_summary == 0
+            want = cake_chain.split_summary_entries(bwd.seq_seg_start.tolist())
+            if bwd_len == 0:
+                assert want == [] and bwd.summary is None and bwd.num_summary == 0
+                continue
+            seg_seq = bwd.seg_seq.tolist()
+            assert want == [
+                s for s in range(1, len(seg_seq)) if seg_seq[s] == seg_seq[s - 1]
+            ]
+            assert bwd.num_summary == len(want) > 0
+            assert bwd.summary.tolist() == [want, [cake_chain.SPLIT_WARM] * len(want)]
+            storage = meta.chunk_start.untyped_storage().data_ptr()
+            assert bwd.summary.untyped_storage().data_ptr() == storage
 
 
 def test_row_stride_of_head_views() -> None:
@@ -2412,14 +2538,17 @@ def test_table_routes_agree_bitwise(pins, device, monkeypatch) -> None:
 def test_table_routes_split_tc_on_dhu_tc2_dvl32_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
-    # the split-64x1-tc pins with DVL32_ARCHS on: the host-built table runs pass 2 on dhu_tc2_dvl32 (after the fused
-    # pre-scan, no dv_local stage), the device-built one dv_local + the register pass 2.  o keeps one set of bits; each
-    # route repeats bitwise and is judged ("host.*", "device.*"; the 640-token sequence splits into two segments)
+    # the split-64x1-tc pins with DVL32_ARCHS on: the host-built table runs pass 2 on dhu_tc2_dvl32 (after the segment
+    # maps of dhu_tc2_dvl32_gm, split_map_stage: no pre-scan, no dv_local stage), the device-built one dv_local + the
+    # register pass 2.  o keeps one set of bits; each route repeats bitwise and is judged ("host.*", "device.*"; the
+    # 640-token sequence splits into two segments)
     arch = _current_arch()
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
     heads = (2, 6)
     assert _tc2(heads) == "dhu_tc2_dvl32"
+    maps = _split_maps(heads)
+    other_maps = tuple(m for m in SPLIT_MAPS if m != maps)
     pins = {"scan_config": (64, 1), "segment_chunks": 6, "dhu_scan": "tc"}
     seq_lens = (300, 77, 640)
     stages = _record_launches(monkeypatch)
@@ -2429,8 +2558,8 @@ def test_table_routes_split_tc_on_dhu_tc2_dvl32_naive_tier_verdict(
         stages.clear()
         runs = {}
         for route, want, other in (
-            ("host", ("dhu_pre_dvl_r64k1", "dhu_tc2_dvl32"), ("dv_local", "dhu_pre_r64k1", "dhu_r64k1", "dhu_tc2")),
-            ("device", ("dv_local", "dhu_pre_r64k1", "dhu_r64k1"), ("dhu_pre_dvl_r64k1", "dhu_tc2_dvl32", "dhu_tc2")),
+            ("host", (maps, "dhu_tc2_dvl32"), ("dv_local", "dhu_pre_r64k1", "dhu_r64k1", "dhu_tc2", *other_maps)),
+            ("device", ("dv_local", "dhu_pre_r64k1", "dhu_r64k1"), (*SPLIT_MAPS, "dhu_tc2_dvl32", "dhu_tc2")),
         ):  # fmt: skip
             start = len(stages)
             runs[route] = _run(inputs, seq_lens, route=route, **pins)
@@ -2824,8 +2953,8 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
 ) -> None:
     # the same plan with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once; a value-head group of three): o and
     # the final state keep the register pass 2's bits; both pass 2s are judged ("tc.*", "reg.*"; the 640-token
-    # sequence splits into two segments).  The pre-scan keeps its BF16 dv_local tile (dhu_pre_dvl_r64k1); both runs
-    # take the round-once tail
+    # sequence splits into two segments).  The tc form's segment maps come from dhu_tc2_dvl32_gm (split_map_stage; the
+    # suite's gates end every map within its first chunks); both runs take the round-once tail
     arch = _current_arch()
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
@@ -2834,8 +2963,10 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     names = OUTPUT_NAMES + ("final_state", "dh0")
     assert _tc2(heads) == "dhu_tc2_dvl32"
     tail = _device_tail(heads, beta_dtype)
-    tc_stages = ("dhu_pre_dvl_r64k1", "dhu_tc2_dvl32")
+    maps = _split_maps(heads)
+    tc_stages = (maps, "dhu_tc2_dvl32")
     reg_stages = ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
+    tc_other = reg_stages + tuple(m for m in SPLIT_MAPS if m != maps)
 
     def draw(j, s):
         inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=s)
@@ -2850,13 +2981,163 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
             assert "stitch" in stages and tail in stages, stages
             assert "dhu_tc2" not in stages, stages
             want, other = (
-                (tc_stages, reg_stages) if scan == "tc" else (reg_stages, tc_stages)
+                (tc_stages, tc_other)
+                if scan == "tc"
+                else (reg_stages, tc_stages + SPLIT_MAPS)
             )
             assert all(x in stages for x in want) and not any(x in stages for x in other), (scan, stages)  # fmt: skip
         _assert_bitwise(runs["tc"], runs["reg"], ("o", "final_state"))
         return runs, inputs, seq_lens, {"initial_state": h0, "dht": dht}
 
     _judge(record_property, draw, names, seed=83)
+
+
+# Cells of the split (64, 1) pins on dhu_tc2_dvl32 (a value-head group of three) whose gates decay slowly, so the
+# segment maps of dhu_tc2_dvl32_gm carry state across segment boundaries (the suite's gates, -0.5 U per token, end
+# every map within its first chunks, where the maps and the pre-scan give the same bits): "gL" the per-head rates
+# logspace(1e-4, 1) per token, g = -rate[h] (0.5 + U); "u1e-2" one rate 1e-2.  id -> (sequence lengths, (H, HV), beta
+# dtype, initial state and final-state gradient, segment_chunks, gates, seed).  Map entries per value head: (1500,
+# 77, 640) at 4 chunks 5 + 2, (300, 77, 640) at 3 chunks 1 + 3, and the long layout (2600, 1300, 130, 64, 1) at 4
+# chunks 10 + 5.
+SLOW_MAP_CELLS = {
+    "gL-4seg": ((1500, 77, 640), (2, 6), torch.float32, False, 4, "gL", 131),
+    "u1e-2-4seg": ((1500, 77, 640), (2, 6), torch.float32, False, 4, "u1e-2", 137),
+    "gL-state-fp32beta": ((300, 77, 640), (2, 6), torch.float32, True, 3, "gL", 107),
+    "gL-state-bf16beta": ((300, 77, 640), (2, 6), torch.bfloat16, True, 3, "gL", 109),
+    "gL-h1-4seg": ((1500, 77, 640), (1, 3), torch.float32, False, 4, "gL", 139),
+    "gL-long": ((2600, 1300, 130, 64, 1), (2, 6), torch.float32, False, 4, "gL", 101),
+}  # fmt: skip
+SLOW_MAP_REPEATS = 5
+
+
+def _slow_gates(seq_lens, heads, kind: str, device, seed: int) -> torch.Tensor:
+    """FP32 gates ``[1, T, HV]`` that decay slowly, drawn on the host: ``"gL"`` g = -logspace(-4, 0, HV)[h] (0.5 +
+    U), ``"u<rate>"`` g = -rate (0.5 + U), U uniform on [0, 1)."""
+    gen = torch.Generator().manual_seed(seed)
+    hv = heads[1]
+    u = torch.rand(1, sum(seq_lens), hv, generator=gen)
+    if kind == "gL":
+        rate = torch.logspace(-4, 0, hv)
+    else:
+        rate = torch.full((hv,), float(kind.removeprefix("u")))
+    return (-rate * (0.5 + u)).float().to(device).contiguous()
+
+
+def _slow_map_cell(cell: str):
+    """The cell's ``(seq_lens, heads, beta dtype, state, pins, gates, seed)``; skips where the split pass 2 forms its
+    maps with the pre-scan, and requires dhu_tc2_dvl32_gm elsewhere."""
+    seq_lens, heads, beta_dtype, with_state, seg, gates, seed = SLOW_MAP_CELLS[cell]
+    arch = _current_arch()
+    if arch not in cake_chain.ADJOINT_MAP_ARCHS or arch not in cake_chain.DVL32_ARCHS:
+        pytest.skip(f"{arch} forms the split pass 2's segment maps with the pre-scan")
+    assert _tc2(heads) == "dhu_tc2_dvl32"
+    assert _split_maps(heads) == "dhu_tc2_dvl32_gm"
+    pins = {"scan_config": (64, 1), "segment_chunks": seg, "dhu_scan": "tc"}
+    return seq_lens, heads, beta_dtype, with_state, pins, gates, seed
+
+
+@pytest.mark.parametrize("cell", sorted(SLOW_MAP_CELLS))
+def test_split_maps_under_slow_gates_naive_tier_verdict(
+    cell, device, monkeypatch, record_property
+) -> None:
+    # The cell's split pass 2 on dhu_tc2_dvl32 forms its segment maps on dhu_tc2_dvl32_gm (no pre-scan) and repeats
+    # bitwise (SLOW_MAP_REPEATS more calls, the first uncached).  With ADJOINT_MAP_ARCHS off the fused pre-scan forms
+    # the maps: o, dq and the final state keep their bits, and on the first draw a gradient of dk / dv / dg / dbeta
+    # takes other bits (the maps carry state).  Both forms are judged ("maps.*", "prescan.*")
+    seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
+    names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
+    kept = ("o", "dq", "final_state") if with_state else ("o", "dq")
+    stages = _record_launches(monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=s)
+        inputs["g"] = _slow_gates(seq_lens, heads, gates, device, s + 3)
+        state = {}
+        if with_state:
+            h0, dht = _state_pair(seq_lens, heads, device, s + 6)
+            state = {"initial_state": h0, "dht": dht}
+        call = {**state, "output_final_state": with_state, **pins}
+        stages.clear()
+        maps = _run(inputs, seq_lens, **call)
+        got = list(stages)
+        assert "dhu_tc2_dvl32_gm" in got and "dhu_pre_dvl_r64k1" not in got, got
+        assert "stitch" in got and "dhu_tc2_dvl32" in got, got
+        for i in range(SLOW_MAP_REPEATS):
+            again = _run(inputs, seq_lens, host_cache=i > 0, **call)
+            _assert_bitwise(again, maps, names)
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "ADJOINT_MAP_ARCHS", ())
+            stages.clear()
+            prescan = _run(inputs, seq_lens, **call)
+            got = list(stages)
+        assert "dhu_pre_dvl_r64k1" in got and "dhu_tc2_dvl32_gm" not in got, got
+        _assert_bitwise(maps, prescan, kept)
+        if j == 0:
+            grads = ("dk", "dv", "dg", "dbeta")
+            assert not all(torch.equal(maps[n], prescan[n]) for n in grads), cell
+        return {"maps": maps, "prescan": prescan}, inputs, seq_lens, state
+
+    _judge(record_property, draw, names, seed=seed)
+
+
+@pytest.mark.parametrize("cell", ["gL-4seg", "gL-state-bf16beta", "gL-long"])
+def test_split_maps_under_cuda_graph_capture(cell, device, monkeypatch) -> None:
+    # A CUDA graph capture of the cell's forward and backward, after two eager calls on the capture's side stream (the
+    # chunk tables with their map entries cached), launches dhu_tc2_dvl32_gm and no pre-scan; two replays give the
+    # eager call's bits on every output, and launch nothing from the host
+    seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
+    names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
+    inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=seed)
+    inputs["g"] = _slow_gates(seq_lens, heads, gates, device, seed + 3)
+    h0 = dht = None
+    if with_state:
+        h0, dht = _state_pair(seq_lens, heads, device, seed + 6)
+    eager = _run(inputs, seq_lens, initial_state=h0, output_final_state=with_state, dht=dht, **pins)  # fmt: skip
+    leaves = {
+        name: inputs[name].detach().clone().requires_grad_(True)
+        for name in ("q", "k", "v", "g", "beta")
+    }
+    if with_state:
+        leaves["h0"] = h0.detach().clone().requires_grad_(True)
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+
+    def step():
+        for leaf in leaves.values():
+            leaf.grad = None
+        o, final = cake_gdn_det(leaves["q"], leaves["k"], leaves["v"], leaves["g"], leaves["beta"],
+                                scale=1.0 / math.sqrt(HEAD_DIM), initial_state=leaves.get("h0"),
+                                output_final_state=with_state, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu,
+                                use_qk_l2norm_in_kernel=True, **pins)  # fmt: skip
+        loss = (o.float() * inputs["do"].float()).sum()
+        if with_state:
+            loss = loss + (final * dht).sum()
+        loss.backward()
+        return o, final
+
+    warmup = torch.cuda.Stream(device=device)
+    warmup.wait_stream(torch.cuda.current_stream(device))
+    with torch.cuda.stream(warmup):
+        for _ in range(2):
+            step()
+    torch.cuda.current_stream(device).wait_stream(warmup)
+    stages = _record_launches(monkeypatch)
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        o, final = step()
+    captured = list(stages)
+    assert "dhu_tc2_dvl32_gm" in captured, captured
+    assert "dhu_pre_dvl_r64k1" not in captured, captured
+    for _ in range(2):
+        graph.replay()
+        torch.cuda.synchronize()
+        got = {
+            "o": o,
+            **{"d" + n: leaves[n].grad for n in ("q", "k", "v", "g", "beta")},
+        }
+        if with_state:
+            got.update(final_state=final, dh0=leaves["h0"].grad)
+        _assert_bitwise(got, eager, names)
+    assert len(stages) == len(captured)  # replays launch nothing from the host
 
 
 @pytest.mark.parametrize("heads", [(8, 16), (8, 24)], ids=["g2", "g3"])
@@ -2892,11 +3173,10 @@ def test_tc_priced_table_changes_only_the_adjoint_table(
         _assert_bitwise(runs[1], runs[0], OUTPUT_NAMES)
         if rec["select"]:
             tc2 = _tc2(heads)
-            want = ("dhu_pre_dvl_r64k1", tc2) if rec["segment_len"] else (tc2,)
-            assert all(x in stages for x in want) and "dv_local" not in stages, (
-                rec,
-                stages,
-            )
+            want = (_split_maps(heads), tc2) if rec["segment_len"] else (tc2,)
+            other = ("dv_local", *(m for m in SPLIT_MAPS if m not in want))
+            assert all(x in stages for x in want), (rec, stages)
+            assert not any(x in stages for x in other), (rec, stages)
         else:  # the pricing keeps the planner's table: the same bits
             _assert_bitwise(runs[0], base, OUTPUT_NAMES)
         return {"planner": base, "priced": runs[0]}, inputs, seq_lens, {}

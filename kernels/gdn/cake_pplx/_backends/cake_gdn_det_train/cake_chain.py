@@ -50,8 +50,12 @@ on a host-built table runs its pass 2 on ``dhu_tc2`` from the stitched segment
 states when its rule (:func:`sdt_pricing`) prices that pass 2 below the
 register one, and then launches no ``dv_local``: its pre-scan
 (``dhu_pre_dvl_r64k1``) computes the ``dv_local`` tiles of the chunks it scans
-(the same bits).  On ``sm_107a``, on a host-built table of a value-head group
-of two, a split adjoint plan the serial-scan rule (:func:`serial_scan_pricing`)
+(the same bits); where that pass 2 is ``dhu_tc2_dvl32`` (a value-head group of
+three) on the architectures of ``ADJOINT_MAP_ARCHS``, the segment maps the
+stitch composes come from ``dhu_tc2_dvl32_gm`` over every segment but each
+sequence's first instead (:func:`split_map_stage`).  On ``sm_107a``, on a
+host-built table of a value-head group of two, a split adjoint plan the
+serial-scan rule (:func:`serial_scan_pricing`)
 prices slower than ``dhu_tc2`` over whole sequences becomes that serial plan
 (other bits of ``dk`` / ``dv`` / ``dg`` / ``dbeta``).  A host-built table
 without plan pins then takes the adjoint table priced for ``dhu_tc2``
@@ -136,6 +140,8 @@ import torch
 from . import cake_backend, cake_jit, cake_plan
 
 __all__ = [
+    "ADJOINT_MAP_ARCHS",
+    "ADJOINT_MAP_STAGE",
     "CHAIN_PLAN",
     "CHUNK",
     "DVL32_ARCHS",
@@ -150,6 +156,7 @@ __all__ = [
     "PACKED_ROW",
     "PRESCAN_CONFIGS",
     "REG_SCAN_CONFIGS",
+    "SPLIT_WARM",
     "TC_PLAN",
     "TC_PLAN_GAIN",
     "TC_PLAN_MIN_SAVING",
@@ -189,6 +196,8 @@ __all__ = [
     "sdt_pricing",
     "serial_scan_pricing",
     "sequence_groups",
+    "split_map_stage",
+    "split_summary_entries",
     "stage_set",
     "tc_plan_pricing",
     "tc_plan_thresholds",
@@ -245,6 +254,15 @@ _DHU_PRE_ARGS = _DHU_ARGS + ("seg_flag", "warmup_thresh_log2")
 _DHU_PRE_DVL_ARGS = tuple(a for a in _DHU_PRE_ARGS if a != "dv_local")
 _DHU_TC2_ARGS = ("qn_tma", "kn_tma", "w_tma", "do_tma") + tuple(
     a for a in _DHU_ARGS[4:] if a != "dv_local"
+)
+# the segment maps of a split pass 2 on dhu_tc2_dvl32 (dhu_tc2_dvl32_gm): the scan's arguments, the entry table (segment
+# index and mode bits per CTA row), the warm-up threshold and the segment flags
+_DHU_TC2_GM_ARGS = (
+    *_DHU_TC2_ARGS,
+    "seg_index",
+    "seg_mode",
+    "warmup_thresh_log2",
+    "seg_flag",
 )
 _DQKWG_ARGS = ("qn", "kn", "v_new", "do", "dv2", "h", "dh", "g_cs", "dq_out", "dk_out", "dw_out", "dg_out",
                "chunk_start", "chunk_len", "num_heads", "num_v_heads", "scale")  # fmt: skip
@@ -304,6 +322,7 @@ LAUNCH_ARGS: dict[str, tuple[str, ...]] = {
     "dv_local": _DV_LOCAL_ARGS,
     "dhu_tc2": _DHU_TC2_ARGS,
     "dhu_tc2_dvl32": _DHU_TC2_ARGS,
+    "dhu_tc2_dvl32_gm": _DHU_TC2_GM_ARGS,
     "dhu_tc2_wavefront": _DHU_TC2_WAVEFRONT_ARGS,
     "dhu_tc2_wavefront_split": _DHU_TC2_WAVEFRONT_ARGS,
     "dqkwg": _DQKWG_ARGS,
@@ -567,6 +586,11 @@ class SegmentTable:
     scan_config: tuple[int, int]
     # fwd_ho's segment order (CTA group b runs walk[b]); None: the identity
     walk: torch.Tensor | None = None
+    # the entry table of the segment maps (``dhu_tc2_dvl32_gm``, :func:`split_map_stage`) of a host-built adjoint table
+    # that splits a sequence: row 0 every segment but each sequence's first, in table order, row 1 its mode
+    # (``SPLIT_WARM``); None: the other tables
+    summary: torch.Tensor | None = None
+    num_summary: int = 0
 
 
 @dataclass(frozen=True)
@@ -638,6 +662,18 @@ def _segment_lists(seq_chunk_start: list[int], segment_len: int):
     return seg_chunk_start, seg_seq, seq_seg_start
 
 
+def split_summary_entries(seq_seg_start) -> list[int]:
+    """The segments whose maps the stitch composes, over a segment table whose sequence ``vs`` owns the segments
+    ``seq_seg_start[vs] .. seq_seg_start[vs + 1]``: every segment but each sequence's first, in table order (empty
+    when no sequence splits)."""
+    starts = [int(x) for x in seq_seg_start]
+    return [
+        seg
+        for s0, s1 in zip(starts[:-1], starts[1:], strict=True)
+        for seg in range(s0 + 1, s1)
+    ]
+
+
 def lpt_sequence_order(seq_lens) -> tuple[int, ...] | None:
     """The sequences longest first by chunk count, ties in the caller's order (``None`` when that is the caller's
     order)."""
@@ -663,7 +699,8 @@ def build_chunk_meta(
 
     ``lpt`` dispatches longest first: the tables list the sequences in :func:`lpt_sequence_order` (each chunk keeps its
     token offset; the state rows follow ``order_index``) and ``fwd_ho`` walks the forward segments in
-    :func:`lpt_walk` order.  Every CTA computes what it computes in the caller's order: the same bits."""
+    :func:`lpt_walk` order.  Every CTA computes what it computes in the caller's order: the same bits.  An adjoint table
+    that splits a sequence carries the entry table of its segment maps (``SegmentTable.summary``)."""
     lengths = [int(x) for x in seq_lens]
     offsets = [0]
     for n in lengths:
@@ -686,6 +723,11 @@ def build_chunk_meta(
     if walk is not None:
         extra["walk"] = len(parts)
         parts.append(walk)
+    # the adjoint table's map entries (parts[8]: its seq_seg_start)
+    summary = split_summary_entries(parts[8])
+    if summary:
+        extra["summary"] = len(parts)
+        parts.append(summary + [SPLIT_WARM] * len(summary))
     if order is not None:
         inverse = [0] * len(order)
         for vs, seq in enumerate(order):
@@ -704,6 +746,7 @@ def build_chunk_meta(
     for part in parts:
         views.append(table[offset : offset + len(part)])
         offset += len(part)
+    summary_table = views[extra["summary"]].view(2, -1) if "summary" in extra else None
     segments = [
         SegmentTable(
             seg_chunk_start=views[3 + 3 * i],
@@ -713,6 +756,8 @@ def build_chunk_meta(
             segment_len=int(scan_plans[i].segment_len),
             scan_config=cast("tuple[int, int]", tuple(scan_plans[i].config)),
             walk=views[extra["walk"]] if i == 0 and "walk" in extra else None,
+            summary=summary_table if i == 1 else None,
+            num_summary=len(summary) if i == 1 else 0,
         )
         for i in range(2)
     ]
@@ -1404,9 +1449,10 @@ def _dhu_tc_selected(
 # A split plan at ``SDT_CONFIG`` runs the pre-scan and the stitch, then pass 2 either as ``dv_local`` + the register
 # scan or on ``dhu_tc2`` (one CTA per (segment, value head), ``dv_local`` fused) from the stitched per-segment ``dht``;
 # on the ``dhu_tc2`` form the pre-scan is ``dhu_pre_dvl_r64k1``, which computes the ``dv_local`` tiles of the chunks it
-# scans, so no ``dv_local`` stage runs.  Both forms give the same bits at the same segment table on ``dhu_tc2``; on
-# ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`: a value-head group of three on ``DVL32_ARCHS``) dv2 rounds once, so dk / dv
-# / dg / dbeta / dh0 take other bits than the register pass 2's, and this rule, the ``dhu_scan``
+# scans, so no ``dv_local`` stage runs (on ``dhu_tc2_dvl32`` the maps of ``dhu_tc2_dvl32_gm`` take its place where
+# :func:`split_map_stage` names them, below).  Both forms give the same bits at the same segment table on
+# ``dhu_tc2``; on ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`: a value-head group of three on ``DVL32_ARCHS``) dv2 rounds
+# once, so dk / dv / dg / dbeta / dh0 take other bits than the register pass 2's, and this rule, the ``dhu_scan``
 # pin and the table route (a device-built table keeps the register pass 2) choose between them.  The rule prices pass
 # 2 the way :func:`dhu_tc_pricing` prices a serial scan: T_tc2 = steps x t(n), steps the makespan of the segment table
 # at one CTA per (segment, value head) and one CTA per SM, n = min(segments x HV, SMs) and t(n) the ``dhu_tc2``
@@ -1498,6 +1544,44 @@ def _sdt_selected(meta: ChunkMeta, segs: SegmentTable, num_v_heads: int, device_
                 _SDT_AUTO.pop(next(iter(_SDT_AUTO)), None)
             _SDT_AUTO[key] = hit
     return hit
+
+
+# --------------------------------------------------------------------------- #
+# the segment maps of a split pass 2 on dhu_tc2_dvl32: dhu_tc2_dvl32_gm in place of the register pre-scan
+# --------------------------------------------------------------------------- #
+# A split plan whose pass 2 runs on ``dhu_tc2_dvl32`` (:func:`_sdt_selected`; a value-head group of three on
+# ``DVL32_ARCHS``) forms the segment maps the stitch composes with ``dhu_tc2_dvl32_gm`` on the architectures of
+# ``ADJOINT_MAP_ARCHS`` (off value ``()``) instead of the register pre-scan ``SDT_PRESCAN``: one CTA per (entry, value
+# head) over the table's ``summary`` entries (every segment but each sequence's first, whose map the stitch never
+# reads; built on the host with the table, mode ``SPLIT_WARM``).  Each CTA walks two states with the tcgen05 scan of
+# ``dhu_tc2_dvl32`` and stores the segment's map ``[B | M]`` into ``seg_state`` (``B`` from zero with ``do``, ``M``
+# from the identity) under the pre-scan's warm-up bound and threshold (:func:`warmup_thresh_log2`): where the running
+# sum of a segment's log2 chunk decays from its start falls below the threshold before its end, the map keeps only the
+# chunks up to there, ``B`` alone, and ``seg_flag`` is 0; elsewhere the whole segment and 1.  The workspaces, the
+# stitch, pass 2 (one launch, or the two groups beside the fused tail), the tails and the tables are unchanged; the
+# table prices of :func:`tc_plan_pricing` and :func:`chain_plan_pricing` still price the register pre-scan.  The maps
+# add the FP32 ``dv_local`` values where the pre-scan rounds its tiles to BF16, so where a map carries state across a
+# segment boundary (slowly decaying gates) dk / dv / dg / dbeta / dh0 take other bits than with the pre-scan; o, dq
+# and the final state keep theirs, and each form is bitwise run to run.  The stage follows host facts only
+# (:func:`split_map_stage`); the maps' extent follows the gates through the warm-up bound, as the pre-scan's does.
+ADJOINT_MAP_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
+ADJOINT_MAP_STAGE = "dhu_tc2_dvl32_gm"
+# the mode bit of a map entry: bound the map by the warm-up threshold and write its seg_flag
+SPLIT_WARM = 16
+
+
+def split_map_stage(arch: str, num_heads: int, num_v_heads: int) -> str:
+    """The stage that forms the segment maps of a split plan whose pass 2 runs on the tcgen05 scan:
+    ``ADJOINT_MAP_STAGE`` for a value-head group of three whose scan is ``dhu_tc2_dvl32`` (:func:`dhu_tc2_stage`) on an
+    architecture of ``ADJOINT_MAP_ARCHS`` whose registry delivers it, else the fused pre-scan ``SDT_PRESCAN``."""
+    if (
+        num_v_heads == 3 * num_heads
+        and arch in ADJOINT_MAP_ARCHS
+        and dhu_tc2_stage(arch, num_heads, num_v_heads) == "dhu_tc2_dvl32"
+        and _available(ADJOINT_MAP_STAGE, arch)
+    ):
+        return ADJOINT_MAP_STAGE
+    return SDT_PRESCAN
 
 
 # --------------------------------------------------------------------------- #
@@ -3772,6 +3856,9 @@ def cake_gdn_det_train_backward(
                                   finalize=options.finalize or forward.get("finalize_stage"))  # fmt: skip
     # the tcgen05 adjoint scan (dhu_tc2_stage): dhu_tc2_dvl32 for a group of three on DVL32_ARCHS, else dhu_tc2
     tc_stage = dhu_tc2_stage(arch, num_heads, num_v_heads)
+    # the segment maps of a split pass 2 on the tcgen05 scan (split_map_stage): dhu_tc2_dvl32_gm for a group of three on
+    # dhu_tc2_dvl32, else the fused pre-scan
+    map_stage = split_map_stage(arch, num_heads, num_v_heads)
     # two groups: the tcgen05 adjoint scan feeding the fused tail, for a serial plan beside tail_g2 (beside a group of
     # three's tail on the architectures of TWO_STREAM_SERIAL_G3_ARCHS) and for the pass 2 of a split plan beside a
     # group of three's tail (a split plan beside tail_g2 runs one stream); either form of a group's tail is its kind
@@ -3839,7 +3926,14 @@ def cake_gdn_det_train_backward(
         seg_flag = workspaces.take(
             table, "b_seg_flag", (segs.num_segments, num_v_heads), torch.int32, device
         )
-        if split_tc:
+        if split_tc and segs.summary is not None and map_stage == ADJOINT_MAP_STAGE:
+            # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, under
+            # the pre-scan's warm-up bound (the same seg_state / seg_flag; a sequence's first map is never read)
+            _launch(ADJOINT_MAP_STAGE, segs.num_summary, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
+                    seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
+                    meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.summary[0], segs.summary[1],
+                    warmup_thresh_log2(options), seg_flag)  # fmt: skip
+        elif split_tc:
             # the pre-scan with the dv_local tiles of its chunks computed in the CTA (the same seg_state / seg_flag)
             _launch(SDT_PRESCAN, segs.num_segments, num_v_heads, 2 * HEAD_DIM // vb, qn, kn, w, do, g_cs, dht32, dh,
                     dv2, dh0, seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,

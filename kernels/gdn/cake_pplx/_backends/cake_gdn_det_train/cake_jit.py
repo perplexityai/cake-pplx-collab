@@ -70,7 +70,13 @@ pre-scan with the ``dv_local`` tiles of its chunks computed in the CTA),
 ``dhu_tc2`` (the serial adjoint scan with ``dv_local`` fused, tcgen05, TMA ring
 fills), ``dhu_tc2_dvl32`` (``dhu_tc2`` adding the FP32 ``dv_local`` values to
 ``dv2`` before its one BF16 rounding; ``dhu_tc2``'s arguments, tables and
-``select`` constants), ``dqkwg``, ``wy_bwd`` / ``wy_bwd_bf16``, ``finalize`` /
+``select`` constants), ``dhu_tc2_dvl32_gm`` (the segment maps ``[B | M]`` of
+a split plan whose pass 2 runs on ``dhu_tc2_dvl32``: two states walked by that
+scan in one CTA per (entry, value head) of an entry table of segments, under
+the pre-scan's warm-up bound, writing the pre-scan's ``seg_state`` /
+``seg_flag``; ``dhu_tc2``'s arguments, then ``seg_index``, ``seg_mode``,
+``warmup_thresh_log2`` and ``seg_flag``), ``dqkwg``, ``wy_bwd`` /
+``wy_bwd_bf16``, ``finalize`` /
 ``finalize_mlp``, ``tail_g2`` / ``tail_g2_bf16`` (``dqkwg``, the WY pullback
 and the finalize of a value-head group of two in one tcgen05 cluster kernel),
 ``tail_g3`` / ``tail_g3_bf16`` (the same for a value-head group of three,
@@ -151,6 +157,7 @@ STAGES = (
     "dhu_tc2_wavefront",
     "dhu_tc2_wavefront_split",
     "dhu_tc2_dvl32",
+    "dhu_tc2_dvl32_gm",
     "dqkwg",
     "wy_bwd",
     "wy_bwd_bf16",
