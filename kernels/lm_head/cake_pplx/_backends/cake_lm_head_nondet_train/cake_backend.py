@@ -1493,6 +1493,11 @@ class ChunkVariants:
     )
 
 
+# the default instance knobs of a plan without per-chunk variants (:meth:`Plan.variants_of`): frozen, so one instance
+# serves every such plan and chunk
+_NO_VARIANTS = ChunkVariants()
+
+
 def chunk_variants(
     rows_c: int,
     hidden: int,
@@ -4493,7 +4498,7 @@ class Plan:
     logprob_keep: ClassVar[bool] = False
 
     def variants_of(self, index: int) -> ChunkVariants:
-        return self.variants[index] if self.variants else ChunkVariants()
+        return self.variants[index] if self.variants else _NO_VARIANTS
 
     @functools.cached_property
     def cast_fold_range(self) -> tuple[int, int]:
@@ -4568,21 +4573,24 @@ class Plan:
             dcnt=self.dcnt,
         )
 
-    @property
+    # compact / rows / num_chunks / num_tiles: formed on first use and kept on the plan (it is frozen), so the many
+    # reads of a binding's call and of its forming read an attribute
+
+    @functools.cached_property
     def compact(self) -> bool:
         """The chunk loop runs over the valid rows only (gather / scatter around the kernels)."""
         return self.valid_rows is not None
 
-    @property
+    @functools.cached_property
     def rows(self) -> int:
         """Rows the chunk loop processes: the valid rows when compacted, else ``T``."""
         return int(self.valid_rows) if self.compact else int(self.problem.num_rows)
 
-    @property
+    @functools.cached_property
     def num_chunks(self) -> int:
         return len(self.chunks)
 
-    @property
+    @functools.cached_property
     def num_tiles(self) -> int:
         return -(-self.problem.vocab // self.geometry.stats_tile)
 
@@ -5731,11 +5739,17 @@ def _grid_term(value, names: dict[str, int]) -> int:
         raise ValueError("grid rule entries must be integers or expressions")
     if isinstance(value, int):
         return int(value)
+    text = str(value).strip()
     try:
-        tree = _grid_tree(str(value).strip())
+        fast = _grid_fast(text)
     except SyntaxError as exc:
         raise ValueError(f"grid rule entry {value!r} is not an expression") from exc
-    return _grid_eval(tree, names)
+    if fast is not None:
+        try:
+            return fast(names)
+        except (KeyError, ValueError):
+            pass  # :func:`_grid_eval` raises the error the rule meets, at the term it meets it
+    return _grid_eval(_grid_tree(text), names)
 
 
 @functools.lru_cache(maxsize=512)
@@ -5743,6 +5757,82 @@ def _grid_tree(text: str) -> ast.Expression:
     """The parsed grid rule entry (the records carry a fixed set of rule texts; bounded, never mutated:
     :func:`_grid_eval` only reads it)."""
     return ast.parse(text, mode="eval")
+
+
+def _grid_source(node) -> Optional[str]:
+    """The Python source of a grid rule node that :func:`_grid_eval` accepts, with its operations: the names read from
+    ``_n`` (the integer host values), ``/`` and ``//`` through :func:`_grid_cdiv` / :func:`_grid_fdiv`, ``min`` /
+    ``max`` of two or more terms, every operation parenthesized as the tree nests it, the operands in the tree's order;
+    ``None`` for a node :func:`_grid_eval` refuses."""
+    if isinstance(node, ast.Constant):
+        if isinstance(node.value, bool) or not isinstance(node.value, int):
+            return None
+        return repr(int(node.value))
+    if isinstance(node, ast.Name):
+        return f"_n[{node.id!r}]"
+    if isinstance(node, ast.BinOp):
+        left, right = _grid_source(node.left), _grid_source(node.right)
+        if left is None or right is None:
+            return None
+        if isinstance(node.op, ast.Add):
+            return f"({left} + {right})"
+        if isinstance(node.op, ast.Sub):
+            return f"({left} - {right})"
+        if isinstance(node.op, ast.Mult):
+            return f"({left} * {right})"
+        if isinstance(node.op, ast.Div):
+            return f"_grid_cdiv({left}, {right})"
+        if isinstance(node.op, ast.FloorDiv):
+            return f"_grid_fdiv({left}, {right})"
+        return None
+    if isinstance(node, ast.Call):
+        if (
+            not isinstance(node.func, ast.Name)
+            or node.func.id not in _GRID_FUNCTIONS
+            or node.keywords
+            or len(node.args) < 2
+        ):
+            return None
+        terms = [_grid_source(arg) for arg in node.args]
+        if any(term is None for term in terms):
+            return None
+        return f"_grid_{node.func.id}({', '.join(terms)})"
+    return None
+
+
+def _grid_cdiv(left: int, right: int) -> int:
+    if right == 0:
+        raise ValueError("grid rule divides by zero")
+    return -(-left // right)
+
+
+def _grid_fdiv(left: int, right: int) -> int:
+    if right == 0:
+        raise ValueError("grid rule divides by zero")
+    return left // right
+
+
+# the names a compiled grid rule reads besides ``_n`` (no builtins)
+_GRID_NAMESPACE = {
+    "__builtins__": {},
+    "_grid_cdiv": _grid_cdiv,
+    "_grid_fdiv": _grid_fdiv,
+    "_grid_min": min,
+    "_grid_max": max,
+}
+
+
+@functools.lru_cache(maxsize=512)
+def _grid_fast(text: str) -> Optional[Callable[[dict[str, int]], int]]:
+    """The compiled form of the grid rule entry ``text`` (:func:`_grid_source`): one call evaluates the whole entry
+    with the same integer operations, in the same order, as :func:`_grid_eval` -- the same value -- where the tree walk
+    makes a call per node; ``None`` for an entry :func:`_grid_eval` refuses (it raises the error).  Formed once per rule
+    text, as its tree (:func:`_grid_tree`); a term that raises (an unknown name, a division by zero) is evaluated again
+    by :func:`_grid_eval`, which raises the error.  The function holds no host value (the values come in ``_n``)."""
+    source = _grid_source(_grid_tree(text).body)
+    if source is None:
+        return None
+    return eval(compile(f"lambda _n: {source}", "<grid rule>", "eval"), _GRID_NAMESPACE)
 
 
 def _grid_eval(node, names: dict[str, int]) -> int:
@@ -9256,9 +9346,14 @@ class _Binding:
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
-        tiles = _chunks_tile_rows(plan)
-        # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        filled = not backward_zero and _rlab_filled(plan, backward_order, tiles)
+        # the calls bind the autograd graph's label residuals (:meth:`_call_rlab`, :attr:`rlab_graph`); only those read
+        # ``filled``.  A sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
+        rlab_graph = not plan.dcnt and _chunks_tile_rows(plan)
+        filled = (
+            rlab_graph
+            and not backward_zero
+            and _rlab_filled(plan, backward_order, True)
+        )
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9312,7 +9407,7 @@ class _Binding:
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
             backward_rlab_filled=filled,
-            rlab_graph=tiles and not plan.dcnt,
+            rlab_graph=rlab_graph,
         )
 
     def holds_no_tensor(self) -> bool:
@@ -9709,9 +9804,14 @@ class _TemperatureBinding(_Binding):
             )
         forward_order, forward_zero = _without_rlab_zero(forward_order)
         backward_order, backward_zero = _without_rlab_zero(backward_order)
-        tiles = _chunks_tile_rows(plan)
-        # a sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
-        filled = not backward_zero and _rlab_filled(plan, backward_order, tiles)
+        # the calls bind the autograd graph's label residuals (:meth:`_call_rlab`, :attr:`rlab_graph`); only those read
+        # ``filled``.  A sequence that had the zero step leaves a row to it (:func:`_rlab_zero_needed`): not filled
+        rlab_graph = not plan.dcnt and _chunks_tile_rows(plan)
+        filled = (
+            rlab_graph
+            and not backward_zero
+            and _rlab_filled(plan, backward_order, True)
+        )
         # the hidden-count path drops the runner's chunk-0 gather / GEMM launches (not in either sequence)
         keep = None if hidden is None else set(forward_order) | set(backward_order)
         # the per-call slots come from :func:`_slot_values`: check it against :func:`stage_values` on the runner's
@@ -9782,7 +9882,7 @@ class _TemperatureBinding(_Binding):
             forward_rlab_zero=forward_zero,
             backward_rlab_zero=backward_zero,
             backward_rlab_filled=filled,
-            rlab_graph=tiles and not plan.dcnt,
+            rlab_graph=rlab_graph,
         )
 
     # the rows of the call in progress, per thread (set and cleared around the inherited sequence)
