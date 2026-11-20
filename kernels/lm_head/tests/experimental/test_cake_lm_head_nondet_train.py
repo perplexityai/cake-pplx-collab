@@ -18463,9 +18463,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
     del graph, scratch
     # a non-reentrant checkpoint's recomputation takes no buffer (the checkpointed call's backward binds the call's
-    # holder); a form without a fill takes its buffer in the backward that binds the holder; a reentrant checkpoint's
-    # first pass is the call without a gradient (it takes what that call takes and frees it at once) and its
-    # recomputation's graph takes one in the backward; the bits are the plain step's
+    # holder); a form without a fill takes its buffer in the backward that binds the holder; a call without a gradient
+    # (a reentrant checkpoint's first pass) records no graph and takes none, and the reentrant recomputation's graph
+    # takes one in the backward; the bits are the plain step's
     calls = []
     phase = ["forward"]
     real = be._graph_rlab
@@ -18485,15 +18485,13 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
             def call(x, w, entry=entry, inp=inp):
                 return entry(x, w, inp.labels, chunk_size=4096)
 
-            first = []
             if kind == "reentrant":
-                # the takes of the call without a gradient (its form: no kept logits)
+                # the call without a gradient (the dz arm: no kept logits) records no graph: no take
                 del calls[:]
                 phase[0] = "forward"
                 with torch.no_grad():
                     call(X, W)
-                first = list(calls)
-                assert first in ([], ["forward"]), (entry.__name__, first)
+                assert calls == [], (entry.__name__, calls)
             del calls[:]
             phase[0] = "forward"
             if kind == "plain":
@@ -18503,10 +18501,10 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
                     call, X, W, use_reentrant=kind == "reentrant"
                 )
             if kind == "reentrant":
-                assert calls == first, (entry.__name__, calls, first)
-                # one take in the backward: the recomputation's forward (the dz arm) or the backward that binds the
-                # recomputed graph's holder (a form without a fill)
-                expect = first + ["backward"]
+                # the first pass takes none; one take in the backward: the recomputation's forward (the dz arm) or
+                # the backward that binds the recomputed graph's holder (a form without a fill)
+                assert calls == [], (entry.__name__, calls)
+                expect = ["backward"]
             else:
                 node = _graph_rlab_node(lp)
                 lazy = bool(getattr(node, "kept", False)) or not node.logprob_dz
@@ -18564,6 +18562,44 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
         monkeypatch,
         SEED + 73,
     )
+
+
+def test_records_graph_reads_the_node_edges():
+    """``_records_graph`` (read by ``_logprob_graph_rlab``): ``True`` in an autograd Function's forward whose call
+    records a graph node (grad mode on and an input that requires a gradient, a reentrant checkpoint's
+    recomputation), ``False`` in one that records none (``torch.no_grad``, inference mode, no input that requires a
+    gradient, a reentrant checkpoint's first pass), ``True`` for a context without the node's edges."""
+    seen = []
+
+    class Probe(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            seen.append(cake_backend._records_graph(ctx))
+            return x * 2.0
+
+        @staticmethod
+        def backward(ctx, g):
+            return g * 2.0
+
+    x = torch.ones(3, requires_grad=True)
+
+    def run(fn):
+        del seen[:]
+        fn()
+        return list(seen)
+
+    assert run(lambda: Probe.apply(x)) == [True]
+    assert run(lambda: Probe.apply(x.detach())) == [False]
+    with torch.no_grad():
+        assert run(lambda: Probe.apply(x)) == [False]
+    with torch.inference_mode():
+        assert run(lambda: Probe.apply(x)) == [False]
+    del seen[:]
+    y = torch.utils.checkpoint.checkpoint(Probe.apply, x, use_reentrant=True)
+    assert seen == [False]
+    y.sum().backward()
+    assert seen == [False, True]
+    assert cake_backend._records_graph(object()) is True
 
 
 def test_checkpoint_recomputation_matches_the_checkpoint_pass(monkeypatch):

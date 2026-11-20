@@ -10217,6 +10217,7 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
             dz_arm=dz_arm,
             fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
             kept=ctx.kept,
+            ctx=ctx,
         )
         return result.logp
 

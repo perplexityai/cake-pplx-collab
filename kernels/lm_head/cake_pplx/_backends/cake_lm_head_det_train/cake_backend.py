@@ -3509,6 +3509,17 @@ def _graph_rlab(rows: int, zero: bool, device: torch.device) -> Optional[tuple]:
     return None
 
 
+def _records_graph(ctx: Any) -> bool:
+    """Whether the autograd Function call of ``ctx`` records a graph node a backward can run: ``False`` when the node
+    has no input edge (grad mode off -- ``torch.no_grad``, inference mode, a reentrant checkpoint's first pass -- or
+    no input that requires a gradient; autograd sets the edges before the forward runs, ``ctx.needs_input_grad``
+    shows only the inputs' flags); ``True`` where the context shows no edges (a traced context)."""
+    try:
+        return len(ctx.next_functions) > 0
+    except Exception:  # a context without the node's edges
+        return True
+
+
 def _logprob_graph_rlab(
     X: torch.Tensor,
     row_index: Optional[torch.Tensor],
@@ -3520,6 +3531,7 @@ def _logprob_graph_rlab(
     fused_dx: bool,
     kept: bool = False,
     recompute: Optional[bool] = None,
+    ctx: Any = None,
 ) -> Optional["_GraphRlab"]:
     """The holder of a log-probability autograd graph's label residuals (:class:`_GraphRlab`), for the backward's
     ``[rows]`` loop rows (the forward's valid-row index): ``None`` when no backward can bind them (no gradient, another
@@ -3532,7 +3544,9 @@ def _logprob_graph_rlab(
     there.  The forward's pick is a placement only: each backward checks the held tensor.  ``None`` also in a
     non-reentrant ``torch.utils.checkpoint``'s recomputation of a ``dz`` arm (``recompute``; ``None``: read from the
     saved-tensor hooks, :func:`_checkpoint_recomputation`): its graph only hands its saved tensors to the checkpointed
-    call's backward, which binds that call's holder, and runs no backward of its own."""
+    call's backward, which binds that call's holder, and runs no backward of its own.
+    ``None`` also in a ``dz`` arm's call that records no graph (``ctx``, :func:`_records_graph`: grad mode off, a
+    reentrant checkpoint's first pass), which no backward binds."""
     if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
         return None
     rows = (
@@ -3544,6 +3558,8 @@ def _logprob_graph_rlab(
         return None
     if kept or not dz_arm:
         return _GraphRlab()
+    if ctx is not None and not _records_graph(ctx):
+        return None
     if recompute is None:
         recompute = _TOP_SAVED_HOOKS(False) is not None and _checkpoint_recomputation()
     if recompute:
@@ -12764,6 +12780,7 @@ class CakeLMHeadDetLogprobFunction(torch.autograd.Function):
                 dz_arm=dz_arm,
                 fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
                 recompute=ckpt is not None and not ckpt.first,
+                ctx=ctx,
             )
         )
         return logp
@@ -12944,6 +12961,7 @@ class CakeLMHeadDetLogprobTemperatureFunction(torch.autograd.Function):
                 dz_arm=dz_arm,
                 fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
                 recompute=ckpt is not None and not ckpt.first,
+                ctx=ctx,
             )
         )
         return logp
@@ -13076,6 +13094,7 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
             dz_arm=ctx.logprob_dz,
             fused_dx=bool(ctx.needs_input_grad[0]) and ctx.dx_finalize,
             kept=ctx.kept,
+            ctx=ctx,
         )
         return result.logp
 
