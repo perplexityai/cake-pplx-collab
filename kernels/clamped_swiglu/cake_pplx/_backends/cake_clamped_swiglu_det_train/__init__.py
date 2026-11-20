@@ -351,27 +351,35 @@ _Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int, int]
 
 
 @functools.cache
-def _route(stage: str, device_index: int) -> tuple[int, _Plan, int, bytes, _Plan, _Plan, _Plan]:
-    """``(fine_rows, fine, limit, table, small, large, tail)`` of ``stage`` on device ``device_index``, made once per
-    stage and device from the device's architecture and SM count (``cake_jit.fine`` and ``cake_jit.route``).  A launch
-    of ``rows <= fine_rows`` rows runs the plan ``fine``, the stage's fine program (``fine_rows`` 0 without one on the
-    architecture, so no launch runs it).  A launch of more rows, below ``limit``, runs the plan ``large`` when
-    ``table[rows]`` is 1 (``rows`` in a window of the large-R program) and the plan ``small`` when it is 0; a launch of
-    more rows runs ``tail``: ``large`` when the last window has no upper bound, else ``small``.  ``limit`` is one above
-    the last edge of ``cake_jit.route`` (0 without a window), and ``fine_rows`` is below its first edge.  The launch
-    compares the row count with one integer and looks up one byte instead of searching the edges: on Grace, a search
-    per launch measured 1-3 % more host time per call.  No library is loaded here: a program's library loads at its
-    first launch."""
+def _programs(stage: str, device_index: int) -> tuple[int, tuple[int, ...], _Plan, _Plan, _Plan]:
+    """``(last, edges, small, large, fine)`` of ``stage`` on device ``device_index``, read once per stage and device
+    from the device's architecture and SM count: the plans of the stage's small-R, large-R and fine programs, the last
+    row count of the fine window (``cake_jit.fine``; 0 without a fine program on the architecture, whose plan is then
+    the small-R one) and the edges of the large-R windows (``cake_jit.route``; none without a large-R program, whose
+    plan is then the small-R one).  No library is loaded here: a program's library loads at its first launch."""
     sm_count = torch.cuda.get_device_properties(device_index).multi_processor_count
     arch = device_arch(device_index)
     edges, small, large = cake_jit.route(stage, arch, sm_count)
-    fine_rows, fine = cake_jit.fine(stage, arch, sm_count)
-    limit = edges[-1] + 1 if edges else 0
-    table = bytearray(limit)
-    for below, last in zip(edges[0::2], edges[1::2]):
-        table[below + 1 : last + 1] = bytes([1]) * (last - below)
-    small, large, fine = (small, *_plan(small)), (large, *_plan(large)), (fine, *_plan(fine))
-    return fine_rows, fine, limit, bytes(table), small, large, large if len(edges) % 2 else small
+    last, fine = cake_jit.fine(stage, arch, sm_count)
+    return last, edges, (small, *_plan(small)), (large, *_plan(large)), (fine, *_plan(fine))
+
+
+@functools.cache
+def _route(stage: str, device_index: int) -> tuple[int, tuple[_Plan, ...], _Plan]:
+    """``(limit, plans, tail)`` of ``stage`` on device ``device_index`` (:func:`_programs`), made once per stage and
+    device.  A launch of ``rows < limit`` rows runs the plan ``plans[rows]``: the fine plan up to the fine window's
+    last row count, then the large-R plan in a large-R window and the small-R plan at every other row count.  A launch
+    of more rows runs ``tail``: the large-R plan when the last window has no upper bound, else the small-R one.
+    ``limit`` is one above the larger of the fine window's last row count and the last edge of ``cake_jit.route``.  So
+    a launch compares the row count with one integer and reads one entry of a tuple, and a launch of more rows makes
+    the comparison only.  The tuple holds a reference per row count below ``limit`` (8 bytes each: 0.65 MB for
+    ``fwd`` on 212 SMs).  On Grace, a search of the edges per launch measured 1-3 % more host time per call."""
+    last, edges, small, large, fine = _programs(stage, device_index)
+    limit = max(edges[-1] + 1 if edges else 0, last + 1)
+    plans = [fine] * (last + 1) + [small] * (limit - last - 1)
+    for below, top in zip(edges[0::2], edges[1::2]):
+        plans[below + 1 : top + 1] = [large] * (top - below)
+    return limit, tuple(plans), large if len(edges) % 2 else small
 
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
@@ -383,10 +391,8 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs.  The entry points launch through
     :func:`_launcher`, which runs the same program with the same arguments and grid, passed by position."""
-    fine_rows, fine, limit, table, small, large, tail = _route(stage, device_index)
-    name, arguments, per_row, per_cta = (
-        fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit else tail
-    )
+    limit, plans, tail = _route(stage, device_index)
+    name, arguments, per_row, per_cta = plans[rows] if rows < limit else tail
     try:
         args = arguments(values)
     except KeyError:
@@ -459,7 +465,7 @@ class _Launcher:
 
     def __init__(self, stage: str, device_index: int) -> None:
         self.route = _route(stage, device_index)
-        _, fine, _, _, small, large, _ = self.route
+        _, _, small, large, fine = _programs(stage, device_index)
         for name in dict.fromkeys((small[0], large[0], fine[0])):
             if parameters(name) != _ARGUMENTS[stage]:
                 raise RuntimeError(
@@ -490,10 +496,8 @@ class _Launcher:
         return weight
 
     def __call__(self, rows: int, *arguments: Any) -> None:
-        fine_rows, fine, limit, table, small, large, tail = self.route
-        name, _, per_row, per_cta = (
-            fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit else tail
-        )
+        limit, plans, tail = self.route
+        name, _, per_row, per_cta = plans[rows] if rows < limit else tail
         entry = self.entries.get(name)
         if entry is None:
             entry = self.entry(name)
@@ -988,10 +992,8 @@ def _forward_step(
                     # The gate and the up share the row stride: the merged tensor's (passed as both, the up from
                     # column 2304) or the two tensors' 2304.
                     stride, out_stride = (shape[1], WIDTH) if rows > 1 else (0, 0)
-                    fine_rows, fine, limit_rows, table, small, large, tail = launch.route
-                    name, _, per_row, per_cta = (
-                        fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit_rows else tail
-                    )
+                    limit_rows, plans, tail = launch.route
+                    name, _, per_row, per_cta = plans[rows] if rows < limit_rows else tail
                     entry = launch.entries.get(name)
                     if entry is None:
                         entry = launch.entry(name)
@@ -1121,14 +1123,8 @@ def _backward_step(
                             up, d_up, col = first, d_first, WIDTH
                         else:
                             col = 0
-                        fine_rows, fine, limit_rows, table, small, large, tail = launch.route
-                        name, _, per_row, per_cta = (
-                            fine
-                            if rows <= fine_rows
-                            else (large if table[rows] else small)
-                            if rows < limit_rows
-                            else tail
-                        )
+                        limit_rows, plans, tail = launch.route
+                        name, _, per_row, per_cta = plans[rows] if rows < limit_rows else tail
                         entry = launch.entries.get(name)
                         if entry is None:
                             entry = launch.entry(name)

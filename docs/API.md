@@ -1819,7 +1819,7 @@ y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down 
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
 - `limit` must be a Python number: a tensor `limit` raises `TypeError`, as reading it would synchronize the host.
-- A program's library builds at its first launch. The row count picks the program, and in the backward so does the weight: an unweighted backward runs its own program. Before capturing a CUDA graph, run an eager call of each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
+- A program's library builds at its first launch. The row count picks the program, and in the backward so does the weight: an unweighted backward runs its own programs. Before capturing a CUDA graph, run an eager call of each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the architecture (the backend's `specs_for_arch`), so that no JIT build runs inside capture.
 
 ---
 

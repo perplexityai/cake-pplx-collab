@@ -140,7 +140,7 @@ PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 STAGES = ("fwd", "bwd", "bwd_unweighted")
-# The stages with a large-R program on some architecture (``bwd_unweighted`` has one program at every row count).
+# The stages with a large-R program on some architecture (``bwd_unweighted`` has none).
 WINDOWED = ("fwd", "bwd")
 # Each stage's small-R role (the stage itself), its large-R role and its fine role.
 LARGE = "_large"
@@ -373,26 +373,31 @@ def host_device(monkeypatch: pytest.MonkeyPatch) -> Iterator[types.SimpleNamespa
         properties = types.SimpleNamespace(multi_processor_count=sm_count)
         monkeypatch.setattr(pkg, "device_arch", lambda index: arch)
         monkeypatch.setattr(torch.cuda, "get_device_properties", lambda index: properties)
-        pkg._route.cache_clear()
+        _clear_routes()
         _fresh_launchers(monkeypatch)
 
     monkeypatch.setattr(pkg, "_entry", lambda name, arch: lambda *args: calls.append((name, arch, args)))
     _fresh_launchers(monkeypatch)
-    pkg._route.cache_clear()
+    _clear_routes()
     yield types.SimpleNamespace(place=place, calls=calls)
+    _clear_routes()
+
+
+def _clear_routes() -> None:
+    """Empties the package's caches of the programs (``pkg._programs``) and the routes (``pkg._route``) of each stage
+    and device."""
+    pkg._programs.cache_clear()
     pkg._route.cache_clear()
 
 
 def _force(patch: pytest.MonkeyPatch, program: str) -> None:
     """Every launch runs the ``program`` (``"small"``, ``"large"`` or ``"fine"``) of its stage on its device, whatever
-    its row count: the route's fine bound and limit become 0, so every launch runs its tail, that plan.  An
-    architecture without such a program of a stage runs the small-R one either way.  The launchers are made afresh on
-    the forced route."""
-    route = pkg._route
+    its row count: the route's limit becomes 0, so every launch runs its tail, that plan.  An architecture without
+    such a program of a stage runs the small-R one either way.  The launchers are made afresh on the forced route."""
 
     def forced(stage: str, device_index: int) -> tuple:
-        _, fine, _, _, small, large, _ = route(stage, device_index)
-        return 0, fine, 0, b"", small, large, {"small": small, "large": large, "fine": fine}[program]
+        _, _, small, large, fine = pkg._programs(stage, device_index)
+        return 0, (), {"small": small, "large": large, "fine": fine}[program]
 
     patch.setattr(pkg, "_route", forced)
     _fresh_launchers(patch)
@@ -411,13 +416,13 @@ def _stages(weighted: bool) -> tuple[str, str]:
 
 def _routed(stage: str, rows: int, device_index: int) -> str:
     """The program a launch of ``stage`` for ``rows`` rows runs on device ``device_index``."""
-    fine_rows, fine, limit, table, small, large, tail = pkg._route(stage, device_index)
-    return (fine if rows <= fine_rows else (large if table[rows] else small) if rows < limit else tail)[0]
+    limit, plans, tail = pkg._route(stage, device_index)
+    return (plans[rows] if rows < limit else tail)[0]
 
 
 def _program(stage: str, device_index: int, program: str) -> str:
     """The ``program`` (``"small"``, ``"large"`` or ``"fine"``) of ``stage`` on device ``device_index``."""
-    _, fine, _, _, small, large, _ = pkg._route(stage, device_index)
+    _, _, small, large, fine = pkg._programs(stage, device_index)
     return {"small": small, "large": large, "fine": fine}[program][0]
 
 
@@ -781,9 +786,8 @@ def test_rows_route_to_the_fine_the_small_or_the_large_program(stage, arch, sm_c
     stage's fine program; a launch of more rows that lie in a window of the large-R record (``lo * SMs <= rows <= hi *
     SMs`` for a window ``[lo, hi]`` of its ``rows_per_sm_windows``) runs its large-R program, any other its small-R
     program, each on its grid: 1 row, one row below, at and above each edge of the windows, and ``MAX_ROWS - 1`` rows.
-    The package's route holds the fine window's last row count, and a byte per row count below one above the last
-    large-R edge, 1 exactly in a large-R window; it runs the large-R program above it when the last window has no upper
-    bound."""
+    The package's route holds the plan of each row count up to the larger of the fine window's last row count and the
+    last large-R edge; above it, it runs the large-R program when the last window has no upper bound."""
     windows, small, large = _expected_route(stage, arch, sm_count)
     last, fine = _expected_fine(stage, arch, sm_count)
     edges = _edges(windows, sm_count)
@@ -791,10 +795,13 @@ def test_rows_route_to_the_fine_the_small_or_the_large_program(stage, arch, sm_c
     assert cake_jit.fine(stage, arch, sm_count) == (last, fine)
     assert not edges or last < edges[0]
     host_device.place(arch, sm_count)
-    fine_rows, got_fine, limit, table, got_small, got_large, tail = pkg._route(stage, 0)
-    assert (fine_rows, got_fine[0], got_small[0], got_large[0]) == (last, fine, small, large)
-    assert limit == (edges[-1] + 1 if edges else 0)
-    assert table == bytes(_in_windows(windows, sm_count, rows) for rows in range(limit))
+    got_last, got_edges, got_small, got_large, got_fine = pkg._programs(stage, 0)
+    assert (got_last, got_edges, got_small[0], got_large[0], got_fine[0]) == (last, tuple(edges), small, large, fine)
+    limit, plans, tail = pkg._route(stage, 0)
+    assert limit == max(edges[-1] + 1 if edges else 0, last + 1) == len(plans)
+    assert {id(plan) for plan in (*plans, tail)} <= {id(got_small), id(got_large), id(got_fine)}
+    want = [fine if rows <= last else large if _in_windows(windows, sm_count, rows) else small for rows in range(limit)]
+    assert [plan[0] for plan in plans] == want
     assert tail[0] == (large if windows and windows[-1][1] is None else small)
     values = {key: f"<{key}>" for key in PARAMETERS[stage]}
     ran = set()
@@ -897,7 +904,10 @@ def test_the_route_refuses_fine_windows_that_are_no_route(stage, row, message, h
         host_device.place("sm_100a", 148)
         if accepted:
             assert cake_jit.fine(stage, "sm_100a", 148) == (hi * 148, fine)
-            assert pkg._route(stage, 0)[:2] == (hi * 148, (fine, *pkg._plan(fine)))
+            last, _, _, _, got = pkg._programs(stage, 0)
+            assert (last, got) == (hi * 148, (fine, *pkg._plan(fine)))
+            _, plans, _ = pkg._route(stage, 0)
+            assert plans[last][0] == fine != plans[last + 1][0]
             continue
         pattern = f"{fine}: rows_per_sm_windows\\['sm_100a'\\] .* {message}"
         with pytest.raises(RuntimeError, match=pattern):
@@ -932,6 +942,27 @@ def test_the_fine_programs_and_their_grids() -> None:
         name = cake_jit.PROGRAM_OF[stage + FINE]["sm_100a"]
         assert cake_jit.grid(name, first - 1)[0] <= 2**31 - 1 < -(-(first + 1) * 9 // 4)
         assert cake_jit.grid(name, first + 1) == (2**31 - 1, 1, 1)
+
+
+def test_the_route_refuses_a_fine_window_whose_grid_passes_the_largest(monkeypatch) -> None:
+    """A fine record's window whose last row count needs more than ``MAX_GRID`` CTAs is a ``RuntimeError`` naming the
+    record (``bwd_unweighted`` has no large-R window to bound it), so the grid of a routed launch, ``ceil(9 R / 4)``
+    CTAs, is never capped; the largest ``hi`` whose last row count fits is a route."""
+    fine = cake_jit.PROGRAM_OF["bwd_unweighted_fine"]["sm_100a"]
+    per_cta, per_row = cake_jit.cta_tasks(fine)
+    most = cake_jit.MAX_GRID * per_cta // (per_row * 148)  # the largest hi whose last row count fits the grid
+    for hi in (most, most + 1):
+        record = {**cake_jit.MODULES[fine], "rows_per_sm_windows": {"sm_100a": [[0, hi]]}}
+        monkeypatch.setitem(cake_jit.MODULES, fine, record)
+        uncapped = -(-hi * 148 * per_row // per_cta)
+        if hi == most:
+            assert cake_jit.fine("bwd_unweighted", "sm_100a", 148) == (hi * 148, fine)
+            assert cake_jit.grid(fine, hi * 148) == (uncapped, 1, 1) and uncapped <= cake_jit.MAX_GRID
+            continue
+        assert uncapped > cake_jit.MAX_GRID
+        pattern = f"{fine}: rows_per_sm_windows\\['sm_100a'\\] .* more than {cake_jit.MAX_GRID} CTAs"
+        with pytest.raises(RuntimeError, match=pattern):
+            cake_jit.fine("bwd_unweighted", "sm_100a", 148)
 
 
 def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monkeypatch) -> None:
@@ -1007,7 +1038,7 @@ def test_the_launcher_refuses_programs_that_take_another_order(role, host_device
     finally:
         pkg.parameters.cache_clear()
         pkg._plan.cache_clear()
-        pkg._route.cache_clear()
+        _clear_routes()
 
 
 def test_the_limit_check_and_its_cached_rounding(monkeypatch) -> None:

@@ -328,10 +328,11 @@ ALIGNMENT_BYTES = 2 * VECTOR_ELEMENTS
 # (``rows * 3`` passes ``2**31 - 1`` from 715,827,883 rows), and its grid, ``ceil(rows * 3 / 4)`` CTAs, stays below
 # ``2**31 - 1`` for every row count below this.
 MAX_ROWS = 2**31 - 256
-# The largest grid a launch takes (the bindings refuse a larger one).  A grid of ``ceil(9 rows / 4)`` CTAs (the
-# ``fwd_fine`` and ``bwd_unweighted_fine`` programs) passes it from about 954 M rows.  Those kernels count their tasks
-# and blocks in 64 bits and stride over the blocks by the grid, so :func:`grid` caps the grid here.  The route runs a
-# fine program only up to its window's last row count, far below that.
+# The largest grid a launch takes (the bindings refuse a larger one).  Below ``MAX_ROWS`` rows, every small-R and
+# large-R program and ``bwd_fine`` (``rows`` CTAs) stay below it.  A grid of ``ceil(9 rows / 4)`` CTAs (the
+# ``fwd_fine`` and ``bwd_unweighted_fine`` programs) passes it from about 954 M rows.  :func:`fine` refuses a window
+# whose last row count needs a larger grid, so a routed launch never reaches this cap.  Those two kernels count their
+# tasks and blocks in 64 bits and stride over the blocks by the grid, so :func:`grid` caps a launch of more rows here.
 MAX_GRID = 2**31 - 1
 
 
@@ -369,7 +370,8 @@ def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
     the program ``name``, the stage's fine role, ahead of :func:`route`.  Its record's ``rows_per_sm_windows[arch]``
     is one window ``[0, hi]`` with an integer ``hi >= 1``, so ``last = hi * sm_count``.  The window must end below
     the first window of the stage's large-R program (``hi`` below its ``lo``: ``last`` at most the first edge of
-    :func:`route`), so the fine program never takes a row count that :func:`route` gives the large-R one.  Without a
+    :func:`route`), so the fine program never takes a row count that :func:`route` gives the large-R one.  Its grid at
+    ``last`` rows must not pass :data:`MAX_GRID`, so a routed launch's grid is :func:`grid`'s, never capped.  Without a
     fine program on ``arch``, ``last`` is 0 (no launch runs it) and ``name`` is the stage's small-R program."""
     name = PROGRAM_OF[stage + FINE].get(arch)
     if name is None:
@@ -390,6 +392,12 @@ def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
         raise RuntimeError(
             f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} reaches the first large-R window of {stage!r}, "
             f"from {edges[0] + 1} rows on {sm_count} SMs"
+        )
+    per_cta, per_row = cta_tasks(name)
+    if -(-last * per_row // per_cta) > MAX_GRID:
+        raise RuntimeError(
+            f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} needs a grid of more than {MAX_GRID} CTAs at its last "
+            f"row count, {last} rows on {sm_count} SMs"
         )
     return last, name
 
@@ -415,7 +423,8 @@ def grid(name: str, rows: int) -> tuple[int, int, int]:
     """The launch grid of program ``name`` for ``rows >= 1`` rows: one CTA per block of ``per_cta`` of the
     ``rows * per_row`` tasks (:func:`cta_tasks`), ``ceil(rows * per_row / per_cta)`` CTAs on the x axis, at most
     :data:`MAX_GRID` (the kernels stride over the blocks from ``blockIdx.x``, so any row count fits one axis and a
-    smaller grid runs every task)."""
+    smaller grid runs every task).  Only a fine program launched at more rows than its window holds reaches the cap
+    (:func:`fine`), so the package's launches pass the uncapped count."""
     if rows < 1:
         raise ValueError(f"a launch needs at least one row, got {rows}")
     per_cta, per_row = cta_tasks(name)

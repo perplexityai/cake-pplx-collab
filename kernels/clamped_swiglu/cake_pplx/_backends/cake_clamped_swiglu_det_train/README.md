@@ -99,8 +99,10 @@ three architectures.  `fwd` and `bwd` also have a large-R program (role `fwd_lar
 (`rows_per_sm_windows`, `cake_jit.fine`).  At more rows it runs the large-R program when `R` lies in one of the
 large-R record's windows: `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (both bounds included), where `hi` None
 has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads the
-architecture once per device and the SM count once per stage and device.  Per call, the fine window costs one integer
-comparison.  An architecture without a fine or a large-R program of a stage runs the small-R one in its place.
+architecture once per device and the SM count once per stage and device.  Per stage and device it makes one table
+with an entry per row count up to the fine window's last row count or the last large-R edge, whichever is larger.  A
+call compares `R` with that table's length and reads one entry; a call of more rows runs the program of the last
+window.  An architecture without a fine or a large-R program of a stage runs the small-R one in its place.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
@@ -202,10 +204,12 @@ gate, the up (and `dh`), at the same columns.  The programs differ in their sche
 | `bwd_unweighted` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, load) tasks | the task's load |
 
 More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs, `ceil(3 R / 4)`
-CTAs in the small-R `bwd_unweighted` program, `ceil(9 R / 4)` CTAs (at most `2**31 - 1`, `cake_jit.MAX_GRID`) in
-`fwd_fine` and `bwd_unweighted_fine`, and `R` CTAs in `bwd_fine` (`cake_jit.grid`, from the launch block and
-`cake_jit.BUILD_OF`; the `bwd_unweighted`, `fwd_fine` and `bwd_unweighted_fine` kernels count their tasks in 64 bits and
-stride over the blocks).  A row or a task past `R` loads the last row and stores nothing.  The programs of a stage
+CTAs in the small-R `bwd_unweighted` program, `ceil(9 R / 4)` CTAs in `fwd_fine` and `bwd_unweighted_fine`, and `R` CTAs
+in `bwd_fine` (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`; the `bwd_unweighted`, `fwd_fine` and
+`bwd_unweighted_fine` kernels count their tasks in 64 bits and stride over the blocks).  No routed launch has more than
+`2**31 - 1` CTAs (`cake_jit.MAX_GRID`): `cake_jit.fine` refuses a fine window whose last row count needs more, and
+`cake_jit.grid` caps only a fine program launched at more rows than its window holds.  A row or a task past `R` loads
+the last row and stores nothing.  The programs of a stage
 compute each element with the same FP32 operations (the deep-gate sigmoid gives the fast one's bits wherever the fast
 one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's columns in
 load order with the same lanes.  In `bwd_fine`, warps 1 to 8 hand their `dh` words and activations to warp 0 in shared
@@ -295,6 +299,6 @@ the fills of those outputs.  The kernels write every element of every output, so
   under `torch.compile` or `torch.jit.trace`: a call that Dynamo or the tracer records launches its forward inside the
   autograd function's `forward`; a checkpoint's recomputation runs with Dynamo disabled.  No MXFP8 or FP4 output.
 - A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
-  does the weight, as an unweighted backward runs its own program.  Before capturing a CUDA graph, run an eager call of
+  does the weight, as an unweighted backward runs its own programs.  Before capturing a CUDA graph, run an eager call of
   each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the
   architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).
