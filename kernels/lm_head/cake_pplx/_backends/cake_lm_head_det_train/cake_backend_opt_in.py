@@ -141,8 +141,13 @@ from .cake_backend import (
     _device_constants,
     _EAGER_BASE,
     _EAGER_FORMED,
+    DX_CAST_FOLD_STAGE,
+    DX_FINALIZE_FOLD_STAGE,
     _dw_stream,
     _dx_keys,
+    _eager_fold_values,
+    _flat_cast_folds,
+    _flat_fold_values,
     _dx_reduce,
     _fold_values,
     _rlab_zero,
@@ -1646,11 +1651,15 @@ def stage_values(
             d_off=0,
         )
         return values
-    if stage == "scale_cast_scatter_bf16":
+    if stage in ("scale_cast_scatter_bf16", DX_FINALIZE_FOLD_STAGE):
         raise ValueError(
-            "scale_cast_scatter_bf16 is bound by finalize_dx at the dX output boundary, not by the chunk loop"
+            f"{stage} is bound by finalize_dx at the dX output boundary, not by the chunk loop"
         )
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage == DX_CAST_FOLD_STAGE and not (index == "dx" and _flat_cast_folds(plan)):
+        raise ValueError(
+            f"{stage} is the dX cast of an uncompacted plan with a cast-fold range"
+        )
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         if acc.numel() != out.numel() or acc.numel() % g.cast_vec:
@@ -1672,6 +1681,8 @@ def stage_values(
             last_chunk=0,
             d_off=0,
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(_flat_fold_values(plan, t))
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -1928,7 +1939,7 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
         )
         return values
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         values.update(
@@ -1936,6 +1947,8 @@ def _slot_values(stage: str, t: dict[str, Any], plan: Plan, index) -> dict[str, 
             g=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
             out=out.reshape(-1),
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(labels=t["labels"], rlab=t["rlab"], W=t["W"])
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -2043,7 +2056,7 @@ def _slot_values_temperature(
             src=t["X"], idx=t["row_index"][row0 : row0 + rows_c], out=t["x_c"][:rows_c]
         )
         return values
-    if stage in ("scale_cast_bf16", "scale_cast_f32"):
+    if stage in ("scale_cast_bf16", "scale_cast_f32", DX_CAST_FOLD_STAGE):
         acc = t["dx_acc"] if index == "dx" else t["dw_acc"]
         out = t["dx_out"] if index == "dx" else t["dw_out"]
         values.update(
@@ -2051,6 +2064,8 @@ def _slot_values_temperature(
             g=t["grad_scale"] if p.entry == "loss" else t["unit_scale"],
             out=out.reshape(-1),
         )
+        if stage == DX_CAST_FOLD_STAGE:
+            values.update(labels=t["labels"], rlab=t["rlab"], W=t["W"])
         return values
     row0, rows_c = plan.chunks[index]
     stop = row0 + rows_c
@@ -2264,7 +2279,10 @@ def cast_keys(plan: Plan) -> tuple[tuple[str, Any], ...]:
     compacted; the log-probability backward runs it inside :func:`recompute_keys` instead)."""
     keys: list[tuple[str, Any]] = []
     if plan.need_dx and plan.dx_cast:
-        keys.append(("scale_cast_bf16", "dx"))
+        # an uncompacted plan's cast folds the label residuals of its fold range (:func:`cast_fold_rows`)
+        keys.append(
+            (DX_CAST_FOLD_STAGE if _flat_cast_folds(plan) else "scale_cast_bf16", "dx")
+        )
     if (
         plan.need_dw and plan.dw_rows is None
     ):  # a ``dw_rows`` plan leaves its accumulator to the caller
@@ -5390,12 +5408,12 @@ def forward_loss(
                 common["need_dw"] = False
     # the exact loss of a zero-weight split: the chunk loop keeps its loss terms and hands their two buffers over
     terms: Optional[dict] = {} if exact else None
-    # the compact dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`): no
-    # fold-alone slab sum on those chunks; the result carries the fold operands to its dX finalize
-    # (``_cast_fold``: the autograd entry only, whose backward finalizes ``dx_acc`` with the result's ``dx_fold``; a
-    # direct call keeps every row of ``dx_acc`` final)
+    # the dX cast folds the label residuals of the one-slice chunks (:func:`.cake_backend.cast_fold_rows`): the compact
+    # scatter, or the flat cast of an uncompacted call; no fold-alone slab sum on those chunks; the result carries the
+    # fold operands to its dX finalize (``_cast_fold``: the autograd entry only, whose backward finalizes ``dx_acc``
+    # with the result's ``dx_fold``; a direct call keeps every row of ``dx_acc`` final)
     cast_fold = bool(
-        _cast_fold and backend == "cake" and fused_dx and row_index is not None
+        _cast_fold and backend == "cake" and (fused_dx or row_index is None)
     )
     fold_out: dict[str, Any] = {}
     cache = BINDING_CACHE
@@ -6166,12 +6184,17 @@ def scale_cast(
     *,
     backend: str = "cake",
     out: Optional[torch.Tensor] = None,
+    fold: Optional[dict[str, Any]] = None,
 ) -> torch.Tensor:
     """``cast(g * acc)`` into a new tensor of ``out_dtype`` (one rounding); ``acc`` is never written.
 
     The single fp32 -> output cast of the backward, for ``dW`` and ``dX`` alike
     (``g`` = the incoming scalar gradient, ``None`` = 1).  ``out`` (a contiguous tensor of ``acc``'s element count
     and ``out_dtype``, e.g. a row block of a larger ``dW``) receives the cast instead of a new tensor and is returned.
+    ``fold`` (:func:`.cake_backend.cast_fold_operands`; the ``cake`` backend only): the rows ``[lo, hi)`` of an
+    uncompacted ``[T, H]`` dX accumulator whose FP32 label residuals no slab sum folded: the BF16 cast's fold program
+    (:data:`.cake_backend.DX_CAST_FOLD_STAGE`) folds them before the scale, the bits of the fold-alone slab sum and the
+    cast (:func:`.cake_backend.scale_cast`).  ``None`` or an empty range: the cast without a fold operand.
     """
     if out_dtype not in GRAD_WEIGHT_DTYPES:
         raise ValueError("the cast produces bfloat16 or float32")
@@ -6190,18 +6213,41 @@ def scale_cast(
         )
     if acc.numel() == 0:
         return out
+    fold_lo, fold_hi = (0, 0) if fold is None else (int(fold["lo"]), int(fold["hi"]))
+    if fold_hi > fold_lo and (
+        out_dtype != torch.bfloat16
+        or acc.ndim != 2
+        or not 0 <= fold_lo <= fold_hi <= int(acc.shape[0])
+    ):
+        raise ValueError(
+            f"the fold rows [{fold_lo}, {fold_hi}) are not rows of the BF16 cast of a [T, H] accumulator"
+        )
     g = (
         _unit_scale(acc.device)
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
     if backend == "reference":
+        if fold_hi > fold_lo:
+            raise NotImplementedError(
+                "the reference backend folds the label residuals in the slab sum"
+            )
         out.reshape(-1).copy_(acc.reshape(-1) * g)
         return out
     module_name, record = record_for(acc.device)
     record_abi(record)
     geometry = Geometry.from_record(record)
-    stage = "scale_cast_f32" if out_dtype == torch.float32 else "scale_cast_bf16"
+    stage = (
+        DX_CAST_FOLD_STAGE
+        if fold_hi > fold_lo
+        else "scale_cast_f32"
+        if out_dtype == torch.float32
+        else "scale_cast_bf16"
+    )
+    if stage not in record:
+        raise NotImplementedError(
+            f"the registered program {module_name!r} lacks the stage {stage!r}"
+        )
     if acc.numel() % geometry.cast_vec:
         raise ValueError(f"the cast needs a multiple of {geometry.cast_vec} elements")
     index = (
@@ -6214,14 +6260,19 @@ def scale_cast(
     values.update(
         acc=acc.reshape(-1), g=g, out=out.reshape(-1), num_vecs=num_vecs, loss_div=1.0
     )
+    form: tuple = (_EAGER_FORMED, module_name, stage, int(index), num_vecs)
+    if fold_hi > fold_lo:
+        H = int(acc.shape[1])
+        if H % geometry.cast_vec:
+            raise ValueError(
+                f"the fold needs a row width of a multiple of {geometry.cast_vec} elements"
+            )
+        # the form also takes the row width and the head's rows; the fold rows are per-call slots
+        # (:data:`EAGER_CALL_SCALARS`)
+        values.update(_eager_fold_values(fold, H), row_vecs=H // geometry.cast_vec)
+        form += (int(values["row_vecs"]), int(values["V"]))
     launch, arguments = _eager_launch(
-        record,
-        module_name,
-        stage,
-        values,
-        acc.device,
-        geometry,
-        form=(_EAGER_FORMED, module_name, stage, int(index), num_vecs),
+        record, module_name, stage, values, acc.device, geometry, form=form
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6250,10 +6301,11 @@ def scale_cast_scatter(
     candidate compact row for every output row and would have none.
 
     ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
-    residuals no slab sum folded (:func:`cast_fold_rows`).  The cast reads such a row's ``acc``, folds
-    ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a nonzero residual -- the fold-alone
-    slab sum's arithmetic and predicate -- and then scales and rounds it: the bits of the slab sum's FP32 store cast
-    as before.  ``None``: no row folds (the kernel reads no fold operand)."""
+    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
+    nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
+    of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
+    fold operand (``scale_cast_scatter_bf16``) runs."""
     if acc.dtype != torch.float32 or acc.ndim != 2 or not acc.is_contiguous():
         raise ValueError("the accumulator must be a contiguous FP32 [T_v, H] tensor")
     T_v, H = (int(s) for s in acc.shape)
@@ -6310,7 +6362,8 @@ def scale_cast_scatter(
     module_name, record = record_for(acc.device)
     record_abi(record)
     geometry = Geometry.from_record(record)
-    stage = "scale_cast_scatter_bf16"
+    # the fold program when a row folds, else the program without a fold operand
+    stage = DX_FINALIZE_FOLD_STAGE if fold_hi > fold_lo else "scale_cast_scatter_bf16"
     if stage not in record:
         raise NotImplementedError(
             f"the registered program {module_name!r} lacks the stage {stage!r}"
@@ -6338,48 +6391,14 @@ def scale_cast_scatter(
         num_rows=num_rows,
         loss_div=1.0,
     )
+    # the form: the output rows and the row width, and with a fold the head's rows; the fold rows are per-call slots
+    # (:data:`EAGER_CALL_SCALARS`)
+    form: tuple = (_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows)
     if fold_hi > fold_lo:
-        labels_f, rlab_f, W_f = fold["labels"], fold["rlab"], fold["W"]
-        if (
-            labels_f.dtype != torch.int64
-            or rlab_f.dtype != torch.float32
-            or W_f.dtype != torch.bfloat16
-            or labels_f.numel() < fold_hi
-            or rlab_f.numel() < fold_hi
-            or W_f.ndim != 2
-            or int(W_f.shape[1]) != H
-            or not (
-                labels_f.is_contiguous()
-                and rlab_f.is_contiguous()
-                and W_f.is_contiguous()
-            )
-        ):
-            raise ValueError(
-                "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
-            )
-        V_f = int(W_f.shape[0])
-        values.update(
-            labels=labels_f,
-            rlab=rlab_f,
-            W=W_f,
-            V=V_f,
-            fold_lo=fold_lo,
-            fold_hi=fold_hi,
-        )
-    else:
-        # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
-        V_f = 0
-        values.update(labels=row_index, rlab=acc, W=out, V=0, fold_lo=0, fold_hi=0)
-    # the form: the output rows, the row width and the fold's head rows (``V``, 0 without a fold); the fold rows are
-    # per-call slots (:data:`EAGER_CALL_SCALARS`)
+        values.update(_eager_fold_values(fold, H))
+        form += (int(values["V"]),)
     launch, arguments = _eager_launch(
-        record,
-        module_name,
-        stage,
-        values,
-        acc.device,
-        geometry,
-        form=(_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows, V_f),
+        record, module_name, stage, values, acc.device, geometry, form=form
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6404,12 +6423,15 @@ def finalize_dx(
     behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
     (zero fill + ``index_copy_``).  All three produce the same bits.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
-    folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
+    (:func:`scale_cast_scatter`) or, every row valid, the flat cast (:func:`scale_cast`) folds the label residuals of
+    the rows no slab sum folded; the flat cast of compacted rows without the mask takes none."""
     if fold is not None and int(fold["hi"]) > int(fold["lo"]):
-        if row_index is None or row_valid is None:
-            raise ValueError("only the compact scatter cast folds label residuals")
+        if row_index is not None and row_valid is None:
+            raise ValueError(
+                "label residuals fold in the compact scatter cast or in the flat cast of every row"
+            )
     if row_index is None:
-        return scale_cast(acc, grad, torch.bfloat16, backend=backend)
+        return scale_cast(acc, grad, torch.bfloat16, backend=backend, fold=fold)
     if num_rows is None:
         raise ValueError("finalize_dx needs num_rows (the caller's T) with row_index")
     if row_valid is None:

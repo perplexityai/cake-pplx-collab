@@ -52,7 +52,7 @@ __device__ __forceinline__ int make_warp_uniform(int x) {
 extern "C" {
 
 __global__ __launch_bounds__(256) void
-kernel_cake_lm_head_det_loss_275a488848d6bb32998f(float* __restrict__ acc, float* __restrict__ g, int* __restrict__ scan, int* __restrict__ idx_lo, __nv_bfloat16* __restrict__ out, int row_vecs, int num_rows, long long* __restrict__ labels, float* __restrict__ rlab, __nv_bfloat16* __restrict__ W, int V, int fold_lo, int fold_hi)
+kernel_cake_lm_head_det_loss_275a488848d6bb32998f(float* __restrict__ acc, float* __restrict__ g, int* __restrict__ scan, int* __restrict__ idx_lo, __nv_bfloat16* __restrict__ out, int row_vecs, int num_rows)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -79,23 +79,6 @@ kernel_cake_lm_head_det_loss_275a488848d6bb32998f(float* __restrict__ acc, float
         int owner = _vec_load_0[0];
         unsigned long long row_in = (unsigned long long)src * vecs64;
         unsigned long long row_out = (unsigned long long)r * vecs64;
-        int in_fold = ((src >= fold_lo) ? 1 : 0);
-        if (src >= fold_hi) {
-            in_fold = 0;
-        }
-        if (owner != r) {
-            in_fold = 0;
-        }
-        long long fy = -1ll;
-        float fr = 0.0f;
-        if (in_fold != 0) {
-            fy = labels[src];
-            fr = rlab[src];
-        }
-        int live = (((unsigned long long)fy < (unsigned long long)V) ? 1 : 0);
-        if (fr == 0.0f) {
-            live = 0;
-        }
         #pragma unroll 2
         for (int c = tid; c < row_vecs; c += 256) {
             unsigned long long off = (unsigned long long)c * 8ull;
@@ -118,47 +101,8 @@ kernel_cake_lm_head_det_loss_275a488848d6bb32998f(float* __restrict__ acc, float
             float o[8];
             #pragma unroll
             for (int j = 0; j < 4; j++) {
-                o[j] = _vec_load_1[j];
-                o[j + 4] = _vec_load_2[j];
-            }
-            if (live != 0) {
-                unsigned int words[4];
-                {
-                    uint4 _uv4_2 = *reinterpret_cast<const uint4*>(W + ((unsigned long long)fy * (unsigned long long)row_vecs + (unsigned long long)c) * 8ull + 0);
-                    words[0 + 0] = _uv4_2.x;
-                    words[0 + 1] = _uv4_2.y;
-                    words[0 + 2] = _uv4_2.z;
-                    words[0 + 3] = _uv4_2.w;
-                }
-                float _fma_3;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_3) : "f"(fr), "f"(__uint_as_float(words[0] << 16)), "f"(o[0]));
-                o[0] = _fma_3;
-                float _fma_4;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_4) : "f"(fr), "f"(__uint_as_float(words[0] & 4294901760u)), "f"(o[1]));
-                o[1] = _fma_4;
-                float _fma_5;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_5) : "f"(fr), "f"(__uint_as_float(words[1] << 16)), "f"(o[2]));
-                o[2] = _fma_5;
-                float _fma_6;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_6) : "f"(fr), "f"(__uint_as_float(words[1] & 4294901760u)), "f"(o[3]));
-                o[3] = _fma_6;
-                float _fma_7;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_7) : "f"(fr), "f"(__uint_as_float(words[2] << 16)), "f"(o[4]));
-                o[4] = _fma_7;
-                float _fma_8;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_8) : "f"(fr), "f"(__uint_as_float(words[2] & 4294901760u)), "f"(o[5]));
-                o[5] = _fma_8;
-                float _fma_9;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_9) : "f"(fr), "f"(__uint_as_float(words[3] << 16)), "f"(o[6]));
-                o[6] = _fma_9;
-                float _fma_10;
-                asm("fma.rn.f32 %0, %1, %2, %3;" : "=f"(_fma_10) : "f"(fr), "f"(__uint_as_float(words[3] & 4294901760u)), "f"(o[7]));
-                o[7] = _fma_10;
-            }
-            #pragma unroll
-            for (int j_1 = 0; j_1 < 4; j_1++) {
-                o[j_1] = ((owner == r) ? scale * o[j_1] : zero);
-                o[j_1 + 4] = ((owner == r) ? scale * o[j_1 + 4] : zero);
+                o[j] = ((owner == r) ? scale * _vec_load_1[j] : zero);
+                o[j + 4] = ((owner == r) ? scale * _vec_load_2[j] : zero);
             }
             unsigned int _packed_0[4];
             #pragma unroll

@@ -129,6 +129,8 @@ from .cake_backend import (
     _device_constants,
     _EAGER_BASE,
     _EAGER_FORMED,
+    DX_FINALIZE_FOLD_STAGE,
+    _eager_fold_values,
     _dw_stream,
     _evict,
     DX_BASES,
@@ -4949,10 +4951,11 @@ def scale_cast_scatter(
     candidate compact row for every output row and would have none.
 
     ``fold`` (:func:`cast_fold_operands`; the ``cake`` backend only): the compact rows ``[lo, hi)`` whose FP32 label
-    residuals no slab sum folded (:func:`cast_fold_rows`).  The cast reads such a row's ``acc``, folds
-    ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a nonzero residual -- the fold-alone
-    slab sum's arithmetic and predicate -- and then scales and rounds it: the bits of the slab sum's FP32 store cast
-    as before.  ``None``: no row folds (the kernel reads no fold operand)."""
+    residuals no slab sum folded (:func:`cast_fold_rows`).  The fold program (:data:`DX_FINALIZE_FOLD_STAGE`) reads
+    such a row's ``acc``, folds ``fma(rlab[r], f32(W[labels[r]]), acc)`` on a row of a label in ``[0, V)`` and a
+    nonzero residual -- the fold-alone slab sum's arithmetic and predicate -- and then scales and rounds it: the bits
+    of the slab sum's FP32 store cast as before.  ``None`` or an empty range: no row folds, and the program without a
+    fold operand (``scale_cast_scatter_bf16``) runs."""
     if acc.dtype != torch.float32 or acc.ndim != 2 or not acc.is_contiguous():
         raise ValueError("the accumulator must be a contiguous FP32 [T_v, H] tensor")
     T_v, H = (int(s) for s in acc.shape)
@@ -5009,7 +5012,8 @@ def scale_cast_scatter(
     module_name, record = record_for(acc.device)
     record_abi(record)
     geometry = Geometry.from_record(record)
-    stage = "scale_cast_scatter_bf16"
+    # the fold program when a row folds, else the program without a fold operand
+    stage = DX_FINALIZE_FOLD_STAGE if fold_hi > fold_lo else "scale_cast_scatter_bf16"
     if stage not in record:
         raise NotImplementedError(
             f"the registered program {module_name!r} lacks the stage {stage!r}"
@@ -5037,48 +5041,14 @@ def scale_cast_scatter(
         num_rows=num_rows,
         loss_div=1.0,
     )
+    # the form: the output rows and the row width, and with a fold the head's rows; the fold rows are per-call slots
+    # (:data:`EAGER_CALL_SCALARS`)
+    form: tuple = (_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows)
     if fold_hi > fold_lo:
-        labels_f, rlab_f, W_f = fold["labels"], fold["rlab"], fold["W"]
-        if (
-            labels_f.dtype != torch.int64
-            or rlab_f.dtype != torch.float32
-            or W_f.dtype != torch.bfloat16
-            or labels_f.numel() < fold_hi
-            or rlab_f.numel() < fold_hi
-            or W_f.ndim != 2
-            or int(W_f.shape[1]) != H
-            or not (
-                labels_f.is_contiguous()
-                and rlab_f.is_contiguous()
-                and W_f.is_contiguous()
-            )
-        ):
-            raise ValueError(
-                "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
-            )
-        V_f = int(W_f.shape[0])
-        values.update(
-            labels=labels_f,
-            rlab=rlab_f,
-            W=W_f,
-            V=V_f,
-            fold_lo=fold_lo,
-            fold_hi=fold_hi,
-        )
-    else:
-        # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
-        V_f = 0
-        values.update(labels=row_index, rlab=acc, W=out, V=0, fold_lo=0, fold_hi=0)
-    # the form: the output rows, the row width and the fold's head rows (``V``, 0 without a fold); the fold rows are
-    # per-call slots (:data:`EAGER_CALL_SCALARS`)
+        values.update(_eager_fold_values(fold, H))
+        form += (int(values["V"]),)
     launch, arguments = _eager_launch(
-        record,
-        module_name,
-        stage,
-        values,
-        acc.device,
-        geometry,
-        form=(_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows, V_f),
+        record, module_name, stage, values, acc.device, geometry, form=form
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
