@@ -24,6 +24,7 @@ import contextlib
 import functools
 import gc
 import inspect
+import json
 import math
 import os
 import re
@@ -17034,3 +17035,132 @@ def test_device_eager_default_forward_is_the_fast_form(glm_weight):
             assert mplan is not None and mplan.fits, mplan
         else:
             assert mplan is None, (mode, mplan)
+
+
+def test_device_graph_rlab_fast_switch_restores_the_stream(monkeypatch):
+    """The graphs' label residuals (``_graph_rlab_tensor``) switch to the holding stream with torch's own
+    ``set_stream`` call on the tensor's current device: the caller's current device and stream are the same after the
+    call, the block lies in the holding stream's segment, the tensor is zero-filled when asked, and the caller's stream
+    object kept for ``record_stream`` is the caller's stream.  Another current device takes the ``torch.cuda.stream``
+    context, with the same segment."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+
+    def segment_stream(t):
+        ptr = t.data_ptr()
+        for seg in torch.cuda.memory_snapshot():
+            if seg["device"] == index and 0 <= ptr - seg["address"] < seg["total_size"]:
+                return seg["stream"]
+        raise AssertionError(f"no segment holds {ptr:#x}")
+
+    caller = torch.cuda.Stream(device=device)
+    held = []
+    for zero, other_device in ((True, False), (False, False), (True, True)):
+        if other_device:
+            monkeypatch.setattr(cake_backend, "_CUDA_GET_DEVICE", lambda: index + 1)
+        with torch.cuda.stream(caller):
+            t = cake_backend._graph_rlab_tensor(300, zero, device)
+            assert torch.cuda.current_device() == index
+            assert torch.cuda.current_stream(index) == caller
+            if zero:
+                assert int(torch.count_nonzero(t)) == 0
+        held.append(t)
+    caller.synchronize()
+    holding = cake_backend._RLAB_STREAMS[index]
+    assert all(segment_stream(t) == holding.cuda_stream for t in held)
+    kept = cake_backend._RLAB_CALLERS[index]
+    assert kept[0] == (caller.stream_id, caller.device_index, caller.device_type)
+    assert kept[1] == caller
+
+
+_RLAB_PLACEMENT_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from torch.utils._python_dispatch import TorchDispatchMode
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+if {context!r}:
+    be._CUDA_SET_STREAM = None  # the torch.cuda.stream context
+real, held, rows = be._graph_rlab_tensor, [], []
+
+
+def logged(n, zero, device):
+    t = real(n, zero, device)
+    held.append(t.data_ptr())
+    return t
+
+
+be._graph_rlab_tensor = logged
+
+
+class Log(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        r = func(*args, **(kwargs or {{}}))
+        for t in r if isinstance(r, (tuple, list)) else (r,):
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                rows.append([str(func), list(t.shape), t.data_ptr()])
+        return r
+
+
+W = make_inputs(1, seed={seed}, device="cuda", ignore_frac=0.0).W
+for T in (32, 16, 256, 32, 1):
+    inp = make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
+    with Log():
+        lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
+        torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
+        del lps
+    torch.cuda.synchronize()
+segs = torch.cuda.memory_snapshot()
+stream = be._RLAB_STREAMS[torch.cuda.current_device()].cuda_stream
+in_holding = [
+    any(s["stream"] == stream and 0 <= p - s["address"] < s["total_size"] for s in segs)
+    for p in held
+]
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, in_holding=in_holding)))
+"""
+
+
+def test_device_graph_rlab_fast_switch_placement(glm_weight, tmp_path):
+    """The fast holding-stream switch places every block as the ``torch.cuda.stream`` context does: two fresh
+    processes run the same log-probability forwards (two graphs alive at a time) and backwards at 32, 16, 256, 32 and
+    1 rows, one with each switch, and every CUDA tensor an operator returns -- the compact rows, the logits, the
+    statistics, every buffer of the forward and the backward -- and every graph's label residuals lie at the same
+    address in both, the residuals in the holding stream's segment."""
+    _require_program(entry="logprob")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(
+        os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    got = {}
+    for context in (False, True):
+        script = _RLAB_PLACEMENT_SCRIPT.format(
+            root=root,
+            package="cake_lm_head_det_train",
+            entry="cake_lm_head_det_train_logprob",
+            seed=SEED,
+            context=context,
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert proc.returncode == 0, (
+            f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("PLACEMENT ")][-1]
+        got[context] = json.loads(line[len("PLACEMENT ") :])
+    fast, context = got[False], got[True]
+    assert fast["held"] and all(fast["in_holding"]) and all(context["in_holding"])
+    assert fast["held"] == context["held"]
+    assert len(fast["rows"]) == len(context["rows"])
+    for a, b in zip(fast["rows"], context["rows"], strict=True):
+        assert a == b

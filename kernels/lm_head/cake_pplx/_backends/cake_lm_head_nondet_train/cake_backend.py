@@ -11995,6 +11995,14 @@ def _logprob_vm_eligible(
 # the streams the graphs' label residuals are allocated on (:func:`_graph_rlab_tensor`), one per device
 _RLAB_STREAMS: dict[int, torch.cuda.Stream] = {}
 _SMALL_BLOCK_BYTES = 1 << 20  # the caching allocator's small-pool request limit
+# torch's own current-device and current-stream accessors under ``torch.cuda.current_stream`` / ``torch.cuda.stream``,
+# without their Python stream objects and device lookups (:func:`_graph_rlab_tensor`); ``None`` on a build without them
+_CUDA_GET_DEVICE = getattr(torch._C, "_cuda_getDevice", None)
+_CUDA_GET_STREAM = getattr(torch._C, "_cuda_getCurrentStream", None)
+_CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
+# per device, the caller's stream of the last graph allocation: its ``(stream_id, device_index, device_type)`` and its
+# stream object (``record_stream`` takes one)
+_RLAB_CALLERS: dict[int, tuple[tuple, torch.cuda.Stream]] = {}
 
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:
@@ -12006,7 +12014,13 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
     buffers keep the placement they have without the held tensor.  The tensor is marked as used on the caller's
     stream (``record_stream``), so its block is reused only after that stream's work on it, and the zero fill runs on
     the caller's stream as before.  Same values, same launches; the holding stream runs no work.  Under a CUDA graph
-    capture, or above the small-pool limit, it is an ordinary allocation on the caller's stream."""
+    capture, or above the small-pool limit, it is an ordinary allocation on the caller's stream.
+
+    On the tensor's own current device the stream switch is torch's ``set_stream`` call itself
+    (:data:`_CUDA_SET_STREAM`), around the one request, and the caller's stream object is the one kept from the
+    previous call on that stream: the allocator sees the same request on the same stream as under
+    ``torch.cuda.stream``, so the block -- and every later block -- is placed as before.  Another current device takes
+    the ``torch.cuda.stream`` context."""
     if (
         rows * 4 > _SMALL_BLOCK_BYTES
         or device.type != "cuda"
@@ -12021,9 +12035,37 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
         stream = _RLAB_STREAMS.setdefault(
             index, torch.cuda.Stream(device=torch.device("cuda", index))
         )
-    current = torch.cuda.current_stream(index)
-    with torch.cuda.stream(stream):
-        held = torch.empty((rows,), dtype=torch.float32, device=device)
+    if (
+        _CUDA_SET_STREAM is None
+        or _CUDA_GET_STREAM is None
+        or _CUDA_GET_DEVICE is None
+        or _CUDA_GET_DEVICE() != index
+    ):
+        current = torch.cuda.current_stream(index)
+        with torch.cuda.stream(stream):
+            held = torch.empty((rows,), dtype=torch.float32, device=device)
+    else:
+        caller = _CUDA_GET_STREAM(index)
+        _CUDA_SET_STREAM(
+            stream_id=stream.stream_id,
+            device_index=index,
+            device_type=stream.device_type,
+        )
+        try:
+            held = torch.empty((rows,), dtype=torch.float32, device=device)
+        finally:
+            _CUDA_SET_STREAM(
+                stream_id=caller[0], device_index=caller[1], device_type=caller[2]
+            )
+        kept = _RLAB_CALLERS.get(index)
+        if kept is None or kept[0] != caller:
+            kept = _RLAB_CALLERS[index] = (
+                caller,
+                torch.cuda.Stream(
+                    stream_id=caller[0], device_index=caller[1], device_type=caller[2]
+                ),
+            )
+        current = kept[1]
     held.record_stream(current)
     if zero:
         held.zero_()
