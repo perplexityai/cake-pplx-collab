@@ -6684,7 +6684,10 @@ _NVJET_FREE_ROWS = {
     }
     | {(K, N, T) for K, N in ((6144, 32), (6144, 128), (8192, 128)) for T in _GLM},
 }
-K1_DGRAD_NVJET_ROWS = {
+#: :data:`K1_DGRAD_NVJET_RULES_BY_SM` of version 0.3.15: the lean program on ``_NVJET_ROWS`` less the rows a part
+#: leaves to the other tables, the lean_free program on the part's ``_NVJET_FREE_ROWS`` (over the lean entry of the
+#: same key).  Version 0.3.16 takes out the keys of ``NONDET_DET_PLAN_0316`` (``K1_DGRAD_NVJET_ROWS``).
+K1_DGRAD_NVJET_ROWS_0315 = {
     ("sm_100a", 148): {
         **{(*r, "bf16"): _NVJET for r in _NVJET_ROWS - _NVJET_SM100_KEPT},
         **{(*r, "bf16"): _NVJET_FREE for r in _NVJET_FREE_ROWS[("sm_100a", 148)]},
@@ -6697,6 +6700,41 @@ K1_DGRAD_NVJET_ROWS = {
     ("sm_107a", 212): {
         (*r, "bf16"): _NVJET_FREE for r in _NVJET_FREE_ROWS[("sm_107a", 212)]
     },
+}
+#: The BF16 input-gradient keys version 0.3.16 leaves to the deterministic plan, ``(arch, SM count, K, N, T) ->
+#: (template, program)``: the key's entry of version 0.3.15 in :data:`K1_DGRAD_NVJET_RULES_BY_SM` (the nvjet program)
+#: and in :data:`K1_DGRAD_RULES_BY_SM` (the deterministic program under it; ``None``: none).  In version 0.3.16 neither
+#: table holds the key, and the call binds the deterministic plan: on the 152-SM ``sm_103a`` part ``4096 -> 32``,
+#: ``4096 -> 64``, ``5120 -> 32``, ``5120 -> 64`` and ``6144 -> 32`` (indexer_hw) at 16172, 16231 and 16384 tokens, on
+#: the 148-SM ``sm_100a`` part ``5120 -> 32`` at those token counts and ``4096 -> 64``, ``5120 -> 64`` and
+#: ``6144 -> 32`` at 16384 tokens; the 152-SM ``sm_100a`` part keeps every key.
+NONDET_DET_PLAN_0316 = {
+    ("sm_103a", 152, 4096, 32, 16172): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_103a", 152, 4096, 32, 16231): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_103a", 152, 4096, 32, 16384): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_103a", 152, 4096, 64, 16172): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_103a", 152, 4096, 64, 16231): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_103a", 152, 4096, 64, 16384): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_103a", 152, 5120, 32, 16172): (_NVJET_FREE, "kn_n256_tma1_w8r"),
+    ("sm_103a", 152, 5120, 32, 16231): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_103a", 152, 5120, 32, 16384): (_NVJET_FREE, None),
+    ("sm_103a", 152, 5120, 64, 16172): (_NVJET_FREE, None),
+    ("sm_103a", 152, 5120, 64, 16231): (_NVJET, None),
+    ("sm_103a", 152, 5120, 64, 16384): (_NVJET_FREE, None),
+    ("sm_103a", 152, 6144, 32, 16172): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+    ("sm_103a", 152, 6144, 32, 16231): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+    ("sm_103a", 152, 6144, 32, 16384): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 148, 4096, 64, 16384): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 148, 5120, 32, 16172): (_NVJET_FREE, "kn_n256_tma1_w8r"),
+    ("sm_100a", 148, 5120, 32, 16231): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 148, 5120, 32, 16384): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 148, 5120, 64, 16384): (_NVJET_FREE, None),
+    ("sm_100a", 148, 6144, 32, 16384): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
+}
+#: :data:`K1_DGRAD_NVJET_RULES_BY_SM`: the tables of version 0.3.15 less the keys of ``NONDET_DET_PLAN_0316``.
+K1_DGRAD_NVJET_ROWS = {
+    part: {key: t for key, t in rows.items() if (*part, *key[:3]) not in NONDET_DET_PLAN_0316}
+    for part, rows in K1_DGRAD_NVJET_ROWS_0315.items()
 }
 _KD, _KD_TMA, _KD_TMA_LEAN_FREE = (
     "dense_proj_gemm_dgrad_kn_n256_f32_ef",
@@ -15594,12 +15632,153 @@ K1_DGRAD_PROGRAMS = {
     "kn_n256_tma1_w8r": "bf16",
     "kn_n256_tma1_w8rs": "bf16",
 }
-#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM`.
+#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` (version 0.3.16 takes out the BF16 entries under the keys of
+#: ``NONDET_DET_PLAN_0316``: 5 on the 148-SM ``sm_100a`` part, 11 on the 152-SM ``sm_103a`` part; version 0.3.15:
+#: ``K1_DGRAD_ROW_COUNTS_0315``).
 K1_DGRAD_ROW_COUNTS = {
+    ("sm_100a", 148): 69,
+    ("sm_100a", 152): 66,
+    ("sm_103a", 152): 56,
+    ("sm_107a", 212): 9,
+}
+#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` in version 0.3.15.
+K1_DGRAD_ROW_COUNTS_0315 = {
     ("sm_100a", 148): 74,
     ("sm_100a", 152): 66,
     ("sm_103a", 152): 67,
     ("sm_107a", 212): 9,
+}
+#: :data:`K1_DGRAD_RULES_BY_SM` of version 0.3.15, BF16 and FP32 out, entry for entry.
+# fmt: off
+K1_DGRAD_RULES_ROWS_0315 = {
+    ("sm_100a", 148): {
+        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7",
+        (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7",
+        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8r",
+        (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (5120, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
+        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16384, "bf16"): "kn_n256_tma1_w8rs", (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (8192, 128, 16172, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (8192, 128, 16231, "bf16"): "kn_n256_tma1_w8rs", (8192, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+    },
+    ("sm_100a", 152): {
+        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16172, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (8192, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+    },
+    ("sm_103a", 152): {
+        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
+        (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
+        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
+        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 64, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (6144, 128, 16384, "bf16"): "kn_n256_tma1_w8rs", (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (8192, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+    },
+    ("sm_107a", 212): {
+        (4096, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1", (4096, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1",
+        (4096, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1",
+        (5120, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1",
+        (6144, 32, 16172, "bf16"): "kn_n256_tma2_pd2_lw_pro15", (6144, 32, 16231, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
+        (6144, 32, 16384, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
+    },
+}
+# fmt: on
+#: :data:`K1_DGRAD_RULES_BY_SM`: the table of version 0.3.15 less its BF16 entries under the keys of
+#: ``NONDET_DET_PLAN_0316`` (16 of them; the other 5 keys had none).
+K1_DGRAD_RULES_ROWS = {
+    part: {
+        key: program
+        for key, program in rows.items()
+        if key[3] != "bf16" or (*part, *key[:3]) not in NONDET_DET_PLAN_0316
+    }
+    for part, rows in K1_DGRAD_RULES_ROWS_0315.items()
 }
 #: The measured token counts of the input-gradient and named forward rows.
 K1_SCREEN_TOKENS = (16172, 16231, 16384)
@@ -15625,10 +15804,12 @@ def test_k1_dgrad_rules_by_sm():
     counts only, on the measured parts, each naming a program of the deterministic package
     for its output dtype; the deterministic planner turns the knobs of each row (:func:`k1_program_knobs`) into exactly
     that program, with whole output tiles (no stream-K units).  :func:`k1_dgrad_knobs` keys exactly: another part,
-    token count, row or output dtype gets no knobs (the deterministic plan)."""
+    token count, row or output dtype gets no knobs (the deterministic plan).  The table is ``K1_DGRAD_RULES_ROWS``,
+    entry for entry."""
     table = cake_backend.K1_DGRAD_RULES_BY_SM
     assert set(table) == set(K1_DGRAD_PARTS)
     assert {part: len(rows) for part, rows in table.items()} == K1_DGRAD_ROW_COUNTS
+    assert table == K1_DGRAD_RULES_ROWS
     bf16 = torch.bfloat16
     for (arch, sms), rows in table.items():
         for (K, N, T, dt), program in rows.items():
@@ -16464,6 +16645,35 @@ def _k1_dgrad_bf16_table(arch, sms, K, N, T):
     return None
 
 
+def _nondet_tables_0315(m):
+    """Put this package's input-gradient entries of version 0.3.15 back (``m``: a monkeypatch context; applying it
+    again in a nested context is a no-op): each key of ``NONDET_DET_PLAN_0316`` with its nvjet program in
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` and, where it had one, its deterministic program in :data:`K1_DGRAD_RULES_BY_SM`.
+    Outside these keys the tables of version 0.3.16 are those of version 0.3.15
+    (``test_nondet_tables_0315_are_the_tables_of_0_3_15``)."""
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0316.items():
+        key = (K, N, T, "bf16")
+        m.setitem(cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[(arch, sms)], key, template)
+        if program is not None:
+            m.setitem(cake_backend.K1_DGRAD_RULES_BY_SM[(arch, sms)], key, program)
+
+
+def _nondet_dgrad_tables_0315_whole(m):
+    """Set this package's four input-gradient tables whole to those of version 0.3.15 from the mirrors of this module,
+    not from the live tables (``m``: a monkeypatch context; copies, so a test may change them):
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``K1_DGRAD_NVJET_ROWS_0315``, :data:`K1_DGRAD_RULES_BY_SM` to
+    ``K1_DGRAD_RULES_ROWS_0315`` and the two tables version 0.3.16 keeps, :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` to
+    ``K1_DGRAD_PROGRAM_ROWS`` and :data:`K1_DGRAD_PROMO_RANGES_BY_SM` to the range of ``K1_DGRAD_PROMO_ROWS``."""
+    promo = {("sm_100a", 148): {(K, N, "bf16"): ((16172, 16384, "l2_256b"),) for K, N in K1_DGRAD_PROMO_ROWS}}
+    for name, table in (
+        ("K1_DGRAD_PROGRAM_RULES_BY_SM", K1_DGRAD_PROGRAM_ROWS),
+        ("K1_DGRAD_NVJET_RULES_BY_SM", K1_DGRAD_NVJET_ROWS_0315),
+        ("K1_DGRAD_RULES_BY_SM", K1_DGRAD_RULES_ROWS_0315),
+        ("K1_DGRAD_PROMO_RANGES_BY_SM", promo),
+    ):
+        m.setattr(cake_backend, name, {part: dict(rows) for part, rows in table.items()})
+
+
 def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
     """The start-path ranges version 0.3.12 of the deterministic package added (BF16 input gradients on the parts of
     ``DET_START_0312_PARTS``), as this package runs them.  At the ends and the middle of each range, one token count
@@ -16472,8 +16682,10 @@ def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
     ``sm_103a`` part has no table) the call binds the plan it bound with the ranges of version 0.3.11
     (``_det_tables_0311``), field for field, also inside a range: the entry's form is a caller-forced form, so the
     deterministic planner reads the row's rule without its part tables there.  Elsewhere the call binds the
-    deterministic plan: inside a range the range form's program, outside the plan of version 0.3.11."""
+    deterministic plan: inside a range the range form's program, outside the plan of version 0.3.11.  This package's
+    tables are those of version 0.3.15 (``_nondet_tables_0315``), whose keys the counts below pin."""
     _det_tables_0312(monkeypatch)  # the ranges of version 0.3.12: version 0.3.13 is checked below
+    _nondet_tables_0315(monkeypatch)  # this package's tables of version 0.3.15: version 0.3.16 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     for name in (
@@ -16844,8 +17056,10 @@ def test_k1_rows_follow_the_deterministic_raster_cells_of_0_3_13(monkeypatch):
     field for field: the entry's form is a caller-forced form, so the deterministic planner reads the row's rule
     without its part tables there, raster group included.  Elsewhere the call binds the deterministic plan: at a cell
     (``4096 -> 32`` on 152-SM ``sm_103a`` parts and ``5120 -> 32`` on 152-SM ``sm_100a`` parts at 32768 tokens)
-    ``kn_n256_tma1_w8relf`` in the cell's raster group, next to it the plan of version 0.3.12."""
+    ``kn_n256_tma1_w8relf`` in the cell's raster group, next to it the plan of version 0.3.12.  This package's tables
+    are those of version 0.3.15 (``_nondet_tables_0315``), which hold the two cells pinned below."""
     _det_tables_0313(monkeypatch)  # the ranges of version 0.3.13: the 128-column start-path ranges are checked below
+    _nondet_tables_0315(monkeypatch)  # this package's tables of version 0.3.15: version 0.3.16 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     _cpu_k1_launches(monkeypatch, "sm_103a")
@@ -16989,8 +17203,10 @@ def test_k1_rows_follow_the_deterministic_128_column_programs(monkeypatch):
     deterministic plan, the 128-column program in the range's K step and raster group, another template than with the
     ranges of version 0.3.13.  The held and followed cells per part: on 152-SM ``sm_103a`` parts and 148-SM
     ``sm_100a`` parts every row is held at 16172, 16231 and 16384 tokens; on 152-SM ``sm_100a`` parts 13 cells are
-    held and ``5120 -> 64`` follows at 16172 and 16384; the 148-SM ``sm_103a`` part has no table of this package."""
+    held and ``5120 -> 64`` follows at 16172 and 16384; the 148-SM ``sm_103a`` part has no table of this package.
+    This package's tables are those of version 0.3.15 (``_nondet_tables_0315``)."""
     _det_tables_0313(monkeypatch)  # the ranges of version 0.3.13 around the injected range
+    _nondet_tables_0315(monkeypatch)  # this package's tables of version 0.3.15: version 0.3.16 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     _cpu_k1_launches(monkeypatch, "sm_103a")
@@ -17185,8 +17401,10 @@ def test_k1_rows_follow_the_deterministic_tile_cells_of_0_3_14(monkeypatch):
     caller-forced form, so the deterministic planner reads the row's rule without its part tables there.  Elsewhere the
     call binds the deterministic plan, the 128-column program in the range's K step and raster group, another template
     than with the ranges of version 0.3.13.  Which cells this package's tables hold follows from those tables (at 16172,
-    16231 and 16384 tokens on the 152-SM parts and the 148-SM ``sm_100a`` part); the counts are pinned below."""
+    16231 and 16384 tokens on the 152-SM parts and the 148-SM ``sm_100a`` part); the counts are pinned below, with
+    this package's tables of version 0.3.15 (``_nondet_tables_0315``)."""
     _det_tables_0314(monkeypatch)  # the ranges of version 0.3.14: version 0.3.15 is checked below
+    _nondet_tables_0315(monkeypatch)  # this package's tables of version 0.3.15: version 0.3.16 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     _cpu_k1_launches(monkeypatch, "sm_103a")
@@ -17475,6 +17693,370 @@ def test_gpu_k1_rows_follow_the_deterministic_tile_cells_of_0_3_15(record_proper
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     print(f"DET_TILE_0315 cells {arch} sm_count={sms}: {ran} rows ran, {followed} on the deterministic plan")
     assert ran and followed
+
+
+#: The 11 BF16 input-gradient rows ``(K, N)`` whose keys at 16172, 16231 and 16384 tokens the round of version 0.3.16
+#: judged on the parts that hold them: ``4096 -> 32 / 48 / 64 / 128``, ``5120 -> 32 / 48 / 64 / 128``,
+#: ``8192 -> 128``, the indexer_hw ``6144 -> 32`` and the indexer_k ``6144 -> 128``.
+NONDET_ROWS_0316 = (
+    (4096, 32),
+    (4096, 48),
+    (4096, 64),
+    (4096, 128),
+    (5120, 32),
+    (5120, 48),
+    (5120, 64),
+    (5120, 128),
+    (8192, 128),
+    (6144, 32),
+    (6144, 128),
+)
+#: The keys of ``NONDET_ROWS_0316`` at 16172, 16231 and 16384 tokens this package's tables hold per part, ``(in version
+#: 0.3.15, in version 0.3.16)``.
+NONDET_ROW_KEYS_0316 = {
+    ("sm_103a", 152): (33, 18),
+    ("sm_100a", 148): (33, 27),
+    ("sm_100a", 152): (30, 30),
+}
+
+
+def test_nondet_tables_0315_are_the_tables_of_0_3_15(monkeypatch):
+    """``_nondet_tables_0315`` puts back exactly the input-gradient entries version 0.3.16 took out: with it
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` is ``K1_DGRAD_NVJET_ROWS_0315`` and :data:`K1_DGRAD_RULES_BY_SM` is
+    ``K1_DGRAD_RULES_ROWS_0315`` (the mirrors of version 0.3.15, entry for entry), the other two input-gradient tables
+    stay as they are, and all four are the tables ``_nondet_dgrad_tables_0315_whole`` sets.  The live tables are those
+    of version 0.3.16 (``K1_DGRAD_NVJET_ROWS``, ``K1_DGRAD_RULES_ROWS``); the two versions differ at the keys of
+    ``NONDET_DET_PLAN_0316`` alone, each holding there its entries of version 0.3.15 (the nvjet program at each key, the
+    deterministic program at the 16 keys that had one).  Applying the rollback again in a nested context changes
+    nothing; leaving a context restores the tables of version 0.3.16."""
+    names = (
+        "K1_DGRAD_NVJET_RULES_BY_SM",
+        "K1_DGRAD_RULES_BY_SM",
+        "K1_DGRAD_PROGRAM_RULES_BY_SM",
+        "K1_DGRAD_PROMO_RANGES_BY_SM",
+    )
+
+    def tables():
+        return tuple({p: dict(t) for p, t in getattr(cake_backend, name).items()} for name in names)
+
+    live = tables()
+    assert live[:2] == (K1_DGRAD_NVJET_ROWS, K1_DGRAD_RULES_ROWS)
+    assert {p: len(t) for p, t in live[1].items()} == K1_DGRAD_ROW_COUNTS
+    with monkeypatch.context() as m:
+        _nondet_tables_0315(m)
+        was = tables()
+        with monkeypatch.context() as again:
+            _nondet_tables_0315(again)
+            assert tables() == was
+        assert tables() == was
+    assert tables() == live
+    assert was[:2] == (K1_DGRAD_NVJET_ROWS_0315, K1_DGRAD_RULES_ROWS_0315) and was[2:] == live[2:]
+    assert {p: len(t) for p, t in was[1].items()} == K1_DGRAD_ROW_COUNTS_0315
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0315_whole(m)
+        assert tables() == was
+    assert tables() == live
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0316.items():
+        what = (arch, sms, K, N, T)
+        assert K1_DGRAD_NVJET_ROWS_0315[(arch, sms)][(K, N, T, "bf16")] == template, what
+        assert K1_DGRAD_RULES_ROWS_0315[(arch, sms)].get((K, N, T, "bf16")) == program, what
+    for now, before, programs in ((live[0], was[0], False), (live[1], was[1], True)):
+        assert set(now) == set(before)
+        for part in now:
+            changed = {k for k in {*now[part], *before[part]} if now[part].get(k) != before[part].get(k)}
+            want = {
+                (K, N, T, "bf16")
+                for (arch, sms, K, N, T), (_, program) in NONDET_DET_PLAN_0316.items()
+                if (arch, sms) == part and (program is not None or not programs)
+            }
+            assert changed == want and not changed & set(now[part]), (part, programs, sorted(changed))
+    assert sum(program is not None for _, program in NONDET_DET_PLAN_0316.values()) == 16
+
+
+def test_k1_dgrad_tables_of_0_3_16(monkeypatch):
+    """The keys version 0.3.16 leaves to the deterministic plan (``NONDET_DET_PLAN_0316``): 15 on the 152-SM ``sm_103a``
+    part and 6 on the 148-SM ``sm_100a`` part, each a key of the round's rows (``NONDET_ROWS_0316``) at 16172, 16231 or
+    16384 tokens that version 0.3.15 held on the lean or lean_free nvjet program, which no table of this package holds
+    now (``_k1_dgrad_bf16_table``).  The backend's per-part sets ``_NVJET_DGRAD_DET_PLAN_ROWS`` hold exactly these keys
+    (the 152-SM ``sm_100a`` part an empty set), and the nvjet table holds 38 / 26 / 31 / 33 keys per part (44 / 26 /
+    46 / 33 in version 0.3.15).  Of the round's keys the tables held 33 on the 152-SM ``sm_103a`` and the 148-SM
+    ``sm_100a`` part and 30 on the 152-SM ``sm_100a`` part; they keep all but those of ``NONDET_DET_PLAN_0316``
+    (``NONDET_ROW_KEYS_0316``)."""
+    parts = {}
+    for arch, sms, K, N, T in NONDET_DET_PLAN_0316:
+        what = (arch, sms, K, N, T)
+        parts.setdefault((arch, sms), set()).add((K, N, T))
+        assert (K, N) in NONDET_ROWS_0316 and T in _GLM, what
+        assert (K, N, T, "bf16") in K1_DGRAD_NVJET_ROWS_0315[(arch, sms)], what
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+    assert {part: len(keys) for part, keys in parts.items()} == {("sm_103a", 152): 15, ("sm_100a", 148): 6}
+    assert cake_backend._NVJET_DGRAD_DET_PLAN_ROWS == {
+        ("sm_100a", 148): frozenset(parts[("sm_100a", 148)]),
+        ("sm_100a", 152): frozenset(),
+        ("sm_103a", 152): frozenset(parts[("sm_103a", 152)]),
+    }
+    nvjet_counts = {("sm_100a", 148): 38, ("sm_100a", 152): 26, ("sm_103a", 152): 31, ("sm_107a", 212): 33}
+    assert {part: len(rows) for part, rows in K1_DGRAD_NVJET_ROWS.items()} == nvjet_counts
+    assert {part: len(rows) for part, rows in K1_DGRAD_NVJET_ROWS_0315.items()} == {
+        ("sm_100a", 148): 44,
+        ("sm_100a", 152): 26,
+        ("sm_103a", 152): 46,
+        ("sm_107a", 212): 33,
+    }
+
+    def held(part):
+        return {
+            (K, N, T) for K, N in NONDET_ROWS_0316 for T in _GLM if _k1_dgrad_bf16_table(*part, K, N, T) is not None
+        }
+
+    now = {part: held(part) for part in NONDET_ROW_KEYS_0316}
+    with monkeypatch.context() as m:
+        _nondet_tables_0315(m)
+        before = {part: held(part) for part in NONDET_ROW_KEYS_0316}
+    assert {part: (len(before[part]), len(now[part])) for part in now} == NONDET_ROW_KEYS_0316
+    for part in now:
+        assert now[part] <= before[part] and before[part] - now[part] == parts.get(part, set()), part
+
+
+def _k1_dgrad_entry(G, W, out):
+    """The cached entry the input-gradient entry point binds for ``(G, W, out)`` (CPU views, nothing launched)."""
+    cake_backend._K1_DET_CACHE.clear()
+    assert cake_backend.cake_dense_gemm_nondet_train_projection_dgrad(G, W, out) is out
+    ((key, entry),) = cake_backend._K1_DET_CACHE.items()
+    assert key[2][0] == ("dgrad",) and entry.k1 is not None
+    return entry
+
+
+def test_k1_dgrad_det_plan_keys_of_0_3_16_bind_the_deterministic_plan(monkeypatch):
+    """At each key of ``NONDET_DET_PLAN_0316`` on its part (CPU views, the part's device facts, nothing launched): no
+    table of this package routes the input gradient (``_k1_table_call`` gives ``None``: no nvjet program, no knobs), the
+    entry point binds the deterministic package's plan of the row field for field, on that package's program, and the
+    generic prepare is the deterministic package's prepared launch of that plan -- the launch the round timed as the
+    deterministic plan.  With the tables of version 0.3.15 (``_nondet_tables_0315``) the same call bound the key's
+    nvjet program on the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, another plan, and the generic prepare named that
+    table."""
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    nvjet_knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    checked = 0
+    for (arch, sms, K, N, T), (template, _) in sorted(NONDET_DET_PLAN_0316.items()):
+        what = (arch, sms, K, N, T)
+        G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+        out = torch.empty(T, K, dtype=bf16)
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            assert cake_backend._k1_table_call(G, W, out, False) is None, what
+            assert cake_backend._k1_dgrad_nvjet_of(G, W, out) is None, what
+            assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+            plan = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+            entry = _k1_dgrad_entry(G, W, out)
+            assert entry.plan == plan and entry.module_name is None, (what, entry.plan.template, plan.template)
+            prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+            det_prepared = det_backend.cake_dense_gemm_det_train_projection_prepare(G, W, out)
+            assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+            assert prepared.plan == det_prepared.plan == plan, what
+            assert prepared.module_name == det_prepared.module_name, what
+            with monkeypatch.context() as before_tables:
+                _nondet_tables_0315(before_tables)
+                held = _k1_dgrad_entry(G, W, out)
+                assert held.module_name == cake_jit.KERNELS[arch][template], what
+                assert held.plan == det_backend._k1_plan(G, W, out, transposed_out=False, knobs=nvjet_knobs)[0], what
+                assert held.plan.template == prefix + cake_backend.K1_DGRAD_NVJET_DET_PROGRAM, what
+                assert held.plan != plan, what
+                routed = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+                assert isinstance(routed, cake_backend.CakeDenseGemmNondetProgramLaunch), what
+                assert (routed.table, routed.template, routed.own) == (
+                    "K1_DGRAD_NVJET_RULES_BY_SM",
+                    template,
+                    True,
+                ), what
+        checked += 1
+    assert checked == len(NONDET_DET_PLAN_0316) == 21
+
+
+def test_k1_dgrad_kept_keys_of_0_3_16_bind_their_program(monkeypatch):
+    """Every BF16 input-gradient key this package held in version 0.3.15 on the 148-SM ``sm_100a`` and the 152-SM
+    ``sm_100a`` and ``sm_103a`` parts, but those of ``NONDET_DET_PLAN_0316``, keeps its entry and its program (CPU
+    views, the part's device facts, nothing launched): a key of ``K1_DGRAD_NVJET_ROWS_0315`` binds its nvjet program on
+    the deterministic package's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, a key of ``K1_DGRAD_RULES_ROWS_0315`` alone
+    the deterministic package's plan of the knobs of its program, that program.  44, 47 and 37 keys."""
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    nvjet_knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    rules_0315 = {
+        part: {key: program for key, program in rows.items() if key[3] == "bf16"}
+        for part, rows in K1_DGRAD_RULES_ROWS_0315.items()
+    }
+    counts = {}
+    for part in (("sm_100a", 148), ("sm_100a", 152), ("sm_103a", 152)):
+        arch, sms = part
+        nvjet, rules = K1_DGRAD_NVJET_ROWS_0315[part], rules_0315[part]
+        dropped = {(K, N, T, "bf16") for a, s, K, N, T in NONDET_DET_PLAN_0316 if (a, s) == part}
+        kept = sorted({*nvjet, *rules} - dropped)
+        with monkeypatch.context() as m:
+            facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+            m.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+            m.setattr(det_backend, "require_arch", lambda device, a=arch: a)
+            for key in kept:
+                K, N, T, _ = key
+                what = (part, key)
+                G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+                out = torch.empty(T, K, dtype=bf16)
+                entry = _k1_dgrad_entry(G, W, out)
+                if key in nvjet:
+                    assert cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[part][key] == nvjet[key], what
+                    assert entry.module_name == cake_jit.KERNELS[arch][nvjet[key]], what
+                    want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=nvjet_knobs)[0]
+                    assert entry.plan == want, (what, entry.plan.template)
+                else:
+                    program = rules[key]
+                    assert cake_backend.K1_DGRAD_RULES_BY_SM[part][key] == program, what
+                    knobs = dict(cake_backend.k1_program_knobs(program))
+                    want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=knobs)[0]
+                    assert entry.module_name is None and entry.plan == want, (what, entry.plan.template)
+                    assert entry.plan.template == prefix + program, (what, entry.plan.template)
+        counts[part] = len(kept)
+    assert counts == {("sm_100a", 148): 44, ("sm_100a", 152): 47, ("sm_103a", 152): 37}, counts
+
+
+def test_k1_dgrad_routes_of_0_3_16_change_at_its_keys_alone(monkeypatch):
+    """The input-gradient routing of version 0.3.16 against that of version 0.3.15 over every part of this package's
+    input-gradient tables of either version and the 148-SM ``sm_103a`` part, every row ``(K, N)`` of their keys (BF16
+    and FP32 out) and of the promotion ranges, BF16 and FP32 ``out`` at each, and the token sweep of every token count
+    of those keys and range ends, one below and one above each and 16300 (CPU views, the part's device facts, nothing
+    planned or launched).  Version 0.3.15 is the four input-gradient tables set whole from the mirrors of this module
+    (``_nondet_dgrad_tables_0315_whole``), not built from the live tables, so a change of a live table outside the keys
+    below shows here.  The route -- the table and key ``_k1_table_call`` names, this package's input-gradient program,
+    its nvjet program and the knobs it hands the deterministic planner -- differs exactly at the keys of
+    ``NONDET_DET_PLAN_0316``, BF16 out, on their part and at their token count: there version 0.3.16 routes to no table
+    (the deterministic plan) and version 0.3.15 to the key's nvjet program, with the knobs of its deterministic program
+    where it had one.  Every other part, row, token count and output dtype routes as in version 0.3.15."""
+    _cpu_k1_launches(monkeypatch, "sm_103a")
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    bf16, f32 = torch.bfloat16, torch.float32
+    base = det_backend.device_facts()
+    facts = {"part": base}
+    monkeypatch.setattr(det_backend, "device_facts", lambda device=None: facts["part"])
+    monkeypatch.setattr(det_backend, "require_arch", lambda device: facts["part"].arch)
+    tables = ("K1_DGRAD_PROGRAM_RULES_BY_SM", "K1_DGRAD_NVJET_RULES_BY_SM", "K1_DGRAD_RULES_BY_SM")
+
+    def sweep():
+        """The parts, rows and token counts of the current tables (each token count with one below and above)."""
+        promo = cake_backend.K1_DGRAD_PROMO_RANGES_BY_SM
+        keys = {key for name in tables for rows in getattr(cake_backend, name).values() for key in rows}
+        ranges = {(K, N, lo, hi) for rows in promo.values() for (K, N, _), spans in rows.items() for lo, hi, _ in spans}
+        return (
+            {part for name in tables for part in getattr(cake_backend, name)} | set(promo),
+            {(K, N) for K, N, _, _ in keys} | {(K, N) for K, N, _, _ in ranges},
+            {T + d for _, _, T, _ in keys for d in (-1, 0, 1)}
+            | {T + d for _, _, lo, hi in ranges for T in (lo, hi) for d in (-1, 0, 1)},
+        )
+
+    live = sweep()
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0315_whole(m)
+        was = sweep()
+    parts = sorted(live[0] | was[0] | {("sm_103a", 148)})
+    rows = sorted(live[1] | was[1])
+    tokens = sorted(live[2] | was[2] | {16300})
+
+    def routes():
+        got = {}
+        for K, N in rows:
+            W = torch.empty(N, K, dtype=bf16)
+            for T in tokens:
+                G = torch.empty(T, N, dtype=bf16)
+                for dt, dtype in (("bf16", bf16), ("f32", f32)):
+                    out = torch.empty(T, K, dtype=dtype)
+                    for arch, sms in parts:
+                        facts["part"] = dataclasses.replace(base, arch=arch, sm_count=sms)
+                        call = cake_backend._k1_table_call(G, W, out, False)
+                        got[(arch, sms, K, N, T, dt)] = (
+                            None if call is None else call[:2],
+                            cake_backend._k1_dgrad_program_of(G, W, out),
+                            cake_backend._k1_dgrad_nvjet_of(G, W, out),
+                            cake_backend._k1_dgrad_knobs_of(G, W, out),
+                        )
+        return got
+
+    now = routes()
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0315_whole(m)
+        before = routes()
+    assert set(now) == set(before) and len(now) == 2 * len(parts) * len(rows) * len(tokens)
+    changed = {where for where, route in now.items() if route != before[where]}
+    assert changed == {(*key, "bf16") for key in NONDET_DET_PLAN_0316}, sorted(changed)
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0316.items():
+        where = (arch, sms, K, N, T, "bf16")
+        assert now[where] == (None, None, None, ()), (where, now[where])
+        assert before[where] == (
+            ("K1_DGRAD_NVJET_RULES_BY_SM", (K, N, T, "bf16")),
+            None,
+            cake_jit.KERNELS[arch][template],
+            cake_backend.k1_program_knobs(program) if program else (),
+        ), (where, before[where])
+    # the sweep reaches the routes of every part that has one
+    assert {where[:2] for where, route in now.items() if route[0] is not None} == set(parts) - {("sm_103a", 148)}
+
+
+def test_gpu_k1_dgrad_det_plan_keys_of_0_3_16_run_the_deterministic_plan(record_property):
+    """On a part with keys of ``NONDET_DET_PLAN_0316``: the BF16 input gradient of each key through this package's entry
+    point binds the deterministic package's plan of the row (no table of this package holds the key) and meets the
+    naive BF16 tier against FP64 over the draws, the first draw launched ``1 + RERUNS`` times into NaN-poisoned outputs.
+    On the last draw's operands the entry point's output and the generic prepared launch's equal the deterministic
+    package's output bit for bit; the first key's call runs a program of the deterministic package (by kernel name).
+    Another part skips."""
+    device, arch, sms = _part_or_skip()
+    keys = sorted((K, N, T) for a, s, K, N, T in NONDET_DET_PLAN_0316 if (a, s) == (arch, sms))
+    if not keys:
+        pytest.skip(f"no key of version 0.3.16 left to the deterministic plan on {arch} with {sms} SMs")
+    dgrad = cake_backend.cake_dense_gemm_nondet_train_projection_dgrad
+    ran = 0
+    for K, N, T in keys:
+        what = f"dgrad {K} {N} {T} bf16"
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        v = _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_bf16_det_plan_0316",
+            SEED + 189,
+            device,
+            dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.bfloat16,
+        )
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None and entry.module_name is None, what
+        G, W = v.ops
+        want = det_backend._k1_plan(G, W, v.out, transposed_out=False, knobs={})[0]
+        assert entry.plan == want, (what, entry.plan.template, want.template)
+        # the same bits as the deterministic package on the last draw's operands
+        det_out = torch.full_like(v.out, float("nan"))
+        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
+        prepared_out = torch.full_like(v.out, float("nan"))
+        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, prepared_out)
+        assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+        assert prepared.plan == want and prepared.launch() is prepared_out, what
+        v.out.fill_(float("nan"))
+        assert dgrad(G, W, v.out) is v.out
+        torch.cuda.synchronize()
+        bits = det_out.view(torch.int16)
+        assert torch.equal(v.out.view(torch.int16), bits), what
+        assert torch.equal(prepared_out.view(torch.int16), bits), what
+        if not ran:
+            _assert_ran_det(lambda G=G, W=W, out=v.out: dgrad(G, W, out))
+        ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"NONDET_DET_PLAN_0316 {arch} sm_count={sms}: {ran} keys ran the deterministic plan")
+    assert ran == len(keys)
 
 
 def test_k1_program_knobs_are_planner_keywords(monkeypatch):
@@ -18394,7 +18976,7 @@ _K1_PROGRAM_TABLE_ROWS = (
     ("K1_FORWARD_PROGRAM_RULES_BY_SM", ("sm_103a", 152), (4096, 512, 16172)),
     ("K1_FORWARD_RULES_BY_SM", ("sm_103a", 152), (4096, 512, 2048)),
     ("K1_DGRAD_PROGRAM_RULES_BY_SM", ("sm_100a", 148), (6144, 576, 16172, "f32")),
-    ("K1_DGRAD_NVJET_RULES_BY_SM", ("sm_103a", 152), (4096, 32, 16231, "bf16")),
+    ("K1_DGRAD_NVJET_RULES_BY_SM", ("sm_103a", 152), (4096, 32, 9472, "bf16")),
     ("K1_DGRAD_RULES_BY_SM", ("sm_100a", 152), None),
     ("K1_WGRAD_SK_RULES_BY_SM", ("sm_103a", 152), (5120, 1024, 16172, "bf16")),
 )
