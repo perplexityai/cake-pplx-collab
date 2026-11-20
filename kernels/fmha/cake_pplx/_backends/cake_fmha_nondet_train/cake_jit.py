@@ -311,7 +311,7 @@ PAIR_REGIONS: dict[str, dict[bool, tuple[tuple[int, int | None, int], ...]]] = {
     "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048),)},
     "sm_107a": {
         False: ((4, 4, 1024), (1, 4, 2048), (1, None, 4096)),
-        True: ((1, 1, 1024), (1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
+        True: ((1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
     },
 }
 # Architecture -> mask -> the least ``length`` of its regions, or None (no region): a call with fewer keys takes the

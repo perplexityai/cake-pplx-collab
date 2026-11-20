@@ -64,7 +64,7 @@ The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
 |---|---|---|
 | `sm_100a` | `B * H` 1: `Skv >= 4096`; `B * H <= 4`: `Skv >= 8192`; `B * H >= 128`: `Skv >= 8192` | none |
 | `sm_103a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 8192` | `B * H <= 4`: `Skv >= 2048` |
-| `sm_107a` | `B * H` 4: `Skv >= 1024`; `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 4096` | `B * H` 1: `Skv >= 1024`; `B * H <= 4`: `Skv >= 2048`; `B * H <= 16`: `Skv >= 4096`; any `B * H`: `Skv >= 8192` |
+| `sm_107a` | `B * H` 4: `Skv >= 1024`; `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 4096` | `B * H <= 4`: `Skv >= 2048`; `B * H <= 16`: `Skv >= 4096`; any `B * H`: `Skv >= 8192` |
 
 ## Kernels
 
