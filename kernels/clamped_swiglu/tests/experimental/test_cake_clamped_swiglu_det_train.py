@@ -62,8 +62,11 @@ the steps' bits and raise when differentiated; inputs the kernels can read are r
 gradient passed as both halves' tensors with the up's column offset 2304, no view), others copied once; every binding
 refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
 refused, before any copy, allocation or launch; the one-pass checks of the common call give the launches of the full
-checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to 1, as its ignored weight,
-also when the process's first unweighted forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
+checks, and every call they leave to the full checks (each refusal class, a tensor subclass, inputs to copy, no rows)
+gives what it gives without them; the common call passes the row strides of its contiguous tensors as constants; one
+launcher per stage and device serves every call; every unweighted forward launch of a device passes one cached FP32
+buffer, set to 1, as its ignored weight, made by the first unweighted forward (no weighted call or backward makes it),
+also when that forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
 FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output,
 and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
@@ -242,8 +245,9 @@ def _manifest_or_skip() -> dict:
 
 
 def _fresh_launchers(patch: pytest.MonkeyPatch) -> None:
-    """The test (or the ``patch`` context) gets its own cache of launchers (``pkg._launcher``): the launchers it makes
-    use its patched route, FFI entries or device, and none of them outlives it or reaches another test."""
+    """The test (or the ``patch`` context) gets its own cache of launchers (``pkg._launcher``, which every launch of
+    the entry points reads, the common call's too): the launchers it makes use its patched route, FFI entries or
+    device, hold their own FFI entries and ignored weight, and none of them outlives it or reaches another test."""
     patch.setattr(pkg, "_launcher", functools.cache(LAUNCHER))
 
 
@@ -543,7 +547,7 @@ def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
     assert layouts == BUILDS
 
 
-def test_argument_plans_are_the_kernel_parameters() -> None:
+def test_argument_plans_are_the_kernel_parameters_then_the_column_offsets() -> None:
     """Each record takes its kernel's parameters in order (tensors as buffers, scalars as parameters), then the
     column offsets of ``up`` (and ``d_up``) as parameters, then the grid; the host names every one of them."""
     for name, record in cake_jit.MODULES.items():
@@ -1158,7 +1162,7 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
 def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     """Row counts 1 to 4097 and each edge of the device's windows of each stage and one row past it, both layouts, a
     strided layout, weighted and unweighted calls and three limits load one library per program they run, once: no
-    recompilation (``rows``, ``limit``, the weight flag and the strides are launch arguments)."""
+    recompilation (``rows``, ``limit``, the weight flag, the strides and the column offsets are launch arguments)."""
     edges = sorted({edge for stage in WINDOWED for edge in _device_edges(stage, device.index)})
     cases = [Case(1), Case(4097), Case(3, "merged", "none", L=7.3), Case(129, "strided", L=1.5), Case(2)]
     cases += [Case(rows, "merged") for edge in edges for rows in (edge, edge + 1)]
@@ -1259,7 +1263,7 @@ def _bwd_with_weight_flag_0(t: types.SimpleNamespace, name: str, device) -> tupl
         "gate": t.gate,
         "up": t.up,
         "dh": t.dh,
-        "w": pkg._ignored_weight(device.index),
+        "w": pkg._launcher("fwd", device.index).ignored_weight(),
         "d_gate": d_gate,
         "d_up": d_up,
         "d_weight": torch.empty(t.R, dtype=torch.float32, device=device),
@@ -1689,11 +1693,11 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout, device, launches) -> None:
     """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted forward
-    in the process before (only a weighted call and an eager unweighted backward, which load the libraries; the ignored
-    weight's cache is cleared): the capture makes the device's cached FP32 buffer, the captured forward passes it as its
-    ignored weight and the captured backward runs ``bwd_unweighted``, which takes no weight, weight flag or weight
-    gradient; later eager unweighted forwards pass the same buffer, and each replay on new inputs copied into the
-    captured tensors gives the bits of eager calls."""
+    through the device's launchers before (fresh launchers; only a weighted call and an eager unweighted backward,
+    which load the libraries and make no ignored weight): the capture makes the device's cached FP32 buffer, the
+    captured forward passes it as its ignored weight and the captured backward runs ``bwd_unweighted``, which takes no
+    weight, weight flag or weight gradient; later eager unweighted forwards pass the same buffer, and each replay on new
+    inputs copied into the captured tensors gives the bits of eager calls."""
     R = 129
     step_outputs(forward, backward, make_inputs(Case(R, layout), seed=70, device=device))
     warm = make_inputs(Case(R, layout, "none"), seed=69, device=device)
@@ -1705,15 +1709,16 @@ def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout,
     h = torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
     d_first = torch.empty(R, WIDTH if second is not None else 2 * WIDTH, dtype=torch.bfloat16, device=device)
     d_up = None if second is None else torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
-    pkg._ignored_weight.cache_clear()
+    assert pkg._launcher("fwd", first.get_device()).weight is None  # a weighted call makes no ignored weight
     launches.clear()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         forward(first, second, None, limit=a.L, out=h)
         backward(dh, first, second, None, limit=a.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
     assert [stage for stage, _, _ in launches] == ["fwd", "bwd_unweighted"]
-    cached = pkg._ignored_weight(first.get_device())
-    assert cached.dtype == torch.float32 and tuple(cached.shape) == (1,) and cached.device == first.device
+    cached = pkg._launcher("fwd", first.get_device()).weight
+    assert cached is not None and cached.dtype == torch.float32 and tuple(cached.shape) == (1,)
+    assert cached.device == first.device
     (_, _, fwd_values), (_, _, bwd_values) = launches
     assert fwd_values["weighted"] == 0 and fwd_values["w"] is cached
     assert tuple(bwd_values) == PARAMETERS["bwd_unweighted"]
@@ -1935,12 +1940,13 @@ def _launch_facts(launched: list, caller: set[int]) -> list:
 
 
 @pytest.mark.parametrize("w", ["random", "none"])
-@pytest.mark.parametrize("rows", [1, 33, 4097])
+@pytest.mark.parametrize("rows", [1, 2, 33, 4097])
 def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, launches, monkeypatch) -> None:
     """With the one-pass checks of the common call on and off (``_FAST_CHECKS``), every layout (merged, two tensors,
     row slices of wider buffers, rows the host copies), with new and with preallocated outputs, gives the same launches
     (each tensor's dtype, shape, strides, storage offset and memory, the caller's or new; every scalar) and the same
-    output bits.  With them on, a merged or two-tensor call of contiguous tensors runs no full check of any tensor."""
+    output bits.  With them on, a merged or two-tensor call of contiguous tensors runs no full check of any tensor: the
+    forward and the backward step each check and launch it in one frame."""
     checked: list = []
     check_tensor = pkg._check_tensor
 
@@ -1992,6 +1998,218 @@ def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, l
                 assert (got is None) == (want is None), what
                 if got is not None:
                     assert_same_bits(got, want, what)
+
+
+class _Subclass(torch.Tensor):
+    """A tensor subclass: the full checks take it (``isinstance``), the one-pass checks leave it to them (exact
+    types)."""
+
+
+def _odd_calls(t: types.SimpleNamespace, device) -> dict:
+    """Calls the one-pass checks of the common call leave to the full checks, each the plain call ``t`` with one
+    argument changed (``(first, second, weight, dh, out, grads)``, ``grads`` the backward's output keywords): refused
+    for a type, a dtype, a device, a shape, an output rule or the row count, or valid and launched by the full checks
+    (a tensor subclass, a non-contiguous or misaligned input, which is copied, a row slice of a wider output, no
+    rows)."""
+    first, second, weight, dh = t.first, t.second, t.weight, t.dh
+    merged, rows, cols = second is None, t.R, t.first.shape[1]
+
+    def misaligned(x: torch.Tensor) -> torch.Tensor:
+        buffer = torch.empty(x.numel() + 8, dtype=x.dtype, device=x.device)
+        view = buffer[1 : 1 + x.numel()].view(x.shape)
+        view.copy_(x)
+        return view
+
+    def many(x: torch.Tensor) -> torch.Tensor:
+        return x[:1].expand(cake_jit.MAX_ROWS, *x.shape[1:])
+
+    calls = {
+        "plain": (first, second, weight, dh, None, {}),
+        "an FP16 first operand": (first.half(), second, weight, dh, None, {}),
+        "an FP32 dh": (first, second, weight, dh.float(), None, {}),
+        "a 3-D first operand": (first[None], second, weight, dh, None, {}),
+        "a first operand of another width": (first[:, :-8], second, weight, dh, None, {}),
+        "a list as the first operand": ([1.0], second, weight, dh, None, {}),
+        "dh one row short": (first, second, weight, dh[:-1], None, {}),
+        "dh on the CPU": (first, second, weight, dh.cpu(), None, {}),
+        "a subclass first operand": (first.as_subclass(_Subclass), second, weight, dh, None, {}),
+        "a subclass dh": (first, second, weight, dh.as_subclass(_Subclass), None, {}),
+        "a misaligned first operand and dh": (misaligned(first), second, weight, misaligned(dh), None, {}),
+        "no rows": (
+            first[:0],
+            None if merged else second[:0],
+            None if weight is None else weight[:0],
+            dh[:0],
+            None,
+            {},
+        ),
+        "too many rows": (
+            many(first),
+            None if merged else many(second),
+            None if weight is None else many(weight),
+            many(dh),
+            None,
+            {},
+        ),
+        "an out of another shape": (first, second, weight, dh, torch.empty_like(dh)[:-1], {}),
+        "a row slice of a wider out": (
+            first,
+            second,
+            weight,
+            dh,
+            torch.empty(rows, WIDTH + 16, dtype=torch.bfloat16, device=device)[:, 8 : 8 + WIDTH],
+            {"grad_gate_up_or_gate": torch.empty(rows, cols + 16, dtype=torch.bfloat16, device=device)[:, 8:-8]},
+        ),
+        "a gradient of another shape": (
+            first,
+            second,
+            weight,
+            dh,
+            None,
+            {"grad_gate_up_or_gate": torch.empty(rows + 1, cols, dtype=torch.bfloat16, device=device)},
+        ),
+    }
+    if merged:
+        calls["a grad_up with a merged input"] = (first, second, weight, dh, None, {"grad_up": torch.empty_like(dh)})
+    else:
+        calls["an up one row short"] = (first, second[:-1], weight, dh, None, {})
+        calls["an FP32 up"] = (first, second.float(), weight, dh, None, {})
+        calls["a subclass up"] = (first, second.as_subclass(_Subclass), weight, dh, None, {})
+    if weight is None:
+        grad_weight = torch.empty(rows, device=device)
+        calls["a grad_weight without a weight"] = (first, second, None, dh, None, {"grad_weight": grad_weight})
+    else:
+        calls["a weight on the CPU"] = (first, second, weight.cpu(), dh, None, {})
+        calls["a BF16 weight"] = (first, second, weight.bfloat16(), dh, None, {})
+        calls["a weight one row short"] = (first, second, weight[:-1], dh, None, {})
+        calls["a subclass weight"] = (first, second, weight.as_subclass(_Subclass), dh, None, {})
+        strided = torch.empty(2 * rows, device=device)[::2]
+        strided.copy_(weight)
+        calls["a strided weight"] = (first, second, strided, dh, None, {})
+        calls["a grad_weight of another length"] = (
+            first,
+            second,
+            weight,
+            dh,
+            None,
+            {"grad_weight": torch.empty(rows + 1, device=device)},
+        )
+    return calls
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_one_pass_checks_leave_every_other_call_to_the_full_checks(layout, w, device, launches, monkeypatch) -> None:
+    """Each kind of call the one-pass checks do not take (:func:`_odd_calls`: a type, a dtype, a device, a shape, an
+    output rule or ``R >= MAX_ROWS`` refused; a tensor subclass, a non-contiguous or misaligned input, a row slice of a
+    wider output or no rows, valid), as a forward and as a backward step, gives with the one-pass checks on what it
+    gives with them off: the same exception (type and message) and no launch, or the same launches (each tensor's
+    dtype, shape, strides, storage offset and memory; every scalar) and the same output bits."""
+    t = make_inputs(Case(33, layout, w), seed=31, device=device)
+
+    def outcome(call, caller: set[int]) -> tuple:
+        launches.clear()
+        try:
+            found = call()
+        except (TypeError, ValueError, RuntimeError) as e:
+            return ("raised", type(e), str(e), _launch_facts(launches, caller))
+        found = found if isinstance(found, tuple) else (found,)
+        return ("ran", _launch_facts(launches, caller), [None if x is None else x.clone() for x in found])
+
+    calls = _odd_calls(t, device)
+    checked = 0
+    for what, (first, second, weight, dh, out, grads) in calls.items():
+        tensors = [x for x in (first, second, weight, dh, out, *grads.values()) if isinstance(x, torch.Tensor)]
+        caller = {x.untyped_storage().data_ptr() for x in tensors}
+        steps = {
+            "forward": functools.partial(forward, first, second, weight, limit=t.L, out=out),
+            "backward": functools.partial(backward, dh, first, second, weight, limit=t.L, **grads),
+        }
+        for step, call in steps.items():
+            runs = []
+            for fast in (True, False):
+                monkeypatch.setattr(pkg, "_FAST_CHECKS", fast)
+                runs.append(outcome(call, caller))
+            (kind, *got), (want_kind, *want) = runs
+            assert kind == want_kind, (what, step, runs)
+            if kind == "raised":
+                assert got[:2] == want[:2] and got[2] == want[2] == [], (what, step, got, want)
+            else:
+                assert got[0] == want[0], (what, step)
+                for a, b in zip(got[1], want[1], strict=True):
+                    assert (a is None) == (b is None), (what, step)
+                    if a is not None:
+                        assert_same_bits(a, b, f"{what}, {step}")
+            checked += 1
+    assert checked == 2 * len(calls) >= 2 * 18, checked
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device, launches) -> None:
+    """The common call passes the row strides of its contiguous tensors as constants, without reading them: at 2, 33
+    and 4097 rows, with new and with preallocated outputs, in the steps and in an autograd and a checkpointed autograd
+    step, every ``<name>_stride`` of every launch is ``stride(0)`` of the tensor ``<name>`` it passes (the merged
+    tensor's for its up half, the merged gradient's for ``d_up``), and at 1 row each is 0."""
+    for rows in (1, 2, 33, 4097):
+        t = make_inputs(Case(rows, layout, w), seed=19, device=device)
+        merged = t.second is None
+        launches.clear()
+        step_outputs(forward, backward, t)
+        h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        d_first = torch.empty(rows, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
+        d_up = None if merged else torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        d_weight = None if t.weight is None else torch.empty(rows, device=device)
+        forward(t.first, t.second, t.weight, limit=t.L, out=h)
+        grads = {"grad_gate_up_or_gate": d_first, "grad_up": d_up, "grad_weight": d_weight}
+        backward(t.dh, t.first, t.second, t.weight, limit=t.L, **grads)
+        _autograd_step(t)
+        _autograd_step(t, checkpoint=True)
+        assert len(launches) == 2 + 2 + 2 + 3, (rows, [stage for stage, _, _ in launches])
+        for stage, launched_rows, values in launches:
+            assert launched_rows == rows
+            strides = {key: value for key, value in values.items() if key.endswith("_stride")}
+            assert len(strides) == {"fwd": 3, "bwd": 5, "bwd_unweighted": 5}[stage], (stage, strides)
+            for key, value in strides.items():
+                tensor = values[key.removesuffix("_stride")]
+                assert value == (tensor.stride(0) if rows > 1 else 0), (rows, stage, key, value, tensor.stride())
+                assert rows == 1 or value == tensor.shape[1], (rows, stage, key)  # contiguous rows
+
+
+def test_one_launcher_per_stage_and_device_serves_every_call(device, monkeypatch) -> None:
+    """Every call on a device, the one-pass checks' and the full checks', weighted and unweighted, the steps and the
+    autograd function, launches through the device's one launcher per stage (``pkg._launcher``), made once, at the
+    stage's first launch.  Only an unweighted forward makes the forward launcher's ignored weight: weighted calls and
+    backward steps leave it None, and every later unweighted forward passes the same buffer."""
+    made: list = []
+
+    def counted(stage: str, index: int):
+        made.append((stage, index))
+        return LAUNCHER(stage, index)
+
+    monkeypatch.setattr(pkg, "_launcher", functools.cache(counted))
+    index = device.index
+    weighted = [make_inputs(Case(33, layout), seed=17, device=device) for layout in ("merged", "split", "strided")]
+    for _ in range(2):
+        for t in weighted:
+            step_outputs(forward, backward, t)
+            _autograd_step(t)
+            _autograd_step(t, checkpoint=True)
+            u = types.SimpleNamespace(**{**vars(t), "weight": None})
+            backward(u.dh, u.first, u.second, None, limit=u.L)
+    assert sorted(made) == [("bwd", index), ("bwd_unweighted", index), ("fwd", index)], made
+    assert pkg._launcher("fwd", index).weight is None
+    unweighted = [make_inputs(Case(33, layout, "none"), seed=18, device=device) for layout in ("merged", "copied")]
+    buffers = set()
+    for _ in range(2):
+        for t in unweighted:
+            step_outputs(forward, backward, t)
+            _autograd_step(t, checkpoint=True)
+            buffers.add(id(pkg._launcher("fwd", index).weight))
+    assert sorted(made) == [("bwd", index), ("bwd_unweighted", index), ("fwd", index)], made
+    weight = pkg._launcher("fwd", index).weight
+    assert len(buffers) == 1 and weight is not None and id(weight) in buffers
+    assert weight.dtype == torch.float32 and tuple(weight.shape) == (1,) and float(weight) == 1.0
 
 
 def test_preallocated_outputs(device) -> None:
