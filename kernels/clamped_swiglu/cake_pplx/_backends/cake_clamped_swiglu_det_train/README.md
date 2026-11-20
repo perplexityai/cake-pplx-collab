@@ -158,8 +158,15 @@ route changes no output bit.  `bwd_unweighted` votes once per (row, run), the ru
 vote over, and computes each element with their operations, taking `dh` where they take `dh w` with `w = 1` (the same
 value).  So it stores the `d_gate` and `d_up` bits of the `bwd` programs with the weight flag 0, for every input.  No
 program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the
-limit, the weight flag (`fwd`, `bwd`) and the strides are launch arguments, so one library per program and
-architecture serves every call.
+limit, the weight flag (`fwd`, `bwd`), the strides and the column offsets below are launch arguments, so one library
+per program and architecture serves every call.
+
+Each program's binding also takes the column offset of `up` (in `bwd` and `bwd_unweighted`, of `d_up` too), in BF16
+elements, last before the grid, and adds it to that pointer.  A merged call passes its `[R, 4608]` tensor as both the
+gate and the up with the offset 2304, and its gradient as both `d_gate` and `d_up`, so the host makes no view; a
+two-tensor call passes 0.  The binding refuses an offset below 0, one that is not a multiple of 8 and one past
+`size(1) - 2304` of a 2-D tensor (`ValueError`).  The kernels and their sources do not change with it.  0.1.5 and
+earlier passed a view of the merged tensor's second half as the up (and `d_up`), with no offset.
 
 ## Numerics
 

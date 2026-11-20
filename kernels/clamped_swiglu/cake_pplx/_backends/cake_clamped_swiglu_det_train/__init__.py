@@ -28,8 +28,9 @@ JIT variables):
   the two halves of one ``[R, 4608]`` tensor (gate columns ``[0, 2304)``, up
   ``[2304, 4608)``; pass it as the first argument with ``up=None``).  The
   kernels take every BF16 tensor's row stride in elements, so a merged tensor
-  is read in place (the kernels get it as the gate, its first 2304 columns,
-  and a view of its second half as the up) and so are row slices of wider
+  is read in place (the launch passes it as both the gate and the up, with the
+  up's column offset 2304: the binding moves the up's pointer that many
+  columns, so the host makes no view) and so are row slices of wider
   tensors.  An input the kernels cannot read (not 2-D with a unit last
   stride, a row stride that is not a multiple of 8 elements, a base address
   that is not 16-byte aligned) is copied once to a contiguous tensor.
@@ -38,10 +39,10 @@ JIT variables):
   one-element FP32 buffer of the device, set to 1, and read its one element
   and ignore it, and the backward runs the unweighted program, which takes no
   weight).  ``limit`` is ``L``, a positive finite Python number rounded to
-  FP32; it is a launch argument, as are ``R``, the weight flag and the
-  strides, so one library per program and architecture serves every call (the
-  row count picks the program, and in the backward so does whether a weight is
-  given).
+  FP32; it is a launch argument, as are ``R``, the weight flag, the strides
+  and the column offsets, so one library per program and architecture serves
+  every call (the row count picks the program, and in the backward so does
+  whether a weight is given).
 - Checks.  An entry point checks every argument (the limit, the operands'
   types, dtypes, shapes and devices, the output buffers, the ``grad_up`` and
   ``grad_weight`` rules, ``R`` and the device's architecture) before it
@@ -60,16 +61,17 @@ JIT variables):
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, 2304]`` tensor, or the
   caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout of
   the inputs: two new contiguous ``[R, 2304]`` tensors, or one new contiguous
-  ``[R, 4608]`` gradient for a merged input.  ``d_weight`` is FP32 ``[R]`` for
-  a weighted call; an unweighted backward has none, and its program writes
-  none, so it allocates none.  A caller's output buffer must already be a
-  layout the kernels write (2-D, unit last stride, a row stride that is a
-  multiple of 8 elements and at least the row width, 16-byte aligned; FP32
-  ``[R]`` contiguous for the weight gradient): it is refused with a
-  ``ValueError`` otherwise, never copied.  An output must not overlap any
-  input or another output (not checked).  A new output is ``torch.empty`` on
-  the operands' device (one ``torch.device`` per device index for the
-  process): a contiguous plain tensor.
+  ``[R, 4608]`` gradient for a merged input (passed as both ``d_gate`` and
+  ``d_up``, with the column offset 2304).  ``d_weight`` is FP32 ``[R]`` for a
+  weighted call; an unweighted backward has none, and its program writes none,
+  so it allocates none.  A caller's output buffer must already be a layout the
+  kernels write (2-D, unit last stride, a row stride that is a multiple of 8
+  elements and at least the row width, 16-byte aligned; FP32 ``[R]``
+  contiguous for the weight gradient): it is refused with a ``ValueError``
+  otherwise, never copied.  An output must not overlap any input or another
+  output (not checked).  A new output is ``torch.empty`` on the operands'
+  device (one ``torch.device`` per device index for the process): a contiguous
+  plain tensor.
 - Launches.  One kernel per call: the forward runs stage ``fwd``, a weighted
   backward ``bwd`` and an unweighted backward ``bwd_unweighted``
   (``cake_jit.MODULES``).  ``fwd`` and ``bwd`` each have two programs: a
@@ -94,15 +96,16 @@ JIT variables):
   during capture; the binding makes the device current): nothing cooperative,
   no PDL, no dynamic shared memory.  The entry points launch through one
   launcher per stage and device (``_launcher``), made at the stage's first
-  launch on the device: the route above, the kernel parameters by position in
-  the order every program of the stage takes them (checked once, when the
-  launcher is made), and each program's FFI entry, bound at its first launch.
-  Nothing here reads device memory, reads an environment variable or
-  synchronizes; the checks read dtypes, shapes, strides, devices and data
-  pointers only.  The host keeps no state between calls but caches of facts a
-  call cannot change (a device's architecture, SM count and launchers, the
-  libraries, the FP32 rounding of the last accepted ``limit``, the forward's
-  ignored weight).  Under ``torch.use_deterministic_algorithms(True)`` with
+  launch on the device: the route above, the kernel parameters and the column
+  offsets of ``up`` (and ``d_up``) by position in the order every program of
+  the stage takes them (checked once, when the launcher is made), and each
+  program's FFI entry, bound at its first launch.  Nothing here reads device
+  memory, reads an environment variable or synchronizes; the checks read
+  dtypes, shapes, strides, devices and data pointers only.  The host keeps no
+  state between calls but caches of facts a call cannot change (a device's
+  architecture, SM count and launchers, the libraries, the FP32 rounding of
+  the last accepted ``limit``, the forward's ignored weight).  Under
+  ``torch.use_deterministic_algorithms(True)`` with
   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
   PyTorch fills every tensor it allocates here with NaN before the kernel
   writes it: one more fill launch per new output (``h``; ``d_gate_up``, or
@@ -261,14 +264,15 @@ def specs_for_arch(arch: str) -> list[Any]:
 
 @functools.cache
 def parameters(name: str) -> tuple[str, ...]:
-    """The kernel parameter names of record ``name`` in ``run`` order (its argument plan without the grid)."""
+    """The parameter names of record ``name`` in ``run`` order (its argument plan without the grid): the kernel's
+    parameters, then the column offsets its binding takes (``up_col``, and ``d_up_col`` in the backward stages)."""
     names: list[str] = []
     axes: list[str] = []
     for kind, key in cake_jit.MODULES[name]["arg_plan"]:
         if kind == "grid":
             axes.append(key)
         elif axes:
-            raise ValueError(f"record {name}: kernel parameter {key!r} follows the grid arguments")
+            raise ValueError(f"record {name}: parameter {key!r} follows the grid arguments")
         else:
             names.append(key)
     if axes != ["grid_x", "grid_y", "grid_z"]:
@@ -284,10 +288,10 @@ def _entry(name: str, arch: str) -> Any:
 
 @functools.cache
 def _plan(name: str) -> tuple[Callable[[dict[str, Any]], tuple[Any, ...]], int, int]:
-    """``(arguments, per_row, per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple
-    of its kernel parameters in ``run`` order (:func:`parameters`), a row is ``per_row`` tasks and one CTA owns
-    ``per_cta`` tasks (``cake_jit.cta_tasks``), so a launch of ``rows`` rows has ``ceil(rows * per_row / per_cta)``
-    CTAs (``cake_jit.grid``)."""
+    """``(arguments, per_row, per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple of
+    its parameters in ``run`` order (:func:`parameters`: the kernel's, then the column offsets), a row is ``per_row``
+    tasks and one CTA owns ``per_cta`` tasks (``cake_jit.cta_tasks``), so a launch of ``rows`` rows has
+    ``ceil(rows * per_row / per_cta)`` CTAs (``cake_jit.grid``)."""
     per_cta, per_row = cake_jit.cta_tasks(name)
     return operator.itemgetter(*parameters(name)), per_row, per_cta
 
@@ -317,8 +321,8 @@ def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Pl
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
     """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
-    small-R one at every other row count; ``bwd_unweighted`` has one program) with its kernel parameters named in
-    ``values``, on the current torch stream of device ``device_index``.
+    small-R one at every other row count; ``bwd_unweighted`` has one program) with its parameters (the kernel's, then
+    the column offsets) named in ``values``, on the current torch stream of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
@@ -338,9 +342,10 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     _entry(name, device_arch(device_index))(*args, -(-rows * per_row // per_cta), 1, 1)
 
 
-# The kernel parameters the entry points pass to the launcher of each stage, in this order (:func:`_launcher`).
+# The parameters the entry points pass to the launcher of each stage, in this order (:func:`_launcher`): the kernel's,
+# then the column offsets of ``up`` (and ``d_up``), which the binding adds to those pointers in BF16 elements.
 _ARGUMENTS: dict[str, tuple[str, ...]] = {
-    "fwd": ("gate", "up", "w", "h", "rows", "gate_stride", "up_stride", "h_stride", "limit", "weighted"),
+    "fwd": ("gate", "up", "w", "h", "rows", "gate_stride", "up_stride", "h_stride", "limit", "weighted", "up_col"),
     "bwd": (
         "gate",
         "up",
@@ -357,6 +362,8 @@ _ARGUMENTS: dict[str, tuple[str, ...]] = {
         "d_up_stride",
         "limit",
         "weighted",
+        "up_col",
+        "d_up_col",
     ),
     "bwd_unweighted": (
         "gate",
@@ -371,6 +378,8 @@ _ARGUMENTS: dict[str, tuple[str, ...]] = {
         "d_gate_stride",
         "d_up_stride",
         "limit",
+        "up_col",
+        "d_up_col",
     ),
 }
 
@@ -388,7 +397,7 @@ def _launcher(stage: str, device_index: int) -> Callable[..., None]:
     for name in dict.fromkeys((small[0], large[0])):
         if parameters(name) != _ARGUMENTS[stage]:
             raise RuntimeError(
-                f"record {name}: kernel parameters {parameters(name)} are not in the order the host passes them, "
+                f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
                 f"{_ARGUMENTS[stage]}"
             )
     arch = device_arch(device_index)
@@ -670,18 +679,19 @@ def _forward(
         h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
     if rows == 0:
         return h, L
-    # A merged input is the gate itself (its first 2304 columns, at its own row stride) and a view of its second half.
-    # A single row's strides are 0 (never dereferenced).
+    # A merged input is both the gate (its first 2304 columns, at its own row stride) and the up, from column 2304 of
+    # each row on: the binding adds the up's column offset to its pointer, so no view is made.  A single row's strides
+    # are 0 (never dereferenced).
     many = rows > 1
     gate_stride = first.stride(0) if many else 0
     if second is None:
-        up_view, up_stride = first.narrow(1, WIDTH, WIDTH), gate_stride
+        up_tensor, up_stride, up_col = first, gate_stride, WIDTH
     else:
-        up_view, up_stride = second, second.stride(0) if many else 0
+        up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
     _launcher("fwd", index)(
         rows,
         first,
-        up_view,
+        up_tensor,
         _ignored_weight(index) if w is None else w,
         h,
         rows,
@@ -690,6 +700,7 @@ def _forward(
         h.stride(0) if many else 0,
         L,
         0 if w is None else 1,
+        up_col,
     )
     return h, L
 
@@ -750,24 +761,25 @@ def _backward(
     result = (d_first, d_second, d_weight)
     if rows == 0:
         return result
-    # A merged input and its gradient are the gate and d_gate themselves, and views of their second halves.  A single
-    # row's strides are 0 (never dereferenced).
+    # A merged input and its gradient are both the gate and the up, and both d_gate and d_up, the up halves from column
+    # 2304 of each row on: the binding adds the column offsets to the up and d_up pointers, so no view is made.  A
+    # single row's strides are 0 (never dereferenced).
     many = rows > 1
     gate_stride = first.stride(0) if many else 0
     d_gate_stride = d_first.stride(0) if many else 0
     if second is None:
-        up_view, up_stride = first.narrow(1, WIDTH, WIDTH), gate_stride
-        d_up, d_up_stride = d_first.narrow(1, WIDTH, WIDTH), d_gate_stride
+        up_tensor, up_stride, up_col = first, gate_stride, WIDTH
+        d_up, d_up_stride, d_up_col = d_first, d_gate_stride, WIDTH
     else:
-        up_view, up_stride = second, second.stride(0) if many else 0
-        d_up, d_up_stride = d_second, d_second.stride(0) if many else 0
+        up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
+        d_up, d_up_stride, d_up_col = d_second, d_second.stride(0) if many else 0, 0
     dh_stride = dh.stride(0) if many else 0
     if w is None:
         # The unweighted program: no weight, no weight flag and no weight gradient; the bits of ``bwd`` at ``w = 1``.
         _launcher("bwd_unweighted", index)(
             rows,
             first,
-            up_view,
+            up_tensor,
             dh,
             d_first,
             d_up,
@@ -778,12 +790,14 @@ def _backward(
             d_gate_stride,
             d_up_stride,
             L,
+            up_col,
+            d_up_col,
         )
         return result
     _launcher("bwd", index)(
         rows,
         first,
-        up_view,
+        up_tensor,
         dh,
         w,
         d_first,
@@ -797,6 +811,8 @@ def _backward(
         d_up_stride,
         L,
         1,
+        up_col,
+        d_up_col,
     )
     return result
 
