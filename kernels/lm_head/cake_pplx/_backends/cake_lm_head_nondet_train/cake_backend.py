@@ -3109,6 +3109,33 @@ def _hidden_count_memory_temperature(
     return out
 
 
+# The attribute under which :func:`valid_rows` and :func:`gradient_rows` keep, on the bool valid-row mask they return
+# (``row_valid``), the host copy of that mask their one synchronization read back (a CUDA call of at most
+# :data:`HOST_COUNT_MAX_ROWS` rows): the dX finalize scans it on the host (:func:`_row_scan`).
+_HOST_MASK_ATTR = "_cake_host_mask"
+
+
+def _row_scan(row_valid: torch.Tensor) -> torch.Tensor:
+    """The inclusive int32 scan of the bool ``[T]`` valid-row mask ``row_valid`` that :func:`scale_cast_scatter` reads
+    (:func:`finalize_dx`).  A mask that carries its host copy (:data:`_HOST_MASK_ATTR`) is scanned on the host and the
+    scan goes to the mask's device in one ``4 T``-byte copy, in place of the device's int32 cast, scan-init and scan
+    kernels; under a CUDA graph capture (it takes no host copy), from another current device, or for a mask without a
+    host copy, the device scans the mask.  Both are the integer prefix sum of the same mask: the same scan, so the same
+    outputs."""
+    host = getattr(row_valid, _HOST_MASK_ATTR, None)
+    if host is not None:
+        device = row_valid.device
+        if (
+            device.index == torch.cuda.current_device()
+            and not torch.cuda.is_current_stream_capturing()
+        ):
+            # pageable host memory: the copy is staged before it returns, so the host scan may go right away
+            return torch.cumsum(host, 0, dtype=torch.int32).to(
+                device, non_blocking=True
+            )
+    return torch.cumsum(row_valid, 0, dtype=torch.int32)
+
+
 def valid_rows(
     labels: torch.Tensor, *, mask: bool = False
 ) -> tuple[Optional[torch.Tensor], Optional[torch.Tensor]]:
@@ -3121,15 +3148,20 @@ def valid_rows(
     :func:`finalize_dx` turns it into the inclusive int32 scan behind the backward's queued GEMMs, not here in the
     synchronization shadow of ``nonzero``); ``None`` whenever ``row_index`` is.  A CUDA call of at most
     :data:`HOST_COUNT_MAX_ROWS` rows reads the mask back instead (the one synchronization) and forms the same index on
-    the host, copied back to the labels' device: no count or select kernels."""
+    the host, copied back to the labels' device: no count or select kernels; with ``mask=True`` the returned mask
+    keeps that host copy (:data:`_HOST_MASK_ATTR`, ``T`` host bytes), which the dX finalize scans on the host
+    (:func:`_row_scan`)."""
     T = int(labels.numel())
     if T == 0:
         return None, None
     valid = labels >= 0
     if T <= HOST_COUNT_MAX_ROWS and labels.is_cuda:
-        index = valid.cpu().nonzero().squeeze(1)
+        host = valid.cpu()
+        index = host.nonzero().squeeze(1)
         if int(index.numel()) == T:
             return None, None
+        if mask:
+            setattr(valid, _HOST_MASK_ATTR, host)
         # pageable host memory: the copy is staged before it returns, so the host index may go right away
         return index.to(labels.device, non_blocking=True), (valid if mask else None)
     index = valid.nonzero().squeeze(1)
@@ -3770,6 +3802,9 @@ def gradient_rows(
         g_host, z_host = both[0].nonzero().squeeze(1), both[1].nonzero().squeeze(1)
         if int(g_host.numel()) == T:
             return None, None, None
+        if mask:
+            # the gradient-row mask's host copy, scanned on the host by the dX finalize (:func:`_row_scan`)
+            setattr(grad, _HOST_MASK_ATTR, both[0])
         # pageable host memory: the copies are staged before they return, so the host indices may go right away
         return (
             g_host.to(device, non_blocking=True),
@@ -11381,7 +11416,8 @@ def finalize_dx(
     """The dX output boundary: ``bf16(g * acc)`` restored to the caller's ``[num_rows, H]`` rows.  Every row valid
     (``row_index`` None): :func:`scale_cast`, already one pass over every row.  Compacted rows with the forward's
     valid-row mask (``row_valid``: the fused dX finalize): the inclusive int32 scan -- one ``cumsum``, issued here
-    behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
+    behind the backward's queued GEMMs, on the host for a mask read back to the host (:func:`_row_scan`) -- and one
+    :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
     (zero fill + ``index_copy_``).  All three produce the same bits.  ``scan`` (the zero-gradient row skip,
     :func:`zero_dlogp_partition`): the inclusive int32 scan of the rows ``acc`` holds, already formed (``row_valid``
@@ -11410,7 +11446,7 @@ def finalize_dx(
         )
     if row_valid.dtype != torch.bool or tuple(row_valid.shape) != (int(num_rows),):
         raise ValueError(f"row_valid must be the bool [{int(num_rows)}] valid-row mask")
-    scan = torch.cumsum(row_valid, 0, dtype=torch.int32)
+    scan = _row_scan(row_valid)
     return scale_cast_scatter(
         acc, grad, row_index, scan, int(num_rows), backend=backend, fold=fold
     )

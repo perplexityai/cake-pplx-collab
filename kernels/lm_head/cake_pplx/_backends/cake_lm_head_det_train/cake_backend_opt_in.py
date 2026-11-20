@@ -6387,7 +6387,8 @@ def finalize_dx(
     """The dX output boundary: ``bf16(g * acc)`` restored to the caller's ``[num_rows, H]`` rows.  Every row valid
     (``row_index`` None): :func:`scale_cast`, already one pass over every row.  Compacted rows with the forward's
     valid-row mask (``row_valid``: the fused dX finalize): the inclusive int32 scan -- one ``cumsum``, issued here
-    behind the backward's queued GEMMs -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
+    behind the backward's queued GEMMs, on the host for a mask read back to the host
+    (:func:`.cake_backend._row_scan`) -- and one :func:`scale_cast_scatter` launch.  Compacted rows without the mask
     (the forward ran with ``dx_finalize=False``): the flat cast, then :func:`scatter_rows`
     (zero fill + ``index_copy_``).  All three produce the same bits.  ``fold`` (:func:`cast_fold_operands`): the scatter cast
     folds the label residuals of the rows no slab sum folded (:func:`scale_cast_scatter`); only the scatter takes it."""
@@ -6406,7 +6407,7 @@ def finalize_dx(
         )
     if row_valid.dtype != torch.bool or tuple(row_valid.shape) != (int(num_rows),):
         raise ValueError(f"row_valid must be the bool [{int(num_rows)}] valid-row mask")
-    scan = torch.cumsum(row_valid, 0, dtype=torch.int32)
+    scan = _main._row_scan(row_valid)
     return scale_cast_scatter(
         acc, grad, row_index, scan, int(num_rows), backend=backend, fold=fold
     )
