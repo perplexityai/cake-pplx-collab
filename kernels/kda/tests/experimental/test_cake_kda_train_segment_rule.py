@@ -740,8 +740,9 @@ def test_the_context_parallel_local_plans_keep_the_occupancy_rule(
     # every context's intra record is taken to write its scratch table set
     seen: list[tuple[str, str]] = []
     for call in LOCAL_BYTE_QUERY_CALLS:
+        real = getattr(backend, call)
 
-        def spy(*args, _real=getattr(backend, call), _call=call, **kwargs):
+        def spy(*args, _real=real, _call=call, **kwargs):
             seen.append((_call, kwargs.get("segment_rule", "not passed")))
             return _real(*args, **kwargs)
 
