@@ -43,19 +43,28 @@ dq, dk, dv = cake_fmha_nondet_train_backward(
 | 64 | none | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64` / `bwd_post_hd64` |
 | 64 | causal | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64_causal` / `bwd_post_hd64` |
 | 128, pair route | none | yes | yes | yes | `bwd_pre` / `bwd_main_2cta` / `bwd_post_pair` |
-| 128, pair route | causal | yes | yes | yes | `bwd_pre` / `bwd_main_2cta_causal` / `bwd_post_pair` |
+| 128, pair route | causal | built, not routed | yes | yes | `bwd_pre` / `bwd_main_2cta_causal` / `bwd_post_pair` |
 
 Every variant takes any head count `H >= 1` (the same `H` for `q` and
 `k` / `v`) and query and key lengths that are positive multiples of 128 (the
 pair route: key lengths that are multiples of 256).  Without the mask `Sq`
 and `Skv` are independent; the causal mask needs `Sq == Skv`.  A head-dimension
-128 call whose key length is a multiple of 256 takes the pair route on the
-architectures that `PAIR_ROUTE` in `cake_jit.py` turns on (`cake_jit.variant`
+128 call whose key length is a multiple of 256 and not longer than its query
+length takes the pair route where a region of `PAIR_REGIONS` in `cake_jit.py`
+holds its `B * H` and `Skv` for its architecture and mask (`cake_jit.variant`
 picks the variant of a call); every other call takes the records of the first
-four rows.  The `build.json` minimum CUDA toolkit is 12.8 for every
-`sm_100a` library, 12.9 for every `sm_103a` library and 13.5 for every
-`sm_107a` library; an older local toolkit raises `RuntimeError` when the
-library is built.
+four rows.  On `sm_100a` the causal pair build ships and no call takes it.  The
+`build.json` minimum CUDA toolkit is 12.8 for every `sm_100a` library, 12.9
+for every `sm_103a` library and 13.5 for every `sm_107a` library; an older
+local toolkit raises `RuntimeError` when the library is built.
+
+The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
+
+| architecture | no mask | causal |
+|---|---|---|
+| `sm_100a` | `B * H` 1: `Skv >= 4096`; `B * H <= 4`: `Skv >= 8192`; `B * H >= 128`: `Skv >= 8192` | none |
+| `sm_103a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 8192` | `B * H <= 4`: `Skv >= 2048` |
+| `sm_107a` | `B * H` 4: `Skv >= 1024`; `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 4096` | `B * H` 1: `Skv >= 1024`; `B * H <= 4`: `Skv >= 2048`; `B * H <= 16`: `Skv >= 4096`; any `B * H`: `Skv >= 8192` |
 
 ## Kernels
 

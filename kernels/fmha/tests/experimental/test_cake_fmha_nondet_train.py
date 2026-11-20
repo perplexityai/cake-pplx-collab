@@ -23,8 +23,9 @@ Without a device: the registry (the three stages in launch order, one program pe
 the three architectures and for no other, the launch facts: a cluster of two CTAs for the 2-CTA main kernels), the
 routing table ``RECORD_OF`` (the preprocess, main-stage and postprocess record of each head dimension, causal flag and
 route, every record used, a 2-CTA main stage with the pair-row postprocess and no other) and the host sequence of each
-variant (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128
-and a key length that is a multiple of 256 on the architectures of ``PAIR_ROUTE``), the launch grids, the stage
+variant (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128,
+a key length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
+``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``), the launch grids, the stage
 launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
 registry-ordered launch), the two layouts of the dQ accumulator in the judge's helper, the build manifest (every
 record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries
@@ -114,6 +115,40 @@ LAUNCHER_KEYWORDS = {
     "launch_bwd_main": ("q", "k", "v", "dout", "lse_log2", "dpsum", "dq_accum", "dk", "dv", "softmax_scale"),
     "launch_bwd_post": ("dq_accum", "dq", "softmax_scale"),
 }
+# The decided route of every measured crossover call (head dimension 128, ``Sq == Skv``), by architecture and mask: for
+# each measured ``B * H``, the least length on the pair route (every longer measured length on it too), or None (no
+# length on it).  This is the decision taken from the crossover run, not a measurement: a call is on the pair route
+# where it was FASTER than 0.1.4 in every counted round, beyond the identical-kernel controls' single-round noise, and
+# so was every longer call of its ``B * H``.  ``PAIR_REGIONS`` must reproduce it.
+MEASURED_COUNTS = (1, 4, 16, 32, 128)
+MEASURED_LENGTHS = (256, 512, 1024, 2048, 4096, 8192)
+DECIDED_LEAST = {
+    "sm_100a": {
+        False: {1: 4096, 4: 8192, 16: None, 32: None, 128: 8192},
+        True: {1: None, 4: None, 16: None, 32: None, 128: None},
+    },
+    "sm_103a": {
+        False: {1: 2048, 4: 2048, 16: 8192, 32: 8192, 128: 8192},
+        True: {1: 2048, 4: 2048, 16: None, 32: None, 128: None},
+    },
+    "sm_107a": {
+        False: {1: 2048, 4: 1024, 16: 4096, 32: 4096, 128: 4096},
+        True: {1: 1024, 4: 2048, 16: 4096, 32: 8192, 128: 8192},
+    },
+}
+
+
+def _pin_route(monkeypatch, pin: bool | None) -> None:
+    """The pair regions a test runs under: ``pin`` True, one region holding every call on every architecture and mask
+    (the pair route wherever the head dimension, the key length and ``Sq >= Skv`` allow it); False, no region (the
+    1-CTA route); None, the shipped ``PAIR_REGIONS``.  ``PAIR_LEAST`` is pinned with them."""
+    if pin is None:
+        return
+    regions = ((1, None, 2 * cake_jit.BLOCK),) if pin else ()
+    least = 2 * cake_jit.BLOCK if pin else None
+    for arch in ARCHES:
+        monkeypatch.setitem(cake_jit.PAIR_REGIONS, arch, {False: regions, True: regions})
+        monkeypatch.setitem(cake_jit.PAIR_LEAST, arch, {False: least, True: least})
 
 
 def main_cases(causal: bool, pair: bool = False) -> list[Case]:
@@ -152,19 +187,41 @@ MAIN_PARAMS = [
     for (D, causal, pair), variant in zip(VARIANTS, VARIANT_IDS, strict=True)
     for case in main_cases(causal, pair)
 ]
+# The backward's cases: the main stage's, each call on its variant's route (``_pin_route``).  A pair case with more
+# keys than queries takes the 1-CTA route through the backward (such a call never takes the pair route), so its id
+# names the variant it runs (``d128``).
+BACKWARD_PARAMS = [
+    pytest.param(
+        D, causal, pair, case, id=f"{VARIANT_IDS[VARIANTS.index((D, causal, pair and case.S >= case.kv))]}-{case.id}"
+    )
+    for D, causal, pair in VARIANTS
+    for case in main_cases(causal, pair)
+]
 # The postprocess records, by (head dimension, pair).
 POST_VARIANTS = ((128, False), (64, False), (128, True))
 POST_IDS = ["d128", "d64", "d128_pair"]
-# The calls whose launched kernels are observed: two (head, batch) pairs of three heads, 256 queries and keys for every
-# head dimension and mask (the pair route at head dimension 128 where ``PAIR_ROUTE`` takes it), and 384 keys (an odd
-# key-block count: the 1-CTA route) at head dimension 128.
+# The calls whose launched kernels are observed, each with the regions it runs under (``_pin_route``): two (head,
+# batch) pairs of three heads and 256 queries and keys for every head dimension and mask, at head dimension 128 both
+# with every call in a pair region (the pair route) and with none (the 1-CTA route); 384 keys (an odd key-block count:
+# the 1-CTA route in any region) at head dimension 128.
 ROUTE_PARAMS = [
-    pytest.param(128, False, Case(2, 3, 256), id="d128"),
-    pytest.param(128, True, Case(2, 3, 256), id="d128_causal"),
-    pytest.param(64, False, Case(2, 3, 256), id="d64"),
-    pytest.param(64, True, Case(2, 3, 256), id="d64_causal"),
-    pytest.param(128, False, Case(2, 3, 384), id="d128-S384"),
-    pytest.param(128, True, Case(2, 3, 384), id="d128_causal-S384"),
+    pytest.param(128, False, Case(2, 3, 256), True, id="d128"),
+    pytest.param(128, True, Case(2, 3, 256), True, id="d128_causal"),
+    pytest.param(128, False, Case(2, 3, 256), False, id="d128-1cta"),
+    pytest.param(128, True, Case(2, 3, 256), False, id="d128_causal-1cta"),
+    pytest.param(64, False, Case(2, 3, 256), True, id="d64"),
+    pytest.param(64, True, Case(2, 3, 256), True, id="d64_causal"),
+    pytest.param(128, False, Case(2, 3, 384), True, id="d128-S384"),
+    pytest.param(128, True, Case(2, 3, 384), True, id="d128_causal-S384"),
+]
+# The shipped regions on the device (``pin`` None): 8192 queries and keys at four (head, batch) pairs, on the route
+# ``DECIDED_LEAST`` names for the architecture (the pair route without the mask everywhere, with it on sm_103a and
+# sm_107a); 1024 queries and keys at sixteen (head, batch) pairs, on the 1-CTA route on every architecture.
+SHIPPED_ROUTE_PARAMS = [
+    pytest.param(128, False, Case(1, 4, 8192), None, id="d128-S8192"),
+    pytest.param(128, True, Case(1, 4, 8192), None, id="d128_causal-S8192"),
+    pytest.param(128, False, Case(1, 16, 1024), None, id="d128-S1024"),
+    pytest.param(128, True, Case(1, 16, 1024), None, id="d128_causal-S1024"),
 ]
 # The source tests' preprocess cases at four heads, then one head and an odd head count.
 PRE_CASES = (Case(1, 4, 128), Case(3, 4, 384), Case(2, 4, 1024), Case(2, 1, 256), Case(3, 5, 384))
@@ -268,22 +325,76 @@ def test_no_record_is_delivered_outside_the_architectures() -> None:
 
 
 def test_the_route_of_a_call() -> None:
-    """``variant(D, causal, Skv, arch)`` is the ``RECORD_OF`` key of a call: ``(D, causal, pair)`` with ``pair`` True
-    for head dimension 128 and a key length that is a multiple of 256 (an even key-block count: the 2-CTA kernel's
-    CTA pairs) where ``PAIR_ROUTE[arch]`` is True, False otherwise (every head-dimension 64 call, every odd key-block
-    count)."""
-    assert set(cake_jit.PAIR_ROUTE) == set(ARCHES)
-    assert all(type(on) is bool for on in cake_jit.PAIR_ROUTE.values())
+    """``variant(D, causal, *, batch, heads, seqlen_q, seqlen_kv, arch)`` is the ``RECORD_OF`` key of a call: ``(D,
+    causal, pair)`` with ``pair`` True for head dimension 128, a key length that is a multiple of 256 (an even key-block
+    count: the 2-CTA kernel's CTA pairs), at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
+    ``PAIR_REGIONS[arch][causal]``, False otherwise (every head-dimension 64 call, every odd key-block count, every call
+    with more keys than queries).  Every bound is a measured value and ``PAIR_LEAST`` the least length of each table;
+    every measured crossover call is on its decided route (``DECIDED_LEAST``); a longer call stays on the pair route; an
+    unmeasured ``B * H`` or length is on it exactly where its measured neighbours are."""
+    assert set(cake_jit.PAIR_REGIONS) == set(ARCHES) and set(cake_jit.PAIR_LEAST) == set(ARCHES)
+    for arch, regions in cake_jit.PAIR_REGIONS.items():
+        assert set(regions) == {False, True}, arch
+        for causal, boxes in regions.items():
+            assert type(boxes) is tuple, (arch, causal)
+            for least, most, length in boxes:
+                assert least in MEASURED_COUNTS and (most is None or most in MEASURED_COUNTS), (arch, causal)
+                assert most is None or most >= least, (arch, causal, least, most)
+                assert length in MEASURED_LENGTHS, (arch, causal, length)
+            assert cake_jit.PAIR_LEAST[arch][causal] == min((box[2] for box in boxes), default=None), (arch, causal)
+    with pytest.raises(TypeError):  # every argument after ``causal`` is keyword-only
+        cake_jit.variant(128, False, 1, 1, 256, 256, ARCHES[0])
+
+    def pair(arch: str, causal: bool, count: int, Sq: int, Skv: int) -> bool:
+        found = cake_jit.variant(128, causal, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+        swapped = cake_jit.variant(128, causal, batch=count, heads=1, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+        assert found == swapped, (arch, causal, count, Sq, Skv)
+        return found[2]
+
+    step = 2 * cake_jit.BLOCK
     for arch in ARCHES:
-        for D in HEAD_DIMS:
-            for causal in (False, True):
-                for blocks in range(1, 70):
-                    Skv = blocks * cake_jit.BLOCK
-                    found = cake_jit.variant(D, causal, Skv, arch)
-                    pair = D == 128 and blocks % 2 == 0 and cake_jit.PAIR_ROUTE[arch]
-                    assert found == (D, causal, pair), (D, causal, Skv, arch, found)
-                    assert type(found[1]) is bool and type(found[2]) is bool, found
-                    assert found in cake_jit.RECORD_OF, found
+        for causal in (False, True):
+            for count, least in DECIDED_LEAST[arch][causal].items():
+                for S in MEASURED_LENGTHS:
+                    expected = least is not None and S >= least
+                    assert pair(arch, causal, count, S, S) == expected, (arch, causal, count, S)
+            for count in (1, 32, 128):
+                assert not pair(arch, False, count, 128, 8192), (arch, count)
+                assert not pair(arch, False, count, 8192, 256), (arch, count)
+            # Every call: the head dimension, the key-block count, Sq >= Skv and the regions decide the route.
+            for D in HEAD_DIMS:
+                for count in (1, 2, 3, 4, 5, 15, 16, 17, 31, 32, 33, 127, 128, 129, 256):
+                    for blocks in range(1, 70):
+                        Skv = blocks * cake_jit.BLOCK
+                        for Sq in (Skv,) if causal else (Skv, 128, 2048, 4096, 8192, 16384):
+                            found = cake_jit.variant(
+                                D, causal, batch=1, heads=count, seqlen_q=Sq, seqlen_kv=Skv, arch=arch
+                            )
+                            inside = Sq >= Skv and any(
+                                least <= count and (most is None or count <= most) and Skv >= length
+                                for least, most, length in cake_jit.PAIR_REGIONS[arch][causal]
+                            )
+                            expected = (D, causal, D == 128 and blocks % 2 == 0 and inside)
+                            assert found == expected, (D, causal, count, Sq, Skv, arch, found)
+                            assert type(found[1]) is bool and type(found[2]) is bool, found
+                            assert found in cake_jit.RECORD_OF, found
+            # A longer call stays on the pair route; a call with more queries than keys takes the route of its key
+            # length and one with more keys than queries the 1-CTA route; an unmeasured B * H or length is on the pair
+            # route exactly where its measured neighbours are (the largest measured value stands for every larger one).
+            for count in range(1, 300):
+                below = max(c for c in MEASURED_COUNTS if c <= count)
+                above = min((c for c in MEASURED_COUNTS if c >= count), default=below)
+                for S in range(step, 16385, step):
+                    on = pair(arch, causal, count, S, S)
+                    shorter = max(s for s in MEASURED_LENGTHS if s <= S)
+                    longer = min((s for s in MEASURED_LENGTHS if s >= S), default=shorter)
+                    around = all(pair(arch, causal, c, s, s) for c in (below, above) for s in (shorter, longer))
+                    assert on == around, (arch, causal, count, S)
+                    if on:
+                        assert pair(arch, causal, count, S + step, S + step), (arch, causal, count, S)
+                    if not causal:
+                        assert pair(arch, causal, count, 2 * S, S) == on, (arch, count, S)
+                        assert not pair(arch, causal, count, S, 2 * S), (arch, count, S)
 
 
 def test_the_accumulator_layouts() -> None:
@@ -321,7 +432,7 @@ def test_grids_cover_every_tile() -> None:
         assert tuple(cake_jit.grid("bwd_main", **dims)) == (Skv // 128, H, B), dims
         assert tuple(cake_jit.grid("bwd_post", **dims)) == (Sq // 128, H, B), dims
         for arch in ARCHES:
-            if cake_jit.variant(128, False, Skv, arch)[2]:
+            if cake_jit.variant(128, False, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)[2]:
                 assert cake_jit.grid("bwd_main", **dims)[0] % 2 == 0, (dims, arch)
 
 
@@ -612,12 +723,17 @@ def test_the_postprocess_matches_the_reference(D, pair, case, device, record_pro
 # The backward: the three stages composed
 
 
-@pytest.mark.parametrize(("D", "causal", "pair", "case"), MAIN_PARAMS)
-def test_the_backward_matches_the_reference(D, causal, pair, case, device, record_property) -> None:
+@pytest.mark.parametrize(("D", "causal", "pair", "case"), BACKWARD_PARAMS)
+def test_the_backward_matches_the_reference(D, causal, pair, case, device, monkeypatch, record_property) -> None:
     """``dq``, ``dk`` and ``dv`` of the backward hold the contract (BF16, contiguous, the inputs' layouts, finite) and
     meet the tier of the backward formula on the same inputs (``dPsum`` from ``out`` and ``dout``), on the cases of
-    each variant (``pair``: the pair route's cases, whose key lengths are multiples of 256); the call takes the route
-    ``variant`` picks for it."""
+    each variant (``pair``: the pair route's cases, whose key lengths are multiples of 256), each call on that
+    variant's route (``_pin_route``: the pair route's cases with every call in a pair region, the 1-CTA cases with
+    none); a pair case with more keys than queries takes the 1-CTA route."""
+    _pin_route(monkeypatch, pair)
+    arch = cake_backend.device_arch(device.index)
+    found = cake_jit.variant(D, causal, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    assert found == (D, causal, pair and case.S >= case.kv), (arch, found)
 
     def draw(seed: int):
         x = make_inputs(case, D, causal=causal, seed=seed, device=device)
@@ -668,13 +784,25 @@ def _assert_launched(launched: list[tuple[str, str]] | None, variant: tuple[int,
     assert launched == list(zip(STAGES, cake_jit.RECORD_OF[variant], strict=True))
 
 
-@pytest.mark.parametrize(("D", "causal", "case"), ROUTE_PARAMS)
-def test_the_backward_launches_the_records_of_its_variant(D, causal, case, device, tmp_path) -> None:
+@pytest.mark.parametrize(("D", "causal", "case", "pin"), ROUTE_PARAMS + SHIPPED_ROUTE_PARAMS)
+def test_the_backward_launches_the_records_of_its_variant(D, causal, case, pin, device, monkeypatch, tmp_path) -> None:
     """A backward call launches, in order, the preprocess, main-stage and postprocess records that ``RECORD_OF``
-    names for its variant (``variant(D, causal, Skv, arch)``: at head dimension 128 the pair route for 256 keys where
-    ``PAIR_ROUTE`` takes it, the 1-CTA route for 384), and no other kernel: the kernels one call runs, observed on the
-    device, are those records' kernels; it writes none of its inputs."""
-    variant = cake_jit.variant(D, causal, case.kv, cake_backend.device_arch(device.index))
+    names for its variant (``variant(D, causal, *, batch, heads, seqlen_q, seqlen_kv, arch)``: at head dimension 128
+    the pair route for 256 keys in a pinned region and the 1-CTA route without one, the 1-CTA route for 384 keys, the
+    shipped regions' route for 8192 queries and keys at ``B * H`` 4 and the 1-CTA route for 1024 queries and keys at
+    ``B * H`` 16 on every architecture), and no other kernel: the kernels one call runs, observed on the device, are
+    those records' kernels; it writes none of its inputs."""
+    _pin_route(monkeypatch, pin)
+    arch = cake_backend.device_arch(device.index)
+    variant = cake_jit.variant(D, causal, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    if pin is None:
+        least = DECIDED_LEAST[arch][causal][case.B * case.H]
+        assert variant[2] == (least is not None and case.kv >= least), (arch, variant)
+        if case.kv == 1024 and case.B * case.H == 16:  # d128-S1024: the 1-CTA route on every architecture
+            assert not variant[2], (arch, variant)
+    else:
+        on = pin and D == 128 and case.kv % (2 * cake_jit.BLOCK) == 0 and case.S >= case.kv
+        assert variant[2] == on, (arch, variant)
     x = make_inputs(case, D, causal=causal, seed=11, device=device)
     inputs = (x.q, x.k, x.v, x.out, x.lse, x.dout)
     before = [t.clone() for t in inputs]
@@ -696,14 +824,17 @@ FALLBACKS = ("run_with_workspace", "stage_launchers")
 
 
 @pytest.mark.parametrize("path", FALLBACKS)
-@pytest.mark.parametrize(("D", "causal", "case"), ROUTE_PARAMS)
+@pytest.mark.parametrize(("D", "causal", "case", "pin"), ROUTE_PARAMS)
 def test_the_backward_without_run_launches_the_same_records(
-    D, causal, case, path, device, monkeypatch, tmp_path, record_property
+    D, causal, case, pin, path, device, monkeypatch, tmp_path, record_property
 ) -> None:
     """When ``run`` returns ``False`` and when the variant has no host sequence, the backward launches the variant's
     three records in order, and its ``dq``, ``dk`` and ``dv`` meet the tier (on both routes of head dimension 128)."""
+    _pin_route(monkeypatch, pin)
     arch = cake_backend.device_arch(device.index)
-    variant = cake_jit.variant(D, causal, case.kv, arch)
+    variant = cake_jit.variant(D, causal, batch=case.B, heads=case.H, seqlen_q=case.S, seqlen_kv=case.kv, arch=arch)
+    on = pin and D == 128 and case.kv % (2 * cake_jit.BLOCK) == 0 and case.S >= case.kv
+    assert variant[2] == on, (arch, variant)
     found = cake_backend._sequence(variant, arch)
     assert found is not None, "every variant ships a host sequence"
     library, run, run_with_workspace = found

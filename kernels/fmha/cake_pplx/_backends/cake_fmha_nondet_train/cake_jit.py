@@ -42,13 +42,17 @@ cooperative, no PDL.  Every kernel runs on the grid ``(S / 128, H, B)``: S is
 the query length for ``bwd_pre`` and ``bwd_post`` and the key length for
 ``bwd_main``.
 
-The pair route (head dimension 128, key length a multiple of 256): the main
-stage is the 2-CTA kernel (``bwd_main_2cta`` / ``bwd_main_2cta_causal``,
-clusters of two CTAs along x: one CTA pair per 256 keys), which adds the dQ
-tiles in the pair-row order, and the postprocess is the build that reads that
-order (``bwd_post_pair``).  The two change together: the other postprocess
-would read the pair-row order as the tile order.  :func:`variant` picks the
-route of a call.
+The pair route (head dimension 128, a key length that is a multiple of 256, at
+least as many queries as keys, and ``B * H`` and the key length in a region of
+``PAIR_REGIONS`` for the architecture and mask): the main stage is the 2-CTA
+kernel (``bwd_main_2cta`` / ``bwd_main_2cta_causal``, clusters of two CTAs
+along x: one CTA pair per 256 keys), which adds the dQ tiles in the pair-row
+order, and the postprocess is the build that reads that order
+(``bwd_post_pair``).  The two change together: the other postprocess would
+read the pair-row order as the tile order.  :func:`variant` picks the route of
+a call.  Every record ships for the three architectures; where no region
+routes a call (``sm_100a`` with the mask) the pair build ships and no call
+takes it.
 """
 
 from __future__ import annotations
@@ -296,15 +300,45 @@ def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> t
     return (rows // BLOCK, heads, batch)
 
 
-# Architecture -> whether the head-dimension 128 calls whose key length is a
-# multiple of 2 * BLOCK take the pair route there (:func:`variant`).
-PAIR_ROUTE: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+# Architecture -> mask (``causal``) -> the regions of the pair route (:func:`variant`).  A region ``(least, most,
+# length)`` holds the calls with ``least <= B * H`` (and ``B * H <= most`` unless ``most`` is None) and at least
+# ``length`` keys; :func:`variant` routes only calls with at least as many queries as keys.  Every measured call inside
+# a region was FASTER than 0.1.4 in every counted round of the crossover run, beyond the identical-kernel controls'
+# single-round noise, and every bound is a measured value (``B * H`` 1, 4, 16, 32 and 128; lengths 256 to 8192).  An
+# empty tuple routes no call: the ``sm_100a`` causal pair build ships and no call takes it.
+PAIR_REGIONS: dict[str, dict[bool, tuple[tuple[int, int | None, int], ...]]] = {
+    "sm_100a": {False: ((1, 1, 4096), (1, 4, 8192), (128, None, 8192)), True: ()},
+    "sm_103a": {False: ((1, 4, 2048), (1, None, 8192)), True: ((1, 4, 2048),)},
+    "sm_107a": {
+        False: ((4, 4, 1024), (1, 4, 2048), (1, None, 4096)),
+        True: ((1, 1, 1024), (1, 4, 2048), (1, 16, 4096), (1, None, 8192)),
+    },
+}
+# Architecture -> mask -> the least ``length`` of its regions, or None (no region): a call with fewer keys takes the
+# 1-CTA route before the regions are read.
+PAIR_LEAST: dict[str, dict[bool, int | None]] = {
+    arch: {causal: min((length for _, _, length in regions), default=None) for causal, regions in masks.items()}
+    for arch, masks in PAIR_REGIONS.items()
+}
 
 
-def variant(D: int, causal: bool, seqlen_kv: int, arch: str) -> tuple[int, bool, bool]:
+def variant(
+    D: int, causal: bool, *, batch: int, heads: int, seqlen_q: int, seqlen_kv: int, arch: str
+) -> tuple[int, bool, bool]:
     """The ``RECORD_OF`` key of a call on ``arch``: ``(D, causal, pair)``.
     ``pair`` is True for the pair route: head dimension 128, a key length that
     is a multiple of ``2 * BLOCK`` (a CTA pair of the 2-CTA main kernel covers
-    two key blocks) and ``PAIR_ROUTE[arch]``.  ``arch`` is one of ``ARCHES``."""
-    pair = D == 128 and seqlen_kv % (2 * BLOCK) == 0 and PAIR_ROUTE[arch]
-    return (D, bool(causal), pair)
+    two key blocks), at least as many queries as keys, and ``batch * heads``
+    and ``seqlen_kv`` in a region of ``PAIR_REGIONS[arch][causal]``.  ``arch``
+    is one of ``ARCHES``; every argument after ``causal`` is keyword-only.  An
+    unknown ``arch`` raises ``KeyError`` (the backend's ``device_arch`` raises
+    ``RuntimeError`` for a device outside ``ARCHES`` before the call)."""
+    causal = bool(causal)
+    least = PAIR_LEAST[arch][causal]
+    if D != 128 or least is None or seqlen_kv < least or seqlen_q < seqlen_kv or seqlen_kv % (2 * BLOCK):
+        return (D, causal, False)
+    count = batch * heads
+    for low, high, length in PAIR_REGIONS[arch][causal]:
+        if low <= count and (high is None or count <= high) and seqlen_kv >= length:
+            return (D, causal, True)
+    return (D, causal, False)

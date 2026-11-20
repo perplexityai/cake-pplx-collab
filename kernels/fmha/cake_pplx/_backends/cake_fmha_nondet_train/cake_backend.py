@@ -35,12 +35,14 @@ operands' device, in this order:
    the dQ tiles added into the FP32 accumulator by bulk reductions.
 3. ``bwd_post``: ``dq = bf16(acc * softmax_scale)`` in the layout of ``q``.
 
-A head-dimension 128 call whose key length is a multiple of 256 takes the pair
-route on the architectures of ``cake_jit.PAIR_ROUTE`` (:func:`.cake_jit.variant`
-picks the ``RECORD_OF`` variant): its main stage is the 2-CTA kernel, one CTA
-pair per 256 keys, which adds the dQ tiles in the pair-row order, and its
-postprocess is the build that reads that order.  The kernel parameters, grids
-and workspace are the same on both routes.
+A head-dimension 128 call whose key length is a multiple of 256, with at least
+as many queries as keys, takes the pair route where a region of
+``cake_jit.PAIR_REGIONS`` for its architecture and mask holds its ``B * H`` and
+key length (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
+variant): its main stage is the 2-CTA kernel, one CTA pair per 256 keys, which
+adds the dQ tiles in the pair-row order, and its postprocess is the build that
+reads that order.  The kernel parameters, grids and workspace are the same on
+both routes.
 
 The backward runs the three launches in one host call: the library of the
 variant's host sequence compiles the three kernel units beside a host unit
@@ -675,7 +677,7 @@ def cake_fmha_nondet_train_backward(
         dk = torch.empty(0, Skv, H, D, dtype=torch.bfloat16, device=device)
         return dq, dk, torch.empty_like(dk)
     arch = device_arch(device.index)  # RuntimeError on a device outside ARCHES, before the alert
-    variant = cake_jit.variant(D, causal, Skv, arch)
+    variant = cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
     pre, main, post = cake_jit.RECORD_OF[variant]
     _alert_nondeterministic(_ENTRY)
     sequence = _sequence(variant, arch)
