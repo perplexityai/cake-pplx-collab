@@ -18463,8 +18463,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
     del graph, scratch
     # a non-reentrant checkpoint's recomputation takes no buffer (the checkpointed call's backward binds the call's
-    # holder); a reentrant one's recomputation does (its graph runs the backward); a form without a fill takes its
-    # buffer in the backward that binds the holder; the bits are the plain step's
+    # holder); a form without a fill takes its buffer in the backward that binds the holder; a reentrant checkpoint's
+    # first pass is the call without a gradient (it takes what that call takes and frees it at once) and its
+    # recomputation's graph takes one in the backward; the bits are the plain step's
     calls = []
     phase = ["forward"]
     real = be._graph_rlab
@@ -18484,6 +18485,15 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
             def call(x, w, entry=entry, inp=inp):
                 return entry(x, w, inp.labels, chunk_size=4096)
 
+            first = []
+            if kind == "reentrant":
+                # the takes of the call without a gradient (its form: no kept logits)
+                del calls[:]
+                phase[0] = "forward"
+                with torch.no_grad():
+                    call(X, W)
+                first = list(calls)
+                assert first in ([], ["forward"]), (entry.__name__, first)
             del calls[:]
             phase[0] = "forward"
             if kind == "plain":
@@ -18492,23 +18502,21 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
                 lp = torch.utils.checkpoint.checkpoint(
                     call, X, W, use_reentrant=kind == "reentrant"
                 )
-            # the form of the call's graph (a reentrant checkpoint's first pass builds none: no gradient)
-            node = None if kind == "reentrant" else _graph_rlab_node(lp)
-            lazy = (
-                node is None
-                or bool(getattr(node, "kept", False))
-                or not node.logprob_dz
-            )
-            del node
+            if kind == "reentrant":
+                assert calls == first, (entry.__name__, calls, first)
+                # one take in the backward: the recomputation's forward (the dz arm) or the backward that binds the
+                # recomputed graph's holder (a form without a fill)
+                expect = first + ["backward"]
+            else:
+                node = _graph_rlab_node(lp)
+                lazy = bool(getattr(node, "kept", False)) or not node.logprob_dz
+                del node
+                # one take: the binding backward's (a form without a fill) or the dz arm's forward
+                expect = ["backward"] if lazy else ["forward"]
             phase[0] = "backward"
             lp.backward(inp.dlogp)
             torch.cuda.synchronize()
-            if lazy:
-                # one take in the backward: the binding backward's (no fill), or the reentrant recomputation's forward
-                # (the no-grad first pass takes none)
-                assert calls == ["backward"], (entry.__name__, kind, calls)
-            else:
-                assert calls == ["forward"], (entry.__name__, kind, calls)
+            assert calls == expect, (entry.__name__, kind, calls)
             out = (_bits(lp.detach()), _bits(X.grad), _bits(W.grad))
             if plain is None:
                 plain = out
@@ -18611,7 +18619,7 @@ from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inp
 from tests.cake.test_helpers.cake_package import cake_package
 be = cake_package("cake.{package}", "cake_backend")
 be._RLAB_POOL_ON = {pool!r}
-rows, held, requests = [], [], []
+rows, held, held_rows, requests = [], [], [], []
 real = be._graph_rlab_tensor
 
 
@@ -18655,7 +18663,10 @@ for T in (32, 16, 256, 32, 1, 300, 16):
         hs = [holder(lp) for lp in lps]
         torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
         # each graph's residuals: taken by its forward (the dz arm) or by its backward (a form without a fill)
-        held.extend(h.tensor.data_ptr() for h in hs if h is not None and h.tensor is not None)
+        took = [h.tensor for h in hs if h is not None and h.tensor is not None]
+        held.extend(t.data_ptr() for t in took)
+        held_rows.extend(t.numel() for t in took)
+        del took
         del hs, lps
     torch.cuda.synchronize()
 # the placement: per segment kind (the holding stream's, the default stream's, another's), the segment's number in the
@@ -18676,7 +18687,7 @@ def where(p):
 
 rows = [[op, shape, where(p)] for op, shape, p in rows]
 held = [where(p) for p in held]
-print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, requests=len(requests))))
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, held_rows=held_rows, requests=len(requests))))
 """
 
 
@@ -18717,10 +18728,17 @@ def _check_graph_rlab_pool_placement(package, entry):
     for a, b in zip(on, off, strict=True):
         assert a == b
     # every graph holds residuals, each of the per-call path's from its own holding-stream request; the free lists
-    # request a buffer only when the stream's last free one is missing or too small: the two graphs at 32 rows (two
-    # alive at a time, capacity 128), at 256 rows and at 300 rows; every other graph reuses a freed buffer
+    # request a buffer only when the stream's last free one is missing or too small: a step's two graphs (alive at a
+    # time, the same rows) take the two buffers the step before freed, else request two of their rows rounded up to
+    # 128; every other graph reuses a freed buffer
+    held_rows = got[True]["held_rows"]
+    assert held_rows == got[False]["held_rows"] and held_rows[::2] == held_rows[1::2]
     assert len(got[True]["held"]) == len(got[False]["held"]) == got[False]["requests"]
-    assert got[True]["requests"] == 6 < got[False]["requests"]
+    capacity = want = 0
+    for n in held_rows[::2]:
+        if n > capacity:
+            capacity, want = -(-n // 128) * 128, want + 2
+    assert got[True]["requests"] == want < got[False]["requests"]
 
 
 def test_device_graph_rlab_pool_placement(glm_weight):
@@ -18729,9 +18747,9 @@ def test_device_graph_rlab_pool_placement(glm_weight):
     time) and backwards at 32, 16, 256, 32, 1, 300 and 16 rows, one with the free lists on and one with them off
     (``_RLAB_POOL_ON``), and every CUDA tensor an operator returns on the default stream's segments -- the compact
     rows, the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the
-    same offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request six
-    buffers (the first two graphs, and two at each larger row count: 256 and 300 rows) where the per-call path
-    requests one per graph."""
+    same offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request two
+    buffers only where a step's rows pass the capacity the steps before left (rows rounded up to 128), where the
+    per-call path requests one per graph."""
     _check_graph_rlab_pool_placement(
         "cake_lm_head_nondet_train", "cake_lm_head_nondet_train_logprob"
     )
