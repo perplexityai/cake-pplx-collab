@@ -248,9 +248,9 @@ def _fresh_launchers(patch: pytest.MonkeyPatch) -> None:
 
 
 def _spy_entries(patch: pytest.MonkeyPatch, record) -> None:
-    """Every launch calls ``record(name, values)`` before the FFI entry of its program ``name``, ``values`` naming
-    the program's kernel parameters (the grid left out): each entry is wrapped as it is looked up, and the launchers
-    are made afresh so that they bind the wrapped entries."""
+    """Every launch calls ``record(name, values)`` before the FFI entry of its program ``name``, ``values`` naming the
+    program's parameters (the kernel's, then the column offsets; the grid left out): each entry is wrapped as it is
+    looked up, and the launchers are made afresh so that they bind the wrapped entries."""
     entry = pkg._entry
 
     def spy(name, arch):
@@ -624,9 +624,9 @@ def test_the_unweighted_backward_program_and_its_grid(host_device) -> None:
 
 
 def test_launches_pass_the_argument_plan_and_the_grid(host_device) -> None:
-    """``run_module`` passes the routed program's kernel parameters in its argument plan's order, then
-    ``cake_jit.grid(name, rows)``; a missing parameter and a launch of no rows are ``ValueError``s naming them, raised
-    before any library is looked up."""
+    """``run_module`` passes the routed program's parameters (the kernel's, then the column offsets) in its argument
+    plan's order, then ``cake_jit.grid(name, rows)``; a missing parameter and a launch of no rows are ``ValueError``s
+    naming them, raised before any library is looked up."""
     host_device.place("sm_100a", 148)
     calls = host_device.calls
     for stage in STAGES:
@@ -749,9 +749,9 @@ def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monke
 @pytest.mark.parametrize("stage", STAGES)
 def test_the_launcher_launches_what_run_module_launches(stage, arch, sm_count, host_device, monkeypatch) -> None:
     """The launcher of a stage and device (the entry points' launch) is made once per stage and device and loads no
-    library when made; at 1 row, one row below, at and above each edge of the windows and ``MAX_ROWS - 1`` rows it
-    runs the program ``run_module`` runs, with the same arguments (the kernel parameters in the plan's order) and grid,
-    and it looks up each program's FFI entry once, at that program's first launch."""
+    library when made; at 1 row, one row below, at and above each edge of the windows and ``MAX_ROWS - 1`` rows it runs
+    the program ``run_module`` runs, with the same arguments (the parameters in the plan's order) and grid, and it looks
+    up each program's FFI entry once, at that program's first launch."""
     host_device.place(arch, sm_count)
     bound: list = []
     entry = pkg._entry
@@ -777,8 +777,8 @@ def test_the_launcher_launches_what_run_module_launches(stage, arch, sm_count, h
 
 
 def test_the_launcher_refuses_programs_that_take_another_order(host_device, monkeypatch) -> None:
-    """A launcher passes the kernel parameters by position, so it is not made (``RuntimeError`` naming the record) for
-    a stage whose program takes them in another order than the entry points pass them; nothing is launched."""
+    """A launcher passes the parameters by position, so it is not made (``RuntimeError`` naming the record) for a stage
+    whose program takes them in another order than the entry points pass them; nothing is launched."""
     host_device.place("sm_100a", SM_COUNTS[0])
     name = cake_jit.PROGRAM_OF["bwd_large"]["sm_100a"]
     plan = [list(item) for item in cake_jit.MODULES[name]["arg_plan"]]
@@ -787,7 +787,7 @@ def test_the_launcher_refuses_programs_that_take_another_order(host_device, monk
     pkg.parameters.cache_clear()
     pkg._plan.cache_clear()
     try:
-        with pytest.raises(RuntimeError, match=f"record {name}: kernel parameters"):
+        with pytest.raises(RuntimeError, match=f"record {name}: parameters"):
             pkg._launcher("bwd", 0)
         assert host_device.calls == []
         pkg._launcher("fwd", 0)  # the other stage's programs keep the order

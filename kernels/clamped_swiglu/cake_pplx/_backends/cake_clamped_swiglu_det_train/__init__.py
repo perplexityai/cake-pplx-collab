@@ -289,10 +289,10 @@ def _entry(name: str, arch: str) -> Any:
 
 @functools.cache
 def _plan(name: str) -> tuple[Callable[[dict[str, Any]], tuple[Any, ...]], int, int]:
-    """``(arguments, per_row, per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple
-    of its kernel parameters in ``run`` order (:func:`parameters`), a row is ``per_row`` tasks and one CTA owns
-    ``per_cta`` tasks (``cake_jit.cta_tasks``), so a launch of ``rows`` rows has ``ceil(rows * per_row / per_cta)``
-    CTAs (``cake_jit.grid``)."""
+    """``(arguments, per_row, per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple of
+    its parameters in ``run`` order (:func:`parameters`: the kernel's, then the column offsets), a row is ``per_row``
+    tasks and one CTA owns ``per_cta`` tasks (``cake_jit.cta_tasks``), so a launch of ``rows`` rows has
+    ``ceil(rows * per_row / per_cta)`` CTAs (``cake_jit.grid``)."""
     per_cta, per_row = cake_jit.cta_tasks(name)
     return operator.itemgetter(*parameters(name)), per_row, per_cta
 
@@ -322,8 +322,8 @@ def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Pl
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
     """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
-    small-R one at every other row count; ``bwd_unweighted`` has one program) with its kernel parameters named in
-    ``values``, on the current torch stream of device ``device_index``.
+    small-R one at every other row count; ``bwd_unweighted`` has one program) with its parameters (the kernel's, then
+    the column offsets) named in ``values``, on the current torch stream of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
@@ -398,7 +398,7 @@ def _launcher(stage: str, device_index: int) -> Callable[..., None]:
     for name in dict.fromkeys((small[0], large[0])):
         if parameters(name) != _ARGUMENTS[stage]:
             raise RuntimeError(
-                f"record {name}: kernel parameters {parameters(name)} are not in the order the host passes them, "
+                f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
                 f"{_ARGUMENTS[stage]}"
             )
     arch = device_arch(device_index)
