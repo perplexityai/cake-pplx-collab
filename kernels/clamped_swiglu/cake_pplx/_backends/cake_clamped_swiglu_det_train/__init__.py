@@ -158,13 +158,15 @@ JIT variables):
   the function adds no saved state of its own and no activation.  The
   gradients have no derivative of their own: when the autograd engine records
   them (``create_graph=True``), differentiating them raises ``RuntimeError``.
-- Checkpointing.  :func:`cake_clamped_swiglu_det` launches its forward kernel
+- Checkpointing.  With saved-tensors hooks set (a non-reentrant checkpoint
+  sets them), :func:`cake_clamped_swiglu_det` launches its forward kernel
   after ``CakeClampedSwiGLUDetFunction.apply`` returns: ``forward`` checks the
   arguments and allocates ``h`` but keeps the launch (:class:`_HeldLaunch`,
   passed as an internal fifth argument), so autograd saves the inputs (runs
   their pack hooks) before the kernel runs, as for a built-in op.  PyTorch
   packs a custom function's saved tensors only after its ``forward`` returns,
-  wherever ``forward`` calls ``save_for_backward``.  Under
+  wherever ``forward`` calls ``save_for_backward``.  Without hooks nothing
+  observes that order, and ``forward`` launches.  Under
   ``torch.utils.checkpoint(..., use_reentrant=False)`` with early stop on (the
   default), the recomputation in the backward stops once it has saved again
   every tensor the region saved, so it ends before the launch when these
@@ -1214,10 +1216,10 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
     ``apply(gate_up_or_gate, up, weight, limit)`` launches the forward kernel inside ``forward``.  PyTorch packs a
     custom function's saved tensors (its saved-tensors hooks run) only after ``forward`` returns, so under a
     non-reentrant checkpoint the recomputation runs that launch even when its output is not used.
-    :func:`cake_clamped_swiglu_det` passes a fifth argument, an internal :class:`_HeldLaunch`: ``forward`` then checks
-    the arguments and allocates ``h`` but keeps the launch, which the caller runs after ``apply`` returns, so the
-    inputs are saved before the kernel runs, as for a built-in op.  Any other fifth argument but ``None`` (such as a
-    ``True`` / ``False`` mode) raises ``TypeError``."""
+    With saved-tensors hooks set, :func:`cake_clamped_swiglu_det` passes a fifth argument, an internal
+    :class:`_HeldLaunch`: ``forward`` then checks the arguments and allocates ``h`` but keeps the launch, which the
+    caller runs after ``apply`` returns, so the inputs are saved before the kernel runs, as for a built-in op.  Any
+    other fifth argument but ``None`` (such as a ``True`` / ``False`` mode) raises ``TypeError``."""
 
     @staticmethod
     def forward(ctx, gate_up_or_gate, up, weight, limit, _launch=None):
@@ -1250,17 +1252,26 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
 
 
 _apply = CakeClampedSwiGLUDetFunction.apply
+# The innermost saved-tensors hooks, a (pack, unpack) pair, or None when none are set: read as torch's own checkpoint
+# reads them.  Without this function (another torch) every autograd call holds its launch.
+_saved_tensors_hooks = getattr(torch._C._autograd, "_top_saved_tensors_default_hooks", None)
 
 
 def _autograd(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tensor:
-    """:func:`cake_clamped_swiglu_det` with positional arguments: :class:`CakeClampedSwiGLUDetFunction` applied with
-    a :class:`_HeldLaunch`, which then launches the forward kernel.  ``apply`` saves the inputs (runs their pack
-    hooks) before it returns, so a non-reentrant checkpoint's recomputation with early stop on (the default) ends
-    inside ``apply``, before this launch, when these inputs are the last tensors its region saves: the recomputed
-    ``h`` would be dropped.  When a later operation of the region saves a tensor (the down projection saves ``h``),
-    the recomputation continues and launches it.  Under ``torch.compile`` or ``torch.jit.trace`` the launch stays inside
-    ``forward`` (a trace records ``apply`` only)."""
-    if torch.compiler.is_compiling() or torch.jit.is_tracing():
+    """:func:`cake_clamped_swiglu_det` with positional arguments.  With saved-tensors hooks set (a non-reentrant
+    checkpoint sets them for its forward and its recomputation; so does activation offloading),
+    :class:`CakeClampedSwiGLUDetFunction` is applied with a :class:`_HeldLaunch`, which then launches the forward
+    kernel.  ``apply`` saves the inputs (runs their pack hooks) before it returns, so a non-reentrant checkpoint's
+    recomputation with early stop on (the default) ends inside ``apply``, before this launch, when these inputs are the
+    last tensors its region saves: the recomputed ``h`` would be dropped.  When a later operation of the region saves a
+    tensor (the down projection saves ``h``), the recomputation continues and launches it.  Without hooks no pack hook
+    runs and nothing can stop the call, so ``apply`` launches inside ``forward``, without the holder's host work.  Under
+    ``torch.compile`` or ``torch.jit.trace`` the launch stays inside ``forward`` (a trace records ``apply`` only)."""
+    if (
+        torch.compiler.is_compiling()
+        or (_saved_tensors_hooks is not None and _saved_tensors_hooks(False) is None)
+        or torch.jit.is_tracing()
+    ):
         return _apply(gate_up_or_gate, up, weight, limit)
     launch = _HeldLaunch()
     h = _apply(gate_up_or_gate, up, weight, limit, launch)
@@ -1275,8 +1286,8 @@ def cake_clamped_swiglu_det(
     *,
     limit: float,
 ) -> torch.Tensor:
-    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments,
-    the forward kernel launched after autograd saved the inputs (:func:`_autograd`)."""
+    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments;
+    with saved-tensors hooks set, the forward kernel launched after autograd saved the inputs (:func:`_autograd`)."""
     return _autograd(gate_up_or_gate, up, weight, limit)
 
 

@@ -38,11 +38,12 @@ y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, w, w_down, use_reent
 
 The op saves only its inputs, so checkpointing it alone saves no memory: the down projection keeps `h` for its weight
 gradient.  A region that also holds the down projection does not keep `h` from the forward to the backward, which
-recomputes it.  `cake_clamped_swiglu_det` launches its forward kernel after autograd saved its inputs, as a built-in
-op does.  So in a non-reentrant region with early stop on (the torch default), the recomputation stops before that
-launch when nothing later in the region saves a tensor: the op checkpointed alone adds no forward to the backward.
-When a later operation saves one (the down projection above saves `h`; so does the whole expert block), the
-recomputation runs the forward.
+recomputes it.  With saved-tensors hooks set (a non-reentrant checkpoint sets them), `cake_clamped_swiglu_det`
+launches its forward kernel after autograd saved its inputs, as a built-in op does.  So in a non-reentrant region with
+early stop on (the torch default), the recomputation stops before that launch when nothing later in the region saves a
+tensor: the op checkpointed alone adds no forward to the backward.  When a later operation saves one (the down
+projection above saves `h`; so does the whole expert block), the recomputation runs the forward.  Without hooks the
+autograd function's `forward` launches, as before.
 A reentrant checkpoint, `early_stop=False` (or `set_checkpoint_early_stop(False)`), `torch.compile`, `torch.jit.trace`
 and a direct `CakeClampedSwiGLUDetFunction.apply` run the recomputed forward in every region, also when its output is
 dropped.  0.1.7 and earlier launched the forward inside the autograd function's `forward`, before autograd saved the
@@ -239,7 +240,7 @@ the fills of those outputs.  The kernels write every element of every output, so
   operands and `dh`, then `limit`, then the output buffers.  The row strides of its contiguous tensors are constants
   (`4608` or `2304`; 0 for one row), not read.  Any other call takes the full checks, which raise every error and copy
   what the kernels cannot read; both give the same launch.  The facade binds the backend's step functions and
-  autograd entry (`apply`, then the forward launch) at their first call.
+  autograd entry (`apply`; with saved-tensors hooks set, then the forward launch) at their first call.
 
 ## Limitations
 

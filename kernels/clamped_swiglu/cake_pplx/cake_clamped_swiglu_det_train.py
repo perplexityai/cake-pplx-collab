@@ -80,7 +80,8 @@ Mode rules:
    checkpointing ``cake_clamped_swiglu_det`` alone saves no memory: the down
    projection that reads ``h`` keeps ``h`` for its weight gradient.  To drop
    ``h`` until the backward, checkpoint a region that also holds the down
-   projection; the backward then recomputes ``h`` for it.
+   projection; the backward then recomputes ``h`` for it.  With
+   saved-tensors hooks set (a non-reentrant checkpoint sets them),
    ``cake_clamped_swiglu_det`` launches its forward kernel after autograd
    saved its inputs, as a built-in op does, so the recomputation of a
    non-reentrant checkpoint with early stop on (the default) skips that
@@ -139,11 +140,12 @@ from ._cake_pplx_api_clamped_swiglu import cake_api
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
 # imported on first use.  The steps and the autograd entry call the backend's
-# own step functions and positional autograd entry (``apply``, then the forward
-# launch), which the backend functions of the same names call: the same work,
-# one Python call fewer per call.  Each is bound to a global of this module at
-# its first call (:func:`_step_forward`, :func:`_step_backward`,
-# :func:`_autograd`), so a later call reads no cache.
+# own step functions and positional autograd entry (``apply``; with
+# saved-tensors hooks set, then the forward launch), which the backend
+# functions of the same names call: the same work, one Python call fewer per
+# call.  Each is bound to a global of this module at its first call
+# (:func:`_step_forward`, :func:`_step_backward`, :func:`_autograd`), so a
+# later call reads no cache.
 
 
 @functools.cache
@@ -168,8 +170,8 @@ def _step_backward(*arguments: Any) -> tuple[torch.Tensor, Optional[torch.Tensor
 
 
 def _autograd(*arguments: Any) -> torch.Tensor:
-    """The backend's autograd entry (``CakeClampedSwiGLUDetFunction.apply``, then the forward launch); the first call
-    imports the backend and binds this global to it."""
+    """The backend's autograd entry (``CakeClampedSwiGLUDetFunction.apply``; with saved-tensors hooks set, then the
+    forward launch); the first call imports the backend and binds this global to it."""
     global _autograd
     _autograd = _backend()._autograd
     return _autograd(*arguments)
@@ -367,11 +369,11 @@ def cake_clamped_swiglu_det(
     -----
     Saves only the inputs and recomputes the activation in the backward (no activation retained; works under
     ``torch.utils.checkpoint(..., use_reentrant=False)``).  Checkpointing this op alone saves no memory (the down
-    projection keeps ``h``); checkpoint a region that also holds the down projection.  The forward kernel runs after
-    autograd saved the inputs, so a non-reentrant checkpoint with early stop on (the default) recomputes it only when
-    a later operation of its region saves a tensor (the down projection saves ``h``).  ``limit`` is checked once, in
-    the forward.  No double backward: differentiating gradients computed with ``create_graph=True`` raises
-    ``RuntimeError``.
+    projection keeps ``h``); checkpoint a region that also holds the down projection.  Under a non-reentrant checkpoint
+    the forward kernel runs after autograd saved the inputs, so with early stop on (the default) the checkpoint
+    recomputes it only when a later operation of its region saves a tensor (the down projection saves ``h``).
+    ``limit`` is checked once, in the forward.  No double backward: differentiating gradients computed with
+    ``create_graph=True`` raises ``RuntimeError``.
     """
 
     return _autograd(gate_up_or_gate, up, weight, limit)

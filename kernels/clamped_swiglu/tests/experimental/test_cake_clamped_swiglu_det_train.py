@@ -56,10 +56,11 @@ row's outputs do not depend on the other rows), on a side stream with no host sy
 the small-R and of the large-R programs, under ``torch.use_deterministic_algorithms`` (where every new output holds
 PyTorch's NaN fill when its kernel launches) and with the current device switched to another GPU (each call runs on its
 operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
-under non-reentrant checkpointing; ``cake_clamped_swiglu_det`` launches its forward after autograd saved the inputs
-(their pack hooks run first; a direct ``apply``, and the entry under ``torch.compile`` or ``torch.jit.trace``, launch
-inside ``forward``), so a checkpoint's backward launches the forward again only where the recomputed ``h`` is saved:
-none for the op alone in a non-reentrant region with early stop, one for the op with the down projection, the whole
+under non-reentrant checkpointing; with saved-tensors hooks set, ``cake_clamped_swiglu_det`` launches its forward
+after autograd saved the inputs (their pack hooks run first; without hooks, a direct ``apply``, and the entry under
+``torch.compile`` or ``torch.jit.trace``, launch inside ``forward``), so a checkpoint's backward launches the forward
+again only where the recomputed ``h`` is saved: none for the op alone in a non-reentrant region with early stop, one
+for the op with the down projection, the whole
 block (gate/up projection, op, down projection), early stop off, a reentrant region or a direct ``apply``, also in a
 captured CUDA graph, all with the bits of the steps without a checkpoint; the autograd backward checks the saved
 operands again (unpacked by a saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and
@@ -1702,14 +1703,26 @@ def _recomputed(launched: list, run) -> tuple[int, int]:
     ("layout", "w"), [("merged", "random"), ("split", "random"), ("merged", "none"), ("split", "none")]
 )
 def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
-    """``cake_clamped_swiglu_det`` launches its forward kernel after ``CakeClampedSwiGLUDetFunction.apply`` returns:
-    every pack hook of the inputs it saves runs before the launch, as for a built-in op.  A direct ``apply`` with four
-    arguments launches inside ``forward``, before the pack hooks, and so does ``cake_clamped_swiglu_det`` while
-    ``torch.compiler.is_compiling()`` or ``torch.jit.is_tracing()`` is true.  Under ``torch.no_grad()`` it launches
-    once and saves nothing.  Every way gives the steps' bits, one forward launch and one backward launch."""
+    """With saved-tensors hooks set, ``cake_clamped_swiglu_det`` launches its forward kernel after
+    ``CakeClampedSwiGLUDetFunction.apply`` returns: every pack hook of the inputs it saves runs before the launch, as
+    for a built-in op.  A direct ``apply`` with four arguments launches inside ``forward``, before the pack hooks, and
+    so does ``cake_clamped_swiglu_det`` while ``torch.compiler.is_compiling()`` or ``torch.jit.is_tracing()`` is true.
+    Without hooks it makes no held launch and ``forward`` launches (with no way to read the hooks, every call holds its
+    launch).  Under ``torch.no_grad()`` it launches once and saves nothing.  Every way gives the steps' bits, one
+    forward launch and one backward launch."""
     t = make_inputs(Case(129, layout, w), seed=31, device=device)
     want = _functional(t)
     packs = sum(x is not None for x in (t.first, t.second, t.weight))
+    made: list = []
+
+    class Counted(pkg._HeldLaunch):
+        __slots__ = ()
+
+        def __init__(self) -> None:
+            made.append(self)
+            super().__init__()
+
+    monkeypatch.setattr(pkg, "_HeldLaunch", Counted)
 
     def pack(x: torch.Tensor) -> torch.Tensor:
         launches.append(("pack", None, None))
@@ -1734,6 +1747,7 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
     held = ["pack"] * packs + ["fwd"]
     inside = ["fwd"] + ["pack"] * packs
     assert run(lambda leaves: clamped_swiglu(*leaves, limit=t.L)) == held
+    assert len(made) == 1
     assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L)) == inside
     assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L, None)) == inside
 
@@ -1749,6 +1763,22 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
 
     assert run(patched(torch.compiler, "is_compiling")) == inside
     assert run(patched(torch.jit, "is_tracing")) == inside
+    assert len(made) == 1
+
+    assert pkg._saved_tensors_hooks is None or pkg._saved_tensors_hooks(False) is None  # no hooks set here
+    for hooks in (pkg._saved_tensors_hooks, None):  # the torch function, then no way to read the hooks
+        monkeypatch.setattr(pkg, "_saved_tensors_hooks", hooks)
+        made.clear()
+        launches.clear()
+        leaves = _leaves(t)
+        h = clamped_swiglu(*leaves, limit=t.L)
+        assert len(made) == (hooks is None), hooks
+        assert [launch[0] for launch in launches] == ["fwd"], hooks
+        h.backward(t.dh)
+        assert_same_bits(h, want["h"], f"h without hooks ({hooks})")
+        assert_same_bits(leaves[0].grad, want["d_first"], f"d_first without hooks ({hooks})")
+        if hooks is None:
+            assert run(lambda leaves: clamped_swiglu(*leaves, limit=t.L)) == held
 
     launches.clear()
     with torch.no_grad():
