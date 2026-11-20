@@ -2863,7 +2863,8 @@ class MoKCommunication:
         self.gather_module = load_kernel("gather")
         self.barrier_module = load_kernel("barrier")
 
-    def all_gather_top_experts(self, routes, gathered, multicast_address, rank):
+    def _check_gather(self, routes, gathered, multicast_address, rank):
+        """The checks of :meth:`all_gather_top_experts`; returns the EP size."""
         import torch
 
         if (
@@ -2894,6 +2895,10 @@ class MoKCommunication:
             raise ValueError(
                 "Metadata chunk must divide each rank's route-buffer bytes"
             )
+        return ep
+
+    def all_gather_top_experts(self, routes, gathered, multicast_address, rank):
+        ep = self._check_gather(routes, gathered, multicast_address, rank)
         if ep == 1:
             gathered[0].copy_(routes)
         else:
@@ -2905,6 +2910,26 @@ class MoKCommunication:
                     rank=rank,
                     numel=routes.numel(),
                 )
+
+    def gather_plan(self, routes, gathered, multicast_address, rank):
+        """:meth:`all_gather_top_experts` validated once for caller-owned
+        ``routes`` and ``gathered`` buffers that outlive the plan: a
+        :class:`_Plan` to launch with ``plan.launch(())`` inside
+        ``_ffi_stream()`` (the same kernel and arguments), or None at EP 1,
+        where the gather is a copy (call :meth:`all_gather_top_experts`)."""
+        if self._check_gather(routes, gathered, multicast_address, rank) == 1:
+            return None
+        return _Plan(
+            self.gather_module,
+            (routes.numel() * 4 // self.chunk_bytes, 1, 1),
+            dict(
+                local_routes=routes,
+                multicast_address=multicast_address,
+                rank=rank,
+                numel=routes.numel(),
+            ),
+            (),
+        )
 
     def barrier_all(self, counter, peer_pointers, multicast_address, target):
         import torch
@@ -2969,6 +2994,30 @@ class MoKCommunication:
         )
 
 
+class _SchedulerPlan:
+    """A validated schedule build (see :meth:`MoKScheduler.plan`): the count,
+    pad, rows and layout launches bound to their launch-invariant arguments,
+    the int32 element ranges of one schedule buffer and the template of its
+    initialized prefix."""
+
+    __slots__ = (
+        "count",
+        "pad",
+        "rows",
+        "layout",
+        "template",
+        "capacity",
+        "slab",
+        "layout_range",
+        "total",
+        "device",
+    )
+
+    def __init__(self, **values):
+        for name, value in values.items():
+            setattr(self, name, value)
+
+
 class MoKScheduler:
     """Three prepared kernel modules; allocations/resets match native MoK.
 
@@ -2980,6 +3029,13 @@ class MoKScheduler:
     created on demand, valid until :meth:`release_counts`). :meth:`layout`
     derives the expert layout of a schedule once, with the ``expert_layout``
     module loaded here, before capture.
+
+    :meth:`plan` / :meth:`launch_planned` / :meth:`layout_planned` are the
+    same launches validated once per (gathered-routes buffer, capacity,
+    rank): per call one int32 allocation holds the whole schedule
+    (``peer_token``, ``peer_rank``, the counter slab and the layout), and one
+    copy from the plan's template writes the ``-1`` sentinel and the zero
+    counters that ``__call__`` writes with a fill and a zero slab.
     """
 
     def __init__(self, world_size: int, local_experts: int):
@@ -2995,7 +3051,8 @@ class MoKScheduler:
         self.layout_module = load_kernel("expert_layout")
         self._counts = None
 
-    def __call__(self, topk_all, schedule_capacity: int, rank: int):
+    def _check(self, topk_all, schedule_capacity, rank):
+        """The argument checks of :meth:`__call__` and :meth:`plan`."""
         import torch
 
         if (
@@ -3014,6 +3071,12 @@ class MoKScheduler:
             raise ValueError(
                 "Schedule capacity must be aligned and hold one source rank"
             )
+        return world, local_tokens, top_k
+
+    def __call__(self, topk_all, schedule_capacity: int, rank: int):
+        import torch
+
+        world, local_tokens, top_k = self._check(topk_all, schedule_capacity, rank)
         kwargs = dict(device=topk_all.device, dtype=torch.int32)
         peer_rank = torch.empty(schedule_capacity, **kwargs)
         peer_token = torch.empty(schedule_capacity, **kwargs)
@@ -3072,6 +3135,109 @@ class MoKScheduler:
         """The expert layout of a schedule: one launch per schedule, consumed by
         every fused launch of it."""
         return expert_layout(self.layout_module, tokens_per_expert, capacity, peer_rank)
+
+    def plan(self, topk_all, schedule_capacity: int, rank: int):
+        """:meth:`__call__` and :meth:`layout` validated once for a caller-owned
+        gathered-routes buffer ``topk_all`` that outlives the plan, a schedule
+        capacity and a rank (a workspace's): a :class:`_SchedulerPlan` for
+        :meth:`launch_planned` and :meth:`layout_planned`.
+
+        A schedule is one int32 buffer ``[peer_token | peer_rank | counter
+        slab | layout]``: ``peer_rank`` and the slab are adjacent, so one copy
+        of the plan's template (``-1`` sentinel, then zeros) initializes both;
+        the slab keeps the layout of :func:`_zero_slab` (counts, then the
+        aligned ``num_tokens`` / ``tokens_per_expert`` group) and the layout
+        starts 512-B aligned. Build the plan outside CUDA Graph capture (its
+        template is written here).
+        """
+        import torch
+
+        world, local_tokens, top_k = self._check(topk_all, schedule_capacity, rank)
+        experts = self.local_experts
+        pieces, keep, slab_total = _slab_pieces((experts * world + world, (1, experts)))
+        views, offset = [], 2 * schedule_capacity
+        for size, kept in zip(pieces, keep, strict=True):
+            if kept:
+                views.append((offset, offset + size))
+            offset += size
+        # 512 B, the caching allocator's alignment of a separate allocation.
+        layout_start = offset + (-offset % 128)
+        layout_end = layout_start + 3 * experts + schedule_capacity // 256
+        kwargs = dict(device=topk_all.device, dtype=torch.int32)
+        template = torch.cat(
+            (
+                torch.full((schedule_capacity,), -1, **kwargs),
+                torch.zeros(slab_total, **kwargs),
+            )
+        )
+        sizes = dict(local_tokens=local_tokens, top_k=top_k, rank=rank)
+        return _SchedulerPlan(
+            count=_Plan(
+                self.count,
+                ((topk_all.numel() + 1023) // 1024, 1, 1),
+                dict(topk_all=topk_all, **sizes),
+                ("counts",),
+            ),
+            pad=_Plan(
+                self.pad,
+                (experts, 1, 1),
+                {},
+                ("counts", "tokens_per_expert", "num_tokens"),
+            ),
+            rows=_Plan(
+                self.rows,
+                (experts * world, 1, 1),
+                dict(topk_all=topk_all, capacity=schedule_capacity, **sizes),
+                (
+                    "counts",
+                    "tokens_per_expert",
+                    "num_tokens",
+                    "schedule_peer_rank",
+                    "schedule_peer_token_idx",
+                ),
+            ),
+            layout=_Plan(
+                self.layout_module,
+                (1, 1, 1),
+                dict(experts=experts),
+                ("counts", "schedule_rank", "layout"),
+            ),
+            template=template,
+            capacity=schedule_capacity,
+            slab=tuple(views),
+            layout_range=(layout_start, layout_end),
+            total=layout_end,
+            device=topk_all.device,
+        )
+
+    def launch_planned(self, plan):
+        """:meth:`__call__` of a :meth:`plan` inside ``_ffi_stream()``: the
+        count, pad and rows launches over one new schedule buffer. Returns
+        ``(peer_rank, peer_token, num_tokens, tokens_per_expert, layout)``,
+        views of that buffer (``layout`` not yet written; see
+        :meth:`layout_planned`). :meth:`owner_loads` reads this call's counts
+        until :meth:`release_counts`."""
+        import torch
+
+        capacity = plan.capacity
+        buffer = torch.empty(plan.total, dtype=torch.int32, device=plan.device)
+        buffer[capacity : capacity + plan.template.numel()].copy_(plan.template)
+        peer_token, peer_rank = buffer[:capacity], buffer[capacity : 2 * capacity]
+        (c0, c1), (n0, n1), (e0, e1) = plan.slab
+        counts, num_tokens, per_expert = buffer[c0:c1], buffer[n0:n1], buffer[e0:e1]
+        plan.count.launch((counts,))
+        plan.pad.launch((counts, per_expert, num_tokens))
+        plan.rows.launch((counts, per_expert, num_tokens, peer_rank, peer_token))
+        self._counts = counts
+        start, end = plan.layout_range
+        return peer_rank, peer_token, num_tokens, per_expert, buffer[start:end]
+
+    @staticmethod
+    def layout_planned(plan, tokens_per_expert, peer_rank, layout):
+        """:meth:`layout` of a :meth:`plan` inside ``_ffi_stream()``, written
+        into the ``layout`` view :meth:`launch_planned` returned."""
+        plan.layout.launch((tokens_per_expert, peer_rank, layout))
+        return layout
 
 
 class MoKEpilogues:

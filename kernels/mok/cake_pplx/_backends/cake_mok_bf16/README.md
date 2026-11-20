@@ -292,6 +292,17 @@ launchers memoise their launch-invariant geometry per distinct launch
 arguments (integers and, for MXFP8, the device); the memo holds no tensors
 and does not change the launch sequence.
 
+`build_schedule` validates its launches once per workspace and adapter and
+keeps them with the workspace's launch plans: the gather, barrier, count, pad,
+rows and layout kernels with their workspace arguments and an int32 route
+buffer that each call overwrites before the gather (in stream order, as the
+workspace's shared buffers already require). Each schedule is one int32
+allocation (`peer_token`, `peer_rank`, the counters and the layout) whose
+`-1` sentinel and zero counters are written by one copy. The kernels, their
+order and their argument values are those of the unplanned launches, which
+the first `build_schedule` of a workspace runs when it happens during CUDA
+Graph capture.
+
 ## Repeatability
 
 Within the scope below, every output repeats bit for bit:

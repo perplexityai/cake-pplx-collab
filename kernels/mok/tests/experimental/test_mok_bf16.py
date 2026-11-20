@@ -490,6 +490,113 @@ def test_scheduler(ep, experts):
         scheduler.owner_loads()
 
 
+@pytest.mark.parametrize("ep,experts", SCHEDULER_LAYOUTS)
+def test_planned_scheduler_matches_the_unplanned_launches(ep, experts):
+    """The scheduler's plan (one int32 buffer per schedule whose sentinel and counters one template copy writes) gives
+    the unplanned launches' schedule bit for bit, twice from one plan: peer ranks, the peer token of every real row,
+    the row count, the padded counts, the owner-rank bins and the written layout prefix.  Every view lies in one
+    allocation, the counters keep the zero slab's alignment and the layout starts 512-B aligned."""
+    require_gpu()
+    _require_role(f"count_{ep}_{experts}")
+    topk = _scheduler_topk(ep, experts)
+    scheduler = MoKScheduler(ep, experts)
+    tokens = 512
+    generator = torch.Generator(device="cuda").manual_seed(2211)
+    ids = (
+        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        .argsort(-1)[:, :topk]
+        .int()
+        .reshape(ep, tokens, topk)
+        .contiguous()
+    )
+    ids[0, tokens - 37 :] = -1
+    capacity = ep * tokens * topk + experts * 256
+    for rank in sorted({0, ep - 1}):
+        peers, slots, total, counts = scheduler(ids, capacity, rank)
+        owner = scheduler.owner_loads().clone()
+        layout = scheduler.layout(counts, capacity, peers)
+        scheduler.release_counts()
+        written = 3 * experts + int(total.item()) // 256
+        real = peers >= 0
+        plan = scheduler.plan(ids, capacity, rank)
+        for _ in range(2):
+            with kernels._ffi_stream():
+                planned = scheduler.launch_planned(plan)
+                planned_owner = scheduler.owner_loads().clone()
+                scheduler.layout_planned(plan, planned[3], planned[0], planned[4])
+            scheduler.release_counts()
+            p_peers, p_slots, p_total, p_counts, p_layout = planned
+            assert torch.equal(p_peers, peers) and torch.equal(p_total, total)
+            assert torch.equal(p_counts, counts) and torch.equal(planned_owner, owner)
+            assert torch.equal(p_slots[real], slots[real])
+            assert torch.equal(p_layout[:written], layout[:written])
+            base = p_peers.untyped_storage().data_ptr()
+            assert all(view.untyped_storage().data_ptr() == base for view in planned)
+            assert p_total.data_ptr() % 128 == 0 and p_counts.data_ptr() == p_total.data_ptr() + 4
+            assert p_layout.data_ptr() % 512 == 0 and p_layout.numel() == 3 * experts + capacity // 256
+
+
+@pytest.mark.parametrize("count", [1024, 777], ids=["full", "partial"])
+def test_build_schedule_plan_matches_the_unplanned_launches(count):
+    """``build_schedule`` through the workspace's schedule plan gives the unplanned launches' schedule bit for bit on
+    full and partial source counts (one-GPU emulation of rank 0 of EP 4, :class:`OneGpuGroup`), and builds the plan
+    once per workspace and adapter.  A workspace's first ``build_schedule`` during CUDA Graph capture runs the
+    unplanned launches and builds no plan; its replay gives the same schedule."""
+    require_gpu()
+    ep, experts, topk, hidden = 4, 4, 2, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    generator = torch.Generator(device=device).manual_seed(3307 + count)
+    ids = (
+        torch.rand(count, ep * experts, device=device, generator=generator)
+        .argsort(-1)[:, :topk]
+        .contiguous()
+    )
+
+    def fields(schedule):
+        written = 3 * experts + int(schedule.num_tokens.item()) // 256
+        real = schedule.peer_rank >= 0
+        return (
+            schedule.peer_rank,
+            schedule.peer_token_idx[real],
+            schedule.num_tokens,
+            schedule.tokens_per_expert,
+            schedule.layout[:written],
+        )
+
+    workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    key = ("schedule", functional.scheduler, functional.communication)
+    planned = [
+        fields(functional.build_schedule(workspace, config, ids, num_local_experts=experts))
+        for _ in range(2)
+    ]
+    plan = workspace.storage.launch_plans[key]
+    assert len([k for k in workspace.storage.launch_plans if k[0] == "schedule"]) == 1
+    rank, token, total, counts, layout = functional._schedule_launches(
+        workspace.storage, config, ids, count
+    )
+    unplanned = fields(
+        workspace_module.MoKSchedule(
+            peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=counts, layout=layout
+        )
+    )
+    assert _same(planned[0], unplanned) and _same(planned[1], unplanned)
+    assert workspace.storage.launch_plans[key] is plan
+
+    fresh, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    stream = torch.cuda.Stream()
+    stream.wait_stream(torch.cuda.current_stream())
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph, stream=stream):
+        captured = functional.build_schedule(fresh, config, ids, num_local_experts=experts)
+    assert key not in fresh.storage.launch_plans
+    graph.replay()
+    torch.cuda.synchronize()
+    assert _same(fields(captured), unplanned)
+
+
 @pytest.mark.parametrize("ep,experts", [(4, 4), (8, 32)])
 def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, experts):
     """The owner-rank bins drop padding (-1), more negative ids and ids at or
