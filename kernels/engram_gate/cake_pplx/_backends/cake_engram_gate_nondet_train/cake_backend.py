@@ -52,11 +52,11 @@ parameter's dtype (rounded once, as ``.to(dtype)`` rounds) for autograd.
 exactly, zero ``dkey[t]`` and ``dvalue[t]``, and adds nothing to the weight
 gradients.
 
-``dot_sum`` selects how ``fwd`` sums ``P``.  ``"compensated"`` (the default)
-launches ``fwd_dot2``: a compensated FP32 dot product (each product split with
-an FMA, each running sum with an error-free two-sum, the error words added once
-at the end).  ``"fp32"`` (opt-in) launches ``fwd_f32``: one FP32 word, faster,
-which rounds more output elements away from the correctly rounded result where
+``dot_sum`` selects how ``fwd`` sums ``P``.  ``"fp32"`` (the default) launches
+``fwd_f32``: one FP32 word.  ``"compensated"`` (opt-in) launches ``fwd_dot2``:
+a compensated FP32 dot product (each product split with an FMA, each running
+sum with an error-free two-sum, the error words added once at the end), slower,
+which rounds fewer output elements away from the correctly rounded result where
 the products nearly cancel.  The backward is the same for both: ``bwd_dot2``
 recomputes ``P`` from the inputs as a compensated dot product, so the gradients
 do not depend on the forward's choice.
@@ -131,9 +131,9 @@ HIDDEN: int = cake_jit.HIDDEN
 KV_WIDTH: int = (STREAMS + 1) * HIDDEN
 
 # The forward sums of the dot product ``P = sum_d w_d h_d k_d`` a caller selects with ``dot_sum``, each with the
-# suffix of the ``fwd`` record it launches (:data:`.cake_jit.ACC_MODES`): ``"compensated"`` (the default) a
-# compensated FP32 dot product, ``"fp32"`` one FP32 word.  Every backward launches ``bwd_dot2``.
-_DOT_SUMS: dict[str, str] = {"compensated": "dot2", "fp32": "f32"}
+# suffix of the ``fwd`` record it launches (:data:`.cake_jit.ACC_MODES`): ``"fp32"`` (the default) one FP32 word,
+# ``"compensated"`` (opt-in) a compensated FP32 dot product.  Every backward launches ``bwd_dot2``.
+_DOT_SUMS: dict[str, str] = {"fp32": "f32", "compensated": "dot2"}
 
 # Token strides of the strided operands are multiples of 8 elements and every
 # BF16 operand starts on a 16-byte boundary: the kernels move 16 bytes per access.
@@ -762,7 +762,7 @@ def cake_engram_gate_nondet_train_forward(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
     out: Optional[torch.Tensor] = None,
 ) -> torch.Tensor:
     """The forward without autograd: ``out`` BF16 ``[T, 4, 5120]`` (``out`` given: written in place and returned).
@@ -770,8 +770,8 @@ def cake_engram_gate_nondet_train_forward(
     ``x`` BF16 ``[T, 4, 5120]`` contiguous; ``key`` BF16 ``[T, 4, 5120]`` and ``value`` BF16 ``[T, 5120]``,
     contiguous or views into a packed ``[T, 25600]`` buffer (unit column stride, stream stride 5120, token stride a
     multiple of 8); ``q_weight`` and ``k_weight`` BF16 or FP32 ``[4, 5120]``; ``token_mask`` bool ``[T]`` or None;
-    every tensor on one CUDA device, every BF16 operand 16-byte aligned.  ``dot_sum``: ``"compensated"`` (default)
-    or ``"fp32"`` (opt-in, faster), how ``P`` is summed.  ``T == 0`` launches nothing.  The forward never consults
+    every tensor on one CUDA device, every BF16 operand 16-byte aligned.  ``dot_sum``: ``"fp32"`` (default) or
+    ``"compensated"`` (opt-in, slower), how ``P`` is summed.  ``T == 0`` launches nothing.  The forward never consults
     ``torch.use_deterministic_algorithms``."""
     return _forward(x, key, value, q_weight, k_weight, token_mask, eps, clamp_value, dot_sum, out)
 
@@ -980,7 +980,7 @@ def cake_engram_gate_nondet(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
 ) -> torch.Tensor:
     """The Engram context gate with autograd (:class:`CakeEngramGateNondetFunction`): ``out`` BF16
     ``[T, 4, 5120]``; operands and ``dot_sum`` as in :func:`cake_engram_gate_nondet_train_forward` (``dot_sum``
@@ -997,7 +997,7 @@ def cake_engram_gate_nondet_kv(
     *,
     eps: float = 1e-20,
     clamp_value: float = 1e-6,
-    dot_sum: str = "compensated",
+    dot_sum: str = "fp32",
 ) -> torch.Tensor:
     """The Engram context gate with autograd on the packed ``kv`` BF16 ``[T, 25600]`` (the four keys, then the
     value; unit column stride, token stride a multiple of 8) (:class:`CakeEngramGateNondetKvFunction`): ``out`` BF16

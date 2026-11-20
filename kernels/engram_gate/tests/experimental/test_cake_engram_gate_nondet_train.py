@@ -58,7 +58,7 @@ RECORDS = ("bwd_dot2", "dw_reduce", "fwd_dot2", "fwd_f32")
 ACC_MODES = {"fwd": ("f32", "dot2"), "bwd": ("dot2",)}
 FWD_ACCS = ACC_MODES["fwd"]
 # The public ``dot_sum`` choices and the forward record suffix each launches; the first is the default.
-DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 ENTRIES = (
     "cake_engram_gate_nondet",
     "cake_engram_gate_nondet_kv",
@@ -133,10 +133,10 @@ def test_each_dot_sum_has_a_forward_record_and_one_backward_serves_both() -> Non
         assert cake_jit.record("fwd", acc) == f"fwd_{acc}"
         assert cake_jit.MODULES[f"fwd_{acc}"]["stage"] == "fwd"
     for bad in ("dot2", "f32", "FP32", "", "compensated "):
-        with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+        with pytest.raises(ValueError, match=r"dot_sum must be one of \['fp32', 'compensated'\]"):
             cake_backend._dot_acc(bad)
     for bad in (None, 1, b"fp32", ("fp32",)):
-        with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+        with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
             cake_backend._dot_acc(bad)
     assert cake_jit.record("bwd", "dot2") == cake_jit.record("bwd") == "bwd_dot2"
     assert cake_jit.MODULES["bwd_dot2"]["stage"] == "bwd"

@@ -17,7 +17,7 @@ Public-API suite of ``cake_pplx.cake_engram_gate_nondet_train``, the non-determi
 
 Without a device: the entries are stable APIs, importing the module imports no backend, the module reads no
 environment variable, every keyword of an entry is the backend's keyword of the same name, the autograd entries and
-the explicit forward take the keyword-only ``dot_sum="compensated"`` (the explicit backward and the workspace query do
+the explicit forward take the keyword-only ``dot_sum="fp32"`` (the explicit backward and the workspace query do
 not) and refuse another choice before they look at the operands, the entries document their behaviour under
 ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a device of capability (10, 7)
 maps to ``sm_107a``.
@@ -83,7 +83,7 @@ ENTRIES = (
 GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
 # The ``dot_sum`` choices (the default first) and the forward record suffix each launches; every backward launches
 # ``bwd_dot2``.
-DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 # The entries that take ``dot_sum``: the forward's sum (the backward is the same for both).
 SUM_ENTRIES = ("cake_engram_gate_nondet", "cake_engram_gate_nondet_kv", "cake_engram_gate_nondet_train_forward")
 # The gradients with one fixed order (the weight gradients are summed with atomics).
@@ -221,7 +221,7 @@ def test_keywords_match_the_backend() -> None:
     assert gate["token_mask"].default is None
     for name in SUM_ENTRIES:
         param = inspect.signature(inspect.unwrap(getattr(api, name))).parameters["dot_sum"]
-        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "compensated", name
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "fp32", name
     for name in sorted(set(ENTRIES) - set(SUM_ENTRIES)):
         assert "dot_sum" not in inspect.signature(inspect.unwrap(getattr(api, name))).parameters, name
     for cls in ("CakeEngramGateNondetFunction", "CakeEngramGateNondetKvFunction"):
@@ -253,11 +253,11 @@ def test_another_dot_sum_is_refused_before_the_operands() -> None:
     assert set(SUM_ENTRIES) <= set(calls)
     for label, call in calls.items():
         for bad in ("dot2", "f32", "FP32", ""):
-            with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+            with pytest.raises(ValueError, match=r"dot_sum must be one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
         for bad in (None, 1):
-            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
     # Both choices pass the check; the CPU operands are refused next.
@@ -338,10 +338,10 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
     api.cake_engram_gate_nondet_train_forward(*args, dot_sum=dot_sum)
     api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
     assert launched == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
-    if dot_sum == "compensated":
+    if dot_sum == "fp32":
         launched.clear()
         _autograd(ns, packed=packed)
-        assert launched == ["fwd_dot2", "bwd_dot2", "dw_reduce"], "the default is the compensated sum"
+        assert launched == ["fwd_f32", "bwd_dot2", "dw_reduce"], "the default is the one-word FP32 sum"
 
 
 def _gpu_activities(call) -> Optional[list[str]]:

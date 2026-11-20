@@ -918,8 +918,8 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
-- `dot_sum="compensated"` (the default): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end.
-- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 5-15% less time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: 0.313 ms against 0.329 ms on GB300, 0.174 ms against 0.205 ms on VR200). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
+- `dot_sum="fp32"` (the default): one FP32 word.
+- `dot_sum="compensated"` (opt-in): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end. The forward takes about 5-18% more time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: 0.329 ms against 0.313 ms on GB300, 0.205 ms against 0.174 ms on VR200). Where the products nearly cancel, it rounds fewer output elements away from the correctly rounded result.
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
@@ -933,7 +933,7 @@ The backward is the same for both. It recomputes `P` as a compensated dot produc
 | `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
-The `out` errors of the two forwards agree to four digits. On the near-cancelling draws, `dot_sum="fp32"` rounds 17802 of the 8.19 million output elements away from BF16 of the FP64 result, against 117 for the default. An FP32 evaluation of the formula rounds 21917 of them away.
+The `out` errors of the two forwards agree to four digits. On the near-cancelling draws, the default `dot_sum="fp32"` rounds 17802 of the 8.19 million output elements away from BF16 of the FP64 result, against 117 for `dot_sum="compensated"`. An FP32 evaluation of the formula rounds 21917 of them away.
 
 **Inputs.** `X` BF16 `[T, 4, 5120]`, contiguous. `K` BF16 `[T, 4, 5120]` and `V` BF16 `[T, 5120]`: contiguous, or views of one packed `kv [T, 25600]` (the four keys, then the value). They need a unit column stride, a stream stride of 5120 for `K` and a token stride that is a multiple of 8 elements. `q_weight` and `k_weight` are BF16 or FP32 `[4, 5120]`, each independently. `token_mask` is bool `[T]` or None. `eps` and `clamp_value` are run-time floats (1e-20 and 1e-6 by default). BF16 operands start on a 16-byte boundary. `T >= 0` is a run-time value: no recompilation for a new `T`.
 
@@ -943,9 +943,9 @@ Every sum has one fixed order. Each cluster of the backward writes its own FP32 
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_engram_gate_det` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated")` | As above; any may require grad | Autograd. Returns BF16 `out [T, 4, 5120]`. The node saves the inputs only. Weight gradients come back in each parameter's dtype. |
-| `cake_engram_gate_det_kv` | `(x, kv, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated")` | `kv` BF16 `[T, 25600]` | Autograd on the packed projection output. The backward writes one `dkv [T, 25600]` (no split, no concatenation copy). |
-| `cake_engram_gate_det_train_forward` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated", out=None)` | `out` BF16 `[T, 4, 5120]`, contiguous | Returns `out`. Nothing is saved. |
+| `cake_engram_gate_det` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32")` | As above; any may require grad | Autograd. Returns BF16 `out [T, 4, 5120]`. The node saves the inputs only. Weight gradients come back in each parameter's dtype. |
+| `cake_engram_gate_det_kv` | `(x, kv, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32")` | `kv` BF16 `[T, 25600]` | Autograd on the packed projection output. The backward writes one `dkv [T, 25600]` (no split, no concatenation copy). |
+| `cake_engram_gate_det_train_forward` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32", out=None)` | `out` BF16 `[T, 4, 5120]`, contiguous | Returns `out`. Nothing is saved. |
 | `cake_engram_gate_det_train_backward` | `(dout, x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dx=None, dkey=None, dvalue=None)` | `dout` BF16 `[T, 4, 5120]`, contiguous; `dkey`/`dvalue` may be views of one `dkv [T, 25600]` | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`, the weight gradients FP32. Takes the forward's inputs, not its output; the same after either `dot_sum`. |
 | `cake_engram_gate_det_train_workspace_bytes` | `(T, device=None)` | | Device bytes one backward allocates beside its operands and outputs (see Caveats). |
 
@@ -985,7 +985,7 @@ token_mask = torch.ones(T, dtype=torch.bool, device=dev)
 out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
 out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.grad, k_weight.grad
 # det: cake_pplx.cake_engram_gate_det_train.cake_engram_gate_det_kv
-# opt-in, a faster forward (the same backward): dot_sum="fp32"
+# opt-in, a compensated forward sum (slower; the same backward): dot_sum="compensated"
 ```
 
 **Caveats.**
