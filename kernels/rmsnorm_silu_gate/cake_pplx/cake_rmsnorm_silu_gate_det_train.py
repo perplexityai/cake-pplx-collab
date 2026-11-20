@@ -56,12 +56,13 @@ call that computes it.  On SM100 and SM103 up to 768 rows per SM, and on
 SM107 except where the look-ahead program runs, its CTAs walk their row
 blocks with no claim, no ticket and no workspace: 128-thread CTAs over
 8-row blocks where ``grad_out``, ``x`` and ``z`` hold packed rows (head
-stride 128 and token stride ``H * 128``; on SM100 and SM103 also one token
-of head stride 128, and up to 128 rows per SM a build for packed rows only),
-and on other layouts up to 32 rows per SM on SM100 and SM103, 256-thread CTAs
-over 16-row blocks on other layouts past that; on SM100 and SM103 past the
-768-row cut the claimed program runs on the workspace.  No kernel waits for
-another CTA or grid.
+stride 128 and token stride ``H * 128``; also one token of head stride 128,
+on SM107 only up to 192 rows per SM; and a build for packed rows only up to
+128 rows per SM on SM100 and SM103 and up to 192 on SM107), and on other
+layouts up to 32 rows per SM on SM100 and SM103 and up to 96 on SM107,
+256-thread CTAs over 16-row blocks on other layouts past that; on SM100 and
+SM103 past the 768-row cut the claimed program runs on the workspace.  No
+kernel waits for another CTA or grid.
 Beside a kernel on another stream that holds ``k`` of the ``N`` SMs, the
 forward takes at most ``N / (N - k)`` times its time alone, plus the share of
 one CTA's row blocks in the call, plus 0.02 (a CTA whose slot that kernel

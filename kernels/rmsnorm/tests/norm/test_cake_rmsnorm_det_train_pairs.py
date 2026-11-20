@@ -484,6 +484,9 @@ RECUT_FP32_ROUTES: dict[
     # FP32-weight route keeps the programs of its earlier windows there, each with the dw reduce of its window
     ("sm_100a", 2048, "bwd", False): ((768, 1024), (1024, 16384), (16384, 58880)),
     ("sm_100a", 6144, "bwd", False): ((384, 4096),),
+    # the backward window where the BF16 route runs a faster program whose FP32-weight twin is not: the FP32-weight
+    # route keeps the twin it ran (SM107 H = 4096 over (24064, 50176])
+    ("sm_107a", 4096, "bwd", False): ((24064, 50176),),
     # and T = 1, where the FP32-weight route runs another column-task program than the BF16 route (the twin of the
     # next window's program on SM100 H = 5120, its earlier column-task program on SM103 H = 4096 and 6144); a re-cut
     # span takes the BF16 window it splits whole
@@ -565,14 +568,15 @@ RECUT_FP32_ROUTES: dict[
 
 
 # The FP32-weight routes whose window runs the FP32-weight twin of another program than the BF16 route's there, under
-# a record of the same host plan (the window, grid rule and workspace of the BF16 record): SM100 H = 5120 above 6144
-# rows and SM103 H = 4096 over (48640, 51200], where the FP32-weight route runs the twin of another program, and
-# SM100 H = 6144 with a residual over (42496, inf), where the BF16 route runs another program and the FP32-weight
-# route keeps the twin of the program of its earlier window.
+# a record of the same host plan (the window, grid rule and workspace of the BF16 record of that program): SM100
+# H = 5120 above 6144 rows, where the FP32-weight route runs the twin of another program, and SM100 H = 6144 with a
+# residual over (42496, inf) and SM107 H = 4096 over (24064, 50176], where the BF16 route runs another program and the
+# FP32-weight route keeps the twin of the program it ran there (the last a re-cut window of ``RECUT_FP32_ROUTES`` as
+# well).
 SWAPPED_FP32_ROUTES: set[tuple[str, int, str, bool]] = {
     ("sm_100a", 5120, "bwd", False),
-    ("sm_103a", 4096, "bwd", False),
     ("sm_100a", 6144, "bwd", True),
+    ("sm_107a", 4096, "bwd", False),
 }
 
 

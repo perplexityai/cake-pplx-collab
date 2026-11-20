@@ -741,8 +741,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # min(ceil(rows / 8), 8 * SMs) CTAs; a call with compute_grad_weight=False
     # runs it in the strided program's place on packed rows (dy, x and z of
     # head stride 128 and token stride heads * 128, or, where
-    # PACKED_SMALL_ROWS_PER_SM has a cut, one token of head stride 128) past
-    # PACKED_SMALL_ROWS_PER_SM rows per SM up to
+    # PACKED_SMALL_ROWS_PER_SM and NODW_STRIDED_ROWS_PER_SM have a cut, one
+    # token of head stride 128) past PACKED_SMALL_ROWS_PER_SM rows per SM up to
     # NODW_STRIDED_ROWS_PER_SM rows per SM, on sm_107a at every row count but
     # the long program's, and on rows of any layout up to
     # NODW_ANY_LAYOUT_ROWS_PER_SM rows per SM (build {"dw": False, "math":
@@ -1178,9 +1178,12 @@ GRID_KINDS = ("persistent_row_blocks", "claimed_row_blocks", "strided_row_blocks
 # launches the BF16 backward's ``min(ceil(rows / 16), 4 * SMs)`` 256-thread
 # CTAs, the one of packed rows its own ``min(ceil(rows / 8), 8 * SMs)``
 # 128-thread CTAs (no claim and no ticket): measured on sm_107a, the
-# 128-thread build is the faster on packed rows and the 256-thread one on
-# other layouts once a 128-thread CTA walks two or more blocks.  Host plan
-# only: a new cut needs no new program.
+# 128-thread build is the faster on packed rows (but on one token of head
+# stride 128 with cold L2 the same or faster only up to 1024 rows per SM and
+# slower from 1533), as fast or faster on other layouts up to
+# ``NODW_ANY_LAYOUT_ROWS_PER_SM`` rows per SM (below), and the slower at
+# about 128 rows per SM, where nearly every 128-thread CTA walks two blocks.
+# Host plan only: a new cut needs no new program.
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 768},
     "sm_103a": {"bwd_bf16": 768},
@@ -1193,11 +1196,19 @@ NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # or role without a cut never runs it.  A cut lies at or below the strided
 # cut.  Measured on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster
 # than the 128-thread strided build up to this cut, slower on sm_100a at 332
-# rows per SM; sm_107a has no cut until it is measured.  Host plan only.
+# rows per SM.  Measured on sm_107a (CUDA Graph replays, hot L2): faster at
+# every measured row count up to 384 rows per SM but 96 (the same); the same
+# from 512 to 1280, leaning slower (0.992 to 0.996), and faster at 1535
+# (1.018).  Cold L2: up to this cut every row flagged slower read the same
+# when timed again; past it rows from 224 to 384 rows per SM were flagged
+# slower (by up to 5.1 %), and 256 rows per SM read 1.3 to 1.9 % slower in
+# eager in six of eight timings on three GPUs, timed-again ones included
+# (one, on the first full run, read 2.4 % faster), so the cut is the last
+# measured point below them.  Host plan only.
 PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 128},
     "sm_103a": {"bwd_bf16": 128},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 192},
 }
 # A call without the weight gradient on rows that are not packed runs the
 # 128-thread strided build (``role + NODW + STRIDED + PACKED``: other layouts
@@ -1206,12 +1217,13 @@ PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
 # many rows per SM, by architecture and role, where the architecture routes
 # both; an architecture or role without a cut never runs it there.  Measured
 # on sm_100a and sm_103a (CUDA Graph replays, cold L2): faster up to this
-# cut, where each 128-thread CTA runs one 8-row block; sm_107a has no cut
-# until it is measured.  Host plan only.
+# cut, where each 128-thread CTA runs one 8-row block.  Measured on sm_107a
+# (CUDA Graph replays, hot L2): faster up to 24 rows per SM and at this cut,
+# the same from 32 to 64, slower at 128.  Host plan only.
 NODW_ANY_LAYOUT_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 32},
     "sm_103a": {"bwd_bf16": 32},
-    "sm_107a": {},
+    "sm_107a": {"bwd_bf16": 96},
 }
 # Elements of one normalized row.
 HEAD_DIM = 128
@@ -1396,7 +1408,7 @@ def nodw_module(
     and layout, and ``packed``, whether the kernel reads packed rows
     (:func:`backward_packed`; the backward also passes one token of head
     stride 128 as packed rows where ``PACKED_SMALL_ROWS_PER_SM[arch]`` has a
-    cut):
+    cut, on an architecture without a strided cut only up to that cut):
 
     - for a long module (packed rows past its cut) the role's long module
       without the weight gradient (``role + NODW + LONG``) where ``arch``
