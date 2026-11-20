@@ -17389,8 +17389,9 @@ def test_cast_fold_programs_are_registered():
     """Every record registers the casts' fold programs beside the programs without a fold operand: the scatter cast
     ``scale_cast_scatter_bf16`` takes no fold operand (the argument plan of the previous release),
     ``scale_cast_scatter_fold_bf16`` the scatter's plus the labels, residuals, head, ``V`` and the fold rows, and
-    ``scale_cast_fold_bf16`` the flat cast's plus the row width and the same fold operands.  Only the fold programs'
-    rows are per-call scalars of an eager form, and only the fold programs read the fold tensors."""
+    ``scale_cast_fold_bf16`` the flat cast's plus the row width and the same fold operands.  Only the scatter fold
+    program's rows are per-call scalars of an eager form (the flat fold program runs in the chunk loop only), and only
+    the fold programs read the fold tensors."""
     fold_args = ["labels", "rlab", "W", "V", "fold_lo", "fold_hi"]
     scatter_fold = cake_backend.DX_FINALIZE_FOLD_STAGE
     flat_fold = cake_backend.DX_CAST_FOLD_STAGE
@@ -17418,10 +17419,7 @@ def test_cast_fold_programs_are_registered():
         ]
         for stage in (scatter_fold, flat_fold):
             assert record[stage]["launch"] == record["scale_cast_bf16"]["launch"]
-    assert cake_backend.EAGER_CALL_SCALARS == {
-        scatter_fold: ("fold_lo", "fold_hi"),
-        flat_fold: ("fold_lo", "fold_hi"),
-    }
+    assert cake_backend.EAGER_CALL_SCALARS == {scatter_fold: ("fold_lo", "fold_hi")}
     tensors = cake_backend.STAGE_TENSORS
     assert tensors["scale_cast_scatter_bf16"] == ("acc", "g", "scan", "idx_lo", "out")
     assert tensors[scatter_fold] == tensors["scale_cast_scatter_bf16"] + (
