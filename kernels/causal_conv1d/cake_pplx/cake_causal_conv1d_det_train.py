@@ -259,9 +259,9 @@ def cake_causal_conv1d_det_train_forward(
         size (:func:`cake_causal_conv1d_det_train_forward_workspace_bytes`) is the
         most over every forward route and token count.  When omitted the
         package uses a zeroed buffer it keeps per (device, current stream), or
-        a zeroed buffer of the call's own inside a CUDA Graph capture.  At a
-        small-S row the program takes no counters: a passed buffer is
-        checked and not read, and none is zeroed.
+        a zeroed buffer of the call's own inside a CUDA Graph capture.  Inside
+        the token range of a small-S row the program takes no counters: a
+        passed buffer is checked and not read, and none is zeroed.
 
     Returns
     -------

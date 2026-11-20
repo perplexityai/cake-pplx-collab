@@ -723,10 +723,10 @@ def cake_causal_conv1d_det_train_forward(
         so one buffer serves every later call of one stream).  Two launches
         that may run at once need two buffers.  When omitted the package
         uses a zeroed buffer it keeps per (device, current stream), or a
-        fresh zeroed one inside a CUDA Graph capture.  At a small-S row
-        (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``) the program takes no
-        counters: a passed buffer is checked, then not read, and none is
-        zeroed.
+        fresh zeroed one inside a CUDA Graph capture.  Inside the token range
+        of a small-S row (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``) the
+        program takes no counters: a passed buffer is checked, then not read,
+        and none is zeroed.
 
     Returns
     -------

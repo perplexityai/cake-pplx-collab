@@ -96,11 +96,12 @@ Host design (the knobs are keywords; no environment variable):
   buffers, the forward's and the backward's separately: per device and kind up
   to ``_POOL_DEPTH`` buffers of the largest need of such a call so far,
   refilled by the next such call after a capture took one or when a call needs
-  more (a forward at a row of ``cake_jit.FALLBACK_ROWS`` or
-  ``cake_jit.DIRECT_ROWS`` takes no counters and zeroes none).  A captured call
-  finds none ready when no such eager call of its kind ran before the capture,
-  when the captures since the last one took them all, when it needs more than
-  that eager need, or when their zero fills have not completed yet (a
+  more (a forward inside the token range of a row of
+  ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` takes no counters and
+  zeroes none).  A captured call finds none ready when no such eager call of
+  its kind ran before the capture, when the captures since the last one took
+  them all, when it needs more than that eager need, or when their zero fills
+  have not completed yet (a
   ``CUDAGraph.capture_begin`` right after such an eager call, with no
   synchronization; ``torch.cuda.graph`` synchronizes first); it then zeroes a
   buffer of its own (one fill node per

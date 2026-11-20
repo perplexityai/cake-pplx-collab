@@ -93,9 +93,9 @@ graph records no fill node for it (the graph holds it until the graph and
 its instantiations are destroyed and their launches have completed; it
 returns to the package, zero again, at the package's next refill).  The
 replays of one graph must not overlap.  Only eager calls without
-``workspace=`` that take counters zero these buffers (a forward at a row of
-``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the forward's and the
-backward's separately, sized to the largest need of such a call whose
+``workspace=`` that take counters zero these buffers (a forward inside the
+token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the
+forward's and the backward's separately, sized to the largest need of such a call whose
 zeroing succeeded (one that runs out of memory keeps no new buffer and keeps
 their size).
 When none is ready (no such eager call of the kind before the capture, all

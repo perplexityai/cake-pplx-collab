@@ -1780,8 +1780,8 @@ def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
 def test_fallback_rows_are_the_literal_rows() -> None:
     """``FALLBACK_ROWS`` is the literal :data:`FALLBACK_ROWS_OF_RECORD`.  Every key names an exported architecture,
     one of its forward routes or of its backward routes other than a pair route (an opt-in route selects by its own
-    rules only), a closed range of channel counts (multiples of 8) and a closed range of token counts from one token;
-    the keys of one architecture and route are disjoint, and the route's fallback program ships for the
+    rules only), a closed range of channel counts (multiples of 8) and a closed range of token counts inside
+    ``S >= 1``; the keys of one architecture and route are disjoint, and the route's fallback program ships for the
     architecture (a forward route's static program)."""
 
     assert cake_jit.FALLBACK_ROWS == FALLBACK_ROWS_OF_RECORD
@@ -1811,10 +1811,11 @@ def test_fallback_rows_are_the_literal_rows() -> None:
 def test_direct_rows_are_the_literal_rows() -> None:
     """``DIRECT_ROWS`` is the literal :data:`DIRECT_ROWS_OF_RECORD` and ``DIRECT_PLANS`` the literal
     :data:`DIRECT_PLANS_OF_RECORD`.  Every key names an exported architecture, one of its forward routes, a closed
-    range of channel counts (multiples of 8), a closed range of token counts from one token and the route's direct
-    program (selection-rule kind ``rows``), which ships for the architecture; the keys of one architecture and route
-    are disjoint; no ``(C, S)`` of a direct range lies in a ``FALLBACK_ROWS`` range, and where a ``FALLBACK_ROWS`` key
-    covers the same channel counts its static range lies below the direct range.  ``DIRECT_PLANS`` names a form
+    range of channel counts (multiples of 8), a closed range of token counts inside ``S >= 1`` and the route's
+    direct program (selection-rule kind ``rows``), which ships for the architecture; the keys of one architecture and
+    route are disjoint; no ``(C, S)`` of a direct range lies in a ``FALLBACK_ROWS`` range, and where a
+    ``FALLBACK_ROWS`` key covers the same channel counts its static range lies below the direct range.
+    ``DIRECT_PLANS`` names a form
     ``(ct_vec, n_sub)`` for exactly the routes the architecture's keys name, within 128 threads."""
 
     assert cake_jit.DIRECT_ROWS == DIRECT_ROWS_OF_RECORD

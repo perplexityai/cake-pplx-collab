@@ -1478,9 +1478,10 @@ def _sr_main(
 ) -> tuple[str, dict[str, int], tuple[int, int, int], int]:
     """The two-launch forward's single-rank main program of a call: ``(record name, plan scalars, grid, counter
     words)`` of the zero-history registry's ``fwd`` route record ``cake_jit.selected_modules`` picks for ``C`` and
-    ``S`` (the rank's local token count: at a row of ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` the
-    route's static or direct program) -- the single-rank forward's plan (its role, route and architecture, so a
-    direct row runs the route's ``cake_jit.DIRECT_PLANS`` tiles) over the rank's ``n_frag`` fragments as documents,
+    ``S`` (the rank's local token count: inside the token range of a row of ``cake_jit.FALLBACK_ROWS`` or
+    ``cake_jit.DIRECT_ROWS`` the route's static or direct program) -- the single-rank forward's plan (its role, route
+    and architecture, so a direct row runs the route's ``cake_jit.DIRECT_PLANS`` tiles) over the rank's ``n_frag``
+    fragments as documents,
     its record's grid for the call (the full co-resident grid; a direct program's capped at its token blocks) and its
     token-chunk counter words (0 for the static and direct programs, which take no counters); a ``ValueError`` when
     ``C`` spans more channel tiles than that grid holds."""
