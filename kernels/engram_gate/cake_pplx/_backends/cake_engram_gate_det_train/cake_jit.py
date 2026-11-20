@@ -50,7 +50,7 @@ never wait on each other).  The dot product ``P = sum_d w_d h_d k_d`` is
 summed in one of two ways: ``dot2`` as a compensated FP32 dot product (each
 product split with an FMA, each running sum with an error-free two-sum, the
 error words summed in FP32 and added once at the end) or ``f32`` in one FP32
-word.  ``fwd`` ships both (``fwd_dot2`` the default, ``fwd_f32`` opt-in);
+word.  ``fwd`` ships both (``fwd_f32`` the default, ``fwd_dot2`` opt-in);
 ``bwd`` ships ``bwd_dot2`` only, which serves either forward (it recomputes
 ``P`` from the inputs).  Every other sum is one FP32 word.  Nothing launches
 cooperatively.

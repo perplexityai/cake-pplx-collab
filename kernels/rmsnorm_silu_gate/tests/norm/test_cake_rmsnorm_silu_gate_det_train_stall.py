@@ -32,8 +32,14 @@ program (on the packed rows these tests use ``min(row blocks, 8 * SMs)``
 SMs)`` 256-thread CTAs over 16-row blocks, each CTA walking its row blocks
 with no claim and no ticket), past it the claimed program, and packed rows
 from the long
-modules' rows per SM the long program without the weight gradient.  No kernel
-waits for another CTA or grid, so none needs the whole device.  Beside a
+modules' rows per SM the long program without the weight gradient.  A
+backward that computes the weight gradient on up to 256 rows runs one CTA
+(up to 16 rows) or one cluster of 16 CTAs (on a device of at least 16 SMs
+that is not a MIG instance).  No kernel waits for another CTA or grid but
+that cluster, whose CTAs wait for the weight-gradient words their peers
+push to them: the GPU starts its 16 CTAs together, once one GPC has room
+for all of them, so none waits for a CTA that is not running and no kernel
+needs the whole device.  Beside a
 long-resident one-thread kernel on another stream each call must keep its
 speed: per token count, the median of seven event-timed calls with the side
 kernel resident is at most ``MAX_RATIO`` times the median of seven calls
@@ -47,7 +53,10 @@ wait of milliseconds behind the resident kernel.  ``y``, ``dx``, ``dz`` and
 The forward and the backward beside a kernel resident on every SM with the
 maximum-shared-memory carveout: at ``ALL_SM_TOKENS``
 each starts beside it and costs at most ``MAX_ALL_SM_EXTRA_MS`` more than
-alone, far below the side kernel's ``ALL_SM_SPIN_MS`` lifetime.  The forward
+alone, far below the side kernel's ``ALL_SM_SPIN_MS`` lifetime; so does the
+backward that computes a BF16 or an FP32 weight gradient on
+``SMALL_ROW_SHAPES`` (1 to 256 rows), which runs the program of one CTA or
+of one cluster.  The forward
 beside a side kernel that holds ``k`` of the ``N`` SMs (1 x 128,
 16 x 640 and 32 x 640 side CTAs): busy / alone is at most
 ``N / (N - k)``, plus the share of one CTA's blocks in the call (a CTA whose
@@ -111,12 +120,12 @@ pytestmark = pytest.mark.skipif(
 )
 
 
-def _inputs(tokens: int):
+def _inputs(tokens: int, heads: int = H):
     generator = torch.Generator(device="cuda").manual_seed(SEED + tokens)
     kwargs = dict(dtype=torch.float32, device="cuda", generator=generator)
-    x = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
-    z = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
-    dy = torch.randn(tokens, H, D, **kwargs).to(torch.bfloat16)
+    x = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
+    z = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
+    dy = torch.randn(tokens, heads, D, **kwargs).to(torch.bfloat16)
     w = (1 + 0.5 * torch.randn(D, **kwargs)).to(torch.bfloat16)
     return x, z, w, dy
 
@@ -490,6 +499,68 @@ def test_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
     _check_outputs(stage, tokens, alone, busy)
     assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
         f"tokens={tokens}: {stage} alone {alone_ms:.4f} ms, beside an all-SM "
+        f"kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
+        f"{MAX_ALL_SM_EXTRA_MS} ms more)"
+    )
+
+
+# Backwards that compute the weight gradient on up to 256 rows, as ``(T,
+# H)``: one CTA up to 16 rows (1 and 16), one cluster of 16 CTAs past that
+# (17, 48, 128 and 256) where the device runs clusters.
+SMALL_ROW_SHAPES = ((1, 1), (1, 16), (1, 17), (1, 48), (1, 128), (2, 128))
+
+
+@pytest.mark.parametrize("dtype", [torch.bfloat16, torch.float32], ids=["bf16", "f32"])
+@pytest.mark.parametrize(
+    "shape", SMALL_ROW_SHAPES, ids=[f"{t}x{h}" for t, h in SMALL_ROW_SHAPES]
+)
+def test_small_row_backward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
+    shape: tuple[int, int], dtype: torch.dtype
+) -> None:
+    tokens, heads = shape
+    rows = tokens * heads
+    x, z, w, dy = _inputs(tokens, heads)
+    index = torch.cuda.current_device()
+    arch = loader.device_arch(index)
+    clusters = loader.device_runs_clusters(index)
+    if rows > 16 and not clusters:
+        pytest.skip("this device runs no cluster program")
+    role = "bwd_f32" if dtype == torch.float32 else "bwd_bf16"
+    name = loader.dw_module(arch, loader.route_module(arch, role), rows, clusters)
+    small = role + (loader.SOLO if rows <= 16 else loader.CLUSTER)
+    assert loader.MODULES[name]["role"] == small, (rows, name)
+    workspace = cake_rmsnorm_silu_gate_det_train_backward_workspace(rows, x.device)
+    grad_weight = torch.empty(D, dtype=dtype, device=x.device)
+
+    def call():
+        return cake_rmsnorm_silu_gate_det_train_backward(
+            dy, x, z, w, EPS, grad_weight=grad_weight, workspace=workspace
+        )
+
+    launched = []
+    run_module = loader.run_module
+
+    def spy(module, values, *, rows, device_index):
+        launched.append(module)
+        return run_module(module, values, rows=rows, device_index=device_index)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(loader, "run_module", spy)
+        call()
+    assert launched == [name], launched
+    alone_ms, busy_ms, alone, busy = _paired_medians(
+        call, _spin(CARVEOUT_MAX_SHARED), ALL_SM_RUNS
+    )
+    print(
+        f"ALL_SM stage=backward_small tokens={tokens} heads={heads} "
+        f"dw={'f32' if dtype == torch.float32 else 'bf16'} module={small} "
+        f"carveout=max_shared alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
+        f"extra_ms={busy_ms - alone_ms:.4f}"
+    )
+    _check_outputs("backward", tokens, alone, busy)
+    assert not bool(workspace.view(torch.int32).any()), "the workspace is not zero"
+    assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
+        f"{tokens}x{heads}: {small} alone {alone_ms:.4f} ms, beside an all-SM "
         f"kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
         f"{MAX_ALL_SM_EXTRA_MS} ms more)"
     )

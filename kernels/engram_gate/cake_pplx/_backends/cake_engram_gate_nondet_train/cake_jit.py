@@ -33,12 +33,12 @@ The stages, in launch order: ``fwd`` (per token and stream, the RMS of the
 stream and of its key, the weighted dot product, the signed square-root gate
 and ``out = bf16(x + gate * value)``; nothing is saved for the backward),
 ``bwd`` (recomputes the forward sums from the inputs; writes dX, dK, dV
-and adds each cluster's FP32 weight-gradient partial sums into one host-zeroed
-``[4, 5120]`` accumulator with float atomics) and ``dw_reduce`` (reads the
-accumulator as one partial row and writes ``dq_weight = dw * k_weight`` and
-``dk_weight = dw * q_weight`` in FP32).  The clusters reach the accumulator in
-arrival order, so the weight gradients are not bitwise reproducible run to run;
-out, dX, dK and dV have one fixed order.
+and one FP32 row of the weight-gradient partial sums per cluster,
+``[clusters, 4, 5120]``, every row written in full) and ``dw_reduce`` (sums the
+partial rows in one fixed order and writes ``dq_weight = dw * k_weight`` and
+``dk_weight = dw * q_weight`` in FP32).  Every record is the deterministic
+package's program under this package's library name; the package promises no
+bits run to run.
 
 The ``fwd`` and ``bwd`` kernels give each token to one cluster of four CTAs
 (each CTA owns 1280 of the 5120 columns of every stream) and walk the tokens
@@ -50,7 +50,7 @@ never wait on each other).  The dot product ``P = sum_d w_d h_d k_d`` is
 summed in one of two ways: ``dot2`` as a compensated FP32 dot product (each
 product split with an FMA, each running sum with an error-free two-sum, the
 error words summed in FP32 and added once at the end) or ``f32`` in one FP32
-word.  ``fwd`` ships both (``fwd_dot2`` the default, ``fwd_f32`` opt-in);
+word.  ``fwd`` ships both (``fwd_f32`` the default, ``fwd_dot2`` opt-in);
 ``bwd`` ships ``bwd_dot2`` only, which serves either forward (it recomputes
 ``P`` from the inputs).  Every other sum is one FP32 word.  Nothing launches
 cooperatively.
@@ -80,9 +80,9 @@ ACC_MODES: dict[str, tuple[str, ...]] = {"fwd": ("f32", "dot2"), "bwd": ("dot2",
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_dot2": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_acc"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_engram_gate_train_a8cb26cf619ca16fe4c9",
+        "kernel_symbol": "kernel_cake_engram_gate_train_638509badcd8ffb2085c",
         "launch": {
             "block": (160, 1, 1),
             "cluster": (4, 1, 1),
@@ -90,7 +90,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 43520,
             "use_pdl": False,
         },
-        "library": "cake_engram_gate_train_a8cb26cf619ca16fe4c9",
+        "library": "cake_engram_gate_train_638509badcd8ffb2085c",
         "stage": "bwd",
     },
     "dw_reduce": {
