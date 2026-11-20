@@ -302,7 +302,7 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -310,7 +310,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
+        "library": "cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
         "role": "fwd_unfused",
     },
     "fwd_unfused_sm_107a": {
@@ -332,7 +332,7 @@ MODULES: dict[str, dict[str, Any]] = {
         ],
         "ffi_entry": "run",
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
-        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_64aae35cfb0e308d103a",
         "launch": {
             "block": (256, 1, 1),
             "cluster": (1, 1, 1),
@@ -340,7 +340,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 0,
             "use_pdl": "runtime",
         },
-        "library": "cake_gated_kv_compression_det_train_4996bf21a2138f378939",
+        "library": "cake_gated_kv_compression_det_train_64aae35cfb0e308d103a",
         "role": "fwd_unfused",
     },
     "bwd": {
