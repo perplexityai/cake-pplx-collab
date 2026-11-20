@@ -2148,7 +2148,8 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
 #:     medians are against the deterministic package's plan of version 0.3.18; since its version 0.3.19 that plan runs
 #:     ``4096 -> 64`` at 16231 tokens (and 16173 to 16383) on its 128-column start-path program
 #:     ``kn_n128_tma1_w8relf`` in raster groups of 16 instead of ``kn_n256_tma1_w8relf``, with the same bits, measured
-#:     1.029 to 1.039 times faster than its plan of version 0.3.18 there, and the call runs that program.
+#:     1.011 to 1.039 times faster than its plan of version 0.3.18 there (1.029 to 1.039 in a confirmation round), and
+#:     the call runs that program.
 #: The other measured keys of these parts (18 on GB300, 27 on B200, 5 on VR200, 7 on GB200) missed the bar and keep
 #: their programs.  A key names one token count: the token counts next to it keep their routes.  Up to version 0.3.17
 #: 152-SM ``sm_100a`` parts kept every entry (an empty set); a part's set holds the rows it leaves, with their entries
