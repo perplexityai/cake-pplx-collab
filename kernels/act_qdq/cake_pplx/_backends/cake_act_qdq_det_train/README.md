@@ -109,19 +109,25 @@ below give the rule's outputs:
   rounded number.  The kernels keep subnormals (no flush to zero), so the product equals the quotient bit for bit.
   A pair of elements takes this multiply, and the E4M3-scaled steps below, in packed two-lane FP32 arithmetic; each
   lane rounds as it would alone.
-- **E4M3 scale.**  `max(amax, 6 * 2^-9) / 6` is an IEEE round-to-nearest division, and the conversion to E4M3
-  rounds to nearest even and saturates at 448.  `amax` has 8 significant bits, so `amax / 3` is either exact or a
-  repeating binary fraction far from every 5-bit value: the FP32 quotient is an E4M3 rounding midpoint only when the
-  exact quotient is one.
-- **E4M3-scaled quotient.**  For `|x|` of at least `2^-100`, `u` is the round-to-nearest FP32 quotient `x / s`, not
-  the plain product `x * RN(1 / s)`.  The kernel forms `inv = 1 / s` (an IEEE division) and `u0 = x * inv`, then
-  corrects `u0` with one FMA residual step: `r = fma(u0, s, -x)` is exact, and the exact value `u0 - r * inv`, which
-  `u = fma(-r, inv, u0)` rounds, is within a small fraction of an FP32 ulp of `x / s`.  The exact quotient of an
-  8-bit `x` by a 4-bit `s` is never an FP32 rounding midpoint, and it is at least `1/30` of an FP32 ulp away from
-  one, so `u` rounds the same way as the division.  For `|x|` below `2^-100` the residual may round and `u` may
-  differ from the division in its last bits; such a quotient is below `2^-91`, so it becomes a signed zero either
-  way.  The exact quotient is at least `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so
-  rounding it to FP32 first never moves it across a midpoint.
+- **E4M3 scale.**  The `sm_107a` programs multiply `max(amax, 6 * 2^-9)` by `RN(1/6)`, the FP32 value nearest
+  `1/6`, which is `1/6` times `1 + 2^-25`; the `sm_100a` and `sm_103a` programs divide it by 6 (an IEEE
+  round-to-nearest division).  Either FP32 result is within `2^-23` (relative) of the exact quotient
+  `max(amax, 6 * 2^-9) / 6`, and equals it whenever that quotient is an FP32 value, as every E4M3 value and rounding
+  midpoint is.  `amax` has 8 significant bits, so `amax / 3` is either exact or at least `2^-8` (relative) away from
+  every 5-bit value that it does not equal.  So the conversion to E4M3, which rounds to nearest even and saturates
+  at 448, gives the E4M3 value of the exact quotient, ties included.
+- **E4M3-scaled quotient.**  `u` is never the plain product `x * RN(1 / s)` rounded to nearest.  Every program forms
+  `inv = 1 / s` once per group (an IEEE division).  The `sm_107a` programs take `u = x * inv` rounded toward zero: `s`
+  is a power of two times one of the eight E4M3 significands `m`, and the FP32 value nearest `1/m` is `1/m` or lies
+  above it by at most `7 * 2^-27` (relative), so the exact product lies just beyond `x / s` (away from zero), within
+  `2^-24` (relative).  The `sm_100a` and `sm_103a` programs take `u0 = x * inv` and correct it with one FMA residual
+  step: `r = fma(u0, s, -x)` is exact, and the exact value `u0 - r * inv`, which `u = fma(-r, inv, u0)` rounds, is
+  within a small fraction of an FP32 ulp of `x / s`.  In both forms `u` is `x / s` whenever that quotient is an FP32
+  value, as every E2M1 midpoint times `s` is, and within one FP32 ulp of it otherwise; in the `sm_100a` and `sm_103a`
+  programs this holds for `|x|` of at least `2^-100`, and below that the residual may round, but such a quotient is
+  below `2^-91` and becomes a signed zero either way.  The exact quotient of an 8-bit `x` by a 4-bit `s` is at least
+  `2^-9` (relative) away from every E2M1 midpoint that it does not equal, so `u` rounds to the E2M1 value of the
+  exact quotient.  A zero `x` keeps its sign.
 - **Clamp.**  The saturating element conversion is the rule's clamp: a `|u|` above `Q` converts to `Q`.
 - **Dequantize.**  Each pair of codes converts exactly to two BF16 values, and one BF16x2 multiply scales both by
   `s`.  `s` is a BF16 value: it has at most 4 significant bits.  `q` has at most 2 (E2M1) or 4 (E4M3) significant
