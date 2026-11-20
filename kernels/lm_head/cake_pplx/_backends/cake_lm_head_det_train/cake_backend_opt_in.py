@@ -10214,10 +10214,6 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
             backend=backend,
             need_dx=bool(ctx.needs_input_grad[0]),
             need_dw=bool(ctx.needs_input_grad[1]),
-            dz_arm=dz_arm,
-            fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
-            kept=ctx.kept,
-            ctx=ctx,
         )
         return result.logp
 

@@ -3384,8 +3384,8 @@ def _rlab_stream(
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:
     """The ``[rows]`` FP32 label residuals of a log-probability autograd graph (:func:`_logprob_graph_rlab`),
-    zero-filled when ``zero``.  The graph holds them from its forward through its backwards, so a forward that runs
-    while a graph is alive would find the caching allocator's small blocks split by them and place its own buffers
+    zero-filled when ``zero``.  The graph holds them from its first backward through its later ones, so a forward that
+    runs while a graph is alive would find the caching allocator's small blocks split by them and place its own buffers
     elsewhere.  A request the small pool serves is therefore made with a per-device holding stream current: its block
     lies in that stream's segment, never among the blocks the calls on the caller's stream reuse, and the forward's
     buffers keep the placement they have without the held tensor.  The stream switch is torch's ``set_stream`` call
@@ -3509,17 +3509,6 @@ def _graph_rlab(rows: int, zero: bool, device: torch.device) -> Optional[tuple]:
     return None
 
 
-def _records_graph(ctx: Any) -> bool:
-    """Whether the autograd Function call of ``ctx`` records a graph node a backward can run: ``False`` when the node
-    has no input edge (grad mode off -- ``torch.no_grad``, inference mode, a reentrant checkpoint's first pass -- or
-    no input that requires a gradient; autograd sets the edges before the forward runs, ``ctx.needs_input_grad``
-    shows only the inputs' flags); ``True`` where the context shows no edges (a traced context)."""
-    try:
-        return len(ctx.next_functions) > 0
-    except Exception:  # a context without the node's edges
-        return True
-
-
 def _logprob_graph_rlab(
     X: torch.Tensor,
     row_index: Optional[torch.Tensor],
@@ -3527,26 +3516,16 @@ def _logprob_graph_rlab(
     backend: str,
     need_dx: bool,
     need_dw: bool,
-    dz_arm: bool,
-    fused_dx: bool,
-    kept: bool = False,
-    recompute: Optional[bool] = None,
-    ctx: Any = None,
 ) -> Optional["_GraphRlab"]:
     """The holder of a log-probability autograd graph's label residuals (:class:`_GraphRlab`), for the backward's
     ``[rows]`` loop rows (the forward's valid-row index): ``None`` when no backward can bind them (no gradient, another
-    backend, no rows).  The ``dz`` arm's recompute needs them zero-filled (clean): its forward takes them right behind
-    its launches (:func:`_graph_rlab`), where a call of few rows is GPU-bound -- its backward is host-bound up to the
-    first GEMM -- and fills them there.  A form that needs no fill -- a first backward whose ``row_grad`` stores every
-    row (``kept``: the kept logits; or no ``dz`` arm) -- starts with an empty holder: its forward takes nothing, and
-    the first backward that binds the holder takes them (:meth:`_Binding._call_rlab`).  A backward under the
-    zero-gradient row skip (:func:`_zero_dlogp_skip`: its counted plan) binds its own, so the holder starts empty
-    there.  The forward's pick is a placement only: each backward checks the held tensor.  ``None`` also in a
-    non-reentrant ``torch.utils.checkpoint``'s recomputation of a ``dz`` arm (``recompute``; ``None``: read from the
-    saved-tensor hooks, :func:`_checkpoint_recomputation`): its graph only hands its saved tensors to the checkpointed
-    call's backward, which binds that call's holder, and runs no backward of its own.
-    ``None`` also in a ``dz`` arm's call that records no graph (``ctx``, :func:`_records_graph`: grad mode off, a
-    reentrant checkpoint's first pass), which no backward binds."""
+    backend, no rows), else an empty holder.  The forward takes no buffer: the first backward that binds the holder
+    takes one (:meth:`_Binding._call_rlab`, from the free list of its stream, :func:`_graph_rlab`) and zero-fills it
+    there when its plan has the ``rlab_zero`` step (the ``dz`` arm's recompute), where a backward without a holder
+    allocates and fills its own; a backward of another form (a counted plan) binds its own.  So no forward takes or
+    fills a buffer -- a call that records no graph (no gradient, a reentrant checkpoint's first pass) and a checkpoint's
+    recomputation (whose graph runs no backward) included -- and the later backwards of a retained graph bind the held
+    tensor."""
     if backend != "cake" or not (need_dx or need_dw) or X.device.type != "cuda":
         return None
     rows = (
@@ -3556,20 +3535,7 @@ def _logprob_graph_rlab(
     )
     if rows <= 0:
         return None
-    if kept or not dz_arm:
-        return _GraphRlab()
-    if ctx is not None and not _records_graph(ctx):
-        return None
-    if recompute is None:
-        recompute = _TOP_SAVED_HOOKS(False) is not None and _checkpoint_recomputation()
-    if recompute:
-        return None
-    if _zero_dlogp_skip(X.device, row_index, backend, dz_arm, need_dx, fused_dx):
-        return _GraphRlab()
-    own = _graph_rlab(rows, True, X.device)
-    if own is None:
-        return _GraphRlab(_graph_rlab_tensor(rows, True, X.device), True)
-    return _GraphRlab(own[1][1], True, own)
+    return _GraphRlab()
 
 
 def scatter_rows(
@@ -6430,16 +6396,16 @@ def _rlab_filled(plan: Plan, keys: tuple) -> bool:
 
 class _GraphRlab:
     """The FP32 label residuals ``rlab`` of one log-probability autograd graph (its rows of the chunk loop), held from
-    its forward through its backwards (a retained graph runs several): a backward binds the held tensor and allocates
-    and fills none of its own (:meth:`_Binding._call_rlab`).  ``clean``: every row without a label column in the head
-    (an ignored row, a label at or past ``V``) holds +0 -- after a zero fill, or after ``row_grad`` over chunks that
-    tile the rows (it stores +0 there); the ``dz`` arms keep it (they store only the rows whose label lies in the head,
-    and every backward of the graph has the same labels in the same row order).  A counted plan (the zero-gradient row
-    skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows past its count unwritten: it never binds the
-    held tensor.  A call takes the tensor until it returns, so a concurrent backward of the same graph allocates its
-    own; a call that fails leaves none.  ``own``: the free-list entry the holder owns and its list (:func:`_graph_rlab`:
-    taken by the forward of a ``dz`` arm, else by the first backward that binds the holder), put back when the holder
-    is freed (the entry stays the holder's while a backward hands back another tensor)."""
+    its first backward through its later ones (a retained graph runs several): a later backward binds the held tensor
+    and allocates and fills none of its own (:meth:`_Binding._call_rlab`).  ``clean``: every row without a label column
+    in the head (an ignored row, a label at or past ``V``) holds +0 -- after a zero fill, or after ``row_grad`` over
+    chunks that tile the rows (it stores +0 there); the ``dz`` arms keep it (they store only the rows whose label lies
+    in the head, and every backward of the graph has the same labels in the same row order).  A counted plan (the
+    zero-gradient row skip, :attr:`Plan.dcnt`) orders the rows per call and leaves the rows past its count unwritten: it
+    never binds the held tensor.  A call takes the tensor until it returns, so a concurrent backward of the same graph
+    allocates its own; a call that fails leaves none.  ``own``: the free-list entry the holder owns and its list
+    (:func:`_graph_rlab`: taken by the first backward that binds the holder), put back when the holder is freed (the
+    entry stays the holder's while a backward hands back another tensor)."""
 
     __slots__ = ("tensor", "clean", "own")
 
@@ -8632,9 +8598,9 @@ class _Binding:
         counted, over chunks that tile its rows, takes the graph's tensor when it is clean or the call stores every row
         (``filled``, :func:`_rlab_filled`) -- no allocation and no fill: the producers store the same rows they store in
         a fresh zero-filled tensor, and every other row already holds +0 -- else it takes one for the graph
-        (zero-filled as above): while the graph owns no buffer (the forward of a form without a fill takes none), from
+        (zero-filled as above): while the graph owns no buffer (its forward takes none), from
         the free list of the call's stream (:func:`_graph_rlab`), or the holding stream's request where no list serves
-        (:func:`_graph_rlab_tensor`, as the forward's), else an ordinary allocation; a counted plan allocates its own
+        (:func:`_graph_rlab_tensor`), else an ordinary allocation; a counted plan allocates its own
         and leaves the graph's."""
         plan = self.plan
         if graph is not None and not plan.dcnt and _chunks_tile_rows(plan):
@@ -12146,20 +12112,6 @@ def _checkpoint_pass() -> Optional[_CheckpointPass]:
     )
 
 
-def _checkpoint_recomputation() -> bool:
-    """Whether this call runs in a non-reentrant ``torch.utils.checkpoint``'s recomputation (in a backward): the answer
-    of :func:`_checkpoint_pass` (not ``None``, not ``first``) from the top saved-tensor hooks' pack function name alone,
-    without the frame and graph reads."""
-    hooks = _TOP_SAVED_HOOKS(False)
-    if hooks is None or not _checkpoint_supported():
-        return False
-    pack = inspect.unwrap(hooks[0])
-    return (
-        getattr(pack, "__qualname__", None) == _CHECKPOINT_RECOMPUTE
-        and getattr(pack, "__module__", None) == _torch_checkpoint.__name__
-    )
-
-
 def _graph_key() -> Any:
     """The key ``torch.utils.checkpoint`` files a backward's recomputation under (its unpack hook's rule)."""
     group = getattr(
@@ -12766,7 +12718,7 @@ class CakeLMHeadDetLogprobFunction(torch.autograd.Function):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = dz_arm
-        # the graph's label residuals, behind the forward's launches (_logprob_graph_rlab); a checkpoint's
+        # the graph's label residuals (_logprob_graph_rlab: its first backward takes them); a checkpoint's
         # recomputation hands its row results to the checkpointed call, whose backward binds that call's
         ctx.rlab = (
             None
@@ -12777,10 +12729,6 @@ class CakeLMHeadDetLogprobFunction(torch.autograd.Function):
                 backend=backend,
                 need_dx=bool(ctx.needs_input_grad[0]),
                 need_dw=bool(ctx.needs_input_grad[1]),
-                dz_arm=dz_arm,
-                fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
-                recompute=ckpt is not None and not ckpt.first,
-                ctx=ctx,
             )
         )
         return logp
@@ -12958,10 +12906,6 @@ class CakeLMHeadDetLogprobTemperatureFunction(torch.autograd.Function):
                 backend=backend,
                 need_dx=bool(ctx.needs_input_grad[0]),
                 need_dw=bool(ctx.needs_input_grad[1]),
-                dz_arm=dz_arm,
-                fused_dx=bool(ctx.needs_input_grad[0]) and fused_dx,
-                recompute=ckpt is not None and not ckpt.first,
-                ctx=ctx,
             )
         )
         return logp
@@ -13091,10 +13035,6 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
             backend="cake",
             need_dx=bool(ctx.needs_input_grad[0]),
             need_dw=bool(ctx.needs_input_grad[1]),
-            dz_arm=ctx.logprob_dz,
-            fused_dx=bool(ctx.needs_input_grad[0]) and ctx.dx_finalize,
-            kept=ctx.kept,
-            ctx=ctx,
         )
         return result.logp
 

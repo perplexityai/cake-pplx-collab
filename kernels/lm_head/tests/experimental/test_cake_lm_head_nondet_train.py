@@ -2045,14 +2045,14 @@ def _graph_rlab_node(lp: torch.Tensor):
 
 
 def test_device_logprob_graph_rlab(glm_weight):
-    """The log-probability autograd graph's label residuals (``_GraphRlab``): the ``dz`` arm's forward takes them behind
-    its launches, zero-filled for its recompute; the kept logits' first backward takes them, uninitialized for its
-    ``row_grad`` (the forward leaves the holder empty); every backward of a retained graph binds that tensor (no
-    allocation, no zero fill, no ``rlab_zero`` host step in the remembered sequences) with +0 on every row without a
-    label column in the head.  dX / dW of four backwards (two ``dlogp`` draws) equal those of the same backwards whose
-    bindings allocate their own ``rlab`` (``node.rlab = None``) bit for bit -- the default form (one chunk and two,
-    compacted and not), the kept form and the small call that stages its rows; a held tensor with NaN on its rows with a
-    label column is bound and every such row is stored again; one that is not clean is not bound."""
+    """The log-probability autograd graph's label residuals (``_GraphRlab``): the forward leaves the holder empty; the
+    first backward takes them, zero-filled for the ``dz`` arm's recompute and uninitialized for the kept logits'
+    ``row_grad``; every later backward of a retained graph binds that tensor (no allocation, no zero fill, no
+    ``rlab_zero`` host step in the remembered sequences) with +0 on every row without a label column in the head.  dX /
+    dW of four backwards (two ``dlogp`` draws) equal those of the same backwards whose bindings allocate their own
+    ``rlab`` (``node.rlab = None``) bit for bit -- the default form (one chunk and two, compacted and not), the kept
+    form and the small call that stages its rows; a held tensor with NaN on its rows with a label column is bound and
+    every such row is stored again; one that is not clean is not bound."""
     _require_program(entry="logprob")
     V = int(glm_weight.shape[0])
     edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
@@ -2089,11 +2089,9 @@ def test_device_logprob_graph_rlab(glm_weight):
                 node.rlab = None  # each backward's binding allocates its own rlab
             else:
                 assert isinstance(holder, cake_backend._GraphRlab), case
-                # the dz arm's forward takes the tensor (zero-filled); a form without a fill (the kept logits) leaves
-                # the holder empty, and its first backward takes the tensor
+                # the forward leaves the holder empty; the first backward takes the tensor
                 held = holder.tensor
-                lazy = bool(getattr(node, "kept", False)) or not node.logprob_dz
-                assert (held is None) == lazy and (holder.own is None) == lazy, case
+                assert held is None and holder.own is None, case
                 saved = node.saved_tensors
                 rows_labels = saved[2] if saved[4] is None else saved[2][saved[4]]
                 live = (rows_labels >= 0) & (rows_labels < V)
@@ -18325,7 +18323,6 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         T: make_inputs(T, seed=seed + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
         for T in (16, 300)
     }
-    forms = set()
 
     def forward(entry, T, **kw):
         inp = inputs[T]
@@ -18336,15 +18333,8 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         saved = node.saved_tensors
         rows = int(saved[2].numel() if saved[4] is None else saved[4].numel())
         holder = node.rlab
-        # the dz arm's forward takes its buffer and fills it; a form without a fill (the kept logits, or no dz arm)
-        # leaves the holder empty, and the first backward that binds it takes one
-        lazy = bool(getattr(node, "kept", False)) or not node.logprob_dz
-        if lazy or not be._RLAB_POOL_ON:
-            assert holder.own is None and (holder.tensor is None) == lazy
-        else:
-            assert holder.own is not None and holder.tensor is holder.own[1][1]
-            assert holder.clean and int(torch.count_nonzero(holder.tensor)) == 0
-        forms.add(lazy)
+        # the forward takes no buffer: the first backward that binds the holder takes one
+        assert holder.tensor is None and holder.own is None and not holder.clean
         return dict(X=X, W=W, lp=lp, dlogp=inp.dlogp, holder=holder, rows=rows)
 
     def backward(g, retain=False):
@@ -18396,8 +18386,8 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
     assert _pool_same(got_c[0], ref_a)
     del b, c, d, e
     gc.collect()
-    # the kept form (no zero fill: its backward takes the buffer) binds a poisoned buffer; rows past a buffer's
-    # capacity take a new, larger one, and a smaller call then binds the [rows] view of the larger buffer
+    # the kept form (no zero fill) binds a poisoned buffer; rows past a buffer's capacity take a new, larger one,
+    # and a smaller call then binds the [rows] view of the larger buffer
     poisoned = set()
     for buf in _pool_free(be):
         buf[3].fill_(float("nan"))
@@ -18462,10 +18452,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         assert be._graph_rlab(16, True, device) is None
     assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
     del graph, scratch
-    # a non-reentrant checkpoint's recomputation takes no buffer (the checkpointed call's backward binds the call's
-    # holder); a form without a fill takes its buffer in the backward that binds the holder; a call without a gradient
-    # (a reentrant checkpoint's first pass) records no graph and takes none, and the reentrant recomputation's graph
-    # takes one in the backward; the bits are the plain step's
+    # no forward takes a buffer -- a plain call, a call without a gradient, a checkpoint's first pass or its
+    # recomputation: one take, in the backward that binds the holder (the checkpointed call's, or the reentrant
+    # recomputation's graph's); the bits are the plain step's
     calls = []
     phase = ["forward"]
     real = be._graph_rlab
@@ -18486,7 +18475,7 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
                 return entry(x, w, inp.labels, chunk_size=4096)
 
             if kind == "reentrant":
-                # the call without a gradient (the dz arm: no kept logits) records no graph: no take
+                # a call without a gradient: no take
                 del calls[:]
                 phase[0] = "forward"
                 with torch.no_grad():
@@ -18500,21 +18489,11 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
                 lp = torch.utils.checkpoint.checkpoint(
                     call, X, W, use_reentrant=kind == "reentrant"
                 )
-            if kind == "reentrant":
-                # the first pass takes none; one take in the backward: the recomputation's forward (the dz arm) or
-                # the backward that binds the recomputed graph's holder (a form without a fill)
-                assert calls == [], (entry.__name__, calls)
-                expect = ["backward"]
-            else:
-                node = _graph_rlab_node(lp)
-                lazy = bool(getattr(node, "kept", False)) or not node.logprob_dz
-                del node
-                # one take: the binding backward's (a form without a fill) or the dz arm's forward
-                expect = ["backward"] if lazy else ["forward"]
+            assert calls == [], (entry.__name__, kind, calls)
             phase[0] = "backward"
             lp.backward(inp.dlogp)
             torch.cuda.synchronize()
-            assert calls == expect, (entry.__name__, kind, calls)
+            assert calls == ["backward"], (entry.__name__, kind, calls)
             out = (_bits(lp.detach()), _bits(X.grad), _bits(W.grad))
             if plain is None:
                 plain = out
@@ -18522,8 +18501,6 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
             assert same, (entry.__name__, kind)
             del lp
     monkeypatch.undo()
-    # both forms ran: the dz arm's forward take and the backward take of a form without a fill
-    assert forms == {False, True}
     # another device: its current stream's list while it is the current device; no buffer from another current device
     if torch.cuda.device_count() > 1:
         other = (index + 1) % torch.cuda.device_count()
@@ -18544,16 +18521,16 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
 
 def test_device_graph_rlab_pool(glm_weight, monkeypatch):
     """The graphs' label residual buffers come from the free list of the caller's stream (``_graph_rlab``,
-    ``_RLAB_POOL``) and go back when the graph is freed -- taken by the forward of the ``dz`` arm (zero-filled there)
-    and by the first backward that binds the holder of a form without a fill (the kept logits): two live graphs hold
-    disjoint buffers; a freed graph's buffer is the next graph's; a retained graph keeps its buffer through every
-    backward while another graph meanwhile takes another; a buffer left with NaN on every row gives the bits of an
-    ordinary tensor (``_RLAB_POOL_ON`` off) -- the default entry's form, whose forward fill overwrites it, and the kept
-    form, whose backward binds it unfilled; a call past a buffer's capacity takes a larger one and a smaller call then
-    binds its view; at most ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA
-    graph capture takes no buffer and changes no list; a non-reentrant checkpoint's recomputation takes none (a
-    reentrant one's does) with the plain step's bits; another device takes its own stream's list, and no buffer comes
-    from another current device."""
+    ``_RLAB_POOL``) and go back when the graph is freed -- taken by the first backward that binds the graph's holder
+    (zero-filled there for the ``dz`` arm; the kept logits' unfilled): two live graphs hold disjoint buffers; a freed
+    graph's buffer is the next graph's; a retained graph keeps its buffer through every backward while another graph
+    meanwhile takes another; a buffer left with NaN on every row gives the bits of an ordinary tensor (``_RLAB_POOL_ON``
+    off) -- the default entry's form, whose backward fill overwrites it, and the kept form, whose backward binds it
+    unfilled; a call past a buffer's capacity takes a larger one and a smaller call then binds its view; at most
+    ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA graph capture takes no
+    buffer and changes no list; no forward takes one (a plain call, a call without a gradient, a checkpoint's first pass
+    or recomputation), the binding backward does, with the plain step's bits; another device takes its own stream's
+    list, and no buffer comes from another current device."""
     _check_graph_rlab_pool(
         cake_backend,
         cake_backend.cake_lm_head_nondet_train_logprob,
@@ -18562,89 +18539,6 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
         monkeypatch,
         SEED + 73,
     )
-
-
-def test_records_graph_reads_the_node_edges():
-    """``_records_graph`` (read by ``_logprob_graph_rlab``): ``True`` in an autograd Function's forward whose call
-    records a graph node (grad mode on and an input that requires a gradient, a reentrant checkpoint's
-    recomputation), ``False`` in one that records none (``torch.no_grad``, inference mode, no input that requires a
-    gradient, a reentrant checkpoint's first pass), ``True`` for a context without the node's edges."""
-    seen = []
-
-    class Probe(torch.autograd.Function):
-        @staticmethod
-        def forward(ctx, x):
-            seen.append(cake_backend._records_graph(ctx))
-            return x * 2.0
-
-        @staticmethod
-        def backward(ctx, g):
-            return g * 2.0
-
-    x = torch.ones(3, requires_grad=True)
-
-    def run(fn):
-        del seen[:]
-        fn()
-        return list(seen)
-
-    assert run(lambda: Probe.apply(x)) == [True]
-    assert run(lambda: Probe.apply(x.detach())) == [False]
-    with torch.no_grad():
-        assert run(lambda: Probe.apply(x)) == [False]
-    with torch.inference_mode():
-        assert run(lambda: Probe.apply(x)) == [False]
-    del seen[:]
-    y = torch.utils.checkpoint.checkpoint(Probe.apply, x, use_reentrant=True)
-    assert seen == [False]
-    y.sum().backward()
-    assert seen == [False, True]
-    assert cake_backend._records_graph(object()) is True
-
-
-def test_checkpoint_recomputation_matches_the_checkpoint_pass(monkeypatch):
-    """The graph label residuals' recomputation check (``_checkpoint_recomputation``, read by ``_logprob_graph_rlab``
-    when its caller passes no ``recompute``) gives the answer of ``_checkpoint_pass`` (not ``None`` and not ``first``)
-    everywhere: outside a checkpoint, in a non-reentrant checkpoint's forward and its recomputation, under other
-    saved-tensor hooks on top (outside and inside the checkpointed function), in a reentrant checkpoint, in nested
-    checkpoints, and on a torch without the hook structure (both ``False``)."""
-    seen = []
-
-    def probe():
-        ckpt = cake_backend._checkpoint_pass()
-        seen.append(
-            (
-                cake_backend._checkpoint_recomputation(),
-                ckpt is not None and not ckpt.first,
-            )
-        )
-
-    def fn(x):
-        probe()
-        with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-            probe()
-        return x.sin()
-
-    def outer(x):
-        probe()
-        return torch.utils.checkpoint.checkpoint(fn, x.cos(), use_reentrant=False)
-
-    x = torch.ones(3, requires_grad=True)
-    probe()
-    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
-    assert [a for a, _ in seen] == [False, False, False, True, False]
-    with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
-        probe()
-        torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
-    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=True).sum().backward()
-    torch.utils.checkpoint.checkpoint(outer, x, use_reentrant=False).sum().backward()
-    monkeypatch.setitem(cake_backend._CHECKPOINT_SUPPORT, "ok", False)
-    n = len(seen)
-    torch.utils.checkpoint.checkpoint(fn, x, use_reentrant=False).sum().backward()
-    monkeypatch.undo()
-    assert seen[n:] and not any(a or b for a, b in seen[n:])
-    assert all(a == b for a, b in seen), seen
-    assert sum(a for a, _ in seen) >= 3
 
 
 _RLAB_POOL_PLACEMENT_SCRIPT = """
@@ -18698,7 +18592,7 @@ for T in (32, 16, 256, 32, 1, 300, 16):
         lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
         hs = [holder(lp) for lp in lps]
         torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
-        # each graph's residuals: taken by its forward (the dz arm) or by its backward (a form without a fill)
+        # each graph's residuals: taken by the backward that binds them
         took = [h.tensor for h in hs if h is not None and h.tensor is not None]
         held.extend(t.data_ptr() for t in took)
         held_rows.extend(t.numel() for t in took)
