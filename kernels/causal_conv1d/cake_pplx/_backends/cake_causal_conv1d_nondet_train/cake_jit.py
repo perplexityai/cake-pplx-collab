@@ -38,12 +38,17 @@ det program's bits), and the backward routes ``bwd`` / ``bwd_dt`` /
 (and token) thresholds, single-launch builds of the det backward bodies,
 except at the rows of ``FALLBACK_ROWS`` (:func:`selected_modules`), where a
 route runs its fallback program (the single-launch build of the det route's
-fallback body).  Below the forward token ceilings of ``FALLBACK_ROWS`` and
-``DIRECT_ROWS`` a forward call runs the det static program (each CTA a fixed
-token range of its channel tile) or the det direct program (each CTA the
-next token blocks of its channel tile, on the route's tiles of
-``DIRECT_PLANS``); neither takes ``work``, and ``y`` is the same bits on every
-forward program and plan.  A backward call is ONE ordinary launch: every
+fallback body).  Inside the token range of a forward row of
+``FALLBACK_ROWS`` or ``DIRECT_ROWS`` a forward call runs the det static
+program (each CTA a fixed token range of its channel tile) or the det direct
+program (each CTA the next token blocks of its channel tile, on the route's
+tiles of ``DIRECT_PLANS``); neither takes ``work``, and ``y`` is the same bits
+on every forward program and plan.  Each row gives its own token range.  For
+most C the first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at
+C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a static
+range.  Outside a row's range, and where an architecture, route and C have
+no row, a forward call runs the dynamic program, which takes ``work``, as in
+0.2.4.  A backward call is ONE ordinary launch: every
 per-thread and per-CTA FP32 step and ``dx`` are those of the det program it
 is built from, and only the cross-CTA reduction of ``dweight`` / ``dbias``
 differs.  Instead of storing one partial row per CTA

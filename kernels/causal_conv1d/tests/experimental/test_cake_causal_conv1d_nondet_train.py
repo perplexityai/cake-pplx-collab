@@ -73,12 +73,12 @@ programmatic dependent launch, through autograd and checkpointing, beside a kern
 another stream, and beside the deterministic package's SM-wide program in one process.  The forward's narrow rows of
 C 520 to 568 (every one, at the row's token floor and one token below it), the ``fwd_bias`` rows with BF16 taps (their
 own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call one
-token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 576 to 768 below the token ceilings): at S
-1000 and on both sides of every split and ceiling the static, direct or dynamic program the tables name, the static and
-direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs too), with
-``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static or direct row); a capture
-above a direct range after an eager call inside it (that call refills no pre-zeroed buffer, so the capture zeroes its
-own); and both packages in one process at a direct row.
+token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 576 to 768, one token range per key): at
+S 1000 inside a range and on both sides of each range's ends the static, direct or dynamic program the tables name, the
+static and direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs
+too), with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static or direct row);
+a capture above a direct range after an eager call inside it (that call refills no pre-zeroed buffer, so the capture
+zeroes its own); and both packages in one process at a direct row.
 
 This suite names its package once, through ``tests.cake.test_helpers.cake_package`` (key
 ``cake_causal_conv1d_nondet_train``).  Every test skips until the exporter has rendered the package (``build.json``
@@ -1390,8 +1390,8 @@ def test_forward_narrow_row(kind, C, tiles, taps, monkeypatch, record_property) 
     vec`` vectors one token below the floor and inside a single-tile range -- once on a caller-owned forward workspace
     of the public size and once on the package's, each holding the launch's counters and zero after the call; ``y``
     of both launches judged against the naive tier.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` are
-    removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which it runs above the
-    keys' token ceilings (the keys' own programs: :func:`test_forward_small_s_row`)."""
+    removed for the test (:func:`_forward_rules_only`): these are the dynamic program's rows, which it runs outside the
+    keys' token ranges (the keys' own programs: :func:`test_forward_small_s_row`)."""
 
     _require_route(kind)
     with _forward_rules_only(_arch()):
@@ -1491,12 +1491,12 @@ def _small_s_docs(S: int):
 )
 def test_forward_small_s_row(kind, taps, monkeypatch, record_property) -> None:
     """Every forward key of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of route ``kind`` on the device's architecture
-    (:func:`_small_s_rows`: S 1000, both sides of the static / direct split and of the key's ceiling, at the key's
-    channel ends): the public forward launches the program the tables name (the static program inside a static range,
-    the direct program inside a direct range, the dynamic program above), the static and direct programs with no
-    ``work`` counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the 32 draws
-    every ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's static
-    program on the same inputs (one key over every token count of the key's channel counts), a launch with
+    (:func:`_small_s_rows`: S 1000 inside the range, both sides of the range's first and last token count, at the
+    key's channel ends): the public forward launches the program the tables name (the static program inside a static
+    range, the direct program inside a direct range, the dynamic program elsewhere), the static and direct programs
+    with no ``work`` counters (a passed forward workspace is checked, not passed on, and stays zero).  On each of the
+    32 draws every ``y`` is judged against the naive tier: 3 launches with and without a caller workspace, the route's
+    static program on the same inputs (one key over every token count of the key's channel counts), a launch with
     ``enable_pdl`` 0 and one with 1, two launches on two streams at once, and the replays of a CUDA Graph captured after
     one eager warm-up, whose capture at a static or direct row has no fill node and counts no capture fallback.  A row
     packs the ``"perf"`` documents, or one document below the packing's minimum (:func:`_small_s_docs`)."""

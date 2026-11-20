@@ -107,7 +107,9 @@ ROUTE_ROWS = [
     *SMALL_S_ROUTE_ROWS,
 ]
 # Multi-entry rows whose C = 576 tensor runs the static program (2000 tokens) or, where the architecture has one
-# there, the direct program (6003 tokens) beside tensors of the dynamic programs.
+# there, the direct program (6003 tokens).  Beside it, the C = 640 tensor runs its own small-S program (static at
+# 2000 tokens; at 6003 static on sm_100a, direct on sm_103a and sm_107a), and only the C = 512 tensor runs the dynamic
+# program.
 SMALL_S_MROWS = [
     ("small-s-static-mixed", (1500, 500), (1, 2, 1497, 500), (576, 512, 640)),
     ("small-s-direct-mixed", (5000, 1003), (1, 2, 4997, 1003), (576, 512, 640)),

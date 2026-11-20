@@ -158,15 +158,20 @@ Host design (the knobs are keywords; no environment variable):
   rules and size, which cover every plan; at C = 520 to 568 it is larger
   than 0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for
   those rows is refused (``ValueError``) from the row's token floor.
-- Below the forward token ceilings at C = 576 to 768 the forward runs two
-  other det programs of its route: the static program in the forward ranges
-  of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token range of its channel
-  tile, on the route's plan above) and the direct program in the ranges of
-  ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of its channel
-  tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at most one CTA per
-  token block).  Neither takes counters: a passed ``workspace`` is checked
-  and not passed to the program, and the workspace size is unchanged.
-  ``y`` is the same bits on every forward program and plan.
+- At C = 576 to 768, inside the token range of a forward row, the forward
+  runs two other det programs of its route: the static program in the
+  forward ranges of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token range
+  of its channel tile, on the route's plan above) and the direct program in
+  the ranges of ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of
+  its channel tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at
+  most one CTA per token block).  Neither takes counters: a passed
+  ``workspace`` is checked and not passed to the program, and the workspace
+  size is unchanged.  Each row gives its own token range.  For most C the
+  first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
+  768 start at S = 13824 (C = 736: 14336) and have only a static range.
+  Outside a row's range, and where an architecture, route and C have no
+  row, the forward runs the dynamic program, which takes counters, as in
+  0.2.4.  ``y`` is the same bits on every forward program and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``

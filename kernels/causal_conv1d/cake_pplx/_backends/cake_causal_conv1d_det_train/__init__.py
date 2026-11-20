@@ -71,14 +71,18 @@ Host design (the knobs are keywords; no environment variable):
   an omitted workspace is a zeroed buffer of the call's own (its zeroing is
   captured with the launch), so a graph never shares counters with eager
   calls or with another graph.
-- At the forward's small-S rows (``cake_jit.FALLBACK_ROWS`` /
-  ``DIRECT_ROWS``: C = 576 to 768, up to a token count per row and
-  architecture) the forward runs the route's static program on the route's
-  plan, or its direct program on the channel tiles of
-  ``cake_jit.DIRECT_PLANS`` with at most one CTA per token block; neither
-  takes counters, so the call zeroes and uses no buffer there (eager or
-  captured), and a passed ``workspace`` is checked and not read.  Every
-  forward program writes the same ``y`` bits.
+- Inside the token range of a forward small-S row (``cake_jit.FALLBACK_ROWS``
+  / ``DIRECT_ROWS``: C = 576 to 768, by architecture and route) the forward
+  runs the route's static program on the route's plan, or its direct program
+  on the channel tiles of ``cake_jit.DIRECT_PLANS`` with at most one CTA per
+  token block; neither takes counters, so the call zeroes and uses no buffer
+  there (eager or captured), and a passed ``workspace`` is checked and not
+  read.  Each row gives its own token range.  For most C the first range
+  starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at
+  S = 13824 (C = 736: 14336) and have only a static range.  Outside a row's
+  range, and where an architecture, route and C have no row, the forward
+  takes its counters from the workspace, as in 0.2.4.  Every forward program
+  writes the same ``y`` bits.
 """
 
 from __future__ import annotations

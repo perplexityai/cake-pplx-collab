@@ -64,14 +64,19 @@ and chunk for every channel count C >= 8 (``channels_at_least`` 8) and, on
 sm_107a, from a per-route channel count (C = 256 on ``fwd``, 512 on
 ``fwd_dt``, 1024 on ``fwd_bias``) the program of two stages per chunk from
 S = 65536, and a copy of it under its own name (``c_band=2048``) from C =
-2048 at every S.  Below a per-route token ceiling at C = 576 to 768 a call
-runs one of two programs with no counter instead (the small-S rows): the
-static program (each CTA one fixed token stream of its channel tile; the
-route's fallback, the record without a ``select_rule``) at the rows of
-:data:`FALLBACK_ROWS`, and the direct program (no shared memory, barrier or
-atomic; the CTAs of a channel tile take its token blocks in turn) at the rows
-of :data:`DIRECT_ROWS`, which plans its own channel tiles
-(:data:`DIRECT_PLANS`) and launches at most one CTA per token block.  Every
+2048 at every S.  At C = 576 to 768, inside the token range of a row of
+:data:`FALLBACK_ROWS` or :data:`DIRECT_ROWS` (the small-S rows), a call runs
+one of two programs with no counter instead: the static program (each CTA
+one fixed token stream of its channel tile; the route's fallback, the record
+without a ``select_rule``) at the rows of :data:`FALLBACK_ROWS`, and the
+direct program (no shared memory, barrier or atomic; the CTAs of a channel
+tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
+plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
+CTA per token block.  Each row gives its own token range.  For most C the
+first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
+768 start at S = 13824 (C = 736: 14336) and have only a static range.
+Outside a row's range, and where an architecture, route and C have no row,
+a call runs the dynamic program its rules select, as in 0.2.4.  Every
 forward program computes each ``y`` element in the same fixed order, so ``y``
 is bitwise the same whichever program and plan a call runs.  The counters
 of the dynamic programs are the forward workspace ``work``

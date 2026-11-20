@@ -417,12 +417,9 @@ DIRECT_PLANS_OF_RECORD = {
 # The CTAs per SM of each forward route's direct program (its co-resident grid, capped at its token blocks): the bias
 # route's program, built with ``min_blocks=3``, holds three.
 DIRECT_CTAS_PER_SM = {"fwd": 4, "fwd_dt": 4, "fwd_bias": 3}
-# The measured conformance cells of the sm_103a narrow forward rows (release 0.2.4's plans at C 704 to 768, each cell
-# timed against the 0.2.3 plan) that lie inside a ``DIRECT_ROWS`` range: (route, taps, bias, C, S).  There the direct
-# program runs on its direct tiles in place of the 0.2.4 plan, so these cells leave the check of the 0.2.4 plans by
-# name; each was timed again on the direct program and was not slower than the 0.2.4 program and plan.  Every other
-# conformance cell, inside a static range too, keeps its 0.2.4 plan.
-R1_DIRECT_CONFORMANCE_CELLS = (
+# Measured sm_103a forward cells at C 704 to 768 that lie inside a ``DIRECT_ROWS`` range: (route, taps, bias, C, S).
+# At each cell a call selects the route's direct program and plans its direct tiles.
+SM103_DIRECT_PLAN_CELLS = (
     ("fwd", "f32", "none", 704, 12288),
     ("fwd", "f32", "none", 704, 14336),
     ("fwd", "f32", "none", 704, 16384),
@@ -3198,14 +3195,13 @@ def test_direct_rows_plan_as_the_deterministic_forward(arch, fake_device) -> Non
 
 @pytest.mark.cpu_only
 def test_conformance_cells_inside_direct_ranges(fake_device) -> None:
-    """Every cell of :data:`R1_DIRECT_CONFORMANCE_CELLS` (distinct, in route order) lies inside a ``DIRECT_ROWS``
-    range of its route on sm_103a: the call selects the route's direct program and plans its direct tiles for the
-    cell's taps, per call and from the row cache.  The cells are the forward routes' C 704 to 768 rows of the
-    conformance set (multiples of 8)."""
+    """Every cell of :data:`SM103_DIRECT_PLAN_CELLS` (distinct, in route order) lies inside a ``DIRECT_ROWS`` range
+    of its route on sm_103a: the call selects the route's direct program and plans its direct tiles for the cell's
+    taps, per call and from the row cache.  The cells are measured forward cells at C 704 to 768 (multiples of 8)."""
 
     arch = "sm_103a"
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    cells = R1_DIRECT_CONFORMANCE_CELLS
+    cells = SM103_DIRECT_PLAN_CELLS
     assert len(set(cells)) == len(cells)
     assert list(cells) == sorted(
         cells, key=lambda c: (FORWARD_ROUTES.index(c[0]), *c[1:])

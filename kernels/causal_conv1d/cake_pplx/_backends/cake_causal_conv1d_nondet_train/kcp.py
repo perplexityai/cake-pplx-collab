@@ -93,7 +93,7 @@ Two-launch forward (the deterministic KCP package's forward): the forward can ru
 program that reads no received row and the ``kcp_fwd_halo`` history-row program.  The main program writes every row,
 a continuing fragment's first rows as at a document start: either this package's zero-history registry's single-rank
 ``fwd`` route program (``cake_jit.selected_modules(arch, "fwd", C=C, S=S)``, the program the single-rank forward
-runs, by the rank's local token count: below the forward token ceilings the route's static or direct program) on the
+runs, by the rank's local token count: inside a forward row's token range the route's static or direct program) on the
 rank's fragments, each a document of its own (``cu = ctx.cu_seqlens_local``, ``num_docs = n_frag``; the record's grid
 and token-chunk counters as in the single-rank forward), or, in the overlapped form
 only, the ``kcp_fwd`` program with every ``hist_row_off`` entry ``-1``.  The history-row program then writes ``y`` of

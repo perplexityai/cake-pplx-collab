@@ -49,8 +49,8 @@ package's per-(device, stream) buffer of the calls that pass none.  The forward'
 32-vector or whole tiles; C 520 to 568 on one tile below a token floor of their own per architecture and on
 narrower tiles from it) keep ``y``'s bits: the suite checks the literal plans per route, token count and
 architecture, and at every C 520 to 568 row one token below its floor and at it the launched plan, ``y``
-bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.  Up to a token count
-per row (C 576 to 768, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the forward runs a static
+bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.  Inside the token
+range of a row (C 576 to 768, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the forward runs a static
 program, or a direct program on channel tiles of its own, and takes no counters: the suite checks the literal
 tables, the selection at every range bound, the direct plan and its token-block grid, and at the first and the
 last row of every range the launched program, ``y`` bitwise the dynamic program's and run to run, a caller-owned
@@ -333,7 +333,7 @@ FWD_NARROW_WORKSPACE_TILES = {
 # -> (route, C_lo, C_hi) -> (S_lo, S_hi), every multiple of 8 from C_lo to C_hi.
 # Inside a static range the route's fallback (the static program) runs on the
 # route's plan; inside a direct range the route's direct program runs on the
-# arch's ``DIRECT_PLANS_OF_RECORD`` form; above them the dynamic program.
+# arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.
 FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
     "sm_100a": {
         ("fwd", 576, 576): (1, 4096),
@@ -1205,8 +1205,8 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
 def test_small_s_rows_literal_tables() -> None:
     """The small-S forward rows: ``cake_jit.FALLBACK_ROWS``, ``DIRECT_ROWS`` and
     ``DIRECT_PLANS`` against the literal tables; keys of forward routes only, on
-    multiples of 8, disjoint in ``C`` per architecture and route, ranges from
-    ``S = 1`` up, a static range below the direct range of a key that both
+    multiples of 8, disjoint in ``C`` per architecture and route, every range
+    inside ``S >= 1``, a static range below the direct range of a key that both
     tables cover; per architecture and forward route one static program (the
     route's fallback, listed first) and at most one direct program (listed
     last, named by every direct key of the route); the static and the direct

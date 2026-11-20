@@ -110,7 +110,7 @@ The forward runs two programs:
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and the rank's token count. It takes each of the rank's
    fragments as a document of its own and launches as the single-rank forward does: at a row of
-   `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 576 to 768 below the token ceilings) the static or the
+   `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 576 to 768, inside the row's token range) the static or the
    direct program, with no counters (the direct program's grid capped at its token blocks); elsewhere the dynamic
    program on its record's full co-resident grid, which takes its token chunks from zeroed counters (a multi call's
    tensors share one counter buffer, which the static and direct programs do not read). It launches without
