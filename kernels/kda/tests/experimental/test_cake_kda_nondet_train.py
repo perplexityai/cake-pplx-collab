@@ -8152,8 +8152,12 @@ def test_batched_arena_content_never_reaches_a_result(
     default arena's call (``<case>.zeroed``), the poisoned arena's forward and backward (``<case>.poisoned``), its
     backward from the default's set (``<case>.default_set``), a version-4 set on the poisoned tape workspace
     (``<case>.light_set``) and its forward without a saved set (``<case>.nosave``).  The states-saving row (above
-    80k tokens at 4 heads) is too large to judge: every result of it is finite, and the states-saving route is
-    judged in :func:`test_lean_arena_serves_the_saved_states_and_the_tape_paths` (``n1-h1``)."""
+    80k tokens at 4 heads, its first document alone in the first group) is too large to judge: every result of it is
+    finite, and the states-saving route is judged in
+    :func:`test_lean_arena_serves_the_saved_states_and_the_tape_paths` (``n1-h1``).  That row saves the states only
+    from ``S >= 384 * NSEG`` on, and the segment count grows with the device's SMs (at 212 SMs NSEG = 212 needs
+    81408 tokens), so its first document grows as :func:`_saving_pack` gives it on this device."""
+    big = _saving_pack((40000, 20000, 20000, 1000), 4, device)
     cases = (
         ((63, 1, 65, 30), 2, "light", 1, {"batch_tokens": 95}),
         ((100, 640, 77, 1000, 129), 2, "light", 3, {"batch_tokens": 1000}),
@@ -8166,7 +8170,7 @@ def test_batched_arena_content_never_reaches_a_result(
         ),
         ((63, 1, 65), 64, "light", 3, {"batch_tokens": 129, "max_docs_per_batch": 1}),
         ((100, 640, 77, 1000, 129), 2, "tape", 2, {"batch_tokens": 1000}),
-        ((40000, 20000, 20000, 1000), 4, "light", 4, {"batch_tokens": 40000}),
+        (big, 4, "light", 4, {"batch_tokens": big[0]}),
     )
 
     def check_row(lengths, heads, save_mode, t, kw):
