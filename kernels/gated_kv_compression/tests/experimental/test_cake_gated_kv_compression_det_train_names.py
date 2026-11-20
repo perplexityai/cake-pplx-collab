@@ -251,9 +251,8 @@ def test_package_identity_and_build_identity():
     """``build.json`` and the registry name the package; every library stem is a
     ``cake_gated_kv_compression_det_train`` program built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the
     registry's library names are the stems of ``build.json``.  Each record names its own program, but the two
-    records of each backward role (``bwd`` and ``bwd_sm_107a``, ``bwd_small`` and ``bwd_small_sm_107a``, ``bwd_vec4``
-    and ``bwd_vec4_sm_103a``), each one program on disjoint architectures, and no library is built twice for one
-    architecture."""
+    records of each backward role (``bwd`` and ``bwd_sm_107a``, ``bwd_small`` and ``bwd_small_sm_107a``), each one
+    program on disjoint architectures, and no library is built twice for one architecture."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_gated_kv_compression_det_train"
@@ -268,8 +267,8 @@ def test_package_identity_and_build_identity():
     assert all(re.fullmatch(pattern, name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
     stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) - 3 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
-    for first, second in (("bwd", "bwd_sm_107a"), ("bwd_small", "bwd_small_sm_107a"), ("bwd_vec4", "bwd_vec4_sm_103a")):
+    assert len(stems) == len(jit.MODULES) - 2 and len(names) == sum(len(rec["arches"]) for rec in jit.MODULES.values())
+    for first, second in (("bwd", "bwd_sm_107a"), ("bwd_small", "bwd_small_sm_107a")):
         assert jit.MODULES[first]["library"] == jit.MODULES[second]["library"], first
 
 
