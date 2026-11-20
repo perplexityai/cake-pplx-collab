@@ -1099,16 +1099,23 @@ def test_gpu_four_pack_step_peak_drops_by_sum_minus_max(
     device, record_property
 ) -> None:
     """The in-repo memory proxy (four prepared packs, one checkpointed KDA layer per pack, forwards of all packs then
-    one backward through all of them, at H = 64; the first draw): the step's ``max_memory_allocated`` with one
-    workspace per pack minus the step's with one reserved shared workspace equals the per-pack workspaces' bytes minus
-    the shared one's (within allocator rounding).  Out and the five gradients of the step on one workspace per pack
-    (``per``) and on the shared workspace (``shared``) are judged per pack on every draw (case ``p<i>``)."""
+    one backward through all of them, at H = 64; the first draw): the step's peak with one workspace per pack minus
+    the step's with one reserved shared workspace equals the per-pack workspaces' bytes minus the shared one's (within
+    1 MiB).  The peaks count the bytes the callers requested (``torch.cuda.memory_stats`` ``requested_bytes``), as
+    the workspaces' ``bytes`` do: ``max_memory_allocated`` counts the caching allocator's blocks, whose rounding and
+    the slack of an unsplit cached block (up to 1 MiB per tensor) differ between the arms (four workspaces' pool
+    tensors against one's, and the step's own tensors placed around the per-pack arm's gradients, which stay alive
+    through the shared arm).  Out and the five gradients of the step on one workspace per pack (``per``) and on the
+    shared workspace (``shared``) are judged per pack on every draw (case ``p<i>``)."""
     H = 64
     ctxs, ops = _packs(device, H)
 
+    def requested(stat: str) -> int:
+        return int(torch.cuda.memory_stats(device)[f"requested_bytes.all.{stat}"])
+
     def step(wss) -> tuple[int, list]:
         torch.cuda.synchronize(device)
-        base = torch.cuda.memory_allocated(device)
+        base = requested("current")
         torch.cuda.reset_peak_memory_stats(device)
         leaves, outs = [], []
         for i, (c, o) in enumerate(zip(ctxs, ops, strict=True)):
@@ -1128,7 +1135,7 @@ def test_gpu_four_pack_step_peak_drops_by_sum_minus_max(
             leaves.append(lf)
         torch.autograd.backward(outs, [o["dout"] for o in ops])
         torch.cuda.synchronize(device)
-        peak = torch.cuda.max_memory_allocated(device) - base
+        peak = requested("peak") - base
         grads = [
             [outs[i].detach()] + [t.grad for t in leaves[i]] for i in range(len(ctxs))
         ]
@@ -1137,7 +1144,7 @@ def test_gpu_four_pack_step_peak_drops_by_sum_minus_max(
     def arm(shared: bool) -> tuple[int, int, list]:
         gc.collect()
         torch.cuda.synchronize(device)
-        base = torch.cuda.memory_allocated(device)
+        base = requested("current")
         if shared:
             ws = _new_ws()
             ws.reserve(ctxs, H)
@@ -1151,7 +1158,7 @@ def test_gpu_four_pack_step_peak_drops_by_sum_minus_max(
         step(wss)  # warm-up: the caching allocator's blocks of the step's own tensors
         gc.collect()
         torch.cuda.synchronize(device)
-        mid = torch.cuda.memory_allocated(device)
+        mid = requested("current")
         peak, grads = step(wss)
         peak_total = mid - base + peak
         del wss
