@@ -4035,6 +4035,22 @@ def plan_chunks(num_rows: int, chunk: int) -> tuple[tuple[int, int], ...]:
     )
 
 
+def _kept_property(fn: Callable[[Any], Any]) -> property:
+    """A read-only property of a frozen plan, formed on first use and kept on the instance under the key of the
+    defining class's function (``_kept_<qualname>``), so an override that reads ``super()``'s value reads the base
+    class's own kept value: one forming per plan and class, the same value (a plan's fields never change)."""
+    key = f"_kept_{fn.__qualname__}"
+
+    def get(self):
+        state = self.__dict__
+        value = state.get(key)
+        if value is None:
+            value = state[key] = fn(self)
+        return value
+
+    return property(get, doc=fn.__doc__)
+
+
 @dataclass(frozen=True)
 class Plan:
     """The chunk schedule of one binding."""
@@ -4191,7 +4207,7 @@ class Plan:
         """``(row0, rows_c)`` of the last chunk (``(0, 0)`` without chunks)."""
         return self.chunks[-1] if self.chunks else (0, 0)
 
-    @property
+    @_kept_property
     def stages(self) -> tuple[str, ...]:
         base = stages_for_entry(
             self.problem.entry,
@@ -4306,7 +4322,7 @@ class _TemperaturePlan(Plan):
     def row_finalize_stage(self) -> str:
         return ROW_FINALIZE_TAU_STAGE
 
-    @property
+    @_kept_property
     def stages(self) -> tuple[str, ...]:
         """:attr:`Plan.stages` with the temperature forms, in the launch order of
         :data:`cake_jit.STAGES_WITH_TEMPERATURE`."""
@@ -4371,7 +4387,7 @@ class _KeptPlan(Plan):
 
     logprob_keep: ClassVar[bool] = True
 
-    @property
+    @_kept_property
     def stages(self) -> tuple[str, ...]:
         n = self.num_chunks
         recompute = {self.recompute_stage(i) for i in range(n)} - {
