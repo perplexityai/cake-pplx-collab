@@ -315,6 +315,30 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
             assert (named["wmode"], named["NP"]) == (0b0101, rows)
 
 
+@pytest.mark.parametrize("T", (0, 1, 2, 3))
+@pytest.mark.parametrize("layout", ("contiguous", "wider"))
+def test_the_kv_views_are_the_slices(T, layout) -> None:
+    """The backend's ``key`` and ``value`` views of a packed ``kv`` address what the slices
+    ``kv[:, :20480].unflatten(1, (4, 5120))`` and ``kv[:, 20480:]`` address: the same storage, offsets and sizes and the
+    same strides on every dimension with more than one element, for a contiguous ``kv`` and for a view into a wider
+    buffer. Both views carry ``kv``'s row stride; a dimension of size 0 or 1 addresses no second element, and torch's
+    view rules may give the sliced key another stride there."""
+    width = (STREAMS + 1) * HIDDEN
+    if layout == "contiguous":
+        kv = torch.zeros(T, width, dtype=torch.bfloat16)
+    else:
+        kv = torch.zeros(T, width + 24, dtype=torch.bfloat16)[:, 8 : 8 + width]
+    sliced = (kv[:, : STREAMS * HIDDEN].unflatten(1, (STREAMS, HIDDEN)), kv[:, STREAMS * HIDDEN :])
+    made = (*cake_backend._split_kv(kv), *cake_backend._kv_views(kv))
+    for got, want in zip(made, sliced * 2, strict=True):
+        assert got.shape == want.shape and got.stride(0) == kv.stride(0), (tuple(got.shape), got.stride())
+        for dim, size in enumerate(want.shape):
+            if size > 1:
+                assert got.stride(dim) == want.stride(dim), (dim, got.stride(), want.stride())
+        assert got.storage_offset() == want.storage_offset()
+        assert got.untyped_storage().data_ptr() == want.untyped_storage().data_ptr()
+
+
 def test_the_package_exports_the_backend_entries() -> None:
     for name in ENTRIES:
         assert getattr(pkg, name) is getattr(cake_backend, name), name
