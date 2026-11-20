@@ -155,7 +155,7 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd_bias", 576, 576): (1, 4096),
         ("fwd_bias", 584, 632): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
-        ("fwd_bias", 704, 704): (1, 16392),
+        ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
@@ -190,8 +190,10 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
         ("fwd", 768, 768): (1, 2048),
-        ("fwd_bias", 576, 576): (1, 12288),
-        ("fwd_bias", 584, 632): (1, 16384),
+        ("fwd_bias", 576, 576): (1, 12296),
+        ("fwd_bias", 584, 584): (1, 16392),
+        ("fwd_bias", 592, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 16392),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
         ("fwd_dt", 576, 640): (1, 12288),
@@ -260,7 +262,7 @@ DIRECT_ROWS_OF_RECORD = {
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("fwd_bias", 704, 704): (
-            16393,
+            17409,
             20480,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
@@ -360,7 +362,7 @@ DIRECT_ROWS_OF_RECORD = {
         ),
         ("fwd", 712, 760): (
             4097,
-            24576,
+            20480,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd", 768, 768): (
@@ -369,13 +371,23 @@ DIRECT_ROWS_OF_RECORD = {
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd_bias", 576, 576): (
-            12289,
+            12297,
             32768,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 632): (
+        ("fwd_bias", 584, 584): (
+            16393,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 592, 624): (
             16385,
             24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 632, 632): (
+            16393,
+            20480,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("fwd_dt", 576, 640): (
