@@ -133,23 +133,73 @@ TOKENS = (
     262144,
     262145,
 )
-# The rows where a backward route runs its fallback program in place of the program its selection rules pick:
-# arch -> (route, C_lo, C_hi) -> (S_min, S_max), every multiple of 8 from C_lo to C_hi.  On sm_100a and sm_103a the
-# ``bwd`` route's C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at
-# which no backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520
-# to 608 up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).
+# The rows where a route runs its fallback program in place of the program its selection rules pick: arch -> (route,
+# C_lo, C_hi) -> (S_min, S_max), every multiple of 8 from C_lo to C_hi.  On sm_100a and sm_103a the ``bwd`` route's
+# C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at which no
+# backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520 to 608
+# up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).  The
+# forward routes' keys (C 576 to 768) run the route's static program, the deterministic package's at the same rows,
+# over the measured token counts where it was not slower than the dynamic program; a direct range of
+# :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends.
 FALLBACK_ROWS_OF_RECORD = {
     "sm_100a": {
         ("bwd", 520, 608): (1, 24575),
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
+        ("fwd", 576, 576): (1, 4096),
+        ("fwd", 584, 640): (1, 8192),
+        ("fwd", 648, 704): (1, 12288),
+        ("fwd", 712, 712): (1, 12288),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 4096),
+        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 648, 696): (1, 8192),
+        ("fwd_bias", 704, 704): (1, 17408),
+        ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_dt", 576, 576): (1, 4096),
+        ("fwd_dt", 584, 640): (1, 8192),
+        ("fwd_dt", 648, 696): (1, 8192),
+        ("fwd_dt", 704, 704): (1, 12288),
+        ("fwd_dt", 712, 768): (1, 16384),
     },
     "sm_103a": {
         ("bwd", 520, 608): (1, 20479),
         ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
+        ("fwd", 576, 632): (1, 2048),
+        ("fwd", 640, 688): (1, 4096),
+        ("fwd", 696, 696): (1, 4096),
+        ("fwd", 704, 704): (1, 8192),
+        ("fwd", 712, 712): (1, 8192),
+        ("fwd", 720, 760): (1, 8192),
+        ("fwd_bias", 584, 640): (1, 4104),
+        ("fwd_bias", 648, 704): (1, 16384),
+        ("fwd_bias", 720, 728): (13824, 16383),
+        ("fwd_bias", 736, 736): (14336, 16383),
+        ("fwd_bias", 744, 760): (13824, 16383),
+        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_dt", 576, 640): (1, 8192),
+        ("fwd_dt", 648, 704): (1, 8192),
+        ("fwd_dt", 712, 752): (1, 12800),
+        ("fwd_dt", 760, 760): (1, 12288),
+        ("fwd_dt", 768, 768): (1, 12288),
+    },
+    "sm_107a": {
+        ("fwd", 576, 704): (1, 4096),
+        ("fwd", 712, 760): (1, 4096),
+        ("fwd", 768, 768): (1, 2048),
+        ("fwd_bias", 576, 576): (1, 12296),
+        ("fwd_bias", 584, 584): (1, 16392),
+        ("fwd_bias", 592, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 640, 696): (1, 24576),
+        ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_dt", 576, 640): (1, 12288),
+        ("fwd_dt", 648, 704): (1, 12288),
+        ("fwd_dt", 712, 712): (1, 32768),
+        ("fwd_dt", 720, 768): (1, 12288),
     },
 }
 # The programs whose rows the fallback takes inside :data:`FALLBACK_ROWS_OF_RECORD` (named by program, not by
@@ -163,6 +213,276 @@ FALLBACK_REPLACES_OF_RECORD = {
         }
     ),
 }
+# The rows where a forward route runs its direct program (a build of the deterministic direct program; each CTA takes
+# the next token blocks of its channel tile, no ``work``): arch -> (route, C_lo, C_hi) -> (S_lo, S_hi, program), every
+# multiple of 8 from C_lo to C_hi.  Each range starts above the key's static range of :data:`FALLBACK_ROWS_OF_RECORD`
+# (or at the token count from which the direct program beat the dynamic one) and ends at the last measured token
+# count where it was not slower than the dynamic program, eager and CUDA Graph replay; the deterministic package
+# keeps the same rows.
+DIRECT_ROWS_OF_RECORD = {
+    "sm_100a": {
+        ("fwd", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 584, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 648, 704): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 712): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 720, 768): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 584, 632): (
+            4097,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 648, 696): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 704, 704): (
+            17409,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 576): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 584, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 696): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 704, 704): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 712, 768): (
+            16385,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+    },
+    "sm_103a": {
+        ("fwd", 576, 632): (
+            2049,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 640, 688): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 696, 696): (
+            4097,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 704, 704): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 712): (
+            8193,
+            20479,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 720, 760): (
+            8193,
+            19456,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 584, 640): (
+            4105,
+            16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 640): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 704): (
+            8193,
+            18432,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 712, 752): (
+            12801,
+            19456,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 760, 760): (
+            12289,
+            19456,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 768, 768): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+    },
+    "sm_107a": {
+        ("fwd", 576, 704): (
+            4097,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 712, 760): (
+            4097,
+            16384,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 768, 768): (
+            2049,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 576, 576): (
+            12297,
+            32768,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 584, 584): (
+            16393,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 592, 624): (
+            16385,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 632, 632): (
+            16393,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 576, 640): (
+            12289,
+            32768,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 648, 704): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 720, 768): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+    },
+}
+# The channel tiles of each route's direct program on each architecture :data:`DIRECT_ROWS_OF_RECORD` names: arch ->
+# route -> (ct_vec, n_sub), ``ct_vec`` channel vectors per channel tile and ``n_sub`` token sub-tiles of 8 tokens.
+DIRECT_PLANS_OF_RECORD = {
+    "sm_100a": {"fwd": (8, 16), "fwd_dt": (8, 16), "fwd_bias": (8, 16)},
+    "sm_103a": {"fwd": (8, 16), "fwd_dt": (16, 8), "fwd_bias": (8, 16)},
+    "sm_107a": {"fwd": (8, 16), "fwd_dt": (16, 8), "fwd_bias": (8, 16)},
+}
+# The CTAs per SM of each forward route's direct program (its co-resident grid, capped at its token blocks): the bias
+# route's program, built with ``min_blocks=3``, holds three.
+DIRECT_CTAS_PER_SM = {"fwd": 4, "fwd_dt": 4, "fwd_bias": 3}
+# Measured sm_103a forward cells at C 704 to 768 that lie inside a ``DIRECT_ROWS`` range: (route, taps, bias, C, S).
+# At each cell a call selects the route's direct program and plans its direct tiles.
+SM103_DIRECT_PLAN_CELLS = (
+    ("fwd", "f32", "none", 704, 12288),
+    ("fwd", "f32", "none", 704, 14336),
+    ("fwd", "f32", "none", 704, 16384),
+    ("fwd", "f32", "none", 704, 18432),
+    ("fwd", "f32", "none", 704, 20479),
+    ("fwd", "f32", "none", 712, 12288),
+    ("fwd", "f32", "none", 712, 12800),
+    ("fwd", "f32", "none", 712, 12960),
+    ("fwd", "f32", "none", 712, 13312),
+    ("fwd", "f32", "none", 712, 13824),
+    ("fwd", "f32", "none", 712, 14336),
+    ("fwd", "f32", "none", 712, 14592),
+    ("fwd", "f32", "none", 712, 14848),
+    ("fwd", "f32", "none", 712, 15360),
+    ("fwd", "f32", "none", 712, 16384),
+    ("fwd", "f32", "none", 712, 17408),
+    ("fwd", "f32", "none", 712, 18432),
+    ("fwd", "f32", "none", 712, 19456),
+    ("fwd", "f32", "none", 712, 20479),
+    ("fwd", "f32", "none", 736, 12288),
+    ("fwd", "f32", "none", 736, 14336),
+    ("fwd", "f32", "none", 736, 16384),
+    ("fwd", "f32", "none", 736, 18432),
+    ("fwd", "f32", "none", 760, 12288),
+    ("fwd", "f32", "none", 760, 14336),
+    ("fwd", "f32", "none", 760, 16384),
+    ("fwd", "f32", "none", 760, 18432),
+    ("fwd_dt", "bf16", "none", 704, 12288),
+    ("fwd_dt", "bf16", "none", 704, 14336),
+    ("fwd_dt", "bf16", "none", 704, 16384),
+    ("fwd_dt", "bf16", "none", 704, 18432),
+    ("fwd_dt", "bf16", "none", 712, 12960),
+    ("fwd_dt", "bf16", "none", 712, 13312),
+    ("fwd_dt", "bf16", "none", 712, 13824),
+    ("fwd_dt", "bf16", "none", 712, 14336),
+    ("fwd_dt", "bf16", "none", 712, 14592),
+    ("fwd_dt", "bf16", "none", 712, 14848),
+    ("fwd_dt", "bf16", "none", 712, 15360),
+    ("fwd_dt", "bf16", "none", 712, 16384),
+    ("fwd_dt", "bf16", "none", 712, 17408),
+    ("fwd_dt", "bf16", "none", 712, 18432),
+    ("fwd_dt", "bf16", "none", 712, 19456),
+    ("fwd_dt", "bf16", "none", 736, 14336),
+    ("fwd_dt", "bf16", "none", 736, 16384),
+    ("fwd_dt", "bf16", "none", 736, 18432),
+    ("fwd_dt", "bf16", "none", 760, 14336),
+    ("fwd_dt", "bf16", "none", 760, 16384),
+    ("fwd_dt", "bf16", "none", 760, 18432),
+    ("fwd_dt", "bf16", "none", 768, 12800),
+    ("fwd_dt", "bf16", "none", 768, 12960),
+    ("fwd_dt", "bf16", "none", 768, 13312),
+    ("fwd_dt", "bf16", "none", 768, 13824),
+    ("fwd_dt", "bf16", "none", 768, 14336),
+    ("fwd_dt", "bf16", "none", 768, 14592),
+    ("fwd_dt", "bf16", "none", 768, 14848),
+    ("fwd_dt", "bf16", "none", 768, 15360),
+    ("fwd_dt", "bf16", "none", 768, 16384),
+    ("fwd_dt", "bf16", "none", 768, 17408),
+    ("fwd_dt", "bf16", "none", 768, 18432),
+    ("fwd_dt", "bf16", "none", 768, 19456),
+    ("fwd_dt", "bf16", "none", 768, 20479),
+    ("fwd_dt", "bf16", "none", 768, 20480),
+)
 # The rows where route ``bwd`` runs an SM-wide program (one CTA per SM for the whole launch): arch -> (route, C_lo,
 # C_hi) -> ((S_lo, S_hi, program), ...), every multiple of 8 from C_lo to C_hi, the segments contiguous up to
 # ``INT32_MAX``.  On each architecture the first segment's program runs from the measured token count from which it
@@ -255,8 +575,9 @@ def _args(record: dict) -> set[str]:
 # ``"runtime"``): its binding takes ``enable_pdl`` (0 or 1) as its last host parameter, before the grid.
 PDL_FIELDS = ("launch", "arg_plan", "logical")
 PDL_ARG = ["launch", "enable_pdl"]
-# The single-rank programs that take the scalar: every record but the opt-in pair routes' (9 forward, 36 backward).
-RUNTIME_PDL_PROGRAMS = 45
+# The single-rank programs that take the scalar: every record but the opt-in pair routes' (15 forward: the static and
+# direct program of each forward route among them; 36 backward).
+RUNTIME_PDL_PROGRAMS = 51
 
 
 def _pdl_program_of(det: dict) -> dict:
@@ -393,13 +714,112 @@ def test_routes_mirror_the_deterministic_package() -> None:
 def test_forward_records_are_the_deterministic_forward_records() -> None:
     """The forward programs are the deterministic ones (same module, build keywords, plan): ``y`` keeps its bits.
     Only the three name fields and the launch's programmatic dependent launch differ: the deterministic record
-    launches without it, this package's takes the per-call ``enable_pdl`` scalar (:func:`_pdl_program_of`)."""
+    launches without it, this package's takes the per-call ``enable_pdl`` scalar (:func:`_pdl_program_of`).  The
+    static and direct programs of every forward route are among them, at the same route positions."""
 
+    paired = 0
     for arch, kind, name, det_name in _pairs("fwd"):
         record, det = cake_jit.MODULES[name], det_jit.MODULES[det_name]
         label = (arch, kind, name)
         assert _strip(record, *NAME_FIELDS, *PDL_FIELDS) == _strip(det, *NAME_FIELDS, *PDL_FIELDS), label
         assert {field: record[field] for field in PDL_FIELDS} == _pdl_program_of(det), label
+        paired += cake_jit.MODULES[name]["workspace_rule"] is None
+    assert paired == len(ARCHES) * 3 + sum(
+        len(routes) for routes in DIRECT_PLANS_OF_RECORD.values()
+    )
+
+
+def _forward_program(arch: str, kind: str, form: str) -> str | None:
+    """The static (``form`` ``"static"``: the record without a selection rule) or direct (``"direct"``: the record of
+    selection-rule kind ``rows``) program of forward route ``kind`` on ``arch``, ``None`` when the route lists none."""
+
+    names = [
+        name
+        for name in cake_jit.route_modules(arch, kind)
+        if (cake_jit.select_rule(cake_jit.MODULES[name]) or {"kind": None})["kind"]
+        == {"static": None, "direct": "rows"}[form]
+    ]
+    assert len(names) <= 1, (arch, kind, form, names)
+    return names[0] if names else None
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_static_and_direct_forward_records(arch) -> None:
+    """Every forward route lists its static program first (the route's fallback: no selection rule) and its direct
+    program last, where :data:`DIRECT_ROWS_OF_RECORD` names a key of the route on ``arch`` and nowhere else; the
+    dynamic programs between them keep their order, the one-stage program now from 8 channels
+    (``channels_at_least``).  Neither the static nor the direct program takes ``work``: no ``work`` argument or
+    logical name and ``workspace_rule`` None.  Each runs a co-resident grid of 128 threads x 8-vectors; the direct
+    program's grid is capped at its token blocks (``cap`` ``token_blocks``) with :data:`DIRECT_CTAS_PER_SM` CTAs per
+    SM, and it ships for exactly the architectures whose ``DIRECT_ROWS`` name its route."""
+
+    for kind in cake_jit.forward_kinds(arch):
+        names = cake_jit.route_modules(arch, kind)
+        static, direct = (
+            _forward_program(arch, kind, "static"),
+            _forward_program(arch, kind, "direct"),
+        )
+        keyed = any(
+            route == kind for route, _, _ in DIRECT_ROWS_OF_RECORD.get(arch, {})
+        )
+        label = (arch, kind)
+        assert static is not None and names[0] == static, label
+        assert (
+            (direct is not None)
+            is keyed
+            is (kind in DIRECT_PLANS_OF_RECORD.get(arch, {}))
+        ), label
+        if direct is not None:
+            assert names[-1] == direct, label
+        dynamic = [name for name in names if name not in (static, direct)]
+        twins = [
+            name.replace("cake_causal_conv1d_train_", "cake_causal_conv1d_det_train_")
+            for name in dynamic
+        ]
+        assert dynamic and twins == _det_route(arch, kind)[1 : 1 + len(dynamic)], label
+        assert cake_jit.select_rule(cake_jit.MODULES[dynamic[0]]) == {
+            "channels": {a: 8 for a in ARCHES},
+            "kind": "channels_at_least",
+        }, label
+        for name in (static, direct):
+            if name is None:
+                continue
+            record = cake_jit.MODULES[name]
+            grid = record["grid_rule"]
+            assert record["role"] == "fwd" and record["workspace_rule"] is None, (
+                label,
+                name,
+            )
+            assert "work" not in _args(record) and "work" not in record["logical"], (
+                label,
+                name,
+            )
+            assert grid["kind"] == "co_resident" and grid["cooperative"] is False, (
+                label,
+                name,
+            )
+            assert grid["geometry"] == {"threads": 128, "vec": 8}, (label, name)
+            assert record["launch"]["use_pdl"] == "runtime", (label, name)
+            if name == static:
+                assert "cap" not in grid and cake_jit.select_rule(record) is None, (
+                    label,
+                    name,
+                )
+                assert record["arches"] == list(ARCHES), (label, name)
+                continue
+            assert (
+                grid["cap"] == "token_blocks"
+                and grid["ctas_per_sm"] == DIRECT_CTAS_PER_SM[kind]
+            ), (label, name)
+            assert cake_jit.select_rule(record) == {"kind": "rows"}, (label, name)
+            assert record["arches"] == [
+                a
+                for a in ARCHES
+                if any(
+                    route == kind for route, _, _ in DIRECT_ROWS_OF_RECORD.get(a, {})
+                )
+            ], (label, name)
 
 
 @pytest.mark.cpu_only
@@ -812,6 +1232,40 @@ def test_runtime_pdl_bindings_and_kernels() -> None:
     assert kernels >= RUNTIME_PDL_PROGRAMS
 
 
+FORWARD_ROUTES = ("fwd", "fwd_dt", "fwd_bias")
+
+
+def _forward_rows(arch: str) -> list[tuple[str, int, int, int, int, str]]:
+    """``(route, C_lo, C_hi, S_lo, S_hi, form)`` of every forward key of ``arch`` in :data:`FALLBACK_ROWS_OF_RECORD`
+    (form ``"static"``) and :data:`DIRECT_ROWS_OF_RECORD` (form ``"direct"``)."""
+
+    rows = [
+        (route, c_lo, c_hi, s_lo, s_hi, "static")
+        for (route, c_lo, c_hi), (s_lo, s_hi) in FALLBACK_ROWS_OF_RECORD.get(
+            arch, {}
+        ).items()
+        if route in FORWARD_ROUTES
+    ]
+    rows += [
+        (route, c_lo, c_hi, s_lo, s_hi, "direct")
+        for (route, c_lo, c_hi), (s_lo, s_hi, _) in DIRECT_ROWS_OF_RECORD.get(
+            arch, {}
+        ).items()
+    ]
+    return rows
+
+
+def _forward_edges(arch: str) -> tuple[set[int], set[int]]:
+    """The channel counts (both sides of every channel bound, one off the 8-channel grid) and token counts (1000 and
+    both sides of every token bound) of the forward keys of ``arch`` (:func:`_forward_rows`)."""
+
+    channels, tokens = set(), {1000}
+    for _, c_lo, c_hi, s_lo, s_hi, _ in _forward_rows(arch):
+        channels |= {c_lo - 8, c_lo, c_lo + 4, c_hi, c_hi + 8}
+        tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    return {C for C in channels if C > 0}, {S for S in tokens if S > 0}
+
+
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
@@ -819,12 +1273,15 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     and plans the same scalars (``y`` / ``dx`` keep their per-element arithmetic).  Where the deterministic package
     selects a det-only program, this package selects what the deterministic package selects without its det-only
     records but those this package copies (:data:`OWN_COPIES`), and its copy where that is one of them.  At a row
-    of :data:`FALLBACK_ROWS_OF_RECORD` this package selects its route's fallback (the program at the deterministic
-    route's first position), where the deterministic package selects the program at the position of one of
-    :data:`FALLBACK_REPLACES_OF_RECORD`.  At a segment of :data:`SM_WIDE_ROWS_OF_RECORD` this package selects the
-    segment's SM-wide program, where the deterministic package (without its det-only records) selects the program
-    at the position of one of :data:`SM_WIDE_REPLACES_OF_RECORD` or its copy, and plans the scalars of the SM-wide
-    program's deterministic twin (:data:`SM_WIDE_COPIES`)."""
+    of :data:`FALLBACK_ROWS_OF_RECORD` of a backward route this package selects its route's fallback (the program at
+    the deterministic route's first position), where the deterministic package selects the program at the position
+    of one of :data:`FALLBACK_REPLACES_OF_RECORD`.  At a segment of :data:`SM_WIDE_ROWS_OF_RECORD` this package
+    selects the segment's SM-wide program, where the deterministic package (without its det-only records) selects
+    the program at the position of one of :data:`SM_WIDE_REPLACES_OF_RECORD` or its copy, and plans the scalars of
+    the SM-wide program's deterministic twin (:data:`SM_WIDE_COPIES`).  The forward keys of ``FALLBACK_ROWS`` and
+    ``DIRECT_ROWS`` exist in both packages: inside and outside every range (both sides of each bound,
+    :func:`_forward_edges`) both select the program at the same route position, the static program inside a static
+    range and the direct program inside a direct range."""
 
     twin_of = {
         band: twin for band_arch, _, band, twin, _ in _bands() if band_arch == arch
@@ -832,10 +1289,19 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     det_only_hits = set()
     replaced = set()
     sm_wide_replaced = set()
+    forward_hits = set()
+    edge_channels, edge_tokens = _forward_edges(arch)
     for kind in cake_jit.KINDS:
         new, det = cake_jit.ROUTES[arch][kind], _det_route(arch, kind)
-        for C in CHANNELS:
-            for S in TOKENS:
+        forward = cake_jit.route_role(kind) == "fwd"
+        channels = (
+            sorted(set(CHANNELS) | {C for C in edge_channels if C % 8 == 0})
+            if forward
+            else CHANNELS
+        )
+        tokens = sorted(set(TOKENS) | edge_tokens) if forward else TOKENS
+        for C in channels:
+            for S in tokens:
                 (name,) = cake_jit.selected_modules(arch, kind, C=C, S=S)
                 (det_name,) = det_jit.selected_modules(arch, kind, C=C, S=S)
                 if det_name in DET_ONLY:
@@ -863,7 +1329,7 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
                     assert taken in SM_WIDE_REPLACES_OF_RECORD[arch], (arch, kind, C, S, taken)
                     sm_wide_replaced.add(taken)
                     det_name = SM_WIDE_COPIES[name]
-                elif bounds is not None and bounds[0] <= S <= bounds[1]:
+                elif not forward and bounds is not None and bounds[0] <= S <= bounds[1]:
                     # The route's fallback, in place of the program at the deterministic pick's position.
                     assert name == new[0] and cake_jit.select_rule(cake_jit.MODULES[name]) is None, (
                         arch, kind, C, S, name
@@ -878,6 +1344,10 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
                     # A channel-band program serves its twin's route position.
                     position = new.index(twin_of.get(name, name))
                     assert position == det.index(det_name), (arch, kind, C, S)
+                if forward:
+                    for form in ("static", "direct"):
+                        if name == _forward_program(arch, kind, form):
+                            forward_hits.add((kind, form))
                 record, det_record = cake_jit.MODULES[name], det_jit.MODULES[det_name]
                 geometry = record["grid_rule"]["geometry"]
                 assert cake_jit.plan(
@@ -895,6 +1365,9 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     assert det_only_hits == det_only_routed, arch
     assert replaced == FALLBACK_REPLACES_OF_RECORD.get(arch, frozenset()), arch
     assert sm_wide_replaced == SM_WIDE_REPLACES_OF_RECORD[arch], arch
+    assert forward_hits == {(route, form) for route, *_, form in _forward_rows(arch)}, (
+        arch
+    )
 
 
 # The FP32 accumulator slots each backward route keeps (one FP32 word per sum and slot): the fp32g routes spread a
@@ -1255,7 +1728,8 @@ def test_c768_backward_rows_are_the_literal_rows() -> None:
 
 
 # ----------------------------------------------------------------------------------------------------------------
-# The rows where a backward route runs its fallback program (``FALLBACK_ROWS``).
+# The rows where a route runs its fallback program (``FALLBACK_ROWS``) and a forward route its direct program
+# (``DIRECT_ROWS``).
 
 
 def _route_fallback(arch: str, kind: str) -> str:
@@ -1269,18 +1743,20 @@ def _route_fallback(arch: str, kind: str) -> str:
 
 def _rules_pick(arch: str, kind: str, C: int, S: int) -> str:
     """The program the selection rules pick for ``(S, C)`` of route ``kind`` on ``arch`` (no fallback rows, no SM-wide
-    rows)."""
+    rows, no direct rows)."""
 
     with pytest.MonkeyPatch.context() as m:
         m.setattr(cake_jit, "FALLBACK_ROWS", {})
         m.setattr(cake_jit, "SM_WIDE_ROWS", {})
+        m.setattr(cake_jit, "DIRECT_ROWS", {})
         (name,) = cake_jit.selected_modules(arch, kind, C=C, S=S)
     return name
 
 
 def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
-    """The program the registry's ``SM_WIDE_ROWS`` segment, else its ``FALLBACK_ROWS`` range, holding ``(C, S)`` of
-    route ``kind`` on ``arch`` names (read from the two tables, not through the selection), ``None`` outside both."""
+    """The program the registry's ``SM_WIDE_ROWS`` segment, else its ``DIRECT_ROWS`` range, else its
+    ``FALLBACK_ROWS`` range, holding ``(C, S)`` of route ``kind`` on ``arch`` names (read from the three tables, not
+    through the selection), ``None`` outside all three."""
 
     if C % 8:
         return None
@@ -1289,6 +1765,11 @@ def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
             for s_lo, s_hi, name in segments:
                 if s_lo <= S <= s_hi:
                     return name
+    for (route, c_lo, c_hi), (s_lo, s_hi, name) in cake_jit.DIRECT_ROWS.get(
+        arch, {}
+    ).items():
+        if route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
+            return name
     for (route, c_lo, c_hi), (s_min, s_max) in cake_jit.FALLBACK_ROWS.get(arch, {}).items():
         if route == kind and c_lo <= C <= c_hi and s_min <= S <= s_max:
             return _route_fallback(arch, kind)
@@ -1298,9 +1779,10 @@ def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
 @pytest.mark.cpu_only
 def test_fallback_rows_are_the_literal_rows() -> None:
     """``FALLBACK_ROWS`` is the literal :data:`FALLBACK_ROWS_OF_RECORD`.  Every key names an exported architecture,
-    one of its backward routes other than a pair route (an opt-in route selects by its own rules only), a closed
-    range of channel counts (multiples of 8) and a closed range of token counts from one token; the keys of one
-    architecture and route are disjoint, and the route's fallback program ships for the architecture."""
+    one of its forward routes or of its backward routes other than a pair route (an opt-in route selects by its own
+    rules only), a closed range of channel counts (multiples of 8) and a closed range of token counts inside
+    ``S >= 1``; the keys of one architecture and route are disjoint, and the route's fallback program ships for the
+    architecture (a forward route's static program)."""
 
     assert cake_jit.FALLBACK_ROWS == FALLBACK_ROWS_OF_RECORD
     for arch, rows in cake_jit.FALLBACK_ROWS.items():
@@ -1308,7 +1790,12 @@ def test_fallback_rows_are_the_literal_rows() -> None:
         spans: dict[str, list[tuple[int, int]]] = {}
         for (route, c_lo, c_hi), (s_min, s_max) in rows.items():
             label = (arch, route, c_lo, c_hi)
-            assert route in cake_jit.backward_kinds(arch) and route not in cake_jit.PAIR_ROUTES, label
+            assert (
+                route in cake_jit.forward_kinds(arch) and route in FORWARD_ROUTES
+            ) or (
+                route in cake_jit.backward_kinds(arch)
+                and route not in cake_jit.PAIR_ROUTES
+            ), label
             assert 0 < c_lo <= c_hi and c_lo % 8 == 0 and c_hi % 8 == 0, label
             assert type(s_min) is int and type(s_max) is int, label
             assert 1 <= s_min <= s_max <= cake_jit.INT32_MAX, label
@@ -1321,12 +1808,131 @@ def test_fallback_rows_are_the_literal_rows() -> None:
 
 
 @pytest.mark.cpu_only
+def test_direct_rows_are_the_literal_rows() -> None:
+    """``DIRECT_ROWS`` is the literal :data:`DIRECT_ROWS_OF_RECORD` and ``DIRECT_PLANS`` the literal
+    :data:`DIRECT_PLANS_OF_RECORD`.  Every key names an exported architecture, one of its forward routes, a closed
+    range of channel counts (multiples of 8), a closed range of token counts inside ``S >= 1`` and the route's
+    direct program (selection-rule kind ``rows``), which ships for the architecture; the keys of one architecture and
+    route are disjoint; no ``(C, S)`` of a direct range lies in a ``FALLBACK_ROWS`` range, and where a
+    ``FALLBACK_ROWS`` key covers the same channel counts its static range lies below the direct range.
+    ``DIRECT_PLANS`` names a form
+    ``(ct_vec, n_sub)`` for exactly the routes the architecture's keys name, within 128 threads."""
+
+    assert cake_jit.DIRECT_ROWS == DIRECT_ROWS_OF_RECORD
+    assert cake_jit.DIRECT_PLANS == DIRECT_PLANS_OF_RECORD
+    assert set(cake_jit.DIRECT_ROWS) <= set(ARCHES) and set(
+        cake_jit.DIRECT_PLANS
+    ) <= set(ARCHES)
+    for arch in ARCHES:
+        rows = cake_jit.DIRECT_ROWS.get(arch, {})
+        spans: dict[str, list[tuple[int, int]]] = {}
+        for (route, c_lo, c_hi), (s_lo, s_hi, name) in rows.items():
+            label = (arch, route, c_lo, c_hi)
+            assert route in cake_jit.forward_kinds(arch) and route in FORWARD_ROUTES, (
+                label
+            )
+            assert 0 < c_lo <= c_hi and c_lo % 8 == 0 and c_hi % 8 == 0, label
+            assert (
+                type(s_lo) is int
+                and type(s_hi) is int
+                and 1 <= s_lo <= s_hi <= cake_jit.INT32_MAX
+            ), label
+            assert name == _forward_program(arch, route, "direct"), label
+            assert arch in cake_jit.MODULES[name]["arches"], label
+            for C in range(c_lo, c_hi + 1, 8):
+                assert cake_jit.direct_row_range(arch, route, C) == (s_lo, s_hi), (
+                    label,
+                    C,
+                )
+                bounds = cake_jit.fallback_row_range(arch, route, C)
+                assert bounds is None or bounds[1] < s_lo, (label, C, bounds)
+            for C in (c_lo - 8, c_hi + 8, c_lo + 4):
+                inside = [
+                    k
+                    for k in rows
+                    if k[0] == route and k[1] <= C <= k[2] and C % 8 == 0
+                ]
+                assert inside or cake_jit.direct_row_range(arch, route, C) is None, (
+                    label,
+                    C,
+                )
+            spans.setdefault(route, []).append((c_lo, c_hi))
+        for route, ranges in spans.items():
+            ranges.sort()
+            for (_, hi), (lo, _) in itertools.pairwise(ranges):
+                assert hi < lo, (arch, route, ranges)
+        plans = cake_jit.DIRECT_PLANS.get(arch, {})
+        assert set(plans) == set(spans), arch
+        for route, (ct_vec, n_sub) in plans.items():
+            assert type(ct_vec) is int and type(n_sub) is int, (arch, route)
+            assert ct_vec >= 1 and n_sub >= 1 and ct_vec * n_sub <= 128, (arch, route)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_direct_module_refuses_registry_errors(arch, monkeypatch) -> None:
+    """``direct_module`` names the key's direct program inside its range and ``None`` outside it or without a key;
+    ``S`` of ``None`` under a key is a ``ValueError``; a key naming a program of another route, or a record whose rule
+    is not of kind ``rows``, is a ``RuntimeError`` (also through the selection).  ``direct_split`` refuses an
+    architecture or route without a form and a form wider than the geometry (``ValueError``)."""
+
+    geometry = {"threads": 128, "vec": 8}
+    rows = DIRECT_ROWS_OF_RECORD.get(arch, {})
+    for (route, c_lo, c_hi), (s_lo, s_hi, name) in rows.items():
+        assert cake_jit.direct_module(arch, route, c_lo, s_lo) == name
+        assert cake_jit.direct_module(arch, route, c_hi, s_hi) == name
+        assert cake_jit.direct_module(arch, route, c_lo, s_hi + 1) is None
+        assert cake_jit.direct_module(arch, route, c_lo, s_lo - 1) is None
+        assert cake_jit.direct_module(arch, route, c_lo + 4, s_lo) is None
+        assert cake_jit.direct_row(arch, route, c_lo, s_lo) and not cake_jit.direct_row(
+            arch, route, c_lo, None
+        )
+        with pytest.raises(ValueError, match="needs S"):
+            cake_jit.direct_module(arch, route, c_lo, None)
+        ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][route]
+        for C in (c_lo, c_hi):
+            assert cake_jit.direct_split(
+                C, geometry=geometry, route=route, arch=arch
+            ) == (
+                ct_vec,
+                n_sub,
+                -(-(C // 8) // ct_vec),
+            ), (route, C)
+    for route in FORWARD_ROUTES:
+        if route not in DIRECT_PLANS_OF_RECORD.get(arch, {}):
+            assert not any(key[0] == route for key in rows), (arch, route)
+            with pytest.raises(ValueError, match="no direct plan"):
+                cake_jit.direct_split(640, geometry=geometry, route=route, arch=arch)
+    with pytest.raises(ValueError):
+        cake_jit.direct_split(640, geometry=geometry, route="fwd", arch="sm_90a")
+    if not rows:
+        return
+    (route, c_lo, c_hi), (s_lo, s_hi, name) = next(iter(rows.items()))
+    with pytest.raises(ValueError, match="does not fit"):
+        cake_jit.direct_split(
+            c_lo, geometry={"threads": 32, "vec": 8}, route=route, arch=arch
+        )
+    other = _forward_program(
+        arch, next(r for r in FORWARD_ROUTES if r != route), "static"
+    )
+    for wrong in (other, _forward_program(arch, route, "static")):
+        monkeypatch.setitem(
+            cake_jit.DIRECT_ROWS, arch, {(route, c_lo, c_hi): (s_lo, s_hi, wrong)}
+        )
+        with pytest.raises(RuntimeError, match="rows"):
+            cake_jit.direct_module(arch, route, c_lo, s_lo)
+        with pytest.raises(RuntimeError, match="rows"):
+            cake_jit.selected_modules(arch, route, C=c_lo, S=s_lo)
+
+
+@pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     """Inside a key (``C_lo <= C <= C_hi``, ``C`` a multiple of 8, ``S_min <= S <= S_max``) a call of the key's route
-    selects the route's fallback program, inside an ``SM_WIDE_ROWS`` segment the segment's program, and the program
-    the selection rules pick everywhere else: both sides of every channel and token bound, on every backward route
-    of the architecture.  ``fallback_row_range`` holds the key's token range at its channel counts only; ``S`` of
+    selects the route's fallback program (a forward route's static program), inside a ``DIRECT_ROWS`` range the
+    route's direct program, inside an ``SM_WIDE_ROWS`` segment the segment's program, and the program the selection
+    rules pick everywhere else: both sides of every channel and token bound, on every forward and backward route of
+    the architecture.  ``fallback_row_range`` holds the key's token range at its channel counts only; ``S`` of
     ``None`` is a ``ValueError`` where a key covers ``C``.  ``plan_row`` needs ``at`` there (``ValueError`` without
     it) and plans, at the first token count of every side of ``row_sides``, the program of that side (``None`` on a
     rules side where a token floor decides); at a row no key covers it plans the same row whatever ``at``."""
@@ -1342,9 +1948,15 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     for (_, c_lo, c_hi), segments in cake_jit.SM_WIDE_ROWS.get(arch, {}).items():
         channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
         tokens |= {bound for s_lo, s_hi, _ in segments for bound in (s_lo - 1, s_lo, s_hi, s_hi + 1)}
-    inside_calls = 0
-    for kind in cake_jit.backward_kinds(arch):
+    for (_, c_lo, c_hi), (s_lo, s_hi, _) in cake_jit.DIRECT_ROWS.get(arch, {}).items():
+        channels |= {c_lo - 8, c_lo, c_lo + 4, c_hi, c_hi + 8}
+        tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    inside_calls = direct_calls = 0
+    for kind in (*cake_jit.forward_kinds(arch), *cake_jit.backward_kinds(arch)):
         fallback = _route_fallback(arch, kind)
+        direct = (
+            _forward_program(arch, kind, "direct") if kind in FORWARD_ROUTES else None
+        )
         for C in sorted(C for C in channels if C > 0):
             keys = [
                 bounds
@@ -1359,7 +1971,9 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                 want = _table_pick(arch, kind, C, S) or _rules_pick(arch, kind, C, S)
                 assert inside is (want == fallback and _table_pick(arch, kind, C, S) is not None), (kind, C, S)
                 assert cake_jit.selected_modules(arch, kind, C=C, S=S) == (want,), (kind, C, S)
+                assert (want == direct) is cake_jit.direct_row(arch, kind, C, S), (kind, C, S)
                 inside_calls += inside
+                direct_calls += want == direct
             if C % 8:
                 continue
 
@@ -1384,6 +1998,7 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                 if picked is None and s_lo > 0:
                     assert planned.names != (fallback,), (kind, C, s_lo)
     assert bool(inside_calls) is bool(rows), arch
+    assert bool(direct_calls) is bool(DIRECT_ROWS_OF_RECORD.get(arch)), arch
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -1543,17 +2158,23 @@ def test_sm_wide_module_refuses_registry_errors(arch, monkeypatch) -> None:
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_row_sides_are_the_selection_edges(arch) -> None:
-    """``row_sides`` cuts the token axis of every backward route and ``C`` at the bounds of the route's
-    ``SM_WIDE_ROWS`` segments and ``FALLBACK_ROWS`` range covering ``C`` (from 0, the last side to
-    ``sys.maxsize``), and the selection holds one program on every side outside the rules' token floors: the program
-    at both ends of a side is the one at its first token count."""
+    """``row_sides`` cuts the token axis of every forward and backward route and ``C`` at the bounds of the route's
+    ``SM_WIDE_ROWS`` segments, ``DIRECT_ROWS`` range and ``FALLBACK_ROWS`` range covering ``C`` (from 0, the last
+    side to ``sys.maxsize``), and the selection holds one program on every side outside the rules' token floors: the
+    program at both ends of a side is the one at its first token count."""
 
-    for kind in cake_jit.backward_kinds(arch):
-        for C in sorted({*CHANNELS, 520, 528, 600, 608, 616, 672, 680, 688}):
+    edge_channels, _ = _forward_edges(arch)
+    for kind in (*cake_jit.forward_kinds(arch), *cake_jit.backward_kinds(arch)):
+        for C in sorted(
+            {*CHANNELS, 520, 528, 600, 608, 616, 672, 680, 688, *edge_channels}
+        ):
             cuts = {0}
             for (route, c_lo, c_hi), segments in SM_WIDE_ROWS_OF_RECORD.get(arch, {}).items():
                 if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
                     cuts |= {bound for s_lo, s_hi, _ in segments for bound in (s_lo, s_hi + 1)}
+            for (route, c_lo, c_hi), (s_lo, s_hi, _) in DIRECT_ROWS_OF_RECORD.get(arch, {}).items():
+                if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
+                    cuts |= {s_lo, s_hi + 1}
             for (route, c_lo, c_hi), (s_min, s_max) in FALLBACK_ROWS_OF_RECORD.get(arch, {}).items():
                 if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
                     cuts |= {s_min, s_max + 1}
@@ -1885,10 +2506,13 @@ def _fwd_taps_of(route: str) -> tuple[bool, ...]:
 
 
 def _forward_tokens() -> tuple[int, ...]:
-    """Token counts on both sides of every forward token floor and single-tile range of either package and of every
-    token floor of the forward selection rules, plus a few others."""
+    """Token counts on both sides of every forward token floor and single-tile range of either package, of every
+    token floor of the forward selection rules and of every bound of the forward keys of ``FALLBACK_ROWS`` and
+    ``DIRECT_ROWS`` (:func:`_forward_edges`), plus a few others."""
 
-    tokens = {1, 2, 1000, 4096, 8192, 16384, 250340, 262144, 500680, 1 << 20}
+    tokens = {1, 2, 1000, 2048, 4096, 8192, 16384, 250340, 262144, 500680, 1 << 20}
+    for arch in ARCHES:
+        tokens |= _forward_edges(arch)[1]
     for table in (
         cake_jit.FORWARD_WIDTH_FLOORS,
         det_jit.NARROW_WIDTH_FLOORS["fwd"],
@@ -1914,6 +2538,22 @@ def _forward_tokens() -> tuple[int, ...]:
             for S in (rule or {}).get("tokens", {}).values():
                 tokens |= {int(S) - 1, int(S)}
     return tuple(sorted(S for S in tokens if S > 0))
+
+
+def _direct_literal(
+    arch: str, kind: str, C: int, S: int
+) -> tuple[int, int, int] | None:
+    """The literal split of a forward call of route ``kind`` on ``arch`` inside a range of
+    :data:`DIRECT_ROWS_OF_RECORD`: the route's :data:`DIRECT_PLANS_OF_RECORD` form ``(ct_vec, n_sub)`` and
+    ``ceil(C / 8 / ct_vec)`` tiles at 128 threads x 8-vectors; ``None`` outside every range."""
+
+    for (route, c_lo, c_hi), (s_lo, s_hi, _) in DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        if route == kind and c_lo <= C <= c_hi and C % 8 == 0 and s_lo <= S <= s_hi:
+            ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][kind]
+            return ct_vec, n_sub, -(-(C // 8) // ct_vec)
+    return None
 
 
 @pytest.mark.cpu_only
@@ -2144,10 +2784,12 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
     the legacy rule.  At 128 x 8 the narrow rows run one tile of C / 8 vectors below the floor, the 32-vector tiles
     from it and their width from the width floor of ``arch`` (the literal tables; the rows below 72 vectors their
     width from the row floor); without a route, without ``S`` or the architecture and under ``legacy`` one tile of C /
-    8 vectors stays; both packages refuse a route of the other role and an unknown architecture."""
+    8 vectors stays; both packages refuse a route of the other role and an unknown architecture.  Inside a range of
+    ``DIRECT_ROWS`` every forward record of the route plans the deterministic forward's direct tiles (the literal
+    :func:`_direct_literal`), whatever the floors and the taps; the rows of ``FALLBACK_ROWS`` keep the plan above."""
 
     tokens = _forward_tokens()
-    literal = 0
+    literal = direct = 0
     for pair_arch, kind, name, det_name in _pairs("fwd"):
         if pair_arch != arch:
             continue
@@ -2190,7 +2832,27 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
                     got = cake_jit.plan(
                         S, C, 3, geometry=geometry, role=record["role"], arch=arch, route=route, bf16_taps=bf16
                     )
-                    if S_min is not None and S >= S_min and not (gap is not None and gap[0] <= S <= gap[1]):
+                    if cake_jit.direct_row(arch, route, C, S):
+                        want = det_jit.plan(
+                            S,
+                            C,
+                            3,
+                            geometry=det_geometry,
+                            role=det["role"],
+                            route=route,
+                            arch=arch,
+                        )
+                        assert _split3(want) == _direct_literal(arch, kind, C, S), (
+                            label,
+                            bf16,
+                            S,
+                        )
+                        direct += 1
+                    elif (
+                        S_min is not None
+                        and S >= S_min
+                        and not (gap is not None and gap[0] <= S <= gap[1])
+                    ):
                         want = det_jit.plan(
                             S, C, 3, geometry=det_geometry, role=det["role"], route=route, arch=arch
                         )
@@ -2227,13 +2889,23 @@ def test_forward_plan_is_the_deterministic_forward_plan(arch) -> None:
                 if gap is not None:
                     steps = [(S, want) for S, want in steps if not gap[0] <= S <= gap[1]]
                     steps += [(gap[0], one_tile), (gap[1], one_tile), (gap[0] - 1, narrow), (gap[1] + 1, narrow)]
+                # Inside a range of ``DIRECT_ROWS`` (both of its bounds among them) the direct tiles.
+                for (key_route, c_lo, c_hi), (
+                    s_lo,
+                    s_hi,
+                    _,
+                ) in DIRECT_ROWS_OF_RECORD.get(arch, {}).items():
+                    if key_route == kind and c_lo <= C <= c_hi:
+                        steps += [(s_lo, None), (s_hi, None)]
                 for S, want in steps:
                     got = cake_jit.plan(
                         S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route, bf16_taps=bf16
                     )
+                    want = _direct_literal(arch, kind, C, S) or want
                     assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, (kind, C, bf16, S)
                     literal += 1
     assert literal, arch
+    assert bool(direct) is bool(DIRECT_ROWS_OF_RECORD.get(arch)), arch
     geometry = {"threads": 128, "vec": 8}
     for registry in (cake_jit, det_jit):
         for kwargs in (
@@ -2255,7 +2927,10 @@ def test_forward_workspace_is_the_deterministic_forward_workspace(arch) -> None:
     (``FWD_NARROW_WORKSPACE_TILES``: C 576 holds 4 tiles, C 528 6), whatever ``FORWARD_NARROW_MIN_S``,
     ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS`` and ``FORWARD_SINGLE_TILE_ROWS`` hold (the sizing
     takes no ``S`` and no taps); every forward program's plan at every token count of :func:`_forward_tokens` and
-    both tap dtypes fits it, so a buffer of the public size never trips the ``work`` size check."""
+    both tap dtypes fits it, so a buffer of the public size never trips the ``work`` size check (a dynamic program's
+    outside the ``DIRECT_ROWS`` ranges: inside one, only the direct program runs, on its own channel tiles).  The
+    static and direct programs take no counters (``workspace_rule`` None, 0 words at every plan) and add nothing to
+    the size: it is the size over the dynamic programs alone."""
 
     tokens = _forward_tokens()
     records = [
@@ -2264,14 +2939,45 @@ def test_forward_workspace_is_the_deterministic_forward_workspace(arch) -> None:
         for name in cake_jit.route_modules(arch, kind)
     ]
     assert records
+    no_work = {
+        name for kind in cake_jit.forward_kinds(arch) for form in ("static", "direct")
+        if (name := _forward_program(arch, kind, form)) is not None
+    }  # fmt: skip
     for _, record in records:
-        assert record["workspace_rule"] == {"kind": "tile_counters", "words_per_tile": 2}
+        if record["kernel"] in no_work:
+            assert record["workspace_rule"] is None, record["kernel"]
+            assert (
+                cake_jit.counter_words(record, 1)
+                == cake_jit.counter_words(record, 96)
+                == 0
+            ), record["kernel"]
+        else:
+            assert record["workspace_rule"] == {
+                "kind": "tile_counters",
+                "words_per_tile": 2,
+            }, record["kernel"]
+    dynamic_only = {
+        kind: [
+            name for name in cake_jit.route_modules(arch, kind) if name not in no_work
+        ]
+        for kind in cake_jit.forward_kinds(arch)
+    }
+    with pytest.MonkeyPatch.context() as m:
+        m.setitem(cake_jit.ROUTES, arch, {**cake_jit.ROUTES[arch], **dynamic_only})
+        sized = {
+            C: cake_jit.forward_workspace_words(arch, C) for C in range(8, 8193, 8)
+        }
+    assert sized == {C: cake_jit.forward_workspace_words(arch, C) for C in sized}, arch
     for C in range(8, 8193, 8):
         words = cake_jit.forward_workspace_words(arch, C)
         assert words == det_jit.forward_workspace_words(arch, C), C
         for kind, record in records:
             for bf16 in _fwd_taps_of(kind):
                 for S in tokens:
+                    if record["kernel"] not in no_work and cake_jit.direct_row(
+                        arch, kind, C, S
+                    ):
+                        continue
                     tiles = cake_jit.plan(
                         S,
                         C,
@@ -2308,11 +3014,39 @@ def test_kcp_forward_main_program_plans_the_single_rank_forward(arch, fake_devic
     record ``selected_modules`` picks with that record's forward plan (its role, route and architecture: the narrow
     rows' single tile below the row's ``forward_narrow_min_s`` floor, their 32-vector tiles from it, the width from
     the width floor) and its counter words, which the forward workspace rule covers; the KCP forward program keeps the
-    legacy plan, one tile of C / 8 vectors at C 576 to 768."""
+    legacy plan, one tile of C / 8 vectors at C 576 to 768.  At the rank's local token count inside a forward key of
+    ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` it runs the static / direct program with 0 counter words, the direct one on
+    its direct tiles."""
 
     kcp = cake_package(KEY, "kcp")
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
-    for C in (512, 520, 528, 536, 544, 552, 560, 568, 576, 640, 704, 712, 768, 776, 1024):
+    keyed = {
+        C
+        for route, c_lo, c_hi, *_ in _forward_rows(arch)
+        if route == "fwd"
+        for C in (c_lo, c_hi)
+    }
+    forms = set()
+    for C in sorted(
+        {
+            512,
+            520,
+            528,
+            536,
+            544,
+            552,
+            560,
+            568,
+            576,
+            640,
+            704,
+            712,
+            768,
+            776,
+            1024,
+            *keyed,
+        }
+    ):
         S_min = _fwd_row_floor(arch, "fwd", C // 8)
         for S in _forward_tokens():
             name, scalars, grid, words = kcp._sr_main(
@@ -2327,16 +3061,24 @@ def test_kcp_forward_main_program_plans_the_single_rank_forward(arch, fake_devic
             assert grid[0] >= scalars["n_ch_tiles"], (C, S)
             assert words == cake_jit.counter_words(record, want["n_ch_tiles"]), (C, S)
             assert words <= cake_jit.forward_workspace_words(arch, C), (C, S)
+            for form in ("static", "direct"):
+                if name == _forward_program(arch, "fwd", form):
+                    assert words == 0, (C, S, form)
+                    forms.add(form)
             if C in FWD_NARROW_SPLITS and (
                 record["grid_rule"]["geometry"] == {"threads": 128, "vec": 8}
             ):
                 floor = FWD_FLOORS[arch].get(C // 8)
                 split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
-                if S_min is None or S < S_min:
+                if _direct_literal(arch, "fwd", C, S) is not None:
+                    assert name == _forward_program(arch, "fwd", "direct"), (C, S)
+                    assert split == _direct_literal(arch, "fwd", C, S), (C, S)
+                elif S_min is None or S < S_min:
                     assert split == FWD_ONE_TILE_SPLITS[C], (C, S)
                 else:
                     wide = floor is not None and S >= floor
                     assert split == (FWD_WIDE_SPLITS[C] if wide else FWD_NARROW_SPLITS[C]), (C, S)
+    assert forms == {form for route, *_, form in _forward_rows(arch) if route == "fwd"}, arch
     (name,) = kcp_jit.route_modules(arch, kcp.KCP_FWD)
     geometry = kcp_jit.MODULES[name]["grid_rule"]["geometry"]
     for C in FWD_NARROW_SPLITS:
@@ -2372,6 +3114,237 @@ def test_kcp_forward_plan_ignores_taps(arch, fake_device) -> None:
             assert kcp._sr_main(arch, S=S, C=C, n_frag=3, device_index=FAKE_DEVICE) == want, (C, S)
 
 
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_direct_rows_plan_as_the_deterministic_forward(arch, fake_device) -> None:
+    """At both channel ends and both token ends of every range of :data:`DIRECT_ROWS_OF_RECORD`, of both tap dtypes,
+    every forward record of the route plans the deterministic package's plan of the same row (its ``plan`` given the
+    route and the architecture), which is the literal direct tiles (:func:`_direct_literal`) whatever the token
+    floors; so do ``_plan_split``, the row plan (``plan_row``) and a per-call plan (``_route`` + ``_launch``) of the
+    call, which launches the route's direct program.  One token outside the range the plan is the one without
+    ``DIRECT_ROWS``."""
+
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    checked = 0
+    for (route, c_lo, c_hi), (s_lo, s_hi, name) in DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        for C in sorted({c_lo, (c_lo + c_hi) // 16 * 8, c_hi}):
+            for S in (s_lo, s_hi):
+                want = _direct_literal(arch, route, C, S)
+                assert want is not None, (route, C, S)
+                for bf16 in _fwd_taps_of(route):
+                    label = (route, C, S, bf16)
+                    for program in cake_jit.route_modules(arch, route):
+                        geometry = cake_jit.MODULES[program]["grid_rule"]["geometry"]
+                        if geometry != {"threads": 128, "vec": 8}:
+                            continue
+                        got = cake_jit.plan(
+                            S,
+                            C,
+                            3,
+                            geometry=geometry,
+                            role="fwd",
+                            arch=arch,
+                            route=route,
+                            bf16_taps=bf16,
+                        )
+                        det = det_jit.plan(
+                            S,
+                            C,
+                            3,
+                            geometry=geometry,
+                            role="fwd",
+                            route=route,
+                            arch=arch,
+                        )
+                        assert got == det and _split3(got) == want, (label, program)
+                        split = cake_jit._plan_split(
+                            S,
+                            C,
+                            geometry=geometry,
+                            role="fwd",
+                            arch=arch,
+                            route=route,
+                            bf16_taps=bf16,
+                        )
+                        assert split == want, (label, program)
+                    per_call = _per_call(arch, route, S, C, 3, 1, None, bf16)
+                    assert per_call == _row_planned(
+                        arch, route, S, C, 3, 1, None, bf16
+                    ), label
+                    assert per_call[0] == (name,) and _split3(per_call[1]) == want, (
+                        label
+                    )
+                    checked += 1
+            for S in (s_lo - 1, s_hi + 1):
+                if S < 1:
+                    continue
+                geometry = {"threads": 128, "vec": 8}
+                got = cake_jit.plan(
+                    S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route
+                )
+                with pytest.MonkeyPatch.context() as m:
+                    m.setattr(cake_jit, "DIRECT_ROWS", {})
+                    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+                    assert got == cake_jit.plan(
+                        S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route
+                    )
+                pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    assert bool(checked) is bool(DIRECT_ROWS_OF_RECORD.get(arch)), arch
+
+
+@pytest.mark.cpu_only
+def test_conformance_cells_inside_direct_ranges(fake_device) -> None:
+    """Every cell of :data:`SM103_DIRECT_PLAN_CELLS` (distinct, in route order) lies inside a ``DIRECT_ROWS`` range
+    of its route on sm_103a: the call selects the route's direct program and plans its direct tiles for the cell's
+    taps, per call and from the row cache.  The cells are measured forward cells at C 704 to 768 (multiples of 8)."""
+
+    arch = "sm_103a"
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    cells = SM103_DIRECT_PLAN_CELLS
+    assert len(set(cells)) == len(cells)
+    assert list(cells) == sorted(
+        cells, key=lambda c: (FORWARD_ROUTES.index(c[0]), *c[1:])
+    )
+    for route, taps, bias, C, S in cells:
+        label = (route, taps, bias, C, S)
+        assert (
+            route in FORWARD_ROUTES
+            and taps in FWD_TAPS
+            and bias in ("none", "bf16", "f32")
+        ), label
+        assert (
+            (bias == "none") is (route != "fwd_bias") and 704 <= C <= 768 and C % 8 == 0
+        ), label
+        assert cake_jit.direct_row(arch, route, C, S), label
+        bf16 = route == "fwd_bias" and taps == "bf16"
+        want = _per_call(arch, route, S, C, 1, 1, None, bf16)
+        assert want == _row_planned(arch, route, S, C, 1, 1, None, bf16), label
+        assert want[0] == (_forward_program(arch, route, "direct"),), label
+        assert _split3(want[1]) == _direct_literal(arch, route, C, S), label
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_static_forward_keeps_the_measured_plan(arch, fake_device) -> None:
+    """Inside every forward range of :data:`FALLBACK_ROWS_OF_RECORD` (both channel ends, both token ends, both tap
+    dtypes) the route's static program plans the forward plan of the package without ``DIRECT_ROWS`` (the route's
+    floors and single-tile ranges of :func:`channel_split`), the plan its dynamic program had there; the row plan
+    and a per-call plan launch the static program on it."""
+
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    checked = 0
+    for route, c_lo, c_hi, s_lo, s_hi, form in _forward_rows(arch):
+        if form != "static":
+            continue
+        static = _forward_program(arch, route, "static")
+        geometry = cake_jit.MODULES[static]["grid_rule"]["geometry"]
+        for C in sorted({c_lo, (c_lo + c_hi) // 16 * 8, c_hi}):
+            for S in (s_lo, s_hi):
+                for bf16 in _fwd_taps_of(route):
+                    label = (route, C, S, bf16)
+                    want = cake_jit.channel_split(
+                        C,
+                        geometry=geometry,
+                        role="fwd",
+                        route=route,
+                        S=S,
+                        arch=arch,
+                        bf16_taps=bf16,
+                    )
+                    got = cake_jit.plan(
+                        S,
+                        C,
+                        3,
+                        geometry=geometry,
+                        role="fwd",
+                        arch=arch,
+                        route=route,
+                        bf16_taps=bf16,
+                    )
+                    assert _split3(got) == want, label
+                    with pytest.MonkeyPatch.context() as m:
+                        m.setattr(cake_jit, "DIRECT_ROWS", {})
+                        assert cake_jit.plan(
+                            S, C, 3, geometry=geometry, role="fwd", arch=arch, route=route, bf16_taps=bf16
+                        ) == got, label  # fmt: skip
+                    per_call = _per_call(arch, route, S, C, 3, 1, None, bf16)
+                    assert per_call == _row_planned(
+                        arch, route, S, C, 3, 1, None, bf16
+                    ), label
+                    assert per_call[0] == (static,) and _split3(per_call[1]) == want, (
+                        label
+                    )
+                    checked += 1
+    assert checked, arch
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_direct_grid_is_capped_at_its_token_blocks(
+    arch, fake_device, monkeypatch
+) -> None:
+    """A direct program launches ``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x n_sub)))`` CTAs (``cap``
+    ``token_blocks``) on its direct tiles, as the deterministic package's launch of the same record on the same device
+    does, at both channel and token ends of every direct range and every SM count of :data:`PLAN_SWEEP_SMS`; without
+    ``C`` and ``S`` it refuses to size the grid (``ValueError``), and a cap on an ``occupancy`` rule or an unknown cap
+    is a ``ValueError``.  A static program launches ``ctas_per_sm x SMs`` CTAs whatever ``C`` and ``S``."""
+
+    assert cake_jit.GRID_CAPS == ("token_blocks",) and cake_jit.DIRECT_BLOCK_TOKENS == 8
+    for sms in PLAN_SWEEP_SMS[arch]:
+        fake_device(arch, sms)
+        monkeypatch.setattr(det_jit, "device_arch", lambda device_index: arch)
+        monkeypatch.setattr(det_jit, "sm_count", lambda device_index, sms=sms: sms)
+        for (route, c_lo, c_hi), (s_lo, s_hi, name) in DIRECT_ROWS_OF_RECORD.get(
+            arch, {}
+        ).items():
+            record = cake_jit.MODULES[name]
+            det = det_jit.MODULES[
+                name.replace(
+                    "cake_causal_conv1d_train_", "cake_causal_conv1d_det_train_"
+                )
+            ]
+            for C in (c_lo, c_hi):
+                for S in sorted({s_lo, min(s_lo + 7, s_hi), s_hi}):
+                    _, n_sub, tiles = _direct_literal(arch, route, C, S)
+                    want = min(
+                        DIRECT_CTAS_PER_SM[route] * sms, tiles * -(-S // (8 * n_sub))
+                    )
+                    got = cake_jit.launch_grid(
+                        record, device_index=FAKE_DEVICE, C=C, S=S
+                    )
+                    assert got == (want, 1, 1), (sms, route, C, S)
+                    assert (
+                        det_jit.launch_grid(det, device_index=FAKE_DEVICE, C=C, S=S)
+                        == got
+                    ), (sms, route, C, S)
+            for kwargs in ({}, {"C": c_lo}, {"S": s_lo}):
+                with pytest.raises(ValueError, match="needs C and S"):
+                    cake_jit.launch_grid(record, device_index=FAKE_DEVICE, **kwargs)
+            for grid_rule in (
+                {**record["grid_rule"], "cap": "tokens"},
+                {**record["grid_rule"], "kind": "occupancy", "grid_mult": {arch: 1}},
+            ):
+                with pytest.raises(ValueError, match="cap"):
+                    cake_jit.launch_grid(
+                        {**record, "grid_rule": grid_rule},
+                        device_index=FAKE_DEVICE,
+                        C=c_lo,
+                        S=s_lo,
+                    )
+        for kind in cake_jit.forward_kinds(arch):
+            record = cake_jit.MODULES[_forward_program(arch, kind, "static")]
+            for C, S in ((576, 1), (768, 1 << 20), (None, None)):
+                got = cake_jit.launch_grid(record, device_index=FAKE_DEVICE, C=C, S=S)
+                assert got == (record["grid_rule"]["ctas_per_sm"] * sms, 1, 1), (
+                    sms,
+                    kind,
+                    C,
+                    S,
+                )
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # The host plan of a call row (``_ROW_PLANS``): planned by the row's first call, the same values as a per-call plan.
 
@@ -2387,7 +3360,8 @@ FULL_PLAN_SWEEP = os.environ.get("CAKE_CONV1D_FULL_PLAN_SWEEP") == "1"
 def _plan_sweep_channels() -> tuple[int, ...]:
     """``CHANNELS``, rows off the 32-channel grid, and every selection threshold and ``TILE_OVERRIDES`` channel count
     of the registry with the multiple of 8 below it, both ends of every ``NARROW_TILES`` key with their neighbours
-    outside it, both ends of every ``FALLBACK_ROWS`` and ``SM_WIDE_ROWS`` key with their neighbours outside it, and
+    outside it, both ends of every ``FALLBACK_ROWS``, ``DIRECT_ROWS`` and ``SM_WIDE_ROWS`` key with their neighbours
+    outside it, and
     the forward's narrow rows (C 520 to 768, two of them off the 64-channel grid, C 712, the first row of sm_103a's
     ``FORWARD_NARROW_ROW_MIN_S`` floors of the ``fwd_bias`` route, and every row of ``FORWARD_NARROW_ROW_FLOORS`` and
     ``FORWARD_SINGLE_TILE_ROWS``) with their neighbours."""
@@ -2406,7 +3380,12 @@ def _plan_sweep_channels() -> tuple[int, ...]:
     for rows in cake_jit.TILE_OVERRIDES.values():
         for _, C in rows:
             channels |= {C - 8, C, C + 8}
-    for table in (cake_jit.NARROW_TILES, cake_jit.FALLBACK_ROWS, cake_jit.SM_WIDE_ROWS):
+    for table in (
+        cake_jit.NARROW_TILES,
+        cake_jit.FALLBACK_ROWS,
+        cake_jit.DIRECT_ROWS,
+        cake_jit.SM_WIDE_ROWS,
+    ):
         for rows in table.values():
             for _, c_lo, c_hi in rows:
                 channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
@@ -2414,11 +3393,11 @@ def _plan_sweep_channels() -> tuple[int, ...]:
 
 
 def _plan_sweep_tokens() -> tuple[int, ...]:
-    """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES``, ``NARROW_TILES``
-    and ``FALLBACK_ROWS`` ranges and the ``SM_WIDE_ROWS`` segments, the forward's ``FORWARD_NARROW_MIN_S``,
-    ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS`` and ``FORWARD_WIDTH_FLOORS`` floors and
-    ``FORWARD_SINGLE_TILE_ROWS`` ranges, the grid-trim minimums and the selection rules' token floors, plus a few
-    others."""
+    """Token counts on both sides of every bound where ``S`` enters a plan: the ``TILE_OVERRIDES``, ``NARROW_TILES``,
+    ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` ranges and the ``SM_WIDE_ROWS`` segments, the forward's
+    ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS`` and ``FORWARD_WIDTH_FLOORS``
+    floors and ``FORWARD_SINGLE_TILE_ROWS`` ranges, the grid-trim minimums and the selection rules' token floors, plus
+    a few others."""
 
     tokens = {1, 2, 63, 64, 1000, 250340, 1 << 20}
     for table in (cake_jit.FORWARD_WIDTH_FLOORS, cake_jit.FORWARD_NARROW_ROW_FLOORS):
@@ -2442,6 +3421,9 @@ def _plan_sweep_tokens() -> tuple[int, ...]:
         for segments in rows.values():
             for s_lo, s_hi, _ in segments:
                 tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    for rows in cake_jit.DIRECT_ROWS.values():
+        for s_lo, s_hi, _ in rows.values():
+            tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
     tokens |= {cake_jit.TILE_ALIGNED_MIN_S - 1, cake_jit.TILE_ALIGNED_MIN_S}
     for classes in cake_jit.TILE_ALIGNED_CLASSES.values():
         for s_min, _ in classes.values():
@@ -2696,9 +3678,10 @@ def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatc
     each floor of :data:`SYNTHETIC_FORWARD_MIN_S` on ``arch`` and either ``arch``'s row and single-tile tables or the
     synthetic ones, every forward route's calls of the narrow rows and their neighbours, of both tap dtypes, on both
     sides of the row's floor (``forward_narrow_min_s``: the floor, the row table's, or below 72 vectors the row
-    floor), of the width floors and of the single-tile ranges plan as a per-call plan does: the deterministic
-    forward's tiles from the row's floor outside its range, the route-less single tile below it and inside it.  The
-    row cache keeps the two tap dtypes apart."""
+    floor), of the width floors, of the single-tile ranges and of the forward keys of ``FALLBACK_ROWS`` and
+    ``DIRECT_ROWS`` plan as a per-call plan does: inside a direct range the direct tiles whatever the floors, else
+    the deterministic forward's tiles from the row's floor outside its range, the route-less single tile below it and
+    inside it.  The row cache keeps the two tap dtypes apart."""
 
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
     channels = (512, 520, 528, 568, 576, 600, 640, 704, 712, 768, 776)
@@ -2733,6 +3716,7 @@ def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatc
                 assert pkg.cake_causal_conv1d_nondet_train_plan_cache_clear() >= 1
                 bounds = {S_min, *FWD_FLOORS[arch].values(), *FWD_ROW_FLOORS[arch].values(), *(S for _, S, *_ in rows)}
                 bounds |= {S for *_, s_lo, s_hi in gaps for S in (s_lo, s_hi + 1)}
+                bounds |= {S for _, _, _, s_lo, s_hi, _ in _forward_rows(arch) for S in (s_lo, s_hi + 1)}
                 tokens = sorted({1, 1 << 20, *(S + d for S in bounds for d in (-1, 0, 1))} - {0})
                 for kind in cake_jit.forward_kinds(arch):
                     for bf16 in _fwd_taps_of(kind):
@@ -2765,7 +3749,13 @@ def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatc
                                     None,
                                 )
                                 inside = gap is not None and gap[0] <= S <= gap[1]
-                                if row_floor is not None and S >= row_floor and not inside:
+                                if _direct_literal(arch, kind, C, S) is not None:
+                                    split = _direct_literal(arch, kind, C, S)
+                                elif (
+                                    row_floor is not None
+                                    and S >= row_floor
+                                    and not inside
+                                ):
                                     split = det_jit.channel_split(
                                         C, geometry=geometry, role="fwd", route=kind, S=S, arch=arch
                                     )

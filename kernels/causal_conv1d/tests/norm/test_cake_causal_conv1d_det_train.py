@@ -49,7 +49,12 @@ package's per-(device, stream) buffer of the calls that pass none.  The forward'
 32-vector or whole tiles; C 520 to 568 on one tile below a token floor of their own per architecture and on
 narrower tiles from it) keep ``y``'s bits: the suite checks the literal plans per route, token count and
 architecture, and at every C 520 to 568 row one token below its floor and at it the launched plan, ``y``
-bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.
+bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.  Inside the token
+range of a row (C 576 to 768, ``FALLBACK_ROWS_OF_RECORD`` and ``DIRECT_ROWS_OF_RECORD``) the forward runs a static
+program, or a direct program on channel tiles of its own, and takes no counters: the suite checks the literal
+tables, the selection at every range bound, the direct plan and its token-block grid, and at the first and the
+last row of every range the launched program, ``y`` bitwise the dynamic program's and run to run, a caller-owned
+workspace left as it was, the naive-tier judge and a CUDA Graph with no fill node.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -62,8 +67,10 @@ runs it unchanged after pointing that table entry at its package.  The
 from __future__ import annotations
 
 import itertools
+import os
 import re
 import statistics
+import tempfile
 from fractions import Fraction
 from pathlib import Path
 
@@ -322,6 +329,127 @@ FWD_NARROW_WORKSPACE_TILES = {
     640: 3,
     768: 3,
 }
+# The small-S forward rows (``cake_jit.FALLBACK_ROWS`` and ``DIRECT_ROWS``): arch
+# -> (route, C_lo, C_hi) -> (S_lo, S_hi), every multiple of 8 from C_lo to C_hi.
+# Inside a static range the route's fallback (the static program) runs on the
+# route's plan; inside a direct range the route's direct program runs on the
+# arch's ``DIRECT_PLANS_OF_RECORD`` form; outside them the dynamic program.
+FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("fwd", 576, 576): (1, 4096),
+        ("fwd", 584, 640): (1, 8192),
+        ("fwd", 648, 704): (1, 12288),
+        ("fwd", 712, 712): (1, 12288),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 4096),
+        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 648, 696): (1, 8192),
+        ("fwd_bias", 704, 704): (1, 17408),
+        ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_dt", 576, 576): (1, 4096),
+        ("fwd_dt", 584, 640): (1, 8192),
+        ("fwd_dt", 648, 696): (1, 8192),
+        ("fwd_dt", 704, 704): (1, 12288),
+        ("fwd_dt", 712, 768): (1, 16384),
+    },
+    "sm_103a": {
+        ("fwd", 576, 632): (1, 2048),
+        ("fwd", 640, 688): (1, 4096),
+        ("fwd", 696, 696): (1, 4096),
+        ("fwd", 704, 704): (1, 8192),
+        ("fwd", 712, 712): (1, 8192),
+        ("fwd", 720, 760): (1, 8192),
+        ("fwd_bias", 584, 640): (1, 4104),
+        ("fwd_bias", 648, 704): (1, 16384),
+        ("fwd_bias", 720, 728): (13824, 16383),
+        ("fwd_bias", 736, 736): (14336, 16383),
+        ("fwd_bias", 744, 760): (13824, 16383),
+        ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_dt", 576, 640): (1, 8192),
+        ("fwd_dt", 648, 704): (1, 8192),
+        ("fwd_dt", 712, 752): (1, 12800),
+        ("fwd_dt", 760, 760): (1, 12288),
+        ("fwd_dt", 768, 768): (1, 12288),
+    },
+    "sm_107a": {
+        ("fwd", 576, 704): (1, 4096),
+        ("fwd", 712, 760): (1, 4096),
+        ("fwd", 768, 768): (1, 2048),
+        ("fwd_bias", 576, 576): (1, 12296),
+        ("fwd_bias", 584, 584): (1, 16392),
+        ("fwd_bias", 592, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 640, 696): (1, 24576),
+        ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_dt", 576, 640): (1, 12288),
+        ("fwd_dt", 648, 704): (1, 12288),
+        ("fwd_dt", 712, 712): (1, 32768),
+        ("fwd_dt", 720, 768): (1, 12288),
+    },
+}
+DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
+    "sm_100a": {
+        ("fwd", 576, 576): (4097, 24576),
+        ("fwd", 584, 640): (8193, 24576),
+        ("fwd", 648, 704): (12289, 24576),
+        ("fwd", 712, 712): (12289, 20480),
+        ("fwd", 720, 768): (8193, 20480),
+        ("fwd_bias", 576, 576): (4097, 24576),
+        ("fwd_bias", 584, 632): (4097, 20480),
+        ("fwd_bias", 648, 696): (8193, 20480),
+        ("fwd_bias", 704, 704): (17409, 20480),
+        ("fwd_dt", 576, 576): (4097, 24576),
+        ("fwd_dt", 584, 640): (8193, 24576),
+        ("fwd_dt", 648, 696): (8193, 20480),
+        ("fwd_dt", 704, 704): (12289, 20480),
+        ("fwd_dt", 712, 768): (16385, 20480),
+    },
+    "sm_103a": {
+        ("fwd", 576, 632): (2049, 24576),
+        ("fwd", 640, 688): (4097, 24576),
+        ("fwd", 696, 696): (4097, 20480),
+        ("fwd", 704, 704): (8193, 24576),
+        ("fwd", 712, 712): (8193, 20479),
+        ("fwd", 720, 760): (8193, 19456),
+        ("fwd_bias", 584, 640): (4105, 16384),
+        ("fwd_dt", 576, 640): (8193, 24576),
+        ("fwd_dt", 648, 704): (8193, 18432),
+        ("fwd_dt", 712, 752): (12801, 19456),
+        ("fwd_dt", 760, 760): (12289, 19456),
+        ("fwd_dt", 768, 768): (12289, 20480),
+    },
+    "sm_107a": {
+        ("fwd", 576, 704): (4097, 32768),
+        ("fwd", 712, 760): (4097, 16384),
+        ("fwd", 768, 768): (2049, 24576),
+        ("fwd_bias", 576, 576): (12297, 32768),
+        ("fwd_bias", 584, 584): (16393, 20480),
+        ("fwd_bias", 592, 624): (16385, 24576),
+        ("fwd_bias", 632, 632): (16393, 20480),
+        ("fwd_dt", 576, 640): (12289, 32768),
+        ("fwd_dt", 648, 704): (12289, 24576),
+        ("fwd_dt", 720, 768): (12289, 24576),
+    },
+}
+# The direct programs' channel tiles: arch -> route -> (ct_vec, n_sub), so a
+# direct row of C channels runs (ct_vec, n_sub, ceil(C / 8 / ct_vec)).
+DIRECT_PLANS_OF_RECORD: dict[str, dict[str, tuple[int, int]]] = {
+    "sm_100a": {
+        "fwd": (8, 16),
+        "fwd_dt": (8, 16),
+        "fwd_bias": (8, 16),
+    },
+    "sm_103a": {
+        "fwd": (8, 16),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (8, 16),
+    },
+    "sm_107a": {
+        "fwd": (8, 16),
+        "fwd_dt": (16, 8),
+        "fwd_bias": (8, 16),
+    },
+}
 # Single-tile rows outside each role's narrow set (one tile on every route).
 ONE_TILE_ROWS = {
     "bwd": (160, 192, 256, 512, 1024),
@@ -470,8 +598,11 @@ def _backward_thresholds(arch: str, kind: str = "bwd") -> tuple[int, ...]:
 
 def _rule_thresholds(rule: dict, arch: str) -> tuple[int, ...]:
     """The channel thresholds a selection rule gives ``arch``: one, several (a
-    program on several channel bands), or none."""
+    program on several channel bands), or none (a direct program's ``rows``
+    rule, which the rows of ``DIRECT_ROWS_OF_RECORD`` select)."""
 
+    if rule["kind"] == loader.ROWS_KIND:
+        return ()
     value = rule["channels"].get(arch)
     if value is None:
         return ()
@@ -720,6 +851,61 @@ def _backward(x, w, cu, dy, b, policy, *, kind=None, **kwargs):
     return grads[0], grads[1], (grads[2] if b is not None else None)
 
 
+def _row_docs(S: int):
+    """The documents of a small-S row: the perf packing from 64 tokens, one
+    document below."""
+
+    return "perf" if S >= 64 else None
+
+
+def _static_of_record(arch: str, kind: str, C: int, S: int) -> bool:
+    """Whether a forward call of route ``kind`` on ``arch`` with ``C`` channels and
+    ``S`` tokens lies in a range of ``FALLBACK_ROWS_OF_RECORD``."""
+
+    return any(
+        route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi
+        for (route, c_lo, c_hi), (s_lo, s_hi) in FALLBACK_ROWS_OF_RECORD.get(
+            arch, {}
+        ).items()
+    )
+
+
+def _direct_of_record(
+    arch: str, kind: str, C: int, S: int
+) -> tuple[int, int, int] | None:
+    """The plan ``(ct_vec, n_sub, n_ch_tiles)`` of the direct program where a
+    forward call of route ``kind`` on ``arch`` with ``C`` channels and ``S``
+    tokens lies in a range of ``DIRECT_ROWS_OF_RECORD`` (the arch's
+    ``DIRECT_PLANS_OF_RECORD`` form, ``ceil(C / 8 / ct_vec)`` tiles), ``None``
+    outside every range."""
+
+    for (route, c_lo, c_hi), (s_lo, s_hi) in DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        if route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
+            ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][kind]
+            return ct_vec, n_sub, -(-(C // 8) // ct_vec)
+    return None
+
+
+def _small_s_rows(
+    arch: str, kind: str
+) -> list[tuple[str, tuple[int, int], tuple[int, int]]]:
+    """``(program, (C_lo, C_hi), (S_lo, S_hi))`` of every range of forward route
+    ``kind`` on ``arch``: ``"static"`` for ``FALLBACK_ROWS_OF_RECORD``, then
+    ``"direct"`` for ``DIRECT_ROWS_OF_RECORD``."""
+
+    return [
+        (program, (c_lo, c_hi), bounds)
+        for program, table in (
+            ("static", FALLBACK_ROWS_OF_RECORD),
+            ("direct", DIRECT_ROWS_OF_RECORD),
+        )
+        for (route, c_lo, c_hi), bounds in table.get(arch, {}).items()
+        if route == kind
+    ]
+
+
 def _fallback_of_record(cv: int, role: str) -> int:
     """The role's fallback at 128 threads in exact arithmetic: of every multiple of 32 (and, for the forward, every
     divisor of cv from 40 to 128), the highest lane use cv / (n_ch_tiles x ct_vec) x (ct_vec x (128 // ct_vec) /
@@ -798,8 +984,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     tables per route, ``S`` and architecture (no ``S``, the floor less one, the
     floor; no architecture; an architecture or row the floors do not list),
     the kept one-tile rows, every multiple of eight up to 8192 against the
-    route-free rule, the plan's ``route`` / ``S`` / ``arch`` and the refused
-    routes and architectures."""
+    route-free rule, the plan's ``route`` / ``S`` / ``arch`` (inside a range of
+    ``DIRECT_ROWS_OF_RECORD`` the plan of the arch's direct form, the channel
+    split the route's) and the refused routes and architectures."""
 
     geometry = {"threads": 128, "vec": 8}
     assert loader.NARROW_TILE_ROUTES == {
@@ -868,7 +1055,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         S, C, 3, geometry=geometry, role=role, route=kind, arch=arch
                     )
                     split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
-                    assert split == want, (kind, C, arch, S)
+                    # Inside a direct range the plan is the direct form.
+                    direct = _direct_of_record(arch, kind, C, S)
+                    assert split == (direct or want), (kind, C, arch, S)
                     split = loader.channel_split(
                         C,
                         geometry=geometry,
@@ -912,7 +1101,9 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         S, C, 3, geometry=geometry, role=role, route=kind, arch=arch
                     )
                     split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
-                    assert split == want, (kind, C, arch, S)
+                    # Inside a direct range the plan is the direct form.
+                    direct = _direct_of_record(arch, kind, C, S)
+                    assert split == (direct or want), (kind, C, arch, S)
                     split = loader.channel_split(
                         C,
                         geometry=geometry,
@@ -1009,6 +1200,342 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
             640, geometry=wide, role=role, route=kind
         ) == loader.channel_split(640, geometry=wide, role=role)
     assert "flags" in loader.LOGICAL_SCALARS and "flags" not in loader.PLAN_SCALARS
+
+
+def test_small_s_rows_literal_tables() -> None:
+    """The small-S forward rows: ``cake_jit.FALLBACK_ROWS``, ``DIRECT_ROWS`` and
+    ``DIRECT_PLANS`` against the literal tables; keys of forward routes only, on
+    multiples of 8, disjoint in ``C`` per architecture and route, every range
+    inside ``S >= 1``, a static range below the direct range of a key that both
+    tables cover; per architecture and forward route one static program (the
+    route's fallback, listed first) and at most one direct program (listed
+    last, named by every direct key of the route); the static and the direct
+    programs take no counters and launch without PDL, only the direct program
+    caps its grid; each direct program's architectures are the ones whose
+    direct rows name it; each direct form fills the forward's threads."""
+
+    assert loader.ROWS_KIND == "rows" and loader.ROWS_KIND not in loader.SELECT_KINDS
+    assert loader.GRID_CAPS == ("token_blocks",) and loader.DIRECT_BLOCK_TOKENS == 8
+    fallback = {arch: dict(rows) for arch, rows in loader.FALLBACK_ROWS.items() if rows}
+    assert fallback == FALLBACK_ROWS_OF_RECORD
+    direct = {
+        arch: {key: (s_lo, s_hi) for key, (s_lo, s_hi, _name) in rows.items()}
+        for arch, rows in loader.DIRECT_ROWS.items()
+        if rows
+    }
+    assert direct == DIRECT_ROWS_OF_RECORD
+    plans = {arch: dict(forms) for arch, forms in loader.DIRECT_PLANS.items() if forms}
+    assert plans == DIRECT_PLANS_OF_RECORD
+    forward = loader.NARROW_TILE_ROUTES["fwd"]
+    for table in (loader.FALLBACK_ROWS, loader.DIRECT_ROWS):
+        assert set(table) <= set(loader.ARCHES)
+        for arch, rows in table.items():
+            assert all(route in forward for route, _, _ in rows), (arch, sorted(rows))
+    named: dict[str, set[str]] = {}
+    for arch in loader.ARCHES:
+        for kind in forward:
+            names = loader.route_modules(arch, kind)
+            rules = {name: loader.select_rule(loader.MODULES[name]) for name in names}
+            static = [name for name, rule in rules.items() if rule is None]
+            rows = [
+                name
+                for name, rule in rules.items()
+                if rule is not None and rule["kind"] == loader.ROWS_KIND
+            ]
+            assert len(static) == 1 and names[0] == static[0], (arch, kind, names)
+            for name in (*static, *rows):
+                record = loader.MODULES[name]
+                assert record["role"] == "fwd" and record["workspace_rule"] is None, (
+                    name
+                )
+                assert "work" not in record["logical"].values(), name
+                assert record["launch"]["use_pdl"] is False, name
+                assert ("cap" in record["grid_rule"]) == (name in rows), name
+            ranges = _small_s_rows(arch, kind)
+            direct_keys = [
+                (span, bounds)
+                for program, span, bounds in ranges
+                if program == "direct"
+            ]
+            if direct_keys:
+                assert len(rows) == 1 and names[-1] == rows[0], (arch, kind, names)
+                assert kind in DIRECT_PLANS_OF_RECORD[arch], (arch, kind)
+                named.setdefault(rows[0], set()).add(arch)
+                for (c_lo, c_hi), _ in direct_keys:
+                    assert loader.DIRECT_ROWS[arch][(kind, c_lo, c_hi)][2] == rows[0]
+            else:
+                assert not rows, (arch, kind, rows)
+            for program in ("static", "direct"):
+                spans = sorted(span for each, span, _ in ranges if each == program)
+                for c_lo, c_hi in spans:
+                    assert c_lo % 8 == 0 and c_hi % 8 == 0 and 8 <= c_lo <= c_hi, (
+                        arch,
+                        kind,
+                        c_lo,
+                    )
+                for (_, end), (start, _) in zip(spans, spans[1:], strict=False):
+                    assert end < start, (arch, kind, program, spans)
+            for program, span, (s_lo, s_hi) in ranges:
+                assert 1 <= s_lo <= s_hi, (arch, kind, span)
+            for _, (c_lo, c_hi), (_, s_x) in (r for r in ranges if r[0] == "static"):
+                for _, (d_lo, d_hi), (t_lo, _) in (
+                    r for r in ranges if r[0] == "direct"
+                ):
+                    if c_lo <= d_hi and d_lo <= c_hi:
+                        assert s_x < t_lo, (arch, kind, (c_lo, c_hi), (d_lo, d_hi))
+    for name, record in loader.MODULES.items():
+        rule = loader.select_rule(record)
+        if rule is not None and rule["kind"] == loader.ROWS_KIND:
+            assert set(record["arches"]) == named.get(name, set()), (
+                name,
+                record["arches"],
+            )
+    for arch, forms in DIRECT_PLANS_OF_RECORD.items():
+        for kind, (ct_vec, n_sub) in forms.items():
+            assert ct_vec * n_sub == loader.NARROW_TILE_THREADS, (arch, kind)
+
+
+def test_small_s_rows_select_their_programs(monkeypatch) -> None:
+    """Inside a range of ``DIRECT_ROWS_OF_RECORD`` a forward call selects the
+    route's direct program, inside one of ``FALLBACK_ROWS_OF_RECORD`` its static
+    program, and elsewhere the dynamic program the rules select without the rows:
+    at ``S`` 1, 1000, each bound of every range of the key and one token beyond
+    it, for the first, a middle and the last ``C`` of every key, on every
+    architecture and forward route.  ``S`` of ``None`` under a key is refused;
+    outside every key it is not needed; a ``C`` off the multiple of 8 lies in no
+    row; a direct key naming a record that is no ``rows`` record of the route is
+    a registry error."""
+
+    for arch in loader.ARCHES:
+        for kind in loader.NARROW_TILE_ROUTES["fwd"]:
+            static = _fallback_program(arch, kind)
+            direct = [
+                name
+                for name in loader.route_modules(arch, kind)
+                if (loader.select_rule(loader.MODULES[name]) or {}).get("kind")
+                == loader.ROWS_KIND
+            ]
+            ranges = _small_s_rows(arch, kind)
+            for c_lo, c_hi in sorted({span for _, span, _ in ranges}):
+                bounds = {
+                    program: (s_lo, s_hi)
+                    for program, span, (s_lo, s_hi) in ranges
+                    if span == (c_lo, c_hi)
+                }
+                tokens = {1, 1000}
+                for s_lo, s_hi in bounds.values():
+                    tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+                for C in sorted({c_lo, c_lo + 8 * ((c_hi - c_lo) // 16), c_hi}):
+                    for S in sorted(S for S in tokens if S >= 1):
+                        with monkeypatch.context() as m:
+                            m.setattr(loader, "DIRECT_ROWS", {})
+                            m.setattr(loader, "FALLBACK_ROWS", {})
+                            rules = loader.selected_modules(arch, kind, C=C, S=S)
+                        assert loader.MODULES[rules[0]]["workspace_rule"] is not None, (
+                            arch,
+                            kind,
+                            C,
+                            S,
+                        )
+                        in_direct = _direct_of_record(arch, kind, C, S) is not None
+                        if in_direct:
+                            want = (direct[0],)
+                        elif _static_of_record(arch, kind, C, S):
+                            want = (static,)
+                        else:
+                            want = rules
+                        got = loader.selected_modules(arch, kind, C=C, S=S)
+                        assert got == want, (arch, kind, C, S, got, want)
+                        assert loader.direct_row(arch, kind, C, S) is in_direct, (
+                            arch,
+                            kind,
+                            C,
+                            S,
+                        )
+                        assert loader.direct_module(arch, kind, C, S) == (
+                            direct[0] if in_direct else None
+                        ), (arch, kind, C, S)
+                    assert loader.fallback_row_range(arch, kind, C) == bounds.get(
+                        "static"
+                    ), (arch, kind, C)
+                    assert loader.direct_row_range(arch, kind, C) == bounds.get(
+                        "direct"
+                    ), (arch, kind, C)
+                    with pytest.raises(ValueError, match="needs S"):
+                        loader.selected_modules(arch, kind, C=C)
+                    if "direct" in bounds:
+                        with pytest.raises(ValueError, match="needs S"):
+                            loader.direct_module(arch, kind, C, None)
+                    assert loader.fallback_row_range(arch, kind, C + 4) is None
+                    assert loader.direct_row_range(arch, kind, C + 4) is None
+                    assert not loader.direct_row(arch, kind, C, None)
+                    assert not loader.direct_row(None, kind, C, 1000)
+            # Below every key no S is needed.
+            assert loader.selected_modules(arch, kind, C=8) == loader.selected_modules(
+                arch, kind, C=8, S=1
+            ), (arch, kind)
+        # The backward routes carry no row.
+        for C in (576, 640, 768):
+            assert loader.fallback_row_range(arch, "bwd", C) is None
+            assert loader.direct_module(arch, "bwd", C, 1000) is None
+    arch, key = next(
+        (arch, key) for arch, rows in loader.DIRECT_ROWS.items() for key in rows
+    )
+    s_lo, s_hi, _name = loader.DIRECT_ROWS[arch][key]
+    for wrong in (
+        _fallback_program(arch, key[0]),
+        "cake_causal_conv1d_det_train_unknown",
+    ):
+        with monkeypatch.context() as m:
+            m.setitem(
+                loader.DIRECT_ROWS,
+                arch,
+                {**loader.DIRECT_ROWS[arch], key: (s_lo, s_hi, wrong)},
+            )
+            with pytest.raises(RuntimeError, match="no record of the route"):
+                loader.selected_modules(arch, key[0], C=key[1], S=s_lo)
+
+
+def test_direct_rows_plan_and_grid(monkeypatch) -> None:
+    """Inside a direct range the forward plan is the architecture's direct form
+    (``DIRECT_PLANS_OF_RECORD``: ``ct_vec`` vectors, ``n_sub`` sub-tiles,
+    ``ceil(C / 8 / ct_vec)`` tiles), the same as :func:`cake_jit.direct_split`;
+    one token outside it, without an architecture or ``S``, in the legacy form
+    and on the backward the plan is :func:`cake_jit.channel_split`'s.  The
+    direct program launches ``min(ctas_per_sm x SMs, n_ch_tiles x ceil(S / (8 x
+    n_sub)))`` CTAs and needs ``C`` and ``S`` for it; the static program
+    launches the co-resident grid.  ``direct_split`` refuses an architecture or
+    route without a form and a form beyond the geometry's threads; a cap on
+    another grid kind or an unknown cap is refused."""
+
+    geometry = {"threads": 128, "vec": 8}
+    for arch in loader.ARCHES:
+        for kind in loader.NARROW_TILE_ROUTES["fwd"]:
+            static = loader.MODULES[_fallback_program(arch, kind)]
+            for program, (c_lo, c_hi), (s_lo, s_hi) in _small_s_rows(arch, kind):
+                if program != "direct":
+                    continue
+                ct_vec, n_sub = DIRECT_PLANS_OF_RECORD[arch][kind]
+                record = loader.MODULES[loader.DIRECT_ROWS[arch][(kind, c_lo, c_hi)][2]]
+                for C in (c_lo, c_hi):
+                    want = (ct_vec, n_sub, -(-(C // 8) // ct_vec))
+                    assert (
+                        loader.direct_split(C, geometry=geometry, route=kind, arch=arch)
+                        == want
+                    )
+                    for S in (s_lo - 1, s_lo, s_hi, s_hi + 1):
+                        split = loader.channel_split(
+                            C, geometry=geometry, role="fwd", route=kind, S=S, arch=arch
+                        )
+                        inside = s_lo <= S <= s_hi
+                        for args, expected in (
+                            (dict(route=kind, arch=arch), want if inside else split),
+                            (
+                                dict(route=kind),
+                                loader.channel_split(
+                                    C, geometry=geometry, role="fwd", route=kind, S=S
+                                ),
+                            ),
+                            (
+                                dict(route=kind, arch=arch, legacy=True),
+                                loader.channel_split(C, geometry=geometry, legacy=True),
+                            ),
+                        ):
+                            scalars = loader.plan(
+                                S, C, 3, geometry=geometry, role="fwd", **args
+                            )
+                            got = (
+                                scalars["ct_vec"],
+                                scalars["n_sub"],
+                                scalars["n_ch_tiles"],
+                            )
+                            assert got == expected, (arch, kind, C, S, args)
+                        bwd = loader.plan(
+                            S,
+                            C,
+                            3,
+                            geometry=geometry,
+                            role="bwd",
+                            route="bwd",
+                            arch=arch,
+                        )
+                        assert (
+                            bwd["ct_vec"],
+                            bwd["n_sub"],
+                            bwd["n_ch_tiles"],
+                        ) == loader.channel_split(
+                            C,
+                            geometry=geometry,
+                            role="bwd",
+                            route="bwd",
+                            S=S,
+                            arch=arch,
+                        ), (arch, C, S)
+                        if not inside:
+                            continue
+                        for sms in (2, 148, 212):
+                            with monkeypatch.context() as m:
+                                m.setattr(
+                                    loader,
+                                    "device_arch",
+                                    lambda _index, arch=arch: arch,
+                                )
+                                m.setattr(
+                                    loader, "sm_count", lambda _index, sms=sms: sms
+                                )
+                                blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * n_sub))
+                                co_resident = record["grid_rule"]["ctas_per_sm"] * sms
+                                assert loader.launch_grid(
+                                    record, device_index=0, C=C, S=S
+                                ) == (
+                                    max(1, min(co_resident, want[2] * blocks)),
+                                    1,
+                                    1,
+                                ), (arch, kind, C, S, sms)
+                                assert loader.launch_grid(
+                                    static, device_index=0, C=C, S=S
+                                ) == (
+                                    static["grid_rule"]["ctas_per_sm"] * sms,
+                                    1,
+                                    1,
+                                )
+                                for missing in (dict(C=C), dict(S=S), {}):
+                                    with pytest.raises(
+                                        ValueError, match="needs the call's C and S"
+                                    ):
+                                        loader.launch_grid(
+                                            record, device_index=0, **missing
+                                        )
+                                for grid_rule in (
+                                    {**record["grid_rule"], "cap": "unknown"},
+                                    {
+                                        **record["grid_rule"],
+                                        "kind": "occupancy",
+                                        "grid_mult": {arch: 1},
+                                    },
+                                ):
+                                    with pytest.raises(ValueError, match="grid cap"):
+                                        loader.launch_grid(
+                                            {**record, "grid_rule": grid_rule},
+                                            device_index=0,
+                                            C=C,
+                                            S=S,
+                                        )
+        for kind in loader.NARROW_TILE_ROUTES["fwd"]:
+            if kind not in DIRECT_PLANS_OF_RECORD.get(arch, {}):
+                with pytest.raises(ValueError, match="no direct plan"):
+                    loader.direct_split(640, geometry=geometry, route=kind, arch=arch)
+    for arch, forms in DIRECT_PLANS_OF_RECORD.items():
+        kind = next(iter(forms))
+        with pytest.raises(ValueError, match="does not fit"):
+            loader.direct_split(
+                640, geometry={"threads": 32, "vec": 8}, route=kind, arch=arch
+            )
+        with pytest.raises(ValueError, match="no direct plan"):
+            loader.direct_split(640, geometry=geometry, route="bwd", arch=arch)
+    for arch in ("sm_90a", ""):
+        with pytest.raises(ValueError, match="arch must be one of"):
+            loader.direct_split(640, geometry=geometry, route="fwd", arch=arch)
 
 
 # The whole-rank trim of the backward main grid (``cake_jit.main_grid``) at 128
@@ -1293,7 +1820,11 @@ def test_backward_selection_literal_table() -> None:
                 continue
             for name in loader.route_modules(arch, kind):
                 rule = loader.select_rule(loader.MODULES[name])
-                channels_only = rule is None or rule["kind"] == "channels_at_least"
+                # A direct program's rows rule carries no floor: its rows hold its tokens.
+                channels_only = rule is None or rule["kind"] in (
+                    "channels_at_least",
+                    loader.ROWS_KIND,
+                )
                 # Besides ``bwd``, only the sm_107a forward routes' two-stage programs carry a token floor.
                 assert channels_only or (
                     arch == "sm_107a"
@@ -1654,9 +2185,11 @@ def test_backward_programs_switch_on_channel_count(kind) -> None:
 @pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
 def test_forward_programs_switch_on_channel_count(kind) -> None:
     """Exactly one forward program of the route runs per call, every program of the route runs for some channel
-    count, and on both sides of each channel threshold (at a floored program's token floor as well) ``y`` is judged
-    against the naive tier and equals, bit for bit, the route's fallback program launched on its own on every draw
-    (every forward program rounds ``y`` as the static one does)."""
+    count, and on both sides of each channel threshold (at a floored program's token floor as well, and at the
+    corners of each small-S range: the static program's of ``FALLBACK_ROWS_OF_RECORD``, the direct program's of
+    ``DIRECT_ROWS_OF_RECORD``) ``y`` is judged against the naive tier and equals, bit for bit, the route's fallback
+    (static) program launched on its own on the one-tile plan on every draw (every forward program rounds ``y`` as
+    the static one does)."""
 
     _require_route(kind)
     arch = _arch()
@@ -1669,7 +2202,10 @@ def test_forward_programs_switch_on_channel_count(kind) -> None:
     fallback = _fallback_program(arch, kind)
     record = loader.MODULES[fallback]
     device = _device()
-    channels = sorted({C for T in thresholds for C in (T - 8, T, T + 8)} | {8192})
+    # The dynamic programs run from C = 8 (no channel count below it).
+    channels = sorted(
+        {C for T in thresholds for C in (T - 8, T, T + 8) if C >= 8} | {8192}
+    )
     rows = [
         (S, docs, C) for S, docs in ((5, (2, 0, 3)), (1000, "perf")) for C in channels
     ]
@@ -1692,6 +2228,12 @@ def test_forward_programs_switch_on_channel_count(kind) -> None:
         for C in (*FWD_ROW_SPLIT_TABLE, *NARROW_SPLIT_TABLE["fwd"])
         if min(floored) <= C
     ]
+    # The small-S rows: the first and the last (S, C) of each static and each
+    # direct range of the route on the architecture.
+    for table in (FALLBACK_ROWS_OF_RECORD, DIRECT_ROWS_OF_RECORD):
+        for (route, c_lo, c_hi), (s_lo, s_hi) in table.get(arch, {}).items():
+            if route == kind:
+                rows += [(s_lo, _row_docs(s_lo), c_lo), (s_hi, _row_docs(s_hi), c_hi)]
     launched = set()
     for S, docs, C in rows:
         selected = loader.selected_modules(arch, kind, C=C, S=S)
@@ -2258,10 +2800,12 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
     the forward's C 576 / 640 on ``FWD_WIDE_SPLIT_TABLE`` from the device
     architecture's ``FWD_NARROW_FLOORS`` floor; the default backward's SM-wide
     band rows from its ``BWD_SM_CTA_RULE`` floor on that program's plan, one
-    whole channel tile of ``threads // (C / 8)`` sub-tiles) for the backward
-    and for the forward its inputs select; ``y`` and ``dx`` are bitwise the
-    one-tile plan's, ``dweight`` / ``dbias`` are bitwise reproducible, and
-    every output is judged against the naive tier."""
+    whole channel tile of ``threads // (C / 8)`` sub-tiles; inside a range of
+    ``DIRECT_ROWS_OF_RECORD`` the forward's direct form) for the backward and
+    for the forward its inputs select; ``y`` and ``dx`` are bitwise the
+    one-tile plan's (the forward's dynamic program, without the small-S rows),
+    ``dweight`` / ``dbias`` are bitwise reproducible, and every output is
+    judged against the naive tier."""
 
     _require_route(kind)
     fwd_kind = FORWARD_OF[kind]
@@ -2297,6 +2841,10 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
             floor = FWD_NARROW_FLOORS.get(arch, {}).get(C // 8)
             if role == "fwd" and narrow and floor is not None and floor <= S:
                 want = FWD_WIDE_SPLIT_TABLE[C]
+            if role == "fwd":
+                # Inside a direct range the direct program's form; a static
+                # range keeps the route's plan.
+                want = _direct_of_record(arch, route, C, S) or want
             if (
                 role == "bwd"
                 and route == "bwd"
@@ -2321,9 +2869,12 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
         # workspace owners, and the backward workspace bytes the default
         # workspace takes), so the forced plan gets the workspace the public
         # bytes function gives its own rule, and the shipped rule's after.
+        # Without the small-S rows the forward runs its dynamic program.
         try:
             with monkeypatch.context() as m:
                 m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
+                m.setattr(loader, "DIRECT_ROWS", {})
+                m.setattr(loader, "FALLBACK_ROWS", {})
                 _clear_tile_rule_caches()
                 y_one = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
                 one = _backward(x, w, cu, dy, b, policy, kind=kind)
@@ -2418,6 +2969,175 @@ def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
                 graph.replay()
                 torch.cuda.synchronize(device)
                 assert torch.equal(_bits(y_graph), _bits(y)), (label, "graph", replay)
+
+
+def _graph_nodes(graph: torch.cuda.CUDAGraph) -> tuple[int, int]:
+    """``(kernel nodes, fill nodes)`` of a graph captured with ``enable_debug_mode``, from its DOT print
+    (``debug_dump``): a fill node is a memset node or a kernel node of torch's fill kernel (``FillFunctor``, a
+    captured ``torch.zeros``)."""
+
+    with tempfile.TemporaryDirectory() as tmp:
+        path = os.path.join(tmp, "graph.dot")
+        graph.debug_dump(path)
+        text = Path(path).read_text()
+    kernels = fills = 0
+    for statement in re.split(r";\s*\n|\n(?=\s*\")", text):
+        node = statement.strip()
+        if "->" in node or not re.match(r'^"?graph_\d+_node_\d+"?\s*\[', node):
+            continue
+        found = [
+            (match.start(), kind)
+            for kind in ("KERNEL", "MEMSET")
+            for match in (re.search(r"\b" + kind + r"\b", node),)
+            if match
+        ]
+        kind = min(found)[1] if found else None
+        if kind == "MEMSET":
+            fills += 1
+        elif kind == "KERNEL":
+            kernels += 1
+            fills += "FillFunctor" in node
+    return kernels, fills
+
+
+@pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
+def test_small_s_rows_launch_and_keep_y_bits(kind, monkeypatch) -> None:
+    """At the first and the last ``(S, C)`` of every static and every direct
+    range of forward route ``kind`` on the device's architecture
+    (``FALLBACK_ROWS_OF_RECORD``, ``DIRECT_ROWS_OF_RECORD``) the forward
+    launches the table's program with no ``work`` counters: the static program
+    on the route's plan and the co-resident grid, the direct program on the
+    architecture's ``DIRECT_PLANS_OF_RECORD`` form and its token-block grid.
+    ``y`` repeats bit for bit, equals the call's with a caller-owned workspace
+    (left as it was: the program does not read or write it) and the dynamic
+    program's on the one-tile plan (the rows removed), and is judged against
+    the naive tier."""
+
+    _require_route(kind)
+    arch = _arch()
+    device = _device()
+    settings = FORWARD_ROUTE_SETTINGS[kind]
+    rows = _small_s_rows(arch, kind)
+    if not rows:
+        pytest.skip(f"the {kind} route on {arch} has no small-S row")
+    sms = loader.sm_count(device.index)
+    for program, (c_lo, c_hi), (s_lo, s_hi) in rows:
+        for S, C in ((s_lo, c_lo), (s_hi, c_hi)):
+            label = f"{kind} {program} S={S} C={C}"
+            docs = _row_docs(S)
+            x, w, cu, _, b, _ = _route_inputs(S, C, docs, settings)
+            launched = []
+
+            def record_launch(name, values, *, device_index, grid=None):
+                launched.append((name, dict(values), grid))
+
+            with monkeypatch.context() as m:
+                m.setattr(pkg, "run_module", record_launch)
+                cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            assert len(launched) == 1, (label, len(launched))
+            name, values, grid = launched[0]
+            record = loader.MODULES[name]
+            direct = _direct_of_record(arch, kind, C, S)
+            if program == "direct":
+                assert direct is not None, label
+                assert loader.select_rule(record) == {"kind": loader.ROWS_KIND}, (
+                    label,
+                    name,
+                )
+                want = direct
+                blocks = -(-S // (loader.DIRECT_BLOCK_TOKENS * want[1]))
+                want_grid = min(
+                    record["grid_rule"]["ctas_per_sm"] * sms, want[2] * blocks
+                )
+            else:
+                assert direct is None and name == _fallback_program(arch, kind), (
+                    label,
+                    name,
+                )
+                want = loader.channel_split(
+                    C,
+                    geometry=record["grid_rule"]["geometry"],
+                    role="fwd",
+                    route=kind,
+                    S=S,
+                    arch=arch,
+                )
+                want_grid = record["grid_rule"]["ctas_per_sm"] * sms
+            got = tuple(values[key] for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+            assert got == want, (label, got, want)
+            assert grid == (max(1, want_grid), 1, 1), (label, grid)
+            assert "work" not in values and record["workspace_rule"] is None, label
+            y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            for repeat in range(2):
+                again = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+                assert torch.equal(_bits(again), _bits(y)), (label, "repeat", repeat)
+            workspace = torch.full((64,), 7, dtype=torch.int32, device=device)
+            owned = cake_causal_conv1d_det_train_forward(
+                x, w, cu, bias=b, workspace=workspace
+            )
+            torch.cuda.synchronize(device)
+            assert torch.equal(_bits(owned), _bits(y)), (label, "workspace")
+            assert bool((workspace == 7).all()), (label, "workspace written")
+            try:
+                with monkeypatch.context() as m:
+                    m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
+                    m.setattr(loader, "DIRECT_ROWS", {})
+                    m.setattr(loader, "FALLBACK_ROWS", {})
+                    _clear_tile_rule_caches()
+                    y_one = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            finally:
+                _clear_tile_rule_caches()
+            assert torch.equal(_bits(y_one), _bits(y)), (label, "one tile")
+
+            def forward(x, w, cu, b, _draw):
+                return cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+
+            _judge_forward(S, C, docs, forward, kind=settings, label=label)
+
+
+@pytest.mark.parametrize("kind", ("fwd", "fwd_dt", "fwd_bias"))
+def test_small_s_rows_cuda_graph_has_no_fill_node(kind) -> None:
+    """At the last ``(S, C)`` of the first static and the first direct range of
+    forward route ``kind`` on the device's architecture, a CUDA Graph of the
+    forward, without a workspace and with a caller-owned one, holds the one
+    kernel node of the table's program and no fill node (the call zeroes no
+    counter buffer), and every replay equals the eager ``y`` bit for bit."""
+
+    _require_route(kind)
+    arch = _arch()
+    device = _device()
+    firsts: dict[str, tuple[int, int]] = {}
+    for program, (_c_lo, c_hi), (_s_lo, s_hi) in _small_s_rows(arch, kind):
+        firsts.setdefault(program, (s_hi, c_hi))
+    if not firsts:
+        pytest.skip(f"the {kind} route on {arch} has no small-S row")
+    for program, (S, C) in firsts.items():
+        x, w, cu, _, b, _ = _route_inputs(
+            S, C, _row_docs(S), FORWARD_ROUTE_SETTINGS[kind], key=29
+        )
+        eager = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+        torch.cuda.synchronize(device)
+        for owned in (False, True):
+            label = f"{kind} {program} S={S} C={C} workspace={owned}"
+            workspace = (
+                torch.zeros(8, dtype=torch.int32, device=device) if owned else None
+            )
+            y_graph = torch.empty_like(x)
+            side = torch.cuda.Stream(device=device)
+            side.wait_stream(torch.cuda.current_stream(device))
+            graph = torch.cuda.CUDAGraph()
+            graph.enable_debug_mode()
+            with torch.cuda.graph(graph, stream=side):
+                cake_causal_conv1d_det_train_forward(
+                    x, w, cu, bias=b, out=y_graph, workspace=workspace
+                )
+            torch.cuda.synchronize(device)
+            assert _graph_nodes(graph) == (1, 0), (label, _graph_nodes(graph))
+            for replay in range(GRAPH_REPLAYS):
+                y_graph.fill_(float("nan"))
+                graph.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(_bits(y_graph), _bits(eager)), (label, replay)
 
 
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
@@ -2912,8 +3632,8 @@ def _forward_tiles(C: int) -> int:
 
 def test_forward_workspace_bytes() -> None:
     """Two int32 counters per channel tile of the forward's plan, the most over every forward route and both plans
-    of a row whose tiles change at a token floor (``FWD_NARROW_WORKSPACE_TILES``); independent of ``S``; the
-    allocated buffer is zero."""
+    of a row whose tiles change at a token floor (``FWD_NARROW_WORKSPACE_TILES``); the static and the direct
+    programs of the small-S rows take none; independent of ``S``; the allocated buffer is zero."""
 
     device = _device()
     arch = _arch()
@@ -2922,10 +3642,17 @@ def test_forward_workspace_bytes() -> None:
     for kind in loader.forward_kinds(arch):
         for name in loader.route_modules(arch, kind):
             record = loader.MODULES[name]
-            assert record["workspace_rule"] == {
-                "kind": "tile_counters",
-                "words_per_tile": 2,
-            }, name
+            rule = loader.select_rule(record)
+            if rule is None or rule["kind"] == loader.ROWS_KIND:
+                # The static program (the route's fallback) and the direct program.
+                assert record["workspace_rule"] is None, name
+                assert "work" not in record["logical"].values(), name
+                assert loader.counter_words(record, 1) == 0, name
+            else:
+                assert record["workspace_rule"] == {
+                    "kind": "tile_counters",
+                    "words_per_tile": 2,
+                }, name
             geometries.add(tuple(sorted(record["grid_rule"]["geometry"].items())))
     assert len(geometries) == 1
     for C in (8, 128, 136, 1024, 1160, 1280, 1344, 1600, 2560, 3200, 8192):
@@ -3402,6 +4129,13 @@ def test_registry_records_reference_the_build_manifest() -> None:
                 == {"fwd": "co_resident", "bwd": "occupancy"}[record["role"]]
             ), name
             assert grid["ctas_per_sm"] >= 1
+            # Only a direct program caps its grid at its token blocks.
+            direct = (loader.select_rule(record) or {}).get("kind") == loader.ROWS_KIND
+            assert ("cap" in grid) == direct, name
+            if direct:
+                assert (
+                    grid["cap"] in loader.GRID_CAPS and grid["kind"] == "co_resident"
+                ), name
             if grid["kind"] == "occupancy":
                 assert set(grid["grid_mult"]) == set(record["arches"]), name
                 assert all(
@@ -3443,9 +4177,17 @@ def test_registry_records_reference_the_build_manifest() -> None:
         elif record["role"] == "reduce":
             assert record["workspace_rule"] is None, name
             assert reduce_core <= logical <= reduce_core | {"db", "flags"}, name
+        elif (
+            loader.select_rule(record) is None
+            or loader.select_rule(record)["kind"] == loader.ROWS_KIND
+        ):
+            # The static program (the forward route's fallback) and the direct programs of the small-S rows
+            # take no counters.
+            assert record["workspace_rule"] is None, name
+            assert not {"work", "dw", "db", "partial"} & logical, name
         else:
-            # A forward program takes its token chunks from the ``work`` counters: two int32 words per channel
-            # tile (the next-chunk counter and the done-CTA counter).
+            # A dynamic forward program takes its token chunks from the ``work`` counters: two int32 words per
+            # channel tile (the next-chunk counter and the done-CTA counter).
             assert record["workspace_rule"] == {
                 "kind": "tile_counters",
                 "words_per_tile": 2,
@@ -3460,9 +4202,12 @@ def test_registry_records_reference_the_build_manifest() -> None:
         # The selection vocabulary: a forward or backward rule is ``channels_at_least`` with one positive
         # multiple-of-8 threshold (or an increasing list of them) per architecture it names, or
         # ``channels_tokens_at_least`` with a positive token floor beside each as well (backward programs, and
-        # the sm_107a two-stage forward programs).
+        # the sm_107a two-stage forward programs); a direct forward program's rule is ``rows`` alone (the
+        # rows of ``DIRECT_ROWS`` select it).
         rule = loader.select_rule(record)
-        if rule is not None:
+        if rule is not None and rule["kind"] == loader.ROWS_KIND:
+            assert record["role"] == "fwd" and rule == {"kind": loader.ROWS_KIND}, name
+        elif rule is not None:
             assert record["role"] in ("fwd", "bwd"), name
             assert rule["kind"] in loader.SELECT_KINDS, name
             if rule["kind"] == "channels_tokens_at_least":
@@ -3528,10 +4273,16 @@ def test_registry_records_reference_the_build_manifest() -> None:
             rules = {name: loader.select_rule(loader.MODULES[name]) for name in names}
             fallbacks = [name for name, rule in rules.items() if rule is None]
             assert len(fallbacks) == 1, (arch, kind, fallbacks)
+            # A direct program's rows rule names no architecture: its rows do.
+            rows_rules = {
+                name
+                for name, rule in rules.items()
+                if rule is not None and rule["kind"] == loader.ROWS_KIND
+            }
             assert all(
                 arch in rules[name]["channels"]
                 for name in names
-                if rules[name] is not None
+                if rules[name] is not None and name not in rows_rules
             ), (arch, kind, names)
             floors = _token_floors(arch, kind)
             owners: dict[int, dict[bool, str]] = {}
@@ -3544,7 +4295,11 @@ def test_registry_records_reference_the_build_manifest() -> None:
                         threshold,
                     )
                     owners.setdefault(threshold, {})[floored] = name
-            unfloored = {name for name in rules if rules[name] and name not in floors}
+            unfloored = {
+                name
+                for name in rules
+                if rules[name] and name not in floors and name not in rows_rules
+            }
             assert len(unfloored) <= 5, (arch, kind, unfloored)
             assert len(floors) <= 2, (arch, kind, floors)
             for S in sorted({1, *(floor for _, floor in floors.values())}):
