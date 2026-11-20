@@ -57,10 +57,19 @@ data kind and at forced grids; the build of packed rows only gives the bits
 of the 128-thread build on the same rows and never runs rows that are not
 packed; every strided program makes no stream workspace and takes no
 reserve workspace, eagerly and in CUDA Graph capture, and leaves a caller
-workspace as it is.  The tests never compare this package with the
-non-deterministic one and hold no output to an error bound of its own.  The
-backward's workspace is zero after every call (``compute_grad_weight=False``
-and accumulation included), serves every shape and both weight-gradient
+workspace as it is.  A backward that computes the weight gradient on up to
+256 rows runs its role's program of one CTA (up to 16 rows) or of one
+cluster of 16 CTAs (where ``device_runs_clusters`` holds; ``dw_module``): on
+every layout of ``make``, three data kinds, both weight-gradient dtypes,
+fresh and accumulated, at every call, on the grids of other SM counts and
+where the device check fails (the role's module past 16 rows), it gives the
+``dx``, ``dz`` and weight-gradient bits of the role's module on the same
+calls, and it makes no stream workspace, takes no reserve workspace and
+leaves a caller workspace as it is, eagerly and in CUDA Graph capture.  The
+tests never compare this package with the non-deterministic one and hold no
+output to an error bound of its own.  The backward's workspace is zero
+after every call (``compute_grad_weight=False`` and accumulation included),
+serves every shape and both weight-gradient
 dtypes, is zeroed by ``cake_rmsnorm_silu_gate_det_train_reset_workspace``, and
 the non-deterministic package's workspace (``uint8``) and unfit buffers (FP32
 ones, FP16, FP64) are refused; a caller workspace's checked buffers serve its
@@ -81,6 +90,7 @@ import gc
 import inspect
 import warnings
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -803,6 +813,12 @@ def _route_to(suffix):
     return module
 
 
+def _keep_module(arch, name, rows, clusters=True):
+    """A ``dw_module`` that keeps the module of every call (no program of one
+    CTA or of one cluster)."""
+    return name
+
+
 def _long_call_modules(arch, suffix, rows, sm_count, packed):
     """The modules ``_long_calls``' calls launch when ``backward_module``
     names the module of their role plus ``suffix`` for ``rows`` rows on
@@ -924,7 +940,10 @@ def test_long_modules_give_the_bits_of_their_roles(shape, launches):
     and ``compute_grad_weight=False`` (the programs ``nodw_module`` names for
     the two modules), on this device's grid and, up to
     ``LONG_BIT_GRID_ROWS`` rows, on the grids of ``LONG_BIT_SM_COUNTS`` SMs
-    (``device_sm_count`` patched); the workspace is zero after the calls."""
+    (``device_sm_count`` patched), with ``dw_module`` patched to keep the
+    module (its programs of one CTA and of one cluster have their own test,
+    ``test_small_row_programs_give_the_bits_of_their_modules``); the
+    workspace is zero after the calls."""
     arch, sms = _device()
     if shape.startswith("long"):
         start = LONG_MIN_ROWS_PER_SM[arch] * sms
@@ -946,6 +965,7 @@ def test_long_modules_give_the_bits_of_their_roles(shape, launches):
         for suffix in ("", loader.LONG):
             with pytest.MonkeyPatch.context() as patch:
                 patch.setattr(pkg, "backward_module", _route_to(suffix))
+                patch.setattr(loader, "dw_module", _keep_module)
                 patch.setattr(
                     loader, "device_sm_count", lambda index, count=sm_count: count
                 )
@@ -1181,10 +1201,12 @@ def test_each_call_launches_one_module_of_its_role(T, H, launches):
     ``bwd_bf16`` for a BF16 weight gradient, ``bwd_f32`` for an FP32 one,
     accumulating or not, each its long module (``LONG_ROLES``) where these
     packed rows reach the long module's ``min_rows_per_sm`` rows per SM
-    (32737 x 48 on every product), and for ``compute_grad_weight=False`` the
-    program ``nodw_module`` names for the ``bwd_bf16`` one (packed rows, a
-    single token of head stride 128 too where ``_one_token_packed``); the
-    reset launches no module."""
+    (32737 x 48 on every product) and, up to 256 rows, in its place the
+    program of one CTA or of one cluster ``dw_module`` names (one CTA for
+    1 x 1; one cluster for 17 x 7 where ``device_runs_clusters`` holds), and
+    for ``compute_grad_weight=False`` the program ``nodw_module`` names for
+    the ``bwd_bf16`` module (packed rows, a single token of head stride 128
+    too where ``_one_token_packed``); the reset launches no module."""
     arch, sms = _device()
     routes = loader.ROUTES[arch]
     for role in loader.ROLES:
@@ -1194,14 +1216,19 @@ def test_each_call_launches_one_module_of_its_role(T, H, launches):
     packed = routes.get("fwd_packed", routes["fwd"])
     assert forward_name == (packed if T > 1 else routes["fwd"])
     long = T > 1 and LONG_MIN_ROWS_PER_SM[arch] * sms <= T * H
+    clusters = _clusters()
     names = {"fwd": forward_name}
+    modules = {}
     for role in ("bwd_bf16", "bwd_f32"):
-        names[role] = routes[role + loader.LONG] if long else routes[role]
+        modules[role] = routes[role + loader.LONG] if long else routes[role]
         got = loader.backward_module(arch, role, T * H, H, sms, tok, D, tok, D, tok, D)
-        assert got == names[role], (role, got)
+        assert got == modules[role], (role, got)
+        names[role] = loader.dw_module(arch, modules[role], T * H, clusters)
+        small = T * H <= 16 or (clusters and T * H <= 256)
+        assert (names[role] != modules[role]) == small, (role, names[role])
     names["nodw"] = loader.nodw_module(
         arch,
-        names["bwd_bf16"],
+        modules["bwd_bf16"],
         T * H,
         sms,
         packed=T > 1 or _one_token_packed(arch, T * H, sms),
@@ -1728,8 +1755,9 @@ def test_single_token_runs_the_programs_of_packed_rows(layout, heads, monkeypatc
     stride ``H * 128`` (packed rows) and runs the program ``_strided_role``
     names for packed rows where ``_one_token_packed`` holds (else, as on the
     gate of wider heads, it passes 0 and runs the program of other layouts);
-    the call that computes the weight gradient passes 0 in both.  ``dx`` and
-    ``dz`` are the bits of that call."""
+    the call that computes the weight gradient passes 0 in both (and runs
+    the program ``dw_module`` names).  ``dx`` and ``dz`` are the bits of
+    that call."""
     arch, sms = _device()
     routes = loader.ROUTES[arch]
     small = loader.PACKED_SMALL_ROWS_PER_SM[arch].get("bwd_bf16", 0)
@@ -1770,7 +1798,7 @@ def test_single_token_runs_the_programs_of_packed_rows(layout, heads, monkeypatc
     want = routes[_strided_role(arch, H, sms, packed)]
     head = D if heads_128 else 2 * D
     assert seen == [
-        (routes["bwd_bf16"], (0, 0, 0), head),
+        (loader.dw_module(arch, routes["bwd_bf16"], H, _clusters()), (0, 0, 0), head),
         (want, (tok, tok, tok), head),
     ], (layout, H, seen)
     assert dw is None
@@ -1939,10 +1967,258 @@ def test_long_rows_without_the_weight_gradient(launches):
         assert_zero(ws, f"the workspace after {want}")
 
 
+# The CTAs and the most rows of a backward role's programs of one CTA
+# (``SOLO``) and of one cluster (``CLUSTER``).
+SMALL_DW_RULES = {loader.SOLO: (1, 16), loader.CLUSTER: (16, 256)}
+# Shapes of the backward that computes the weight gradient around those
+# programs, as ``(T, H)``: 1, 15, 16, 17, 48, 128, 129, 255 and 256 rows, and
+# 257 (the role's module, a control).
+SMALL_DW_SHAPES = (
+    (1, 1),
+    (3, 5),
+    (1, 16),
+    (17, 1),
+    (1, 48),
+    (2, 64),
+    (3, 43),
+    (5, 51),
+    (16, 16),
+    (257, 1),
+)
+SMALL_DW_LAYOUTS = ("contiguous", "flat", "projection", "head_major", "misaligned")
+SMALL_DW_DATA = ("normal", "near_zero", "saturated")
+# The roles of ``_dw_calls``' calls, in order, and the names of its outputs.
+DW_CALL_ROLES = ("bwd_bf16", "bwd_bf16", "bwd_f32", "bwd_f32")
+DW_CALL_OUTPUTS = tuple(
+    f"{call} {name}"
+    for call in ("BF16", "BF16 accumulated", "FP32", "FP32 accumulated")
+    for name in ("dx", "dz", "dw")
+)
+
+
+def _small_suffix(role):
+    """The suffix of a role of ``CLUSTER_ROLES``: ``SOLO`` or ``CLUSTER``."""
+    return loader.SOLO if role.endswith(loader.SOLO) else loader.CLUSTER
+
+
+def _clusters():
+    """Whether this device runs the cluster programs."""
+    return loader.device_runs_clusters(torch.cuda.current_device())
+
+
+def _small_dw_module(arch, role, rows, clusters):
+    """The module a call of backward role ``role`` that computes the weight
+    gradient launches on ``rows`` rows (this test's own reading of the
+    routes): the role's program of one CTA up to 16 rows, of one cluster up
+    to 256 rows where ``clusters`` (the device runs it), else the role's
+    module."""
+    for suffix, (ctas, most) in SMALL_DW_RULES.items():
+        if rows <= most and (ctas == 1 or clusters):
+            return loader.ROUTES[arch][role + suffix]
+    return loader.ROUTES[arch][role]
+
+
+def _small_dw_modules(arch, rows, clusters):
+    """``_small_dw_module`` of each of ``_dw_calls``' calls."""
+    return [_small_dw_module(arch, role, rows, clusters) for role in DW_CALL_ROLES]
+
+
+def _dw_calls(dy, x, z, w, workspace=None):
+    """The backward calls that compute the weight gradient, of the roles
+    ``DW_CALL_ROLES``: a BF16 weight gradient, one accumulated onto 0.5, an
+    FP32 one and one accumulated onto 0.25, each on ``workspace``.  Their
+    ``dx``, ``dz`` and weight gradients (``DW_CALL_OUTPUTS``)."""
+    got = []
+    for dtype, start in ((torch.bfloat16, 0.5), (torch.float32, 0.25)):
+        fresh = torch.empty(D, dtype=dtype, device=x.device)
+        acc = torch.full((D,), start, dtype=dtype, device=x.device)
+        for grad_weight, accumulate in ((fresh, False), (acc, True)):
+            got += backward(
+                dy,
+                x,
+                z,
+                w,
+                EPS,
+                grad_weight=grad_weight,
+                accumulate_grad_weight=accumulate,
+                workspace=workspace,
+            )
+    return got
+
+
+def _assert_dw_calls_equal(got, want, what):
+    for a, b, name in zip(got, want, DW_CALL_OUTPUTS, strict=True):
+        assert_same_bits(a, b, f"{what}: {name}")
+
+
+@pytest.mark.parametrize("data", SMALL_DW_DATA)
+@pytest.mark.parametrize("layout", SMALL_DW_LAYOUTS)
+@pytest.mark.parametrize("shape", [f"{T}x{H}" for T, H in SMALL_DW_SHAPES])
+def test_small_row_programs_give_the_bits_of_their_modules(
+    shape, layout, data, launches, monkeypatch
+):
+    """``SMALL_DW_SHAPES`` in every layout of ``make`` (``SMALL_DW_LAYOUTS``)
+    with ``SMALL_DW_DATA``: ``REPEATS`` rounds of ``_dw_calls`` run the
+    programs ``_small_dw_modules`` names (one CTA up to 16 rows, one cluster
+    up to 256 rows where ``device_runs_clusters`` holds, else the role's
+    module) and give the ``dx``, ``dz`` and weight-gradient bits, fresh and
+    accumulated, of the role's module on the same calls (``dw_module``
+    patched to keep the module)."""
+    arch, _ = _device()
+    clusters = _clusters()
+    T, H = (int(v) for v in shape.split("x"))
+    rows = T * H
+    x, z, w, dy = make(T, H, layout=layout, data=data, seed=80)
+    runs = []
+    for i in range(REPEATS):
+        launches.clear()
+        runs.append(_dw_calls(dy, x, z, w))
+        assert launches == _small_dw_modules(arch, rows, clusters), (i, launches)
+    monkeypatch.setattr(loader, "dw_module", _keep_module)
+    launches.clear()
+    want = _dw_calls(dy, x, z, w)
+    assert launches == [loader.ROUTES[arch][role] for role in DW_CALL_ROLES], launches
+    for i, got in enumerate(runs):
+        _assert_dw_calls_equal(got, want, f"{shape} {layout} {data} call {i}")
+
+
+@pytest.mark.parametrize("T,H", [(1, 16), (1, 128), (2, 128)])
+def test_small_row_programs_meet_the_naive_tier(T, H, record_property):
+    """``check_all`` on the rows of the program of one CTA (16) and of one
+    cluster (128 and 256, where ``device_runs_clusters`` holds)."""
+    check_all(record_property, lambda s: make(T, H, seed=s), seed=81)
+
+
+@pytest.mark.parametrize("T,H", [(1, 16), (2, 128)], ids=["one_cta", "one_cluster"])
+def test_small_row_programs_use_no_workspace(T, H, monkeypatch, launches):
+    """The program of one CTA (16 rows) and of one cluster (256 rows, where
+    ``device_runs_clusters`` holds) make no stream workspace and take no
+    reserve workspace, eagerly and in CUDA Graph capture, whose graph holds
+    their kernels only (no fill kernel, memset or event wait); a caller
+    workspace filled with 7 is checked and left as it is, and a zero one
+    stays zero.  Every call and every replay gives the bits of the same calls
+    before the workspace tables were emptied."""
+    pytest.importorskip("cuda.bindings.runtime")
+    arch, _ = _device()
+    clusters = _clusters()
+    rows = T * H
+    if rows > SMALL_DW_RULES[loader.SOLO][1] and not clusters:
+        pytest.skip("this device runs no cluster program")
+    x, z, w, dy = make(T, H, seed=82)
+    want = _dw_calls(dy, x, z, w)
+    filled = workspace_for(rows, x.device).fill_(7.0)
+    zero = workspace_for(rows, x.device)
+    torch.cuda.synchronize()
+    monkeypatch.setattr(pkg, "_STREAM_WORKSPACES", {})
+    monkeypatch.setattr(pkg, "_RESERVES", {})
+    monkeypatch.setattr(pkg, "_CAPTURE_WORKSPACES", {})
+    modules = _small_dw_modules(arch, rows, clusters)
+    for i, workspace in enumerate((None, filled, zero, None)):
+        launches.clear()
+        got = _dw_calls(dy, x, z, w, workspace=workspace)
+        assert launches == modules, (i, launches)
+        _assert_dw_calls_equal(got, want, f"{rows} rows, call {i}")
+    torch.cuda.synchronize()
+    assert torch.equal(filled, torch.full_like(filled, 7.0)), "the caller workspace"
+    assert_zero(zero, "the zero caller workspace")
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    f32s = [torch.empty(D, dtype=torch.float32, device=x.device) for _ in range(2)]
+    accs = [torch.empty(D, dtype=torch.float32, device=x.device) for _ in range(2)]
+    graph = _kept_graph()
+    launches.clear()
+    with torch.cuda.graph(graph):
+        outs = []
+        for ws, f32, acc in zip((None, filled), f32s, accs, strict=True):
+            outs.append(backward(dy, x, z, w, EPS, workspace=ws))
+            backward(dy, x, z, w, EPS, grad_weight=f32, workspace=ws)
+            backward(
+                dy,
+                x,
+                z,
+                w,
+                EPS,
+                grad_weight=acc,
+                accumulate_grad_weight=True,
+                workspace=ws,
+            )
+    assert launches == [modules[0], modules[2], modules[3]] * 2, launches
+    types = _graph_node_types(graph)
+    assert types == ["KERNEL"] * 6, types
+    assert pkg._STREAM_WORKSPACES == {} and pkg._RESERVES == {}
+    assert pkg._CAPTURE_WORKSPACES == {}
+    for k in range(3):
+        for out in outs:
+            for t in out:
+                t.zero_()
+        for f32, acc in zip(f32s, accs, strict=True):
+            f32.zero_()
+            acc.fill_(0.25)
+        graph.replay()
+        torch.cuda.synchronize()
+        for i, (out, f32, acc) in enumerate(zip(outs, f32s, accs, strict=True)):
+            what = f"{rows} rows, replay {k} call {i}"
+            # _dw_calls' outputs: 0-2 BF16, 8 FP32 dw, 11 accumulated FP32 dw
+            for a, b, name in zip(out, want[:3], ("dx", "dz", "dw"), strict=True):
+                assert_same_bits(a, b, f"{what}: BF16 {name}")
+            assert_same_bits(f32, want[8], f"{what}: FP32 dw")
+            assert_same_bits(acc, want[11], f"{what}: FP32 accumulated dw")
+    assert torch.equal(filled, torch.full_like(filled, 7.0)), "the caller workspace"
+
+
+@pytest.mark.parametrize("sm_count", OTHER_SM_COUNTS)
+def test_small_row_programs_on_other_sm_counts(sm_count, launches):
+    """With the SM count patched to ``sm_count`` (``device_sm_count``: the
+    host's routing and grids; ``device_runs_clusters`` reads the device
+    itself), ``_dw_calls`` on ``SMALL_DW_SHAPES`` up to 256 rows run the
+    programs ``_small_dw_modules`` names, whose grids do not depend on the
+    SM count, and give the bits of the same calls on this device; from 4 SMs
+    the role's module (``dw_module`` patched to keep it), whose grid there
+    is one CTA a 16-row block, gives them too."""
+    arch, _ = _device()
+    clusters = _clusters()
+    for T, H in SMALL_DW_SHAPES[:-1]:
+        rows = T * H
+        x, z, w, dy = make(T, H, seed=83)
+        want = _dw_calls(dy, x, z, w)
+        with pytest.MonkeyPatch.context() as patch:
+            for module in (pkg, loader):
+                patch.setattr(module, "device_sm_count", lambda index: sm_count)
+            launches.clear()
+            got = _dw_calls(dy, x, z, w)
+            assert launches == _small_dw_modules(arch, rows, clusters), launches
+            _assert_dw_calls_equal(got, want, f"{T}x{H} on {sm_count} SMs")
+            if sm_count < 4:
+                continue
+            patch.setattr(loader, "dw_module", _keep_module)
+            launches.clear()
+            got = _dw_calls(dy, x, z, w)
+            assert launches == [loader.ROUTES[arch][r] for r in DW_CALL_ROLES], launches
+            _assert_dw_calls_equal(got, want, f"{T}x{H}, the module on {sm_count} SMs")
+
+
+def test_devices_without_clusters_run_the_module_past_16_rows(launches):
+    """Where ``device_runs_clusters`` fails (patched: a device of fewer than
+    16 SMs or a MIG instance), ``_dw_calls`` on ``SMALL_DW_SHAPES`` run the
+    program of one CTA up to 16 rows and the role's module past that, with
+    the bits of the same calls on this device."""
+    arch, _ = _device()
+    for T, H in SMALL_DW_SHAPES:
+        rows = T * H
+        x, z, w, dy = make(T, H, seed=84)
+        want = _dw_calls(dy, x, z, w)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loader, "device_runs_clusters", lambda index: False)
+            launches.clear()
+            got = _dw_calls(dy, x, z, w)
+        assert launches == _small_dw_modules(arch, rows, False), launches
+        _assert_dw_calls_equal(got, want, f"{T}x{H} without clusters")
+
+
 def test_workspace_size_and_layout():
     """The backward's workspace: ``workspace_elements`` FP32 elements (4738,
     18952 bytes) for every backward module (both weight-gradient dtypes and
-    their long modules, so one stream workspace serves them all) and every row
+    their long modules, so one stream workspace serves them all; the
+    programs of one CTA and of one cluster have none) and every row
     count, zero-filled, 16-byte aligned; negative rows are a ``ValueError``.
     Its views are the ``uint64`` digit counters (``slots * limbs * 128``), one
     ``uint32`` flag word a column and the two ``uint32`` words of the arrival
@@ -1954,6 +2230,8 @@ def test_workspace_size_and_layout():
         for role in ("bwd_bf16", "bwd_f32", *loader.LONG_ROLES)
     ]
     assert len(set(names)) == 4
+    for role in loader.CLUSTER_ROLES:
+        assert "workspace" not in loader.MODULES[loader.route_module(arch, role)], role
     elements = loader.workspace_elements(names[0])
     for name in names:
         shape = loader.MODULES[name]["workspace"]
@@ -2760,7 +3038,9 @@ def test_registry_records_reference_the_build_manifest():
     """Every call role (``ROLES``: the forward and the backward of each
     weight-gradient dtype) ships one module per architecture, every
     architecture routes the long module of each backward role
-    (``LONG_ROLES``), an architecture may also route a forward of packed rows
+    (``LONG_ROLES``) and the programs of one CTA and of one cluster of each
+    backward role (``CLUSTER_ROLES``), an architecture may also route a
+    forward of packed rows
     (``PACKED_ROLES``) and programs of a backward without the weight gradient
     (``NODW_ROLES``; ``NODW_STRIDED_ROWS_PER_SM`` cuts the rows between the
     strided and the claimed one exactly where both are routed; the strided
@@ -2785,10 +3065,18 @@ def test_registry_records_reference_the_build_manifest():
         NODW_STRIDED_SMALL,
         NODW_LONG,
     )
+    assert loader.SOLO == "_solo" and loader.CLUSTER == "_cluster"
+    assert loader.CLUSTER_ROLES == (
+        "bwd_bf16" + loader.SOLO,
+        "bwd_f32" + loader.SOLO,
+        "bwd_bf16" + loader.CLUSTER,
+        "bwd_f32" + loader.CLUSTER,
+    )
     assert loader.GRID_KINDS == (
         "persistent_row_blocks",
         "claimed_row_blocks",
         "strided_row_blocks",
+        "cluster",
     )
     assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
     for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
@@ -2822,12 +3110,13 @@ def test_registry_records_reference_the_build_manifest():
     package = Path(cake_build.__file__).parent
     for arch in loader.ARCHES:
         roles = set(loader.ROUTES[arch])
-        assert {*loader.ROLES, *loader.LONG_ROLES} <= roles
+        assert {*loader.ROLES, *loader.LONG_ROLES, *loader.CLUSTER_ROLES} <= roles
         assert roles <= {
             *loader.ROLES,
             *loader.LONG_ROLES,
             *loader.PACKED_ROLES,
             *loader.NODW_ROLES,
+            *loader.CLUSTER_ROLES,
         }
         for role, name in loader.ROUTES[arch].items():
             record = loader.MODULES[name]
@@ -2890,9 +3179,10 @@ BACKWARD_ARGUMENTS = {
 
 
 def test_records_launch_alone_and_take_the_hosts_arguments():
-    """Every record launches without a cluster, cooperatively or with
-    programmatic dependent launch, and its kernel parameters map exactly onto
-    the logical arguments the host passes.  Each forward (``fwd`` and
+    """Every record launches without a cooperative launch or programmatic
+    dependent launch, and without a cluster but the programs of one cluster,
+    and its kernel parameters map exactly onto the logical arguments the
+    host passes.  Each forward (``fwd`` and
     ``fwd_packed``): 128 threads, no dynamic shared memory, no workspace, a
     ``persistent_row_blocks`` rule of positive ``ctas_per_sm``,
     ``max_blocks_per_cta``, ``persistent_from_rows_per_sm`` and
@@ -2911,10 +3201,15 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
     ``bwd_bf16`` module's CTAs (the 256-thread one) or 8 CTAs per SM over
     8-row blocks (the 128-thread builds, which launch 128 threads); the
     build of packed rows only launches and takes its arguments as the
-    128-thread build does."""
+    128-thread build does.  Each program of one CTA or of one cluster
+    (``CLUSTER_ROLES``): 256 threads, no workspace, the ``cluster`` rule of
+    its CTAs and the most rows it serves (``SMALL_DW_RULES``: 1 CTA up to 16
+    rows, 16 CTAs up to 256 rows), launched as one cluster of its CTAs, and
+    the arguments, entry and architectures of its role's module."""
     for name, record in loader.MODULES.items():
         launch = record["launch"]
-        assert tuple(launch["cluster"]) == (1, 1, 1), name
+        rule = record["grid_rule"]
+        assert tuple(launch["cluster"]) == (rule.get("cluster", 1), 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         logical = record["logical"]
         plan = record["arg_plan"]
@@ -2924,7 +3219,6 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             else:
                 assert key in logical, (name, kind, key)
         assert {key for kind, key in plan if kind != "grid"} == set(logical), name
-        rule = record["grid_rule"]
         if record["role"] in ("fwd", *loader.PACKED_ROLES):
             assert rule["kind"] == "persistent_row_blocks", name
             positive = (
@@ -2944,6 +3238,12 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             assert rule == NODW_STRIDED_GRID_RULES[record["role"]], name
             threads = NODW_STRIDED_THREADS[record["role"]]
             assert tuple(launch["block"]) == (threads, 1, 1), name
+            assert "workspace" not in record, name
+            assert set(logical.values()) == BACKWARD_ARGUMENTS, name
+        elif record["role"] in loader.CLUSTER_ROLES:
+            ctas, most = SMALL_DW_RULES[_small_suffix(record["role"])]
+            assert rule == {"cluster": ctas, "kind": "cluster", "max_rows": most}, name
+            assert tuple(launch["block"]) == (256, 1, 1), name
             assert "workspace" not in record, name
             assert set(logical.values()) == BACKWARD_ARGUMENTS, name
         else:
@@ -3011,6 +3311,13 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             small, build = (loader.MODULES[routes[r]] for r in NODW_128)
             for key in ("grid_rule", "launch", "logical", "arg_plan", "ffi_entry"):
                 assert small[key] == build[key], (arch, key)
+        for role in loader.CLUSTER_ROLES:
+            twin_role = role.removesuffix(_small_suffix(role))
+            small, twin = (loader.MODULES[routes[r]] for r in (role, twin_role))
+            for key in ("logical", "arg_plan", "ffi_entry", "arches"):
+                assert small[key] == twin[key], (arch, role, key)
+            for key in ("block", "cooperative", "use_pdl"):
+                assert small["launch"][key] == twin["launch"][key], (arch, role, key)
 
 
 # Without a device: the grids of both rules at several SM counts (small
@@ -3296,6 +3603,79 @@ def test_nodw_module_and_the_strided_grid(sm_count):
         for rows in rows_list:
             got = loader.launch_grid(twin, rows=rows, sm_count=sm_count)
             assert got == (min(-(-rows // 16), wave), 1, 1), (arch, rows, got)
+
+
+def test_the_small_row_plans_are_those_of_the_routes():
+    # dw_module reads the plans built once at import (_DW_PLANS): they are
+    # the plans the routes and the small-row programs' rules give, for every
+    # routed architecture and module
+    assert loader._DW_PLANS == {
+        arch: {name: loader._dw_plan(arch, name) for name in loader.MODULES}
+        for arch in loader.ROUTES
+    }
+
+
+# Row counts around the cuts of the programs of one CTA and of one cluster,
+# and far past them.
+SMALL_DW_ROWS = (1, 2, 15, 16, 17, 48, 128, 129, 255, 256, 257, 4096, 2**31 - 1)
+
+
+@pytest.mark.parametrize("sm_count", GRID_SM_COUNTS)
+def test_dw_module_and_the_small_row_grids(sm_count):
+    """``dw_module`` and the small-row grids (host only): a backward role's
+    module gives way to its program of one CTA up to 16 rows and, with
+    ``clusters`` (the default), to its program of one cluster up to 256 rows
+    (``_small_dw_module``); every other module is kept at every row count.
+    The program of one CTA launches one CTA and that of one cluster its 16
+    CTAs at every row count and SM count; from 4 SMs a role's module
+    launches one CTA a 16-row block up to 256 rows."""
+    for arch in loader.ARCHES:
+        routes = loader.ROUTES[arch]
+        for name, record in loader.MODULES.items():
+            role = record["role"]
+            for rows in SMALL_DW_ROWS:
+                for clusters in (True, False):
+                    want = name
+                    if role in DW_CALL_ROLES:
+                        want = _small_dw_module(arch, role, rows, clusters)
+                    got = loader.dw_module(arch, name, rows, clusters)
+                    assert got == want, (arch, name, rows, clusters, got)
+                got = loader.dw_module(arch, name, rows)
+                assert got == loader.dw_module(arch, name, rows, True), (arch, rows)
+            if role in loader.CLUSTER_ROLES:
+                ctas = SMALL_DW_RULES[_small_suffix(role)][0]
+                for rows in SMALL_DW_ROWS:
+                    got = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+                    assert got == (ctas, 1, 1), (arch, name, rows, got)
+        if sm_count < 4:
+            continue
+        for role in ("bwd_bf16", "bwd_f32"):
+            record = loader.MODULES[routes[role]]
+            for rows in range(1, 257):
+                got = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+                assert got == (-(-rows // 16), 1, 1), (arch, role, rows, got)
+
+
+def test_device_runs_clusters_reads_the_sm_count_and_the_name(monkeypatch):
+    """``device_runs_clusters``' rule (the uncached function, the device's
+    properties patched): a device of at least ``CLUSTER_MIN_SMS`` (16) SMs
+    runs the cluster programs unless it is a MIG instance (``MIG`` in its
+    name); a device of fewer SMs does not."""
+    assert loader.CLUSTER_MIN_SMS == 16
+    rule = loader.device_runs_clusters.__wrapped__
+    for count, name, want in (
+        (148, "NVIDIA B200", True),
+        (16, "NVIDIA B200", True),
+        (15, "NVIDIA B200", False),
+        (1, "NVIDIA B200", False),
+        (16, "NVIDIA B200 MIG 1g.23gb", False),
+        (148, "NVIDIA B200 MIG 7g.180gb", False),
+    ):
+        properties = SimpleNamespace(multi_processor_count=count, name=name)
+        monkeypatch.setattr(
+            torch.cuda, "get_device_properties", lambda index, p=properties: p
+        )
+        assert rule(0) is want, (count, name)
 
 
 # The strides (in elements) of ``dy``, ``x`` and ``z`` of 48 heads the
