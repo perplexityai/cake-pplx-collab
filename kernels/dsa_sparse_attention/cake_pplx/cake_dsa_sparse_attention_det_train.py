@@ -53,8 +53,19 @@ the flat rope form, the flat NoPE form and the packed NoPE form::
 The packed forward also returns the global rows and row lengths that its
 backward reads.
 
-The NoPE entries take the ``sink`` keyword of the non-deterministic package's
-entries with ``None`` only: a sink raises ``NotImplementedError`` here.
+The NoPE entries, flat and packed, take an optional trainable per-head sink,
+``sink`` FP32 ``[64]`` (SM100 / SM103 / SM107), as the non-deterministic
+package's NoPE entries do: it adds ``exp(sink[h])`` to every row's softmax
+denominator, ``lse`` includes it, and its gradient ``dsink`` flows back
+through autograd (the step backwards return it); ``dsink`` repeats bit for bit
+too.
+
+A call without query rows (``T = 0``) launches nothing: the forwards return
+empty ``out`` / ``lse`` / ``o_lo``; the NoPE step backwards return an empty
+``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
+sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
+``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
 
 Their autograd Functions, ``CakeDSASparseAttentionDetFunction`` (both rope
 entries), ``CakeDSASparseAttentionDetNopeFunction`` and
@@ -65,10 +76,11 @@ here.  The backward of either program may split its main stage into key-range
 passes (as the non-deterministic package's policy does, or as ``key_passes``
 asks; the NoPE policy keeps one pass unless ``key_passes`` asks for more).
 Every backward accumulates in one form, and its dK / dV do not depend on the
-pass count.  The flat rope entry and the rope step backward take
-``num_segments``, the packed segment count of the key row (default 1): a
-count above 1 plans one pass unless ``key_passes`` overrides, as the packed
-entry does for the same rows.
+pass count.  The flat entries and the step backwards of both forms take
+``num_segments``, the packed segment count of the key row (default 1): on
+the rope form a count above 1 plans one pass unless ``key_passes``
+overrides, as the packed entry does for the same rows; the NoPE form plans
+one pass whatever the count (its policy never plans more).
 
 Usage::
 
@@ -195,16 +207,6 @@ def _check_num_segments(num_segments: Any) -> int:
             f"got {shown}"
         )
     return int(num_segments)
-
-
-def _refuse_sink(sink: Optional[torch.Tensor]) -> None:
-    """The NoPE entries take the ``sink`` keyword of the non-deterministic package's entries, ``None`` only: this
-    package has no sink build."""
-    if sink is not None:
-        raise NotImplementedError(
-            "a sink is not supported by the deterministic package: it has no sink build of the NoPE kernels; "
-            "the non-deterministic package's flat NoPE entries take one"
-        )
 
 
 @cake_api
@@ -485,6 +487,7 @@ def cake_dsa_sparse_attention_det_nope(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
+    num_segments: int = 1,
 ):
     r"""Differentiable top-k sparse MLA attention without a rope part (NoPE:
     the whole score is the 512-dimensional latent product) for training, 64
@@ -523,6 +526,20 @@ def cake_dsa_sparse_attention_det_nope(
         route.
     softmax_scale : Optional[float]
         Defaults to ``1 / 16``.
+    sink : Optional[torch.Tensor]
+        FP32 ``[64]`` trainable per-head sink, contiguous, on the device of
+        ``q``, as in the non-deterministic package: it adds ``exp(sink[h])``
+        (unscaled, no value term) to every row's softmax denominator, so
+        ``lse`` includes it and a row without a valid slot gives ``out = 0``
+        and ``lse = sink[h]``; ``-inf`` disables the sink of its head.  Its
+        gradient ``dsink[h] = -sum_t exp(sink[h] - lse[t]) * delta[t]``
+        (``delta = <dout, O>``) is summed over all rows of the call in FP32,
+        in a fixed chunk partition and order that do not depend on the SM
+        count or the grid: it repeats bit for bit.  Only the metadata is
+        checked (no device synchronization): ``+inf`` and NaN values are not
+        supported.  A call without query rows (``T = 0``) launches nothing:
+        it checks the sink's metadata and device, returns empty outputs and
+        gives a zero ``dsink``.  ``None`` (default) runs without a sink.
     return_lse : bool
         Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows).
@@ -553,6 +570,13 @@ def cake_dsa_sparse_attention_det_nope(
         validated, without effect.
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`.
+    num_segments : int
+        The packed segment count of the key row, as in
+        :func:`cake_dsa_sparse_attention_det` (a Python ``int``, read on the
+        host; default 1).  The NoPE key-pass policy plans one pass whatever
+        the count, so it selects nothing here; it is accepted for parity with
+        the non-deterministic package.  ``bool``, a tensor or a value below 1
+        raises ``ValueError``.
 
     Returns
     -------
@@ -561,7 +585,7 @@ def cake_dsa_sparse_attention_det_nope(
     lse : torch.Tensor
         Only with ``return_lse=True``.
 
-    Gradients flow to ``q`` and ``kv``.  ``dkv`` is formed in FP32 from the
+    Gradients flow to ``q`` and ``kv`` (and ``sink`` when given).  ``dkv`` is formed in FP32 from the
     integer sums and handed over in FP32: through ``dkv_acc`` when given,
     otherwise as the ``kv`` gradient -- which the autograd engine casts to the
     dtype of the ``kv`` leaf (BF16 for a BF16 leaf); call
@@ -578,7 +602,7 @@ def cake_dsa_sparse_attention_det_nope(
     Host side as in :func:`cake_dsa_sparse_attention_det` (the same
     ``BINDING_CACHE``, under keys disjoint from the rope entries).
     """
-    _refuse_sink(sink)
+    num_segments = _check_num_segments(num_segments)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).cake_dsa_sparse_attention_det_nope(
@@ -591,8 +615,10 @@ def cake_dsa_sparse_attention_det_nope(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 
@@ -638,7 +664,10 @@ def cake_dsa_sparse_attention_det_nope_varlen(
     and the caller's ``topk_length`` is a position cut applied before
     compaction.  See :func:`cake_dsa_sparse_attention_det_nope` for the other
     arguments, the ``1 / 16`` default scale, the FP32 ``dK + dV`` semantics and
-    the returns.
+    the returns.  ``sink`` as there: the forward of every route runs the sink
+    build over the packed rows (a row whose every slot is invalid gives
+    ``out = 0`` and ``lse = sink[h]``; a zero-length query segment adds no
+    row), and ``dsink`` is summed over all packed rows of the call.
 
     ``cu_seqlens_q`` and ``cu_seqlens_k`` are caller-owned prefix sums: int32
     ``[num_docs + 1]`` tensors of one length on the device of ``q``, starting
@@ -667,7 +696,6 @@ def cake_dsa_sparse_attention_det_nope_varlen(
     check_dst_map : Optional[bool]
         As in :func:`cake_dsa_sparse_attention_det`.
     """
-    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).cake_dsa_sparse_attention_det_nope_varlen(
@@ -688,6 +716,7 @@ def cake_dsa_sparse_attention_det_nope_varlen(
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
         check_cu_seqlens=check_cu_seqlens,
+        sink=sink,
     )
 
 
@@ -822,11 +851,19 @@ def cake_dsa_sparse_attention_det_train_nope_forward(
     ``topk_length``, the table has fewer than
     ``cake_backend.NOPE_CONVERT_SLOT_LIMIT`` slots, or the rows have no holes
     (at or above that limit, without ``topk_length``, the autograd entry
-    compacts the rows first).
+    compacts the rows first). With ``sink`` (FP32 ``[64]``, as in
+    :func:`cake_dsa_sparse_attention_det_nope`) ``lse`` includes the sink
+    (``sink[h]`` on a row without a valid slot); pass the same ``sink`` to the
+    step backward. A call without query rows returns empty outputs without
+    launching.
     """
-    _refuse_sink(sink)
     return _backend(backend).forward_nope(
-        q, kv, indices, topk_length=topk_length, softmax_scale=softmax_scale
+        q,
+        kv,
+        indices,
+        topk_length=topk_length,
+        softmax_scale=softmax_scale,
+        sink=sink,
     )
 
 
@@ -849,8 +886,10 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """Training backward of the NoPE form without autograd: ``(dq, dkv)``.
+    num_segments: int = 1,
+) -> tuple[Optional[torch.Tensor], ...]:
+    """Training backward of the NoPE form without autograd: ``(dq, dkv)``,
+    or ``(dq, dkv, dsink)`` with a ``sink``.
 
     ``out``, ``o_lo`` and ``lse`` are the outputs of
     :func:`cake_dsa_sparse_attention_det_train_nope_forward` on the same
@@ -864,9 +903,16 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
     of the autograd entry's backward on the same inputs and ``key_passes``
     under the conditions of
     :func:`cake_dsa_sparse_attention_det_train_nope_forward`. Nothing raises or
-    warns under ``torch.use_deterministic_algorithms(True)``.
+    warns under ``torch.use_deterministic_algorithms(True)``. ``sink``: the
+    sink the step forward ran with; the call then also returns ``dsink``, FP32
+    ``[64]``, summed over all rows (``(dq, None, dsink)`` with a tensor
+    ``dkv_acc``). ``num_segments`` (the packed segment count of the key row,
+    default 1) as in :func:`cake_dsa_sparse_attention_det_nope`. A call
+    without query rows launches nothing and returns an empty ``dq``, a zero
+    ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a ``sink``, a zero
+    ``dsink``.
     """
-    _refuse_sink(sink)
+    num_segments = _check_num_segments(num_segments)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).backward_nope(
@@ -882,8 +928,10 @@ def cake_dsa_sparse_attention_det_train_nope_backward(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 
@@ -913,9 +961,11 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_forward(
     five unchanged to
     :func:`cake_dsa_sparse_attention_det_train_nope_varlen_backward`. Every
     output repeats bit for bit and is that of the autograd entry's forward on
-    the same inputs.
+    the same inputs. With ``sink`` (FP32 ``[64]``, as in
+    :func:`cake_dsa_sparse_attention_det_nope_varlen`) ``lse`` includes the
+    sink (``sink[h]`` on a row without a valid slot); pass the same ``sink``
+    to the step backward.
     """
-    _refuse_sink(sink)
     return _backend(backend).forward_nope_varlen(
         q,
         kv,
@@ -926,6 +976,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_forward(
         softmax_scale=softmax_scale,
         topk_length=topk_length,
         check_cu_seqlens=check_cu_seqlens,
+        sink=sink,
     )
 
 
@@ -949,9 +1000,9 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_backward(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[Optional[torch.Tensor], ...]:
     """Training backward of the packed NoPE form without autograd: ``(dq,
-    dkv)``.
+    dkv)``, or ``(dq, dkv, dsink)`` with a ``sink``.
 
     ``out``, ``o_lo``, ``lse``, ``indices`` and ``topk_length`` are the outputs
     of :func:`cake_dsa_sparse_attention_det_train_nope_varlen_forward`;
@@ -959,9 +1010,10 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_backward(
     in :func:`cake_dsa_sparse_attention_det_train_nope_backward`. Every
     gradient repeats bit for bit and is that of the autograd entry's backward
     on the same inputs and ``key_passes``. Nothing raises or warns under
-    ``torch.use_deterministic_algorithms(True)``.
+    ``torch.use_deterministic_algorithms(True)``. ``sink``: the sink the step
+    forward ran with; the call then also returns ``dsink``, FP32 ``[64]``,
+    summed over all packed rows of the call.
     """
-    _refuse_sink(sink)
     if check_dst_map is None:
         check_dst_map = _check_dst_map_from_environment()
     return _backend(backend).backward_nope(
@@ -980,6 +1032,7 @@ def cake_dsa_sparse_attention_det_train_nope_varlen_backward(
         num_segments=int(cu_seqlens_k.numel()) - 1,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 

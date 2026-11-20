@@ -430,7 +430,9 @@ def _launch(
     that many times the record's untrimmed grid (``launch_grid`` without the
     row), never trimmed to whole channel-tile ranks.  The plan names the
     device's architecture, so a forward row of ``NARROW_TILE_WIDTHS`` runs its
-    width from the architecture's token floor (``cake_jit.NARROW_WIDTH_FLOORS``).
+    width from the architecture's token floor (``cake_jit.NARROW_WIDTH_FLOORS``)
+    and a forward row of ``cake_jit.NARROW_ROW_FLOORS`` (C = 520 to 568) keeps
+    one tile below its own floor.
     """
 
     arch = _loader.device_arch(device_index)
@@ -563,9 +565,12 @@ def cake_causal_conv1d_det_train_forward_workspace_bytes(
     tile), sized by the most over every forward program of every forward route
     of the architecture and both channel-tile plans of a row whose tiles change
     at a token floor (``cake_jit.forward_workspace_words``,
-    ``cake_jit.NARROW_WIDTH_FLOORS``), so one buffer serves every route and
-    token count; the size depends on ``C`` only (``S`` is checked and
-    otherwise unused, as for the backward helper).  The buffer must be zero
+    ``cake_jit.NARROW_WIDTH_FLOORS`` and ``cake_jit.NARROW_ROW_FLOORS``), so
+    one buffer serves every route and token count; the size depends on ``C``
+    only (``S`` is checked and otherwise unused, as for the backward helper).
+    From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
+    before), so a buffer sized by an earlier release raises ``ValueError``
+    there from the row's token floor.  The buffer must be zero
     before its first launch; every launch leaves it zero, so one buffer serves
     every later forward call of one stream, CUDA Graph replays included,
     without zeroing.  Two launches that may run at once (on two streams, or

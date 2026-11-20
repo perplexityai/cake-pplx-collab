@@ -138,30 +138,109 @@ def test_readme_states_every_output():
         "cake_dsa_sparse_attention_det_train_nope_varlen_backward",
     ],
 )
-def test_nope_entries_refuse_a_sink(name, monkeypatch):
-    """The NoPE entries take the ``sink`` keyword of the non-deterministic entries with ``None`` only: this package
-    has no sink build, so a sink raises ``NotImplementedError`` before any argument is read or the backend is
-    reached."""
+def test_nope_entries_forward_the_sink(name, monkeypatch):
+    """The NoPE entries take the ``sink`` keyword of the non-deterministic entries and hand it to the backend as given
+    (``None`` by default) without reading it."""
+    seen = []
 
-    def refuse(*args, **kwargs):
-        raise AssertionError("a call with a sink must not reach the backend")
+    class Backend:
+        def __getattr__(self, attr):
+            def call(*args, **kwargs):
+                seen.append((attr, kwargs))
+                return attr
 
-    monkeypatch.setattr(public_api, "_backend", refuse)
+            return call
+
+    monkeypatch.setattr(public_api, "_backend", lambda backend: Backend())
     entry = getattr(public_api, name)
     parameters = inspect.signature(entry).parameters.values()
     positional = [
         p for p in parameters if p.kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
     ]
-    # the required keyword-only arguments (the packed backward's ``topk_length``) stand as ``None`` as well
+    # the operands stand as ``None`` (the packed backward reads the length of ``cu_seqlens_k``), and so do the
+    # required keyword-only arguments (the packed backward's ``topk_length``)
+    args = [
+        torch.zeros(3, dtype=torch.int32) if p.name.startswith("cu_seqlens") else None
+        for p in positional
+    ]
     required = {
         p.name: None
         for p in parameters
         if p.kind is inspect.Parameter.KEYWORD_ONLY
         and p.default is inspect.Parameter.empty
     }
-    with pytest.raises(NotImplementedError, match="sink"):
-        entry(*([None] * len(positional)), **required, sink=torch.zeros(64))
     assert inspect.signature(entry).parameters["sink"].default is None
+    entry(*args, **required)
+    sink = torch.zeros(64)
+    entry(*args, **required, sink=sink)
+    assert len(seen) == 2 and seen[0][0] == seen[1][0]
+    assert seen[0][1]["sink"] is None and seen[1][1]["sink"] is sink
+    assert {k: v for k, v in seen[0][1].items() if k != "sink"} == {
+        k: v for k, v in seen[1][1].items() if k != "sink"
+    }
+
+
+def test_nope_entries_hand_num_segments_to_the_backend(monkeypatch):
+    """The flat NoPE entry and the NoPE step backward hand ``num_segments`` to the backend as a Python ``int``: 1 by
+    default, the caller's count when given, with every other keyword as before; the packed step backward hands the
+    documents' count (``len(cu_seqlens_k) - 1``); a bad count raises ``ValueError`` naming it before the backend."""
+    seen = {}
+
+    def flat(q, kv, indices, **kwargs):
+        seen["flat"] = kwargs
+        return "flat"
+
+    def backward_nope(*args, **kwargs):
+        seen["backward"] = (len(args), kwargs)
+        return "backward"
+
+    monkeypatch.setattr(cake_backend, "cake_dsa_sparse_attention_det_nope", flat)
+    monkeypatch.setattr(cake_backend, "backward_nope", backward_nope)
+    monkeypatch.delenv(public_api.CHECK_DST_MAP_ENV, raising=False)
+    q = torch.zeros(8, 64, 512, dtype=torch.bfloat16)
+    kv = torch.zeros(16, 512, dtype=torch.bfloat16)
+    idx = torch.zeros(8, 5, dtype=torch.int32)
+    out = torch.zeros(8, 64, 512, dtype=torch.bfloat16)
+    lse = torch.zeros(8, 64)
+    flat_default = dict(
+        topk_length=None,
+        softmax_scale=None,
+        return_lse=False,
+        key_passes=None,
+        dkv_acc=None,
+        dkv_dst_map=None,
+        num_segments=1,
+        dkv_direct=None,
+        check_dst_map=False,
+        sink=None,
+    )
+    assert public_api.cake_dsa_sparse_attention_det_nope(q, kv, idx) == "flat"
+    assert seen["flat"] == flat_default
+    public_api.cake_dsa_sparse_attention_det_nope(
+        q, kv, idx, num_segments=8, key_passes=2
+    )
+    assert seen["flat"] == dict(flat_default, num_segments=8, key_passes=2)
+    assert type(seen["flat"]["num_segments"]) is int
+    step_backward = public_api.cake_dsa_sparse_attention_det_train_nope_backward
+    assert step_backward(q, kv, idx, out, out, lse, out) == "backward"
+    default = seen["backward"]
+    assert default[0] == 7 and default[1]["num_segments"] == 1
+    step_backward(q, kv, idx, out, out, lse, out, num_segments=3)
+    assert seen["backward"] == (7, dict(default[1], num_segments=3))
+    assert type(seen["backward"][1]["num_segments"]) is int
+    varlen_backward = (
+        public_api.cake_dsa_sparse_attention_det_train_nope_varlen_backward
+    )
+    cu_k = torch.tensor([0, 6, 6, 16], dtype=torch.int32)
+    varlen_backward(q, kv, idx, out, out, lse, out, cu_k, topk_length=idx[:, 0])
+    assert seen["backward"][1]["num_segments"] == 3
+    for bad in (0, -1, True, 2.0, "2", torch.tensor(2)):
+        seen.clear()
+        with pytest.raises(ValueError, match="num_segments"):
+            public_api.cake_dsa_sparse_attention_det_nope(q, kv, idx, num_segments=bad)
+        with pytest.raises(ValueError, match="num_segments"):
+            step_backward(q, kv, idx, out, out, lse, out, num_segments=bad)
+        assert seen == {}
 
 
 def _rope_host_views():

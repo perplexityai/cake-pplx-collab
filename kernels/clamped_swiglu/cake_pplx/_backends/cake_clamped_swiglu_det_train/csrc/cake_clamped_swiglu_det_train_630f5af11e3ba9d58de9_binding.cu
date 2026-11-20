@@ -55,7 +55,7 @@ int64_t CMod(int64_t a, int64_t b) {
   return b == -1 ? 0 : a % b;
 }
 
-void Run(TensorView a_gate, TensorView a_up, TensorView a_dh, TensorView a_w, TensorView a_d_gate, TensorView a_d_up, TensorView a_d_weight, int64_t a_rows, int64_t a_gate_stride, int64_t a_up_stride, int64_t a_dh_stride, int64_t a_d_gate_stride, int64_t a_d_up_stride, double a_limit, int64_t a_weighted, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
+void Run(TensorView a_gate, TensorView a_up, TensorView a_dh, TensorView a_w, TensorView a_d_gate, TensorView a_d_up, TensorView a_d_weight, int64_t a_rows, int64_t a_gate_stride, int64_t a_up_stride, int64_t a_dh_stride, int64_t a_d_gate_stride, int64_t a_d_up_stride, double a_limit, int64_t a_weighted, int64_t a_up_col, int64_t a_d_up_col, int64_t grid_x, int64_t grid_y, int64_t grid_z) {
   DLDevice dev = a_gate.device();
   tvm::ffi::CUDADeviceGuard device_guard(dev.device_id);
   check_cuda_tensor(a_gate, "gate");
@@ -64,6 +64,8 @@ void Run(TensorView a_gate, TensorView a_up, TensorView a_dh, TensorView a_w, Te
   check_cuda_tensor(a_up, "up");
   check_dtype(a_up, DLDataType{kDLBfloat, 16, 1}, "up");
   CheckAligned(a_up, "up", 16);
+  TVM_FFI_CHECK(a_up_col >= 0 && a_up_col % 8 == 0 && a_up.ndim() == 2 && a_up_col <= a_up.size(1) - 2304, ValueError)
+      << KERNEL_NAME << ": 'up_col' = " << a_up_col << " must be a multiple of 8 with 'up' 2-D and up_col + 2304 <= up.size(1)";
   check_cuda_tensor(a_dh, "dh");
   check_dtype(a_dh, DLDataType{kDLBfloat, 16, 1}, "dh");
   CheckAligned(a_dh, "dh", 16);
@@ -75,6 +77,8 @@ void Run(TensorView a_gate, TensorView a_up, TensorView a_dh, TensorView a_w, Te
   check_cuda_tensor(a_d_up, "d_up");
   check_dtype(a_d_up, DLDataType{kDLBfloat, 16, 1}, "d_up");
   CheckAligned(a_d_up, "d_up", 16);
+  TVM_FFI_CHECK(a_d_up_col >= 0 && a_d_up_col % 8 == 0 && a_d_up.ndim() == 2 && a_d_up_col <= a_d_up.size(1) - 2304, ValueError)
+      << KERNEL_NAME << ": 'd_up_col' = " << a_d_up_col << " must be a multiple of 8 with 'd_up' 2-D and d_up_col + 2304 <= d_up.size(1)";
   check_cuda_tensor(a_d_weight, "d_weight");
   check_dtype(a_d_weight, DLDataType{kDLFloat, 32, 1}, "d_weight");
   TVM_FFI_CHECK(a_rows >= -2147483648LL && a_rows <= 2147483647LL, ValueError)
@@ -113,11 +117,11 @@ void Run(TensorView a_gate, TensorView a_up, TensorView a_dh, TensorView a_w, Te
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") exceeds CUDA's limits";
   cudaStream_t stream = static_cast<cudaStream_t>(TVMFFIEnvGetStream(dev.device_type, dev.device_id));
   void* v_gate = DataPtr(a_gate);
-  void* v_up = DataPtr(a_up);
+  void* v_up = static_cast<char*>(DataPtr(a_up)) + a_up_col * 2;
   void* v_dh = DataPtr(a_dh);
   void* v_w = DataPtr(a_w);
   void* v_d_gate = DataPtr(a_d_gate);
-  void* v_d_up = DataPtr(a_d_up);
+  void* v_d_up = static_cast<char*>(DataPtr(a_d_up)) + a_d_up_col * 2;
   void* v_d_weight = DataPtr(a_d_weight);
   int32_t v_rows = static_cast<int32_t>(a_rows);
   int64_t v_gate_stride = static_cast<int64_t>(a_gate_stride);

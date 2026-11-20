@@ -219,7 +219,8 @@ built without the weight gradient where the architecture routes one
 (``NODW_ROLES``, :func:`nodw_module`): the band's program with all of its
 weight-gradient work removed at build time and the same kernel parameters
 (the weight-gradient and workspace ones unread), so ``dx`` and ``dz`` are
-the bits of the band's program at every grid.  A small-row band runs its
+the bits of the band's program at every grid (but on the packed rows of the
+build of packed rows only, below).  A small-row band runs its
 one-cluster program built so (``<band>_nodw``: no weight-gradient sums and
 no cluster synchronization).  On sm_100a and sm_103a the fused band runs
 its strided program (``<band>_nodw_strided``: CTA ``b`` runs the 16-row
@@ -236,7 +237,22 @@ each 16 lanes, as in the 256-thread programs) and on other layouts in
 long program built so (``bwd_bf16_rep_nodw_long``), or, where none is
 routed, the long role with ``weight_grad`` 0.  A band whose architecture
 routes no such program runs its own module with ``weight_grad`` 0, the
-same bits.
+same bits.  On packed rows (``dy``, ``x`` and ``z`` of head stride 128 and
+token stride ``H * 128``; the call also passes one token of head stride 128
+as packed rows where this cut is) up to ``PACKED_SMALL_ROWS_PER_SM`` rows
+per SM, a band that routes a program without the weight gradient runs in
+its place the repeatable band's build of packed rows only
+(``PACKED_SMALL_ROLE``, ``bwd_bf16_rep_nodw_strided_packed_small``; sm_100a
+and sm_103a): the deterministic package's 128-thread strided build of
+packed rows (8-row blocks, a row to each 16 lanes, no stride test, every
+row read at its linear offset, a row's sum of squares and its dot product
+reduced across its lanes together, the repeatable backward's FP32
+operations in the same order, no claim, no ticket and no workspace), so
+there ``dx`` and ``dz`` are the repeatable backward's bits at any grid,
+which can differ in their last bits from the band program's: the
+one-cluster programs' row arithmetic is their own, and on sm_103a the
+fused backward's row sums run on other FMA chains (on sm_100a they are the
+repeatable backward's bits).
 
 Grids (:func:`launch_grid`): the forward and the short forward launch one
 CTA per block of ``rows_per_cta`` rows; the extra-long, long and mid forwards
@@ -260,7 +276,7 @@ min(ceil(rows / rows_per_block), ctas_per_sm * SMs)`` (:func:`backward_ctas`;
 the CTAs claim the blocks).  A strided program without the weight gradient
 launches the same ``G = min(ceil(rows / rows_per_block), ctas_per_sm *
 SMs)`` of its own rule (16-row blocks and 4 CTAs per SM, the 128-thread
-program of the repeatable band's packed rows 8-row blocks and 8 CTAs per
+programs of the repeatable band's packed rows 8-row blocks and 8 CTAs per
 SM), CTA ``b`` walking the blocks ``b``, ``b + G``, ... with no claim.
 Every backward is correct at any grid, every
 chunked or small-row one gives the same bits at any grid and the
@@ -2444,6 +2460,99 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "bwd_bf16_rep_nodw_strided_packed",
     },
+    # The repeatable backward without the weight gradient, strided, for packed
+    # rows only, at small row counts: the deterministic package's BF16 backward
+    # program built without the weight gradient, strided, in 128-thread CTAs of
+    # packed rows only (its build with "threads": 128, "min_blocks": 8, "dw":
+    # False, "strided": True, "packed_rows": 1 and "schedule": "joint"), a row
+    # to each 16 lanes as in the repeatable backward, CTA b running the 8-row
+    # blocks b, b + grid, ... with no claim, no ticket and no workspace word,
+    # no stride test and no division by the head count (every row read at its
+    # linear offset, row * 128), a row's sum of squares and its dot product
+    # computed before both are reduced across the row's 16 lanes together, with
+    # the repeatable backward's FP32 operations in the same order, so dx and dz
+    # are the repeatable backward's bits at any grid; the repeatable backward's
+    # kernel parameters (the strides and the weight-gradient and workspace ones
+    # unread) and the 128-thread build's grid, min(ceil(rows / 8), 8 * SMs)
+    # CTAs; a call with compute_grad_weight=False runs it on packed rows only
+    # (dy, x and z of head stride 128 and token stride heads * 128, or one
+    # token of head stride 128) up to PACKED_SMALL_ROWS_PER_SM rows per SM on
+    # sm_100a and sm_103a, in the place of the program without the weight
+    # gradient of the band that runs the rows. (build {"dw": False, "math":
+    # "ax", "min_blocks": 8, "out": "bf16", "packed_rows": 1, "prefetch_share":
+    # None, "schedule": "joint", "strided": True, "threads": 128}).
+    "cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "dy"],
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "dx"],
+            ["buffer", "dz"],
+            ["buffer", "acc"],
+            ["buffer", "flags"],
+            ["buffer", "done"],
+            ["buffer", "dw"],
+            ["parameter", "rows"],
+            ["parameter", "heads"],
+            ["parameter", "dy_tok"],
+            ["parameter", "dy_head"],
+            ["parameter", "x_tok"],
+            ["parameter", "x_head"],
+            ["parameter", "z_tok"],
+            ["parameter", "z_head"],
+            ["parameter", "eps"],
+            ["parameter", "accumulate"],
+            ["parameter", "weight_grad"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "ctas_per_sm": 8,
+            "kind": "strided_row_blocks",
+            "rows_per_block": 8,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c",
+        "logical": {
+            "acc": "acc",
+            "accumulate": "accumulate",
+            "done": "done",
+            "dw": "dw",
+            "dx": "dx",
+            "dy": "dy",
+            "dy_head": "dy_head",
+            "dy_tok": "dy_tok",
+            "dz": "dz",
+            "eps": "eps",
+            "flags": "flags",
+            "heads": "heads",
+            "rows": "rows",
+            "w": "w",
+            "weight_grad": "weight_grad",
+            "x": "x",
+            "x_head": "x_head",
+            "x_tok": "x_tok",
+            "z": "z",
+            "z_head": "z_head",
+            "z_tok": "z_tok",
+        },
+        "role": "bwd_bf16_rep_nodw_strided_packed_small",
+    },
     # The repeatable backward without the weight gradient, claimed: the
     # deterministic package's BF16 backward program built without the weight
     # gradient (its build plus "dw": False), with its claims, its arrival
@@ -2640,6 +2749,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_fused_nodw": "cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49",
         "bwd_bf16_fused_nodw_strided": "cake_rmsnorm_silu_gate_train_1b2751f09a6c95f35605",
         "bwd_bf16_rep_nodw": "cake_rmsnorm_silu_gate_train_cefc51faec88b7212f3c",
+        "bwd_bf16_rep_nodw_strided_packed_small": "cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c",
         "bwd_bf16_rep_nodw_long": "cake_rmsnorm_silu_gate_train_d8dd2e7dae0ca8233241",
         "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
         "bwd_f32_t512": "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015",
@@ -2664,6 +2774,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "bwd_bf16_fused_nodw": "cake_rmsnorm_silu_gate_train_20a7c07ccc0866350d49",
         "bwd_bf16_fused_nodw_strided": "cake_rmsnorm_silu_gate_train_1b2751f09a6c95f35605",
         "bwd_bf16_rep_nodw": "cake_rmsnorm_silu_gate_train_cefc51faec88b7212f3c",
+        "bwd_bf16_rep_nodw_strided_packed_small": "cake_rmsnorm_silu_gate_train_38d04fbfa79b1461bc0c",
         "bwd_bf16_rep_nodw_long": "cake_rmsnorm_silu_gate_train_d8dd2e7dae0ca8233241",
         "bwd_f32": "cake_rmsnorm_silu_gate_train_421e73578399336342e3",
         "bwd_f32_t512": "cake_rmsnorm_silu_gate_train_348a297be36a61e8f015",
@@ -2925,9 +3036,28 @@ LONG_BACKWARD_ROWS_PER_SM: dict[str, dict[str, int]] = {
 NODW = "_nodw"
 STRIDED = "_strided"
 PACKED = "_packed"
+SMALL = "_small"
 NODW_STRIDED_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16_fused": 512},
     "sm_103a": {"bwd_bf16_fused": 448},
+    "sm_107a": {},
+}
+# The repeatable band's build of packed rows only (``bwd_bf16_rep + NODW +
+# STRIDED + PACKED + SMALL``): the deterministic package's 128-thread strided
+# build of packed rows without the weight gradient, which a call with
+# ``compute_grad_weight=False`` on packed rows runs up to this many rows per
+# SM, by architecture and the BF16 bands' role (``bwd_bf16``), in the place
+# of the program without the weight gradient of whichever band runs the
+# rows (a band that routes none, and the long role, keep their own), where
+# the architecture routes it; an architecture without a cut never runs it.
+# Its ``dx`` and ``dz`` are the repeatable backward's bits, which can differ
+# in their last bits from those of the band's own program.  The cut is the
+# deterministic package's for the same program on sm_100a and sm_103a;
+# this package has no sm_107a cut (no measurement backs one).  Host plan only.
+PACKED_SMALL_ROLE = "bwd_bf16_rep_nodw_strided_packed_small"
+PACKED_SMALL_ROWS_PER_SM: dict[str, dict[str, int]] = {
+    "sm_100a": {"bwd_bf16": 128},
+    "sm_103a": {"bwd_bf16": 128},
     "sm_107a": {},
 }
 
@@ -2966,7 +3096,8 @@ BAND_ROLES = (
 # with ``compute_grad_weight=False`` runs in its band's place where routed
 # (:func:`nodw_module`): the small-row backwards', the fused backward's and
 # the repeatable backward's (claimed and strided; the repeatable one's also
-# strided for packed rows), and the repeatable backward's long role's.
+# strided for packed rows, and for packed rows only at small row counts, in
+# the place of every band's), and the repeatable backward's long role's.
 NODW_ROLES = (
     "bwd_bf16_short_nodw",
     "bwd_bf16_t512_nodw",
@@ -2975,6 +3106,7 @@ NODW_ROLES = (
     "bwd_bf16_rep_nodw",
     "bwd_bf16_rep_nodw_strided",
     "bwd_bf16_rep_nodw_strided_packed",
+    "bwd_bf16_rep_nodw_strided_packed_small",
     "bwd_bf16_rep_nodw_long",
 )
 GRID_KINDS = (
@@ -3141,6 +3273,9 @@ def _nodw_keys(role: str) -> tuple[str | None, str, str, str]:
 _NODW_KEYS = {
     record["role"]: _nodw_keys(record["role"]) for record in MODULES.values()
 }
+# An empty table (read, never written): the default of a lookup that may
+# miss, so :func:`nodw_module` makes no dict.
+_EMPTY: dict[str, Any] = {}
 
 
 def nodw_module(
@@ -3151,36 +3286,91 @@ def nodw_module(
     :func:`module_for_rows` names for the call (the BF16 bands' role
     ``bwd_bf16``) and its band role ``band`` (the record's role), and
     ``packed``, whether ``dy``, ``x`` and ``z`` hold packed rows (the
-    caller's test, as for :func:`module_for_rows`): for a long role (packed
-    rows past its cut) the band's long program without the weight gradient
-    (``band + NODW + LONG``, ``band`` the long role's band) where ``arch``
-    routes one, else ``name`` itself (run with ``weight_grad`` 0); otherwise
-    the strided program (``band + NODW + STRIDED``; for packed rows ``band +
-    NODW + STRIDED + PACKED`` in its place where ``arch`` routes that too)
-    where ``arch`` routes one and ``rows <=
-    NODW_STRIDED_ROWS_PER_SM[arch][band] * sm_count``, else the band's
-    program without the weight gradient (``band + NODW``: claimed, or one
-    cluster for a small-row band) where routed, else the strided program
-    where routed (a band without a claimed program has no cut: its strided
-    program runs every row count), else ``name``.  Every one gives the
-    ``dx`` and ``dz`` bits of ``name``."""
+    caller's test, as for :func:`module_for_rows`; the backward also passes
+    one token of head stride 128 as packed rows where
+    ``PACKED_SMALL_ROWS_PER_SM[arch]`` has a cut):
 
-    routes = ROUTES.get(arch, {})
+    - for a long role (packed rows past its cut) the band's long program
+      without the weight gradient (``band + NODW + LONG``, ``band`` the long
+      role's band) where ``arch`` routes one, else ``name`` itself (run with
+      ``weight_grad`` 0);
+    - else, for packed rows up to ``PACKED_SMALL_ROWS_PER_SM[arch]["bwd_bf16"]
+      * sm_count``, the repeatable band's build of packed rows only
+      (``PACKED_SMALL_ROLE``) where ``arch`` routes it and the band routes a
+      program without the weight gradient (its ``dx`` and ``dz`` are the
+      repeatable backward's bits);
+    - else the strided program (``band + NODW + STRIDED``; for packed rows
+      ``band + NODW + STRIDED + PACKED`` in its place where ``arch`` routes
+      that too) where ``arch`` routes one and ``rows <=
+      NODW_STRIDED_ROWS_PER_SM[arch][band] * sm_count``;
+    - else the band's program without the weight gradient (``band + NODW``:
+      claimed, or one cluster for a small-row band) where routed, else the
+      strided program where routed (a band without a claimed program has no
+      cut: its strided program runs every row count), else ``name``.
+
+    Every one but the build of packed rows only gives the ``dx`` and ``dz``
+    bits of ``name``; that build never runs rows that are not packed.  The
+    modules and cuts of ``arch`` and ``name`` come from :func:`_nodw_plan`,
+    read once at import for every routed architecture and module
+    (``_NODW_PLANS``)."""
+
+    plan = _NODW_PLANS.get(arch, _EMPTY).get(name) or _nodw_plan(arch, name)
+    done, small, small_cut, strided, packed_strided, cut, claimed = plan
+    if done is not None:
+        return done
+    if packed:
+        if rows <= small_cut * sm_count:
+            return small
+        strided = packed_strided
+    if strided is not None and cut is not None and rows <= cut * sm_count:
+        return strided
+    if claimed is not None:
+        return claimed
+    return name if strided is None else strided
+
+
+def _nodw_plan(
+    arch: str, name: str
+) -> tuple[
+    str | None, str | None, int, str | None, str | None, int | None, str | None
+]:
+    """What :func:`nodw_module` reads for module ``name`` on ``arch``, from
+    ``ROUTES`` and the cut tables: ``(done, small, small_cut, strided,
+    packed_strided, cut, claimed)``.  ``done`` is the answer for a long
+    module (its long module without the weight gradient where routed, else
+    ``name``), else ``None``; ``small`` the build of packed rows only
+    (``PACKED_SMALL_ROLE``) where routed and ``small_cut`` its rows per SM
+    (-1, which no row count is at most, where it is not routed or the band
+    routes no program without the weight gradient: no strided and no
+    claimed one); ``strided`` the strided module where routed;
+    ``packed_strided`` the module of packed rows past ``small_cut`` (``band
+    + NODW + STRIDED + PACKED`` where routed, else ``strided``); ``cut`` the
+    strided cut (``None`` without one); ``claimed`` the band's program
+    without the weight gradient where routed."""
+
+    routes = ROUTES.get(arch, _EMPTY)
     band = MODULES[name]["role"]
     keys = _NODW_KEYS.get(band) or _nodw_keys(band)
     long_key, strided_key, packed_key, claimed_key = keys
     if long_key is not None:
-        return routes.get(long_key, name)
+        return routes.get(long_key, name), None, -1, None, None, None, None
     strided = routes.get(strided_key)
-    if packed and strided is not None:
-        strided = routes.get(packed_key, strided)
-    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, {}).get(band)
-    if strided is not None and cut is not None and int(rows) <= cut * int(sm_count):
-        return strided
-    own = routes.get(claimed_key)
-    if own is not None:
-        return own
-    return name if strided is None else strided
+    claimed = routes.get(claimed_key)
+    packed_strided = None if strided is None else routes.get(packed_key, strided)
+    small = routes.get(PACKED_SMALL_ROLE)
+    small_cut = -1
+    if small is not None and (strided is not None or claimed is not None):
+        small_cut = PACKED_SMALL_ROWS_PER_SM.get(arch, _EMPTY).get("bwd_bf16", 0)
+    cut = NODW_STRIDED_ROWS_PER_SM.get(arch, _EMPTY).get(band)
+    return None, small, small_cut, strided, packed_strided, cut, claimed
+
+
+# The plan of every routed architecture and module, read once at import: a
+# call without the weight gradient then makes two lookups and compares ints
+# (its host path is most of the time of a small call).
+_NODW_PLANS = {
+    arch: {name: _nodw_plan(arch, name) for name in MODULES} for arch in ROUTES
+}
 
 
 def backward_ctas(name: str, rows: int, sm_count: int) -> int:
@@ -3434,8 +3624,11 @@ __all__ = [
     "NODW_STRIDED_ROWS_PER_SM",
     "PACKED",
     "PACKED_ROWS",
+    "PACKED_SMALL_ROLE",
+    "PACKED_SMALL_ROWS_PER_SM",
     "ROLES",
     "ROUTES",
+    "SMALL",
     "STRIDED",
     "STRIDED_FORWARD_BANDS",
     "WORKSPACE_ALIGNMENT",

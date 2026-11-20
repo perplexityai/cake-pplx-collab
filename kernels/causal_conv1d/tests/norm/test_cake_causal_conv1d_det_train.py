@@ -45,7 +45,11 @@ another stream does not stall the backward (``busy <= 2 x alone``) and leaves ``
 forward takes its token chunks from int32 counters in a forward workspace that every launch leaves zero: the
 suite checks its size rule, one caller-owned buffer over repeated calls of every forward route, two streams with
 two buffers running at once, CUDA Graph capture and replay with and without a caller-owned buffer, and the
-package's per-(device, stream) buffer of the calls that pass none.
+package's per-(device, stream) buffer of the calls that pass none.  The forward's narrow rows (C 576 to 768 on
+32-vector or whole tiles; C 520 to 568 on one tile below a token floor of their own per architecture and on
+narrower tiles from it) keep ``y``'s bits: the suite checks the literal plans per route, token count and
+architecture, and at every C 520 to 568 row one token below its floor and at it the launched plan, ``y``
+bitwise the one-tile plan's and run to run, the naive-tier judge and a CUDA Graph replay.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -222,24 +226,106 @@ NARROW_SPLIT_TABLE = {
 }
 # The forward's narrow rows of other widths: cv -> ct_vec (whole tiles), from
 # the token floor of ``FWD_NARROW_FLOORS``.
-FWD_NARROW_WIDTHS = {72: 18, 80: 40}
+FWD_NARROW_WIDTHS = {65: 13, 66: 11, 68: 17, 69: 23, 70: 14, 72: 18, 80: 40}
 # Their plan from the floor on the forward routes of ``NARROW_TILE_ROUTES``:
 # C -> (ct_vec, n_sub, n_ch_tiles).
 FWD_WIDE_SPLIT_TABLE = {576: (18, 7, 4), 640: (40, 3, 2)}
 # The token count from which each row of ``FWD_NARROW_WIDTHS`` runs its width,
 # per architecture: arch -> {cv: S} (``cake_jit.NARROW_WIDTH_FLOORS["fwd"]``).
 FWD_NARROW_FLOORS = {
-    "sm_100a": {72: 32768, 80: 24576},
-    "sm_103a": {72: 32768, 80: 24576},
-    "sm_107a": {72: 40960, 80: 36864},
+    "sm_100a": {
+        65: 20480,
+        66: 24576,
+        68: 20480,
+        69: 16384,
+        70: 24576,
+        72: 32768,
+        80: 24576,
+    },
+    "sm_103a": {
+        65: 20480,
+        66: 24576,
+        68: 20480,
+        69: 16384,
+        70: 24576,
+        72: 32768,
+        80: 24576,
+    },
+    "sm_107a": {
+        65: 40960,
+        66: 62585,
+        68: 24576,
+        69: 24576,
+        70: 24576,
+        72: 40960,
+        80: 36864,
+    },
+}
+# The forward's rows below 72 vectors (C 520 to 568) keep one tile below a token
+# floor of their own, per architecture: arch -> {cv: S}
+# (``cake_jit.NARROW_ROW_FLOORS["fwd"]``); a row of ``FWD_NARROW_WIDTHS`` among
+# them takes its width from that floor.
+FWD_ROW_FLOORS = {
+    "sm_100a": {
+        65: 20480,
+        66: 24576,
+        67: 16384,
+        68: 20480,
+        69: 16384,
+        70: 24576,
+        71: 12288,
+    },
+    "sm_103a": {
+        65: 20480,
+        66: 24576,
+        67: 16384,
+        68: 20480,
+        69: 16384,
+        70: 24576,
+        71: 12288,
+    },
+    "sm_107a": {
+        65: 40960,
+        66: 62585,
+        67: 16384,
+        68: 24576,
+        69: 24576,
+        70: 24576,
+        71: 16384,
+    },
+}
+# Their plan from the floor on the forward routes of ``NARROW_TILE_ROUTES`` (whole
+# tiles of ``FWD_NARROW_WIDTHS``, the 32-vector tiles at C 536 and 568):
+# C -> (ct_vec, n_sub, n_ch_tiles).  Below the floor, without a token count and
+# without an architecture, one tile.
+FWD_ROW_SPLIT_TABLE = {
+    520: (13, 9, 5),
+    528: (11, 11, 6),
+    536: (32, 4, 3),
+    544: (17, 7, 4),
+    552: (23, 5, 3),
+    560: (14, 9, 5),
+    568: (32, 4, 3),
 }
 # The forward workspace's channel tiles of the narrow rows: the larger tile
-# count of the 32-vector plan and of the floor's plan (C 576: 3, then 4).
-FWD_NARROW_WORKSPACE_TILES = {576: 4, 640: 3, 768: 3}
+# count of the plans on both sides of a floor (C 576: 3, then 4; C 520: 1,
+# then 5).
+FWD_NARROW_WORKSPACE_TILES = {
+    520: 5,
+    528: 6,
+    536: 3,
+    544: 4,
+    552: 3,
+    560: 5,
+    568: 3,
+    576: 4,
+    640: 3,
+    768: 3,
+}
 # Single-tile rows outside each role's narrow set (one tile on every route).
 ONE_TILE_ROWS = {
     "bwd": (160, 192, 256, 512, 1024),
-    "fwd": (224, 520, 568, 776, 832),
+    "fwd": (224, 512, 776, 832),
 }
 # Rows whose plan, launch and gradients the narrow-tile tests check per route:
 # C 576 / 640 below every token floor of ``FWD_NARROW_FLOORS`` (S = 4097) and
@@ -705,13 +791,15 @@ def test_channel_split_literal_table() -> None:
 
 def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     """The narrow single-tile rows of each role run 32-vector tiles on the routes
-    of ``NARROW_TILE_ROUTES`` only, and the forward's C 576 / 640 whole tiles of
-    ``NARROW_TILE_WIDTHS`` from their token floor on the call's architecture:
-    the literal tables per route, ``S`` and architecture (no ``S``, the floor
-    less one, the floor; no architecture; an architecture or row the floors do
-    not list), the kept one-tile rows, every multiple of eight up to 8192
-    against the route-free rule, the plan's ``route`` / ``S`` / ``arch`` and
-    the refused routes and architectures."""
+    of ``NARROW_TILE_ROUTES`` only, the forward's C 576 / 640 whole tiles of
+    ``NARROW_TILE_WIDTHS`` from their token floor on the call's architecture,
+    and the forward's C 520 to 568 one tile below their own token floor of
+    ``NARROW_ROW_FLOORS`` and ``FWD_ROW_SPLIT_TABLE`` from it: the literal
+    tables per route, ``S`` and architecture (no ``S``, the floor less one, the
+    floor; no architecture; an architecture or row the floors do not list),
+    the kept one-tile rows, every multiple of eight up to 8192 against the
+    route-free rule, the plan's ``route`` / ``S`` / ``arch`` and the refused
+    routes and architectures."""
 
     geometry = {"threads": 128, "vec": 8}
     assert loader.NARROW_TILE_ROUTES == {
@@ -731,6 +819,14 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
     assert loader.NARROW_TILE_WIDTHS == {"fwd": FWD_NARROW_WIDTHS, "bwd": {}}
     assert loader.NARROW_WIDTH_FLOORS == {"fwd": FWD_NARROW_FLOORS, "bwd": {}}
     assert set(FWD_NARROW_FLOORS) == set(loader.ARCHES)
+    assert loader.NARROW_ROW_FLOORS == {"fwd": FWD_ROW_FLOORS, "bwd": {}}
+    assert set(FWD_ROW_FLOORS) == set(loader.ARCHES)
+    for arch in loader.ARCHES:
+        # The same rows on every architecture; a row with a width takes it from its row floor.
+        assert set(FWD_ROW_FLOORS[arch]) == {C // 8 for C in FWD_ROW_SPLIT_TABLE}, arch
+        for cv, floor in FWD_ROW_FLOORS[arch].items():
+            if cv in FWD_NARROW_WIDTHS:
+                assert FWD_NARROW_FLOORS[arch][cv] == floor, (arch, cv)
     for kind in loader.KINDS:
         role = loader.route_role(kind)
         narrow = kind in loader.NARROW_TILE_ROUTES[role]
@@ -783,6 +879,50 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         arch=arch,
                     )
                     assert split == one_tile, (kind, C, arch, S)
+        # The forward's rows of FWD_ROW_FLOORS: one tile without S or an
+        # architecture and below the floor, FWD_ROW_SPLIT_TABLE from it.
+        row_floored = FWD_ROW_SPLIT_TABLE if role == "fwd" else {}
+        for C, tiles in row_floored.items():
+            one_tile = (C // 8, 128 // (C // 8), 1)
+            got = loader.channel_split(C, geometry=geometry, role=role, route=kind)
+            assert got == one_tile, (kind, C)
+            for S in (None, 0, 262144):
+                split = loader.channel_split(
+                    C, geometry=geometry, role=role, route=kind, S=S
+                )
+                assert split == one_tile, (kind, C, S)
+            for arch in loader.ARCHES:
+                floor = FWD_ROW_FLOORS[arch][C // 8]
+                from_floor = tiles if narrow else one_tile
+                steps = [
+                    (None, one_tile),
+                    (0, one_tile),
+                    (floor - 1, one_tile),
+                    (floor, from_floor),
+                    (262144, from_floor),
+                ]
+                for S, want in steps:
+                    split = loader.channel_split(
+                        C, geometry=geometry, role=role, route=kind, S=S, arch=arch
+                    )
+                    assert split == want, (kind, C, arch, S)
+                    if S is None:
+                        continue
+                    scalars = loader.plan(
+                        S, C, 3, geometry=geometry, role=role, route=kind, arch=arch
+                    )
+                    split = (scalars["ct_vec"], scalars["n_sub"], scalars["n_ch_tiles"])
+                    assert split == want, (kind, C, arch, S)
+                    split = loader.channel_split(
+                        C,
+                        geometry=geometry,
+                        role=role,
+                        legacy=True,
+                        route=kind,
+                        S=S,
+                        arch=arch,
+                    )
+                    assert split == one_tile, (kind, C, arch, S)
         for C in ONE_TILE_ROWS[role]:
             assert loader.channel_split(
                 C, geometry=geometry, role=role, route=kind
@@ -792,20 +932,23 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
             base = loader.channel_split(C, geometry=geometry, role=role)
             got = loader.channel_split(C, geometry=geometry, role=role, route=kind)
             if role == "bwd":
-                in_set = 64 < cv < 128 or cv == 28
+                in_set = floored_set = 64 < cv < 128 or cv == 28
                 width = 32
             else:
-                in_set = 72 <= cv <= 96
+                # Without S the rows below 72 vectors keep one tile; from their floors they narrow too.
+                in_set, floored_set = 72 <= cv <= 96, 65 <= cv <= 96
                 width = FWD_NARROW_WIDTHS.get(cv, 32)
             want = (32, 4, -(-cv // 32))
             assert got == (want if narrow and in_set else base), (kind, C)
-            # From the floors on every arch only the rows of FWD_NARROW_WIDTHS change.
+            # From the floors on every arch only the rows of FWD_NARROW_WIDTHS and
+            # FWD_ROW_FLOORS change.
             want = (width, 128 // width, -(-cv // width))
             for arch in loader.ARCHES:
                 split = loader.channel_split(
                     C, geometry=geometry, role=role, route=kind, S=262144, arch=arch
                 )
-                assert split == (want if narrow and in_set else base), (kind, C, arch)
+                expected = want if narrow and floored_set else base
+                assert split == expected, (kind, C, arch)
     # An arch or a row the floors do not list keeps the 32-vector tiles at every S.
     with monkeypatch.context() as m:
         m.setattr(
@@ -824,6 +967,26 @@ def test_channel_split_narrow_tiles_per_route(monkeypatch) -> None:
                         arch=arch,
                     )
                     want = tiles if listed else NARROW_SPLIT_TABLE["fwd"][C]
+                    assert got == want, (kind, arch, C)
+    # An arch the row floors do not list keeps one tile on their rows at every S.
+    with monkeypatch.context() as m:
+        m.setattr(
+            loader,
+            "NARROW_ROW_FLOORS",
+            {"fwd": {"sm_103a": FWD_ROW_FLOORS["sm_103a"]}, "bwd": {}},
+        )
+        for kind in loader.NARROW_TILE_ROUTES["fwd"]:
+            for arch in loader.ARCHES:
+                for C, tiles in FWD_ROW_SPLIT_TABLE.items():
+                    got = loader.channel_split(
+                        C,
+                        geometry=geometry,
+                        role="fwd",
+                        route=kind,
+                        S=262144,
+                        arch=arch,
+                    )
+                    want = tiles if arch == "sm_103a" else (C // 8, 128 // (C // 8), 1)
                     assert got == want, (kind, arch, C)
     refused = (("bwd", "fwd"), ("fwd", "bwd_bias"), ("bwd", "dx"), (None, "bwd"))
     for role, kind in refused:
@@ -1520,11 +1683,13 @@ def test_forward_programs_switch_on_channel_count(kind) -> None:
     # The narrow rows at the floor of a floored program whose channels they reach:
     # that program on the narrow plan (C 576 / 640 on FWD_WIDE_SPLIT_TABLE when
     # the program's floor is at least the row's FWD_NARROW_FLOORS floor, else
-    # NARROW_SPLIT_TABLE), y bit for bit the fallback's on the one-tile plan.
+    # NARROW_SPLIT_TABLE; C 520 to 568 on FWD_ROW_SPLIT_TABLE when it is at
+    # least the row's FWD_ROW_FLOORS floor, else one tile), y bit for bit the
+    # fallback's on the one-tile plan.
     rows += [
         (floor, "perf", C)
         for floored, floor in _token_floors(arch, kind).values()
-        for C in NARROW_SPLIT_TABLE["fwd"]
+        for C in (*FWD_ROW_SPLIT_TABLE, *NARROW_SPLIT_TABLE["fwd"])
         if min(floored) <= C
     ]
     launched = set()
@@ -2168,6 +2333,93 @@ def test_narrow_tiles_launch_and_keep_y_and_dx_bits(kind, monkeypatch) -> None:
         assert torch.equal(_bits(grads[0]), _bits(one[0])), (kind, S, C, "dx")
 
 
+# The backward routes whose inputs select each forward route and taps dtype of
+# the row-floor test: FP32 taps, BF16 taps, FP32 taps and bias, BF16 taps and bias.
+FWD_ROW_KINDS = ("bwd", "bwd_dt_bf16_taps", "bwd_bias", "bwd_bias_bf16_taps")
+
+
+@pytest.mark.parametrize("kind", FWD_ROW_KINDS)
+def test_forward_row_floors_launch_and_keep_y_bits(kind, monkeypatch) -> None:
+    """At every row of ``FWD_ROW_SPLIT_TABLE`` (C 520 to 568), one token below the
+    device architecture's ``FWD_ROW_FLOORS`` floor and at it, the forward of the
+    inputs of backward route ``kind`` launches one tile below the floor and the
+    row's ``FWD_ROW_SPLIT_TABLE`` plan from it, with two counter words per
+    channel tile; ``y`` repeats bit for bit, is bitwise the one-tile plan's and
+    the call's with a caller-owned workspace (zero after the call), and is
+    judged against the naive tier; at the floor a CUDA Graph captured after an
+    eager call one token below replays it bit for bit."""
+
+    _require_route(kind)
+    fwd_kind = FORWARD_OF[kind]
+    arch = _arch()
+    device = _device()
+    for C, tiles in FWD_ROW_SPLIT_TABLE.items():
+        floor = FWD_ROW_FLOORS[arch][C // 8]
+        one_tile = (C // 8, 128 // (C // 8), 1)
+        for S, want in ((floor - 1, one_tile), (floor, tiles)):
+            label = f"{fwd_kind} {kind} S={S} C={C}"
+            x, w, cu, _, b, _ = _route_inputs(S, C, "perf", kind)
+            launched = []
+
+            def record_launch(name, values, *, device_index, grid=None):
+                launched.append(dict(values))
+
+            with monkeypatch.context() as m:
+                m.setattr(pkg, "run_module", record_launch)
+                cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            assert len(launched) == 1, (label, len(launched))
+            got = tuple(launched[0][key] for key in ("ct_vec", "n_sub", "n_ch_tiles"))
+            assert got == want, (label, got, want)
+            assert int(launched[0]["work"].numel()) >= 2 * want[2], label
+            y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            again = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            assert torch.equal(_bits(again), _bits(y)), (label, "repeat")
+            workspace = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
+            assert workspace.numel() == 2 * FWD_NARROW_WORKSPACE_TILES[C], label
+            owned = cake_causal_conv1d_det_train_forward(
+                x, w, cu, bias=b, workspace=workspace
+            )
+            torch.cuda.synchronize(device)
+            assert int(torch.count_nonzero(workspace)) == 0, label
+            assert torch.equal(_bits(owned), _bits(y)), (label, "workspace")
+            try:
+                with monkeypatch.context() as m:
+                    m.setattr(loader, "NARROW_TILE_ROUTES", {"fwd": (), "bwd": ()})
+                    _clear_tile_rule_caches()
+                    y_one = cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+            finally:
+                _clear_tile_rule_caches()
+            assert torch.equal(_bits(y_one), _bits(y)), (label, "one tile")
+
+            def forward(x, w, cu, b, _draw):
+                return cake_causal_conv1d_det_train_forward(x, w, cu, bias=b)
+
+            _judge_forward(S, C, "perf", forward, kind=kind, label=label)
+            if S != floor:
+                below = (x, w, cu, b)
+                continue
+            # The graph's call plans the floor's tiles after an eager call one
+            # token below on the capture stream (whose package buffer then holds
+            # the one-tile plan's two words).
+            side = torch.cuda.Stream(device=device)
+            side.wait_stream(torch.cuda.current_stream(device))
+            y_graph = torch.empty_like(x)
+            with torch.cuda.stream(side):
+                cake_causal_conv1d_det_train_forward(
+                    below[0], below[1], below[2], bias=below[3]
+                )
+            torch.cuda.current_stream(device).wait_stream(side)
+            torch.cuda.synchronize(device)
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph, stream=side):
+                cake_causal_conv1d_det_train_forward(x, w, cu, bias=b, out=y_graph)
+            for replay in range(GRAPH_REPLAYS):
+                y_graph.fill_(float("nan"))
+                graph.replay()
+                torch.cuda.synchronize(device)
+                assert torch.equal(_bits(y_graph), _bits(y)), (label, "graph", replay)
+
+
 @pytest.mark.parametrize("kind", NEW_BWD_KINDS)
 def test_nan_poisoned_workspace_per_route(kind) -> None:
     """Every backward program of the dt, bias, fp32g and bf16_taps routes rewrites every partial row it reduces, the
@@ -2689,8 +2941,9 @@ def test_forward_workspace_bytes() -> None:
         large = cake_causal_conv1d_det_train_forward_workspace_bytes(262401, C, device)
         assert small == large == 4 * 2 * tiles, C
         # Every forward route's plan of the row at any S fits the buffer.
+        floors = {*FWD_NARROW_FLOORS[arch].values(), *FWD_ROW_FLOORS[arch].values()}
         for kind in loader.NARROW_TILE_ROUTES["fwd"]:
-            for S in (1, *FWD_NARROW_FLOORS[arch].values(), 262401):
+            for S in (1, *sorted(floors), *sorted(f - 1 for f in floors), 262401):
                 name = loader.selected_modules(arch, kind, C=C, S=S)[0]
                 record = loader.MODULES[name]
                 scalars = loader.plan(
