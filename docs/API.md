@@ -1583,7 +1583,7 @@ dWr = cake_dense_gemm_det_train_router_wgrad(Gr, Xr)       # [256, 6144] fp32
 
 ## moe_grouped_gemm
 
-**Computes.** A ragged BF16 MoE grouped GEMM over groups of rows. The groups are given by an int32 device tensor of cumulative end offsets (`offs [E]`, or `m_indptr [E+1]`).
+**Computes.** A ragged BF16 MoE grouped GEMM over groups of rows. The groups are given by an int32 device tensor of cumulative end offsets (`offs [E]`, or `m_indptr [E+1]`). With `m_indptr`, group `e` is the rows `[m_indptr[e], m_indptr[e+1])` of the row operands, in absolute row numbers, and `m_indptr[0]` may be above 0 (device slices, below).
 
 - Forward: `Y[offs[e-1]:offs[e]] = X[...] @ W[e].T`.
 - Data gradient: `dX = G @ W[e]`.
@@ -1602,16 +1602,25 @@ All three accumulate in FP32. The weight gradient has an optional accumulate mod
   - Dgrad: `K % 256 == 0` and `N % 64 == 0`.
   - Wgrad: `N % 256 == 0` and K a multiple of the selected k tile (256 or 512).
 
+**Device slices.** `m_indptr[0]` may be above 0. For example, pass the full `x` / `g` and `m_indptr_all[e0:e1+1]` to run experts `e0 .. e1-1` as one chunk.
+
+- Rows outside `[m_indptr[0], m_indptr[E])` are neither read nor written. There is no copy and no host read: the kernels read `m_indptr[0]` on the device at every launch and every CUDA Graph replay.
+- The weight gradient reads `m_indptr [E+1]` only with `num_groups=E`. Without it, `E+1` entries are `E+1` end offsets.
+- The `m_indptr` form binds the lead twins of the programs. A twin is JIT-compiled at its first call if it is not prebuilt. The twins can be slightly slower. When `m_indptr[0] == 0`, pass `m_indptr[1:]` (the `[E]` form): it binds the original programs at no extra cost and gives the same bits.
+- Bits: the plan uses `sum_m = x.shape[0]`, all rows. A slice gives the bits of the host-offset call on `x[m_indptr[0]:m_indptr[E]]` when the two plans are equal. Otherwise it gives the bits of that call padded with rows of no group to the same `sum_m`.
+- A slice with no row and `accumulate=True` still launches. It can turn `-0.0` in `out` into `+0.0` (equal values).
+- Autograd: the rows of `Y` and of the `x` gradient outside the slice are uninitialized. So the `x` gradients of several slices of one shared `x` cannot be summed. Use the op-level functions with caller-owned outputs.
+
 ### `cake_pplx.cake_moe_grouped_gemm_det_train`
 
 Every launch reduces in a fixed order. `Y`, `dX` and `dW` are bitwise reproducible run to run, including with `accumulate=True` or `fuse_wgrad_accumulation=True`. Deterministic algorithms change nothing. Source: [`kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_det_train.py`](../kernels/moe_grouped_gemm/cake_pplx/cake_moe_grouped_gemm_det_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_moe_grouped_gemm_det` | `(x, w, offs, *, fuse_wgrad_accumulation=False)` | As above | Autograd. Returns BF16 `[sum_m, N]`. The backward gives BF16 `x.grad` and `w.grad` in `w`'s dtype. With `fuse_wgrad_accumulation=True`, it adds `dW` into `w.main_grad` (FP32 or BF16) in place and returns an empty/zeros placeholder or `None` for `w`. Not supported under `torch.jit.trace`, `torch.compile` or a `create_graph` backward (`NotImplementedError`). |
-| `cake_moe_grouped_gemm_det_train_forward` | `(x, w, offs, out=None)` | `offs [E]` with `offs[-1] == sum_m`, or `m_indptr [E+1]`; `out` BF16, may be row-padded | Prepares and launches in one call. Returns `out`. |
+| `cake_moe_grouped_gemm_det` | `(x, w, offs, *, fuse_wgrad_accumulation=False)` | As above | Autograd. Returns BF16 `[sum_m, N]`. The backward gives BF16 `x.grad` and `w.grad` in `w`'s dtype. With `fuse_wgrad_accumulation=True`, it adds `dW` into `w.main_grad` (FP32 or BF16) in place and returns an empty/zeros placeholder or `None` for `w`. Not supported under `torch.jit.trace`, `torch.compile` or a `create_graph` backward (`NotImplementedError`). Summing the `x` gradients of device slices of one shared `x` is not supported. |
+| `cake_moe_grouped_gemm_det_train_forward` | `(x, w, offs, out=None)` | `offs [E]` with `offs[-1] <= sum_m`, or `m_indptr [E+1]` (a device slice when `m_indptr[0] > 0`); `out` BF16, may be row-padded | Prepares and launches in one call. Returns `out`. Rows outside the groups are not written. |
 | `cake_moe_grouped_gemm_det_train_dgrad` | `(g, w, offs, out=None)` | `out` BF16 `[sum_m, K]` | Returns `dX`. `W` is read in place, with no transpose copy. |
-| `cake_moe_grouped_gemm_det_train_wgrad` | `(g, x, offs, out=None, out_dtype=None, num_groups=None, *, accumulate=False)` | `num_groups=E` allows `m_indptr [E+1]`. `out_dtype` is bf16 or fp32 and defaults to `out`'s dtype, else bf16. With `accumulate`, `out` is required and must not overlap `g`, `x` or `offs` (`ValueError`). | Returns `dW [E, N, K]`. Empty groups give exact zeros. `accumulate=True` adds into `out` with AccumulateGrad's bits. With `sum_m == 0`, `out` is unchanged. |
+| `cake_moe_grouped_gemm_det_train_wgrad` | `(g, x, offs, out=None, out_dtype=None, num_groups=None, *, accumulate=False)` | `num_groups=E` allows `m_indptr [E+1]`, also a device slice; without it, `E+1` entries are `E+1` end offsets. `out_dtype` is bf16 or fp32 and defaults to `out`'s dtype, else bf16. With `accumulate`, `out` is required and must not overlap `g`, `x` or `offs` (`ValueError`). | Returns `dW [E, N, K]`. Empty groups give exact zeros. `accumulate=True` adds into `out` with AccumulateGrad's bits. With `sum_m == 0`, `out` is unchanged. |
 | `cake_moe_grouped_gemm_det_train_prepare_forward` | `(x, w, offs, out=None)` | As forward. The 512-column tile is used when `N % 512 == 0` on `wide_fwd_archs`. | Returns `CakeMoEGroupedGemmDetLaunch`; call `launch()`. Works with CUDA Graph capture. |
 | `cake_moe_grouped_gemm_det_train_prepare_dgrad` | `(g, w, offs, out=None)` | The 512-column tile is used when `K % 512 == 0` on `wide_dgrad_archs` | Prepared dgrad. |
 | `cake_moe_grouped_gemm_det_train_prepare_wgrad` | `(g, x, offs, out=None, out_dtype=None, num_groups=None, *, accumulate=False)` | As wgrad | Prepared `dW`. With `accumulate=True`, every `launch()` and every graph replay adds again. `plan['accumulate']` is `'fused'` or `'composed'`. The composed route uses an `E*N*K`-element scratch owned by the launch. |
@@ -1620,7 +1629,7 @@ Other public names:
 
 - `is_cake_moe_grouped_gemm_det_train_supported(device=None)`: loads and launches nothing.
 - `CakeMoEGroupedGemmDetFunction`: `apply(x, w, offs, None, fuse_wgrad_accumulation)`. A 4th argument other than `None` raises `TypeError`. A direct `apply` always recomputes under checkpoint.
-- `CakeMoEGroupedGemmDetLaunch`: `launch()` returns `out` with no host sync and stays valid when `offs` or operand values change. Exposes `plan` and `stages`.
+- `CakeMoEGroupedGemmDetLaunch`: `launch()` returns `out` with no host sync and stays valid when `offs` or operand values change. Exposes `plan`, `stages`, and `bound_routes` / `bound_programs` (the lead twins for `m_indptr`).
 
 ### `cake_pplx.cake_moe_grouped_gemm_nondet_train`
 

@@ -12,15 +12,16 @@ query `is_cake_moe_grouped_gemm_det_train_supported`. The forward also has a
 There is no automatic backend selection.
 
 Three operations over `E` groups of rows, described by an int32 **device**
-tensor `offs[E]` of cumulative end offsets (`offs[-1] == sum_m`; groups may be
-imbalanced, empty, one row long, or any size that is not a tile multiple) or,
-equivalently, an `m_indptr[E + 1]` with a leading 0 (`torch._grouped_mm` /
-`grouped_mm_bf16` form; `cake_moe_grouped_gemm_det_train_wgrad` needs `num_groups=E` to tell the
-two forms apart). The kernels read the offsets on the device; the host never
+tensor `offs[E]` of cumulative end offsets (`offs[-1] <= sum_m`; groups may be
+imbalanced, empty, one row long, or any size that is not a tile multiple) or
+an `m_indptr[E + 1]` (`torch._grouped_mm` / `grouped_mm_bf16` form, whose first
+entry may be above 0: device slices, below; `cake_moe_grouped_gemm_det_train_wgrad` needs
+`num_groups=E` to tell the two forms apart). The kernels read the offsets on the device; the host never
 synchronises on them.
 
 The slice lower bound is `0` for `e == 0` and `offs[e-1]` for `e > 0`.
-For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]`.
+For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]` and the
+lower bound of group 0 is `m_indptr[0]` (device slices, below).
 
 | helper | computation | inputs | output |
 | --- | --- | --- | --- |
@@ -38,6 +39,56 @@ Numerics: fp32 tensor-core accumulation with one bf16 rounding at the store
 (the fp32 weight-gradient variant stores the accumulator); bitwise
 deterministic (no atomics; the split-K tail sums fp32 partials in a fixed
 order); `dW[e] == 0` exactly for empty groups.
+
+## Device slices (`m_indptr[0] > 0`)
+
+An `m_indptr[E + 1]` may start above 0. The call then covers the rows
+`[m_indptr[0], m_indptr[E])` of the whole `x` / `g`, in absolute row numbers:
+for example the experts `e0 .. e1 - 1` of a larger table, one chunk of experts
+at a time, without copying rows or reading the table on the host.
+
+```python
+# m_indptr: [E_all + 1] int32 on the device; x: [R, K], g: [R, N]: all routed rows
+chunk = m_indptr[e0 : e1 + 1]  # a view; chunk[0] may be above 0
+y = torch.empty(R, N, dtype=torch.bfloat16, device=x.device)
+cake_moe_grouped_gemm_det_train_forward(x, w[e0:e1], chunk, out=y)  # writes rows chunk[0] .. chunk[-1] - 1 of y
+dw = cake_moe_grouped_gemm_det_train_wgrad(g, x, chunk, num_groups=e1 - e0)
+```
+
+- Rows outside `[m_indptr[0], m_indptr[E])` are neither read nor written: the
+  forward and the data gradient leave those rows of `out` as they are. The
+  entries must be nondecreasing row numbers of the operands, at most `sum_m`.
+- The weight gradient reads the `[E + 1]` form only with `num_groups=E`;
+  without it, `E + 1` entries are `E + 1` end offsets.
+- The kernels read `m_indptr[0]` on the device at every launch: a prepared
+  launch and a CUDA graph that captured it follow new boundaries, the first
+  entry included.
+- Programs: the `m_indptr` form binds the lead twins of the programs (the
+  routes `<route>_lead` of `cake_jit`, programs `<program>_lead` with
+  `twin_of`); the `[E]` form
+  binds the programs themselves (`launch.bound_routes`, `launch.bound_programs`
+  name them). A process JIT-compiles a twin at its first call where the package
+  ships no prebuilt build of it.
+- Cost: the twins read `m_indptr[0]` once per role, and some launches are
+  slightly slower (most a weight gradient with a split tail). When
+  `m_indptr[0]` is 0, pass `m_indptr[1:]` (the `[E]` form): it binds the
+  original programs at no extra cost and gives the same bits.
+- Bits: the plan (k tile, stage, grid, tail split) comes from the shapes, and
+  `sum_m` is `x.shape[0]`, every row, not the rows of the slice. A slice gives
+  the bits of the host-offset call over its rows (`x[m_indptr[0]:m_indptr[E]]`
+  with `offs = m_indptr[1:] - m_indptr[0]`) when the two calls plan the same.
+  When they plan differently (for example the rows per group cross
+  `k512_min_rows_per_group`), it gives the bits of that host-offset call with
+  its rows padded by rows of no group to the same `sum_m`, which plans the
+  same. Both results repeat bit for bit and meet the same accuracy bar.
+- A slice with no row and `accumulate=True` (`m_indptr[0] == m_indptr[E]`)
+  still launches, as the host does not read the table. Its add of exact zeros turns a `-0.0` in `out` into `+0.0`. The values are
+  equal. The host-offset call with no row launches nothing.
+- Autograd: `cake_moe_grouped_gemm_det(x, w, chunk)` writes only the slice's rows of
+  `Y` and of the gradient of `x`; the other rows of these new tensors are
+  uninitialized (`torch.empty`). Summing the `x` gradients of several slices
+  of one shared `x` is therefore not supported: a sliced layout calls the
+  op-level functions with caller-owned outputs.
 
 ## Reproducibility and accuracy
 
@@ -164,8 +215,8 @@ every call.
 The forward projection also has a handoff with the call shape of
 `grouped_mm_bf16(a, b, m_indptr, out=None, out_dtype=torch.bfloat16, tactic=-1)`:
 `cake_backend.grouped_det_mm_bf16_cake` (bfloat16 outputs only, no tactic
-index, `N % 256 == 0`, `K % 64 == 0`; rows of `a` past `m_indptr[-1]` are left
-untouched). It rejects the options the backend does not take and emits no
+index, `N % 256 == 0`, `K % 64 == 0`; rows of `a` before `m_indptr[0]` and
+past `m_indptr[-1]` are left untouched). It rejects the options the backend does not take and emits no
 warning.
 
 `cake_moe_grouped_gemm_det(x, w, offs)` is a `torch.autograd.Function`
@@ -596,7 +647,7 @@ package's functions emits no log and no warning.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_det_train.py tests/experimental/test_cake_moe_grouped_gemm_det_train_api.py tests/experimental/test_cake_moe_grouped_gemm_det_train_names.py tests/experimental/test_cake_moe_grouped_gemm_det_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_det_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_det_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_det_train_device_slice.py
 python benchmarks/bench_cake_moe_grouped_gemm_det_train.py --help
 ```
 
@@ -634,6 +685,15 @@ composed one (split tails, the planned walk with empty groups last, the wave
 halves, the k256 tail, `-0.0`, 32 groups), each judged against the naive BF16
 tier, CUDA graph replays, streams, layouts, and the autograd flag with the
 generated programs.
+`test_cake_moe_grouped_gemm_det_train_device_slice.py` covers the device
+slices (above): on the CPU the lead routes against their routes, the lead
+builds' CUDA floor, the row table's views and the lead binding over every
+architecture; on a GPU each slice against the `[E]` call over the same rows
+moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
+(bitwise where it plans the same), every forced stage, edges with the rows
+outside poisoned, padded rows, graph replay over device-copied routings, two
+streams, accumulation, the autograd entry and the bits of the judged `[E]`
+cases.
 `test_cake_moe_grouped_gemm_det_train_acceptance.py` repeats every output of
 the reproducibility table five times into a zeroed and five times into a
 filled output under concurrent copy streams, over changing offsets, and
@@ -655,3 +715,5 @@ gradients).
 - The alignment rules above; no transposed operand layouts other than the
   documented in-place `W` read of `dgrad`.
 - Compute capability 10.0, 10.3 or 10.7 only; other devices raise.
+- The autograd entry does not support summing the `x` gradients of several
+  device slices of one shared `x` (device slices, above).
