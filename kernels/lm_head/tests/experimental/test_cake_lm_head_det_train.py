@@ -17278,10 +17278,39 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         assert h.tensor.numel() == g["rows"] <= h.own[1][2] and h.own[1][2] % 128 == 0
         return _pool_span(h)
 
-    # the first backward of a call key runs the runner's own path (its own residuals, no holder bound) and remembers
-    # the binding: one step per key first, so that every backward below binds its graph's holder
+    # the first backward of a call key (a binding-cache miss) runs the runner's own path -- its own residuals, as K's
+    # backward allocates them: no pool buffer taken, the holder left unbound -- unless the form builds its binding
+    # before its launches (then the binding binds the holder at once); either way it remembers the binding, so every
+    # backward below binds its graph's holder
+    be.BINDING_CACHE.clear()
+    takes, bound = [], []
+    real_take, real_call = be._graph_rlab, be._Binding._call_rlab
+
+    def take(rows, zero, dev):
+        takes.append(rows)
+        return real_take(rows, zero, dev)
+
+    def call_rlab(self, zero, graph=None, filled=False):
+        bound.append(graph)
+        return real_call(self, zero, graph, filled)
+
+    monkeypatch.setattr(be, "_graph_rlab", take)
+    monkeypatch.setattr(be._Binding, "_call_rlab", call_rlab)
+    runner_path = 0
     for entry, T in ((default, 16), (default, 300), (keep, 16)):
-        backward(forward(entry, T))
+        g = forward(entry, T)
+        h, misses = g["holder"], be.BINDING_CACHE.misses
+        del takes[:], bound[:]
+        backward(g)
+        assert be.BINDING_CACHE.misses > misses, (entry.__name__, T)
+        if any(x is h for x in bound):
+            assert takes == [g["rows"]] and h.own is not None, (entry.__name__, T, takes)
+        else:
+            runner_path += 1
+            assert takes == [] and h.tensor is None and h.own is None, (entry.__name__, T, takes)
+        del g, h
+    monkeypatch.undo()
+    assert runner_path >= 1
     gc.collect()
     be._RLAB_POOL.clear()
     gc.collect()
@@ -17465,8 +17494,9 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
     ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA graph capture takes no
     buffer and changes no list; no forward takes one (a plain call, a call without a gradient, a checkpoint's first pass
     or recomputation), the binding backward does, with the plain step's bits; another device takes its own stream's
-    list, and no buffer comes from another current device.  Each call key runs one step first: a key's first backward
-    runs the runner's own path, which binds no holder."""
+    list, and no buffer comes from another current device.  Each call key runs one step first, from an empty binding
+    cache: a first backward that runs the runner's own path takes no buffer and binds no holder (as K allocates its own
+    residuals), one whose binding is built before its launches binds the holder at once."""
     _check_graph_rlab_pool(
         cake_backend,
         cake_backend.cake_lm_head_det_train_logprob,
