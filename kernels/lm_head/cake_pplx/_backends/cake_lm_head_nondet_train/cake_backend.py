@@ -7705,6 +7705,18 @@ def _bind_all(
 EAGER_CALL_SCALARS: dict[str, tuple[str, ...]] = {
     "scale_cast_scatter_bf16": ("fold_lo", "fold_hi")
 }
+# The stand-in host values every eager launch of the output boundary starts from (:func:`scale_cast`,
+# :func:`scale_cast_scatter`, :func:`dw_cast`): no common tensor and every common scalar 0, built once; a call copies it
+# and sets its stage's values over it.
+_EAGER_BASE: dict[str, Any] = {
+    **dict.fromkeys(COMMON_TENSORS),
+    **dict.fromkeys(COMMON_SCALARS, 0),
+}
+# The head of a form an eager caller keys itself (:func:`_eager_launch` ``form``): ``(_EAGER_FORMED, module, stage,
+# device index, *the host values its stage varies)``; the caller fixes every other host value of the stage, so the
+# tuple names the form :func:`_eager_form` would, without a pass over every value or a sort.  Never equal to a form of
+# :func:`_eager_form`.
+_EAGER_FORMED = "formed"
 
 
 def _eager_form(module_name: str, stage: str, device, values: dict[str, Any]) -> tuple:
@@ -7741,14 +7753,21 @@ def _eager_template(launch: _Launch) -> _Launch:
 
 
 def _eager_launch(
-    record, module_name: str, stage: str, values: dict[str, Any], device, geometry
+    record,
+    module_name: str,
+    stage: str,
+    values: dict[str, Any],
+    device,
+    geometry,
+    form: Optional[tuple] = None,
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
     remembered there per form (:func:`_eager_form`) -- the record, the stage, the device and every host value that is
     neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a later call of the
     same form slots its tensors and per-call scalars into it (:func:`_eager_template`): the same entry, grid and
-    arguments as a fresh binding."""
+    arguments as a fresh binding.  ``form``: the caller's own key of the call's form (:data:`_EAGER_FORMED`), used
+    instead of :func:`_eager_form`."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -7756,7 +7775,8 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = _eager_form(module_name, stage, device, values)
+    if form is None:
+        form = _eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
@@ -10900,22 +10920,24 @@ def scale_cast(
     stage = "scale_cast_f32" if out_dtype == torch.float32 else "scale_cast_bf16"
     if acc.numel() % geometry.cast_vec:
         raise ValueError(f"the cast needs a multiple of {geometry.cast_vec} elements")
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
-    values.update(
-        acc=acc.reshape(-1),
-        g=g,
-        out=out.reshape(-1),
-        num_vecs=int(acc.numel() // geometry.cast_vec),
-        loss_div=1.0,
-    )
-    launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
     index = (
         acc.device.index
         if acc.device.index is not None
         else torch.cuda.current_device()
+    )
+    num_vecs = int(acc.numel() // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
+    values.update(
+        acc=acc.reshape(-1), g=g, out=out.reshape(-1), num_vecs=num_vecs, loss_div=1.0
+    )
+    launch, arguments = _eager_launch(
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), num_vecs),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -10985,11 +11007,14 @@ def scale_cast_scatter(
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
-    fold_lo, fold_hi = (0, 0) if fold is None else (int(fold["lo"]), int(fold["hi"]))
-    if not 0 <= fold_lo <= fold_hi <= T_v:
-        raise ValueError(
-            f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
-        )
+    if fold is None:
+        fold_lo = fold_hi = 0
+    else:
+        fold_lo, fold_hi = int(fold["lo"]), int(fold["hi"])
+        if not 0 <= fold_lo <= fold_hi <= T_v:
+            raise ValueError(
+                f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
+            )
     if backend == "reference":
         if fold_hi > fold_lo:
             raise NotImplementedError(
@@ -11010,8 +11035,13 @@ def scale_cast_scatter(
         raise ValueError(
             f"the scatter needs a row width of a multiple of {geometry.cast_vec} elements"
         )
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    index = (
+        acc.device.index
+        if acc.device.index is not None
+        else torch.cuda.current_device()
+    )
+    row_vecs = int(H // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         acc=acc,
         g=g,
@@ -11020,7 +11050,7 @@ def scale_cast_scatter(
             torch.int32
         ),  # the low int32 word of each int64 index (stride 2)
         out=out,
-        row_vecs=int(H // geometry.cast_vec),
+        row_vecs=row_vecs,
         num_rows=num_rows,
         loss_div=1.0,
     )
@@ -11043,24 +11073,29 @@ def scale_cast_scatter(
             raise ValueError(
                 "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
             )
+        V_f = int(W_f.shape[0])
         values.update(
             labels=labels_f,
             rlab=rlab_f,
             W=W_f,
-            V=int(W_f.shape[0]),
+            V=V_f,
             fold_lo=fold_lo,
             fold_hi=fold_hi,
         )
     else:
         # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
+        V_f = 0
         values.update(labels=row_index, rlab=acc, W=out, V=0, fold_lo=0, fold_hi=0)
+    # the form: the output rows, the row width and the fold's head rows (``V``, 0 without a fold); the fold rows are
+    # per-call slots (:data:`EAGER_CALL_SCALARS`)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
-    index = (
-        acc.device.index
-        if acc.device.index is not None
-        else torch.cuda.current_device()
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows, V_f),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -11213,8 +11248,7 @@ def dw_cast(
         )
     geometry = Geometry.from_record(record)
     index = device.index if device.index is not None else torch.cuda.current_device()
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         A=dz_last,
         B=x_rows,
@@ -11237,8 +11271,27 @@ def dw_cast(
             first_chunk=int(dw_acc is None),
         ),
     )
+    # the form: the GEMM's rows, width, vocabulary rows, raster / block and first-chunk arguments (its launch scalars
+    # are :func:`gemm_scalars` of them; the record fixes the geometry)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, device, geometry
+        record,
+        module_name,
+        stage,
+        values,
+        device,
+        geometry,
+        form=(
+            _EAGER_FORMED,
+            module_name,
+            stage,
+            int(index),
+            int(rows),
+            H,
+            int(V),
+            group_m,
+            group_n,
+            int(dw_acc is None),
+        ),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:

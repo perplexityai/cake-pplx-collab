@@ -12945,9 +12945,9 @@ def test_device_scatter_fold_form_serves_every_valid_row_count(monkeypatch, modu
     calls, binds = [], []
     real_eager, real_bind = mod._eager_launch, mod._bind_all
 
-    def eager(record, module_name, name, values, device, geometry):
+    def eager(record, module_name, name, values, device, geometry, form=None):
         launch, arguments = real_eager(
-            record, module_name, name, values, device, geometry
+            record, module_name, name, values, device, geometry, form=form
         )
         calls.append(
             (
@@ -18238,3 +18238,171 @@ def test_device_graph_rlab_fast_switch_placement(glm_weight, tmp_path):
     assert len(fast["rows"]) == len(context["rows"])
     for a, b in zip(fast["rows"], context["rows"], strict=True):
         assert a == b
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_eager_launch_formed_key_reuse(monkeypatch, module):
+    """An eager launch of the output boundary keyed by its caller (``form``: ``_EAGER_FORMED``, the module, the stage,
+    the device index and the host values the stage varies) never forms :func:`_eager_form` over every value: the first
+    call of a form binds, every later call of it slots its own values into the remembered launch, a call without a
+    form keeps :func:`_eager_form`, and a disabled cache binds every call.  The stand-ins every caller starts from
+    (``_EAGER_BASE``) are the values each built before: no common tensor, every common scalar 0, in that order."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    base = cake_backend._EAGER_BASE
+    assert list(base) == [*cake_backend.COMMON_TENSORS, *cake_backend.COMMON_SCALARS]
+    assert base == {
+        **{name: None for name in cake_backend.COMMON_TENSORS},
+        **{name: 0 for name in cake_backend.COMMON_SCALARS},
+    }
+    binds, generic = [], []
+
+    def bind_all(record, module_name, keys, values, device, geometry):
+        v = values[keys[0]]
+        binds.append(keys[0])
+        launch = cake_backend._Launch(
+            stage=keys[0][0],
+            module=module_name,
+            entry=lambda *args: None,
+            arguments=(v["a"], v["c"], v["b"]),
+            grid=(1, 1, 1),
+            slots=((0, "a"), (2, "b")),
+        )
+        return {keys[0]: launch}
+
+    def eager_form(module_name, stage, device, values):
+        generic.append(stage)
+        return ("generic", module_name, stage, str(device))
+
+    monkeypatch.setattr(mod, "_bind_all", bind_all)
+    monkeypatch.setattr(cake_backend, "_eager_form", eager_form)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    record = {}
+    form = (cake_backend._EAGER_FORMED, "m", "s", 0, 3)
+    a1, b1, a2, b2 = (torch.zeros(1) for _ in range(4))
+    first = mod._eager_launch(
+        record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None, form=form
+    )
+    again = mod._eager_launch(
+        record, "m", "s", dict(a=a2, b=b2, c=7), "cuda:0", None, form=form
+    )
+    assert binds == [("s", "eager")] and generic == []
+    assert first[1] == [a1, 7, b1] and again[1] == [a2, 7, b2]
+    assert list(cache._eager) == [form]
+    assert again[0].arguments == (None, 7, None)
+    mod._eager_launch(record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None)
+    assert generic == ["s"] and len(binds) == 2 and len(cache._eager) == 2
+    cache.configure(enabled=False)
+    mod._eager_launch(
+        record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None, form=form
+    )
+    assert len(binds) == 3 and len(cache._eager) == 0
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_eager_cast_formed_keys_match_eager_form(monkeypatch, module):
+    """The output boundary's casts (``scale_cast``, ``scale_cast_scatter``, ``dw_cast``) key their eager launches
+    themselves (``_EAGER_FORMED``): over calls of several shapes, fold rows, accumulators and output types, two calls
+    share a formed key exactly when :func:`_eager_form` over their full host values is the same, so the cache keeps
+    one launch per form as before; a repeated call binds nothing, and every output is bitwise the output with the
+    binding cache disabled."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    calls, binds = [], []
+    real_eager, real_bind = mod._eager_launch, mod._bind_all
+
+    def eager(record, module_name, stage, values, device, geometry, form=None):
+        calls.append((module_name, stage, device, dict(values), form))
+        return real_eager(
+            record, module_name, stage, values, device, geometry, form=form
+        )
+
+    def bind(record, module_name, keys, *args, **kwargs):
+        binds.append(tuple(key[0] for key in keys))
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_eager_launch", eager)
+    monkeypatch.setattr(mod, "_bind_all", bind)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    H, V = DEFAULT_H, DEFAULT_V
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 89)
+    dgen = torch.Generator(device=CUDA).manual_seed(SEED + 89)
+    head = (0.05 * torch.randn(512, H, generator=gen)).to(torch.bfloat16).to(CUDA)
+    g = torch.tensor(0.75, device=CUDA)
+    accs = [torch.randn(rows, H, generator=gen).to(CUDA) for rows in (5, 12)]
+    scatters = []
+    for num_rows, T_v, lo, hi in (
+        (64, 15, 0, 15),
+        (64, 30, 7, 30),
+        (64, 30, 0, 0),
+        (65, 15, 0, 15),
+    ):
+        valid = torch.zeros(num_rows, dtype=torch.bool)
+        valid[torch.randperm(num_rows, generator=gen)[:T_v]] = True
+        acc = torch.randn(T_v, H, generator=gen).to(CUDA)
+        labels = torch.randint(0, 512, (T_v,), generator=gen).to(CUDA)
+        rlab = (1e-3 * torch.randn(T_v, generator=gen)).to(CUDA)
+        fold = dict(labels=labels, rlab=rlab, W=head, lo=lo, hi=hi) if hi > lo else None
+        scan = torch.cumsum(valid.to(CUDA), 0, dtype=torch.int32)
+        scatters.append(
+            (acc, valid.nonzero().squeeze(1).to(CUDA), scan, num_rows, fold)
+        )
+    dws = [
+        (
+            torch.randn((rows, V), device=CUDA, generator=dgen).to(torch.bfloat16),
+            torch.randn((rows, H), device=CUDA, generator=dgen).to(torch.bfloat16),
+        )
+        for rows in (3, 5)
+    ]
+    dw_acc = torch.randn((V, H), device=CUDA, generator=dgen)
+
+    def run():
+        out = []
+        for acc in accs:
+            out.append(mod.scale_cast(acc, g, torch.bfloat16))
+            out.append(mod.scale_cast(acc, g, torch.float32))
+        for acc, idx, scan, num_rows, fold in scatters:
+            out.append(
+                mod.scale_cast_scatter(
+                    acc, g, idx, scan, num_rows, backend="cake", fold=fold
+                )
+            )
+        for k, (dz, x) in enumerate(dws):
+            out.append(mod.dw_cast(dz, x, None, g, torch.bfloat16))
+            out.append(mod.dw_cast(dz, x, dw_acc, g, torch.bfloat16))
+            if k == 0:
+                out.append(mod.dw_cast(dz, x, None, g, torch.float32))
+        torch.cuda.synchronize()
+        return out
+
+    cache.configure(enabled=False)
+    fresh = run()
+    cache.configure(enabled=True)
+    calls.clear()
+    binds.clear()
+    first = run()
+    assert calls and all(form is not None for *_, form in calls), [
+        stage for _, stage, _, _, form in calls if form is None
+    ]
+    generic = [
+        cake_backend._eager_form(name, stage, device, values)
+        for name, stage, device, values, _ in calls
+    ]
+    formed = [form for *_, form in calls]
+    for i in range(len(calls)):
+        for j in range(len(calls)):
+            assert (formed[i] == formed[j]) == (generic[i] == generic[j]), (
+                calls[i][1],
+                calls[j][1],
+            )
+    assert len(binds) == len(set(formed)) == len(cache._eager)
+    assert set(cache._eager) == set(formed)
+    for a, b in zip(fresh, first, strict=True):
+        assert a.dtype == b.dtype and torch.equal(a, b)
+    del first
+    binds.clear()
+    again = run()
+    assert binds == [] and len(cache._eager) == len(set(formed))
+    for a, b in zip(fresh, again, strict=True):
+        assert a.dtype == b.dtype and torch.equal(a, b)

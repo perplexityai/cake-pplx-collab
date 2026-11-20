@@ -139,6 +139,8 @@ from .cake_backend import (
     _chunk_rows,
     _deferred_operands,
     _device_constants,
+    _EAGER_BASE,
+    _EAGER_FORMED,
     _dw_stream,
     _dx_keys,
     _dx_reduce,
@@ -2594,14 +2596,21 @@ def _bind_all(
 
 
 def _eager_launch(
-    record, module_name: str, stage: str, values: dict[str, Any], device, geometry
+    record,
+    module_name: str,
+    stage: str,
+    values: dict[str, Any],
+    device,
+    geometry,
+    form: Optional[tuple] = None,
 ) -> tuple[_Launch, list]:
     """``(launch, arguments)`` of one eager stage of the output boundary (:func:`scale_cast`, :func:`scale_cast_scatter`,
     :func:`dw_cast`).  Bound by :func:`_bind_all`; while :data:`BINDING_CACHE` is enabled the templated launch is
     remembered there per form (:func:`.cake_backend._eager_form`) -- the record, the stage, the device and every host
     value that is neither a tensor nor a per-call scalar, which fix the grid and the other scalar arguments -- and a
     later call of the same form slots its tensors and per-call scalars into it (:func:`.cake_backend._eager_template`):
-    the same entry, grid and arguments as a fresh binding."""
+    the same entry, grid and arguments as a fresh binding.  ``form``: the caller's own key of the call's form
+    (:data:`.cake_backend._EAGER_FORMED`), used instead of :func:`.cake_backend._eager_form`."""
     key = (stage, "eager")
     cache = BINDING_CACHE
     if not cache.enabled:
@@ -2609,7 +2618,8 @@ def _eager_launch(
             record, module_name, (key,), {key: values}, device, geometry
         )[key]
         return launch, list(launch.arguments)
-    form = _main._eager_form(module_name, stage, device, values)
+    if form is None:
+        form = _main._eager_form(module_name, stage, device, values)
     launch = cache.eager_lookup(form, record)
     if launch is None:
         launch = _bind_all(
@@ -6194,22 +6204,24 @@ def scale_cast(
     stage = "scale_cast_f32" if out_dtype == torch.float32 else "scale_cast_bf16"
     if acc.numel() % geometry.cast_vec:
         raise ValueError(f"the cast needs a multiple of {geometry.cast_vec} elements")
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
-    values.update(
-        acc=acc.reshape(-1),
-        g=g,
-        out=out.reshape(-1),
-        num_vecs=int(acc.numel() // geometry.cast_vec),
-        loss_div=1.0,
-    )
-    launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
     index = (
         acc.device.index
         if acc.device.index is not None
         else torch.cuda.current_device()
+    )
+    num_vecs = int(acc.numel() // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
+    values.update(
+        acc=acc.reshape(-1), g=g, out=out.reshape(-1), num_vecs=num_vecs, loss_div=1.0
+    )
+    launch, arguments = _eager_launch(
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), num_vecs),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6279,11 +6291,14 @@ def scale_cast_scatter(
         if grad is None
         else grad.detach().reshape(1).to(device=acc.device, dtype=torch.float32)
     )
-    fold_lo, fold_hi = (0, 0) if fold is None else (int(fold["lo"]), int(fold["hi"]))
-    if not 0 <= fold_lo <= fold_hi <= T_v:
-        raise ValueError(
-            f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
-        )
+    if fold is None:
+        fold_lo = fold_hi = 0
+    else:
+        fold_lo, fold_hi = int(fold["lo"]), int(fold["hi"])
+        if not 0 <= fold_lo <= fold_hi <= T_v:
+            raise ValueError(
+                f"the fold rows [{fold_lo}, {fold_hi}) are not compact rows of [0, {T_v})"
+            )
     if backend == "reference":
         if fold_hi > fold_lo:
             raise NotImplementedError(
@@ -6304,8 +6319,13 @@ def scale_cast_scatter(
         raise ValueError(
             f"the scatter needs a row width of a multiple of {geometry.cast_vec} elements"
         )
-    values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-    values.update({name: 0 for name in COMMON_SCALARS})
+    index = (
+        acc.device.index
+        if acc.device.index is not None
+        else torch.cuda.current_device()
+    )
+    row_vecs = int(H // geometry.cast_vec)
+    values: dict[str, Any] = dict(_EAGER_BASE)
     values.update(
         acc=acc,
         g=g,
@@ -6314,7 +6334,7 @@ def scale_cast_scatter(
             torch.int32
         ),  # the low int32 word of each int64 index (stride 2)
         out=out,
-        row_vecs=int(H // geometry.cast_vec),
+        row_vecs=row_vecs,
         num_rows=num_rows,
         loss_div=1.0,
     )
@@ -6337,24 +6357,29 @@ def scale_cast_scatter(
             raise ValueError(
                 "the fold takes the compact int64 labels, the FP32 residuals and the contiguous BF16 [V, H] head"
             )
+        V_f = int(W_f.shape[0])
         values.update(
             labels=labels_f,
             rlab=rlab_f,
             W=W_f,
-            V=int(W_f.shape[0]),
+            V=V_f,
             fold_lo=fold_lo,
             fold_hi=fold_hi,
         )
     else:
         # no row folds: the kernel reads none of the fold operands; typed stand-ins of the call's own tensors
+        V_f = 0
         values.update(labels=row_index, rlab=acc, W=out, V=0, fold_lo=0, fold_hi=0)
+    # the form: the output rows, the row width and the fold's head rows (``V``, 0 without a fold); the fold rows are
+    # per-call slots (:data:`EAGER_CALL_SCALARS`)
     launch, arguments = _eager_launch(
-        record, module_name, stage, values, acc.device, geometry
-    )
-    index = (
-        acc.device.index
-        if acc.device.index is not None
-        else torch.cuda.current_device()
+        record,
+        module_name,
+        stage,
+        values,
+        acc.device,
+        geometry,
+        form=(_EAGER_FORMED, module_name, stage, int(index), row_vecs, num_rows, V_f),
     )
     with _ffi_stream_context(int(index)):
         if launch.prepare is not None:
@@ -6556,8 +6581,7 @@ class _DwCastForm:
         ``out`` = ``cast(g * (acc + dz^T @ x_rows))`` (``[m, H]``; ``acc`` ``None``: ``cast(g * dz^T @ x_rows)``)."""
         rows, m = (int(n) for n in dz.shape)
         H = int(x_rows.shape[1])
-        values: dict[str, Any] = {name: None for name in COMMON_TENSORS}
-        values.update({name: 0 for name in COMMON_SCALARS})
+        values: dict[str, Any] = dict(_EAGER_BASE)
         values.update(
             A=dz,
             B=x_rows,
@@ -6580,6 +6604,8 @@ class _DwCastForm:
                 first_chunk=int(acc is None),
             ),
         )
+        # the form: the GEMM's rows, width, vocabulary rows, raster / block and first-chunk arguments (its launch
+        # scalars are :func:`.cake_backend.gemm_scalars` of them; the record fixes the geometry)
         launch, arguments = _eager_launch(
             self.record,
             self.module_name,
@@ -6587,6 +6613,18 @@ class _DwCastForm:
             values,
             self.device,
             self.geometry,
+            form=(
+                _EAGER_FORMED,
+                self.module_name,
+                self.stage,
+                self.index,
+                rows,
+                H,
+                m,
+                self.group_m,
+                self.group_n,
+                int(acc is None),
+            ),
         )
         with _ffi_stream_context(self.index):
             if launch.prepare is not None:
