@@ -113,7 +113,9 @@ faster there, and `pair_table` for more; both write the same bytes.  Every launc
 stream-ordered launch on the current torch stream of the operands' device; nothing
 synchronizes.  Host work per call: the operands' device index, its architecture and the
 roles are looked up once and passed to the launches, and each record's argument plan and
-grid rule are read once per process.  Numerics: FP32 throughout, IEEE round to nearest, no
+grid rule are read once per process.  The checks read a plain tensor operand's shape,
+strides and address once; an output the call allocates itself takes no stride or overlap
+check, and the autograd backward reuses what its forward checked.  Numerics: FP32 throughout, IEEE round to nearest, no
 flush to zero; the logit gap is `u = z1 - z0`, `e = exp(-|u|)` (precise `expf`), the
 larger-logit token's weight `1 / (1 + e)` and the other's `e / (1 + e)`, both correctly
 rounded divisions; the forward value is `fma(e, c_small, c_big) / (1 + e)`.  Gate gaps of

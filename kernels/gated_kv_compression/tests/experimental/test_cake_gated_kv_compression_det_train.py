@@ -27,7 +27,9 @@ sm_100a / sm_103a and ``bwd_sm_107a`` on sm_107a; the launch facts, the kernel p
 record each role launches on each architecture, the pair-table role of 512 and 513 documents and the forward role of
 256, 257, 512, 513 and more documents, the launch grids (every row covered, the pair tables on one CTA), the
 launchers' keywords and the kernel arguments they pass, the exact overlap rule of two row-strided views
-(the two column halves of one buffer share no element), the memory report, the build manifest (every record's
+(the two column halves of one buffer share no element), the operand checks' fast path (for every well-formed and
+malformed operand variant it gives the full checks' result or exception type and message, or defers to them; an output
+a call allocates takes no overlap check), the memory report, the build manifest (every record's
 library, the recorded source digests), the standalone loader, the prebuilt libraries served first, and no environment
 read outside the JIT shim.
 
@@ -713,6 +715,200 @@ def test_the_disjoint_check_refuses_exactly_the_overlapping_pairs() -> None:
                     cake_backend._disjoint((written_name, written), pair)
             else:
                 cake_backend._disjoint((written_name, written), pair)
+
+
+def _outcome(check, *args):
+    """``("ok", result)`` of ``check(*args)``, or ``("error", exception type, message)``."""
+    try:
+        return ("ok", check(*args))
+    except (TypeError, ValueError) as error:
+        return ("error", type(error), str(error))
+
+
+def _offset(dtype: torch.dtype, shape: tuple[int, ...], offset_bytes: int) -> torch.Tensor:
+    """A contiguous CPU tensor of ``shape`` whose base is ``offset_bytes`` past a fresh 64-byte-aligned allocation."""
+    size = torch.tensor([], dtype=dtype).element_size()
+    count = 1
+    for n in shape:
+        count *= n
+    storage = torch.zeros(count + 64, dtype=dtype)
+    skip = (-storage.data_ptr() % 64 + offset_bytes) // size
+    return storage[skip : skip + count].view(shape)
+
+
+def _token_variants() -> list[tuple[str, tuple]]:
+    """``(label, (c, z, cu_seqlens))`` on the CPU: well-formed operands (column halves, separate tensors, padded rows,
+    one and no token, a subclass) and one malformed operand each (every check of the token operands)."""
+    cz = torch.zeros(7, 2 * WIDTH)
+    c, z = cz[:, :WIDTH], cz[:, WIDTH:]
+    cu = torch.tensor([0, 2, 7], dtype=torch.int32)
+    padded = torch.zeros(7, 520)[:, :WIDTH]
+    return [
+        ("halves", (c, z, cu)),
+        ("separate", (torch.zeros(7, WIDTH), torch.zeros(7, WIDTH), cu)),
+        ("padded rows", (padded, z, cu)),
+        ("one token", (torch.zeros(1, WIDTH), torch.zeros(1, WIDTH), torch.tensor([0, 1], dtype=torch.int32))),
+        ("no token", (torch.zeros(0, WIDTH), torch.zeros(0, WIDTH), torch.zeros(1, dtype=torch.int32))),
+        ("parameter c", (torch.nn.Parameter(torch.zeros(7, WIDTH)), z, cu)),
+        ("c not a tensor", ([0.0] * WIDTH, z, cu)),
+        ("z not a tensor", (c, None, cu)),
+        ("cu_seqlens not a tensor", (c, z, [0, 2, 7])),
+        ("z on meta", (c, z.to("meta"), cu)),
+        ("cu_seqlens on meta", (c, z, cu.to("meta"))),
+        ("c dtype", (c.to(torch.bfloat16), z, cu)),
+        ("z dtype", (c, z.double(), cu)),
+        ("cu_seqlens dtype", (c, z, cu.long())),
+        ("c rank", (c[None], z, cu)),
+        ("c width", (cz[:, :256], z, cu)),
+        ("z rows", (c, cz[:6, WIDTH:], cu)),
+        ("c feature stride", (torch.zeros(WIDTH, 7).t(), z, cu)),
+        ("z feature stride", (c, torch.zeros(WIDTH, 7).t(), cu)),
+        ("c row stride off 8", (torch.zeros(7, 1028)[:, :WIDTH], z, cu)),
+        ("z rows overlap", (c, torch.zeros(7 * 256 + 256).as_strided((7, WIDTH), (256, 1)), cu)),
+        ("c misaligned", (cz[:, 4 : 4 + WIDTH], z, cu)),
+        ("z misaligned", (c, cz[:, WIDTH - 4 : 2 * WIDTH - 4], cu)),
+        ("cu_seqlens rank", (c, z, cu[None])),
+        ("cu_seqlens empty", (c, z, cu[:0])),
+        ("cu_seqlens strided", (c, z, torch.zeros(6, dtype=torch.int32)[::2])),
+        ("too many documents", (c, z, torch.zeros(cake_jit.MAX_DOCS + 2, dtype=torch.int32))),
+    ]
+
+
+def test_the_fast_operand_checks_give_the_checks_result_or_defer() -> None:
+    """For every token-operand variant: the fast path returns the full checks' result or defers (``None``), and
+    ``_token_operands`` gives exactly the full checks' outcome: the same result, or the same exception type and
+    message (on the CPU device, given; without a device, every CPU operand is refused alike)."""
+    cpu = torch.device("cpu")
+    deferred = []
+    for label, (c, z, cu) in _token_variants():
+        want = _outcome(cake_backend._check_token_operands, c, z, cu, cpu)
+        fast = cake_backend._token_operands_fast(c, z, cu, cpu)
+        if fast is None:
+            deferred.append(label)
+        else:
+            assert want == ("ok", fast), label
+        assert _outcome(cake_backend._token_operands, c, z, cu, cpu) == want, label
+        assert _outcome(cake_backend._token_operands, c, z, cu, None) == _outcome(
+            cake_backend._check_token_operands, c, z, cu, None
+        ), label
+    # the plain operands of two tokens or more take the fast path; the others and every malformed variant defer
+    assert sorted({label for label, _ in _token_variants()} - set(deferred)) == [
+        "halves",
+        "padded rows",
+        "separate",
+    ]
+
+
+def _backward_variants() -> list[tuple[str, dict]]:
+    """``(label, operands)`` of the explicit backward on the CPU: well-formed operands with and without caller
+    ``dc`` / ``dz`` and ``pair_offsets``, and one malformed or overlapping operand each."""
+    cz = torch.zeros(7, 2 * WIDTH)
+    base = {
+        "dout": torch.zeros(3, WIDTH, dtype=torch.bfloat16),
+        "c": cz[:, :WIDTH],
+        "z": cz[:, WIDTH:],
+        "cu_seqlens": torch.tensor([0, 2, 7], dtype=torch.int32),
+        "dc": None,
+        "dz": None,
+        "pair_offsets": None,
+    }
+    grads = torch.zeros(7, 2 * WIDTH)
+    overlapping = torch.zeros(8, WIDTH)
+    shared = torch.zeros(7, WIDTH)
+    variants = [
+        ("allocated", {}),
+        ("given halves", {"dc": grads[:, :WIDTH], "dz": grads[:, WIDTH:]}),
+        ("given dc", {"dc": torch.zeros(7, WIDTH)}),
+        ("given dz", {"dz": torch.zeros(7, WIDTH)}),
+        ("pair_offsets", {"pair_offsets": torch.tensor([0, 1, 3], dtype=torch.int32)}),
+        ("no pair", {"dout": torch.zeros(0, WIDTH, dtype=torch.bfloat16)}),
+        ("dout dtype", {"dout": torch.zeros(3, WIDTH)}),
+        ("dout rank", {"dout": torch.zeros(3, WIDTH, 1, dtype=torch.bfloat16)}),
+        ("dout width", {"dout": torch.zeros(3, 511, dtype=torch.bfloat16)}),
+        ("dout strided", {"dout": torch.zeros(WIDTH, 3, dtype=torch.bfloat16).t()}),
+        ("dout misaligned", {"dout": _offset(torch.bfloat16, (3, WIDTH), 8)}),
+        ("dc not a tensor", {"dc": [0.0]}),
+        ("dc on meta", {"dc": torch.zeros(7, WIDTH, device="meta")}),
+        ("dc dtype", {"dc": torch.zeros(7, WIDTH, dtype=torch.bfloat16)}),
+        ("dc rows", {"dc": torch.zeros(6, WIDTH)}),
+        ("dz width", {"dz": torch.zeros(7, 256)}),
+        ("dz feature stride", {"dz": torch.zeros(WIDTH, 7).t()}),
+        ("dz row stride off 8", {"dz": torch.zeros(7, 1028)[:, :WIDTH]}),
+        ("dz misaligned", {"dz": _offset(torch.float32, (7, WIDTH), 16)}),
+        ("dc is dz", {"dc": shared, "dz": shared}),
+        ("dc over dz", {"dc": overlapping[:7], "dz": overlapping[1:]}),
+        ("dc over c", {"dc": cz[:, :WIDTH]}),
+        ("dz over z", {"dz": cz[:, WIDTH:]}),
+        ("dc over cu_seqlens", {"dc": torch.zeros(7, WIDTH)}),
+        ("pair_offsets not a tensor", {"pair_offsets": [0, 1, 3]}),
+        ("pair_offsets on meta", {"pair_offsets": torch.zeros(3, dtype=torch.int32, device="meta")}),
+        ("pair_offsets dtype", {"pair_offsets": torch.tensor([0, 1, 3])}),
+        ("pair_offsets length", {"pair_offsets": torch.tensor([0, 1], dtype=torch.int32)}),
+        ("pair_offsets strided", {"pair_offsets": torch.zeros(6, dtype=torch.int32)[::2]}),
+    ]
+    out = []
+    for label, edit in variants:
+        o = dict(base, **edit)
+        if label == "dc over cu_seqlens":
+            o["cu_seqlens"] = o["dc"].view(-1)[:3].view(torch.int32)
+            o["cu_seqlens"][:] = torch.tensor([0, 2, 7], dtype=torch.int32)
+        out.append((label, o))
+    buffer = torch.zeros(7, WIDTH)
+    dout = buffer.view(-1).view(torch.bfloat16)[: 3 * WIDTH].view(3, WIDTH)
+    out.append(("dz over dout", dict(base, dz=buffer, dout=dout)))
+    out += [(f"token: {label}", dict(base, c=c, z=z, cu_seqlens=cu)) for label, (c, z, cu) in _token_variants()]
+    return out
+
+
+def _same_grads(fast, want, o) -> None:
+    """The fast path's backward operands equal the checks': every host value, a caller ``dc`` / ``dz`` itself and an
+    allocated one of the same dtype, device, shape and strides."""
+    assert fast[:6] == want[:6] and (fast[7], fast[9]) == (want[7], want[9])
+    for name, got, ref in (("dc", fast[6], want[6]), ("dz", fast[8], want[8])):
+        if o[name] is not None:
+            assert got is o[name] and ref is o[name], name
+        else:
+            assert (got.dtype, got.device, got.shape, got.stride()) == (ref.dtype, ref.device, ref.shape, ref.stride())
+
+
+def test_the_fast_backward_checks_give_the_checks_result_or_defer() -> None:
+    """For every explicit-backward variant on the CPU device: the fast path gives the full checks' outcome (the same
+    host values and caller outputs, or the same exception type and message) or defers (``None``); an output the call
+    allocates takes no overlap check.  The plain well-formed operands of at least two tokens and one pair take the fast
+    path."""
+    cpu = torch.device("cpu")
+    names = ("dout", "c", "z", "cu_seqlens", "dc", "dz", "pair_offsets")
+    taken = []
+    for label, o in _backward_variants():
+        args = [o[name] for name in names]
+        want = _outcome(cake_backend._check_backward_operands, *args, cpu)
+        fast = _outcome(cake_backend._backward_operands_fast, *args, cpu)
+        if fast == ("ok", None):
+            continue
+        taken.append(label)
+        assert fast[0] == want[0], (label, fast, want)
+        if want[0] == "ok":
+            _same_grads(fast[1], want[1], o)
+        else:
+            assert fast == want, label
+    assert sorted(taken) == sorted(
+        [
+            "allocated",
+            "given halves",
+            "given dc",
+            "given dz",
+            "pair_offsets",
+            "dc is dz",
+            "dc over dz",
+            "dc over c",
+            "dz over z",
+            "dc over cu_seqlens",
+            "dz over dout",
+            "token: halves",
+            "token: separate",
+            "token: padded rows",
+        ]
+    )
 
 
 def test_the_memory_report_separates_workspace_and_retained_state() -> None:
