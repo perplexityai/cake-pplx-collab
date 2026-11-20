@@ -126,8 +126,10 @@ from ._cake_pplx_api_clamped_swiglu import cake_api
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
 # imported on first use.  The steps and the autograd entry call the backend's
-# own step functions and autograd class, which the backend functions of the
-# same names call: the same work, one Python call fewer per call.
+# own step functions and autograd ``apply``, which the backend functions of the
+# same names call: the same work, one Python call fewer per call.  Each is bound
+# to a global of this module at its first call (:func:`_step_forward`,
+# :func:`_step_backward`, :func:`_apply`), so a later call reads no cache.
 
 
 @functools.cache
@@ -135,6 +137,28 @@ def _backend() -> Any:
     from ._backends import cake_clamped_swiglu_det_train  # noqa: PLC0415 - the backend package, imported on first use
 
     return cake_clamped_swiglu_det_train
+
+
+def _step_forward(*arguments: Any) -> torch.Tensor:
+    """The backend's forward step; the first call imports the backend and binds this global to its own function."""
+    global _step_forward
+    _step_forward = _backend()._forward_step
+    return _step_forward(*arguments)
+
+
+def _step_backward(*arguments: Any) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """The backend's backward step; the first call imports the backend and binds this global to its own function."""
+    global _step_backward
+    _step_backward = _backend()._backward_step
+    return _step_backward(*arguments)
+
+
+def _apply(*arguments: Any) -> torch.Tensor:
+    """The backend's ``CakeClampedSwiGLUDetFunction.apply``; the first call imports the backend and binds this global
+    to it."""
+    global _apply
+    _apply = _backend().CakeClampedSwiGLUDetFunction.apply
+    return _apply(*arguments)
 
 
 # The backend package's own objects (the autograd class and the constants),
@@ -223,7 +247,7 @@ def cake_clamped_swiglu_det_train_forward(
     and passed to every call avoids the fill of ``h``.
     """
 
-    return _backend()._forward(gate_up_or_gate, up, weight, limit, out)[0]
+    return _step_forward(gate_up_or_gate, up, weight, limit, out)
 
 
 @cake_api
@@ -293,8 +317,8 @@ def cake_clamped_swiglu_det_train_backward(
     NaN first, one fill launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
-    return _backend()._backward(
-        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight
+    return _step_backward(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
     )
 
 
@@ -328,11 +352,13 @@ def cake_clamped_swiglu_det(
     Notes
     -----
     Saves only the inputs and recomputes the activation in the backward (no activation retained; works under
-    ``torch.utils.checkpoint(..., use_reentrant=False)``).  ``limit`` is checked once, in the forward.  No double
-    backward: differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
+    ``torch.utils.checkpoint(..., use_reentrant=False)``).  ``limit`` is checked in the forward (twice there for a
+    number that is neither a Python float nor an int that a float holds exactly), not in the backward, which reuses
+    its FP32 rounding.  No double backward: differentiating gradients computed with ``create_graph=True`` raises
+    ``RuntimeError``.
     """
 
-    return _backend().CakeClampedSwiGLUDetFunction.apply(gate_up_or_gate, up, weight, limit)
+    return _apply(gate_up_or_gate, up, weight, limit)
 
 
 def __getattr__(name: str) -> Any:

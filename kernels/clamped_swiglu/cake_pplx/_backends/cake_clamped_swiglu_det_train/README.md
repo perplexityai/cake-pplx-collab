@@ -212,9 +212,20 @@ the fills of those outputs.  The kernels write every element of every output, so
   the backward recomputes it.  The backward reuses the forward's FP32 `limit` and checks the saved inputs again, since
   a saved-tensors hook or a `.data` assignment can change them after the forward.
 - Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
-  and one launcher per stage (the route, and each program's FFI entry bound at its first launch); per process, the
-  loaded libraries and the FP32 rounding of the last accepted `limit`.  The architecture is still checked at every
-  call, before any allocation.
+  and one launcher per stage (the route, each program's FFI entry bound at its first launch, and in `fwd` the ignored
+  weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
+  architecture is still checked at every call, before any allocation.
+- Host path: a common call (plain contiguous operands and outputs of the exact dtypes and shapes on one device, the
+  BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched by the step function itself, without the
+  full checks.  The step checks the first operand, the weight and `dh` in its own frame, and the `up` of a two-tensor
+  input and each caller-provided output buffer with one helper call each.  So only a merged input with new outputs,
+  whose limit is a Python float, or an int that a float holds exactly, equal to the float value of the last accepted
+  limit, is checked and launched in exactly one Python frame per step once the host caches above are filled (any other
+  limit adds one `_limit` call; a call that fills a host cache, such as the first launch of a program on a device,
+  adds the calls that fill it).  The checks keep the order of the full checks: the operands and `dh`, then `limit`,
+  then the output buffers.  The row strides of its contiguous tensors are constants (`4608` or `2304`; 0 for one row),
+  not read.  Any other call takes the full checks, which raise every error and copy what the kernels cannot read; both
+  give the same launch.  The facade binds the backend's step functions and autograd `apply` at their first call.
 
 ## Limitations
 
