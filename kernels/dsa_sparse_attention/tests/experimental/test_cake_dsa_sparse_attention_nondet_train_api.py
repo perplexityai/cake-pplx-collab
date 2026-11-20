@@ -629,6 +629,13 @@ def test_check_dst_map_environment_checks_the_map_before_the_backward_launches(
     nv.judge_draws(record_property, case, seed=SEED + 23)
 
 
+def _keep_public_api(monkeypatch):
+    """Put every object of the public module back when the test ends: a reload replaces them there, while the
+    names this module (or any other) imported from it still hold the old ones."""
+    for name, value in list(vars(public_api).items()):
+        monkeypatch.setitem(vars(public_api), name, value)
+
+
 def test_binding_cache_capacity_environment_configures_the_backend_cache(monkeypatch):
     """``CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY`` is read when :mod:`cake_pplx.cake_dsa_sparse_attention_nondet_train` is
     imported (a malformed value fails there, naming the variable) and applied to the backend's ``BINDING_CACHE``
@@ -636,6 +643,7 @@ def test_binding_cache_capacity_environment_configures_the_backend_cache(monkeyp
     blank leaves the configured capacity alone."""
     env = public_api.BINDING_CACHE_CAPACITY_ENV
     assert env == "CAKE_PPLX_DSA_TRAIN_BINDING_CACHE_CAPACITY"
+    _keep_public_api(monkeypatch)
     cache = cake_backend.BINDING_CACHE
     before = cache.capacity
     try:
@@ -3046,8 +3054,9 @@ def test_public_entries_forward_with_o_lo(monkeypatch):
 def test_no_olo_case_reaches_the_entries_this_module_imported(monkeypatch, request):
     """The ``no_olo`` case of the ``with_o_lo`` fixture (:func:`nv.with_o_lo_case`) makes ``with_o_lo=False`` the
     default of the ten public entries and of the four this module imported, also after a reload of the public
-    module (as the binding-cache capacity test makes) has replaced them there; the case passes when its plans
-    resolved the twins and fails when one resolved a default forward stage; every default is ``True`` after it."""
+    module has replaced them there; the case passes when its plans resolved the twins and fails when one resolved a
+    default forward stage; every default is ``True`` after it.  A test that reloads the module puts its own objects
+    back: the module holds the four this module imported when the test starts."""
     names = (
         "cake_dsa_sparse_attention_nondet",
         "cake_dsa_sparse_attention_nondet_varlen",
@@ -3055,7 +3064,10 @@ def test_no_olo_case_reaches_the_entries_this_module_imported(monkeypatch, reque
         "cake_dsa_sparse_attention_nondet_nope_varlen",
     )
     imported = [globals()[name] for name in names]
+    # no earlier test left the module holding other objects than this module imported (the reloads put them back)
+    assert all(getattr(public_api, f.__name__) is f for f in imported)
     monkeypatch.delenv(public_api.BINDING_CACHE_CAPACITY_ENV, raising=False)
+    _keep_public_api(monkeypatch)
     importlib.reload(public_api)
     assert all(getattr(public_api, f.__name__) is not f for f in imported)
     functions = [v for v in vars(public_api).values() if inspect.isfunction(v)]
