@@ -941,8 +941,8 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     order-independent way, and the sum rounded once to FP32 (then to BF16 for a BF16
     gradient; see the module): the same row count on a device with the same SM
     count gives the same bits, and up to 256 rows (one CTA, or one cluster of
-    16 CTAs that wait for each other's words) on any device of at least 4
-    SMs.
+    16 CTAs that wait for each other's words where the device runs clusters,
+    else the role's module) on any device of at least 4 SMs.
 
     Parameters
     ----------

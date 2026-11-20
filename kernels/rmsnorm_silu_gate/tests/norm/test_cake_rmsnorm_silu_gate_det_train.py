@@ -60,12 +60,14 @@ reserve workspace, eagerly and in CUDA Graph capture, and leaves a caller
 workspace as it is.  A backward that computes the weight gradient on up to
 256 rows runs its role's program of one CTA (up to 16 rows) or of one
 cluster of 16 CTAs (where ``device_runs_clusters`` holds; ``dw_module``): on
-every layout of ``make``, three data kinds, both weight-gradient dtypes,
-fresh and accumulated, at every call, on the grids of other SM counts and
-where the device check fails (the role's module past 16 rows), it gives the
-``dx``, ``dz`` and weight-gradient bits of the role's module on the same
-calls, and it makes no stream workspace, takes no reserve workspace and
-leaves a caller workspace as it is, eagerly and in CUDA Graph capture.  The
+every layout of ``make``, three data kinds and infinite and NaN terms, both
+weight-gradient dtypes, fresh and accumulated (onto infinite and NaN starts
+too), at every call, on the grids of other SM counts and where the device
+check fails (the role's module past 16 rows), it gives the ``dx``, ``dz``
+and weight-gradient bits of the role's module on the same calls, its
+weight gradient has the FP64 reference's NaN and infinite columns, and it
+makes no stream workspace, takes no reserve workspace and leaves a caller
+workspace as it is, eagerly and in CUDA Graph capture.  The
 tests never compare this package with the non-deterministic one and hold no
 output to an error bound of its own.  The backward's workspace is zero
 after every call (``compute_grad_weight=False`` and accumulation included),
@@ -1986,7 +1988,7 @@ SMALL_DW_SHAPES = (
     (257, 1),
 )
 SMALL_DW_LAYOUTS = ("contiguous", "flat", "projection", "head_major", "misaligned")
-SMALL_DW_DATA = ("normal", "near_zero", "saturated")
+SMALL_DW_DATA = ("normal", "near_zero", "saturated", "non_finite")
 # The roles of ``_dw_calls``' calls, in order, and the names of its outputs.
 DW_CALL_ROLES = ("bwd_bf16", "bwd_bf16", "bwd_f32", "bwd_f32")
 DW_CALL_OUTPUTS = tuple(
@@ -2023,15 +2025,85 @@ def _small_dw_modules(arch, rows, clusters):
     return [_small_dw_module(arch, role, rows, clusters) for role in DW_CALL_ROLES]
 
 
-def _dw_calls(dy, x, z, w, workspace=None):
+# The accumulated weight gradient's start columns of ``non_finite`` data:
+# ``+inf``, ``-inf`` and NaN on finite sums (columns 120 to 122), ``-inf`` on
+# the ``+inf`` sum of column 0 (NaN) and the ``-inf`` sum of column 36, NaN
+# on the ``+inf`` sum of column 45 and ``+inf`` on the NaN sum of column 9.
+NON_FINITE_STARTS = (
+    (120, float("inf")),
+    (121, float("-inf")),
+    (122, float("nan")),
+    (0, float("-inf")),
+    (36, float("-inf")),
+    (45, float("nan")),
+    (9, float("inf")),
+)
+
+
+def _dw_start(dtype, value, non_finite, device):
+    """The accumulated weight gradient's start: ``value`` in every column, with
+    ``NON_FINITE_STARTS`` where ``non_finite``."""
+    start = torch.full((D,), value, dtype=dtype, device=device)
+    if non_finite:
+        for column, v in NON_FINITE_STARTS:
+            start[column] = v
+    return start
+
+
+def _set_term(t, row, H, column, value):
+    """``value`` at ``row`` (``token * H + head``) and ``column`` of a
+    ``[T, H, 128]`` or a flat ``[T * H, 128]`` tensor of ``make``, in place
+    through any of its views."""
+    if t.dim() == 2:
+        t[row, column] = value
+    else:
+        t[row // H, row % H, column] = value
+
+
+def _small_non_finite(x, z, dy, H):
+    """Infinite and NaN weight-gradient terms in ``make``'s tensors of any
+    layout, written in place, in columns of different CTAs of a 16-CTA
+    cluster (8 columns each): column 0 sums to ``+inf`` (a gate of ``+inf`` in
+    the last row), columns 9 (a NaN gate) and 27 (``silu(-inf)`` is NaN) to
+    NaN, column 18 to NaN from 2 rows on (a ``+inf`` and a ``-inf`` term, else
+    ``+inf``), column 36 to ``-inf``, column 45 to ``+inf`` (an upstream
+    gradient of ``+inf``), from 2 rows on column 127 to NaN (a NaN and a
+    ``+inf`` term) and, from 4 rows on, column 54 to NaN (an ``x`` of ``+inf``
+    in row 1, whose other terms are then 0).  ``x`` is 1 at the gate terms, so
+    a term's sign is the gradient's.  The terms sit in rows 0, ``rows // 2``
+    and ``rows - 1``.  The other columns stay finite."""
+    rows = x.numel() // D
+    last, mid = rows - 1, rows // 2
+    cases = [
+        (last, 0, float("inf"), 1.0),
+        (0, 9, float("nan"), 1.0),
+        (0, 18, float("inf"), 1.0),
+        (mid, 27, float("-inf"), 1.0),
+        (mid, 36, float("inf"), -1.0),
+        (last, 45, 1.0, float("inf")),
+    ]
+    if rows >= 2:
+        cases.append((last, 18, float("inf"), -1.0))
+        cases.append((0, 127, float("nan"), 1.0))
+        cases.append((last, 127, float("inf"), 1.0))
+    for row, column, gate, grad in cases:
+        _set_term(z, row, H, column, gate)
+        _set_term(dy, row, H, column, grad)
+        _set_term(x, row, H, column, 1.0)
+    if rows >= 4:
+        _set_term(x, 1, H, 54, float("inf"))
+
+
+def _dw_calls(dy, x, z, w, workspace=None, non_finite_starts=False):
     """The backward calls that compute the weight gradient, of the roles
     ``DW_CALL_ROLES``: a BF16 weight gradient, one accumulated onto 0.5, an
-    FP32 one and one accumulated onto 0.25, each on ``workspace``.  Their
-    ``dx``, ``dz`` and weight gradients (``DW_CALL_OUTPUTS``)."""
+    FP32 one and one accumulated onto 0.25 (with ``NON_FINITE_STARTS`` where
+    ``non_finite_starts``), each on ``workspace``.  Their ``dx``, ``dz`` and
+    weight gradients (``DW_CALL_OUTPUTS``)."""
     got = []
     for dtype, start in ((torch.bfloat16, 0.5), (torch.float32, 0.25)):
         fresh = torch.empty(D, dtype=dtype, device=x.device)
-        acc = torch.full((D,), start, dtype=dtype, device=x.device)
+        acc = _dw_start(dtype, start, non_finite_starts, x.device)
         for grad_weight, accumulate in ((fresh, False), (acc, True)):
             got += backward(
                 dy,
@@ -2058,7 +2130,9 @@ def test_small_row_programs_give_the_bits_of_their_modules(
     shape, layout, data, launches, monkeypatch
 ):
     """``SMALL_DW_SHAPES`` in every layout of ``make`` (``SMALL_DW_LAYOUTS``)
-    with ``SMALL_DW_DATA``: ``REPEATS`` rounds of ``_dw_calls`` run the
+    with ``SMALL_DW_DATA`` (``non_finite``: ``make``'s normal data with
+    ``_small_non_finite``'s terms, accumulated onto ``NON_FINITE_STARTS``):
+    ``REPEATS`` rounds of ``_dw_calls`` run the
     programs ``_small_dw_modules`` names (one CTA up to 16 rows, one cluster
     up to 256 rows where ``device_runs_clusters`` holds, else the role's
     module) and give the ``dx``, ``dz`` and weight-gradient bits, fresh and
@@ -2068,18 +2142,63 @@ def test_small_row_programs_give_the_bits_of_their_modules(
     clusters = _clusters()
     T, H = (int(v) for v in shape.split("x"))
     rows = T * H
-    x, z, w, dy = make(T, H, layout=layout, data=data, seed=80)
+    non_finite = data == "non_finite"
+    kind = "normal" if non_finite else data
+    x, z, w, dy = make(T, H, layout=layout, data=kind, seed=80)
+    if non_finite:
+        _small_non_finite(x, z, dy, H)
     runs = []
     for i in range(REPEATS):
         launches.clear()
-        runs.append(_dw_calls(dy, x, z, w))
+        runs.append(_dw_calls(dy, x, z, w, non_finite_starts=non_finite))
         assert launches == _small_dw_modules(arch, rows, clusters), (i, launches)
     monkeypatch.setattr(loader, "dw_module", _keep_module)
     launches.clear()
-    want = _dw_calls(dy, x, z, w)
+    want = _dw_calls(dy, x, z, w, non_finite_starts=non_finite)
     assert launches == [loader.ROUTES[arch][role] for role in DW_CALL_ROLES], launches
     for i, got in enumerate(runs):
         _assert_dw_calls_equal(got, want, f"{shape} {layout} {data} call {i}")
+
+
+@pytest.mark.parametrize(
+    "T,H",
+    [(1, 16), (3, 5), (17, 1), (8, 16), (16, 16)],
+    ids=["16_rows", "15_rows", "17_rows", "128_rows", "256_rows"],
+)
+def test_small_row_programs_give_the_classes_of_infinite_and_nan_sums(T, H, launches):
+    """``_small_non_finite``'s terms on the rows of the program of one CTA (15
+    and 16 rows) and of one cluster (17, 128 and 256 rows, where
+    ``device_runs_clusters`` holds), which ``_dw_calls`` launches
+    (``_small_dw_modules``): the BF16 and the FP32 weight gradient, fresh and
+    accumulated onto ``NON_FINITE_STARTS``, are NaN in the FP64 reference's NaN
+    columns, its infinity in its infinite ones and finite in the others."""
+    arch, _ = _device()
+    x, z, w, dy = make(T, H, seed=82)
+    _small_non_finite(x, z, dy, H)
+    dw64 = fp64_reference(dy, x, z, w, EPS)[3]
+    assert dw64[0].item() == dw64[45].item() == float("inf")
+    assert dw64[36].item() == float("-inf")
+    assert bool(dw64[[9, 18, 27, 54, 127]].isnan().all())
+    finite = torch.ones(D, dtype=torch.bool, device=x.device)
+    finite[[0, 9, 18, 27, 36, 45, 54, 127]] = False
+    assert bool(dw64[finite].isfinite().all())
+    launches.clear()
+    got = _dw_calls(dy, x, z, w, non_finite_starts=True)
+    assert launches == _small_dw_modules(arch, T * H, _clusters()), launches
+    wants = []
+    for dtype, start in ((torch.bfloat16, 0.5), (torch.float32, 0.25)):
+        begin = _dw_start(dtype, start, True, x.device).double()
+        wants += [dw64, begin + dw64]
+    assert bool(wants[1][[0, 9, 45, 122]].isnan().all())
+    assert wants[1][120].item() == float("inf")
+    assert wants[1][121].item() == wants[1][36].item() == float("-inf")
+    names = ("BF16", "BF16 accumulated", "FP32", "FP32 accumulated")
+    for got_dw, want, what in zip(got[2::3], wants, names, strict=True):
+        assert torch.equal(got_dw.isnan(), want.isnan()), f"{what}: NaN columns"
+        inf = want.isinf()
+        assert torch.equal(got_dw.isinf(), inf), f"{what}: infinite columns"
+        assert torch.equal(got_dw[inf].double(), want[inf]), f"{what}: infinities"
+        assert bool(got_dw[want.isfinite()].isfinite().all()), f"{what}: finite columns"
 
 
 @pytest.mark.parametrize("T,H", [(1, 16), (1, 128), (2, 128)])
