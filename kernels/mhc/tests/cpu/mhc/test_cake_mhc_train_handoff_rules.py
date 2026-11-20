@@ -25,10 +25,11 @@ and workspaces:
   ``bwd_token__<form>_ho`` twin (the base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
   record, before ``T``; its launch, dynamic shared memory included, is the base record's: ``dpre_in`` is one FP32
   word per stream, reduced in the kernel's own order);
-* ``collapse_forward`` / ``collapse_backward`` are one record each (``collapse_fwd`` / ``collapse_bwd``) with their own
-  library stems and no workspace; the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on),
-  the VJP none; the VJP is the coalesced form: its dynamic shared memory stages each warp's slab of the ``dU`` row and
-  of the four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial sums.
+* ``collapse_forward`` / ``collapse_backward`` are one record each on sm_100a / sm_103a (``collapse_fwd`` /
+  ``collapse_bwd``) with their own library stems and no workspace (on sm_107a ``collapse_forward`` is a token-count band
+  of two records, below); the forward takes the per-call PDL attribute on its own edge ``K4->C`` (no band: on), the VJP
+  none; the VJP is the coalesced form: its dynamic shared memory stages each warp's slab of the ``dU`` row and of the
+  four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial sums.
 
 The routes exist at hidden 5120 on sm_100a, sm_103a and sm_107a (each token-owner twin on the architectures of its
 base form: sm_107a's backward runs the ``_iu`` forms of ``ao22_rae7_pd1_ntr`` and ``dot_ao8_l2l`` (the idle-lane
@@ -40,7 +41,10 @@ sm_100a / sm_103a record under its own name, on sm_107a only, with the same laun
 ``fwd_collapse__m2_pi_pn`` and ``collapse_fwd__m2`` take two sub-tokens per thread group and trip
 (``rows_per_cta`` 4: ``ceil(5 T / 4)`` CTAs in place of ``ceil(5 T / 2)``), and ``collapse_bwd__vjpwa_pfq2`` (the
 VJP staged by ``cp.async`` with an L2 prefetch of a later token) keeps the grid ``T`` and the dynamic shared memory.
-The base collapse records ship on sm_100a and sm_103a only.
+The base collapse records ship on sm_100a and sm_103a only.  On sm_107a ``collapse_forward`` holds two records chosen by
+the token count alone (``rows_between``, :data:`COLLAPSE_FWD_BAND`): ``collapse_fwd__m2`` up to 8191 tokens and
+``collapse_fwd__m2_xhnone`` from :data:`BAND_T` = 8192 tokens, the ``collapse_fwd__m2`` record under its own name (the
+same form reading ``X`` without the L2 evict-first policy) with every other fact the same.
 """
 
 from __future__ import annotations
@@ -81,8 +85,20 @@ COLLAPSE_RECORD_ARCHES = {
     "collapse_bwd": ["sm_100a", "sm_103a"],
     "fwd_collapse__m2_pi_pn": ["sm_107a"],
     "collapse_fwd__m2": ["sm_107a"],
+    "collapse_fwd__m2_xhnone": ["sm_107a"],
     "collapse_bwd__vjpwa_pfq2": ["sm_107a"],
 }
+# The token-count band of the standalone collapse forward per architecture, in route order: (record without the prefix
+# and the hidden suffix, above, at_most) of its ``rows_between`` select rule.  An architecture without an entry runs
+# its one record of COLLAPSE_RECORDS at every token count.
+COLLAPSE_FWD_BAND = {
+    "sm_107a": (
+        ("collapse_fwd__m2", 0, 8191),
+        ("collapse_fwd__m2_xhnone", 8191, None),
+    ),
+}
+# The first token count of sm_107a's ``collapse_fwd__m2_xhnone``.
+BAND_T = 8192
 # Sub-tokens (token column parts) per CTA of the two collapse forwards' grids: ceil(5 T / rows_per_cta) CTAs.
 COLLAPSE_ROWS_PER_CTA = {"sm_100a": 2, "sm_103a": 2, "sm_107a": 4}
 BOARDS = (("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 216))
@@ -115,7 +131,9 @@ ROWS = (
     2049,
     4096,
     4097,
+    8191,
     8192,
+    8193,
     12000,
     16384,
     20001,
@@ -136,6 +154,21 @@ def _strip(record: dict, *keys: str) -> dict:
 
 def _collapse(mode: str, arch: str) -> tuple[str, str, str]:
     return tuple(f"{PREFIX[mode]}{s}__h{HIDDEN}" for s in COLLAPSE_RECORDS[arch])
+
+
+def _collapse_forward_route(mode: str, arch: str) -> list[str]:
+    """The records of ``collapse_forward`` on ``arch``, in route order."""
+    if arch in COLLAPSE_FWD_BAND:
+        return [f"{PREFIX[mode]}{s}__h{HIDDEN}" for s, _, _ in COLLAPSE_FWD_BAND[arch]]
+    return [_collapse(mode, arch)[1]]
+
+
+def _collapse_forward(mode: str, arch: str, rows: int) -> str:
+    """The record ``collapse_forward`` launches at ``rows`` tokens on ``arch``."""
+    if arch in COLLAPSE_FWD_BAND:
+        low, high = _collapse_forward_route(mode, arch)
+        return low if rows < BAND_T else high
+    return _collapse(mode, arch)[1]
 
 
 def _swaps(mode: str, arch: str) -> dict[str, str]:
@@ -283,9 +316,39 @@ def test_collapse_records(mode: str, arch: str) -> None:
     assert REGISTRIES[mode].pdl_edge(fwd["library"]) == "K4->C"
     assert REGISTRIES[mode].pdl_edge(bwd["library"]) is None
     for rec, smem in ((fwd, 0), (bwd, VJP_SMEM)):
-        assert rec["workspace_rule"] is None and rec["select_rule"] is None
+        assert rec["workspace_rule"] is None
         assert rec["launch"]["dynamic_smem_bytes"] == smem
         assert tuple(rec["launch"]["block"]) == (256, 1, 1)
+    assert bwd["select_rule"] is None
+    # the forward: one record at every token count, or on sm_107a a token-count band of two records (rows_between,
+    # T <= 8191 / T >= 8192); the record above the edge is the one below under its own name, with every other fact the
+    # same (the same form without the L2 evict-first policy on X)
+    if arch in COLLAPSE_FWD_BAND:
+        band = COLLAPSE_FWD_BAND[arch]
+        assert band[0][0] == COLLAPSE_RECORDS[arch][1]
+        assert [(above, at_most) for _, above, at_most in band] == [
+            (0, BAND_T - 1),
+            (BAND_T - 1, None),
+        ]
+        for suffix, above, at_most in band:
+            assert _rec(mode, f"{suffix}__h{HIDDEN}")["select_rule"] == {
+                "above": above,
+                "at_most": at_most,
+                "kind": "rows_between",
+            }, suffix
+        twin_suffix = band[1][0]
+        twin = _rec(mode, f"{twin_suffix}__h{HIDDEN}")
+        name = f"{PREFIX[mode]}{twin_suffix}__h{HIDDEN}"
+        assert (twin["kernel"], twin["library"], twin["kernel_symbol"]) == (
+            name,
+            name,
+            f"kernel_{name}",
+        )
+        assert twin["arches"] == COLLAPSE_RECORD_ARCHES[twin_suffix] == [arch]
+        assert _strip(twin, "select_rule") == _strip(fwd, "select_rule")
+        assert REGISTRIES[mode].pdl_edge(twin["library"]) == "K4->C"
+    else:
+        assert fwd["select_rule"] is None
     assert fwd["grid_rule"] == collapse_grid
     one_token_per_cta = {
         "col_split": 1,
@@ -301,12 +364,12 @@ def test_collapse_records(mode: str, arch: str) -> None:
             k for kind, k in rec["arg_plan"] if kind in ("buffer", "parameter")
         }
     # an architecture's own form is the sm_100a / sm_103a record under its own name, on its architectures, with the
-    # architecture's grid (checked above): every other fact the same
+    # architecture's grid and select rule (both checked above): every other fact the same
     for own, shared in zip(COLLAPSE_RECORDS[arch], COLLAPSE_RECORDS["sm_100a"]):
         if own != shared:
             a, b = _rec(mode, f"{own}__h{HIDDEN}"), _rec(mode, f"{shared}__h{HIDDEN}")
-            assert _strip(a, "arches", "grid_rule") == _strip(
-                b, "arches", "grid_rule"
+            assert _strip(a, "arches", "grid_rule", "select_rule") == _strip(
+                b, "arches", "grid_rule", "select_rule"
             ), own
 
 
@@ -332,8 +395,8 @@ def test_handoff_routes_are_the_standard_routes_with_the_swaps(
         for f in TOKEN_FORMS
         if arch in REGISTRIES[mode].MODULES[f"{p}bwd_token__{f}__h{HIDDEN}"]["arches"]
     }
-    _, fwd_collapse, bwd_collapse = _collapse(mode, arch)
-    assert routes[f"collapse_forward_h{HIDDEN}"] == [fwd_collapse]
+    _, _, bwd_collapse = _collapse(mode, arch)
+    assert routes[f"collapse_forward_h{HIDDEN}"] == _collapse_forward_route(mode, arch)
     assert routes[f"collapse_backward_h{HIDDEN}"] == [bwd_collapse]
     for kind in HANDOFF_KINDS:
         for name in reg.route_modules(arch, HIDDEN, kind):
@@ -348,7 +411,7 @@ def test_a_handoff_call_selects_the_standard_programs_with_the_swaps(
     mode: str, arch: str, sm: int, iters: int
 ) -> None:
     swaps = _swaps(mode, arch)
-    _, fwd_collapse, bwd_collapse = _collapse(mode, arch)
+    _, _, bwd_collapse = _collapse(mode, arch)
     for rows in ROWS:
         for kind, standard in (
             ("fwd_prepare_handoff", "fwd_prepare"),
@@ -360,10 +423,41 @@ def test_a_handoff_call_selects_the_standard_programs_with_the_swaps(
             )
             assert _selected(mode, arch, kind, rows, sm, iters) == want, (kind, rows)
         for kind, name in (
-            ("collapse_forward", fwd_collapse),
+            ("collapse_forward", _collapse_forward(mode, arch, rows)),
             ("collapse_backward", bwd_collapse),
         ):
-            assert _selected(mode, arch, kind, rows, sm, iters) == (name,)
+            assert _selected(mode, arch, kind, rows, sm, iters) == (name,), (kind, rows)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("mode", tuple(REGISTRIES))
+@pytest.mark.parametrize("sm", (208, 212, 216))
+def test_the_sm107a_collapse_forward_band_reads_the_token_count_only(
+    mode: str, sm: int
+) -> None:
+    """sm_107a's ``collapse_forward`` takes ``collapse_fwd__m2`` below :data:`BAND_T` tokens and
+    ``collapse_fwd__m2_xhnone`` from it, on every sm_107a board and Sinkhorn count (and, in the deterministic
+    registry, along every call path)."""
+    low, high = _collapse_forward_route(mode, "sm_107a")
+    reg = REGISTRIES[mode]
+    paths = [{}]
+    if mode == "det":
+        paths += [{"path": path} for path in reg.PDL_PATHS]
+    edge = (BAND_T - 2, BAND_T - 1, BAND_T, BAND_T + 1)
+    for rows in (1, 2, 4096, 6144, *edge, 16384, 65536, 131072):
+        want = (low if rows < BAND_T else high,)
+        for path in paths:
+            for iters in (20, 7):
+                got = reg.selected_modules(
+                    "sm_107a",
+                    HIDDEN,
+                    "collapse_forward",
+                    rows=rows,
+                    sm_count=sm,
+                    sinkhorn_iters=iters,
+                    **path,
+                )
+                assert got == want, (rows, path, iters)
 
 
 @pytest.mark.cpu_only
@@ -375,7 +469,8 @@ def test_handoff_launch_grids_and_pdl_arguments(
     reg, swaps = REGISTRIES[mode], _swaps(mode, arch)
     monkeypatch.setattr(reg, "sm_count", lambda device_index: sm)
     monkeypatch.setattr(reg, "device_arch", lambda device_index: arch)
-    pi_pn, fwd, bwd = (reg.MODULES[n] for n in _collapse(mode, arch))
+    pi_pn, _, bwd = (reg.MODULES[n] for n in _collapse(mode, arch))
+    fwds = [reg.MODULES[n] for n in _collapse_forward_route(mode, arch)]
     base_collapse = f"{PREFIX[mode]}fwd_collapse__h{HIDDEN}"
     collapse_ctas = COLLAPSE_ROWS_PER_CTA[arch]
     for rows in ROWS:
@@ -404,14 +499,15 @@ def test_handoff_launch_grids_and_pdl_arguments(
                     rows,
                     path,
                 )
-        assert reg.launch_grid(fwd, rows, device_index=0) == (
-            math.ceil(5 * rows / collapse_ctas),
-            1,
-            1,
-        )
+        for fwd in fwds:
+            assert reg.launch_grid(fwd, rows, device_index=0) == (
+                math.ceil(5 * rows / collapse_ctas),
+                1,
+                1,
+            ), (fwd["kernel"], rows)
         assert reg.launch_grid(bwd, rows, device_index=0) == (rows, 1, 1)
         for path in reg.PDL_PATHS:
-            for rec in (fwd, bwd):
+            for rec in (*fwds, bwd):
                 args = (rows, arch, path) if mode == "det" else (rows, arch, path, sm)
                 assert reg.enable_pdl(rec["kernel"], *args) == 1
 
@@ -441,8 +537,8 @@ def test_the_nondet_handoff_records_are_the_det_records_renamed() -> None:
             s in n for s in ("_pi_pn__", "collapse_fwd__", "collapse_bwd__", "_ho__")
         )
     }
-    # the fused collapse, the standalone collapse pair (each in its sm_100a / sm_103a and its sm_107a form) and one
-    # twin per token-owner form
+    # the fused collapse, the standalone collapse pair (each in its sm_100a / sm_103a and its sm_107a form, the
+    # forward's sm_107a form in its two token-count records) and one twin per token-owner form
     assert new == {f"{PREFIX['det']}{s}__h{HIDDEN}" for s in COLLAPSE_RECORD_ARCHES} | {
         f"{PREFIX['det']}bwd_token__{f}_ho__h{HIDDEN}" for f in TOKEN_FORMS
     }, sorted(new)

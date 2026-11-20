@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "062b736c1caab0e0b737ed36e984327dbb58cbf5",
+    "cake_revision": "8645186c770cfff0886e13667c1538dfdbc08011",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-19T23:49:58Z"
+    "rendered_at": "2026-11-20T09:05:49Z"
   },
   "libraries": [
     {
@@ -2239,6 +2239,29 @@
       "sources": [
         "csrc/cake_mhc_train_collapse_fwd__m2__h5120_kernel.cu",
         "csrc/cake_mhc_train_collapse_fwd__m2__h5120_binding.cu"
+      ]
+    },
+    {
+      "arch": "sm_107a",
+      "closure_sha256": "6bdb2c2d626a624ee61fee73b07624b40072e37521f497f0468c5ef4d19d7c63",
+      "entry": "run",
+      "gencode": "-gencode=arch=compute_107a,code=sm_107a",
+      "min_cuda": "13.5",
+      "name": "cake_mhc_train_collapse_fwd__m2_xhnone__h5120_sm_107a",
+      "nvcc_flags": [
+        "--prec-div=true",
+        "--prec-sqrt=true",
+        "--ftz=false"
+      ],
+      "nvcc_flags_if": [],
+      "path": "aot/cake_mhc_train_collapse_fwd__m2_xhnone__h5120_sm_107a.so",
+      "sha256": {
+        "csrc/cake_mhc_train_collapse_fwd__m2_xhnone__h5120_binding.cu": "d57f84dc02e2f5489bbfd20a10a88d8d53c5955ccfc40e9e8a23a170d05ef916",
+        "csrc/cake_mhc_train_collapse_fwd__m2_xhnone__h5120_kernel.cu": "a1d44c652b56a93bfeed084b02e534dbe7e869fd5509ba93595c6ab55efd6e9b"
+      },
+      "sources": [
+        "csrc/cake_mhc_train_collapse_fwd__m2_xhnone__h5120_kernel.cu",
+        "csrc/cake_mhc_train_collapse_fwd__m2_xhnone__h5120_binding.cu"
       ]
     },
     {
