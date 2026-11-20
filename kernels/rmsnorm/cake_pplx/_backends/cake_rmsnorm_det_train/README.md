@@ -306,8 +306,7 @@ first eight hex digits of the program name.
 | `bwd_h6144` | (0, 1] | 0dafdf09 | column task | - | - |
 | `bwd_h6144` | (1, 256] | dffe53d5 | column task | - | - |
 | `bwd_h6144` | (256, 1664] | 0dafdf09 | column task | - | - |
-| `bwd_h6144` | (1664, 3072] | af220b26 | plain | row-strided slots | fb3f2a96 (tree) |
-| `bwd_h6144` | (3072, 19456] | 5d292172 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
+| `bwd_h6144` | (1664, 19456] | 5d292172 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
 | `bwd_h6144` | (19456, inf) | 9cc51adf | 8-row blocks | tail_div 12, max_halving 5 | fb3f2a96 (tree) |
 | `bwd_residual_h6144` | (0, 368] | ee1be07a | column task | - | - |
 | `bwd_residual_h6144` | (368, 19456] | 36cad444 | plain | tail_div 12, max_halving 5 | fb3f2a96 (tree) |

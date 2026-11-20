@@ -1928,7 +1928,7 @@ EDGES: dict[str, dict[str, tuple[tuple[int, str], ...]]] = {
             (16, "unmeasured"),
             (320, "same"),
             (1024, "same"),
-            (12288, "unmeasured"),
+            (12288, "same"),
             (16384, "same"),
             (45056, "unmeasured"),
             (65536, "unmeasured"),
@@ -3783,7 +3783,7 @@ Beside those, leave some SMs free of the resident kernel.
   (32768, inf) f6956a41
 * ``sm_107a`` ``bwd_h1536``: (0, 4] db218c92 (one cluster) ?
   (4, 16] c2a523de (one cluster) ? (16, 320] 1207b056 = (320, 1024] 7dc29629 (det pair)
-  = (1024, 12288] 88510c60 (det pair) ? (12288, 16384] 6a428da2 (det pair) =
+  = (1024, 12288] 88510c60 (det pair) = (12288, 16384] 6a428da2 (det pair) =
   (16384, 45056] 56d26996 (det pair) ? (45056, 65536] 411e270c (det pair) ?
   (65536, inf) c93d0266
 * ``sm_107a`` ``bwd_w32_h1536``: (0, 4] 6d3986ee (one cluster) ?
