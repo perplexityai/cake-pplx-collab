@@ -162,6 +162,7 @@ def _bwd_role(arch: str, docs: int) -> str:
     high = BWD_MAX_DOCS[arch]
     return "bwd" if BWD_SMALL_DOCS[arch] < docs and (high is None or docs <= high) else "bwd_small"
 
+
 # The forward programs with the warp row search, which ``fwd_unfused`` ships.
 UNFUSED_LIBRARIES = {
     "fwd_unfused": "cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
