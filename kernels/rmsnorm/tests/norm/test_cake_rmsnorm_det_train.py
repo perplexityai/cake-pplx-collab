@@ -71,8 +71,11 @@ WIDTHS = (
     (4096, 1e-5),
     (2048, 1e-6),
     (1536, 1e-6),
+    (1280, 1e-20),
+    (1024, 1e-6),
     (512, 1e-6),
     (256, 1e-6),
+    (128, 1e-20),
 )
 HIDDEN_SIZES = tuple(hidden for hidden, _eps in WIDTHS)
 EPS = {hidden: eps for hidden, eps in WIDTHS}
@@ -84,6 +87,9 @@ ROWS = (1, 2, 7, 63, 64, 65, 127, 128, 129, 255, 257, 16172, 16231)
 CONTRACT_ROWS = {
     4096: (1023, 1025, 4097, 14928, 16263, 16384, 32769, 65536),
     1536: (1023, 1025, 4097, 14928, 15566, 16263, 16384, 32769, 65536),
+    1280: (8192, 16384),
+    1024: (1536, 8192, 16384),
+    128: (4096, 8192, 16384),
 }
 STRIDE_PADS = (0, 64, "2H")
 # The row count standing in for the open end of a route's last program window.
@@ -382,7 +388,7 @@ def test_backward_programs_switch_on_row_count(hidden: int, record_property) -> 
     )
 
 
-@pytest.mark.parametrize("hidden", (6144, 5120, 4096, 2048, 1536, 256))
+@pytest.mark.parametrize("hidden", (6144, 5120, 4096, 2048, 1536, 1280, 1024, 256, 128))
 @pytest.mark.parametrize("rows", (1, 129, 4097))
 @pytest.mark.parametrize("below", (1, 0))
 def test_backward_below_the_measured_sm_count(
@@ -1137,7 +1143,8 @@ def _fp32_case(
 # and dw reduce are the BF16 twins of the FP32-weight window's}.  The twin records share the FP32-weight records' grid
 # and workspace rules; a twin window the BF16 route no longer runs keeps its records in the registry under no route.
 RECUT_FP32_BACKWARD_TWINS: dict[
-    tuple[str, int], dict[tuple[int, int], tuple[tuple[int, int], str]]
+    tuple[str, int],
+    dict[tuple[int, int | None], tuple[tuple[int, int | None], str]],
 ] = {
     ("sm_100a", 2048): {
         (768, 1024): ((288, 768), "caf6978e"),
@@ -1150,6 +1157,21 @@ RECUT_FP32_BACKWARD_TWINS: dict[
     ("sm_103a", 6144): {
         (0, 1): ((0, 20), "44508df7"),
         (256, 4096): ((256, 767), "5c804aed"),
+    },
+    ("sm_100a", 1024): {(1, 1024): ((1, 64), "89fa3e96")},
+    ("sm_103a", 1280): {
+        (512, 4096): ((512, 2048), "12bbedff"),
+        (4096, None): ((2048, None), "c646e097"),
+    },
+    ("sm_103a", 1024): {
+        (1, 1024): ((1, 64), "89fa3e96"),
+        (1024, 1536): ((1024, 1536), "5e32dd88"),
+        (2048, 16384): ((1024, 1536), "5e32dd88"),
+        (16384, 24576): ((1536, 2048), "5e32dd88"),
+    },
+    ("sm_107a", 1280): {
+        (512, 4096): ((512, 8192), "12bbedff"),
+        (4096, 16384): ((8192, 16384), "c646e097"),
     },
 }
 
@@ -1232,7 +1254,7 @@ def _fp32_backward_twin(hidden: int, residual: bool, rows: int) -> tuple[str, ..
     arch = loader.arch_for_capability(_capability())
     recut = {} if residual else RECUT_FP32_BACKWARD_TWINS.get((arch, hidden), {})
     for (above, at_most), (twin, program) in recut.items():
-        if above < rows <= at_most:
+        if above < rows and (at_most is None or rows <= at_most):
             names = _twin_records(
                 loader.route_modules(arch, hidden, "bwd", False), twin, program
             ) or _twin_records(
@@ -1788,11 +1810,14 @@ def test_registry_records_reference_the_build_manifest() -> None:
 
 
 # dw at the largest row counts of the long-chunk windows, where an FP32 chunk sum over many rows accumulates the most
-# rounding: H = 1536 / 2048 / 4096 / 6144 at 65536 rows; H = 5120 at 40960 and 65536 rows; H = 256 at 81920 rows,
-# at the key rows of a 65536-token batch (262144), at 1179649 rows and at the query rows of a 65536-token batch
-# (1572864) and one above (1572865).  Three seeds per case, each judged over its draws against the naive BF16 weight
-# gradient; BF16 and FP32 weight.
+# rounding: H = 128 / 1024 / 1280 / 1536 / 2048 / 4096 / 6144 at 65536 rows; H = 5120 at 40960 and 65536 rows;
+# H = 256 at 81920 rows, at the key rows of a 65536-token batch (262144), at 1179649 rows and at the query rows of a
+# 65536-token batch (1572864) and one above (1572865).  Three seeds per case, each judged over its draws against the
+# naive BF16 weight gradient; BF16 and FP32 weight.
 LARGE_ROW_DW_CASES = (
+    (128, 65536),
+    (1024, 65536),
+    (1280, 65536),
     (1536, 65536),
     (2048, 65536),
     (4096, 65536),

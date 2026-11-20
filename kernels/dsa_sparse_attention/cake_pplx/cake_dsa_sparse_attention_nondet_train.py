@@ -56,17 +56,24 @@ the flat rope form, the flat NoPE form and the packed NoPE form::
 The packed forward also returns the global rows and row lengths that its
 backward reads.
 
-The flat rope entry and the rope step backward take ``num_segments``, the
-packed segment count of the key row (default 1, a one-document row).  A caller
-that passes the global rows of a packed batch passes its count
-(``len(cu_seqlens_k) - 1``): the backward then plans its key-range passes as
-the packed entry does for the same rows.  The count selects the plan only.
+The flat entries and the step backwards of both forms take ``num_segments``,
+the packed segment count of the key row (default 1, a one-document row).  A
+caller that passes the global rows of a packed batch passes its count
+(``len(cu_seqlens_k) - 1``): the backward then plans as the packed entry does
+for the same rows (the rope form's key-range passes; on SM107 the ``dkv_direct``
+rule of both forms).  The count selects the plan only.
 
-The flat NoPE entries take an optional trainable per-head sink, ``sink`` FP32
-``[64]`` (SM100 / SM103): it adds ``exp(sink[h])`` to every row's softmax
-denominator, ``lse`` includes it, and its gradient ``dsink`` flows back
-through autograd (the step backward returns it).  The packed NoPE entries
-take ``sink=None`` only.
+The NoPE entries, flat and packed, take an optional trainable per-head sink,
+``sink`` FP32 ``[64]`` (SM100 / SM103 / SM107): it adds ``exp(sink[h])`` to
+every row's softmax denominator, ``lse`` includes it, and its gradient
+``dsink`` flows back through autograd (the step backwards return it).
+
+A call without query rows (``T = 0``) launches nothing: the forwards return
+empty ``out`` / ``lse`` / ``o_lo``; the NoPE step backwards return an empty
+``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
+sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
+``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
 
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and
@@ -215,17 +222,6 @@ def _check_num_segments(num_segments: Any) -> int:
             f"got {shown}"
         )
     return int(num_segments)
-
-
-def _refuse_varlen_sink(sink: Optional[torch.Tensor]) -> None:
-    """The packed NoPE entries take ``sink=None`` only: their per-document forward has no sink build in this
-    package."""
-    if sink is not None:
-        raise NotImplementedError(
-            "a sink is not supported by the packed (varlen) NoPE entries: their per-document forward has no "
-            "sink build in this package; pass global index rows to "
-            "cake_dsa_sparse_attention_nondet_nope or the flat NoPE step entries"
-        )
 
 
 @cake_api
@@ -544,6 +540,7 @@ def cake_dsa_sparse_attention_nondet_nope(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
+    num_segments: int = 1,
 ):
     r"""Differentiable top-k sparse MLA attention without a rope part (NoPE:
     the whole score is the 512-dimensional latent product) for training, 64
@@ -599,11 +596,11 @@ def cake_dsa_sparse_attention_nondet_nope(
         lse[t]) * delta[t]`` in FP32, summed over all rows of the call
         (``delta = <dout, O>``), in a fixed order that does not depend on the
         SM count.  Only the metadata is checked (no device synchronization):
-        ``+inf`` and NaN values are not supported.  SM100 / SM103 only: on
-        SM107 a call with query rows raises ``NotImplementedError``.  A call
-        without query rows (``T = 0``) launches nothing on any architecture,
-        SM107 included: it checks the sink's metadata and device, returns
-        empty outputs and gives a zero ``dsink``.
+        ``+inf`` and NaN values are not supported.  SM100 / SM103 / SM107 (on
+        SM107 the sink build of the forward's scanner-warp build).  A call
+        without query rows (``T = 0``) launches nothing: it checks the sink's
+        metadata and device, returns empty outputs and gives a zero
+        ``dsink``.
     return_lse : bool
         Also return the natural-log logsumexp ``[T, 64]`` FP32 of the scaled
         scores over the valid keys (``-inf`` for fully masked rows), plus the
@@ -671,6 +668,18 @@ def cake_dsa_sparse_attention_nondet_nope(
         synchronization), raising ``ValueError`` on a violation.  ``None``
         (default) reads ``CAKE_PPLX_DSA_CHECK_DST_MAP`` (unset, empty
         or ``0`` = no check); ``True`` / ``False`` decide explicitly.
+    num_segments : int
+        The packed segment count of the key row: ``len(cu_seqlens_k) - 1``
+        when ``indices`` hold the global rows of a packed batch whose tokens
+        select keys of their own segment only (a Python ``int``, read on the
+        host: no device synchronization; default 1, a one-document row).  The
+        NoPE record plans one key-range pass on every row, so on this form
+        the count reaches the ``dkv_direct`` rule alone: on SM107 its ``K_eff =
+        min(K_slots, ceil(S / num_segments))``, as
+        :func:`cake_dsa_sparse_attention_nondet_nope_varlen` computes it for
+        the same rows; SM100 / SM103 do not read it.  The count selects the
+        plan only; every value gives a valid result.  ``bool``, a tensor or a
+        value below 1 raises ``ValueError``.
 
     Returns
     -------
@@ -711,6 +720,7 @@ def cake_dsa_sparse_attention_nondet_nope(
     binding launch from the remembered argument plans (the same
     ``BINDING_CACHE``, under keys disjoint from the rope entries).
     """
+    num_segments = _check_num_segments(num_segments)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:
@@ -725,6 +735,7 @@ def cake_dsa_sparse_attention_nondet_nope(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
         sink=sink,
@@ -810,10 +821,14 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
     Parameters
     ----------
     sink : Optional[torch.Tensor]
-        ``None`` only: the packed entries have no sink build yet (any tensor
-        raises ``NotImplementedError``); the flat entry
-        :func:`cake_dsa_sparse_attention_nondet_nope` takes a sink over global
-        index rows.
+        FP32 ``[64]`` trainable per-head sink, as in
+        :func:`cake_dsa_sparse_attention_nondet_nope`: the forward of every
+        route (in-kernel conversion or index preparation) runs the sink build
+        over the packed rows, a row whose every slot is invalid gives
+        ``out = 0`` and ``lse = sink[h]``, a zero-length query segment adds no
+        row, and the gradient ``dsink`` is summed over all packed rows of the
+        call.  ``None`` (default) runs without a sink, with unchanged
+        results.
     check_cu_seqlens : bool
         ``True`` checks the values of ``cu_seqlens_q`` / ``cu_seqlens_k``
         against the invariants above at the cost of one blocking device-to-host
@@ -836,7 +851,6 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         ``CAKE_PPLX_DSA_CHECK_DST_MAP``; ``True`` validates the values of
         ``dkv_dst_map`` on every backward, ``False`` never does.
     """
-    _refuse_varlen_sink(sink)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:
@@ -859,6 +873,7 @@ def cake_dsa_sparse_attention_nondet_nope_varlen(
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
         check_cu_seqlens=check_cu_seqlens,
+        sink=sink,
     )
 
 
@@ -994,7 +1009,8 @@ def cake_dsa_sparse_attention_nondet_train_nope_forward(
     ``lse`` and ``o_lo`` come from one forward kernel. With ``sink`` (FP32
     ``[64]``, as in :func:`cake_dsa_sparse_attention_nondet_nope`) ``lse``
     includes the sink (``sink[h]`` on a row without a valid slot); pass the
-    same ``sink`` to the step backward.
+    same ``sink`` to the step backward. A call without query rows returns
+    empty outputs without launching.
     """
     return _backend(backend).forward_nope(
         q,
@@ -1025,6 +1041,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
+    num_segments: int = 1,
 ) -> tuple[Optional[torch.Tensor], ...]:
     """Training backward of the NoPE form without autograd: ``(dq, dkv)``,
     or ``(dq, dkv, dsink)`` with a ``sink``.
@@ -1047,7 +1064,13 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
     exp(sink - lse[t]) * delta[t]`` summed over all rows of the call:
     ``(dq, dkv, dsink)``, or ``(dq, None, dsink)`` with a tensor ``dkv_acc``.
     With ``sink=None`` the return is ``(dq, dkv)`` or ``(dq, None)``.
+    ``num_segments`` (the packed segment count of the key row, default 1) as
+    in :func:`cake_dsa_sparse_attention_nondet_nope`. A call without query
+    rows launches nothing and returns an empty ``dq``, a zero ``dkv``
+    (``None`` with a tensor ``dkv_acc``) and, with a ``sink``, a zero
+    ``dsink``.
     """
+    num_segments = _check_num_segments(num_segments)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:
@@ -1065,6 +1088,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_backward(
         key_passes=key_passes,
         dkv_acc=dkv_acc,
         dkv_dst_map=dkv_dst_map,
+        num_segments=num_segments,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
         sink=sink,
@@ -1096,10 +1120,12 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
     (int32 ``[T]``) are the rows and row lengths the forward read. Pass all
     five unchanged to
     :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_backward`.
-    ``out``, ``lse`` and ``o_lo`` come from one forward kernel. ``sink``:
-    ``None`` only (any tensor raises ``NotImplementedError``).
+    ``out``, ``lse`` and ``o_lo`` come from one forward kernel. With
+    ``sink`` (FP32 ``[64]``, as in
+    :func:`cake_dsa_sparse_attention_nondet_nope_varlen`) ``lse`` includes the
+    sink (``sink[h]`` on a row without a valid slot); pass the same ``sink``
+    to the step backward.
     """
-    _refuse_varlen_sink(sink)
     return _backend(backend).forward_nope_varlen(
         q,
         kv,
@@ -1110,6 +1136,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_forward(
         softmax_scale=softmax_scale,
         topk_length=topk_length,
         check_cu_seqlens=check_cu_seqlens,
+        sink=sink,
     )
 
 
@@ -1133,9 +1160,9 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
     dkv_dst_map: Optional[torch.Tensor] = None,
     dkv_direct: Optional[bool] = None,
     check_dst_map: Optional[bool] = None,
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+) -> tuple[Optional[torch.Tensor], ...]:
     """Training backward of the packed NoPE form without autograd: ``(dq,
-    dkv)``.
+    dkv)``, or ``(dq, dkv, dsink)`` with a ``sink``.
 
     ``out``, ``o_lo``, ``lse``, ``indices`` and ``topk_length`` are the outputs
     of :func:`cake_dsa_sparse_attention_nondet_train_nope_varlen_forward`;
@@ -1144,10 +1171,10 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
     ``dK`` / ``dV`` are added with FP32 atomics; no output is promised to
     repeat bit for bit. Under ``torch.use_deterministic_algorithms(True)``
     it raises PyTorch's ``RuntimeError`` before its first backward kernel
-    (with ``warn_only=True`` a ``UserWarning``, then it runs). ``sink``:
-    ``None`` only (any tensor raises ``NotImplementedError``).
+    (with ``warn_only=True`` a ``UserWarning``, then it runs). ``sink``: the
+    sink the step forward ran with; the call then also returns ``dsink``,
+    FP32 ``[64]``, summed over all packed rows of the call.
     """
-    _refuse_varlen_sink(sink)
     if dkv_direct is None:
         dkv_direct = _dkv_direct_from_environment()
     if check_dst_map is None:
@@ -1168,6 +1195,7 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
         num_segments=int(cu_seqlens_k.numel()) - 1,
         dkv_direct=dkv_direct,
         check_dst_map=check_dst_map,
+        sink=sink,
     )
 
 

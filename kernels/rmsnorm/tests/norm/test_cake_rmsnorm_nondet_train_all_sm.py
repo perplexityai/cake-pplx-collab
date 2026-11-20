@@ -85,7 +85,7 @@ def _det_package():
 det = _det_package()
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
-HIDDEN_SIZES = (256, 512, 1536, 2048, 4096, 5120, 6144)
+HIDDEN_SIZES = (128, 256, 512, 1024, 1280, 1536, 2048, 4096, 5120, 6144)
 # one-thread side kernel (#7038): as the backend stall suite
 TOKENS = (256, 1024, 4096, 16384, 65536)
 SIDE_SLEEP_CYCLES = 10_000_000
