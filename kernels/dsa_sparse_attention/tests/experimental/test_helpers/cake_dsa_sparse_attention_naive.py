@@ -435,16 +435,18 @@ WITH_O_LO_FIXTURE = dict(
 )
 
 
-def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules):
+def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules, caller=None):
     """Run one case of a training-suite test under ``with_o_lo`` (the body of the suites' ``with_o_lo`` fixture,
     a generator: ``yield from`` it).  ``False`` makes ``with_o_lo=False`` the default of every function of
     ``backend`` and ``modules`` that takes the keyword with a default -- the entries, the step entries, the prepared
     runners and the binding-key builders, not ``generated_program_available`` (a missing stage then fails the case
     instead of skipping it) -- so each call of the test, its helpers included, runs the mode as a caller passing
-    ``with_o_lo=False`` does; :data:`WITH_O_LO` follows.  Every case gets an empty binding cache, and the stages its
-    plans resolve (``backend._stage_entry``) are recorded: when the case ends none may belong to the other mode --
-    under ``False`` no forward or delta stage that has a ``with_o_lo=False`` twin (``jit.NO_OLO_STAGES``), under
-    ``True`` no twin."""
+    ``with_o_lo=False`` does; :data:`WITH_O_LO` follows.  ``caller`` (the test module) has the same done to the
+    functions of those modules it holds under its own names: a reload of a module replaces its functions there but
+    not the ones the test module imported.  Every case gets an empty binding cache, and the stages its plans resolve
+    (``backend._stage_entry``) are recorded: when the case ends none may belong to the other mode -- under ``False``
+    no forward or delta stage that has a ``with_o_lo=False`` twin (``jit.NO_OLO_STAGES``), so every plan of the case
+    ran the twins (a plan resolves its forward stage first), under ``True`` no twin."""
     resolved: list = []
     stage_entry = backend._stage_entry
 
@@ -456,12 +458,14 @@ def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules):
     monkeypatch.setattr(backend.BINDING_CACHE, "_entries", OrderedDict())
     monkeypatch.setitem(globals(), "WITH_O_LO", with_o_lo)
     if not with_o_lo:
-        for module in (backend, *modules):
-            for value in list(vars(module).values()):
+        defining = {module.__name__ for module in (backend, *modules)}
+        holders = (backend, *modules) + (() if caller is None else (caller,))
+        for holder in holders:
+            for value in list(vars(holder).values()):
                 function = inspect.unwrap(value) if inspect.isfunction(value) else None
                 if (
                     function is None
-                    or function.__module__ != module.__name__
+                    or function.__module__ not in defining
                     or function.__name__ == "generated_program_available"
                 ):
                     continue

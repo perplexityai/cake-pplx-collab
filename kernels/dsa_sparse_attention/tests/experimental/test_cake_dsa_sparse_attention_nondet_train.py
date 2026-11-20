@@ -1919,7 +1919,8 @@ def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache(
         for _ in range(2):
             graph.replay()
         torch.cuda.synchronize()
-        replayed = [t.clone() for t in captured]  # copies that outlive the graph
+        # copies that outlive the graph
+        replayed = [None if t is None else t.clone() for t in captured]
         runs = {
             "eager": _rope_outputs(eager),
             "warm 1": _rope_outputs(warm[0]),
@@ -5651,7 +5652,8 @@ def test_nope_varlen_step_makes_no_capture_query_once_its_bindings_are_cached(
         del queries[:], calls[:]
         step()
         assert queries == [] and len(cache) == 3, state
-        assert calls[0][0] == "nope_fwd" or calls[0][0] == NOPE_INDEX_PREP_STAGE
+        stage = calls[0][0]
+        assert stage in (_mode_stage("nope_fwd", with_o_lo), NOPE_INDEX_PREP_STAGE)
 
 
 @pytest.mark.parametrize("form", [None, "tensor", "callable"])
@@ -7489,7 +7491,8 @@ def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache(
         for _ in range(2):
             graph.replay()
         torch.cuda.synchronize()
-        replayed = tuple(t.clone() for t in captured)  # the values the replays wrote
+        # the values the replays wrote
+        replayed = tuple(None if t is None else t.clone() for t in captured)
         runs = {"eager": _forward_run(eager), "graph": _forward_run(replayed)}
         return nv.judged(nv.nope_problem(inp), runs)
 
@@ -7506,10 +7509,12 @@ def test_nope_autograd_function_and_the_explicit_backward(with_o_lo, record_prop
         inp = _nope_inputs(256, 1024, seed=s, topk=128)
         explicit = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
         leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-        function = cake_backend.CakeDSASparseAttentionNondetNopeFunction
-        out_f, lse_f = function.apply(
+        nope_function = cake_backend.CakeDSASparseAttentionNondetNopeFunction
+        out_f, lse_f = nope_function.apply(
             *_apply_args(
-                function, (*leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE), with_o_lo
+                nope_function,
+                (*leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE),
+                with_o_lo,
             )
         )
         with pytest.raises(NotImplementedError, match="lse"):
@@ -7525,9 +7530,9 @@ def test_nope_autograd_function_and_the_explicit_backward(with_o_lo, record_prop
         )
         acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
         leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-        out_a, lse_a = function.apply(
+        out_a, lse_a = nope_function.apply(
             *_apply_args(
-                function,
+                nope_function,
                 (*leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE, None, acc),
                 with_o_lo,
             )
@@ -12548,6 +12553,8 @@ def test_no_olo_needs_its_stages(program, monkeypatch):
     )
     twin = _mode_stage(cake_jit.stage_name("fwd", program), False)
     served = cake_jit.stage_for(twin, arch, program)
+    # read while the registered record is installed: the record without the twins below has no entry for it
+    served_arches = cake_jit.stage_arches(served, program)
     T, S, K = 128, 512, 64
     if nope:
         q, kv, idx, dout = _nope_device_inputs(T, S, K)
@@ -12592,7 +12599,7 @@ def test_no_olo_needs_its_stages(program, monkeypatch):
         with pytest.raises(NotImplementedError, match=rf"'{twin}'.*{arch}"):
             attempt(False)
     elsewhere = dict(original)
-    others = [a for a in cake_jit.stage_arches(served, program) if a != arch]
+    others = [a for a in served_arches if a != arch]
     elsewhere[served] = dict(original[served], arches=others or ["sm_90a"])
     monkeypatch.setitem(cake_jit.MODULES, program, elsewhere)
     with pytest.raises(NotImplementedError, match=f"not supported on {arch}"):

@@ -31,6 +31,7 @@ backend suite are repeated here: test modules do not import one another.
 
 import contextlib
 import importlib
+import inspect
 import warnings
 
 import pytest
@@ -105,10 +106,15 @@ def _require_program(*, backward: bool = False):
 @pytest.fixture(**nv.WITH_O_LO_FIXTURE)
 def with_o_lo(request, monkeypatch):
     """Each test that judges an output runs as shipped (``True``) and with ``with_o_lo=False`` (marker ``no_olo``):
-    every call of the entries and the package in that mode, every judged ``o_lo`` ``None``
-    (:func:`nv.with_o_lo_case`)."""
+    every call of the entries (this module's imported names too) and the package in that mode, every judged
+    ``o_lo`` ``None`` (:func:`nv.with_o_lo_case`)."""
     yield from nv.with_o_lo_case(
-        request.param, monkeypatch, cake_backend, cake_jit, public_api
+        request.param,
+        monkeypatch,
+        cake_backend,
+        cake_jit,
+        public_api,
+        caller=request.module,
     )
 
 
@@ -3034,6 +3040,53 @@ def test_public_entries_forward_with_o_lo(monkeypatch):
             seen.clear()
             assert call(**given) == target, label
             assert seen == {target: given.get("with_o_lo", True)}, (label, given)
+
+
+@pytest.mark.cpu_only
+def test_no_olo_case_reaches_the_entries_this_module_imported(monkeypatch, request):
+    """The ``no_olo`` case of the ``with_o_lo`` fixture (:func:`nv.with_o_lo_case`) makes ``with_o_lo=False`` the
+    default of the ten public entries and of the four this module imported, also after a reload of the public
+    module (as the binding-cache capacity test makes) has replaced them there; the case passes when its plans
+    resolved the twins and fails when one resolved a default forward stage; every default is ``True`` after it."""
+    names = (
+        "cake_dsa_sparse_attention_nondet",
+        "cake_dsa_sparse_attention_nondet_varlen",
+        "cake_dsa_sparse_attention_nondet_nope",
+        "cake_dsa_sparse_attention_nondet_nope_varlen",
+    )
+    imported = [globals()[name] for name in names]
+    monkeypatch.delenv(public_api.BINDING_CACHE_CAPACITY_ENV, raising=False)
+    importlib.reload(public_api)
+    assert all(getattr(public_api, f.__name__) is not f for f in imported)
+    functions = [v for v in vars(public_api).values() if inspect.isfunction(v)]
+    entries = [f for f in functions if (f.__kwdefaults__ or {}).get("with_o_lo")]
+    assert len(entries) == 10
+    monkeypatch.setattr(cake_backend, "_stage_entry", lambda stage, *args: stage)
+    twins = (cake_jit.NO_OLO_STAGES["fwd"], cake_jit.NO_OLO_STAGES["bwd_delta"])
+    cases = {twins: None, ("fwd",): r"stages \['fwd'\] of the other mode"}
+    for stages, failure in cases.items():
+        with monkeypatch.context() as patch:
+            case = nv.with_o_lo_case(
+                False,
+                patch,
+                cake_backend,
+                cake_jit,
+                public_api,
+                caller=request.module,
+            )
+            assert next(case) is False
+            for function in (*imported, *entries):
+                assert function.__kwdefaults__["with_o_lo"] is False, function
+            for stage in stages:
+                cake_backend._stage_entry(stage, "sm_100a", {})
+            if failure is None:
+                with pytest.raises(StopIteration):
+                    next(case)
+            else:
+                with pytest.raises(AssertionError, match=failure):
+                    next(case)
+        for function in (*imported, *entries):
+            assert function.__kwdefaults__["with_o_lo"] is True, function
 
 
 @pytest.mark.cpu_only
