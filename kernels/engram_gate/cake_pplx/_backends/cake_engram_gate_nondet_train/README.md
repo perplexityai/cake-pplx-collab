@@ -105,7 +105,7 @@ VR200. Measured on GB300 (`T = 16`, 25 draws of each kind); relative L2 error, m
 | `out`, random (either `dot_sum`) | 1.448e-3 / 1.457e-3 | 2.896e-3 / 2.914e-3 |
 | `out`, near-cancelling (either `dot_sum`) | 1.661e-3 / 1.669e-3 | 3.321e-3 / 3.338e-3 |
 | `dx`, `dkey`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 3.3e-3 / 3.4e-3 |
-| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
+| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.3e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
 The gradients are those of the one backward. The `out` errors of the two forwards agree to four digits, but the

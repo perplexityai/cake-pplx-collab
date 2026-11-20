@@ -930,7 +930,7 @@ The backward is the same for both. It recomputes `P` as a compensated dot produc
 | `out`, random (either `dot_sum`) | 1.448e-3 / 1.457e-3 | 2.896e-3 / 2.914e-3 |
 | `out`, near-cancelling (either `dot_sum`) | 1.661e-3 / 1.669e-3 | 3.321e-3 / 3.338e-3 |
 | `dX`, `dK`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 3.3e-3 / 3.4e-3 |
-| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
+| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.3e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
 The `out` errors of the two forwards agree to four digits. On the near-cancelling draws, the default `dot_sum="fp32"` rounds 17802 of the 8.19 million output elements away from BF16 of the FP64 result, against 117 for `dot_sum="compensated"`. An FP32 evaluation of the formula rounds 21917 of them away.
