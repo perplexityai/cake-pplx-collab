@@ -41,6 +41,9 @@ FACADE = "cake_pplx.cake_dsa_sparse_attention_det_train"
 PACKAGE = "cake_pplx._backends.cake_dsa_sparse_attention_det_train"
 BACKEND = f"{PACKAGE}.cake_backend"
 NONDET_FACADE = "cake_pplx.cake_dsa_sparse_attention_nondet_train"
+# Keywords of the non-deterministic entries the det entries do not take: ``with_o_lo`` (the det entries always
+# write ``o_lo``).
+NONDET_ONLY = frozenset({"with_o_lo"})
 CONSTANT = re.compile(r"^[A-Z][A-Z0-9_]*$")
 WORD = re.compile(r"[A-Z]+(?![a-z])|[A-Z]?[a-z0-9]+")
 ENTRIES = (
@@ -84,15 +87,18 @@ def test_public_names_carry_the_mode_word() -> None:
 
 def test_entries_take_the_keywords_of_the_nondeterministic_entries() -> None:
     """Each entry and each step entry has the parameters of its non-deterministic counterpart, in the same order with
-    the same defaults (``key_passes`` and ``dkv_direct`` included), and no ``deterministic`` keyword."""
+    the same defaults (``key_passes`` and ``dkv_direct`` included), except the counterpart's :data:`NONDET_ONLY`
+    keywords, which it does not take, and no ``deterministic`` keyword."""
 
     det = importlib.import_module(FACADE)
     nondet = importlib.import_module(NONDET_FACADE)
     for name in ENTRIES + STEP_ENTRIES:
         mine = inspect.signature(getattr(det, name)).parameters
-        theirs = inspect.signature(
+        every = inspect.signature(
             getattr(nondet, name.replace("_det", "_nondet", 1))
         ).parameters
+        assert NONDET_ONLY <= set(every) and not NONDET_ONLY & set(mine), name
+        theirs = {k: p for k, p in every.items() if k not in NONDET_ONLY}
         assert list(mine) == list(theirs), name
         for param, other in zip(mine.values(), theirs.values(), strict=True):
             assert param.kind == other.kind and param.default == other.default, (

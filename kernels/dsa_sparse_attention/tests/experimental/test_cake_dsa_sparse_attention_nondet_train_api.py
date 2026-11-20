@@ -102,6 +102,16 @@ def _require_program(*, backward: bool = False):
         )
 
 
+@pytest.fixture(**nv.WITH_O_LO_FIXTURE)
+def with_o_lo(request, monkeypatch):
+    """Each test that judges an output runs as shipped (``True``) and with ``with_o_lo=False`` (marker ``no_olo``):
+    every call of the entries and the package in that mode, every judged ``o_lo`` ``None``
+    (:func:`nv.with_o_lo_case`)."""
+    yield from nv.with_o_lo_case(
+        request.param, monkeypatch, cake_backend, cake_jit, public_api
+    )
+
+
 def _rule_passes(
     record: dict, num_queries: int, num_kv: int, topk: int = 2048, arch=None
 ) -> int:
@@ -443,7 +453,7 @@ def test_dkv_direct_environment_is_resolved_by_the_public_entry(monkeypatch):
         )
 
 
-def test_dkv_direct_environment_selects_the_backward_path(monkeypatch, record_property):
+def test_dkv_direct_environment_selects_the_backward_path(with_o_lo, monkeypatch, record_property):
     """Through the public entry with ``dkv_acc`` at S / T = 8, top-k 128: ``CAKE_PPLX_DSA_DKV_DIRECT=0`` plans the
     cast path, ``1`` the direct path, ``auto`` (and the variable unset) the record's rule of the device's
     architecture (the direct path from 4 keys per query on every architecture: on sm_107a T * K_eff = 32,768 stays
@@ -562,7 +572,7 @@ def test_check_dst_map_environment_is_resolved_by_the_public_entry(monkeypatch):
 
 
 def test_check_dst_map_environment_checks_the_map_before_the_backward_launches(
-    monkeypatch, record_property
+    with_o_lo, monkeypatch, record_property
 ):
     """On the device, ``CAKE_PPLX_DSA_CHECK_DST_MAP=1`` makes the public entry's backward validate the map it
     is about to accumulate through: an in-range identity map passes (the check is host validation), an out-of-range
@@ -657,7 +667,7 @@ def test_binding_cache_capacity_environment_configures_the_backend_cache(monkeyp
 # ---------------------------------------------------------------------------
 
 
-def test_varlen_multi_document_forward_and_the_flat_forward(record_property):
+def test_varlen_multi_document_forward_and_the_flat_forward(with_o_lo, record_property):
     """The public varlen entry on three packed documents (per-document rows) and the flat forward on the same
     documents' global rows (the varlen rule leaves the generator's picks as they are): both forwards are judged on
     the same draw."""
@@ -696,7 +706,7 @@ def test_varlen_multi_document_forward_and_the_flat_forward(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 4)
 
 
-def test_backward_whole_row_policy_two_passes_through_public_entry(record_property):
+def test_backward_whole_row_policy_two_passes_through_public_entry(with_o_lo, record_property):
     """The registered policy takes two passes at T = 4096 x S = 65,536 (top-k 2048) under the R1
     rule (the sm_100a / sm_103a records; the sm_107a rule keeps that row single-pass, so the test
     forces two there), through the public entry; the 4k x 4k row stays single-pass and every row
@@ -794,7 +804,7 @@ def test_backward_whole_row_policy_two_passes_through_public_entry(record_proper
     nv.judge_draws(record_property, case, seed=SEED + 17)
 
 
-def test_public_entry_derives_row_lengths_beside_full_length_rows(record_property):
+def test_public_entry_derives_row_lengths_beside_full_length_rows(with_o_lo, record_property):
     """Without ``topk_length`` the public entry derives the per-row length (last valid slot + 1) and the kernels skip
     the trailing invalid blocks on documents shorter than top-k (most slots ``-1``); the derived-length step and the
     explicit full-length step (``out``, ``lse`` and every gradient) are judged on the same draw."""
@@ -841,7 +851,7 @@ def test_public_entry_derives_row_lengths_beside_full_length_rows(record_propert
     nv.judge_draws(record_property, case, seed=SEED + 752)
 
 
-def test_varlen_multi_segment_row_plans_single_pass(record_property):
+def test_varlen_multi_segment_row_plans_single_pass(with_o_lo, record_property):
     """A packed two-segment key row whose total length triggers the whole-row formula (2 x 23,000 keys >
     45,511) plans the single-pass stage through the varlen entry (``num_segments = len(cu_seqlens_k) - 1``:
     whole-row ranges do not match segment-confined index rows), while the flat call on the same global
@@ -944,6 +954,7 @@ def test_rope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
         num_segments=1,
         dkv_direct=None,
         check_dst_map=False,
+        with_o_lo=True,
     )
     assert cake_dsa_sparse_attention_nondet(*rope, idx) == "flat"
     assert seen["flat"] == flat_default
@@ -964,6 +975,7 @@ def test_rope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
         num_segments=1,
         dkv_direct=None,
         check_dst_map=False,
+        with_o_lo=True,
     )
     assert seen["backward"] == (9, step_default)
     step_backward(*rope, idx, out, out, lse, out, num_segments=3)
@@ -991,7 +1003,7 @@ def test_rope_public_entries_refuse_a_bad_num_segments(monkeypatch, bad):
         step_backward(*rope, idx, out, out, lse, out, num_segments=bad)
 
 
-def test_flat_entry_with_num_segments_plans_the_varlen_pass(record_property):
+def test_flat_entry_with_num_segments_plans_the_varlen_pass(with_o_lo, record_property):
     """The flat rope entry (through autograd) and the rope step pair with ``num_segments=2`` on the global rows of a
     packed two-segment row that the policy would split into whole-row passes as one segment (T = 2 x 128, S = 2 x
     65,536 keys, top-k 128: one token chunk, at the ``sm_107a`` key floor) plan the single-pass backward of the varlen
@@ -1076,7 +1088,7 @@ def test_flat_entry_with_num_segments_plans_the_varlen_pass(record_property):
 
 @pytest.mark.parametrize("offset", [1, 8, 13])
 def test_indices_view_inside_a_storage_through_forward_backward_and_autograd(
-    offset, record_property
+    with_o_lo, offset, record_property
 ):
     """A contiguous ``indices`` view that starts inside its storage (a slice of a larger buffer)
     reaches the kernels as the nearest vector-aligned base plus the element offset, so their
@@ -1122,7 +1134,7 @@ def test_indices_view_inside_a_storage_through_forward_backward_and_autograd(
     nv.judge_draws(record_property, case, seed=SEED + 18)
 
 
-def test_autograd_function_and_explicit_backward(record_property):
+def test_autograd_function_and_explicit_backward(with_o_lo, record_property):
     """The public entry's autograd step and the explicit forward and backward on the same inputs: both steps
     (``out``, ``lse`` and every gradient) are judged on the same draw."""
     _require_program(backward=True)
@@ -1179,7 +1191,7 @@ def test_autograd_lse_gradient_is_rejected_and_unused_out_gives_no_grad():
     )
 
 
-def test_forward_backward_read_q_rope_as_a_q256_channel_slice(record_property):
+def test_forward_backward_read_q_rope_as_a_q256_channel_slice(with_o_lo, record_property):
     """``q_rope`` as the ``192:256`` channel slice of a ``[T, 64, 256]`` query (head stride 256, token stride 16384,
     384 B storage offset) with a contiguous ``q_latent``: the TMA descriptor takes the view's strides, the view is
     consumed in place, the remembered binding serves it, and the autograd path puts the rope gradient into channels
@@ -1223,7 +1235,7 @@ def test_forward_backward_read_q_rope_as_a_q256_channel_slice(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 756)
 
 
-def test_kv_as_column_slices_of_576_and_704_rows(record_property):
+def test_kv_as_column_slices_of_576_and_704_rows(with_o_lo, record_property):
     """``kv_latent = kv[:, :512]`` / ``k_rope = kv[:, 512:576]`` of a packed ``[S, 704]`` row (indexer key alongside)
     and of a ``[S, 576]`` row (gather descriptor / rope pointer stride only); the ``[S, 704]`` autograd leaf gets its
     gradient in columns 0:576 only (exact zeros past them).  The contiguous step, both packed steps and the autograd
@@ -1274,7 +1286,7 @@ def test_kv_as_column_slices_of_576_and_704_rows(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 757)
 
 
-def test_varlen_causal_tail_of_prefix(record_property):
+def test_varlen_causal_tail_of_prefix(with_o_lo, record_property):
     """Query segments that are the tail of their key prefix (seqlen_q < seqlen_k) with gather indices that
     deliberately select keys beyond the causal bound ``(seqlen_k - seqlen_q) + local_q`` and 10 % ``-1`` slots
     anywhere: the varlen entry masks exactly those slots (loop reference of the rule; the oracle sees the same set)
@@ -1362,7 +1374,7 @@ def test_varlen_causal_tail_of_prefix(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 758)
 
 
-def test_varlen_segment_with_every_slot_masked_gives_zero_outputs(record_property):
+def test_varlen_segment_with_every_slot_masked_gives_zero_outputs(with_o_lo, record_property):
     """A packed segment whose gather rows are all ``-1``: ``out = 0``, ``lse = -inf``, ``dq = 0`` for its rows and
     exact zeros in dK / dV for its keys.  The varlen step and the flat step on the unmasked rows are judged on the
     same draw."""
@@ -1402,7 +1414,7 @@ def test_varlen_segment_with_every_slot_masked_gives_zero_outputs(record_propert
     nv.judge_draws(record_property, case, seed=SEED + 759)
 
 
-def test_varlen_packed_glm_structure_small(record_property):
+def test_varlen_packed_glm_structure_small(with_o_lo, record_property):
     """Scaled-down GLM-5.2 packed batch: 8 segments alternating a full document and the tail of a ~32x longer key
     prefix, top-k 128, through the varlen entry and the flat call on the generator's global indices (the
     generator's causal picks are left untouched by the rule): both steps are judged on the same draw."""
@@ -1627,6 +1639,7 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         dkv_direct=None,
         check_dst_map=False,
         sink=None,
+        with_o_lo=True,
     )
     sink = torch.zeros(NUM_HEADS)
     cake_dsa_sparse_attention_nondet_nope(q, kv, idx, sink=sink)
@@ -1683,6 +1696,7 @@ def test_nope_public_entries_forward_their_keywords_to_the_backend(monkeypatch):
         check_dst_map=True,
         check_cu_seqlens=False,
         sink=None,
+        with_o_lo=True,
     )
     cake_dsa_sparse_attention_nondet_nope_varlen(
         q, kv, idx, cu_q, cu_k, check_cu_seqlens=True
@@ -1796,7 +1810,7 @@ def test_nope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
 
 
 def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
-    record_property,
+    with_o_lo, record_property,
 ):
     """The flat step pair with a sink on the rows of the sink's model (width 640, scale ``512 ** -0.5``): the forward's
     ``lse`` includes the sink, the backward returns ``(dq, dkv, dsink)`` (``dkv`` ``None`` with ``dkv_acc``), and every
@@ -1862,7 +1876,7 @@ def test_nope_step_pair_with_a_sink_returns_dsink_and_meets_the_naive_tier(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 750)
 
 
-def test_nope_autograd_explicit_backward_and_accumulator(record_property):
+def test_nope_autograd_explicit_backward_and_accumulator(with_o_lo, record_property):
     """Through the public entry the ``kv`` gradient is the FP32 ``dkv`` cast by the autograd engine to the BF16 leaf
     and a gradient through ``lse`` is refused; with ``dkv_acc`` the FP32 values are accumulated (columns past the
     latent untouched) and the ``kv`` gradient is ``None``.  The autograd step, the explicit forward and backward and
@@ -1911,7 +1925,7 @@ def test_nope_autograd_explicit_backward_and_accumulator(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED)
 
 
-def test_nope_public_head_major_dout_and_one_head_kv_leaf(record_property):
+def test_nope_public_head_major_dout_and_one_head_kv_leaf(with_o_lo, record_property):
     """A head-major ``dout`` (the layout an output projection hands back) through autograd, a ``[S, 1, 512]`` kv
     leaf that receives its gradient through the squeeze (with the dense ``dout``), and the explicit forward and
     backward on the dense ``dout``: the three steps are judged on the same draw."""
@@ -1949,7 +1963,7 @@ def test_nope_public_head_major_dout_and_one_head_kv_leaf(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 1)
 
 
-def test_nope_varlen_multi_document_and_flat(record_property):
+def test_nope_varlen_multi_document_and_flat(with_o_lo, record_property):
     """The NoPE varlen entry on four packed documents (one without queries) through autograd, the flat entry's
     forward on the global rows and the explicit forward and backward: the three steps are judged on the same
     draw."""
@@ -1998,7 +2012,7 @@ def test_nope_varlen_multi_document_and_flat(record_property):
 
 @pytest.mark.parametrize("route", ["shipped", "stage"])
 def test_nope_varlen_causal_tail_of_prefix_drops_future_keys(
-    route, monkeypatch, record_property
+    with_o_lo, route, monkeypatch, record_property
 ):
     """``causal=True`` on a query segment that is the tail of its key prefix: a selected key after the query's own
     position is invalid.  Below the slot limit (the shipped route for this 384 x 96 table) the varlen entry keeps
@@ -2247,7 +2261,7 @@ def test_rope_varlen_launch_count_is_the_stage_and_the_forward():
         assert len(flat) == 1 and names[-1] == flat[0], (names, flat)
 
 
-def test_public_rope_entries_take_a_head_major_dout_through_autograd(record_property):
+def test_public_rope_entries_take_a_head_major_dout_through_autograd(with_o_lo, record_property):
     """A head-major ``dout`` (``[512, T * 512, 1]`` strides, the layout an output projection hands back) and its
     dense copy through the public rope entry's autograd and the public varlen entry's: every step's ``out`` and
     gradients are judged on the same draw."""
@@ -2296,7 +2310,7 @@ def test_public_rope_entries_take_a_head_major_dout_through_autograd(record_prop
     nv.judge_draws(record_property, case, seed=SEED + 95)
 
 
-def test_rope_varlen_entry_captures_into_a_cuda_graph(record_property):
+def test_rope_varlen_entry_captures_into_a_cuda_graph(with_o_lo, record_property):
     """Forward + backward of the public rope varlen entry (the stage route on hole rows) capture into a CUDA graph
     and replay; the eager step's, the warm-up steps' and the replayed graph's ``out``, ``dq_latent`` and ``dq_rope``
     are judged on the same draw."""
@@ -2656,7 +2670,7 @@ def _explicit_step(form, inp, acc=None, *, backward=True, one_head=False):
     """One forward and (``backward``) one backward through the step entries of ``form`` (the varlen backward on the
     rows and lengths its forward returns; ``one_head``: a NoPE ``kv`` of shape ``[S, 1, 512]``): the
     :class:`nv.Problem` the outputs answer and the outputs by the names :func:`nv.judged` takes.  The backward leaves
-    ``o_lo`` unchanged."""
+    ``o_lo`` unchanged (``None`` under ``with_o_lo=False``)."""
     forward, step_backward = _step_entries(form)
     kw = {} if acc is None else dict(dkv_acc=acc)
     kv = _step_kv(inp, one_head)
@@ -2695,10 +2709,10 @@ def _explicit_step(form, inp, acc=None, *, backward=True, one_head=False):
     got = dict(out=out, lse=lse, o_lo=o_lo)
     if not backward:
         return problem, got, run
-    o_lo_before = o_lo.clone()
+    o_lo_before = None if o_lo is None else o_lo.clone()
     grads = run()
     torch.cuda.synchronize()
-    assert _same_bits(o_lo, o_lo_before)
+    assert o_lo is None or _same_bits(o_lo, o_lo_before)
     for name, grad in zip(STEP_GRADS[form], grads, strict=True):
         assert (grad is None) == (
             acc is not None and name in ("dkv_latent", "dk_rope", "dkv")
@@ -2766,7 +2780,7 @@ def test_step_entries_return_the_autograd_shapes_and_dtypes(form, one_head, acc)
 
 
 @pytest.mark.parametrize("form, one_head", STEP_CASES, ids=STEP_CASE_IDS)
-def test_step_entries_meet_the_naive_tier(form, one_head, record_property):
+def test_step_entries_meet_the_naive_tier(with_o_lo, form, one_head, record_property):
     """The explicit forward and backward (fresh dK + dV, and added into a zeroed ``dkv_acc``) and the autograd entry
     on the same inputs meet the naive tier over the draws; the NoPE forms also with a one-head ``kv [S, 1, 512]``."""
     _require_step(form)
@@ -2807,3 +2821,262 @@ def test_torch_deterministic_mode_step_forward_runs_and_step_backward_raises(for
             grads = run()
     torch.cuda.synchronize()
     assert all(g is not None for g in grads)
+
+
+# ---------------------------------------------------------------------------
+# with_o_lo: keyword checks, forwarding and calls without query rows (CPU)
+# ---------------------------------------------------------------------------
+
+_NOT_A_BOOL = [0, 1, None, "False", torch.tensor(False)]
+_STEP_BACKENDS = {
+    "rope": ("forward", "backward"),
+    "nope": ("forward_nope", "backward_nope"),
+    "nope_varlen": ("forward_nope_varlen", "backward_nope"),
+}
+
+
+def _refuse(*args, **kwargs):
+    raise AssertionError("this call must not reach the backend's planning, loading or launching")
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("bad", _NOT_A_BOOL, ids=["0", "1", "None", "str", "tensor"])
+def test_with_o_lo_is_a_bool(monkeypatch, bad):
+    """``with_o_lo`` is a Python ``bool``: ``0``, ``1``, ``None``, a string and a tensor raise ``ValueError`` naming it
+    -- in the ten public entries before the backend is loaded, in the nine backend functions and both prepared
+    runners before any other check, and in the three autograd Functions' forwards."""
+    match = "with_o_lo must be a Python bool"
+    rope, idx = _rope_host_views()
+    q, kv, nidx = _nope_host_inputs()
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    cu_q = torch.tensor([0, 8], dtype=torch.int32)
+    cu_k = torch.tensor([0, 16], dtype=torch.int32)
+    lengths = torch.full((8,), 5, dtype=torch.int32)
+    rope_fwd, rope_bwd = _step_entries("rope")
+    nope_fwd, nope_bwd = _step_entries("nope")
+    varlen_fwd, varlen_bwd = _step_entries("nope_varlen")
+    with monkeypatch.context() as mp:
+        mp.setattr(public_api, "_backend", _refuse)
+        entries = (
+            lambda: cake_dsa_sparse_attention_nondet(*rope, idx, with_o_lo=bad),
+            lambda: cake_dsa_sparse_attention_nondet_varlen(*rope, idx, cu_q, cu_k, with_o_lo=bad),
+            lambda: cake_dsa_sparse_attention_nondet_nope(q, kv, nidx, with_o_lo=bad),
+            lambda: cake_dsa_sparse_attention_nondet_nope_varlen(q, kv, nidx, cu_q, cu_k, with_o_lo=bad),
+            lambda: rope_fwd(*rope, idx, with_o_lo=bad),
+            lambda: rope_bwd(*rope, idx, out, out, lse, out, with_o_lo=bad),
+            lambda: nope_fwd(q, kv, nidx, with_o_lo=bad),
+            lambda: nope_bwd(q, kv, nidx, out, out, lse, out, with_o_lo=bad),
+            lambda: varlen_fwd(q, kv, nidx, cu_q, cu_k, with_o_lo=bad),
+            lambda: varlen_bwd(q, kv, nidx, out, out, lse, out, cu_k, topk_length=lengths, with_o_lo=bad),
+        )  # fmt: skip
+        for call in entries:
+            with pytest.raises(ValueError, match=match):
+                call()
+    for name in ("record_for", "_plan", "_plan_nope", "validate_dsa_train_inputs"):
+        monkeypatch.setattr(cake_backend, name, _refuse)
+    monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", _refuse)
+    backend = (
+        lambda: cake_backend.forward(*rope, idx, with_o_lo=bad),
+        lambda: cake_backend.backward(*rope, idx, out, out, lse, out, with_o_lo=bad),
+        lambda: cake_backend.forward_nope(q, kv, nidx, with_o_lo=bad),
+        lambda: cake_backend.backward_nope(q, kv, nidx, out, out, lse, out, with_o_lo=bad),
+        lambda: cake_backend.forward_nope_varlen(q, kv, nidx, cu_q, cu_k, with_o_lo=bad),
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet(*rope, idx, with_o_lo=bad),
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet_varlen(*rope, idx, cu_q, cu_k, with_o_lo=bad),
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet_nope(q, kv, nidx, with_o_lo=bad),
+        lambda: cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(q, kv, nidx, cu_q, cu_k, with_o_lo=bad),
+        lambda: cake_backend.prepare_dsa_train(*rope, idx, with_o_lo=bad),
+        lambda: cake_backend.prepare_dsa_nope_train(q, kv, nidx, with_o_lo=bad),
+        lambda: cake_backend.CakeDSASparseAttentionNondetFunction.apply(
+            *rope, idx, None, 0.125, None, None, None, 1, False, None, False, None, bad
+        ),
+        lambda: cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
+            q, kv, nidx, None, 0.0625, None, None, None, 1, False, None, False, None, bad
+        ),
+        lambda: cake_backend.CakeDSASparseAttentionNondetNopeVarlenFunction.apply(
+            q, kv, nidx, cu_q, cu_k, False, None, 0.0625, None, None, None, 1, None, False,
+            "index_prep", None, bad,
+        ),
+    )  # fmt: skip
+    for call in backend:
+        with pytest.raises(ValueError, match=match):
+            call()
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("rows", [8, 0], ids=["rows", "no_rows"])
+def test_step_backward_refuses_a_mismatched_o_lo(monkeypatch, rows):
+    """``o_lo`` is ``None`` exactly when ``with_o_lo`` is ``False``: each step backward raises ``ValueError`` on a
+    mismatch before any plan, load or launch -- ``with_o_lo=False`` with a tensor, also without query rows, and the
+    default with ``None`` on query rows -- while a call without query rows and ``o_lo=None`` returns the empty
+    gradients in both modes (the default call as before)."""
+    for name in ("record_for", "_plan", "_plan_nope", "_binding"):
+        monkeypatch.setattr(cake_backend, name, _refuse)
+    monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", _refuse)
+    q, kv, idx = _host_inputs(total_q=rows)
+    rope = (q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:])
+    nq, nkv, nidx = _nope_host_inputs(total_q=rows)
+    out = torch.zeros(rows, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(rows, NUM_HEADS)
+    cu_k = torch.tensor([0, 16], dtype=torch.int32)
+    lengths = torch.full((rows,), 5, dtype=torch.int32)
+    backwards = {
+        "rope": lambda o_lo, **kw: _step_entries("rope")[1](
+            *rope, idx, out, o_lo, lse, out, **kw
+        ),
+        "nope": lambda o_lo, **kw: _step_entries("nope")[1](
+            nq, nkv, nidx, out, o_lo, lse, out, **kw
+        ),
+        "nope_varlen": lambda o_lo, **kw: _step_entries("nope_varlen")[1](
+            nq, nkv, nidx, out, o_lo, lse, out, cu_k, topk_length=lengths, **kw
+        ),
+    }
+    shapes = {
+        "rope": [(rows, NUM_HEADS, D_LATENT), (rows, NUM_HEADS, D_ROPE), (16, D_LATENT), (16, D_ROPE)],
+        "nope": [(rows, NUM_HEADS, D_LATENT), (16, D_LATENT)],
+        "nope_varlen": [(rows, NUM_HEADS, D_LATENT), (16, D_LATENT)],
+    }  # fmt: skip
+    for form, backward in backwards.items():
+        with pytest.raises(ValueError, match="with_o_lo=False takes o_lo=None"):
+            backward(out, with_o_lo=False)
+        if rows:
+            with pytest.raises(ValueError, match="with_o_lo=True needs the o_lo"):
+                backward(None)
+            with pytest.raises(ValueError, match="with_o_lo=True needs the o_lo"):
+                backward(None, with_o_lo=True)
+            continue
+        for kw in ({}, {"with_o_lo": False}):
+            grads = backward(None, **kw)
+            assert [tuple(g.shape) for g in grads] == shapes[form], (form, kw)
+            assert all(torch.all(g == 0) for g in grads[-1:]), (form, kw)
+
+
+@pytest.mark.cpu_only
+def test_public_entries_forward_with_o_lo(monkeypatch):
+    """Each of the ten entries hands ``with_o_lo`` to its backend function as given -- ``True`` by default, ``False``
+    when the caller passes it -- and the step backwards take ``o_lo=None`` in its positional slot."""
+    seen = {}
+
+    def stub(name):
+        def call(*args, **kwargs):
+            seen[name] = kwargs["with_o_lo"]
+            return name
+
+        return call
+
+    for name in (
+        "cake_dsa_sparse_attention_nondet",
+        "cake_dsa_sparse_attention_nondet_varlen",
+        "cake_dsa_sparse_attention_nondet_nope",
+        "cake_dsa_sparse_attention_nondet_nope_varlen",
+        "forward",
+        "backward",
+        "forward_nope",
+        "backward_nope",
+        "forward_nope_varlen",
+    ):
+        monkeypatch.setattr(cake_backend, name, stub(name))
+    monkeypatch.delenv(public_api.DKV_DIRECT_ENV, raising=False)
+    monkeypatch.delenv(public_api.CHECK_DST_MAP_ENV, raising=False)
+    rope, idx = _rope_host_views()
+    q, kv, nidx = _nope_host_inputs()
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    cu_q = torch.tensor([0, 8], dtype=torch.int32)
+    cu_k = torch.tensor([0, 16], dtype=torch.int32)
+    lengths = torch.full((8,), 5, dtype=torch.int32)
+    steps = {form: _step_entries(form) for form in STEP_FORMS}
+    calls = {
+        "cake_dsa_sparse_attention_nondet": lambda **kw: cake_dsa_sparse_attention_nondet(*rope, idx, **kw),
+        "cake_dsa_sparse_attention_nondet_varlen": lambda **kw: cake_dsa_sparse_attention_nondet_varlen(
+            *rope, idx, cu_q, cu_k, **kw
+        ),
+        "cake_dsa_sparse_attention_nondet_nope": lambda **kw: cake_dsa_sparse_attention_nondet_nope(q, kv, nidx, **kw),
+        "cake_dsa_sparse_attention_nondet_nope_varlen": lambda **kw: cake_dsa_sparse_attention_nondet_nope_varlen(
+            q, kv, nidx, cu_q, cu_k, **kw
+        ),
+        "rope forward": lambda **kw: steps["rope"][0](*rope, idx, **kw),
+        "rope backward": lambda **kw: steps["rope"][1](*rope, idx, out, None, lse, out, **kw),
+        "nope forward": lambda **kw: steps["nope"][0](q, kv, nidx, **kw),
+        "nope backward": lambda **kw: steps["nope"][1](q, kv, nidx, out, None, lse, out, **kw),
+        "nope_varlen forward": lambda **kw: steps["nope_varlen"][0](q, kv, nidx, cu_q, cu_k, **kw),
+        "nope_varlen backward": lambda **kw: steps["nope_varlen"][1](
+            q, kv, nidx, out, None, lse, out, cu_k, topk_length=lengths, **kw
+        ),
+    }  # fmt: skip
+    targets = {
+        "rope forward": "forward",
+        "rope backward": "backward",
+        "nope forward": "forward_nope",
+        "nope backward": "backward_nope",
+        "nope_varlen forward": "forward_nope_varlen",
+        "nope_varlen backward": "backward_nope",
+    }
+    for label, call in calls.items():
+        target = targets.get(label, label)
+        for given in ({}, {"with_o_lo": True}, {"with_o_lo": False}):
+            seen.clear()
+            assert call(**given) == target, label
+            assert seen == {target: given.get("with_o_lo", True)}, (label, given)
+
+
+@pytest.mark.cpu_only
+def test_no_olo_zero_query_rows_return_none_without_binding(monkeypatch):
+    """``T == 0`` under ``with_o_lo=False`` through every entry: the forwards return ``None`` in the ``o_lo`` slot (the
+    packed step forward also its empty rows and lengths), the step backwards take that ``None`` and return the empty
+    gradients of a default call, the autograd entries return empty outputs and zero leaf gradients -- and nothing
+    consults the registry, loads a module, binds or launches."""
+    for name in ("prepare_dsa_train", "prepare_dsa_nope_train", "_binding", "record_for"):
+        monkeypatch.setattr(cake_backend, name, _refuse)
+    monkeypatch.setattr(cake_jit, "load_cake_dsa_train_module", _refuse)
+    q, kv, idx = _host_inputs(total_q=0, total_k=16, topk=5)
+    rope = (q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:])
+    nq, nkv, nidx = _nope_host_inputs(total_q=0)
+    dout = torch.zeros(0, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    no_rows = torch.tensor([0, 0], dtype=torch.int32)
+    cu_k = torch.tensor([0, 16], dtype=torch.int32)
+    empty = (0, NUM_HEADS, D_LATENT)
+    for forward, backward, args, grads in (
+        (*_step_entries("rope"), (*rope, idx), [empty, (0, NUM_HEADS, D_ROPE), (16, D_LATENT), (16, D_ROPE)]),
+        (cake_backend.forward, cake_backend.backward, (*rope, idx), None),
+        (*_step_entries("nope"), (nq, nkv, nidx), [empty, (16, D_LATENT)]),
+        (cake_backend.forward_nope, cake_backend.backward_nope, (nq, nkv, nidx), None),
+    ):  # fmt: skip
+        out, lse, o_lo = forward(*args, with_o_lo=False)
+        assert o_lo is None and tuple(out.shape) == empty
+        assert tuple(lse.shape) == (0, NUM_HEADS)
+        got = backward(*args, out, None, lse, dout, with_o_lo=False)
+        if grads is None:
+            grads = [tuple(g.shape) for g in backward(*args, out, None, lse, dout)]
+        assert [tuple(g.shape) for g in got] == grads
+        assert torch.all(got[-1] == 0)
+    varlen_fwd, varlen_bwd = _step_entries("nope_varlen")
+    out, lse, o_lo, rows, lengths = varlen_fwd(nq, nkv, nidx, no_rows, cu_k, with_o_lo=False)
+    assert o_lo is None and tuple(out.shape) == empty
+    assert tuple(rows.shape) == (0, 5) and tuple(lengths.shape) == (0,)
+    dq, dkv = varlen_bwd(nq, nkv, rows, out, None, lse, dout, cu_k, topk_length=lengths, with_o_lo=False)
+    assert tuple(dq.shape) == empty and tuple(dkv.shape) == (16, D_LATENT)
+    assert torch.all(dkv == 0)
+    # the autograd entries
+    leaves = [t.detach().clone().requires_grad_() for t in rope]
+    for entry, extra in (
+        (cake_dsa_sparse_attention_nondet, ()),
+        (cake_dsa_sparse_attention_nondet_varlen, (no_rows, cu_k)),
+    ):
+        out = entry(*leaves, idx, *extra, with_o_lo=False)
+        assert tuple(out.shape) == empty
+        g = torch.autograd.grad(out, leaves, dout)
+        assert [tuple(t.shape) for t in g] == [tuple(leaf.shape) for leaf in leaves]
+        assert torch.all(g[2] == 0) and torch.all(g[3] == 0)
+    for kv_leaf in (nkv, nkv.unsqueeze(1)):
+        leaves = [t.detach().clone().requires_grad_() for t in (nq, kv_leaf)]
+        for entry, extra in (
+            (cake_dsa_sparse_attention_nondet_nope, ()),
+            (cake_dsa_sparse_attention_nondet_nope_varlen, (no_rows, cu_k)),
+        ):
+            out = entry(*leaves, nidx, *extra, with_o_lo=False)
+            assert tuple(out.shape) == empty
+            g = torch.autograd.grad(out, leaves, dout)
+            assert [tuple(t.shape) for t in g] == [tuple(leaf.shape) for leaf in leaves]
+            assert torch.all(g[1] == 0)

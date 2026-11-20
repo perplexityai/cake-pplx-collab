@@ -14,6 +14,9 @@ See the License for the specific language governing permissions and
 limitations under the License.
 """
 
+import ast
+import importlib.util
+import inspect
 import json
 import math
 import os
@@ -93,6 +96,32 @@ def _require_program(*, backward: bool = False):
             + (" with backward stages" if backward else "")
             + " not registered for this device"
         )
+
+
+@pytest.fixture(**nv.WITH_O_LO_FIXTURE)
+def with_o_lo(request, monkeypatch):
+    """Each test that judges an output runs as shipped (``True``) and with ``with_o_lo=False`` (marker ``no_olo``):
+    every call of the package in that mode, every judged ``o_lo`` ``None`` (:func:`nv.with_o_lo_case`)."""
+    yield from nv.with_o_lo_case(request.param, monkeypatch, cake_backend, cake_jit)
+
+
+def _mode_stage(stage: str, with_o_lo: bool) -> str:
+    """``stage``, or its ``with_o_lo=False`` twin (``NO_OLO_STAGES``)."""
+    return stage if with_o_lo else cake_jit.NO_OLO_STAGES[stage]
+
+
+def _mode_tag(tag: str, with_o_lo: bool) -> str:
+    """The first slot ``tag`` of a binding key in the mode: ``tag + "_no_olo"`` under ``with_o_lo=False``."""
+    return tag if with_o_lo else f"{tag}_no_olo"
+
+
+def _apply_args(function, args: tuple, with_o_lo: bool) -> tuple:
+    """``args`` of ``function.apply``; under ``with_o_lo=False`` completed by the defaults of the later inputs and
+    the flag, the last input."""
+    if with_o_lo:
+        return tuple(args)
+    later = list(inspect.signature(function.forward).parameters.values())
+    return (*args, *(p.default for p in later[1 + len(args) : -1]), False)
 
 
 # ---------------------------------------------------------------------------
@@ -1631,7 +1660,7 @@ def _rope_outputs(forward=None, grads=None, **more) -> dict:
 
 
 @pytest.mark.parametrize("topk", [128, 200])
-def test_forward_iid(topk, record_property):
+def test_forward_iid(with_o_lo, topk, record_property):
     _require_program()
 
     def case(s, j):
@@ -1645,7 +1674,7 @@ def test_forward_iid(topk, record_property):
     nv.judge_draws(record_property, case, seed=SEED)
 
 
-def test_forward_accepts_packed_views(record_property):
+def test_forward_accepts_packed_views(with_o_lo, record_property):
     """q / kv as column views of packed ``[T, 64, 576]`` / ``[S, 576]`` tensors: the split and the view calls are
     both judged."""
     _require_program()
@@ -1671,7 +1700,7 @@ def test_forward_accepts_packed_views(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 1)
 
 
-def test_forward_masked_rows_and_out_of_range(record_property):
+def test_forward_masked_rows_and_out_of_range(with_o_lo, record_property):
     """Invalid slots anywhere in a row, a row masked by -1 and one by ``topk_length`` 0: judged on the valid
     slots (the contract holds ``out = 0`` and ``lse = -inf`` on the rows without a valid slot)."""
     _require_program()
@@ -1700,7 +1729,7 @@ def test_forward_masked_rows_and_out_of_range(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 2)
 
 
-def test_forward_repeated_calls(record_property):
+def test_forward_repeated_calls(with_o_lo, record_property):
     """Two forward calls on the same inputs: both are judged."""
     _require_program()
 
@@ -1736,7 +1765,7 @@ def test_runner_launches_without_allocation():
     assert after["allocation.all.allocated"] == before["allocation.all.allocated"]
 
 
-def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(record_property):
+def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(with_o_lo, record_property):
     """Repeated eager calls of one geometry share one cached plan (no new entry, no
     re-validation) and still return distinct output tensors; every call's outputs are judged."""
     _require_program(backward=True)
@@ -1752,7 +1781,9 @@ def test_eager_calls_reuse_the_plan_and_return_fresh_outputs(record_property):
         assert len(cache) == 1
         torch.cuda.synchronize()
         assert all(
-            a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True)
+            a.data_ptr() != b.data_ptr()
+            for a, b in zip(first, second, strict=True)
+            if a is not None
         )
         out, lse, o_lo = first
         g1 = cake_backend.backward(*args, out, o_lo, lse, inp.dout)
@@ -1857,7 +1888,7 @@ def test_binding_cache_is_bounded():
 
 
 def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache(
-    record_property,
+    with_o_lo, record_property,
 ):
     """A forward captured into a CUDA graph plans privately (the cache keeps the eager entry only); the eager call,
     the two warm-up calls on the capture stream and the captured outputs after two replays are judged."""
@@ -1898,7 +1929,7 @@ def test_eager_forward_captures_into_a_cuda_graph_without_touching_the_cache(
 
 
 @pytest.mark.parametrize("seq_q, seq_k, topk", [(384, 1024, 200), (256, 4096, 2048)])
-def test_backward_iid(seq_q, seq_k, topk, record_property):
+def test_backward_iid(with_o_lo, seq_q, seq_k, topk, record_property):
     _require_program(backward=True)
 
     def case(s, j):
@@ -1913,7 +1944,7 @@ def test_backward_iid(seq_q, seq_k, topk, record_property):
     nv.judge_draws(record_property, case, seed=SEED + 6)
 
 
-def test_backward_masked_rows_give_zero_dq(record_property):
+def test_backward_masked_rows_give_zero_dq(with_o_lo, record_property):
     """A fully masked row and a row with every other slot masked: judged on the valid slots (the contract holds
     dq of the fully masked row exactly 0)."""
     _require_program(backward=True)
@@ -1934,7 +1965,7 @@ def test_backward_masked_rows_give_zero_dq(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 7)
 
 
-def test_backward_peaked(record_property):
+def test_backward_peaked(with_o_lo, record_property):
     """Own key carrying ~99 % of the softmax mass (the strongest calibrated peaked case).
 
     A saturated softmax (self weight -> 1) makes the exact dQ vanish, so beta is calibrated to the
@@ -1962,7 +1993,7 @@ def test_backward_peaked(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 8)
 
 
-def test_backward_repeated_calls(record_property):
+def test_backward_repeated_calls(with_o_lo, record_property):
     """Two backward calls on the same inputs: both are judged."""
     _require_program(backward=True)
 
@@ -2004,7 +2035,7 @@ def _masked_indices(inp):
     return idx, topk_length
 
 
-def test_backward_forced_key_passes_with_masked_slots(record_property):
+def test_backward_forced_key_passes_with_masked_slots(with_o_lo, record_property):
     """Three forced key-range passes over 65,536 keys (T = 256) with the masking cases: the plan, the
     workspace regions and the launch order; the forward, two three-pass backwards and the single-pass
     backward are judged (the contract holds dq of the rows masked by -1 and by topk_length 0 exactly 0)."""
@@ -2026,7 +2057,7 @@ def test_backward_forced_key_passes_with_masked_slots(record_property):
                 key_passes=3,
             )
             assert runner.key_passes == 3
-            expected_order = ["bwd_delta"]
+            expected_order = [_mode_stage("bwd_delta", with_o_lo)]
             for index in range(3):
                 expected_order += [(stage, 0, index) for stage in KEY_PASS_STAGES]
             if "bwd_cast" in runner.launches:
@@ -2059,7 +2090,7 @@ def test_backward_forced_key_passes_with_masked_slots(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 16)
 
 
-def test_backward_forced_passes_over_two_token_chunks(record_property):
+def test_backward_forced_passes_over_two_token_chunks(with_o_lo, record_property):
     """Two forced passes over a row of 4352 tokens (one full chunk of 4224 and one of 128): the
     launches run chunk by chunk through every pass and the pass scratch holds one chunk (the plan,
     on the first draw); the forward, two two-pass backwards (``dq`` carried through the FP32
@@ -2109,7 +2140,7 @@ def test_backward_forced_passes_over_two_token_chunks(record_property):
 
 
 def test_forward_derives_row_lengths_in_kernel_and_binding_key_covers_it(
-    record_property,
+    with_o_lo, record_property,
 ):
     """``forward(..., topk_length=buf, derive_topk_length=True)`` fills ``buf`` with the row lengths (exactly
     :func:`derive_topk_length`), through the remembered binding on every call and on the prepared runner; the
@@ -2184,7 +2215,7 @@ def _indices_view_inside_storage(indices: torch.Tensor, offset: int) -> torch.Te
 
 @pytest.mark.parametrize("offset", [1, 4, 8, 13])
 def test_key_pass_compaction_accepts_an_indices_view_inside_a_storage(
-    offset, record_property
+    with_o_lo, offset, record_property
 ):
     """The compaction stage's 8-wide index loads (whole 256-slot blocks, so top-k 256) see the
     storage base plus the element offset: two forced key-range passes over the plain tensor and
@@ -2208,7 +2239,7 @@ def test_key_pass_compaction_accepts_an_indices_view_inside_a_storage(
     nv.judge_draws(record_property, case, seed=SEED + 19)
 
 
-def test_backward_dkv_fp32_returns_natural_layout_gradients(record_property):
+def test_backward_dkv_fp32_returns_natural_layout_gradients(with_o_lo, record_property):
     """``dkv_fp32=True`` yields natural-layout FP32 dK/dV (a permuted accumulator layout would miss the
     oracle), judged beside the BF16 path, and never the kernels' internal accumulators: the prepared
     runner's FP32 gradients come from the cast stage and are judged as well."""
@@ -2262,7 +2293,7 @@ def test_backward_dkv_fp32_returns_natural_layout_gradients(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 11)
 
 
-def test_forward_accepts_wide_query_head_strides(record_property):
+def test_forward_accepts_wide_query_head_strides(with_o_lo, record_property):
     """q views whose head stride exceeds the packed 576 (the tensor maps carry both strides): the plain and the
     wide-stride calls are both judged."""
     _require_program()
@@ -2292,7 +2323,7 @@ def test_forward_accepts_wide_query_head_strides(record_property):
 
 
 @pytest.mark.parametrize("pad", [3, 8])
-def test_indices_column_slice_of_a_wider_buffer(pad, record_property):
+def test_indices_column_slice_of_a_wider_buffer(with_o_lo, pad, record_property):
     """``indices`` as a column slice of a wider buffer (row stride topk + pad): the kernels take the
     row stride; a stride that is not a multiple of eight takes their scalar index path.  The forward
     and the backward over the plain tensor and over the slice are judged."""
@@ -2835,7 +2866,7 @@ def _forward_and_natural_dkv(inp):
     return args, _rope_outputs(fwd, grads)
 
 
-def test_backward_dkv_acc_identity_accumulates_in_place(record_property):
+def test_backward_dkv_acc_identity_accumulates_in_place(with_o_lo, record_property):
     """``dkv_acc`` without a map: ``+= dkv`` into a pre-filled ``[S, 704]`` buffer over two calls, the second
     through the strided 576-column view of the buffer; no dK/dV outputs; each call's dq and buffer increment
     are judged (the contract holds the columns from 576 on to their bits)."""
@@ -2880,7 +2911,7 @@ def _require_direct_program():
     return record, stages
 
 
-def test_backward_dkv_acc_direct_and_cast_paths(record_property):
+def test_backward_dkv_acc_direct_and_cast_paths(with_o_lo, record_property):
     """With dkv_acc the natural-layout main stage (``dkv_direct=True``) adds into the caller's rows itself (no
     accumulators, no cast); forced through the cast path (``dkv_direct=False``) the same rows receive the gradients
     through the cast stage; ``dkv_direct=None`` (the default) takes the rule of the device's architecture (at
@@ -2987,7 +3018,7 @@ def test_backward_dkv_acc_direct_and_cast_paths(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 24)
 
 
-def test_bwd_cast_accumulates_without_map(record_property):
+def test_bwd_cast_accumulates_without_map(with_o_lo, record_property):
     """The accumulating cast stage launched alone without a map adds a prepared runner's permuted accumulators
     into the caller's ``[S, 704]`` buffer: its increment is judged beside the runner's own outputs (the contract
     holds the columns from 576 on to their bits)."""
@@ -3031,6 +3062,7 @@ def test_bwd_cast_accumulates_without_map(record_property):
             backward=True,
             key_passes=runner.key_passes,
             dkv_acc=acc,
+            with_o_lo=runner.with_o_lo,
         )
         assert plan.accumulate_dkv and plan.constants["dst_row_stride"] == 704
         operand, _ = cake_backend._check_dkv_acc(acc, None, S)
@@ -3049,7 +3081,7 @@ def test_bwd_cast_accumulates_without_map(record_property):
 
 
 def test_backward_dkv_acc_destination_map_with_duplicates_matches_index_add(
-    record_property,
+    with_o_lo, record_property,
 ):
     """A many-to-few map (512 source rows into 300 destination rows) sums the key gradients like ``index_add_``
     (the oracle's gradients added through the map); a permutation lands every source row on its own destination
@@ -3094,7 +3126,7 @@ def test_backward_dkv_acc_destination_map_with_duplicates_matches_index_add(
     nv.judge_draws(record_property, case, seed=SEED + 22)
 
 
-def test_binding_cache_serves_dkv_acc_bindings_per_buffer(record_property):
+def test_binding_cache_serves_dkv_acc_bindings_per_buffer(with_o_lo, record_property):
     """A remembered dkv_acc plan re-supplies the caller's buffer and map per call (a second call adds again);
     another buffer layout plans anew; every call's dq and buffer increment are judged."""
     _require_program(backward=True)
@@ -3155,7 +3187,7 @@ def test_binding_cache_serves_dkv_acc_bindings_per_buffer(record_property):
 
 
 def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
-    record_property,
+    with_o_lo, record_property,
 ):
     """Through the autograd function with ``dkv_acc`` (no map, then a permutation map) the key leaves get no
     gradient and the buffer receives the key gradients: each call's out, lse, dq and buffer increment are
@@ -3172,8 +3204,13 @@ def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
         S = inp.total_k
         acc = torch.zeros(S, D_QK, device="cuda")
         before = acc.clone()
-        out, lse = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
-            *leaves, inp.idx_global, None, default_softmax_scale(), None, acc, None
+        function = cake_backend.CakeDSASparseAttentionNondetFunction
+        out, lse = function.apply(
+            *_apply_args(
+                function,
+                (*leaves, inp.idx_global, None, default_softmax_scale(), None, acc, None),
+                with_o_lo,
+            )
         )
         out.backward(inp.dout)
         torch.cuda.synchronize()
@@ -3192,8 +3229,12 @@ def test_autograd_function_with_dkv_acc_returns_no_kv_grads_and_accumulates(
         perm = torch.randperm(S, device="cuda", generator=gen).to(torch.int32)
         acc_p = torch.zeros(S, D_QK, device="cuda")
         before_p = acc_p.clone()
-        out2, lse2 = cake_backend.CakeDSASparseAttentionNondetFunction.apply(
-            *leaves, inp.idx_global, None, default_softmax_scale(), None, acc_p, perm
+        out2, lse2 = function.apply(
+            *_apply_args(
+                function,
+                (*leaves, inp.idx_global, None, default_softmax_scale(), None, acc_p, perm),
+                with_o_lo,
+            )
         )
         out2.backward(inp.dout)
         torch.cuda.synchronize()
@@ -3600,20 +3641,33 @@ def test_nope_stage_names_and_registry_accessors():
     assert cake_jit.NOPE_STAGES[1:] == tuple(
         cake_jit.stage_name(s, NOPE_PROGRAM) for s in cake_jit.STAGES[1:]
     )
-    # the NoPE program's trainable-sink stages close its order: the forward's sink build, the sink gradient, then
-    # the sink build's scanner-warp build
+    # the NoPE program's trainable-sink stages close its default order: the forward's sink build, the sink
+    # gradient, then the sink build's scanner-warp build; each record's with_o_lo=False twins (``NO_OLO_STAGES``)
+    # follow its default stages in their order, the forward twins with scanner-warp builds of their own
     assert cake_jit.NOPE_SINK_STAGES == ("nope_fwd_sink", "nope_bwd_dsink")
     assert cake_jit.SCAN_STAGES == {
         "fwd": "fwd_scan",
         "nope_fwd": "nope_fwd_scan",
         "nope_fwd_sink": "nope_fwd_scan_sink",
+        "fwd_no_olo": "fwd_scan_no_olo",
+        "nope_fwd_no_olo": "nope_fwd_scan_no_olo",
+        "nope_fwd_sink_no_olo": "nope_fwd_scan_sink_no_olo",
     }
     assert cake_jit.STAGES_OF == {
-        cake_jit.PROGRAM: cake_jit.STAGES + (cake_jit.SCAN_STAGES["fwd"],),
+        cake_jit.PROGRAM: cake_jit.STAGES
+        + ("fwd_scan",)
+        + ("fwd_no_olo", "bwd_delta_no_olo", "fwd_scan_no_olo"),
         NOPE_PROGRAM: cake_jit.NOPE_STAGES
-        + (cake_jit.SCAN_STAGES["nope_fwd"],)
+        + ("nope_fwd_scan",)
         + cake_jit.NOPE_SINK_STAGES
-        + (cake_jit.SCAN_STAGES["nope_fwd_sink"],),
+        + ("nope_fwd_scan_sink",)
+        + (
+            "nope_fwd_no_olo",
+            "nope_bwd_delta_no_olo",
+            "nope_fwd_scan_no_olo",
+            "nope_fwd_sink_no_olo",
+            "nope_fwd_scan_sink_no_olo",
+        ),
     }
     assert cake_jit.stage_name("bwd_main_pass_natural", NOPE_PROGRAM) == (
         "nope_bwd_main_pass_natural"
@@ -5146,7 +5200,7 @@ def test_nope_varlen_index_mode_follows_the_table_size(monkeypatch):
     # the compacting one-launch mode, by name only
     del calls[:]
     cake_backend._packed_forward_nope(
-        q, kv, small, cu_q, cu_k, True, None, 1 / 16, "kernel"
+        q, kv, small, cu_q, cu_k, True, None, 1 / 16, "kernel", with_o_lo=True
     )
     assert [c[0] for c in calls] == ["nope_fwd"]
     assert calls[0][1]["convert"] == cake_backend.NOPE_CONVERT_COMPACT == 1
@@ -5154,11 +5208,12 @@ def test_nope_varlen_index_mode_follows_the_table_size(monkeypatch):
     for name in ("kernel", "mask"):
         with pytest.raises(ValueError, match=f"{name} mode"):
             cake_backend._packed_forward_nope(
-                q, kv, small, cu_q, cu_k, True, cu_q.new_zeros(1024), 1 / 16, name
+                q, kv, small, cu_q, cu_k, True, cu_q.new_zeros(1024), 1 / 16, name,
+                with_o_lo=True,
             )
     with pytest.raises(ValueError, match="unknown NoPE index mode"):
         cake_backend._packed_forward_nope(
-            q, kv, small, cu_q, cu_k, True, None, 1 / 16, "torch"
+            q, kv, small, cu_q, cu_k, True, None, 1 / 16, "torch", with_o_lo=True
         )
 
 
@@ -5518,7 +5573,7 @@ def test_nope_backward_key_is_settled_at_forward_unless_a_callable_gives_the_acc
 
 
 def test_nope_varlen_step_makes_no_capture_query_once_its_bindings_are_cached(
-    monkeypatch,
+    with_o_lo, monkeypatch,
 ):
     """The NoPE varlen entry hands its own lengths to the forward and the backward binding, so neither owns a
     ``topk_length`` vector: a first step under capture plans both privately (one capture query each) and stores
@@ -5890,7 +5945,7 @@ def test_nope_kernel_level_packed_forward_is_the_public_entry_without_autograd(
     # the compacting one-launch mode, by name
     del calls[:]
     _, _, _, idx_k, len_k = cake_backend._packed_forward_nope(
-        q, kv, local, cu_q, cu_k, True, None, 1 / 16, "kernel"
+        q, kv, local, cu_q, cu_k, True, None, 1 / 16, "kernel", with_o_lo=True
     )
     assert [c[0] for c in calls] == ["nope_fwd"]
     v = calls[0][1]
@@ -5919,7 +5974,7 @@ def test_nope_kernel_level_packed_forward_is_the_public_entry_without_autograd(
     ],
 )
 def test_nope_kernel_level_packed_pair_and_the_autograd_entry(
-    seqs_q, seqs_k, topk, limit, monkeypatch, record_property
+    with_o_lo, seqs_q, seqs_k, topk, limit, monkeypatch, record_property
 ):
     """The kernel-level pair -- ``forward_nope_varlen`` and ``backward_nope`` (and its prepared form through
     ``prepare_dsa_nope_train``) over the rows and lengths it returns -- and the autograd packed entry, on both index
@@ -6108,7 +6163,8 @@ def test_nope_packed_entry_route_when_the_forward_program_converts(monkeypatch):
     # the compacting one-launch mode by name: the same operands with convert = 1
     del calls[:]
     cake_backend._packed_forward_nope(
-        q, kv, wide[:, 3 : 3 + K], cu_q, cu_k, True, None, 1 / 16, "kernel"
+        q, kv, wide[:, 3 : 3 + K], cu_q, cu_k, True, None, 1 / 16, "kernel",
+        with_o_lo=True,
     )
     assert [c[0] for c in calls] == ["nope_fwd"]
     v = calls[0][1]
@@ -6694,7 +6750,7 @@ def test_nope_registered_record_without_kernels_fails_loudly():
 
 
 @pytest.mark.parametrize("topk", [128, 200])
-def test_nope_forward_iid(topk, record_property):
+def test_nope_forward_iid(with_o_lo, topk, record_property):
     _require_nope_program()
 
     def case(s, j):
@@ -6706,7 +6762,7 @@ def test_nope_forward_iid(topk, record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED)
 
 
-def test_nope_forward_pooled_default_width(record_property):
+def test_nope_forward_pooled_default_width(with_o_lo, record_property):
     """The recorded pool structure at the profiled K_slots (2176: up to 512 complete pools plus the causal tail),
     rows shorter than the width padded with ``-1``."""
     _require_nope_program()
@@ -6722,7 +6778,7 @@ def test_nope_forward_pooled_default_width(record_property):
 
 
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
-def test_nope_forward_slot_widths(topk, record_property):
+def test_nope_forward_slot_widths(with_o_lo, topk, record_property):
     """Any ``K_slots >= 1``: the 256 / 512 / 1024 widths, the odd widths 1 / 67 / 2177 and 64."""
     _require_nope_program()
 
@@ -6737,7 +6793,7 @@ def test_nope_forward_slot_widths(topk, record_property):
 
 @pytest.mark.parametrize("key_passes", [1, 2])
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
-def test_nope_backward_slot_widths(topk, key_passes, record_property):
+def test_nope_backward_slot_widths(with_o_lo, topk, key_passes, record_property):
     """The backward at every width above, as the single pass and as two forced passes (the compaction and pass
     stages read the index rows through the same ``K_slots`` metadata), with its forward, every output judged."""
     if key_passes > 1:
@@ -6756,7 +6812,7 @@ def test_nope_backward_slot_widths(topk, key_passes, record_property):
 
 
 @pytest.mark.parametrize("seq_q, seq_k", [(4095, 4096), (4097, 4097)])
-def test_nope_irregular_tail_lengths(seq_q, seq_k, record_property):
+def test_nope_irregular_tail_lengths(with_o_lo, seq_q, seq_k, record_property):
     """Query counts one below and one above a 4096 multiple (the latter with an odd key count): the forward and the
     single-pass backward handle the partial tail tile at the top-k width 2176."""
     _require_nope_program(backward=True)
@@ -6769,7 +6825,7 @@ def test_nope_irregular_tail_lengths(seq_q, seq_k, record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 200 + seq_q)
 
 
-def test_nope_backward_32k_x_256k_skewed_row(record_property):
+def test_nope_backward_32k_x_256k_skewed_row(with_o_lo, record_property):
     """The 32k x 256k peaked row (own key ~99 % of the softmax mass, iid K_slots 2176): the forward and backward
     outputs are judged over the draws, and each draw's self weight (from the oracle's ``lse``) lies in the peaked
     window.  The FP64 oracle of a draw takes minutes: opt in with ``CAKE_PPLX_DSA_NOPE_LARGE_TESTS=1``."""
@@ -6794,7 +6850,7 @@ def test_nope_backward_32k_x_256k_skewed_row(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 300)
 
 
-def test_nope_forward_masked_rows_and_out_of_range(record_property):
+def test_nope_forward_masked_rows_and_out_of_range(with_o_lo, record_property):
     _require_nope_program()
 
     def case(s, j):
@@ -6812,7 +6868,7 @@ def test_nope_forward_masked_rows_and_out_of_range(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 2)
 
 
-def test_nope_forward_reads_a_strided_query_view(record_property):
+def test_nope_forward_reads_a_strided_query_view(with_o_lo, record_property):
     """A query slice of a packed [T, 64, 576] tensor (head stride 576) and the contiguous queries: both calls are
     judged."""
     _require_nope_program()
@@ -6832,7 +6888,7 @@ def test_nope_forward_reads_a_strided_query_view(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 3)
 
 
-def test_nope_forward_derives_row_lengths_in_kernel(record_property):
+def test_nope_forward_derives_row_lengths_in_kernel(with_o_lo, record_property):
     """Rows shorter than the width: the forward without lengths (derived in the kernel), with the explicit lengths
     and with the derived lengths written to a caller vector (exactly ``derive_topk_length`` of the rows); each
     call's outputs are judged against the problem of the lengths it received."""
@@ -6865,7 +6921,7 @@ def test_nope_forward_derives_row_lengths_in_kernel(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 4)
 
 
-def test_nope_forward_repeat_calls(record_property):
+def test_nope_forward_repeat_calls(with_o_lo, record_property):
     """Two forward calls on the same inputs: both are judged."""
     _require_nope_program()
 
@@ -6881,7 +6937,7 @@ def test_nope_forward_repeat_calls(record_property):
 
 
 @pytest.mark.parametrize("seq_q, seq_k, topk", [(384, 1024, 200), (4096, 4096, 2176)])
-def test_nope_backward_iid(seq_q, seq_k, topk, record_property):
+def test_nope_backward_iid(with_o_lo, seq_q, seq_k, topk, record_property):
     _require_nope_program(backward=True)
 
     def case(s, j):
@@ -6892,7 +6948,7 @@ def test_nope_backward_iid(seq_q, seq_k, topk, record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 6)
 
 
-def test_nope_backward_pooled_with_masked_rows(record_property):
+def test_nope_backward_pooled_with_masked_rows(with_o_lo, record_property):
     _require_nope_program(backward=True)
 
     def case(s, j):
@@ -6910,7 +6966,7 @@ def test_nope_backward_pooled_with_masked_rows(record_property):
 @pytest.mark.parametrize(
     "target, seed", [(0.99, NOPE_SEED + 8), (0.53, NOPE_SEED + 9)], ids=["0.99", "0.53"]
 )
-def test_nope_backward_peaked_self_weight(target, seed, record_property):
+def test_nope_backward_peaked_self_weight(with_o_lo, target, seed, record_property):
     """Own key carrying ~99 % (the strongest calibrated peaked case) or ~53 % of the softmax mass: ``beta`` from
     the FP64 self-weight bisection on the case's seed, each draw's self weight (from the oracle's ``lse``) within
     0.05 of the target, every output judged."""
@@ -6938,7 +6994,7 @@ def test_nope_backward_peaked_self_weight(target, seed, record_property):
     nv.judge_draws(record_property, case, seed=seed)
 
 
-def test_nope_backward_fresh_and_accumulate_forms(record_property):
+def test_nope_backward_fresh_and_accumulate_forms(with_o_lo, record_property):
     """The fresh FP32 ``dkv`` and the accumulate form (identity map; a wider buffer accumulating twice, its columns
     past 512 untouched): every call's ``dq`` and gradient are judged, an accumulation by its increment."""
     _require_nope_program(backward=True)
@@ -6975,7 +7031,7 @@ def test_nope_backward_fresh_and_accumulate_forms(record_property):
     "chunks", [(4096,), (2048, 2048), (1000, 1000, 1000, 1096), (4095, 1)]
 )
 def test_nope_backward_chunk_partitions_accumulate_into_one_buffer(
-    chunks, record_property
+    with_o_lo, chunks, record_property
 ):
     """Backward passes over query chunks of one row accumulate into one ``dkv_acc``: the whole row's calls and the
     chunks' calls (their outputs side by side, the buffer by its increment) are both judged."""
@@ -6999,7 +7055,9 @@ def test_nope_backward_chunk_partitions_accumulate_into_one_buffer(
             assert none is None
             parts.append((out_c, lse_c, o_lo_c, dq_c))
             base += n
-        out, lse, o_lo, dq = (torch.cat(t) for t in zip(*parts, strict=True))
+        out, lse, o_lo, dq = (
+            None if t[0] is None else torch.cat(t) for t in zip(*parts, strict=True)
+        )
         chunked = dict(
             out=out,
             lse=lse,
@@ -7012,7 +7070,7 @@ def test_nope_backward_chunk_partitions_accumulate_into_one_buffer(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 11)
 
 
-def test_nope_backward_reads_a_head_major_dout(record_property):
+def test_nope_backward_reads_a_head_major_dout(with_o_lo, record_property):
     """A head-major ``dout`` view (strides ``[512, T * 512, 1]``), read in place by the eager backward and by a
     prepared runner, and its dense copy: every call is judged."""
     _require_nope_program(backward=True)
@@ -7043,7 +7101,7 @@ def test_nope_backward_reads_a_head_major_dout(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 12)
 
 
-def test_nope_backward_repeat_calls(record_property):
+def test_nope_backward_repeat_calls(with_o_lo, record_property):
     """Two backward calls on the same saved forward (FP32 ``dkv`` atomics: no fixed summation order): both are
     judged."""
     _require_nope_program(backward=True)
@@ -7065,7 +7123,7 @@ def test_nope_backward_repeat_calls(record_property):
 
 
 def test_nope_backward_destination_map_with_duplicates_matches_index_add(
-    record_property,
+    with_o_lo, record_property,
 ):
     """A random destination map with repeated rows into a wider FP32 buffer, on the record's route, forced through
     the natural-layout main stage and forced through the cast: each accumulation is judged against the oracle's key
@@ -7109,7 +7167,7 @@ def test_nope_backward_destination_map_with_duplicates_matches_index_add(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 14)
 
 
-def test_nope_backward_direct_and_cast_paths(record_property):
+def test_nope_backward_direct_and_cast_paths(with_o_lo, record_property):
     """The natural-layout main stage (``dkv_direct=True``) adds into the FP32 buffer itself (no accumulator, no
     cast), for the fresh ``dkv`` and for ``dkv_acc`` alike; ``dkv_direct=False`` forces the cast path; both run on
     every architecture.  ``dkv_direct=None`` takes the rule of the device's architecture (S = 8 T, top-k 128: the
@@ -7173,7 +7231,7 @@ def test_nope_backward_direct_and_cast_paths(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 15)
 
 
-def test_nope_backward_forced_key_passes(record_property):
+def test_nope_backward_forced_key_passes(with_o_lo, record_property):
     """Three forced key passes (two eager calls and a prepared runner) beside the single pass, on the record's route,
     plus three passes forced through the natural-layout pass stage (``dkv_direct=True``) and through the permuted
     pass stage and the cast (``dkv_direct=False``), so both pass forms run on every architecture (S = 16 T, top-k
@@ -7209,7 +7267,7 @@ def test_nope_backward_forced_key_passes(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 16)
 
 
-def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
+def test_nope_backward_forced_passes_over_two_token_chunks(with_o_lo, record_property):
     """Two forced passes over a row longer than one token chunk (4736 at K_slots 2176, plus 128): the launches run
     chunk by chunk through every pass with a one-chunk pass scratch; two calls of the two-pass backward on the
     record's route, the single pass, and the two-pass backward forced through the natural-layout pass stage
@@ -7270,7 +7328,7 @@ def test_nope_backward_forced_passes_over_two_token_chunks(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 22)
 
 
-def test_nope_runner_launches_without_allocation(record_property):
+def test_nope_runner_launches_without_allocation(with_o_lo, record_property):
     """A prepared runner's second step allocates nothing; both steps' outputs and the eager pair's are judged."""
     _require_nope_program(backward=True)
 
@@ -7285,7 +7343,7 @@ def test_nope_runner_launches_without_allocation(record_property):
         first = dict(
             out=runner.out.clone(),
             lse=runner.lse.clone(),
-            o_lo=runner.o_lo.clone(),
+            o_lo=None if runner.o_lo is None else runner.o_lo.clone(),
             dq=dq_r.clone(),
             dkv=dkv_r.clone(),
         )
@@ -7307,7 +7365,7 @@ def test_nope_runner_launches_without_allocation(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 17)
 
 
-def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(record_property):
+def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(with_o_lo, record_property):
     _require_nope_program(backward=True)
     cache = cake_backend.BINDING_CACHE
     rope_program = generated_program_available(torch.device("cuda"))
@@ -7318,10 +7376,14 @@ def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(record_property):
         args = (inp.q, inp.kv, inp.idx_global)
         first = forward_nope(*args)
         second = forward_nope(*args)
-        assert len(cache) == 1 and next(iter(cache._entries))[0] == "nope_fwd"
+        assert len(cache) == 1 and next(iter(cache._entries))[0] == _mode_tag(
+            "nope_fwd", with_o_lo
+        )
         torch.cuda.synchronize()
         assert all(
-            a.data_ptr() != b.data_ptr() for a, b in zip(first, second, strict=True)
+            a.data_ptr() != b.data_ptr()
+            for a, b in zip(first, second, strict=True)
+            if a is not None
         )
         out, lse, o_lo = first
         g1 = backward_nope(*args, out, o_lo, lse, inp.dout)
@@ -7358,7 +7420,7 @@ def test_nope_eager_calls_reuse_the_plan_under_tagged_keys(record_property):
 
 
 def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache(
-    record_property,
+    with_o_lo, record_property,
 ):
     """The forward captures into a CUDA graph over the cached plan (no new cache entry); the eager call and the
     replayed capture are both judged."""
@@ -7393,7 +7455,7 @@ def test_nope_forward_captures_into_a_cuda_graph_without_touching_the_cache(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 19)
 
 
-def test_nope_autograd_function_and_the_explicit_backward(record_property):
+def test_nope_autograd_function_and_the_explicit_backward(with_o_lo, record_property):
     """The function's ``q`` and ``kv`` gradients -- without ``dkv_acc`` the FP32 ``dkv`` reaches a BF16 ``kv`` leaf
     as BF16 (the autograd engine casts to the leaf's dtype); with ``dkv_acc`` the FP32 values are accumulated and
     ``kv.grad`` is ``None`` -- and the explicit pair: every output is judged; ``lse`` has no gradient."""
@@ -7403,8 +7465,11 @@ def test_nope_autograd_function_and_the_explicit_backward(record_property):
         inp = _nope_inputs(256, 1024, seed=s, topk=128)
         explicit = _nope_pair(inp.q, inp.kv, inp.idx_global, inp.dout)
         leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-        out_f, lse_f = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
-            *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE
+        function = cake_backend.CakeDSASparseAttentionNondetNopeFunction
+        out_f, lse_f = function.apply(
+            *_apply_args(
+                function, (*leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE), with_o_lo
+            )
         )
         with pytest.raises(NotImplementedError, match="lse"):
             torch.autograd.grad(lse_f.sum(), leaves)
@@ -7419,8 +7484,12 @@ def test_nope_autograd_function_and_the_explicit_backward(record_property):
         )
         acc = torch.zeros(inp.total_k, D_LATENT, device="cuda")
         leaves = [t.detach().clone().requires_grad_() for t in (inp.q, inp.kv)]
-        out_a, lse_a = cake_backend.CakeDSASparseAttentionNondetNopeFunction.apply(
-            *leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE, None, acc
+        out_a, lse_a = function.apply(
+            *_apply_args(
+                function,
+                (*leaves, inp.idx_global, None, NOPE_SOFTMAX_SCALE, None, acc),
+                with_o_lo,
+            )
         )
         out_a.backward(inp.dout)
         torch.cuda.synchronize()
@@ -7437,7 +7506,7 @@ def test_nope_autograd_function_and_the_explicit_backward(record_property):
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 20)
 
 
-def test_nope_backend_entry_squeezes_the_one_head_kv(record_property):
+def test_nope_backend_entry_squeezes_the_one_head_kv(with_o_lo, record_property):
     _require_nope_program(backward=True)
 
     def case(s, j):
@@ -7737,7 +7806,7 @@ def test_nope_index_prep_reads_strided_and_offset_index_views_in_place(topk, com
     ],
 )
 def test_nope_packed_entry_with_on_device_index_prep_and_the_glue_path(
-    seqs_q, seqs_k, topk, causal, route, monkeypatch, record_property
+    with_o_lo, seqs_q, seqs_k, topk, causal, route, monkeypatch, record_property
 ):
     """The backend's packed entry and the explicit glue plus the flat entry with caller lengths, every call's float
     outputs (``dkv`` as FP32 atomics into a caller buffer) judged against the problem of the rows and lengths it
@@ -7970,7 +8039,7 @@ def _judge_hole_case(record_property, name, case, *, seed):
 
 @pytest.mark.parametrize("name", sorted(_HOLE_CASES))
 def test_nope_hole_rows_and_their_stable_compaction_through_the_kernels(
-    name, monkeypatch, record_property
+    with_o_lo, name, monkeypatch, record_property
 ):
     """The stage route (at or above the slot limit; every hole case is below the shipped limit, so the limit is
     set to 0 here).  Through ``forward_nope_varlen`` the hole rows and their stable per-document twin return the
@@ -8081,7 +8150,7 @@ def test_nope_hole_rows_and_their_stable_compaction_through_the_kernels(
 
 @pytest.mark.parametrize("name", sorted(_HOLE_CASES))
 def test_nope_hole_rows_below_the_limit_take_the_position_preserving_forward(
-    name, monkeypatch, record_property
+    with_o_lo, name, monkeypatch, record_property
 ):
     """Below the slot limit (raised above every case here; every case, the 652,800-slot repro included, also sits
     below the shipped limit) the packed entry converts in-kernel, position-preserving (``convert = 2``).  Through
@@ -8211,7 +8280,7 @@ def test_nope_hole_rows_below_the_limit_take_the_position_preserving_forward(
 
 
 @pytest.mark.parametrize("name", ["interleaved", "k2177_runs", "repro_small"])
-def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(name, record_property):
+def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(with_o_lo, name, record_property):
     """A caller ``topk_length`` is a position cut applied before the compaction: ``nope_compact_indices(glob, S,
     topk_length=L)`` == ``compact_rows(glob, S, L)``; ``cake_backend.forward_nope_varlen(..., topk_length=L)``
     returns those rows and counts.  The varlen entry with ``L`` on hole rows, the flat entry on the cut compaction
@@ -8310,7 +8379,7 @@ def test_nope_caller_cut_on_hole_rows_takes_the_cut_compaction(name, record_prop
 @pytest.mark.parametrize("topk", NOPE_SLOT_WIDTHS)
 @pytest.mark.parametrize("offset", [0, 3, 13])
 def test_nope_flat_entry_hole_variants_on_every_slot_width(
-    topk, offset, route, monkeypatch, record_property
+    with_o_lo, topk, offset, route, monkeypatch, record_property
 ):
     """Global rows with every third slot ``-1`` (and a fully masked row) at every slot width, read from a column
     slice at offset 0 / 3 / 13 of a wider buffer, through the flat entry without lengths.  Below the slot limit
@@ -8385,7 +8454,7 @@ def test_nope_flat_entry_hole_variants_on_every_slot_width(
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 820 + topk)
 
 
-def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(record_property):
+def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(with_o_lo, record_property):
     """The compacting one-launch mode (``"kernel"``, ``convert = 1``; never selected by size, so the route
     function is replaced here) and the stage route (the limit set to 0) return the same global rows (the stable
     compaction) and lengths (the valid counts) through ``forward_nope_varlen``: the forward's scan lanes write the
@@ -8434,7 +8503,7 @@ def test_nope_kernel_route_compacts_like_the_stage_on_hole_rows(record_property)
     nv.judge_draws(record_property, case, seed=NOPE_SEED + 835)
 
 
-def test_nope_hole_rows_repeat_calls(record_property):
+def test_nope_hole_rows_repeat_calls(with_o_lo, record_property):
     """Two calls of the varlen entry and of ``forward_nope_varlen`` on hole rows: the rows and lengths the forward
     returns are the same (a fixed launch order, no atomics on the index side); every float output is judged."""
     _require_nope_compacting_stage()
@@ -8470,7 +8539,7 @@ def _graph_capture(fn):
     stream = torch.cuda.Stream()
     stream.wait_stream(torch.cuda.current_stream())
     with torch.cuda.stream(stream):
-        eager = tuple(t.detach().clone() for t in fn())
+        eager = tuple(None if t is None else t.detach().clone() for t in fn())
         for _ in range(2):
             fn()
     torch.cuda.current_stream().wait_stream(stream)
@@ -8484,7 +8553,7 @@ def _graph_capture(fn):
     return eager, captured
 
 
-def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(record_property):
+def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(with_o_lo, record_property):
     """Forward + backward of the public NoPE entries (the varlen entry on hole rows, the flat entry on hole rows
     without lengths) and the kernel-level ``forward_nope_varlen`` capture into a CUDA graph and replay: the stage
     route allocates before its launches and nothing synchronizes with the device.  The replayed rows and lengths
@@ -8524,7 +8593,9 @@ def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(record_prope
             eager, captured = _graph_capture(fn)
             for a, b in zip(eager[3:], captured[3:], strict=True):
                 assert torch.equal(a, b)  # the kernel-level rows and lengths
-            replayed = (t.detach().clone() for t in captured[:3])
+            replayed = (
+                None if t is None else t.detach().clone() for t in captured[:3]
+            )
             runs[f"{label} eager"] = dict(zip(names, eager[:3], strict=True))
             runs[f"{label} graph"] = dict(zip(names, replayed, strict=True))
         return nv.judged(nv.nope_problem(c, indices=c.glob), runs)
@@ -8535,7 +8606,7 @@ def test_nope_public_entries_capture_into_a_cuda_graph_on_hole_rows(record_prope
 @pytest.mark.parametrize("route", ["mask", "index_prep"])
 @pytest.mark.parametrize("construction", ["pooled_fixed_tail", "every_third"])
 def test_nope_flat_entry_hole_rows_on_both_routes(
-    construction, route, monkeypatch, record_property
+    with_o_lo, construction, route, monkeypatch, record_property
 ):
     """The flat entry without lengths on hole rows (512 x 256 = 131,072 slots): below the slot limit (``"mask"``,
     the shipped route for this table, the raw slot order) and on the stage route (``"index_prep"``, the limit set
@@ -8576,7 +8647,7 @@ def test_nope_flat_entry_hole_rows_on_both_routes(
 
 @pytest.mark.parametrize("construction", ["every_third_causal", "pooled_fixed_tail"])
 def test_nope_autograd_backward_on_masked_rows_in_raw_order(
-    construction, monkeypatch, record_property
+    with_o_lo, construction, monkeypatch, record_property
 ):
     """Autograd through both public entries on small tables with holes anywhere (below the slot limit, raised
     here above both constructions): the varlen entry on per-document rows, the flat entry on their globalized rows
@@ -8861,7 +8932,7 @@ def test_validate_dsa_train_inputs_admits_a_head_major_dout_and_rejects_odd_stri
         )
 
 
-def test_rope_backward_reads_a_head_major_dout_without_a_copy(record_property):
+def test_rope_backward_reads_a_head_major_dout_without_a_copy(with_o_lo, record_property):
     """A head-major ``dout`` through the eager rope backward, the prepared runner and autograd: the runner binds the
     view in place (its ``dout`` pointer is the caller's); the head-major backward's peak memory above the inputs is
     not larger than the contiguous backward's (no contiguous copy of ``dout``: the backward allocates its gradients,
@@ -9008,7 +9079,7 @@ def test_rope_varlen_entry_takes_the_compacting_stage_then_the_forward(monkeypat
     assert torch.equal(fwd["indices"], rows) and torch.equal(fwd["topk_length"], counts)
 
 
-def test_rope_varlen_stage_and_fallback_routes_on_hole_rows(record_property):
+def test_rope_varlen_stage_and_fallback_routes_on_hole_rows(with_o_lo, record_property):
     """The rope varlen entry on hole rows through the stage route, the torch twin (a record without the stage) and
     non-contiguous prefix sums (the twin again), and the flat rope entry on the stable compaction of the rows with
     the counts as lengths (every route compacts, so all run the same computation): every route's ``out``, ``lse``
@@ -9637,7 +9708,7 @@ def test_rope_accumulator_errors_follow_the_forward_launches(monkeypatch):
 
 
 def test_rope_varlen_binding_serves_captured_calls_and_a_capture_miss_stays_private(
-    monkeypatch,
+    with_o_lo, monkeypatch,
 ):
     """The rope varlen binding owns no storage: during capture a hit serves the call without the capture query
     (stage and forward launched as in eager mode), and a miss is planned privately and not stored.  The flat entry's
@@ -9670,17 +9741,19 @@ def test_rope_varlen_binding_serves_captured_calls_and_a_capture_miss_stays_priv
     varlen(*args, causal=True)
     assert queries == [] and len(cache) == 1
     assert next(iter(cache._entries.values())) is binding
-    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, "fwd"]
+    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, _mode_stage("fwd", with_o_lo)]
     del queries[:], calls[:]
     varlen(*args, causal=False)
     assert queries == [True] and len(cache) == 1
-    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, "fwd"]
+    assert [c[0] for c in calls] == [NOPE_INDEX_PREP_STAGE, _mode_stage("fwd", with_o_lo)]
     assert calls[0][1]["causal"] == 0
     capturing[0] = False
     del queries[:]
     cake_backend.forward(q_latent, q_rope, kv_latent, k_rope, idx)
     assert queries == [False] and len(cache) == 2
-    flat = next(b for k, b in cache._entries.items() if k[0] == "fwd")
+    flat = next(
+        b for k, b in cache._entries.items() if k[0] == _mode_tag("fwd", with_o_lo)
+    )
     assert flat.topk_length is not None
     cake_backend.forward(q_latent, q_rope, kv_latent, k_rope, idx)
     assert queries == [False, False]
@@ -9741,7 +9814,7 @@ def test_rope_varlen_routes_return_the_flat_function_with_its_saved_list(monkeyp
 
 
 def test_rope_varlen_repeated_calls_reuse_the_binding_and_pin_nothing(
-    record_property,
+    with_o_lo, record_property,
 ):
     """Repeated steps of the rope varlen entry on the stage route reuse one forward and one backward binding and
     leave nothing allocated once their results are released: neither binding owns a tensor (not even a ``[T]``
@@ -9779,7 +9852,10 @@ def test_rope_varlen_repeated_calls_reuse_the_binding_and_pin_nothing(
         steps = [step()]
         torch.cuda.synchronize()
         entries = dict(cache._entries)
-        assert sorted(key[0] for key in entries) == ["bwd", "rope_varlen_fwd"]
+        assert sorted(key[0] for key in entries) == [
+            _mode_tag("bwd", with_o_lo),
+            _mode_tag("rope_varlen_fwd", with_o_lo),
+        ]
         assert all(binding.topk_length is None for binding in entries.values())
         live = torch.cuda.memory_allocated()
         for _ in range(3):
@@ -9886,15 +9962,16 @@ def _kv_leaf_indices(name):
     return (1,) if name.startswith("nope") else (2, 3)
 
 
-def _ckpt_entry(name, inp, *, acc_form=None, dst_map=False):
+def _ckpt_entry(name, inp, *, acc_form=None, dst_map=False, with_o_lo=None):
     """``(fn, leaves, acc)`` of one autograd entry over the recorded checkpointing construction: ``fn(*leaves) -> out``.  With
     ``acc_form`` the FP32 accumulator ``acc`` (zeroed by the caller per step) is passed in that form; ``dst_map``
-    adds the destination map into the ``CKPT_DST_ROWS``-row buffer (NoPE varlen only)."""
+    adds the destination map into the ``CKPT_DST_ROWS``-row buffer (NoPE varlen only); ``with_o_lo`` (``None``: the
+    entry's default) is passed as given."""
     S = int(inp.kv.shape[0])
     nope = name.startswith("nope")
     cols = D_LATENT if nope else D_QK
     acc = None
-    kw = {}
+    kw = {} if with_o_lo is None else dict(with_o_lo=with_o_lo)
     if acc_form is not None:
         rows = CKPT_DST_ROWS if dst_map else S
         acc = torch.zeros(rows, cols, device="cuda")
@@ -10030,7 +10107,7 @@ def test_ckpt_autograd_entries_keep_nothing_alive_after_a_checkpointed_forward(c
 
 @pytest.mark.parametrize("case", _ckpt_case_ids(), ids=_ckpt_case_name)
 def test_ckpt_outputs_and_gradients_of_the_checkpointed_and_the_eager_pair(
-    case, record_property
+    with_o_lo, case, record_property
 ):
     """Every entry under checkpointing and in the eager pair (the fresh ``dkv`` path, the ``dkv_acc`` accumulate path
     and the ``dkv_dst_map`` path alike), with the accumulator zero-filled between the checkpointed forward and its
@@ -10071,7 +10148,7 @@ def test_ckpt_outputs_and_gradients_of_the_checkpointed_and_the_eager_pair(
 
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_ckpt_backward_is_recompute_safe_after_an_unrelated_forward(
-    name, record_property
+    with_o_lo, name, record_property
 ):
     """The checkpointed backward of one call runs after a second, unrelated forward on the same inputs (another
     layer's call in a training step) and after the binding cache served other geometries: the recompute finds its
@@ -10154,7 +10231,7 @@ def test_ckpt_eager_peak_memory_is_not_above_the_reference_package(name):
 
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_save_on_cpu_outputs_and_gradients_of_every_autograd_entry(
-    name, record_property
+    with_o_lo, name, record_property
 ):
     """Under ``torch.autograd.graph.save_on_cpu`` -- every saved tensor packed to host memory once the forward returns
     and unpacked in the backward -- each autograd entry's ``out`` and gradients, and those of the eager step, are
@@ -10236,7 +10313,7 @@ def _nope_flat_step(q, kv, rows, dout, cut, *, offload=None):
 @pytest.mark.parametrize("lengths", [False, True], ids=["mask", "topk_length"])
 @pytest.mark.parametrize("view", NOPE_ROW_VIEWS)
 def test_nope_backward_keys_offloaded_strided_rows_by_their_saved_layout(
-    monkeypatch, view, lengths, order, record_property
+    with_o_lo, monkeypatch, view, lengths, order, record_property
 ):
     """The flat NoPE entry over strided caller rows -- a column slice of a wider buffer, a view at an offset into a
     flat buffer -- saves the rows as given, on the mask route and with caller lengths; ``save_on_cpu`` hands them
@@ -10271,7 +10348,7 @@ def test_nope_backward_keys_offloaded_strided_rows_by_their_saved_layout(
             label = "eager" if offload is None else "offloaded"
             runs[label] = dict(out=out, dq=grads[0], dkv=grads[1])
         assert len(layouts) == 2
-        keys = [k for k in cache._entries if k[0] == "nope_bwd"]
+        keys = [k for k in cache._entries if k[0] == _mode_tag("nope_bwd", with_o_lo)]
         assert len(keys) == 2 and {k[3] for k in keys} == layouts
         problem = nv.Problem(
             q_latent=q, kv_latent=kv, indices=rows, topk_length=cut, dout=dout
@@ -10287,7 +10364,7 @@ def test_nope_backward_keys_offloaded_strided_rows_by_their_saved_layout(
 @pytest.mark.parametrize("lengths", [False, True], ids=["mask", "topk_length"])
 @pytest.mark.parametrize("view", NOPE_ROW_VIEWS)
 def test_nope_selective_offload_of_one_of_two_same_geometry_layers(
-    monkeypatch, view, lengths, offloaded, record_property
+    with_o_lo, monkeypatch, view, lengths, offloaded, record_property
 ):
     """Selective activation offload: two layers of one step call the flat NoPE entry with one geometry (the same
     strided rows), one of them inside ``save_on_cpu``, after a cache-cleared eager step; one backward over both
@@ -10493,7 +10570,7 @@ SIDE_STREAM_CASES = (
     ids=[n + ("" if s is None else "+index_prep") for n, s in SIDE_STREAM_CASES],
 )
 def test_autograd_entries_launch_on_the_callers_side_stream(
-    monkeypatch, name, slot_limit, record_property
+    with_o_lo, monkeypatch, name, slot_limit, record_property
 ):
     """Forward + backward of every autograd entry issued on a side stream whose inputs arrive late (the stream
     sleeps, then writes them) make the default-stream step's launches in the same order, each issued while that
@@ -10516,7 +10593,8 @@ def test_autograd_entries_launch_on_the_callers_side_stream(
         out_e, grads_e, _ = _eager_step(fn, leaves, inp.dout, None)
         stages = [stage for stage, _ in streams]
         assert {h for _, h in streams} == {torch.cuda.current_stream().cuda_stream}
-        assert any(stage.endswith("bwd_delta") for stage in stages), stages
+        delta = _mode_stage("bwd_delta", with_o_lo)
+        assert any(stage.endswith(delta) for stage in stages), stages
         if stage_route:
             assert stages[0] == NOPE_INDEX_PREP_STAGE, stages
 
@@ -10551,7 +10629,7 @@ def test_autograd_entries_launch_on_the_callers_side_stream(
 )
 @pytest.mark.parametrize("name", CKPT_ENTRIES)
 def test_autograd_entries_capture_the_first_call_of_a_new_geometry(
-    monkeypatch, name, form, record_property
+    with_o_lo, monkeypatch, name, form, record_property
 ):
     """The first call of a geometry captured into a CUDA graph -- every binding of the step planned during the
     capture, privately and not stored, after the entry has run eagerly on another geometry only -- replays twice,
@@ -10623,7 +10701,7 @@ def test_autograd_entries_capture_the_first_call_of_a_new_geometry(
 
 @pytest.mark.parametrize("form", [None, "tensor"], ids=["fresh", "tensor_dkv_acc"])
 def test_nope_backward_over_alternating_dout_layouts_and_a_failed_allocation(
-    monkeypatch, form, record_property
+    with_o_lo, monkeypatch, form, record_property
 ):
     """With the registered kernels, through the NoPE varlen entry: backwards over alternating ``dout`` layouts
     (dense and head-major) -- each running the prediction, a lookup or a plan -- and a backward of each layout
@@ -10731,7 +10809,8 @@ def _require_nope_sink_program():
 
 
 def test_nope_sink_stages_are_registered_for_every_architecture_of_the_record():
-    """The NoPE record registers the trainable-sink stages last in its launch order and serves a sink on each of its
+    """The NoPE record registers the trainable-sink stages last among its default stages (its ``with_o_lo=False``
+    twins follow) and serves a sink on each of its
     architectures: the forward's sink build for ``sm_100a`` / ``sm_103a`` (its own library, the forward's launch
     geometry), its scanner-warp build for ``sm_107a`` (``SCAN_STAGES``: it serves the sink forward there, with the
     scanner-warp forward's launch geometry), and the sink-gradient stage for all three (256 threads, one CTA per
@@ -10741,8 +10820,15 @@ def test_nope_sink_stages_are_registered_for_every_architecture_of_the_record():
     sink_stages = cake_jit.NOPE_SINK_STAGES + (NOPE_SCAN_SINK_STAGE,)
     assert cake_jit.NOPE_SINK_STAGES == (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
     assert NOPE_SCAN_SINK_STAGE == "nope_fwd_scan_sink"
-    assert stages[-3:] == sink_stages
-    assert tuple(record["stages"][-3:]) == sink_stages
+    # the sink block closes the default stages; the five with_o_lo=False twins follow
+    twins = tuple(
+        cake_jit.NO_OLO_STAGES[s]
+        for s in cake_jit.STAGES_OF[NOPE_PROGRAM]
+        if s in cake_jit.NO_OLO_STAGES
+    )
+    assert len(twins) == 5 and stages[-5:] == tuple(record["stages"][-5:]) == twins
+    assert stages[-8:-5] == sink_stages
+    assert tuple(record["stages"][-8:-5]) == sink_stages
     assert tuple(record["arches"]) == SINK_ARCHES
     arches = {
         NOPE_SINK_FORWARD_STAGE: SINK_FORWARD_ARCHES,
@@ -11202,7 +11288,7 @@ _assert_sink_bounds = sink_h.assert_sink_bounds
 
 @pytest.mark.parametrize("case", sorted(SINK_CASES))
 def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
-    case, record_property
+    with_o_lo, case, record_property
 ):
     """Per draw, the rows of the sink's model (window slots, then compressed slots; two one-token documents, holes in
     the middle of the rows, one row without a valid slot), the sink vector of the acceptance (ordinary heads, a
@@ -11348,7 +11434,7 @@ def _force_varlen_route(mp, route: str) -> None:
 @pytest.mark.parametrize("route", sink_h.SINK_VARLEN_ROUTES)
 @pytest.mark.parametrize("case", sorted(sink_h.SINK_VARLEN_CASES))
 def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
-    case, route, record_property
+    with_o_lo, case, route, record_property
 ):
     """The packed entries with a sink, on each route of the packed rows (``mask``, ``index_prep``, ``kernel``): per
     draw, the documents of the sink's model packed with a zero-length query segment, each document's key rows its
@@ -11410,7 +11496,7 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
 
 
 @pytest.mark.parametrize("total_q", [1, 64, 65, 1024])
-def test_nope_sink_gradient_meets_the_tier_on_every_grid(total_q, record_property):
+def test_nope_sink_gradient_meets_the_tier_on_every_grid(with_o_lo, total_q, record_property):
     """The sink-gradient stage on any grid: the backward of one forward with the stage's grid set to 1, 7, one CTA
     per chunk and two CTAs per chunk (a fresh binding each) is judged beside the eager backward of the shipped grid,
     every gradient against the FP64 oracle and the BF16 naive tier.  ``T = 1`` and ``64`` / ``65`` put one and two
@@ -11495,7 +11581,7 @@ def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
             assert torch.equal(got, torch.zeros(NUM_HEADS, device="cuda")), fill
 
 
-def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(record_property):
+def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(with_o_lo, record_property):
     """``torch.utils.checkpoint(..., use_reentrant=False)`` over the flat entry with a sink: the recomputed forward
     meets the same sink, and ``out``, ``dq``, the accumulator's increment and ``dsink`` are judged.  An eager call with
     a sink saves the seven tensors of a call without one plus the reference to the caller's ``sink``, and a
@@ -11549,7 +11635,7 @@ def test_nope_sink_under_checkpointing_retains_only_the_sink_reference(record_pr
 
 
 def test_nope_sink_step_captures_into_a_cuda_graph_and_does_not_synchronize(
-    record_property,
+    with_o_lo, record_property,
 ):
     """A step of the flat entry with a sink (forward and ``autograd.grad`` to ``q`` and ``sink``, the accumulator
     through a destination map with repeated rows) captures into a CUDA graph and replays, judged beside the eager
@@ -11626,7 +11712,7 @@ def test_nope_sink_step_captures_into_a_cuda_graph_and_does_not_synchronize(
     assert c["device_alloc"] == 0, summary(c)
 
 
-def test_nope_sink_new_token_and_key_counts_load_no_new_module(record_property):
+def test_nope_sink_new_token_and_key_counts_load_no_new_module(with_o_lo, record_property):
     """New ``T`` and ``S`` values run on the modules already loaded (one library per stage and architecture, no
     shape in its build): after a warm-up step, the step of every draw -- each with its own ``T`` and hence its own
     ``S``, all on the one-launch route of the flat entry -- adds no entry and no miss to the module loader's cache,
@@ -11674,3 +11760,937 @@ def test_nope_sink_new_token_and_key_counts_load_no_new_module(record_property):
         return nv.judged(_sink_problem(inp), {"": run})
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 400)
+
+
+# ---------------------------------------------------------------------------
+# with_o_lo=False: the forward without the o_lo residual
+# ---------------------------------------------------------------------------
+
+# The stages of the two records in 0.5.0, in their launch order: the with_o_lo=False twins follow them.
+_STAGES_0_5_0 = {
+    cake_jit.PROGRAM: (
+        "fwd",
+        "bwd_delta",
+        "bwd_main",
+        "bwd_main_natural",
+        "bwd_compact",
+        "bwd_main_pass",
+        "bwd_main_pass_natural",
+        "bwd_cast",
+        "fwd_scan",
+    ),
+    NOPE_PROGRAM: (
+        "nope_fwd",
+        "nope_bwd_delta",
+        "nope_bwd_main",
+        "nope_bwd_main_natural",
+        "nope_bwd_compact",
+        "nope_bwd_main_pass",
+        "nope_bwd_main_pass_natural",
+        "nope_bwd_cast",
+        "nope_fwd_scan",
+        "nope_fwd_sink",
+        "nope_bwd_dsink",
+        "nope_fwd_scan_sink",
+    ),
+}
+
+# The functions of the backend that take ``with_o_lo`` and have an internal call: each such call passes the keyword.
+_WITH_O_LO_CALLEES = frozenset(
+    {
+        "_plan",
+        "_plan_nope",
+        "_rope_varlen_binding_key",
+        "forward_binding_key",
+        "backward_binding_key",
+        "forward_binding_key_nope",
+        "backward_binding_key_nope",
+        "_prepare_forward_nope",
+        "_prepare_flat_forward_nope",
+        "_prepare_packed_forward_nope",
+        "_packed_forward_nope",
+        "_empty_forward",
+        "_empty_forward_nope",
+        "_NopeBackwardPrep",
+        "generated_program_available",
+        "forward",
+        "backward",
+        "forward_nope",
+        "backward_nope",
+        "cake_dsa_sparse_attention_nondet",
+        "cake_dsa_sparse_attention_nondet_nope",
+    }
+)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("program", cake_jit.PROGRAMS)
+def test_no_olo_twins_are_registered(program):
+    """Each record lists its ``with_o_lo=False`` twins (``NO_OLO_STAGES``) after its 0.5.0 stages, in their order; a
+    twin has its default stage's architectures, entry and launch leaves and a library of its own, except that the
+    delta twins of both records name one library (as the default deltas do); a forward twin's scanner-warp build is
+    the twin of the default's, so the same architecture picks the scanner build in both modes; ``build.json`` names
+    every twin library for every architecture it ships for."""
+    record = cake_jit.record(program)
+    defaults = _STAGES_0_5_0[program]
+    twins = tuple(
+        cake_jit.NO_OLO_STAGES[s] for s in defaults if s in cake_jit.NO_OLO_STAGES
+    )
+    assert len(twins) == (3 if program == cake_jit.PROGRAM else 5)
+    assert cake_jit.STAGES_OF[program] == defaults + twins
+    stages = cake_jit.registered_stages(program)
+    assert stages[-len(twins) :] == twins
+    assert stages[: -len(twins)] == tuple(s for s in defaults if s in stages)
+    assert tuple(record["stages"][-len(twins) :]) == twins
+    libraries = {e["name"]: e for e in cake_build.manifest()["libraries"]}
+    missing = []
+    for default in defaults:
+        twin = cake_jit.NO_OLO_STAGES.get(default)
+        if twin is None:
+            continue
+        assert record[twin]["launch"] == record[default]["launch"], twin
+        assert record[twin]["ffi_entry"] == record[default]["ffi_entry"], twin
+        assert cake_jit.stage_arches(twin, program) == cake_jit.stage_arches(
+            default, program
+        ), twin
+        assert record[twin]["library"] != record[default]["library"], twin
+        scan = cake_jit.SCAN_STAGES.get(default)
+        if scan is not None:
+            assert cake_jit.SCAN_STAGES[twin] == cake_jit.NO_OLO_STAGES[scan], twin
+            for arch in record["arches"]:
+                assert cake_jit.stage_for(twin, arch, program) == _mode_stage(
+                    cake_jit.stage_for(default, arch, program), False
+                ), (twin, arch)
+        for arch in cake_jit.stage_arches(twin, program):
+            entry = libraries.get(f"{record[twin]['library']}_{arch}")
+            if entry is None:
+                missing.append(f"{record[twin]['library']}_{arch}")
+                continue
+            assert entry["arch"] == arch and entry["entry"] == record[twin]["ffi_entry"]
+    rope, nope = cake_jit.record(), cake_jit.record(NOPE_PROGRAM)
+    assert rope["bwd_delta_no_olo"]["library"] == nope["nope_bwd_delta_no_olo"]["library"]
+    assert rope["bwd_delta"]["library"] == nope["nope_bwd_delta"]["library"]
+    assert not missing, f"build.json lacks {missing}"
+
+
+@pytest.mark.cpu_only
+def test_no_olo_twins_use_the_default_launchers():
+    """Every twin keeps its default stage's kernel argument list (the ``o_lo`` parameter stays in each build): the
+    generated launcher passes the same positional values, the grid rule gives the same grid and ``STAGE_ARGS`` is
+    the same list -- the binding's ``Run(`` list matches it for every registered stage
+    (:func:`test_binding_run_signatures_match_the_stage_argument_lists`) -- so the NoPE forward twins carry the
+    conversion operands :func:`nope_fwd_converts_indices` reads from the default forward."""
+    seen = 0
+    for program in cake_jit.PROGRAMS:
+        stages = cake_jit.registered_stages(program)
+        for default, twin in cake_jit.NO_OLO_STAGES.items():
+            if twin not in stages:
+                continue
+            seen += 1
+            names = tuple(cake_launch.STAGE_ARGS[twin])
+            assert names == tuple(cake_launch.STAGE_ARGS[default]), twin
+            for scalars in ((130, 4096, 2048), (0, 4096, 2176), (5, 7, 3)):
+                assert cake_launch.GRID[twin](*scalars) == cake_launch.GRID[default](
+                    *scalars
+                ), (twin, scalars)
+            values = {name: object() for name in names[:-3]}
+            got, want = _Recorder(), _Recorder()
+            cake_launch.LAUNCH[twin](got, values, (7, 1, 1))
+            cake_launch.LAUNCH[default](want, values, (7, 1, 1))
+            assert got.calls == want.calls == [
+                tuple(values[name] for name in names[:-3]) + (7, 1, 1)
+            ], twin
+            if default.startswith("nope_fwd"):
+                assert all(
+                    name in names for name in cake_backend.NOPE_FWD_CONVERT_ARGS
+                ), twin
+    assert seen == len(cake_jit.NO_OLO_STAGES)
+
+
+@pytest.mark.cpu_only
+def test_binding_keys_tag_the_no_olo_mode():
+    """A ``with_o_lo=False`` binding key is the default key of the same arguments with ``key[0] + "_no_olo"``: every
+    other slot keeps its position, so the NoPE backward's ``key[:7]`` (after the tag), ``key[8:12]`` and the sink's
+    ``key[-1]`` keep their meaning, and the default keys are the keys they were."""
+    q, kv, idx = _host_inputs()
+    ql, qr, kl, kr = q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:]
+    scale = default_softmax_scale()
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    lengths = torch.full((8,), 5, dtype=torch.int32)
+    nq, nkv, nidx = _nope_host_inputs()
+    sink = torch.zeros(NUM_HEADS)
+    builders = (
+        (forward_binding_key, (ql, qr, kl, kr, idx, lengths, scale, True)),
+        (
+            backward_binding_key,
+            (ql, qr, kl, kr, idx, out, out, lse, out, None, scale, False, 2, 3),
+        ),
+        (
+            forward_binding_key_nope,
+            (nq, nkv, nidx, None, NOPE_SOFTMAX_SCALE, False, sink),
+        ),
+        (
+            backward_binding_key_nope,
+            (
+                nq,
+                nkv,
+                nidx,
+                out,
+                out,
+                lse,
+                out,
+                lengths,
+                NOPE_SOFTMAX_SCALE,
+                2,
+                1,
+                None,
+                None,
+                True,
+                sink,
+            ),
+        ),
+        (
+            cake_backend._rope_varlen_binding_key,
+            (ql, qr, kl, kr, idx, None, True, scale),
+        ),
+    )
+    for builder, args in builders:
+        if builder is cake_backend._rope_varlen_binding_key:
+            default = builder(*args, with_o_lo=True)
+        else:
+            default = builder(*args)
+            assert default == builder(*args, with_o_lo=True), builder.__name__
+        tagged = builder(*args, with_o_lo=False)
+        assert tagged[0] == default[0] + "_no_olo", builder.__name__
+        assert tagged[1:] == default[1:], builder.__name__
+    assert [builder(*args, with_o_lo=True)[0] for builder, args in builders] == [
+        "fwd",
+        "bwd",
+        "nope_fwd",
+        "nope_bwd",
+        "rope_varlen_fwd",
+    ]
+    default = backward_binding_key_nope(*builders[3][1])
+    tagged = backward_binding_key_nope(*builders[3][1], with_o_lo=False)
+    assert tagged[1:7] == default[1:7] and tagged[8:12] == default[8:12]
+    assert tagged[-1] == default[-1] is not None
+
+
+@pytest.mark.cpu_only
+def test_every_internal_call_passes_with_o_lo():
+    """Every call inside the backend of a function that takes ``with_o_lo`` -- the internal helpers (a required
+    keyword) and the documented functions (default ``True``) -- passes the keyword by name: no hop between the
+    entries and the plans falls back to a default.  At least the 39 calls of the 21 functions with an internal call
+    today are found."""
+    path = Path(importlib.util.find_spec(cake_backend.__name__).origin)
+    tree = ast.parse(path.read_text())
+    takes = {
+        node.name
+        for node in tree.body
+        if isinstance(node, ast.FunctionDef)
+        and any(arg.arg == "with_o_lo" for arg in node.args.kwonlyargs)
+    }
+    takes.add("_NopeBackwardPrep")
+    assert _WITH_O_LO_CALLEES - {"_NopeBackwardPrep"} <= takes
+    found, bare = [], []
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Name)
+            and node.func.id in takes
+        ):
+            found.append(node.func.id)
+            if not any(k.arg == "with_o_lo" for k in node.keywords):
+                bare.append(f"{node.func.id} at line {node.lineno}")
+    assert not bare, bare
+    assert len(found) >= 39, len(found)
+    assert _WITH_O_LO_CALLEES <= set(found), sorted(_WITH_O_LO_CALLEES - set(found))
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize(
+    "function, counts",
+    [
+        ("CakeDSASparseAttentionNondetFunction", (14, 15, 16)),
+        ("CakeDSASparseAttentionNondetNopeFunction", (12, 13, 14)),
+        ("CakeDSASparseAttentionNondetNopeVarlenFunction", (15, 16, 17)),
+    ],
+)
+def test_autograd_functions_without_dout_return_one_gradient_per_input(
+    function, counts
+):
+    """An output unused downstream (``dout`` is ``None``): each autograd Function's backward returns one ``None`` per
+    input its ``apply`` received -- the default arities, with the optional trailing input (the rope ``launched``,
+    the NoPE ``sink``) and with ``with_o_lo``."""
+    backward = getattr(cake_backend, function).backward
+    for count in counts:
+        ctx = SimpleNamespace(needs_input_grad=(True,) * count)
+        assert backward(ctx, None) == (None,) * count
+        assert backward(ctx, None, None) == (None,) * count
+
+
+@pytest.mark.parametrize("sink", [False, True], ids=["plain", "sink"])
+@pytest.mark.parametrize("program", cake_jit.PROGRAMS)
+def test_plans_select_the_no_olo_stages(program, sink):
+    """A ``with_o_lo=False`` plan runs the twins of the forward (of the sink build with a sink) and of the delta
+    stage -- served by the twin's scanner-warp build where that ships (``sm_107a``) -- and no default stage that has
+    a twin; the default plan keeps ``fwd`` / ``bwd_delta`` / ``nope_fwd`` / ``nope_fwd_sink`` / ``nope_bwd_delta`` and
+    their libraries."""
+    nope = program == NOPE_PROGRAM
+    if sink and not nope:
+        pytest.skip("the sink is an input of the NoPE program")
+    if sink:
+        _require_nope_sink_program()
+    elif nope:
+        _require_nope_program(backward=True)
+    else:
+        _require_program(backward=True)
+    arch = cake_backend.arch_for(torch.device("cuda"))
+    T, S, K = 128, 512, 64
+    plans = {}
+    for mode in (True, False):
+        if nope:
+            q, kv, idx, dout = _nope_device_inputs(T, S, K)
+            plans[mode] = cake_backend._plan_nope(
+                q,
+                kv,
+                idx,
+                topk_length=None,
+                dout=dout,
+                softmax_scale=None,
+                outputs={},
+                backward=True,
+                key_passes=None,
+                sink=torch.zeros(NUM_HEADS, device="cuda") if sink else None,
+                with_o_lo=mode,
+            )
+        else:
+            q_latent, q_rope, kv_latent, k_rope, idx, dout = _rope_device_inputs(
+                T, S, K
+            )
+            plans[mode] = cake_backend._plan(
+                q_latent,
+                q_rope,
+                kv_latent,
+                k_rope,
+                idx,
+                topk_length=None,
+                dout=dout,
+                softmax_scale=None,
+                outputs={},
+                dkv_fp32=False,
+                backward=True,
+                key_passes=None,
+                with_o_lo=mode,
+            )
+    fwd = NOPE_SINK_FORWARD_STAGE if sink else cake_jit.stage_name("fwd", program)
+    delta = cake_jit.stage_name("bwd_delta", program)
+    record = cake_jit.record(program)
+    for mode, plan in plans.items():
+        f, d = _mode_stage(fwd, mode), _mode_stage(delta, mode)
+        assert plan.with_o_lo is mode
+        assert tuple(plan.forward_stages) == (f,)
+        assert tuple(plan.launch_keys()[:2]) == (f, d)
+        assert not {_mode_stage(fwd, not mode), _mode_stage(delta, not mode)} & set(
+            plan.entries
+        )
+        served = cake_jit.stage_for(f, arch, program)
+        assert served == _mode_stage(cake_jit.stage_for(fwd, arch, program), mode)
+        assert cake_jit.library_name(f, arch, program) == (
+            f"{record[served]['library']}_{arch}"
+        )
+    assert cake_jit.library_name(fwd, arch, program) != cake_jit.library_name(
+        _mode_stage(fwd, False), arch, program
+    )
+
+
+_NO_OLO_ROUTES = (
+    "rope",
+    "rope_varlen_stage",
+    "rope_varlen_torch",
+    "nope_flat_mask",
+    "nope_flat_index_prep",
+    "nope_flat_lengths",
+    "nope_flat_offload",
+    "nope_flat_sink",
+    "nope_varlen_mask",
+    "nope_varlen_index_prep",
+    "nope_varlen_kernel",
+    "nope_varlen_sink",
+)
+
+
+@pytest.mark.parametrize("route", _NO_OLO_ROUTES)
+def test_no_olo_reaches_every_route(route, with_o_lo, monkeypatch):
+    """Every autograd route plans the forward and the delta stage of the call's mode (the fixture refuses any stage
+    of the other mode) and saves the ``o_lo`` the forward produced: ``[T, 64, 512]`` BF16 by default, the zero-size
+    placeholder under ``with_o_lo=False``; the backward completes with finite gradients.  Routes: rope flat; rope
+    varlen on the stage and on the torch route; NoPE flat on the one-launch route, the stage route, with caller
+    lengths, and under ``save_on_cpu`` over a column slice of the rows (the backward rebuilds its key for the
+    unpacked rows); NoPE packed on the one-launch (``mask``), the stage (``index_prep``) and the compacting-kernel
+    route; both NoPE forms with a sink."""
+    inp = _ckpt_inputs()
+    nope = route.startswith("nope")
+    stage_route = route in (
+        "rope_varlen_stage",
+        "nope_flat_index_prep",
+        "nope_varlen_index_prep",
+        "nope_varlen_kernel",
+    )
+    if stage_route:
+        _require_nope_compacting_stage()
+    if route == "nope_varlen_mask":
+        _require_nope_mask_route()
+    sink = None
+    if route.endswith("_sink"):
+        _require_nope_sink_program()
+        sink = torch.zeros(NUM_HEADS, device="cuda", requires_grad=True)
+    if route.endswith("index_prep"):
+        monkeypatch.setattr(cake_backend, "NOPE_CONVERT_SLOT_LIMIT", 0)
+    resolved = []
+    stage_entry = cake_backend._stage_entry
+
+    def recorded(stage, *args, **kwargs):
+        resolved.append(stage)
+        return stage_entry(stage, *args, **kwargs)
+
+    monkeypatch.setattr(cake_backend, "_stage_entry", recorded)
+    scale = 1 / 16
+    if route == "rope":
+        fn, leaves, _ = _ckpt_entry("rope", inp)
+    elif route.startswith("rope_varlen"):
+        cu_q = inp.cu if stage_route else torch.stack([inp.cu, inp.cu], 1)[:, 0]
+        assert cake_backend._rope_varlen_index_mode(inp.idx, cu_q, inp.cu, CKPT_T) == (
+            "index_prep" if stage_route else "torch"
+        )
+        leaves = (inp.q, inp.q_rope, inp.kv, inp.k_rope)
+
+        def fn(q, q_rope, kv, k_rope):
+            return cake_backend.cake_dsa_sparse_attention_nondet_varlen(
+                q, q_rope, kv, k_rope, inp.idx, cu_q, inp.cu, causal=True
+            )
+
+    elif route == "nope_varlen_kernel":
+        leaves = (inp.q, inp.kv)
+        function = cake_backend.CakeDSASparseAttentionNondetNopeVarlenFunction
+
+        def fn(q, kv):
+            out, _ = function.apply(
+                q, kv, inp.idx, inp.cu, inp.cu, True, None, scale, None, None, None,
+                1, None, False, "kernel", None, with_o_lo,
+            )  # fmt: skip
+            return out
+
+    elif route.startswith("nope_varlen"):
+        assert cake_backend.varlen_index_mode(inp.idx) == (
+            "index_prep" if stage_route else "mask"
+        )
+        leaves = (inp.q, inp.kv) + ((sink,) if sink is not None else ())
+
+        def fn(q, kv, *rest):
+            return cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+                q, kv, inp.idx, inp.cu, inp.cu, causal=True, softmax_scale=scale,
+                sink=rest[0] if rest else None,
+            )  # fmt: skip
+
+    else:
+        rows, lengths = inp.idx, None
+        if route == "nope_flat_lengths":
+            lengths = derive_topk_length(inp.idx, CKPT_T)
+        if route == "nope_flat_offload":
+            rows = _nope_row_view(inp.idx, "column_slice")
+        if lengths is None:
+            assert cake_backend.nope_flat_index_mode(CKPT_T, CKPT_W) == (
+                "index_prep" if stage_route else "mask"
+            )
+        leaves = (inp.q, inp.kv) + ((sink,) if sink is not None else ())
+
+        def fn(q, kv, *rest):
+            return cake_backend.cake_dsa_sparse_attention_nondet_nope(
+                q, kv, rows, topk_length=lengths, softmax_scale=scale,
+                sink=rest[0] if rest else None,
+            )  # fmt: skip
+
+    if route == "nope_flat_offload":
+        with torch.autograd.graph.save_on_cpu(pin_memory=False):
+            out = fn(*leaves)
+    else:
+        out = fn(*leaves)
+    o_lo = out.grad_fn.saved_tensors[4 if nope else 7]
+    assert o_lo.dtype == torch.bfloat16
+    if with_o_lo:
+        assert tuple(o_lo.shape) == (CKPT_T, NUM_HEADS, D_LATENT)
+    else:
+        assert o_lo.numel() == 0
+    del o_lo
+    grads = torch.autograd.grad(out, leaves, inp.dout)
+    torch.cuda.synchronize()
+    assert all(bool(torch.isfinite(g).all()) for g in grads)
+    program = NOPE_PROGRAM if nope else cake_jit.PROGRAM
+    fwd = NOPE_SINK_FORWARD_STAGE if sink is not None else cake_jit.stage_name("fwd", program)
+    delta = cake_jit.stage_name("bwd_delta", program)
+    assert {_mode_stage(fwd, with_o_lo), _mode_stage(delta, with_o_lo)} <= set(
+        resolved
+    ), resolved
+
+
+@pytest.mark.parametrize("form", ["rope", "nope", "nope_varlen"])
+def test_no_olo_step_forwards_return_none(form):
+    """The step forwards under ``with_o_lo=False`` return ``None`` in the ``o_lo`` slot -- ``(out, lse, None)``, the
+    packed ``(out, lse, None, indices, topk_length)`` -- also without query rows, and their peak allocation is
+    exactly the ``T * 64 * 512 * 2`` bytes of ``o_lo`` below the default forward's."""
+    T, S, K = 256, 512, 128
+    if form == "rope":
+        _require_program()
+        inp = make_inputs([T], [S], seed=SEED + 960, topk=K)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        empty = (args[0][:0], args[1][:0], args[2], args[3], args[4][:0])
+        call = cake_backend.forward
+    else:
+        _require_nope_program()
+        inp = _nope_inputs(T, S, seed=NOPE_SEED + 960, topk=K)
+        if form == "nope":
+            args = (inp.q, inp.kv, inp.idx_global)
+            empty = (inp.q[:0], inp.kv, inp.idx_global[:0])
+            call = forward_nope
+        else:
+            args = (inp.q, inp.kv, inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k)
+            no_rows = torch.zeros(2, dtype=torch.int32, device="cuda")
+            empty = (inp.q[:0], inp.kv, inp.idx_local[:0], no_rows, inp.cu_seqlens_k)
+            call = cake_backend.forward_nope_varlen
+
+    def peak(mode):
+        torch.cuda.synchronize()
+        torch.cuda.reset_peak_memory_stats()
+        base = torch.cuda.memory_allocated()
+        got = call(*args, with_o_lo=mode)
+        torch.cuda.synchronize()
+        return got, torch.cuda.max_memory_allocated() - base
+
+    for mode in (True, False):
+        peak(mode)  # plans and per-device state
+    default, peak_default = peak(True)
+    opt_in, peak_opt_in = peak(False)
+    assert len(opt_in) == len(default) == (5 if form == "nope_varlen" else 3)
+    assert opt_in[2] is None
+    assert tuple(default[2].shape) == (T, NUM_HEADS, D_LATENT)
+    assert peak_default - peak_opt_in == T * NUM_HEADS * D_LATENT * 2, (
+        peak_default,
+        peak_opt_in,
+    )
+    got = call(*empty, with_o_lo=False)
+    assert got[2] is None and tuple(got[0].shape) == (0, NUM_HEADS, D_LATENT)
+
+
+@pytest.mark.parametrize("name", CKPT_ENTRIES)
+def test_no_olo_autograd_saves_no_residual(name):
+    """Every autograd entry saves as many tensors under ``with_o_lo=False`` as by default, in the same order and
+    shapes except the ``o_lo`` slot, which holds the zero-size placeholder; the eager forward keeps exactly the
+    ``T * 64 * 512 * 2`` bytes of ``o_lo`` less alive until its backward, and a non-reentrant checkpointed forward
+    keeps no more than the default's (at most ``CKPT_RETAINED_LIMIT_MIB``)."""
+    inp = _ckpt_inputs()
+    slot = 4 if name.startswith("nope") else 7
+    saved, kept, live = {}, {}, {}
+    for mode in (True, False):
+        fn, leaves, _ = _ckpt_entry(name, inp, with_o_lo=mode)
+        fn(*leaves)  # warm-up: kernels, plans, per-device workspaces
+        torch.cuda.synchronize()
+        kept[mode] = _ckpt_retained_mib(fn, *leaves)
+        before = torch.cuda.memory_allocated()
+        out = fn(*leaves)
+        torch.cuda.synchronize()
+        live[mode] = (
+            torch.cuda.memory_allocated() - before - out.untyped_storage().nbytes()
+        )
+        saved[mode] = [(tuple(t.shape), t.dtype) for t in out.grad_fn.saved_tensors]
+        del out
+    assert len(saved[False]) == len(saved[True])
+    assert saved[True][slot] == ((CKPT_T, NUM_HEADS, D_LATENT), torch.bfloat16)
+    assert saved[False][slot] == ((0,), torch.bfloat16)
+    others = [[s for i, s in enumerate(saved[m]) if i != slot] for m in (True, False)]
+    assert others[0] == others[1]
+    assert live[True] - live[False] == CKPT_T * NUM_HEADS * D_LATENT * 2, live
+    assert kept[False] <= kept[True] and kept[False] <= CKPT_RETAINED_LIMIT_MIB, kept
+
+
+class _DropGradient(torch.autograd.Function):
+    """Identity whose backward returns no gradient: the output it wraps reaches the loss with ``dout`` ``None``."""
+
+    @staticmethod
+    def forward(ctx, x):
+        return x.view_as(x)
+
+    @staticmethod
+    def backward(ctx, grad):
+        return None
+
+
+_SINK_INPUT = object()
+
+
+@pytest.mark.parametrize("form", ["rope", "nope", "nope_varlen"])
+def test_function_apply_arities(form):
+    """Each autograd Function takes its default ``apply`` arities and the flag -- rope 14 / 15 / 16 inputs, NoPE 12 /
+    13 / 14 (the sink thirteenth), packed NoPE 15 / 16 / 17 (the sink sixteenth) -- and its backward returns one
+    gradient per input: ``dsink`` in the sink's slot and ``None`` in the flag's (autograd rejects a misplaced or a
+    missing one).  An output that reaches the loss through a Function returning no gradient (``dout`` is ``None``)
+    completes at every arity."""
+    T, S, K = 128, 512, 64
+    with_sink = False
+    if form == "rope":
+        _require_program(backward=True)
+        q_latent, q_rope, kv_latent, k_rope, idx, dout = _rope_device_inputs(T, S, K)
+        sources = (q_latent, q_rope, kv_latent, k_rope)
+        function = cake_backend.CakeDSASparseAttentionNondetFunction
+
+        def head(leaves):
+            return (*leaves, idx, None, default_softmax_scale(), None, None, None, 1, False, None, False)  # fmt: skip
+
+        tails = [(), (None,), (None, False), (None, True)]
+    else:
+        _require_nope_program(backward=True)
+        arch = cake_backend.arch_for(torch.device("cuda"))
+        served = cake_jit.stage_for(NOPE_SINK_FORWARD_STAGE, arch, NOPE_PROGRAM)
+        with_sink = all(
+            arch in cake_jit.stage_arches(s, NOPE_PROGRAM)
+            for s in (served, NOPE_DSINK_STAGE)
+        )
+        q, kv, idx, dout = _nope_device_inputs(T, S, K)
+        sources = (q, kv)
+        if form == "nope":
+            function = cake_backend.CakeDSASparseAttentionNondetNopeFunction
+
+            def head(leaves):
+                return (*leaves, idx, None, NOPE_SOFTMAX_SCALE, None, None, None, 1, False, None, False)  # fmt: skip
+
+        else:
+            mode = cake_backend.varlen_index_mode(idx)
+            if mode == "mask":
+                _require_nope_mask_route()
+            else:
+                _require_nope_index_prep()
+            cu_q = torch.tensor([0, T], dtype=torch.int32, device="cuda")
+            cu_k = torch.tensor([0, S], dtype=torch.int32, device="cuda")
+            function = cake_backend.CakeDSASparseAttentionNondetNopeVarlenFunction
+
+            def head(leaves):
+                return (*leaves, idx, cu_q, cu_k, False, None, NOPE_SOFTMAX_SCALE, None, None, None, 1, None, False, mode)  # fmt: skip
+
+        tails = [(), (None, False), (None, True)]
+        if with_sink:
+            tails += [(_SINK_INPUT,), (_SINK_INPUT, False)]
+    arities = set()
+    for tail in tails:
+        uses_sink = _SINK_INPUT in tail
+        for drop in (False, True):
+            leaves = [t.detach().clone().requires_grad_() for t in sources]
+            if uses_sink:
+                leaves.append(torch.zeros(NUM_HEADS, device="cuda", requires_grad=True))
+            args = head(leaves[: len(sources)]) + tuple(
+                leaves[-1] if a is _SINK_INPUT else a for a in tail
+            )
+            arities.add(len(args))
+            out, _ = function.apply(*args)
+            if drop:
+                grads = torch.autograd.grad(
+                    _DropGradient.apply(out).float().sum(), leaves, allow_unused=True
+                )
+                assert all(g is None for g in grads), len(args)
+            else:
+                grads = torch.autograd.grad(out, leaves, dout)
+                assert all(g is not None for g in grads), len(args)
+    torch.cuda.synchronize()
+    first = {"rope": 14, "nope": 12, "nope_varlen": 15}[form]
+    assert arities == (
+        {first, first + 1, first + 2}
+        if form == "rope" or with_sink
+        else {first, first + 2}
+    )
+
+
+@pytest.mark.parametrize("form", ["rope", "nope", "nope_sink"])
+def test_no_olo_runners(form):
+    """A runner prepared with ``with_o_lo=False`` owns no ``o_lo`` (``runner.o_lo`` is ``None``, its operand the
+    zero-size placeholder, ``forward()`` returns ``None`` in its slot), runs the forward twin and launches the delta
+    twin first in its backward, and refuses an ``o_lo=`` buffer; the default runner of the same call keeps both."""
+    T, S, K = 256, 512, 128
+    if form == "rope":
+        _require_program(backward=True)
+        inp = make_inputs([T], [S], seed=SEED + 970, topk=K)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, inp.idx_global)
+        kw = dict(dout=inp.dout, backward=True)
+        prepare, fwd, delta = prepare_dsa_train, "fwd", "bwd_delta"
+    else:
+        if form == "nope_sink":
+            _require_nope_sink_program()
+            inp = nope_ref.make_sink_inputs(T, 640, seed=SINK_SEED + 970)
+            args = (inp.q, inp.kv, inp.indices)
+            kw = dict(dout=inp.dout, softmax_scale=SINK_SCALE, sink=inp.sink)
+            fwd = NOPE_SINK_FORWARD_STAGE
+        else:
+            _require_nope_program(backward=True)
+            inp = _nope_inputs(T, S, seed=NOPE_SEED + 970, topk=K)
+            args = (inp.q, inp.kv, inp.idx_global)
+            kw = dict(dout=inp.dout)
+            fwd = "nope_fwd"
+        prepare, delta = prepare_dsa_nope_train, "nope_bwd_delta"
+    runner = prepare(*args, **kw, with_o_lo=False)
+    assert runner.with_o_lo is False and runner.o_lo is None
+    assert runner.tensors["o_lo"].numel() == 0
+    assert tuple(runner.forward_stages) == (_mode_stage(fwd, False),)
+    assert runner.backward_order[0] == _mode_stage(delta, False)
+    out, lse, o_lo = runner.forward()
+    assert o_lo is None
+    grads = runner.backward()
+    torch.cuda.synchronize()
+    assert all(g is None or bool(torch.isfinite(g).all()) for g in grads)
+    with pytest.raises(ValueError, match="with_o_lo=False takes o_lo=None"):
+        prepare(*args, **kw, o_lo=torch.empty_like(out), with_o_lo=False)
+    default = prepare(*args, **kw)
+    assert default.with_o_lo is True
+    assert tuple(default.o_lo.shape) == (T, NUM_HEADS, D_LATENT)
+    assert tuple(default.forward_stages) == (fwd,)
+    assert default.backward_order[0] == delta
+
+
+@pytest.mark.parametrize("program", cake_jit.PROGRAMS)
+def test_no_olo_needs_its_stages(program, monkeypatch):
+    """A record without the twins plans the default mode as before and refuses ``with_o_lo=False`` with
+    ``NotImplementedError`` naming the missing twin and the architecture (``generated_program_available(...,
+    with_o_lo=False)`` is ``False`` for it); a twin that does not ship for the device's architecture is refused
+    naming that architecture."""
+    nope = program == NOPE_PROGRAM
+    if nope:
+        _require_nope_program(backward=True)
+    else:
+        _require_program(backward=True)
+    device = torch.device("cuda")
+    arch = cake_backend.arch_for(device)
+    original = cake_jit.record(program)
+    assert generated_program_available(
+        device, backward=True, program=program, with_o_lo=False
+    )
+    twin = _mode_stage(cake_jit.stage_name("fwd", program), False)
+    served = cake_jit.stage_for(twin, arch, program)
+    T, S, K = 128, 512, 64
+    if nope:
+        q, kv, idx, dout = _nope_device_inputs(T, S, K)
+
+        def plan(mode):
+            return cake_backend._plan_nope(
+                q, kv, idx, topk_length=None, dout=dout, softmax_scale=None,
+                outputs={}, backward=True, key_passes=None, with_o_lo=mode,
+            )  # fmt: skip
+
+        def call(mode):
+            return forward_nope(q, kv, idx, with_o_lo=mode)
+
+    else:
+        q_latent, q_rope, kv_latent, k_rope, idx, dout = _rope_device_inputs(T, S, K)
+
+        def plan(mode):
+            return cake_backend._plan(
+                q_latent, q_rope, kv_latent, k_rope, idx, topk_length=None, dout=dout,
+                softmax_scale=None, outputs={}, dkv_fp32=False, backward=True,
+                key_passes=None, with_o_lo=mode,
+            )  # fmt: skip
+
+        def call(mode):
+            return cake_backend.forward(
+                q_latent, q_rope, kv_latent, k_rope, idx, with_o_lo=mode
+            )
+
+    twins = set(cake_jit.NO_OLO_STAGES.values())
+    without = {k: v for k, v in original.items() if k not in twins}
+    without["stages"] = [s for s in original["stages"] if s not in twins]
+    _private_binding_cache(monkeypatch)
+    monkeypatch.setitem(cake_jit.MODULES, program, without)
+    assert generated_program_available(device, backward=True, program=program)
+    assert not generated_program_available(
+        device, backward=True, program=program, with_o_lo=False
+    )
+    assert plan(True).with_o_lo is True
+    call(True)
+    torch.cuda.synchronize()
+    for attempt in (plan, call):
+        with pytest.raises(NotImplementedError, match=rf"'{twin}'.*{arch}"):
+            attempt(False)
+    elsewhere = dict(original)
+    others = [a for a in cake_jit.stage_arches(served, program) if a != arch]
+    elsewhere[served] = dict(original[served], arches=others or ["sm_90a"])
+    monkeypatch.setitem(cake_jit.MODULES, program, elsewhere)
+    with pytest.raises(NotImplementedError, match=f"not supported on {arch}"):
+        plan(False)
+    assert not generated_program_available(
+        device, backward=True, program=program, with_o_lo=False
+    )
+
+
+@pytest.mark.parametrize("form", ["rope", "nope", "nope_sink"])
+def test_default_forward_writes_every_o_lo_element(form):
+    """A default prepared runner given a NaN-filled ``o_lo`` buffer writes every element of it: after ``forward()``
+    the buffer is finite, and exactly 0 on the rows without a valid slot (:func:`nv.assert_contract`).  The one
+    test that sees a default forward that lost its residual store."""
+    T, S, K = 256, 512, 128
+    nan = dict(dtype=torch.bfloat16, device="cuda")
+    if form == "rope":
+        _require_program()
+        inp = make_inputs([T], [S], seed=SEED + 980, topk=K)
+        idx = inp.idx_global.clone()
+        idx[::7] = -1  # rows without a valid slot
+        o_lo = torch.full((T, NUM_HEADS, D_LATENT), float("nan"), **nan)
+        runner = prepare_dsa_train(
+            inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope, idx,
+            o_lo=o_lo, backward=False,
+        )  # fmt: skip
+        problem = nv.rope_problem(inp, indices=idx, dout=None)
+    elif form == "nope":
+        _require_nope_program()
+        inp = _nope_inputs(T, S, seed=NOPE_SEED + 980, topk=K)
+        idx = inp.idx_global.clone()
+        idx[::7] = -1
+        o_lo = torch.full((T, NUM_HEADS, D_LATENT), float("nan"), **nan)
+        runner = prepare_dsa_nope_train(inp.q, inp.kv, idx, o_lo=o_lo, backward=False)
+        problem = nv.nope_problem(inp, indices=idx, dout=None)
+    else:
+        _require_nope_sink_program()
+        inp = nope_ref.make_sink_inputs(T, 640, seed=SINK_SEED + 980)
+        o_lo = torch.full((T, NUM_HEADS, D_LATENT), float("nan"), **nan)
+        runner = prepare_dsa_nope_train(
+            inp.q, inp.kv, inp.indices, softmax_scale=SINK_SCALE, sink=inp.sink,
+            o_lo=o_lo, backward=False,
+        )  # fmt: skip
+        problem = _sink_problem(inp).with_(dout=None)
+    out, lse, got = runner.forward()
+    torch.cuda.synchronize()
+    assert got.data_ptr() == o_lo.data_ptr()
+    assert bool(problem.valid().any(-1).logical_not().any()), "the case needs rows without a valid slot"
+    nv.assert_contract(form, problem, dict(out=out, lse=lse, o_lo=o_lo))
+
+
+@pytest.mark.parametrize("form", ["rope", "nope"])
+def test_default_backward_refuses_a_zero_size_o_lo(form, monkeypatch):
+    """A default step backward handed the zero-size BF16 tensor in place of ``o_lo`` (what a ``with_o_lo=False``
+    call saves) raises ``ValueError`` while planning: no stage launches."""
+    T, S, K = 128, 512, 64
+    if form == "rope":
+        _require_program(backward=True)
+        q_latent, q_rope, kv_latent, k_rope, idx, dout = _rope_device_inputs(T, S, K)
+        args = (q_latent, q_rope, kv_latent, k_rope, idx)
+        out, lse, _ = cake_backend.forward(*args)
+        backward = cake_backend.backward
+    else:
+        _require_nope_program(backward=True)
+        q, kv, idx, dout = _nope_device_inputs(T, S, K)
+        args = (q, kv, idx)
+        out, lse, _ = forward_nope(*args)
+        backward = backward_nope
+    torch.cuda.synchronize()
+    streams = _record_launch_streams(monkeypatch)
+    placeholder = torch.empty(0, dtype=torch.bfloat16, device="cuda")
+    with pytest.raises(ValueError, match="o_lo must be a contiguous"):
+        backward(*args, out, placeholder, lse, dout)
+    assert streams == []
+
+
+def test_no_olo_nope_autograd_backward_reuses_the_prediction(monkeypatch):
+    """The ``with_o_lo=False`` twin of the NoPE autograd settlement: the packed entry with a caller accumulator
+    settles its backward under the tagged key (``key_head[0] == "nope_bwd_no_olo"``) and saves the zero-size
+    ``o_lo``; the first backward (``retain_graph``) looks the binding up once and plans it in the mode; the second
+    runs it from the prediction with no lookup: ``delta`` allocated, the delta twin launched first, then ``dq`` and
+    the main stage."""
+    calls = []
+    _stand_in_index_prep(monkeypatch, calls)
+    events = []
+    real_alloc = cake_backend._alloc
+    real_launch = cake_backend._NopeBinding._launch_stages
+    real_plan, cache = cake_backend._plan_nope, cake_backend.BINDING_CACHE
+    real_get = cache.get
+
+    def alloc(shape, dtype, device, *, zero=False):
+        events.append(("alloc", tuple(int(d) for d in shape)))
+        return real_alloc(shape, dtype, device, zero=zero)
+
+    def launch(self, values, keys):
+        events.append(
+            ("launch", tuple(k if isinstance(k, str) else k[0] for k in keys))
+        )
+        return real_launch(self, values, keys)
+
+    def plan(*args, **kwargs):
+        events.append(("plan", kwargs["with_o_lo"]))
+        return real_plan(*args, **kwargs)
+
+    def get(key):
+        binding = real_get(key)
+        events.append(("cache", binding is not None))
+        return binding
+
+    monkeypatch.setattr(cake_backend, "_alloc", alloc)
+    monkeypatch.setattr(cake_backend._NopeBinding, "_launch_stages", launch)
+    monkeypatch.setattr(cake_backend, "_plan_nope", plan)
+    monkeypatch.setattr(cache, "get", get)
+    local, cu_q, cu_k = (t.cuda() for t in _index_prep_example())
+    T, K = (int(d) for d in local.shape)
+    S = 18
+    q, kv, _ = _nope_host_inputs(total_q=T, total_k=S, topk=K, device="cuda")
+    q.requires_grad_()
+    dout = torch.zeros_like(q)
+    acc = torch.empty(S, D_LATENT, device="cuda")
+    out, lse = cake_backend.cake_dsa_sparse_attention_nondet_nope_varlen(
+        q, kv, local, cu_q, cu_k, return_lse=True, dkv_acc=acc, with_o_lo=False
+    )
+    prep = out.grad_fn.nope_prep
+    assert prep.key_head[0] == "nope_bwd_no_olo" and len(prep.key_head) == 7
+    assert [c[0] for c in calls][-1] == "nope_fwd_no_olo"
+    assert len(out.grad_fn.saved_tensors) == 7
+    assert out.grad_fn.saved_tensors[4].numel() == 0
+    del events[:], calls[:]
+    torch.autograd.grad(out, (q,), dout, retain_graph=True)
+    kinds = [e[0] for e in events]
+    assert kinds[:2] == ["cache", "plan"] and events[0][1] is False, events
+    assert events[1] == ("plan", False) and kinds.count("plan") == 1, events
+    assert calls[0][0] == "nope_bwd_delta_no_olo" and calls[0][1]["o_lo"].numel() == 0
+    del events[:], calls[:]
+    (dq,) = torch.autograd.grad(out, (q,), dout)
+    kinds = [e[0] for e in events]
+    assert kinds == ["alloc", "launch", "alloc", "launch"], events
+    assert events[0][1] == (T, NUM_HEADS) and events[1][1] == ("nope_bwd_delta_no_olo",)
+    assert events[2][1] == (T, NUM_HEADS, D_LATENT) and len(events[3][1]) >= 1
+    assert [c[0] for c in calls] == list(events[1][1] + events[3][1])
+    assert calls[0][1]["o_lo"].numel() == 0
+    assert tuple(dq.shape) == (T, NUM_HEADS, D_LATENT)
+
+
+def test_no_olo_rope_second_backward_with_retain_graph(monkeypatch, record_property):
+    """Two backwards of one ``with_o_lo=False`` rope forward (``retain_graph`` on the first): each launches
+    ``bwd_delta_no_olo``, and the forward's outputs and both gradient sets are judged."""
+    _require_program(backward=True)
+    streams = _record_launch_streams(monkeypatch)
+
+    def case(s, j):
+        inp = make_inputs([256], [512], seed=s, topk=128)
+        leaves = [
+            t.detach().clone().requires_grad_()
+            for t in (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        ]
+        out, lse = cake_backend.cake_dsa_sparse_attention_nondet(
+            *leaves, inp.idx_global, return_lse=True, with_o_lo=False
+        )
+        assert out.grad_fn.saved_tensors[7].numel() == 0
+        del streams[:]
+        first = torch.autograd.grad(out, leaves, inp.dout, retain_graph=True)
+        second = torch.autograd.grad(out, leaves, inp.dout)
+        torch.cuda.synchronize()
+        deltas = [stage for stage, _ in streams if "delta" in stage]
+        assert deltas == ["bwd_delta_no_olo", "bwd_delta_no_olo"], deltas
+        runs = {
+            "first": dict(
+                out=out.detach(), lse=lse.detach(), **_rope_grad_outputs(first)
+            ),
+            "second": _rope_grad_outputs(second),
+        }
+        return nv.judged(nv.rope_problem(inp), runs)
+
+    nv.judge_draws(record_property, case, seed=SEED + 990)
