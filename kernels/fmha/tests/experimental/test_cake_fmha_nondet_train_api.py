@@ -33,9 +33,12 @@ not fit is PyTorch's ``torch.OutOfMemoryError``; under ``torch.use_deterministic
 empty gradients and alerts nothing; the launches run on the current stream without synchronizing; a call
 captured in a CUDA graph replays to results that meet the tier; a device outside the exported architectures is a
 ``RuntimeError``; with two devices, operands on the device that is not current give results there that meet the tier,
-and operands on two devices are a ``ValueError``.  The stream, graph and second-device checks run on both routes of
-head dimension 128 (the 1-CTA main kernel and, with every call in a pair region, the pair route's 2-CTA main kernel).
-The package promises no bits: no test compares two runs bit for bit. """
+and operands on two devices are a ``ValueError``.  The stream, graph and second-device checks run on three routes of
+head dimension 128 without the mask: the 1-CTA main kernel and, with every call in a pair region, the pair route's 2-CTA
+main kernel, each with the one-launch route turned off (``fused_record`` patched to give None), and the route the
+one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region); the alert is raised
+on that small call unpatched and on a three-kernel route.  The package promises no bits: no test here compares two runs
+bit for bit. """
 
 from __future__ import annotations
 
@@ -71,12 +74,13 @@ VARIANT_IDS = ["d128", "d128_causal", "d64", "d64_causal"]
 ALERT = f"{ENTRY} does not have a deterministic implementation"
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000
-# Head-dimension 128 calls on both routes: 256 queries and 384 keys (an odd key-block count: the 1-CTA route in any
-# region) and 512 queries and keys with every call in a pair region (``_pin_route``: the pair route, the 2-CTA main
-# kernel and the pair-row postprocess; the shipped regions hold long sequences only, and a call with more keys than
-# queries never takes the pair route).
-ROUTE_CASES = (Case(2, 3, 256, 384), Case(2, 3, 512))
-ROUTE_IDS = ("one_cta", "pair")
+# Head-dimension 128 calls without the mask on three routes: 256 queries and 384 keys (an odd key-block count: the
+# 1-CTA route in any region) and 512 queries and keys with every call in a pair region (``_pin_route``: the pair route,
+# the 2-CTA main kernel and the pair-row postprocess; the shipped regions hold long sequences only, and a call with more
+# keys than queries never takes the pair route), both with the one-launch route turned off; and one head pair of 256
+# queries and keys, unpatched (the route ``fused_record`` gives: the one-launch kernel inside its region).
+ROUTE_CASES = (Case(2, 3, 256, 384), Case(2, 3, 512), Case(1, 2, 256))
+ROUTE_IDS = ("one_cta", "pair", "fused")
 
 
 def _backend():
@@ -174,6 +178,33 @@ def _torch_deterministic(*, warn_only: bool):
 
 def _grads(dq, dk, dv) -> dict:
     return {"dq": dq, "dk": dk, "dv": dv}
+
+
+def _route(label: str, case: Case, device: torch.device, monkeypatch) -> tuple:
+    """``(record, launches)`` of a head-dimension 128 call without the mask on ``case`` and ``device``, the route
+    checked against ``label`` under the regions the test runs with: ``one_cta`` (the 1-CTA route) and ``pair`` (the
+    pair route) with the one-launch route turned off first (``fused_record`` patched to give None); ``fused``
+    unpatched.  ``record`` is the one-launch record ``fused_record`` gives the call (None on the three-kernel routes);
+    every ``launch_bwd_fused`` call from then on appends its record name to ``launches``."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
+    backend = _backend()
+    if label != "fused":
+        monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
+    arch = backend.device_arch(device.index)
+    record = cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, 128, False)
+    if label != "fused":
+        assert record is None, (label, record)
+        _assert_route(device, case, label == "pair")
+    launches = []
+    launch = backend.launch_bwd_fused
+
+    def counted(name, **kwargs):
+        launches.append(name)
+        launch(name, **kwargs)
+
+    monkeypatch.setattr(backend, "launch_bwd_fused", counted)
+    return record, launches
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -429,8 +460,12 @@ def test_sizes_past_the_kernels_limits_are_a_value_error(sizes) -> None:
 def test_a_workspace_that_does_not_fit_is_torch_out_of_memory_error(monkeypatch) -> None:
     """A call whose FP32 workspace does not fit raises ``torch.OutOfMemoryError`` (a ``RuntimeError``), the error of
     a PyTorch allocation: the process is held by ``torch.cuda.set_per_process_memory_fraction`` to its operands, the
-    three gradients and 60 MiB, below ``dq_accum``'s 160 MiB."""
+    three gradients and 60 MiB, below ``dq_accum``'s 160 MiB.  The call is held on a three-kernel route
+    (``fused_record`` patched to give None): the one-launch route needs no workspace."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     _pin_route(monkeypatch, True)
     _assert_route(device, Case(1, 16, 20480), True)
     _call(_operands(device))  # loads the libraries
@@ -459,6 +494,21 @@ def test_deterministic_mode_raises_the_alert(monkeypatch) -> None:
     with _torch_deterministic(warn_only=False):
         with pytest.raises(RuntimeError, match=ALERT) as info:
             api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+    assert "_det_train" not in str(info.value)
+    got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+    assert_backward_contract("outside the mode", x, _grads(*got))
+
+
+def test_deterministic_mode_raises_the_alert_on_a_three_kernel_route(monkeypatch) -> None:
+    """The same alert on the same call with the one-launch route turned off (``fused_record`` patched to give None):
+    the three-kernel route of its variant raises it before it launches; outside the mode the call runs there."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
+    device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
+    x = make_inputs(Case(1, 2, 256), 128, causal=False, seed=5, device=device)
+    with _torch_deterministic(warn_only=False), pytest.raises(RuntimeError, match=ALERT) as info:
+        api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
     assert "_det_train" not in str(info.value)
     got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
     assert_backward_contract("outside the mode", x, _grads(*got))
@@ -501,14 +551,14 @@ def test_an_empty_batch_launches_nothing_and_alerts_nothing(causal) -> None:
         assert value.is_contiguous(), name
 
 
-@pytest.mark.parametrize("case", ROUTE_CASES, ids=ROUTE_IDS)
-def test_runs_on_the_current_stream_without_synchronizing(case, monkeypatch) -> None:
+@pytest.mark.parametrize(("case", "label"), list(zip(ROUTE_CASES, ROUTE_IDS)), ids=ROUTE_IDS)
+def test_runs_on_the_current_stream_without_synchronizing(case, label, monkeypatch) -> None:
     """On a side stream, behind a long sleep kernel that precedes the write of ``dout`` (NaN until then): the call
     returns while the sleep still runs (no synchronization), and its gradients are finite (every launch read ``dout``
-    after the write, on the current stream), on both routes."""
+    after the write, on the current stream), on each route."""
     device = _device_or_skip()
     _pin_route(monkeypatch, True)
-    _assert_route(device, case, ROUTE_IDS[ROUTE_CASES.index(case)] == "pair")
+    record, launches = _route(label, case, device, monkeypatch)
     x = make_inputs(case, 128, causal=False, seed=21, device=device)
     dout = torch.full_like(x.dout, math.nan)
     side = torch.cuda.Stream(device)
@@ -524,23 +574,26 @@ def test_runs_on_the_current_stream_without_synchronizing(case, monkeypatch) -> 
     side.synchronize()
     assert pending, "the call synchronized: the sleep kernel queued before it had finished"
     assert_backward_contract("on a side stream", x, _grads(*got))
+    assert launches == ([] if record is None else [record, record]), (label, record, launches)
 
 
-@pytest.mark.parametrize("case", ROUTE_CASES, ids=ROUTE_IDS)
-def test_a_call_captured_in_a_cuda_graph_replays(case, monkeypatch, record_property) -> None:
+@pytest.mark.parametrize(("case", "label"), list(zip(ROUTE_CASES, ROUTE_IDS)), ids=ROUTE_IDS)
+def test_a_call_captured_in_a_cuda_graph_replays(case, label, monkeypatch, record_property) -> None:
     """A call captured in a CUDA graph (its launches go to the capture stream): after its gradients are filled with
-    NaN, the replay writes every element and the results meet the tier, on both routes."""
+    NaN, the replay writes every element and the results meet the tier, on each route."""
     device = _device_or_skip()
     _pin_route(monkeypatch, True)
-    _assert_route(device, case, ROUTE_IDS[ROUTE_CASES.index(case)] == "pair")
+    record, launches = _route(label, case, device, monkeypatch)
     x = make_inputs(case, 128, causal=False, seed=31, device=device)
     api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)  # loads the libraries before a capture
 
     def draw(seed: int):
         x = make_inputs(case, 128, causal=False, seed=seed, device=device)
         graph = torch.cuda.CUDAGraph()
+        launches.clear()
         with torch.cuda.graph(graph):
             got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+        assert launches == ([] if record is None else [record]), (label, record, launches)
         for t in got:
             t.fill_(math.nan)
         graph.replay()
@@ -592,11 +645,16 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 
-@pytest.mark.parametrize("case", (Case(2, 3, 256), Case(2, 3, 256, 384)), ids=("pair", "one_cta"))
-def test_operands_on_another_device(case, monkeypatch, record_property) -> None:
+@pytest.mark.parametrize(
+    ("case", "label"),
+    ((Case(2, 3, 256), "pair"), (Case(2, 3, 256, 384), "one_cta"), (Case(1, 2, 256), "fused")),
+    ids=("pair", "one_cta", "fused"),
+)
+def test_operands_on_another_device(case, label, monkeypatch, record_property) -> None:
     """With two devices: operands on the device that is not current give gradients on that device that meet the tier,
-    on both routes of head dimension 128 (256 keys: the pair route, with every call in a pair region; 384: the 1-CTA
-    route); operands on two devices are a ``ValueError``."""
+    on three routes of head dimension 128 (256 keys: the pair route, with every call in a pair region; 384: the 1-CTA
+    route; both with the one-launch route turned off; a small call unpatched: the route ``fused_record`` gives it);
+    operands on two devices are a ``ValueError``."""
     _device_or_skip()
     _pin_route(monkeypatch, True)
     if torch.cuda.device_count() < 2:
@@ -604,7 +662,7 @@ def test_operands_on_another_device(case, monkeypatch, record_property) -> None:
     other = torch.device("cuda:1")
     if torch.cuda.get_device_capability(other) not in ((10, 0), (10, 3), (10, 7)):
         pytest.skip("the second device is not an exported architecture")
-    _assert_route(other, case, case.kv == 256)
+    record, launches = _route(label, case, other, monkeypatch)
     previous = torch.cuda.current_device()
     torch.cuda.set_device(0)
     try:
@@ -612,7 +670,9 @@ def test_operands_on_another_device(case, monkeypatch, record_property) -> None:
         def draw(seed: int):
             x = make_inputs(case, 128, causal=False, seed=seed, device=other)
             assert torch.cuda.current_device() == 0
+            launches.clear()
             got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+            assert launches == ([] if record is None else [record]), (label, record, launches)
             return judged_backward(x, {"other": _grads(*got)})
 
         judge_draws(record_property, draw)
