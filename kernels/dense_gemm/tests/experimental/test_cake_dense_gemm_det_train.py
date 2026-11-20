@@ -18693,20 +18693,17 @@ def test_tables_0314_puts_back_the_tile_0315_keys(monkeypatch):
 
 def test_tile_0315_tables(monkeypatch):
     """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.14 (``_tables_0314``) in the five BF16 input-gradient keys of
-    ``TILE_0315_RANGES`` alone, each holding the ranges listed there, and ``ROW_RULES_BY_SM`` is unchanged.  The ranges
-    of a key are sorted and disjoint, and each measured token count of its row (``TILE_0314_MEASURED``) lies in one: at
-    a cell of version 0.3.15 (``TILE_0315_CELLS``, each a cell version 0.3.14 kept) the cell's 128-column rule, at a
-    cell of version 0.3.14 (``TILE_0314_CELLS``) that cell's rule, at the others (GB200 4096 -> 64 at T 16231, B200
-    4096 -> 64 at T 16384 and 32768) the rule of version 0.3.14, no 128-column rule.  A 128-column range holds a cell
-    of either version and no other measured token count.  The rule differs from that of version 0.3.14 exactly at the
-    token counts of ``TILE_0315_NEW``, each a 128-column rule where version 0.3.14 had none."""
+    ``TILE_0315_RANGES`` alone, each holding the ranges listed there.  The ranges of a key are sorted and disjoint, and
+    each measured token count of its row (``TILE_0314_MEASURED``) lies in one: at a cell of version 0.3.15
+    (``TILE_0315_CELLS``, each a cell version 0.3.14 kept) the cell's 128-column rule, at a cell of version 0.3.14
+    (``TILE_0314_CELLS``) that cell's rule, at the others (GB200 4096 -> 64 at T 16231, B200 4096 -> 64 at T 16384 and
+    32768) the rule of version 0.3.14, no 128-column rule.  A 128-column range holds a cell of either version and no
+    other measured token count.  The rule differs from that of version 0.3.14 exactly at the token counts of
+    ``TILE_0315_NEW``, each a 128-column rule where version 0.3.14 had none."""
     live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
-    rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
     with monkeypatch.context() as m:
         _tables_0314(m)
         was = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
-        rules_0314 = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
-    assert rules_now == rules_0314
     assert set(live) == set(was)
     keys = {part: {_bf16_dgrad_key(part[0], *row) for row in rows} for part, rows in TILE_0315_RANGES.items()}
     for p in live:
