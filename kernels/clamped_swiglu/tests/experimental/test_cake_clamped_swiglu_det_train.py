@@ -28,10 +28,10 @@ once per stage and device, no library loaded), the launch grid of each program (
 ``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits) and the arguments of a launch in its
 plan's order, the entry points' launcher of a stage and device (made once per stage and device, no library loaded; the
 program, arguments and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused
-for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for an
-equal float or int; every other limit takes the full checks and their errors), the build manifest (every record's
-library, the recorded source digests), the capability map, the required ``limit`` keyword, the refusal of CPU tensors
-and no environment read outside the JIT shim.
+for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for a
+float, or an int that a float holds exactly, equal to its float value; every other limit takes the full checks and their
+errors), the build manifest (every record's library, the recorded source digests), the capability map, the required
+``limit`` keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) of each stage's small-R
 and large-R program (each forced through the route) judged against the naive BF16 tier
@@ -73,9 +73,10 @@ architecture); every spied launch has the grid ``cake_jit.grid`` of its program;
 call give the launches of the full checks (the program, the grid and every argument), and every call they leave to the
 full checks (each refusal class, a tensor subclass, inputs to copy, no rows, a call that fails only one check of the
 step's own, a tensor on another GPU) gives what it gives without them; a call with two faults raises the error of the
-one the full checks find first; the steps and the autograd function check and launch the common call themselves (no
-call of the full checks) and pass the row strides of its contiguous tensors as constants; one launcher per stage and
-device, made once, serves every call; every unweighted forward launch of a device passes one cached FP32
+one the full checks find first; the steps and the autograd function (its backward also with ``create_graph=True``)
+check and launch the common call themselves (no call of the full checks) and pass the row strides of its contiguous
+tensors as constants; one launcher per stage and device, made once by the package's own cache of launchers, serves
+every call; every unweighted forward launch of a device passes one cached FP32
 buffer, set to 1, as its ignored weight, made by the first unweighted forward (no weighted call or backward makes it),
 also when that forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
 FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output,
@@ -847,10 +848,10 @@ def test_the_launcher_refuses_programs_that_take_another_order(host_device, monk
 
 
 def test_the_limit_check_and_its_cached_rounding(monkeypatch) -> None:
-    """``limit`` is the same FP32 value whatever the calls before passed: a float or an int equal to the last
-    accepted limit gets its cached rounding, and every other value (another number, a bool, a float subclass, a
-    fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the full checks, with their
-    errors, also right after an equal valid limit was cached."""
+    """``limit`` is the same FP32 value whatever the calls before passed: a float, or an int that a float holds exactly,
+    equal to the float value of the last accepted limit gets its cached rounding, and every other value (another number,
+    a bool, a float subclass, a fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the
+    full checks, with their errors, also right after an equal valid limit was cached."""
     monkeypatch.setattr(pkg, "_last_limit", (math.nan, math.nan))
 
     class Limit(float):
@@ -2648,11 +2649,12 @@ def test_the_one_pass_checks_refuse_in_the_order_of_the_full_checks(
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device, launches, monkeypatch) -> None:
     """The common call passes the row strides of its contiguous tensors as constants, without reading them: at 2, 33
-    and 4097 rows, with new and with preallocated outputs, in the steps and in an autograd and a checkpointed autograd
-    step, every ``<name>_stride`` of every launch is ``stride(0)`` of the tensor ``<name>`` it passes (the merged
-    tensor's for its up half, the merged gradient's for ``d_up``), and at 1 row each is 0.  Every one of these calls,
-    the autograd function's forward and backward too, is checked and launched by the step itself: none of the full
-    checks runs (no call of :func:`_forward`, :func:`_backward` or :func:`_check_tensor`)."""
+    and 4097 rows, with new and with preallocated outputs, in the steps, in an autograd and a checkpointed autograd
+    step and in gradients computed with ``create_graph=True``, every ``<name>_stride`` of every launch is ``stride(0)``
+    of the tensor ``<name>`` it passes (the merged tensor's for its up half, the merged gradient's for ``d_up``), and at
+    1 row each is 0.  Every one of these calls, the autograd function's forward and backward too (also the backward
+    that records the gradients' graph, through ``_Gradients``), is checked and launched by the step itself: none of the
+    full checks runs (no call of :func:`_forward`, :func:`_backward` or :func:`_check_tensor`)."""
     checked = _full_checks(monkeypatch)
     for rows in (1, 2, 33, 4097):
         t = make_inputs(Case(rows, layout, w), seed=19, device=device)
@@ -2671,9 +2673,14 @@ def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device
         assert not checked, (rows, "autograd step", checked)
         _autograd_step(t, checkpoint=True)
         assert not checked, (rows, "checkpointed autograd step", checked)
+        leaves = _leaves(t)
+        wants = [leaf for leaf in leaves if leaf is not None]
+        grads = torch.autograd.grad(clamped_swiglu(*leaves, limit=t.L), wants, t.dh, create_graph=True)
+        assert all(grad.requires_grad for grad in grads), rows  # the backward ran through ``_Gradients``
+        assert not checked, (rows, "autograd step with create_graph=True", checked)
         # The checkpointed step launches no recompute: the op alone is the region (the forward runs after autograd
         # saved the inputs, so the recomputation stops before it).
-        assert len(launches) == 2 + 2 + 2 + 2, (rows, [stage for stage, _, _ in launches])
+        assert len(launches) == 2 + 2 + 2 + 2 + 2, (rows, [stage for stage, _, _ in launches])
         for stage, launched_rows, values in launches:
             assert launched_rows == rows
             strides = {key: value for key, value in values.items() if key.endswith("_stride")}
@@ -2684,14 +2691,14 @@ def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device
                 assert rows == 1 or value == tensor.shape[1], (rows, stage, key)  # contiguous rows
 
 
-def test_one_launcher_per_stage_and_device_serves_every_call(device, monkeypatch) -> None:
+def test_one_launcher_per_stage_and_device_serves_every_call(device, monkeypatch, request) -> None:
     """Every call on a device, the one-pass checks' and the full checks', weighted and unweighted, the steps and the
     autograd function, launches through the device's one launcher per stage (``pkg._launcher``), made once, at the
-    stage's first launch: the test counts every :class:`_Launcher` made (by the package's own cache of launchers) and
-    every FFI entry looked up (:func:`_entry`, which a launcher calls once per program), so a step that made its own
-    launcher or looked up its own entry at a call would count more.  Only an unweighted forward makes the forward
-    launcher's ignored weight: weighted calls and backward steps leave it None, and every later unweighted forward
-    passes the same buffer."""
+    stage's first launch: the test counts every :class:`_Launcher` made (by the package's own cache of launchers,
+    emptied before the calls and again after the test) and every FFI entry looked up (:func:`_entry`, which a launcher
+    calls once per program), so a step that made its own launcher or looked up its own entry at a call, or a cache
+    that dropped a launcher, would count more.  Only an unweighted forward makes the forward launcher's ignored weight:
+    weighted calls and backward steps leave it None, and every later unweighted forward passes the same buffer."""
     made: list = []
     looked_up: list = []
     entry = pkg._entry
@@ -2707,7 +2714,11 @@ def test_one_launcher_per_stage_and_device_serves_every_call(device, monkeypatch
 
     monkeypatch.setattr(pkg, "_Launcher", Counted)
     monkeypatch.setattr(pkg, "_entry", counted_entry)
-    _fresh_launchers(monkeypatch)
+    # The package's own cache (``pkg._launcher``, whose body reads ``_Launcher`` from the module), not
+    # :func:`_fresh_launchers`: emptied here, so it makes every launcher of the calls below, and after the test, so no
+    # counted launcher outlives it.
+    pkg._launcher.cache_clear()
+    request.addfinalizer(pkg._launcher.cache_clear)
     index = device.index
     weighted = [make_inputs(Case(33, layout), seed=17, device=device) for layout in ("merged", "split", "strided")]
     for _ in range(2):

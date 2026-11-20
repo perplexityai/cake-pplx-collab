@@ -372,8 +372,9 @@ def cake_clamped_swiglu_det(
     projection keeps ``h``); checkpoint a region that also holds the down projection.  Under a non-reentrant checkpoint
     the forward kernel runs after autograd saved the inputs, so with early stop on (the default) the checkpoint
     recomputes it only when a later operation of its region saves a tensor (the down projection saves ``h``).
-    ``limit`` is checked once, in the forward.  No double backward: differentiating gradients computed with
-    ``create_graph=True`` raises ``RuntimeError``.
+    ``limit`` is checked in the forward (twice there for a number that is neither a Python float nor an int that a
+    float holds exactly), not in the backward, which reuses its FP32 rounding.  No double backward: differentiating
+    gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
     return _autograd(gate_up_or_gate, up, weight, limit)
