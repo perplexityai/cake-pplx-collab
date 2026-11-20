@@ -718,9 +718,10 @@ def test_autograd_backward_alerts_once_deterministic_algorithms_are_enabled(
         want = module(shape)
         if not weight_grad:
             # the band's program without the weight gradient (contiguous
-            # inputs: packed rows but for a single token)
+            # inputs: packed rows, and a single token too where the build of
+            # packed rows only has a cut)
             rows = shape[0] * shape[1]
-            packed = suite._backward_packed(*shape)
+            packed = suite._nodw_packed(*shape)
             want = loader.nodw_module(arch, want, rows, _sm_count(), packed=packed)
         assert launched == [want], (shape, weight_grad, launched)
 
@@ -1088,7 +1089,10 @@ def test_compute_grad_weight_false_meets_the_naive_tier(
 ) -> None:
     """Without the weight gradient (with this package's workspace or none,
     and through autograd with a weight that needs no gradient), ``dx`` and
-    ``dz`` are the bits of a backward with the weight gradient, at 257 tokens
+    ``dz`` are the bits of a backward with the weight gradient (of the
+    repeatable backward where the build of packed rows only runs the rows:
+    packed rows up to its cut on sm_100a and sm_103a, ``suite._nodw_bits``),
+    at 257 tokens
     of 48 heads and, for ``band``, at the fewest whole tokens of 48 heads in
     that BF16 band, the fused, the repeatable or the long role's packed rows
     (``suite._band_shape``; a call without the weight gradient takes the
@@ -1099,10 +1103,14 @@ def test_compute_grad_weight_false_meets_the_naive_tier(
     if shape is None:
         pytest.skip(f"this device routes no {band} band")
     T, H = shape
+    rows = T * H
+    nodw = suite._nodw_module(
+        suite._backward_module(rows), rows, packed=suite._nodw_packed(T, H)
+    )
 
     def run(j, s):
         x, z, w, dy = suite.make(T, H, seed=s)
-        want_dx, want_dz, _ = nd_backward(dy, x, z, w, EPS)
+        want_dx, want_dz = suite._nodw_bits(nodw, dy, x, z, w)
         ws = nd_workspace(T * H, x.device)
         launches = [{"dx": want_dx, "dz": want_dz}]
         for workspace in (ws, None):
@@ -2634,6 +2642,262 @@ def test_kernel_view_strides(shape, strides, want) -> None:
         t = torch.empty_strided(shape, strides, dtype=torch.bfloat16)
     _, tok, head = backend._kernel_view(t, "x", shape=t.shape, device=t.device)
     assert (tok, head) == want
+
+
+class _FunctionTensor(torch.Tensor):
+    """A ``torch.Tensor`` subclass with its own ``__torch_function__``."""
+
+    @classmethod
+    def __torch_function__(cls, func, types, args=(), kwargs=None):
+        return super().__torch_function__(func, types, args, kwargs or {})
+
+
+# Whether this torch build has dimension names (named tensors; torch 2.14 has
+# none): the cases with names skip without them.
+NAMED_TENSORS = hasattr(torch.Tensor, "refine_names")
+
+
+def _named(t: torch.Tensor) -> torch.Tensor:
+    """``t`` with the dimension names ``T``, ``H`` and ``D``."""
+    if not NAMED_TENSORS:
+        pytest.skip("this torch build has no dimension names")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        return t.refine_names("T", "H", "D")
+
+
+def _view_layout(layout: str, device: torch.device) -> torch.Tensor:
+    """A ``[T, H, 128]`` input of ``layout`` (``[5, 3, 128]`` but for
+    ``one_token``, ``one_head`` and ``flat``; any dtype other than BF16 by
+    name: ``float32``) on ``device``."""
+    T, H = 5, 3
+    if layout == "contiguous":
+        return torch.randn(T, H, D, device=device).bfloat16()
+    if layout == "projection":
+        return torch.randn(T, H, 2 * D, device=device).bfloat16()[:, :, :D]
+    if layout == "head_major":
+        return torch.randn(H, T, D, device=device).bfloat16().transpose(0, 1)
+    if layout == "one_token":
+        return torch.randn(1, H, D, device=device).bfloat16()
+    if layout == "one_head":
+        return torch.randn(T, 2, D, device=device).bfloat16()[:, :1]
+    if layout == "offset_16":
+        return torch.randn(T * H * D + 16, device=device).bfloat16()[16:].view(T, H, D)
+    if layout == "misaligned":
+        return torch.randn(T * H * D + 8, device=device).bfloat16()[8:].view(T, H, D)
+    if layout == "token_stride_8":
+        return (
+            torch.randn(T, H * D + 8, device=device)
+            .bfloat16()[:, : H * D]
+            .view(T, H, D)
+        )
+    if layout == "head_stride_8":
+        return torch.randn(T, H + 1, D + 8, device=device).bfloat16()[:, :H, :D]
+    if layout == "last_stride_2":
+        return torch.randn(T, H, 2 * D, device=device).bfloat16()[:, :, ::2]
+    if layout == "named":
+        return _named(_view_layout("contiguous", device))
+    if layout == "named_misaligned":
+        return _named(_view_layout("misaligned", device))
+    if layout == "function_subclass":
+        return _view_layout("contiguous", device).as_subclass(_FunctionTensor)
+    if layout == "flat":
+        return torch.randn(T * H, D, device=device).bfloat16()
+    if layout == "float32":
+        return torch.randn(T, H, D, device=device)
+    raise ValueError(layout)
+
+
+# Plain BF16 ``[T, H, 128]`` CUDA inputs: the short path of ``_kernel_view``
+# reads each in place or copies it (each failed check of the in-place read
+# alone: ``misaligned``, ``token_stride_8``, ``head_stride_8``,
+# ``last_stride_2``).
+SHORT_PATH_LAYOUTS = [
+    "contiguous",
+    "projection",
+    "head_major",
+    "one_token",
+    "one_head",
+    "offset_16",
+    "misaligned",
+    "token_stride_8",
+    "head_stride_8",
+    "last_stride_2",
+]
+
+
+@requires_device
+@pytest.mark.parametrize("layout", SHORT_PATH_LAYOUTS + ["flat"])
+def test_kernel_view_short_path_matches_every_check(layout) -> None:
+    """The short path of ``_kernel_view`` (a plain BF16 ``[T, H, 128]`` tensor
+    on its device, read in place) returns what every check
+    (``_kernel_view_checked``) returns: the same tensor read in place, or a
+    copy with the same values, and the same strides."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    t = _view_layout(layout, device)
+    view, tok, head = backend._kernel_view(t, "x", shape=t.shape, device=device)
+    want, want_tok, want_head = backend._kernel_view_checked(
+        t, "x", shape=t.shape, device=device
+    )
+    assert (tok, head) == (want_tok, want_head)
+    assert (view.data_ptr() == t.data_ptr()) == (want.data_ptr() == t.data_ptr())
+    assert view.shape == want.shape and view.stride() == want.stride()
+    assert torch.equal(view, want)
+
+
+# ``_kernel_view`` inputs every check refuses (a ValueError): another dtype,
+# shape, device type or device index, a short last dimension.
+KERNEL_VIEW_REFUSALS = ["float32", "other_shape", "cpu", "other_index", "one_dim_short"]
+
+
+def _kernel_view_case(
+    case: str, device: torch.device
+) -> tuple[torch.Tensor, torch.Size, torch.device]:
+    """``(input, shape, device)`` of a ``_kernel_view`` case off the short path
+    (or ``named``, a contiguous input with dimension names)."""
+    t = _view_layout("contiguous", device)
+    if case == "other_shape":
+        return t, torch.Size((5, 4, D)), device
+    if case == "cpu":
+        return t.cpu(), t.shape, device
+    if case == "other_index":
+        # The checks only compare the device: no tensor lives on it.
+        return t, t.shape, torch.device("cuda", device.index + 1)
+    if case == "one_dim_short":
+        t = t[:, :, : D // 2]
+    elif case == "subclass":
+        t = torch.nn.Parameter(t, requires_grad=False)
+    elif case != "contiguous":
+        t = _view_layout(case, device)
+    return t, t.shape, device
+
+
+@requires_device
+@pytest.mark.parametrize(
+    "case",
+    KERNEL_VIEW_REFUSALS
+    + ["subclass", "function_subclass", "flat", "named", "named_misaligned"],
+)
+def test_kernel_view_short_path_refuses_as_every_check(case) -> None:
+    """An input the short path refuses gets the error of every check
+    (``_kernel_view_checked``); a subclass, a flat input and an input with
+    dimension names get its result or its error (an input with names that
+    needs a copy raises as in 0.2.8)."""
+    t, shape, device = _kernel_view_case(
+        case, torch.device("cuda", torch.cuda.current_device())
+    )
+    outcomes = []
+    for view_of in (backend._kernel_view, backend._kernel_view_checked):
+        try:
+            view, tok, head = view_of(t, "x", shape=shape, device=device)
+        except (TypeError, ValueError, RuntimeError) as error:
+            outcomes.append((type(error), str(error)))
+        else:
+            outcomes.append(
+                (
+                    view.data_ptr() == t.data_ptr(),
+                    tok,
+                    head,
+                    type(view),
+                    getattr(view, "names", None),
+                    view.stride(),
+                )
+            )
+    assert outcomes[0] == outcomes[1]
+    if case in KERNEL_VIEW_REFUSALS:
+        assert outcomes[0][0] is ValueError
+
+
+@requires_device
+def test_kernel_view_runs_every_check_only_off_the_short_path(monkeypatch) -> None:
+    """``_kernel_view`` runs every check (``_kernel_view_checked``) for no
+    plain BF16 ``[T, H, 128]`` CUDA input on its device, read in place (with
+    dimension names or without) or copied, and for every other input:
+    another dtype, shape, device or type, a flat input, and an input with
+    dimension names that needs a copy."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    checked = backend._kernel_view_checked
+    calls = []
+
+    def record(tensor, name, *, shape, device):
+        calls.append(name)
+        return checked(tensor, name, shape=shape, device=device)
+
+    monkeypatch.setattr(backend, "_kernel_view_checked", record)
+    named = ["named"] if NAMED_TENSORS else []
+    for layout in SHORT_PATH_LAYOUTS + named:
+        t = _view_layout(layout, device)
+        backend._kernel_view(t, layout, shape=t.shape, device=device)
+    assert calls == []
+    others = KERNEL_VIEW_REFUSALS + ["subclass", "function_subclass", "flat"]
+    others += ["named_misaligned"] if NAMED_TENSORS else []
+    for case in others:
+        t, shape, on = _kernel_view_case(case, device)
+        try:
+            backend._kernel_view(t, case, shape=shape, device=on)
+        except (TypeError, ValueError, RuntimeError):
+            pass
+    assert calls == others
+
+
+@requires_device
+@pytest.mark.parametrize(
+    "like",
+    [
+        "bfloat16",
+        "float32",
+        "none",
+        "projection",
+        "head_major",
+        "function_subclass",
+        "named",
+    ],
+)
+def test_new_output_buffer_is_contiguous_and_aligned(like) -> None:
+    """A new output buffer is a plain contiguous 32-byte aligned BF16 tensor of
+    the input's shape on its device without dimension names (as
+    ``torch.empty`` gives it), whatever ``like`` is."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    x = _view_layout("contiguous", device)
+    if like == "bfloat16":
+        ref = x
+    elif like == "float32":
+        ref = x.float()
+    elif like == "none":
+        ref = None
+    else:
+        ref = _view_layout(like, device)
+    out, user = backend._output(None, "grad_x", shape=x.shape, device=device, like=ref)
+    assert user is None
+    assert type(out) is torch.Tensor and out.dtype == torch.bfloat16
+    assert out.shape == x.shape and out.device == device and out.is_contiguous()
+    assert out.data_ptr() % (2 * loader.ALIGNMENT_ELEMENTS) == 0
+    if NAMED_TENSORS:
+        assert out.names == (None,) * out.dim()
+
+
+@requires_device
+def test_launch_placeholder_converts_a_legacy_dlpack_capsule(monkeypatch) -> None:
+    """The empty buffer a launch does not read is converted once to a
+    ``tvm_ffi.Tensor`` from a legacy DLPack capsule (no stream exchange), not
+    from the torch tensor, and reused."""
+    index = torch.cuda.current_device()
+    convert = backend.tvm_ffi.from_dlpack
+    seen = []
+
+    def record(value, *args, **kwargs):
+        seen.append(type(value).__name__)
+        return convert(value, *args, **kwargs)
+
+    monkeypatch.setattr(backend.tvm_ffi, "from_dlpack", record)
+    backend._launch_placeholder.cache_clear()
+    try:
+        held = backend._launch_placeholder(index, torch.bfloat16)
+        assert backend._launch_placeholder(index, torch.bfloat16) is held
+    finally:
+        backend._launch_placeholder.cache_clear()
+    assert seen == ["PyCapsule"]
+    assert isinstance(held, backend.tvm_ffi.Tensor)
 
 
 # The modules that warm rows in L2, by role: the mid and the extra-long

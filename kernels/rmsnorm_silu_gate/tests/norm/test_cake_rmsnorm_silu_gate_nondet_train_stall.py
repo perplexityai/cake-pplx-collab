@@ -110,7 +110,11 @@ weight gradient from ``LONG_BACKWARD_ROWS_PER_SM`` rows per SM on (2560 on
 SM100 and SM103, 1536 on SM107) run its long role (``bwd_bf16_rep_long`` or
 ``bwd_f32_rep_long``: the deterministic package's look-ahead program of the
 same build, the same grid, block schedule and bits).  A call with
-``compute_grad_weight=False`` (stage ``backward_nodw``) runs its band's
+``compute_grad_weight=False`` (stage ``backward_nodw``) runs on SM100 and
+SM103 on packed rows up to 128 rows per SM the repeatable band's build of
+packed rows only, in any band's place (``min(row blocks, 8 * SMs)``
+128-thread CTAs over 8-row blocks, each walking its blocks with no claim and
+no ticket), and else its band's
 program without the weight gradient: one cluster in a small-row band; on
 SM100 and SM103 in the fused band up to its cut of rows per SM a strided
 program of the band's grid, each CTA walking its 16-row blocks with no claim
