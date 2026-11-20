@@ -128,8 +128,9 @@ def cake_gated_kv_compression_det_train_forward(
 ) -> torch.Tensor:
     r"""The pooled rows: ``out[r] = BF16(p0 * C[t0] + p1 * C[t1])`` with ``(p0, p1) = softmax(Z[t0], Z[t1])``.
 
-    Two launches on the current stream: the pair table of ``cu_seqlens`` (int32 ``[S + 1]``, a per-call workspace),
-    then one row of 512 columns per pair, in FP32 with one rounding to BF16.
+    One or two launches on the current stream: the pair table of ``cu_seqlens`` (int32 ``[S + 1]``, a per-call
+    workspace) when ``S`` is above 256, then one row of 512 columns per pair, in FP32 with one rounding to BF16.  A
+    forward of at most 256 documents builds the pair table inside its one launch.
 
     Parameters
     ----------

@@ -75,6 +75,8 @@ __device__ __forceinline__ uint32_t cvt_bf16x2_e2m1x2(uint32_t src) {
 
 #include <math_constants.h>
 
+#if __CUDA_ARCH__ == 1070
+#else
 __device__ __forceinline__ float2 mul_f32x2_noftz(float2 a, float2 b) {
     float2 r;
     asm("mul.rn.f32x2 %0, %1, %2;"
@@ -83,16 +85,29 @@ __device__ __forceinline__ float2 mul_f32x2_noftz(float2 a, float2 b) {
     return r;
 }
 
+#endif
 
 // ex2_emulation_f32x2 defined in softmax_frag_exp2_cast helper (or standalone)
 
+#if __CUDA_ARCH__ == 1070
+__device__ __forceinline__ float2 mul_f32x2_rz_noftz(float2 a, float2 b) {
+#else
 __device__ __forceinline__ float2 fma_f32x2_rn_noftz(float2 a, float2 b, float2 c) {
+#endif
     float2 r;
+#if __CUDA_ARCH__ == 1070
+    asm("mul.rz.f32x2 %0, %1, %2;"
+#else
     asm("fma.rn.f32x2 %0, %1, %2, %3;"
+#endif
         : "=l"(*(unsigned long long*)&r)
         : "l"(*(const unsigned long long*)&a),
+#if __CUDA_ARCH__ == 1070
+          "l"(*(const unsigned long long*)&b));
+#else
           "l"(*(const unsigned long long*)&b),
           "l"(*(const unsigned long long*)&c));
+#endif
     return r;
 }
 
@@ -201,18 +216,38 @@ kernel_cake_act_qdq_3c9b6d6bcbaf8c45c904(const __nv_bfloat16* x, __nv_bfloat16* 
             float inv = 0.0f;
             int sbits = 0;
             float floor_amax = 0.01171875f;
+#if __CUDA_ARCH__ == 1070
+            float by_six;
+            asm("mul.rn.f32 %0, %1, %2;" : "=f"(by_six) : "f"(fmaxf(am, floor_amax)), "f"(0.16666667f));
+            uint16_t _e4m3x2_5;
+            asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_e4m3x2_5) : "f"(0.0f), "f"(by_six));
+            uint8_t _cvt_satfinite_e4m3_f32_4 = (uint8_t)_e4m3x2_5;
+            uint32_t _f16x2_decode_6;
+#else
             float _fdiv_5 = __fdiv_rn(fmaxf(am, floor_amax), 6.0f);
             uint16_t _e4m3x2_6;
             asm("cvt.rn.satfinite.e4m3x2.f32 %0, %1, %2;" : "=h"(_e4m3x2_6) : "f"(0.0f), "f"(_fdiv_5));
             uint8_t _cvt_satfinite_e4m3_f32_4 = (uint8_t)_e4m3x2_6;
             uint32_t _f16x2_decode_7;
+#endif
             float _fp8_e4m3_decode_3;
+#if __CUDA_ARCH__ == 1070
+            asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_f16x2_decode_6) : "h"(_e4m3x2_5));
+            uint16_t _f16_decode_6 = (uint16_t)_f16x2_decode_6;
+            asm("cvt.f32.f16 %0, %1;" : "=f"(_fp8_e4m3_decode_3) : "h"(_f16_decode_6));
+#else
             asm("cvt.rn.f16x2.e4m3x2 %0, %1;" : "=r"(_f16x2_decode_7) : "h"(_e4m3x2_6));
             uint16_t _f16_decode_7 = (uint16_t)_f16x2_decode_7;
             asm("cvt.f32.f16 %0, %1;" : "=f"(_fp8_e4m3_decode_3) : "h"(_f16_decode_7));
+#endif
             s = _fp8_e4m3_decode_3;
+#if __CUDA_ARCH__ == 1070
+            float _fdiv_7 = __fdiv_rn(1.0f, s);
+            inv = _fdiv_7;
+#else
             float _fdiv_8 = __fdiv_rn(1.0f, s);
             inv = _fdiv_8;
+#endif
             sbits = reinterpret_cast<int*>(&s)[0];
             unsigned int s_word = (unsigned int)(sbits | sbits >> 16);
             float2 inv2 = make_float2(inv, inv);
@@ -222,20 +257,33 @@ kernel_cake_act_qdq_3c9b6d6bcbaf8c45c904(const __nv_bfloat16* x, __nv_bfloat16* 
             #pragma unroll
             for (int p = 0; p < 4; p++) {
                 float2 x2 = make_float2(v[2 * p], v[2 * p + 1]);
+#if __CUDA_ARCH__ == 1070
+                u[p] = mul_f32x2_rz_noftz(x2, inv2);
+#else
                 u[p] = mul_f32x2_noftz(x2, inv2);
                 float2 neg_x2 = make_float2(-v[2 * p], -v[2 * p + 1]);
                 u[p] = fma_f32x2_rn_noftz(fma_f32x2_rn_noftz(u[p], s2, neg_x2), neg_inv2, u[p]);
+#endif
             }
             unsigned int packed[4];
             #pragma unroll
             for (int p_1 = 0; p_1 < 4; p_1++) {
                 unsigned int q_word = 0;
+#if __CUDA_ARCH__ == 1070
+                uint32_t _fp4_e2m1_pack_pair_9;
+                uint16_t _e2m1_pair_h_10;
+                asm("{\n"             ".reg .b8 byte0;\n"             "cvt.rn.satfinite.e2m1x2.f32 byte0, %2, %1;\n"             "mov.b16 %0, {byte0, 0};\n"             "}\n"             : "=h"(_e2m1_pair_h_10) : "f"(u[p_1].x), "f"(u[p_1].y));
+                _fp4_e2m1_pack_pair_9 = (uint32_t)_e2m1_pair_h_10;
+                uint32_t _cvt_bf16x2_e2m1x2_8 = cvt_bf16x2_e2m1x2((uint16_t)_fp4_e2m1_pack_pair_9);
+                q_word = _cvt_bf16x2_e2m1x2_8;
+#else
                 uint32_t _fp4_e2m1_pack_pair_10;
                 uint16_t _e2m1_pair_h_11;
                 asm("{\n"             ".reg .b8 byte0;\n"             "cvt.rn.satfinite.e2m1x2.f32 byte0, %2, %1;\n"             "mov.b16 %0, {byte0, 0};\n"             "}\n"             : "=h"(_e2m1_pair_h_11) : "f"(u[p_1].x), "f"(u[p_1].y));
                 _fp4_e2m1_pack_pair_10 = (uint32_t)_e2m1_pair_h_11;
                 uint32_t _cvt_bf16x2_e2m1x2_9 = cvt_bf16x2_e2m1x2((uint16_t)_fp4_e2m1_pack_pair_10);
                 q_word = _cvt_bf16x2_e2m1x2_9;
+#endif
                 uint32_t y_word;
                 asm volatile("mul.rn.bf16x2 %0, %1, %2;" : "=r"(y_word) : "r"(q_word), "r"(s_word));
                 packed[p_1] = y_word;
