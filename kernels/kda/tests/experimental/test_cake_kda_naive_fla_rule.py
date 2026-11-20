@@ -22,12 +22,21 @@ Each judged output here has two distinct values per draw (``[1, 2]`` scaled by a
 differ and the max norm is the norm judged draw by draw), and each side's error on a draw is its offset (one number for
 both elements, or one per element) times that scale: the ratios of the errors are the ratios of the offsets.  The
 offsets are dyadic, so every value is exact in FP32 and the naive values are exact in BF16.
+
+The pin of FLA's autotuned kernels (``cake_kda_fla.FLA_PINS``) is checked here on stand-in FLA modules whose kernels
+are real Triton autotuners (one under a real ``@triton.heuristics`` wrapper) over Python launches: the pin leaves each
+its first config, so it launches that config with no benchmark; a first config other than its pin, or a kernel that
+is not autotuned, fails the pin and changes nothing; an autotuner that chooses a config at run time fails the reference
+after the call; and a forbidden variable or another FLA / Triton version fails the reference of a draw FLA runs (a
+:class:`FlaReferenceError`), while operands FLA does not run keep their naive-tier-only reason.
 """
 
 from __future__ import annotations
 
 import json
 import os
+import sys
+import types
 
 import pytest
 import torch
@@ -36,11 +45,14 @@ from tests.cake_naive import DRAWS, NO_FLA_COUNTERPART, REFERENCE, TierJudge, ti
 from tests.experimental.test_helpers import cake_kda_fla
 from tests.experimental.test_helpers import cake_kda_known_gaps as known_gaps
 from tests.experimental.test_helpers.cake_kda_fla import (
+    NOT_PINNED,
     UNAVAILABLE,
     FlaReference,
+    FlaReferenceError,
     FlaSteps,
     fla_line,
     fla_of,
+    reference_line,
 )
 
 pytestmark = pytest.mark.cpu_only
@@ -221,7 +233,7 @@ def test_settle_passes_an_fla_met_output_and_fails_a_double_miss() -> None:
         known_gaps.settle(missed.verdicts(), missed.failures(), lengths=(64,))
 
 
-def test_fla_reference_values_and_reasons() -> None:
+def test_fla_reference_values_and_reasons(monkeypatch) -> None:
     ddt = torch.arange(4 * 128, dtype=torch.float32)
     ref = FlaReference({"out": torch.zeros(3, 2, 128), "ddt_bias": ddt}, None, 0.5)
     assert ref.value("ddt_bias", torch.empty(4, 128)).shape == (4, 128)
@@ -233,8 +245,18 @@ def test_fla_reference_values_and_reasons() -> None:
     steps.add(ref)
     steps.add(gone)
     steps.add(gone)
-    assert steps.summary() == {"calls": 3, "seconds": 0.5, "reasons": {f"{UNAVAILABLE}: test": 2}}
+    # no pinned reference ran in the process: no record
+    monkeypatch.setattr(cake_kda_fla, "_reference", None)
+    want = {"calls": 3, "seconds": 0.5, "reasons": {f"{UNAVAILABLE}: test": 2}}
+    assert steps.summary() == {**want, "reference": None}
     assert fla_line("t", steps.summary()) == f"FLA t calls=3 seconds=0.5 | {UNAVAILABLE}: test x2"
+    # the record of the pinned reference that ran: in the summary and on its own line
+    record = {"fla": "0.6.0", "triton": "3.8.0", "pin": "first-config x14"}
+    monkeypatch.setattr(cake_kda_fla, "_reference", record)
+    assert steps.summary() == {**want, "reference": record}
+    assert fla_line("t", steps.summary()) == f"FLA t calls=3 seconds=0.5 | {UNAVAILABLE}: test x2"
+    line = reference_line(steps.summary()["reference"])
+    assert line == "FLA reference fla: 0.6.0; triton: 3.8.0; pin: first-config x14"
 
 
 def _operands(device: str = "cpu", g=None) -> dict:
@@ -251,10 +273,10 @@ def _operands(device: str = "cpu", g=None) -> dict:
 
 
 def test_fla_of_gives_reasons_where_fla_does_not_run(monkeypatch) -> None:
-    # no FLA in the environment
-    monkeypatch.setattr(cake_kda_fla, "_loaded", (None, f"{UNAVAILABLE}: fla does not import (test)"))
+    # operands FLA does not run keep their reason (naive tier only), whether or not the pinned reference can run
+    monkeypatch.setattr(cake_kda_fla, "_loaded", (None, f"{NOT_PINNED}: test"))
     got = fla_of(_operands(), 128**-0.5, -5.0, False)
-    assert got.values is None and got.reason == f"{UNAVAILABLE}: fla does not import (test)"
+    assert got.values is None and got.reason == f"{UNAVAILABLE}: the operands are on cpu, FLA runs on CUDA devices"
     # FLA present: operands on the CPU, and an activated gate outside FLA's safe gate range
     monkeypatch.setattr(cake_kda_fla, "_loaded", (object(), None))
     got = fla_of(_operands(), 128**-0.5, -5.0, False)
@@ -268,11 +290,158 @@ def test_fla_of_gives_reasons_where_fla_does_not_run(monkeypatch) -> None:
 
 
 def test_fla_version_and_env(monkeypatch) -> None:
-    # the reference is FLA 0.6.0's Triton chunk_kda; the environment of its import and calls is restored afterwards
-    assert cake_kda_fla.FLA_VERSION == "0.6.0"
+    # the reference is FLA 0.6.0's Triton chunk_kda with Triton 3.8.0, its 14 autotuned kernels pinned; the environment
+    # of its import and calls is restored afterwards
+    assert cake_kda_fla.FLA_VERSION == "0.6.0" and cake_kda_fla.TRITON_VERSION == "3.8.0"
+    assert len(cake_kda_fla.FLA_PINS) == 14 and cake_kda_fla.FLA_PIN == "first-config x14"
     assert cake_kda_fla.FLA_ENV == {"FLA_FLASH_KDA": "0", "FLA_TILELANG": "0"}
+    assert not set(cake_kda_fla.FORBIDDEN_ENV) & set(cake_kda_fla.FLA_ENV)
+    assert not set(cake_kda_fla.FORBIDDEN_ENV) & set(cake_kda_fla.RECORDED_ENV)
     monkeypatch.setenv("FLA_FLASH_KDA", "1")
     monkeypatch.delenv("FLA_TILELANG", raising=False)
     with cake_kda_fla._environment(cake_kda_fla.FLA_ENV):
         assert os.environ["FLA_FLASH_KDA"] == "0" and os.environ["FLA_TILELANG"] == "0"
     assert os.environ["FLA_FLASH_KDA"] == "1" and "FLA_TILELANG" not in os.environ
+
+
+def test_fla_of_fails_where_fla_runs_and_the_pinned_reference_cannot(monkeypatch) -> None:
+    # FLA runs the operands (the operand check passes) and the pinned reference cannot: the test fails, the draw is
+    # not judged against the naive tier only
+    monkeypatch.setattr(cake_kda_fla, "_check", lambda inputs: None)
+    monkeypatch.setattr(cake_kda_fla, "_loaded", (None, f"{NOT_PINNED}: test"))
+    with pytest.raises(FlaReferenceError, match=f"^{NOT_PINNED}: test$"):
+        fla_of(_operands(), 128**-0.5, -5.0, False)
+
+
+@pytest.mark.parametrize("key", cake_kda_fla.FORBIDDEN_ENV)
+def test_a_forbidden_variable_fails_the_reference(monkeypatch, key) -> None:
+    # checked before FLA is imported: nothing of FLA runs
+    monkeypatch.setattr(cake_kda_fla, "_loaded", None)
+    for other in cake_kda_fla.FORBIDDEN_ENV:
+        monkeypatch.delenv(other, raising=False)
+    monkeypatch.setenv(key, "1")
+    chunk_kda, reason = cake_kda_fla.load()
+    assert chunk_kda is None
+    assert reason == f"{NOT_PINNED}: RuntimeError: {key} set: each changes FLA's or Triton's code or numbers"
+    monkeypatch.setattr(cake_kda_fla, "_check", lambda inputs: None)
+    with pytest.raises(FlaReferenceError, match=key):
+        fla_of(_operands(), 128**-0.5, -5.0, False)
+
+
+@pytest.mark.parametrize("installed", [("0.5.0", "3.8.0"), ("0.6.0", "3.7.0")])
+def test_another_fla_or_triton_version_fails_the_reference(monkeypatch, installed) -> None:
+    triton = pytest.importorskip("triton")
+    fla_version, triton_version = installed
+    # stand-in FLA packages of version fla_version; the installed Triton reports triton_version
+    fake = {name: types.ModuleType(name) for name in ("fla", "fla.ops", "fla.ops.kda")}
+    fake["fla"].__version__ = fla_version
+    fake["fla.ops.kda"].chunk_kda = object()
+    for name, module in fake.items():
+        monkeypatch.setitem(sys.modules, name, module)
+    monkeypatch.setattr(triton, "__version__", triton_version)
+    for key in cake_kda_fla.FORBIDDEN_ENV:
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setattr(cake_kda_fla, "_loaded", None)
+    chunk_kda, reason = cake_kda_fla.load()
+    assert chunk_kda is None
+    assert reason == (
+        f"{NOT_PINNED}: RuntimeError: fla {fla_version} and triton {triton_version} are installed, "
+        "the reference is fla 0.6.0 with triton 3.8.0"
+    )
+
+
+class _Launch:
+    """A stand-in for a ``@triton.jit`` kernel under an autotuner: ``fn`` is its Python function (as a JIT function's
+    is), and each launch records the keyword arguments it gets (the config's among them)."""
+
+    def __init__(self) -> None:
+        self.fn, self.launches = _kernel, []
+
+    def run(self, *args, **kwargs) -> None:
+        self.launches.append(kwargs)
+
+
+def _kernel(x):
+    return x
+
+
+def _stand_in_fla(monkeypatch, lists: dict) -> dict:
+    """Stand-in FLA modules ``fla.pin_test_<name>``, each holding kernel ``<name>``: a real Triton autotuner over the
+    configs ``lists[name]`` (its benchmark records the configs it times and makes the last one the fastest), the first
+    under a real ``@triton.heuristics`` wrapper.  :data:`cake_kda_fla.FLA_PINS` becomes their first configs.  Returns
+    ``name -> autotuner``."""
+    from triton.runtime.autotuner import Autotuner, Heuristics
+
+    class Tuner(Autotuner):
+        def _bench(self, *args, config, **meta):
+            self.benchmarked.append(str(config))
+            return [-float(len(self.benchmarked))] * 3
+
+    tuners, pins = {}, {}
+    for i, (name, configs) in enumerate(lists.items()):
+        tuner = Tuner(_Launch(), ["x"], configs, ["x"], None, None)
+        tuner.benchmarked = []
+        module = types.ModuleType(f"fla.pin_test_{name}")
+        setattr(module, name, Heuristics(tuner, ["x"], {}) if i == 0 else tuner)
+        monkeypatch.setitem(sys.modules, module.__name__, module)
+        tuners[name] = tuner
+        pins[(module.__name__, name)] = str(configs[0])
+    monkeypatch.setattr(cake_kda_fla, "FLA_PINS", pins)
+    return tuners
+
+
+def _lists() -> dict:
+    triton = pytest.importorskip("triton")
+    return {
+        "cumsum": [triton.Config({"BS": 32}, num_warps=2), triton.Config({"BS": 64}, num_warps=4)],
+        "gate_bwd": [triton.Config({}, num_warps=4, num_stages=2), triton.Config({}, num_warps=8, num_stages=3)],
+    }
+
+
+def test_the_pin_leaves_each_fla_autotuner_its_first_config(monkeypatch) -> None:
+    lists = _lists()
+    tuners = _stand_in_fla(monkeypatch, lists)
+    cumsum = sys.modules["fla.pin_test_cumsum"].cumsum  # the @triton.heuristics wrapper
+    assert cake_kda_fla._autotuner(cumsum) is tuners["cumsum"]
+    # unpinned, an autotuner times its configs and launches the fastest (the last here); the check after a call fails
+    before = cake_kda_fla._cache_sizes()
+    cumsum.run(1)
+    assert tuners["cumsum"].benchmarked == [str(c) for c in lists["cumsum"]]
+    assert tuners["cumsum"].fn.launches[-1]["BS"] == 64
+    with pytest.raises(FlaReferenceError, match="chose their config at run time: fla.pin_test_cumsum.cumsum$"):
+        cake_kda_fla._assert_pinned(before)
+    # pinned: one config each, the cache cleared
+    cake_kda_fla._pin()
+    for name, tuner in tuners.items():
+        assert tuner.configs == [lists[name][0]] and tuner.cache == {}
+        tuner.benchmarked.clear()
+    # each launches its first config with no benchmark and fills no cache; the check after the calls passes
+    before = cake_kda_fla._cache_sizes()
+    cumsum.run(2)
+    sys.modules["fla.pin_test_gate_bwd"].gate_bwd.run(3)
+    cake_kda_fla._assert_pinned(before)
+    for name, tuner in tuners.items():
+        launch = tuner.fn.launches[-1]
+        first = lists[name][0]
+        assert {k: launch[k] for k in first.all_kwargs()} == first.all_kwargs()
+        assert tuner.benchmarked == [] and tuner.cache == {}
+
+
+def test_the_pin_refuses_a_first_config_that_is_not_its_pin(monkeypatch) -> None:
+    lists = _lists()
+    tuners = _stand_in_fla(monkeypatch, lists)
+    pins = dict(cake_kda_fla.FLA_PINS)
+    pins[("fla.pin_test_gate_bwd", "gate_bwd")] = str(lists["gate_bwd"][1])
+    pins[("fla.pin_test_cumsum", "_kernel_absent")] = str(lists["cumsum"][0])
+    monkeypatch.setattr(cake_kda_fla, "FLA_PINS", pins)
+    with pytest.raises(RuntimeError) as raised:
+        cake_kda_fla._pin()
+    assert str(raised.value) == (
+        "fla.pin_test_gate_bwd.gate_bwd: the first config is "
+        "'num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None', "
+        "the pin 'num_warps: 8, num_ctas: 1, num_stages: 3, maxnreg: None'; "
+        "fla.pin_test_cumsum._kernel_absent is not an autotuned Triton kernel"
+    )
+    # no autotuner is changed when a pin fails
+    for name, tuner in tuners.items():
+        assert tuner.configs == lists[name]

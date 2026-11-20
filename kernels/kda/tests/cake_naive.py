@@ -44,8 +44,8 @@ same oracle in the same norms on the same draws, on FLA's value as it is (not
 cast), and the output meets FLA by the same rule: :data:`NEAR_TIE`, the norms
 judged draw by draw, the zero rule.  The output passes when it meets the naive
 tier or FLA, and fails only when it misses both.  An output without an FLA
-value on every draw (it has no FLA counterpart, or FLA is not importable or
-does not support the case) is judged against the naive tier only: it passes
+value on every draw (it has no FLA counterpart, or FLA does not run the case)
+is judged against the naive tier only: it passes
 when it meets the tier and fails when it misses it, and its verdict names the
 reason.  Each test records every
 output's verdict with pytest's ``record_property``
