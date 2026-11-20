@@ -65,10 +65,10 @@ and the main program otherwise.  The small program's range out of place is 65,53
 (to 131,072 for MXFP8 without the scale output) and 1 to 262,144 on `sm_107a`; in place it is 1 to 262,144 on `sm_107a`,
 and `sm_100a` and `sm_103a` have none, since the small program measured no faster there in place.  The wide program's
 range starts above the main and small programs' sizes: out of place from 131,073 vectors to 2,147,483,136 (2^31 - 512,
-since it forms `n_vecs + 511`), and in place from 262,145 to 33,554,431, below the large program's range.  The large
-program's range holds the largest sizes: in place from 4,194,304 vectors (from 33,554,432 for MXFP8 without the scale
-output) and out of place from 8,388,608 for MXFP8 with the scale output only, all to 2,147,481,600 (2^31 - 2048, since
-it forms `n_vecs + 2047`).  The main program runs above the wide and the large ranges.
+since it forms `n_vecs + 511`; the main program runs above that), and in place from 262,145 to 33,554,431, below the
+large program's range.  The large program's range holds the largest sizes: in place from 4,194,304 vectors (from
+33,554,432 for MXFP8 without the scale output) and out of place from 8,388,608 for MXFP8 with the scale output only, all
+to 2,147,481,600 (2^31 - 2048, since it forms `n_vecs + 2047`; the main program runs above that).
 
 A program sees the flat input as `n_vecs = numel / 8` vectors of 8 BF16 values (16 bytes), and the `G / 8` adjacent
 threads of one group combine their maxima with warp shuffles.  A CTA has 64 threads and takes a tile of 128 vectors (256
