@@ -81,7 +81,8 @@ eager call's bits.  The segment maps of a split pass 2 on ``dhu_tc2_dvl32`` (``d
 register pre-scan, :func:`cake_chain.split_map_stage`, switch ``ADJOINT_MAP_ARCHS``): without a device the rule, its
 switch, the record and the host entry tables; on a device, under slowly decaying gates where the maps carry state
 across segment boundaries (per-head rates from 1e-4 to 1 per token, and a uniform 1e-2), the maps against the pre-scan
-(the launches, o / dq / final state bitwise, both judged) with five run-to-run repeats, and a CUDA graph capture with
+(the launches, o / dq / final state bitwise, both judged) with five run-to-run repeats, the same bits with the pooled
+segment maps poisoned (NaN maps, every flag 1: the stitch reads only what the call wrote), and a CUDA graph capture with
 the eager bits.
 
 Accuracy has no tolerance.  Each judged output is measured against the FP64 recurrence (:func:`_reference`) beside
@@ -3036,14 +3037,31 @@ def _slow_map_cell(cell: str):
     return seq_lens, heads, beta_dtype, with_state, pins, gates, seed
 
 
+def _poison_segment_maps(device) -> tuple[int, int]:
+    """NaN into every pooled adjoint ``seg_state`` workspace of the caller's stream and 1 (a whole map ``[B | M]``)
+    into every pooled ``seg_flag``: a map or flag the stitch reads that the call did not write carries NaN into the
+    gradients; returns the ``seg_state`` and ``seg_flag`` buffers poisoned."""
+    table = cake_chain._POOLED.table(cake_chain._device_index(device))
+    counts = []
+    for role, value in (("b_seg_state", float("nan")), ("b_seg_flag", 1)):
+        buffers = list(table.get(role, {}).values())
+        for buffer in buffers:
+            buffer.fill_(value)
+        counts.append(len(buffers))
+    return counts[0], counts[1]
+
+
 @pytest.mark.parametrize("cell", sorted(SLOW_MAP_CELLS))
 def test_split_maps_under_slow_gates_naive_tier_verdict(
     cell, device, monkeypatch, record_property
 ) -> None:
     # The cell's split pass 2 on dhu_tc2_dvl32 forms its segment maps on dhu_tc2_dvl32_gm (no pre-scan) and repeats
-    # bitwise (SLOW_MAP_REPEATS more calls, the first uncached).  With ADJOINT_MAP_ARCHS off the fused pre-scan forms
-    # the maps: o, dq and the final state keep their bits, and on the first draw a gradient of dk / dv / dg / dbeta
-    # takes other bits (the maps carry state).  Both forms are judged ("maps.*", "prescan.*")
+    # bitwise (SLOW_MAP_REPEATS more calls, the first uncached).  With the pooled seg_state poisoned (NaN) and every
+    # seg_flag set to 1 after the first call, the call gives the same bits: the stitch reads only the maps and flags
+    # that dhu_tc2_dvl32_gm wrote (never a sequence's first map, never the M half of a bounded map).  With
+    # ADJOINT_MAP_ARCHS off the fused pre-scan forms the maps: o, dq and the final state keep their bits, and on the
+    # first draw a gradient of dk / dv / dg / dbeta takes other bits (the maps carry state).  Both forms are judged
+    # ("maps.*", "prescan.*")
     seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
     names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
     kept = ("o", "dq", "final_state") if with_state else ("o", "dq")
@@ -3062,6 +3080,9 @@ def test_split_maps_under_slow_gates_naive_tier_verdict(
         got = list(stages)
         assert "dhu_tc2_dvl32_gm" in got and "dhu_pre_dvl_r64k1" not in got, got
         assert "stitch" in got and "dhu_tc2_dvl32" in got, got
+        # the same pooled workspaces as the first call (same shapes), poisoned: exact, no tolerance
+        assert min(_poison_segment_maps(device)) >= 1
+        _assert_bitwise(_run(inputs, seq_lens, **call), maps, names)
         for i in range(SLOW_MAP_REPEATS):
             again = _run(inputs, seq_lens, host_cache=i > 0, **call)
             _assert_bitwise(again, maps, names)
