@@ -882,11 +882,12 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
 
 Every entry -- the four autograd entries, the three step forwards and the
 three step backwards, and in this backend `forward`, `backward`,
-`forward_nope`, `backward_nope`, `forward_nope_varlen`, both
-`prepare_*` runners and the three autograd `Function`s -- takes `with_o_lo`, a
-keyword-only Python `bool` (default `True`; anything else raises
-`ValueError`).  No environment variable sets it: it chooses the accuracy class
-of the gradients and stays visible at the call site.
+`forward_nope`, `backward_nope`, `forward_nope_varlen` and both `prepare_*`
+runners -- takes `with_o_lo`, a keyword-only Python `bool` (default `True`;
+anything else raises `ValueError`); the three autograd `Function`s take it as
+their last `apply` input (see below).  No environment variable sets it: it
+chooses the accuracy class of the gradients and stays visible at the call
+site.
 
 ```text
 with_o_lo=True   forward writes out, lse, o_lo     delta = rowsum(dout * (out + o_lo))   FP32

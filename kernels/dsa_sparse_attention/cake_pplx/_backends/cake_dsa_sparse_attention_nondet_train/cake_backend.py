@@ -804,7 +804,8 @@ def generated_program_available(
     """Whether ``device`` is served by ``program`` (with the backward stages when ``backward``): its record is
     registered for the device's architecture and carries the forward stage (and the delta, main and cast stages
     plus a key-range-pass policy for the backward).  With ``with_o_lo=False`` the forward and delta stages are
-    their ``with_o_lo=False`` twins (``cake_jit.NO_OLO_STAGES``)."""
+    their ``with_o_lo=False`` twins (``cake_jit.NO_OLO_STAGES``), each of which must also ship for the device's
+    architecture (:func:`_require_no_olo_stages`, the check a ``with_o_lo=False`` plan makes)."""
     try:
         _, record = record_for(device, program)
     except NotImplementedError:
@@ -814,6 +815,14 @@ def generated_program_available(
         ("fwd", "bwd_delta", "bwd_main", "bwd_cast") if backward else ("fwd",), program
     )
     if not with_o_lo:
+        try:
+            _require_no_olo_stages(
+                program,
+                arch_for(device),
+                tuple(stage for stage in needed if stage in cake_jit.NO_OLO_STAGES),
+            )
+        except NotImplementedError:
+            return False
         needed = tuple(cake_jit.NO_OLO_STAGES.get(stage, stage) for stage in needed)
     return all(stage in stages for stage in needed) and (
         not backward or "key_pass_policy" in record
@@ -3753,7 +3762,7 @@ class _RopeVarlenBinding(_Binding):
         length_in: Optional[torch.Tensor],
         indices: torch.Tensor,
         lengths: torch.Tensor,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    ) -> tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]]:
         """Issue both launches of one call: the index-preparation stage -- the compacted rows into ``indices``, the
         valid counts into ``lengths``, ``length_in`` as the caller's cut -- then the forward over them into fresh
         ``(out, lse, o_lo)`` (the allocations of :meth:`_Binding.forward`; ``o_lo`` ``None`` on a
@@ -4841,7 +4850,9 @@ class _NopeBinding(_Binding):
 
     def prepared_forward(
         self, q_latent, kv_latent, indices, topk_length, extra=None, sink=None
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], Callable[[], None]]:
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], Callable[[], None]
+    ]:
         """``((out, lse, o_lo), launch)``: the forward's outputs allocated and its launch values bound; ``launch()``
         issues the forward stage.  The varlen entry binds first, launches its index preparation and then calls
         ``launch()``, so the forward kernel follows that launch with no host work in between.  ``extra``: further
@@ -4859,7 +4870,9 @@ class _NopeBinding(_Binding):
 
     def _forward_values(
         self, q_latent, kv_latent, indices, topk_length, extra=None, sink=None
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], dict[str, Any]]:
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], dict[str, Any]
+    ]:
         """The forward's fresh outputs and its bound launch values (no ``o_lo`` buffer on a ``with_o_lo=False``
         plan: ``None`` in its slot, the zero-size placeholder as the operand)."""
         plan = self.plan
@@ -4889,7 +4902,9 @@ class _NopeBinding(_Binding):
 
     def prebound_forward(
         self, q_latent, kv_latent, indices, topk_length, extra=None, sink=None
-    ) -> tuple[tuple[torch.Tensor, torch.Tensor, torch.Tensor], tuple[_Launch, ...]]:
+    ) -> tuple[
+        tuple[torch.Tensor, torch.Tensor, Optional[torch.Tensor]], tuple[_Launch, ...]
+    ]:
         """``((out, lse, o_lo), launches)``: as :meth:`prepared_forward`, with every tensor operand converted to its
         tvm-ffi view now and the forward's stage entries bound to those values.  Each launch, issued by the caller
         inside its own FFI stream context (no operand is a torch tensor to take the stream from), costs one binding

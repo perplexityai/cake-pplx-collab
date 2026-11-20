@@ -80,8 +80,9 @@ the form cuDNN's DSA backward uses; on peaked rows the gradient error grows to
 that class.  ``out`` and ``lse`` have the same accuracy in both modes.  The
 step forwards then return ``None`` in the ``o_lo`` slot, and a step backward
 takes ``o_lo=None`` with the same ``with_o_lo=False``: ``o_lo`` is ``None``
-exactly when ``with_o_lo`` is ``False``, and a mismatch raises ``ValueError``
-before anything is planned or launched.
+exactly when ``with_o_lo`` is ``False`` (a default call without query rows
+also accepts ``None``), and a mismatch raises ``ValueError`` before anything
+is planned or launched.
 
 A call without query rows (``T = 0``) launches nothing: the forwards return
 empty ``out`` / ``lse`` / ``o_lo`` (``None`` for ``o_lo`` with
@@ -1059,10 +1060,10 @@ def cake_dsa_sparse_attention_nondet_train_backward(
     ``with_o_lo`` (``bool``, default ``True``) is the step forward's: ``o_lo``
     is the tensor that forward returned with ``True`` and ``None`` with
     ``False``, which forms ``delta = rowsum(dout * out)`` from the BF16
-    ``out`` (and, with a ``sink``, ``dsink`` from that ``delta``).  A tensor
-    with ``False``, or ``None`` with ``True`` on a call with query rows,
-    raises ``ValueError`` before anything is planned or launched; any value
-    of ``with_o_lo`` other than a ``bool`` raises ``ValueError`` too.
+    ``out``.  A tensor with ``False``, or ``None`` with ``True`` on a call
+    with query rows, raises ``ValueError`` before anything is planned or
+    launched; any value of ``with_o_lo`` other than a ``bool`` raises
+    ``ValueError`` too.
     """
     with_o_lo = _check_with_o_lo(with_o_lo)
     num_segments = _check_num_segments(num_segments)
@@ -1303,7 +1304,8 @@ def cake_dsa_sparse_attention_nondet_train_nope_varlen_backward(
     sink the step forward ran with; the call then also returns ``dsink``,
     FP32 ``[64]``, summed over all packed rows of the call. ``with_o_lo`` as
     in :func:`cake_dsa_sparse_attention_nondet_train_nope_backward`: ``o_lo``
-    is ``None`` exactly when ``with_o_lo`` is ``False``.
+    is ``None`` exactly when ``with_o_lo`` is ``False`` (a default call
+    without query rows also accepts ``None``).
     """
     with_o_lo = _check_with_o_lo(with_o_lo)
     if dkv_direct is None:
