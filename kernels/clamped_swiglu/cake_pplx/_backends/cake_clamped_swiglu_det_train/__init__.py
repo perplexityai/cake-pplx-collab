@@ -272,7 +272,7 @@ def parameters(name: str) -> tuple[str, ...]:
         if kind == "grid":
             axes.append(key)
         elif axes:
-            raise ValueError(f"record {name}: kernel parameter {key!r} follows the grid arguments")
+            raise ValueError(f"record {name}: parameter {key!r} follows the grid arguments")
         else:
             names.append(key)
     if axes != ["grid_x", "grid_y", "grid_z"]:

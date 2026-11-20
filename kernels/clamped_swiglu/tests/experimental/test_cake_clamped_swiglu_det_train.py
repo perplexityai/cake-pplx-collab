@@ -268,7 +268,8 @@ def _spy_entries(patch: pytest.MonkeyPatch, record) -> None:
 
 @pytest.fixture
 def launches(monkeypatch: pytest.MonkeyPatch) -> list:
-    """``(stage, rows, values)`` of every launch, in order: ``values`` names the kernel parameters of the launch."""
+    """``(stage, rows, values)`` of every launch, in order: ``values`` names the parameters of the launch (the kernel's,
+    then the column offsets)."""
     launched: list = []
     _spy_entries(
         monkeypatch, lambda name, values: launched.append((cake_jit.MODULES[name]["stage"], values["rows"], values))
