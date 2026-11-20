@@ -42,7 +42,12 @@ more (:func:`launch_bwd`); both write the same bytes.  The pair table is
 ``pair_table_small`` for at most :func:`.cake_jit.small_docs` documents and
 ``pair_table`` for more (:func:`launch_pair_table`); both write the same
 bytes.  A call looks up the operands' device index, its architecture and the
-roles once and passes them to its launches.  Every launch is a plain
+roles once and passes them to its launches.  The checks read a plain tensor
+operand's shape, strides and address once, and run one by one (the first
+failing check raising its error) only for an operand that fails that read or
+is not a plain tensor.  An output a call allocates itself takes no stride or
+overlap check, and the autograd nodes' backward reuses what their forward
+checked and looked up.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device.
 Nothing here reads an environment variable, reads device memory or
 synchronizes: grids, buffer sizes and the pair-table launch come from tensor
@@ -95,6 +100,7 @@ CZ_WIDTH = cake_jit.CZ_WIDTH
 arch_for_capability = cake_jit.arch_for_capability
 device_arch = cake_jit.device_arch
 
+_Tensor = torch.Tensor
 _F32 = torch.float32
 _BF16 = torch.bfloat16
 _I32 = torch.int32
@@ -259,11 +265,58 @@ def _disjoint(written: tuple[str, torch.Tensor], others: tuple[tuple[str, Option
             raise ValueError(f"{name} must not overlap {other_name}")
 
 
+def _token_operands_fast(
+    c: Any, z: Any, cu_seqlens: Any, device: torch.device | None
+) -> tuple[torch.device, int, int, int, int] | None:
+    """:func:`_check_token_operands`'s result for plain tensors (``torch.Tensor`` itself, no subclass) of at least two
+    tokens that pass every one of its checks, read once (each shape and stride tuple, each base address); ``None`` for
+    anything else, which the caller hands to :func:`_check_token_operands` (its error, or its result for the shapes
+    this path leaves to it).  ``device``: the operands' device, or ``None`` for ``c``'s, which must be a CUDA device."""
+    if type(c) is not _Tensor or type(z) is not _Tensor or type(cu_seqlens) is not _Tensor:
+        return None
+    if device is None:
+        device = c.device
+        if device.type != "cuda":
+            return None
+    elif c.device != device:
+        return None
+    if z.device != device or cu_seqlens.device != device:
+        return None
+    if c.dtype is not _F32 or z.dtype is not _F32 or cu_seqlens.dtype is not _I32:
+        return None
+    c_shape, z_shape = c.shape, z.shape
+    if len(c_shape) != 2 or len(z_shape) != 2 or c_shape[1] != WIDTH or z_shape[1] != WIDTH:
+        return None
+    T = c_shape[0]
+    if z_shape[0] != T or T < 2 or T > cake_jit.MAX_TOKENS:
+        return None
+    (c_ld, c_unit), (z_ld, z_unit) = c.stride(), z.stride()
+    if c_unit != 1 or z_unit != 1 or c_ld < WIDTH or z_ld < WIDTH or c_ld % _LD or z_ld % _LD:
+        return None
+    if c.data_ptr() % _ALIGN["c"] or z.data_ptr() % _ALIGN["z"]:
+        return None
+    if cu_seqlens.dim() != 1 or not cu_seqlens.is_contiguous() or cu_seqlens.data_ptr() % _ALIGN["cu_seqlens"]:
+        return None
+    entries = cu_seqlens.shape[0]
+    if entries < 1 or entries > cake_jit.MAX_DOCS + 1:
+        return None
+    return device, T, entries - 1, c_ld, z_ld
+
+
 def _token_operands(
     c: Any, z: Any, cu_seqlens: Any, device: Optional[torch.device]
 ) -> tuple[torch.device, int, int, int, int]:
     """``(device, T, S, c_ld, z_ld)`` of valid ``c``, ``z`` and ``cu_seqlens``; ``ValueError`` / ``TypeError``
-    otherwise."""
+    otherwise (:func:`_token_operands_fast`, else :func:`_check_token_operands`)."""
+    found = _token_operands_fast(c, z, cu_seqlens, device)
+    return found if found is not None else _check_token_operands(c, z, cu_seqlens, device)
+
+
+def _check_token_operands(
+    c: Any, z: Any, cu_seqlens: Any, device: torch.device | None
+) -> tuple[torch.device, int, int, int, int]:
+    """``(device, T, S, c_ld, z_ld)`` of valid ``c``, ``z`` and ``cu_seqlens``; ``ValueError`` / ``TypeError``
+    otherwise: each check in turn, the first failing one raising its error."""
     _tensor(c, "c")
     _tensor(z, "z")
     _tensor(cu_seqlens, "cu_seqlens")
@@ -315,6 +368,79 @@ def _pair_count(num_pairs: Any, out: Optional[torch.Tensor]) -> int:
 # Launchers: caller-owned buffers, the current stream, no allocation, no check of the operands' contents
 
 
+def _launch_table(cu_seqlens: torch.Tensor, cu_pairs: torch.Tensor, S: int, index: int, arch: str) -> None:
+    """The pair-table launch of :func:`launch_pair_table` for ``S`` documents on device ``index`` (of ``arch``)."""
+    role = "pair_table_small" if S <= cake_jit.small_docs(arch) else "pair_table"
+    values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
+    cake_jit.run_module(role, values, rows=1, device_index=index, arch=arch)
+
+
+def _launch_fwd(
+    c: torch.Tensor,
+    z: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_pairs: torch.Tensor,
+    out: torch.Tensor,
+    S: int,
+    G: int,
+    c_ld: int,
+    z_ld: int,
+    role: str,
+    index: int,
+    arch: str | None,
+) -> None:
+    """The forward launch of :func:`launch_fwd`: role ``fwd`` or ``fwd_unfused`` on ``G`` rows."""
+    values = {
+        "c": c,
+        "z": z,
+        "cu_seqlens": cu_seqlens,
+        "cu_pairs": cu_pairs,
+        "out": out,
+        "num_docs": S,
+        "G": G,
+        "c_ld": c_ld,
+        "z_ld": z_ld,
+    }
+    cake_jit.run_module(role, values, rows=G, device_index=index, arch=arch)
+
+
+def _launch_bwd(
+    dout: torch.Tensor,
+    c: torch.Tensor,
+    z: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    cu_pairs: torch.Tensor,
+    dc: torch.Tensor,
+    dz: torch.Tensor,
+    S: int,
+    G: int,
+    c_ld: int,
+    z_ld: int,
+    dc_ld: int,
+    dz_ld: int,
+    role: str,
+    index: int,
+    arch: str | None,
+) -> None:
+    """The backward launch of :func:`launch_bwd`: role ``bwd`` or ``bwd_small`` on ``G + S`` virtual rows."""
+    values = {
+        "dout": dout,
+        "c": c,
+        "z": z,
+        "cu_seqlens": cu_seqlens,
+        "cu_pairs": cu_pairs,
+        "dc": dc,
+        "dz": dz,
+        "num_docs": S,
+        "G": G,
+        "c_ld": c_ld,
+        "z_ld": z_ld,
+        "dc_ld": dc_ld,
+        "dz_ld": dz_ld,
+    }
+    cake_jit.run_module(role, values, rows=G + S, device_index=index, arch=arch)
+
+
 def launch_pair_table(
     *,
     cu_seqlens: torch.Tensor,
@@ -331,9 +457,7 @@ def launch_pair_table(
         device_index = cu_seqlens.device.index
     if arch is None:
         arch = cake_jit.device_arch(device_index)
-    role = "pair_table_small" if S <= cake_jit.small_docs(arch) else "pair_table"
-    values = {"cu_seqlens": cu_seqlens, "cu_pairs": cu_pairs, "num_docs": S}
-    cake_jit.run_module(role, values, rows=1, device_index=device_index, arch=arch)
+    _launch_table(cu_seqlens, cu_pairs, S, device_index, arch)
 
 
 def launch_fwd(
@@ -364,18 +488,7 @@ def launch_fwd(
         arch = cake_jit.device_arch(device_index)
     if role is None:
         role = "fwd" if S <= cake_jit.fuse_docs(arch) else "fwd_unfused"
-    values = {
-        "c": c,
-        "z": z,
-        "cu_seqlens": cu_seqlens,
-        "cu_pairs": cu_pairs,
-        "out": out,
-        "num_docs": S,
-        "G": G,
-        "c_ld": int(c_ld),
-        "z_ld": int(z_ld),
-    }
-    cake_jit.run_module(role, values, rows=G, device_index=device_index, arch=arch)
+    _launch_fwd(c, z, cu_seqlens, cu_pairs, out, S, G, int(c_ld), int(z_ld), role, device_index, arch)
 
 
 def launch_bwd(
@@ -403,28 +516,14 @@ def launch_bwd(
     ``bwd_small``), ``device_index`` and ``arch``: the role the caller chose by that rule, the index of the operands'
     device and its architecture when the caller has them; ``None`` looks them up."""
     S, G = int(cu_seqlens.numel()) - 1, int(dout.shape[0])
-    values = {
-        "dout": dout,
-        "c": c,
-        "z": z,
-        "cu_seqlens": cu_seqlens,
-        "cu_pairs": cu_pairs,
-        "dc": dc,
-        "dz": dz,
-        "num_docs": S,
-        "G": G,
-        "c_ld": int(c_ld),
-        "z_ld": int(z_ld),
-        "dc_ld": int(dc_ld),
-        "dz_ld": int(dz_ld),
-    }
+    lds = int(c_ld), int(z_ld), int(dc_ld), int(dz_ld)
     if device_index is None:
         device_index = dout.device.index
     if role is None:
         if arch is None:
             arch = cake_jit.device_arch(device_index)
         role = "bwd_small" if S <= cake_jit.bwd_small_docs(arch) else "bwd"
-    cake_jit.run_module(role, values, rows=G + S, device_index=device_index, arch=arch)
+    _launch_bwd(dout, c, z, cu_seqlens, cu_pairs, dc, dz, S, G, *lds, role, device_index, arch)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -437,11 +536,15 @@ def _forward(
     cu_seqlens: torch.Tensor,
     num_pairs: Any,
     out: Optional[torch.Tensor],
-) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
-    """``(out, cu_pairs)`` of one forward call; ``cu_pairs`` is the pair table the call computed (``None`` when it
-    launched nothing)."""
+) -> tuple[torch.Tensor, torch.Tensor | None, tuple[int, int, int, int, int, torch.device, int, str]]:
+    """``(out, cu_pairs, plan)`` of one forward call.  ``cu_pairs`` is the pair table the call computed (``None`` when
+    it launched nothing); ``plan`` is ``(T, S, G, c_ld, z_ld, device, device index, arch)``, what the call checked and
+    looked up, which the autograd nodes' backward reuses."""
     device, T, S, c_ld, z_ld = _token_operands(c, z, cu_seqlens, None)
-    G = _pair_count(num_pairs, out)
+    if out is None and type(num_pairs) is int and 0 <= num_pairs <= cake_jit.MAX_PAIRS:
+        G = num_pairs  # what _pair_count gives a plain int in range and no out
+    else:
+        G = _pair_count(num_pairs, out)
     if out is None:
         out = torch.empty((G, WIDTH), dtype=_BF16, device=device)
     else:
@@ -451,12 +554,13 @@ def _forward(
         _disjoint(("out", out), (("c", c), ("z", z), ("cu_seqlens", cu_seqlens)))
     index = device.index
     arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    plan = (T, S, G, c_ld, z_ld, device, index, arch)
     if G == 0:
-        return out, None
+        return out, None, plan
     if T == 0 or S == 0:
         # No token, or no document: every row is past the pair count.
         out.zero_()
-        return out, None
+        return out, None, plan
     cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
     # The device, its architecture and the roles are looked up once here and passed to the launches.
     if S <= cake_jit.fuse_docs(arch):
@@ -465,20 +569,9 @@ def _forward(
     else:
         # A forward of more reads the table this launch writes.
         role = "fwd_unfused"
-        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, device_index=index, arch=arch)
-    launch_fwd(
-        c=c,
-        z=z,
-        cu_seqlens=cu_seqlens,
-        cu_pairs=cu_pairs,
-        out=out,
-        c_ld=c_ld,
-        z_ld=z_ld,
-        role=role,
-        device_index=index,
-        arch=arch,
-    )
-    return out, cu_pairs
+        _launch_table(cu_seqlens, cu_pairs, S, index, arch)
+    _launch_fwd(c, z, cu_seqlens, cu_pairs, out, S, G, c_ld, z_ld, role, index, arch)
+    return out, cu_pairs, plan
 
 
 def cake_gated_kv_compression_det_train_forward(
@@ -494,23 +587,94 @@ def cake_gated_kv_compression_det_train_forward(
     return _forward(c, z, cu_seqlens, num_pairs, out)[0]
 
 
-def cake_gated_kv_compression_det_train_backward(
-    dout: torch.Tensor,
-    c: torch.Tensor,
-    z: torch.Tensor,
-    cu_seqlens: torch.Tensor,
-    *,
-    dc: Optional[torch.Tensor] = None,
-    dz: Optional[torch.Tensor] = None,
-    pair_offsets: Optional[torch.Tensor] = None,
-) -> tuple[torch.Tensor, torch.Tensor]:
-    """FP32 ``(dc, dz)``, ``[T, 512]`` each, every row written; see
-    :func:`cake_pplx.cake_gated_kv_compression_det_train.cake_gated_kv_compression_det_train_backward`."""
-    _tensor(dout, "dout")
-    if dout.device.type != "cuda":
-        raise ValueError(f"dout must be on a CUDA device, got {dout.device}")
-    device = dout.device
-    device, T, S, c_ld, z_ld = _token_operands(c, z, cu_seqlens, device)
+def _grad_ld_fast(t: Any, name: str, T: int, device: torch.device) -> int:
+    """The row stride of a caller ``dc`` / ``dz`` (``name``) that :func:`_check_backward_operands` accepts, for a
+    plain tensor and ``T >= 2``; 0 for anything else."""
+    if type(t) is not _Tensor or t.device != device or t.dtype is not _F32:
+        return 0
+    shape = t.shape
+    if len(shape) != 2 or shape[0] != T or shape[1] != WIDTH:
+        return 0
+    ld, unit = t.stride()
+    if unit != 1 or ld < WIDTH or ld % _LD or t.data_ptr() % _ALIGN[name]:
+        return 0
+    return ld
+
+
+def _backward_operands_fast(
+    dout: Any,
+    c: Any,
+    z: Any,
+    cu_seqlens: Any,
+    dc: Any,
+    dz: Any,
+    pair_offsets: Any,
+    device: torch.device,
+) -> tuple[torch.device, int, int, int, int, int, torch.Tensor, int, torch.Tensor, int] | None:
+    """:func:`_check_backward_operands`'s result for plain tensors of at least two tokens and one pair that pass every
+    one of its checks, each read once; ``None`` for anything else (the caller then runs those checks).  ``dc`` or
+    ``dz`` this call allocates (``None`` given) takes no stride or overlap check: a fresh block of the caching
+    allocator shares no byte with a live tensor, and it is dense with a ``WIDTH`` row stride.  A caller's ``dc`` /
+    ``dz`` takes the overlap checks of :func:`_check_backward_operands` (their first error)."""
+    found = _token_operands_fast(c, z, cu_seqlens, device)
+    if found is None or dout.dtype is not _BF16 or dout.dim() != 2:
+        return None
+    _, T, S, c_ld, z_ld = found
+    G, width = dout.shape
+    if width != WIDTH or G < 1 or G > cake_jit.MAX_PAIRS or not dout.is_contiguous():
+        return None
+    if dout.data_ptr() % _ALIGN["dout"]:
+        return None
+    dc_ld = dz_ld = WIDTH
+    if dc is not None:
+        dc_ld = _grad_ld_fast(dc, "dc", T, device)
+        if not dc_ld:
+            return None
+    if dz is not None:
+        dz_ld = _grad_ld_fast(dz, "dz", T, device)
+        if not dz_ld:
+            return None
+    if pair_offsets is not None and (
+        type(pair_offsets) is not _Tensor
+        or pair_offsets.device != device
+        or pair_offsets.dtype is not _I32
+        or pair_offsets.dim() != 1
+        or pair_offsets.shape[0] != S + 1
+        or not pair_offsets.is_contiguous()
+        or pair_offsets.data_ptr() % _ALIGN["cu_seqlens"]
+    ):
+        return None
+    if dc is not None or dz is not None:
+        reads = (("dout", dout), ("c", c), ("z", z), ("cu_seqlens", cu_seqlens), ("pair_offsets", pair_offsets))
+        if dc is not None:
+            _disjoint(("dc", dc), (("dz", dz), *reads))
+        if dz is not None:
+            _disjoint(("dz", dz), reads)
+    if dc is None:
+        dc = torch.empty((T, WIDTH), dtype=_F32, device=device)
+        if dc.data_ptr() % _ALIGN["dc"]:
+            return None
+    if dz is None:
+        dz = torch.empty((T, WIDTH), dtype=_F32, device=device)
+        if dz.data_ptr() % _ALIGN["dz"]:
+            return None
+    return device, T, S, G, c_ld, z_ld, dc, dc_ld, dz, dz_ld
+
+
+def _check_backward_operands(
+    dout: Any,
+    c: Any,
+    z: Any,
+    cu_seqlens: Any,
+    dc: Any,
+    dz: Any,
+    pair_offsets: Any,
+    device: torch.device,
+) -> tuple[torch.device, int, int, int, int, int, torch.Tensor, int, torch.Tensor, int]:
+    """``(device, T, S, G, c_ld, z_ld, dc, dc_ld, dz, dz_ld)`` of the valid operands of an explicit backward on
+    ``device`` (``dout``'s, a CUDA device), ``dc`` / ``dz`` allocated when not given; ``ValueError`` / ``TypeError``
+    otherwise: each check in turn, the first failing one raising its error."""
+    device, T, S, c_ld, z_ld = _check_token_operands(c, z, cu_seqlens, device)
     _dtype(dout, "dout", _BF16)
     G = _dense(dout, "dout", None, "dout")
     if G > cake_jit.MAX_PAIRS:
@@ -535,8 +699,29 @@ def cake_gated_kv_compression_det_train_backward(
     reads = (("dout", dout), ("c", c), ("z", z), ("cu_seqlens", cu_seqlens), ("pair_offsets", pair_offsets))
     _disjoint(("dc", dc), (("dz", dz), *reads))
     _disjoint(("dz", dz), reads)
-    index = device.index
-    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    return device, T, S, G, c_ld, z_ld, dc, dc_ld, dz, dz_ld
+
+
+def _backward(
+    dout: torch.Tensor,
+    c: torch.Tensor,
+    z: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    pair_offsets: torch.Tensor | None,
+    dc: torch.Tensor,
+    dz: torch.Tensor,
+    T: int,
+    S: int,
+    G: int,
+    c_ld: int,
+    z_ld: int,
+    dc_ld: int,
+    dz_ld: int,
+    device: torch.device,
+    index: int,
+    arch: str,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The launches of a backward on checked operands (the explicit backward, the autograd nodes): ``(dc, dz)``."""
     if T == 0:
         return dc, dz
     if G == 0 or S == 0:
@@ -544,30 +729,43 @@ def cake_gated_kv_compression_det_train_backward(
         dc.zero_()
         dz.zero_()
         return dc, dz
-    # The device, its architecture and the role are looked up once here and passed to the launches: a backward of at
-    # most bwd_small_docs documents runs bwd_small, of more bwd, with the table given or launched here.
+    # The device, its architecture and the role are looked up once and passed to the launches: a backward of at most
+    # bwd_small_docs documents runs bwd_small, of more bwd, with the table given or launched here.
     role = "bwd_small" if S <= cake_jit.bwd_small_docs(arch) else "bwd"
     cu_pairs = pair_offsets
     if cu_pairs is None:
         cu_pairs = torch.empty(S + 1, dtype=_I32, device=device)
-        launch_pair_table(cu_seqlens=cu_seqlens, cu_pairs=cu_pairs, device_index=index, arch=arch)
-    launch_bwd(
-        dout=dout,
-        c=c,
-        z=z,
-        cu_seqlens=cu_seqlens,
-        cu_pairs=cu_pairs,
-        dc=dc,
-        dz=dz,
-        c_ld=c_ld,
-        z_ld=z_ld,
-        dc_ld=dc_ld,
-        dz_ld=dz_ld,
-        role=role,
-        device_index=index,
-        arch=arch,
-    )
+        _launch_table(cu_seqlens, cu_pairs, S, index, arch)
+    _launch_bwd(dout, c, z, cu_seqlens, cu_pairs, dc, dz, S, G, c_ld, z_ld, dc_ld, dz_ld, role, index, arch)
     return dc, dz
+
+
+def cake_gated_kv_compression_det_train_backward(
+    dout: torch.Tensor,
+    c: torch.Tensor,
+    z: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+    *,
+    dc: Optional[torch.Tensor] = None,
+    dz: Optional[torch.Tensor] = None,
+    pair_offsets: Optional[torch.Tensor] = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """FP32 ``(dc, dz)``, ``[T, 512]`` each, every row written; see
+    :func:`cake_pplx.cake_gated_kv_compression_det_train.cake_gated_kv_compression_det_train_backward`."""
+    found = None
+    if type(dout) is _Tensor and dout.is_cuda:
+        found = _backward_operands_fast(dout, c, z, cu_seqlens, dc, dz, pair_offsets, dout.device)
+    if found is None:
+        _tensor(dout, "dout")
+        if dout.device.type != "cuda":
+            raise ValueError(f"dout must be on a CUDA device, got {dout.device}")
+        found = _check_backward_operands(dout, c, z, cu_seqlens, dc, dz, pair_offsets, dout.device)
+    device, T, S, G, c_ld, z_ld, dc, dc_ld, dz, dz_ld = found
+    index = device.index
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
+    return _backward(
+        dout, c, z, cu_seqlens, pair_offsets, dc, dz, T, S, G, c_ld, z_ld, dc_ld, dz_ld, device, index, arch
+    )
 
 
 def cake_gated_kv_compression_det_train_memory_bytes(num_tokens: int, num_docs: int) -> dict[str, int]:
@@ -600,7 +798,15 @@ def _incoming(dout: torch.Tensor) -> torch.Tensor:
 
 
 def _halves(cz: Any) -> tuple[torch.Tensor, torch.Tensor]:
-    """``(C, Z)``: the column halves of a valid FP32 ``cz [T, 1024]``; ``ValueError`` / ``TypeError`` otherwise."""
+    """``(C, Z)``: the column halves of a valid FP32 ``cz [T, 1024]``; ``ValueError`` / ``TypeError`` otherwise.  A
+    plain tensor of at least two rows that passes every check is read once (its shape, strides and address); anything
+    else takes the checks in turn, the first failing one raising its error."""
+    if type(cz) is _Tensor and cz.is_cuda and cz.dtype is _F32:
+        shape = cz.shape
+        if len(shape) == 2 and shape[1] == CZ_WIDTH and shape[0] >= 2:
+            ld, unit = cz.stride()
+            if unit == 1 and ld >= CZ_WIDTH and not ld % _LD and not cz.data_ptr() % _ALIGN["c"]:
+                return cz.narrow(1, 0, WIDTH), cz.narrow(1, WIDTH, WIDTH)
     _tensor(cz, "cz")
     if cz.device.type != "cuda":
         raise ValueError(f"cz must be on a CUDA device, got {cz.device}")
@@ -614,16 +820,19 @@ class CakeGatedKvCompressionDetFunction(torch.autograd.Function):
     :func:`cake_gated_kv_compression_det_train_forward`, backward :func:`cake_gated_kv_compression_det_train_backward`
     (one launch writes ``dC`` and ``dZ``: ``bwd_small`` or ``bwd`` by the explicit backward's rule).  The node saves
     ``c``, ``z``, ``cu_seqlens`` and its forward's pair table (int32 ``[S + 1]``) only: no activation and no
-    probability, and the backward reuses the table (no pair-table launch).  Under
+    probability, and the backward reuses the table (no pair-table launch).  The backward also reuses what the forward
+    checked and looked up (``T``, ``S``, ``G``, the row strides, the device and its architecture; autograd refuses a
+    saved tensor changed in place since) and writes gradients it allocates itself, so it checks nothing again.  Under
     ``torch.utils.checkpoint(..., use_reentrant=False)`` the recompute gives the same bits."""
 
     @staticmethod
     def forward(  # type: ignore[override]
         ctx: Any, c: torch.Tensor, z: torch.Tensor, cu_seqlens: torch.Tensor, num_pairs: int
     ) -> torch.Tensor:
-        out, cu_pairs = _forward(c, z, cu_seqlens, num_pairs, None)
+        out, cu_pairs, plan = _forward(c, z, cu_seqlens, num_pairs, None)
         ctx.set_materialize_grads(False)
         ctx.save_for_backward(c, z, cu_seqlens, cu_pairs)
+        ctx.cake_plan = plan
         return out
 
     @staticmethod
@@ -632,7 +841,11 @@ class CakeGatedKvCompressionDetFunction(torch.autograd.Function):
         if dout is None:
             return None, None, None, None
         c, z, cu_seqlens, cu_pairs = ctx.saved_tensors
-        dc, dz = cake_gated_kv_compression_det_train_backward(_incoming(dout), c, z, cu_seqlens, pair_offsets=cu_pairs)
+        T, S, G, c_ld, z_ld, device, index, arch = ctx.cake_plan
+        dout = _incoming(dout)
+        dc = torch.empty((T, WIDTH), dtype=_F32, device=device)
+        dz = torch.empty((T, WIDTH), dtype=_F32, device=device)
+        _backward(dout, c, z, cu_seqlens, cu_pairs, dc, dz, T, S, G, c_ld, z_ld, WIDTH, WIDTH, device, index, arch)
         need_c, need_z = ctx.needs_input_grad[0], ctx.needs_input_grad[1]
         return (dc if need_c else None), (dz if need_z else None), None, None
 
@@ -641,14 +854,16 @@ class CakeGatedKvCompressionDetCzFunction(torch.autograd.Function):
     """Autograd node of :func:`cake_gated_kv_compression_det_cz`: ``cz [T, 1024]`` holds C in columns ``[0, 512)``
     and Z in ``[512, 1024)``.  Its backward allocates one FP32 ``[T, 1024]`` gradient and one launch writes ``dC``
     and ``dZ`` into its two halves: no slice-backward zero fill or copy.  The node saves ``cz``, ``cu_seqlens`` and its
-    forward's pair table only."""
+    forward's pair table only; like :class:`CakeGatedKvCompressionDetFunction` its backward reuses what the forward
+    checked and looked up."""
 
     @staticmethod
     def forward(ctx: Any, cz: torch.Tensor, cu_seqlens: torch.Tensor, num_pairs: int) -> torch.Tensor:  # type: ignore[override]
         c, z = _halves(cz)
-        out, cu_pairs = _forward(c, z, cu_seqlens, num_pairs, None)
+        out, cu_pairs, plan = _forward(c, z, cu_seqlens, num_pairs, None)
         ctx.set_materialize_grads(False)
         ctx.save_for_backward(cz, cu_seqlens, cu_pairs)
+        ctx.cake_plan = plan
         return out
 
     @staticmethod
@@ -657,16 +872,14 @@ class CakeGatedKvCompressionDetCzFunction(torch.autograd.Function):
         if dout is None:
             return None, None, None
         cz, cu_seqlens, cu_pairs = ctx.saved_tensors
-        grad = torch.empty((cz.shape[0], CZ_WIDTH), dtype=_F32, device=cz.device)
-        cake_gated_kv_compression_det_train_backward(
-            _incoming(dout),
-            cz[:, :WIDTH],
-            cz[:, WIDTH:],
-            cu_seqlens,
-            dc=grad[:, :WIDTH],
-            dz=grad[:, WIDTH:],
-            pair_offsets=cu_pairs,
-        )
+        T, S, G, c_ld, z_ld, device, index, arch = ctx.cake_plan
+        dout = _incoming(dout)
+        grad = torch.empty((T, CZ_WIDTH), dtype=_F32, device=device)
+        # The halves' row stride as the explicit backward's checks give it: the buffer's for two rows or more.
+        ld = CZ_WIDTH if T > 1 else WIDTH
+        c, z = cz.narrow(1, 0, WIDTH), cz.narrow(1, WIDTH, WIDTH)
+        dc, dz = grad.narrow(1, 0, WIDTH), grad.narrow(1, WIDTH, WIDTH)
+        _backward(dout, c, z, cu_seqlens, cu_pairs, dc, dz, T, S, G, c_ld, z_ld, ld, ld, device, index, arch)
         return grad, None, None
 
 
