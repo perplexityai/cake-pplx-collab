@@ -82,10 +82,10 @@ STREAMS, MAPPING_ROWS = 4, 24
 SEED = 8900
 # A1 / A9: T = 1, small, irregular and the issue's benchmark points.
 T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
-# The standalone collapse; 8191 / 8192 pin both sides of sm_107a's token-count band of ``collapse_forward``.
-T_COLLAPSE = (1, 7, 257, 2049, 8191, 8192, 16384, 65536)
+# The standalone collapse; 6655 / 6656 pin both sides of sm_107a's token-count band of ``collapse_forward``.
+T_COLLAPSE = (1, 7, 257, 2049, 6655, 6656, 8191, 8192, 16384, 65536)
 # Every record of a token-count band of ``collapse_forward``, launched on its own.
-T_COLLAPSE_BAND = (1, 129, 2049, 8191, 8192, 16384)
+T_COLLAPSE_BAND = (1, 129, 2049, 6655, 6656, 8191, 8192, 16384)
 _PARAMETER = ("dfn", "dscale", "dbase")
 
 
@@ -978,8 +978,8 @@ def test_handoff_outputs_are_deterministic(T: int) -> None:
 
 @pytest.mark.parametrize("T", T_COLLAPSE_BAND)
 def test_every_collapse_forward_record_gives_the_same_bits(T: int) -> None:
-    """Where ``collapse_forward`` is a token-count band of records (sm_107a: ``collapse_fwd__m2`` below 8192 tokens,
-    ``collapse_fwd__m2_xhnone`` from 8192), every record of the route, launched on its own on the same inputs into a
+    """Where ``collapse_forward`` is a token-count band of records (sm_107a: ``collapse_fwd__m2`` below 6656 tokens,
+    ``collapse_fwd__m2_xhnone`` from 6656), every record of the route, launched on its own on the same inputs into a
     NaN-filled ``U``, writes every word, and every record and the public entry point give the same bits."""
     route = loader.route_modules(_arch(), HIDDEN, "collapse_forward")
     if len(route) < 2:

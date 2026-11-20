@@ -6686,7 +6686,9 @@ _NVJET_FREE_ROWS = {
 }
 #: :data:`K1_DGRAD_NVJET_RULES_BY_SM` of version 0.3.15: the lean program on ``_NVJET_ROWS`` less the rows a part
 #: leaves to the other tables, the lean_free program on the part's ``_NVJET_FREE_ROWS`` (over the lean entry of the
-#: same key).  Version 0.3.16 takes out the keys of ``NONDET_DET_PLAN_0316`` (``K1_DGRAD_NVJET_ROWS``).
+#: same key).  Version 0.3.16 takes out the keys of ``NONDET_DET_PLAN_0316`` (``K1_DGRAD_NVJET_ROWS_0316``), version
+#: 0.3.17 those of ``NONDET_DET_PLAN_0317`` (``K1_DGRAD_NVJET_ROWS_0317``), version 0.3.18 the nvjet keys of
+#: ``NONDET_DET_PLAN_0318`` (``K1_DGRAD_NVJET_ROWS``).
 K1_DGRAD_NVJET_ROWS_0315 = {
     ("sm_100a", 148): {
         **{(*r, "bf16"): _NVJET for r in _NVJET_ROWS - _NVJET_SM100_KEPT},
@@ -6731,10 +6733,75 @@ NONDET_DET_PLAN_0316 = {
     ("sm_100a", 148, 5120, 64, 16384): (_NVJET_FREE, None),
     ("sm_100a", 148, 6144, 32, 16384): (_NVJET_FREE, "kn_n256_tma1_w8rs"),
 }
-#: :data:`K1_DGRAD_NVJET_RULES_BY_SM`: the tables of version 0.3.15 less the keys of ``NONDET_DET_PLAN_0316``.
-K1_DGRAD_NVJET_ROWS = {
+#: :data:`K1_DGRAD_NVJET_RULES_BY_SM` of version 0.3.16: the tables of version 0.3.15 less the keys of
+#: ``NONDET_DET_PLAN_0316``.
+K1_DGRAD_NVJET_ROWS_0316 = {
     part: {key: t for key, t in rows.items() if (*part, *key[:3]) not in NONDET_DET_PLAN_0316}
     for part, rows in K1_DGRAD_NVJET_ROWS_0315.items()
+}
+#: The BF16 input-gradient keys version 0.3.17 leaves to the deterministic plan, in the form of
+#: ``NONDET_DET_PLAN_0316``: the key's entry of version 0.3.16 in :data:`K1_DGRAD_NVJET_RULES_BY_SM` (the lean_free
+#: nvjet program) and in :data:`K1_DGRAD_RULES_BY_SM` (``kn_n256_tma2_pd2_lw_pro15`` under the three indexer_hw keys;
+#: ``None``: none).  In version 0.3.17 neither table holds the key, and the call binds the deterministic plan: on the
+#: 212-SM ``sm_107a`` part ``4096 -> 32``, ``5120 -> 32`` and ``6144 -> 32`` (indexer_hw) at 16172, 16231 and 16384
+#: tokens and ``5120 -> 64`` at 16384 tokens, where the deterministic plan runs its 128-column start-path programs of
+#: its version 0.3.17 (``DET_TILE_0317_ROWS``).
+NONDET_DET_PLAN_0317 = {
+    ("sm_107a", 212, 4096, 32, 16172): (_NVJET_FREE, None),
+    ("sm_107a", 212, 4096, 32, 16231): (_NVJET_FREE, None),
+    ("sm_107a", 212, 4096, 32, 16384): (_NVJET_FREE, None),
+    ("sm_107a", 212, 5120, 32, 16172): (_NVJET_FREE, None),
+    ("sm_107a", 212, 5120, 32, 16231): (_NVJET_FREE, None),
+    ("sm_107a", 212, 5120, 32, 16384): (_NVJET_FREE, None),
+    ("sm_107a", 212, 5120, 64, 16384): (_NVJET_FREE, None),
+    ("sm_107a", 212, 6144, 32, 16172): (_NVJET_FREE, "kn_n256_tma2_pd2_lw_pro15"),
+    ("sm_107a", 212, 6144, 32, 16231): (_NVJET_FREE, "kn_n256_tma2_pd2_lw_pro15"),
+    ("sm_107a", 212, 6144, 32, 16384): (_NVJET_FREE, "kn_n256_tma2_pd2_lw_pro15"),
+}
+#: :data:`K1_DGRAD_NVJET_RULES_BY_SM` of version 0.3.17: the tables of version 0.3.16 less the keys of
+#: ``NONDET_DET_PLAN_0317``.
+K1_DGRAD_NVJET_ROWS_0317 = {
+    part: {key: t for key, t in rows.items() if (*part, *key[:3]) not in NONDET_DET_PLAN_0317}
+    for part, rows in K1_DGRAD_NVJET_ROWS_0316.items()
+}
+#: The BF16 input-gradient keys version 0.3.18 leaves to the deterministic plan, ``(arch, SM count, K, N, T) ->
+#: (template, program)``: the key's entry of version 0.3.17 in :data:`K1_DGRAD_NVJET_RULES_BY_SM` (the lean nvjet
+#: program; ``None``: none) and in :data:`K1_DGRAD_RULES_BY_SM` (the deterministic program, under the nvjet entry where
+#: the key has one; ``None``: none).  In version 0.3.18 neither table holds the key, and the call binds the
+#: deterministic plan: on the 152-SM ``sm_100a`` part (GB200) ``4096 -> 32``, ``4096 -> 64``, ``4096 -> 128``,
+#: ``5120 -> 32`` and ``6144 -> 32`` (indexer_hw) at 16172, 16231 and 16384 tokens, ``5120 -> 48`` and ``6144 -> 128``
+#: (indexer_k) at 16172 and 16384 tokens, ``4096 -> 48``, ``5120 -> 128`` and ``8192 -> 128`` at 16172 tokens and
+#: ``5120 -> 64`` at 16231 tokens: 10 keys of the nvjet table (7 with a deterministic program under the nvjet entry)
+#: and 13 keys of :data:`K1_DGRAD_RULES_BY_SM` alone.
+NONDET_DET_PLAN_0318 = {
+    ("sm_100a", 152, 4096, 32, 16172): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 4096, 32, 16231): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 4096, 32, 16384): (_NVJET, "kn_n256_tma1_w8"),
+    ("sm_100a", 152, 4096, 48, 16172): (None, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 4096, 64, 16172): (_NVJET, None),
+    ("sm_100a", 152, 4096, 64, 16231): (_NVJET, None),
+    ("sm_100a", 152, 4096, 64, 16384): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 4096, 128, 16172): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 4096, 128, 16231): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 4096, 128, 16384): (None, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 5120, 32, 16172): (None, "kn_n256_tma1_w8"),
+    ("sm_100a", 152, 5120, 32, 16231): (_NVJET, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 5120, 32, 16384): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 5120, 48, 16172): (None, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 5120, 48, 16384): (None, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 5120, 64, 16231): (_NVJET, None),
+    ("sm_100a", 152, 5120, 128, 16172): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 6144, 32, 16172): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 6144, 32, 16231): (_NVJET, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 6144, 32, 16384): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 6144, 128, 16172): (None, "kn_n256_tma1_w8rs"),
+    ("sm_100a", 152, 6144, 128, 16384): (None, "kn_n256_tma1_w8r"),
+    ("sm_100a", 152, 8192, 128, 16172): (None, "kn_n256_tma1_w8rs"),
+}
+#: :data:`K1_DGRAD_NVJET_RULES_BY_SM`: the tables of version 0.3.17 less the keys of ``NONDET_DET_PLAN_0318``.
+K1_DGRAD_NVJET_ROWS = {
+    part: {key: t for key, t in rows.items() if (*part, *key[:3]) not in NONDET_DET_PLAN_0318}
+    for part, rows in K1_DGRAD_NVJET_ROWS_0317.items()
 }
 _KD, _KD_TMA, _KD_TMA_LEAN_FREE = (
     "dense_proj_gemm_dgrad_kn_n256_f32_ef",
@@ -15632,10 +15699,26 @@ K1_DGRAD_PROGRAMS = {
     "kn_n256_tma1_w8r": "bf16",
     "kn_n256_tma1_w8rs": "bf16",
 }
-#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` (version 0.3.16 takes out the BF16 entries under the keys of
-#: ``NONDET_DET_PLAN_0316``: 5 on the 148-SM ``sm_100a`` part, 11 on the 152-SM ``sm_103a`` part; version 0.3.15:
-#: ``K1_DGRAD_ROW_COUNTS_0315``).
+#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` (version 0.3.18 takes out the BF16 entries of the keys of
+#: ``NONDET_DET_PLAN_0318``: 20 on the 152-SM ``sm_100a`` part; version 0.3.17: ``K1_DGRAD_ROW_COUNTS_0317``).
 K1_DGRAD_ROW_COUNTS = {
+    ("sm_100a", 148): 69,
+    ("sm_100a", 152): 46,
+    ("sm_103a", 152): 56,
+    ("sm_107a", 212): 6,
+}
+#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` in version 0.3.17 (it takes out the BF16 entries under the keys
+#: of ``NONDET_DET_PLAN_0317``: 3 on the 212-SM ``sm_107a`` part; version 0.3.16: ``K1_DGRAD_ROW_COUNTS_0316``).
+K1_DGRAD_ROW_COUNTS_0317 = {
+    ("sm_100a", 148): 69,
+    ("sm_100a", 152): 66,
+    ("sm_103a", 152): 56,
+    ("sm_107a", 212): 6,
+}
+#: The rows per part of :data:`K1_DGRAD_RULES_BY_SM` in version 0.3.16 (it takes out the BF16 entries under the keys
+#: of ``NONDET_DET_PLAN_0316``: 5 on the 148-SM ``sm_100a`` part, 11 on the 152-SM ``sm_103a`` part; version 0.3.15:
+#: ``K1_DGRAD_ROW_COUNTS_0315``).
+K1_DGRAD_ROW_COUNTS_0316 = {
     ("sm_100a", 148): 69,
     ("sm_100a", 152): 66,
     ("sm_103a", 152): 56,
@@ -15770,15 +15853,35 @@ K1_DGRAD_RULES_ROWS_0315 = {
     },
 }
 # fmt: on
-#: :data:`K1_DGRAD_RULES_BY_SM`: the table of version 0.3.15 less its BF16 entries under the keys of
+#: :data:`K1_DGRAD_RULES_BY_SM` of version 0.3.16: the table of version 0.3.15 less its BF16 entries under the keys of
 #: ``NONDET_DET_PLAN_0316`` (16 of them; the other 5 keys had none).
-K1_DGRAD_RULES_ROWS = {
+K1_DGRAD_RULES_ROWS_0316 = {
     part: {
         key: program
         for key, program in rows.items()
         if key[3] != "bf16" or (*part, *key[:3]) not in NONDET_DET_PLAN_0316
     }
     for part, rows in K1_DGRAD_RULES_ROWS_0315.items()
+}
+#: :data:`K1_DGRAD_RULES_BY_SM` of version 0.3.17: the table of version 0.3.16 less its BF16 entries under the keys of
+#: ``NONDET_DET_PLAN_0317`` (the 3 indexer_hw keys; the other 7 keys had none).
+K1_DGRAD_RULES_ROWS_0317 = {
+    part: {
+        key: program
+        for key, program in rows.items()
+        if key[3] != "bf16" or (*part, *key[:3]) not in NONDET_DET_PLAN_0317
+    }
+    for part, rows in K1_DGRAD_RULES_ROWS_0316.items()
+}
+#: :data:`K1_DGRAD_RULES_BY_SM`: the table of version 0.3.17 less its BF16 entries of the keys of
+#: ``NONDET_DET_PLAN_0318`` (20 of them; the other 3 keys had none).
+K1_DGRAD_RULES_ROWS = {
+    part: {
+        key: program
+        for key, program in rows.items()
+        if key[3] != "bf16" or (*part, *key[:3]) not in NONDET_DET_PLAN_0318
+    }
+    for part, rows in K1_DGRAD_RULES_ROWS_0317.items()
 }
 #: The measured token counts of the input-gradient and named forward rows.
 K1_SCREEN_TOKENS = (16172, 16231, 16384)
@@ -16645,33 +16748,83 @@ def _k1_dgrad_bf16_table(arch, sms, K, N, T):
     return None
 
 
-def _nondet_tables_0315(m):
-    """Put this package's input-gradient entries of version 0.3.15 back (``m``: a monkeypatch context; applying it
-    again in a nested context is a no-op): each key of ``NONDET_DET_PLAN_0316`` with its nvjet program in
-    :data:`K1_DGRAD_NVJET_RULES_BY_SM` and, where it had one, its deterministic program in :data:`K1_DGRAD_RULES_BY_SM`.
-    Outside these keys the tables of version 0.3.16 are those of version 0.3.15
-    (``test_nondet_tables_0315_are_the_tables_of_0_3_15``)."""
-    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0316.items():
+def _nondet_tables_put_back(m, keys):
+    """Put back this package's input-gradient entries of the keys ``keys`` (``NONDET_DET_PLAN_0316``,
+    ``NONDET_DET_PLAN_0317`` or ``NONDET_DET_PLAN_0318``; ``m``: a monkeypatch context): each key with its nvjet program
+    in :data:`K1_DGRAD_NVJET_RULES_BY_SM` where it had one, and its deterministic program in
+    :data:`K1_DGRAD_RULES_BY_SM` where it had one."""
+    for (arch, sms, K, N, T), (template, program) in keys.items():
         key = (K, N, T, "bf16")
-        m.setitem(cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[(arch, sms)], key, template)
+        if template is not None:
+            m.setitem(cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[(arch, sms)], key, template)
         if program is not None:
             m.setitem(cake_backend.K1_DGRAD_RULES_BY_SM[(arch, sms)], key, program)
 
 
-def _nondet_dgrad_tables_0315_whole(m):
-    """Set this package's four input-gradient tables whole to those of version 0.3.15 from the mirrors of this module,
-    not from the live tables (``m``: a monkeypatch context; copies, so a test may change them):
-    :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``K1_DGRAD_NVJET_ROWS_0315``, :data:`K1_DGRAD_RULES_BY_SM` to
-    ``K1_DGRAD_RULES_ROWS_0315`` and the two tables version 0.3.16 keeps, :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` to
-    ``K1_DGRAD_PROGRAM_ROWS`` and :data:`K1_DGRAD_PROMO_RANGES_BY_SM` to the range of ``K1_DGRAD_PROMO_ROWS``."""
+def _nondet_tables_0317(m):
+    """Put this package's input-gradient entries of version 0.3.17 back (``m``: a monkeypatch context; applying it
+    again in a nested context is a no-op): each key of ``NONDET_DET_PLAN_0318`` with its lean nvjet program in
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` (10 keys) and its deterministic program in :data:`K1_DGRAD_RULES_BY_SM` (20
+    keys).  Outside these keys the tables of version 0.3.18 are those of version 0.3.17
+    (``test_nondet_tables_0317_are_the_tables_of_0_3_17``)."""
+    _nondet_tables_put_back(m, NONDET_DET_PLAN_0318)
+
+
+def _nondet_tables_0316(m):
+    """Put this package's input-gradient entries of version 0.3.16 back (``m``: a monkeypatch context; applying it
+    again in a nested context is a no-op): those of version 0.3.17 (``_nondet_tables_0317``), then each key of
+    ``NONDET_DET_PLAN_0317`` with its lean_free nvjet program in :data:`K1_DGRAD_NVJET_RULES_BY_SM` and, at the three
+    indexer_hw keys, its deterministic program in :data:`K1_DGRAD_RULES_BY_SM`.  Outside these keys the tables of
+    version 0.3.17 are those of version 0.3.16 (``test_nondet_tables_0316_are_the_tables_of_0_3_16``)."""
+    _nondet_tables_0317(m)
+    _nondet_tables_put_back(m, NONDET_DET_PLAN_0317)
+
+
+def _nondet_tables_0315(m):
+    """Put this package's input-gradient entries of version 0.3.15 back (``m``: a monkeypatch context; applying it
+    again in a nested context is a no-op): those of version 0.3.16 (``_nondet_tables_0316``), then each key of
+    ``NONDET_DET_PLAN_0316`` with its nvjet program in :data:`K1_DGRAD_NVJET_RULES_BY_SM` and, where it had one, its
+    deterministic program in :data:`K1_DGRAD_RULES_BY_SM`.  Outside these keys the tables of version 0.3.16 are those of
+    version 0.3.15 (``test_nondet_tables_0315_are_the_tables_of_0_3_15``)."""
+    _nondet_tables_0316(m)
+    _nondet_tables_put_back(m, NONDET_DET_PLAN_0316)
+
+
+def _nondet_dgrad_tables_whole(m, nvjet, rules):
+    """Set this package's four input-gradient tables whole from the mirrors of this module, not from the live tables
+    (``m``: a monkeypatch context; copies, so a test may change them): :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``nvjet``,
+    :data:`K1_DGRAD_RULES_BY_SM` to ``rules`` and the two tables versions 0.3.16 to 0.3.18 keep,
+    :data:`K1_DGRAD_PROGRAM_RULES_BY_SM` to ``K1_DGRAD_PROGRAM_ROWS`` and :data:`K1_DGRAD_PROMO_RANGES_BY_SM` to the
+    range of ``K1_DGRAD_PROMO_ROWS``."""
     promo = {("sm_100a", 148): {(K, N, "bf16"): ((16172, 16384, "l2_256b"),) for K, N in K1_DGRAD_PROMO_ROWS}}
     for name, table in (
         ("K1_DGRAD_PROGRAM_RULES_BY_SM", K1_DGRAD_PROGRAM_ROWS),
-        ("K1_DGRAD_NVJET_RULES_BY_SM", K1_DGRAD_NVJET_ROWS_0315),
-        ("K1_DGRAD_RULES_BY_SM", K1_DGRAD_RULES_ROWS_0315),
+        ("K1_DGRAD_NVJET_RULES_BY_SM", nvjet),
+        ("K1_DGRAD_RULES_BY_SM", rules),
         ("K1_DGRAD_PROMO_RANGES_BY_SM", promo),
     ):
         m.setattr(cake_backend, name, {part: dict(rows) for part, rows in table.items()})
+
+
+def _nondet_dgrad_tables_0315_whole(m):
+    """Set this package's four input-gradient tables whole to those of version 0.3.15 from the mirrors of this module
+    (``_nondet_dgrad_tables_whole``): :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``K1_DGRAD_NVJET_ROWS_0315`` and
+    :data:`K1_DGRAD_RULES_BY_SM` to ``K1_DGRAD_RULES_ROWS_0315``."""
+    _nondet_dgrad_tables_whole(m, K1_DGRAD_NVJET_ROWS_0315, K1_DGRAD_RULES_ROWS_0315)
+
+
+def _nondet_dgrad_tables_0316_whole(m):
+    """Set this package's four input-gradient tables whole to those of version 0.3.16 from the mirrors of this module
+    (``_nondet_dgrad_tables_whole``): :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``K1_DGRAD_NVJET_ROWS_0316`` and
+    :data:`K1_DGRAD_RULES_BY_SM` to ``K1_DGRAD_RULES_ROWS_0316``."""
+    _nondet_dgrad_tables_whole(m, K1_DGRAD_NVJET_ROWS_0316, K1_DGRAD_RULES_ROWS_0316)
+
+
+def _nondet_dgrad_tables_0317_whole(m):
+    """Set this package's four input-gradient tables whole to those of version 0.3.17 from the mirrors of this module
+    (``_nondet_dgrad_tables_whole``): :data:`K1_DGRAD_NVJET_RULES_BY_SM` to ``K1_DGRAD_NVJET_ROWS_0317`` and
+    :data:`K1_DGRAD_RULES_BY_SM` to ``K1_DGRAD_RULES_ROWS_0317``."""
+    _nondet_dgrad_tables_whole(m, K1_DGRAD_NVJET_ROWS_0317, K1_DGRAD_RULES_ROWS_0317)
 
 
 def test_k1_rows_follow_the_deterministic_start_ranges_of_0_3_12(monkeypatch):
@@ -16940,6 +17093,21 @@ def _det_tables_0314(m):
                     rule["group_m"] = group
                 ranges.append((lo, hi, rule))
             m.setitem(table, (part[0], False, True, False, False, False, K, N, None), tuple(ranges))
+
+
+#: The BF16 input gradients ``(K, N)`` of ``out[T, K] = G[T, N] @ W[N, K]`` whose keys version 0.3.17 of the
+#: deterministic package added to the 212-SM ``sm_107a`` part ranges (its 128-column start-path programs there).
+DET_TILE_0317_ROWS = ((4096, 32), (5120, 32), (6144, 32), (4096, 64), (5120, 64))
+
+
+def _det_tables_0316(m):
+    """Put the deterministic package's ranges of version 0.3.16 back (``m``: a monkeypatch context; applying it again in
+    a nested context is a no-op): the 212-SM ``sm_107a`` part without the keys of ``DET_TILE_0317_ROWS``."""
+    table = det_backend.ROW_RULE_RANGES_BY_SM.get(("sm_107a", 212))
+    if table is None:
+        return
+    for K, N in DET_TILE_0317_ROWS:
+        m.delitem(table, ("sm_107a", False, True, False, False, False, K, N, None), raising=False)
 
 
 #: The deterministic package's ranges of version 0.3.13 of the BF16 input gradients its 128-column start-path ranges
@@ -17403,6 +17571,7 @@ def test_k1_rows_follow_the_deterministic_tile_cells_of_0_3_14(monkeypatch):
     than with the ranges of version 0.3.13.  Which cells this package's tables hold follows from those tables (at 16172,
     16231 and 16384 tokens on the 152-SM parts and the 148-SM ``sm_100a`` part); the counts are pinned below, with
     this package's tables of version 0.3.15 (``_nondet_tables_0315``)."""
+    _det_tables_0316(monkeypatch)  # without the 212-SM sm_107a keys of version 0.3.17
     _det_tables_0314(monkeypatch)  # the ranges of version 0.3.14: version 0.3.15 is checked below
     _nondet_tables_0315(monkeypatch)  # this package's tables of version 0.3.15: version 0.3.16 is checked below
     bf16 = torch.bfloat16
@@ -17724,11 +17893,13 @@ def test_nondet_tables_0315_are_the_tables_of_0_3_15(monkeypatch):
     """``_nondet_tables_0315`` puts back exactly the input-gradient entries version 0.3.16 took out: with it
     :data:`K1_DGRAD_NVJET_RULES_BY_SM` is ``K1_DGRAD_NVJET_ROWS_0315`` and :data:`K1_DGRAD_RULES_BY_SM` is
     ``K1_DGRAD_RULES_ROWS_0315`` (the mirrors of version 0.3.15, entry for entry), the other two input-gradient tables
-    stay as they are, and all four are the tables ``_nondet_dgrad_tables_0315_whole`` sets.  The live tables are those
-    of version 0.3.16 (``K1_DGRAD_NVJET_ROWS``, ``K1_DGRAD_RULES_ROWS``); the two versions differ at the keys of
+    stay as they are, and all four are the tables ``_nondet_dgrad_tables_0315_whole`` sets.  The tables it starts from
+    are those of version 0.3.16 (``_nondet_tables_0316`` over the live tables of version 0.3.18:
+    ``K1_DGRAD_NVJET_ROWS_0316``, ``K1_DGRAD_RULES_ROWS_0316``); the two versions differ at the keys of
     ``NONDET_DET_PLAN_0316`` alone, each holding there its entries of version 0.3.15 (the nvjet program at each key, the
     deterministic program at the 16 keys that had one).  Applying the rollback again in a nested context changes
     nothing; leaving a context restores the tables of version 0.3.16."""
+    _nondet_tables_0316(monkeypatch)  # this package's tables of version 0.3.16: version 0.3.17 is checked below
     names = (
         "K1_DGRAD_NVJET_RULES_BY_SM",
         "K1_DGRAD_RULES_BY_SM",
@@ -17740,8 +17911,8 @@ def test_nondet_tables_0315_are_the_tables_of_0_3_15(monkeypatch):
         return tuple({p: dict(t) for p, t in getattr(cake_backend, name).items()} for name in names)
 
     live = tables()
-    assert live[:2] == (K1_DGRAD_NVJET_ROWS, K1_DGRAD_RULES_ROWS)
-    assert {p: len(t) for p, t in live[1].items()} == K1_DGRAD_ROW_COUNTS
+    assert live[:2] == (K1_DGRAD_NVJET_ROWS_0316, K1_DGRAD_RULES_ROWS_0316)
+    assert {p: len(t) for p, t in live[1].items()} == K1_DGRAD_ROW_COUNTS_0316
     with monkeypatch.context() as m:
         _nondet_tables_0315(m)
         was = tables()
@@ -17777,11 +17948,14 @@ def test_k1_dgrad_tables_of_0_3_16(monkeypatch):
     """The keys version 0.3.16 leaves to the deterministic plan (``NONDET_DET_PLAN_0316``): 15 on the 152-SM ``sm_103a``
     part and 6 on the 148-SM ``sm_100a`` part, each a key of the round's rows (``NONDET_ROWS_0316``) at 16172, 16231 or
     16384 tokens that version 0.3.15 held on the lean or lean_free nvjet program, which no table of this package holds
-    now (``_k1_dgrad_bf16_table``).  The backend's per-part sets ``_NVJET_DGRAD_DET_PLAN_ROWS`` hold exactly these keys
-    (the 152-SM ``sm_100a`` part an empty set), and the nvjet table holds 38 / 26 / 31 / 33 keys per part (44 / 26 /
-    46 / 33 in version 0.3.15).  Of the round's keys the tables held 33 on the 152-SM ``sm_103a`` and the 148-SM
-    ``sm_100a`` part and 30 on the 152-SM ``sm_100a`` part; they keep all but those of ``NONDET_DET_PLAN_0316``
-    (``NONDET_ROW_KEYS_0316``)."""
+    in version 0.3.16 (``_nondet_tables_0316``; ``_k1_dgrad_bf16_table``).  The backend's per-part sets
+    ``_NVJET_DGRAD_DET_PLAN_ROWS`` of these parts hold exactly these keys (the 152-SM ``sm_100a`` set, less the keys
+    version 0.3.18 adds (``test_k1_dgrad_tables_of_0_3_18``), is empty; the 212-SM ``sm_107a`` set is that of version
+    0.3.17, ``test_k1_dgrad_tables_of_0_3_17``), and the nvjet table of version 0.3.16 holds 38 / 26 / 31 / 33 keys per
+    part (44 / 26 / 46 / 33 in version 0.3.15).  Of the round's keys the tables held 33 on the 152-SM
+    ``sm_103a`` and the 148-SM ``sm_100a`` part and 30 on the 152-SM ``sm_100a`` part; they keep all but those of
+    ``NONDET_DET_PLAN_0316`` (``NONDET_ROW_KEYS_0316``)."""
+    _nondet_tables_0316(monkeypatch)  # this package's tables of version 0.3.16: version 0.3.17 is checked below
     parts = {}
     for arch, sms, K, N, T in NONDET_DET_PLAN_0316:
         what = (arch, sms, K, N, T)
@@ -17790,13 +17964,17 @@ def test_k1_dgrad_tables_of_0_3_16(monkeypatch):
         assert (K, N, T, "bf16") in K1_DGRAD_NVJET_ROWS_0315[(arch, sms)], what
         assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
     assert {part: len(keys) for part, keys in parts.items()} == {("sm_103a", 152): 15, ("sm_100a", 148): 6}
-    assert cake_backend._NVJET_DGRAD_DET_PLAN_ROWS == {
+    sets = dict(cake_backend._NVJET_DGRAD_DET_PLAN_ROWS)
+    sets.pop(("sm_107a", 212))  # the set of version 0.3.17 (test_k1_dgrad_tables_of_0_3_17)
+    # less the 152-SM sm_100a keys of version 0.3.18 (test_k1_dgrad_tables_of_0_3_18)
+    sets[("sm_100a", 152)] -= {(K, N, T) for _, _, K, N, T in NONDET_DET_PLAN_0318}
+    assert sets == {
         ("sm_100a", 148): frozenset(parts[("sm_100a", 148)]),
         ("sm_100a", 152): frozenset(),
         ("sm_103a", 152): frozenset(parts[("sm_103a", 152)]),
     }
     nvjet_counts = {("sm_100a", 148): 38, ("sm_100a", 152): 26, ("sm_103a", 152): 31, ("sm_107a", 212): 33}
-    assert {part: len(rows) for part, rows in K1_DGRAD_NVJET_ROWS.items()} == nvjet_counts
+    assert {part: len(rows) for part, rows in K1_DGRAD_NVJET_ROWS_0316.items()} == nvjet_counts
     assert {part: len(rows) for part, rows in K1_DGRAD_NVJET_ROWS_0315.items()} == {
         ("sm_100a", 148): 44,
         ("sm_100a", 152): 26,
@@ -17883,7 +18061,10 @@ def test_k1_dgrad_kept_keys_of_0_3_16_bind_their_program(monkeypatch):
     ``sm_100a`` and ``sm_103a`` parts, but those of ``NONDET_DET_PLAN_0316``, keeps its entry and its program (CPU
     views, the part's device facts, nothing launched): a key of ``K1_DGRAD_NVJET_ROWS_0315`` binds its nvjet program on
     the deterministic package's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, a key of ``K1_DGRAD_RULES_ROWS_0315`` alone
-    the deterministic package's plan of the knobs of its program, that program.  44, 47 and 37 keys."""
+    the deterministic package's plan of the knobs of its program, that program.  44, 47 and 37 keys.  This package's
+    tables are those of version 0.3.17 (``_nondet_tables_0317``), which hold the 152-SM ``sm_100a`` keys of version
+    0.3.15 (version 0.3.18: ``test_k1_dgrad_kept_keys_of_0_3_18_bind_their_program``)."""
+    _nondet_tables_0317(monkeypatch)  # this package's tables of version 0.3.17: version 0.3.18 is checked below
     bf16 = torch.bfloat16
     prefix = det_backend._TEMPLATE_PREFIX
     _cpu_k1_launches(monkeypatch, "sm_103a")
@@ -17925,18 +18106,15 @@ def test_k1_dgrad_kept_keys_of_0_3_16_bind_their_program(monkeypatch):
     assert counts == {("sm_100a", 148): 44, ("sm_100a", 152): 47, ("sm_103a", 152): 37}, counts
 
 
-def test_k1_dgrad_routes_of_0_3_16_change_at_its_keys_alone(monkeypatch):
-    """The input-gradient routing of version 0.3.16 against that of version 0.3.15 over every part of this package's
-    input-gradient tables of either version and the 148-SM ``sm_103a`` part, every row ``(K, N)`` of their keys (BF16
-    and FP32 out) and of the promotion ranges, BF16 and FP32 ``out`` at each, and the token sweep of every token count
-    of those keys and range ends, one below and one above each and 16300 (CPU views, the part's device facts, nothing
-    planned or launched).  Version 0.3.15 is the four input-gradient tables set whole from the mirrors of this module
-    (``_nondet_dgrad_tables_0315_whole``), not built from the live tables, so a change of a live table outside the keys
-    below shows here.  The route -- the table and key ``_k1_table_call`` names, this package's input-gradient program,
-    its nvjet program and the knobs it hands the deterministic planner -- differs exactly at the keys of
-    ``NONDET_DET_PLAN_0316``, BF16 out, on their part and at their token count: there version 0.3.16 routes to no table
-    (the deterministic plan) and version 0.3.15 to the key's nvjet program, with the knobs of its deterministic program
-    where it had one.  Every other part, row, token count and output dtype routes as in version 0.3.15."""
+def _k1_dgrad_routes(monkeypatch, tables_before):
+    """``(now, before, parts)``: the input-gradient route per ``(arch, SM count, K, N, T, out dtype)`` with this
+    package's current tables (``now``) and with the tables ``tables_before`` sets (``before``; a
+    ``_nondet_dgrad_tables_*_whole`` setter, in a nested monkeypatch context), and the parts swept.  The sweep: every
+    part of this package's input-gradient tables of either set and the 148-SM ``sm_103a`` part, every row ``(K, N)`` of
+    their keys (BF16 and FP32 out) and of the promotion ranges, BF16 and FP32 ``out`` at each, and every token count of
+    those keys and range ends, one below and one above each and 16300 (CPU views, the part's device facts, nothing
+    planned or launched).  The route: the table and key ``_k1_table_call`` names, this package's input-gradient
+    program, its nvjet program and the knobs it hands the deterministic planner."""
     _cpu_k1_launches(monkeypatch, "sm_103a")
     monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
     bf16, f32 = torch.bfloat16, torch.float32
@@ -17960,7 +18138,7 @@ def test_k1_dgrad_routes_of_0_3_16_change_at_its_keys_alone(monkeypatch):
 
     live = sweep()
     with monkeypatch.context() as m:
-        _nondet_dgrad_tables_0315_whole(m)
+        tables_before(m)
         was = sweep()
     parts = sorted(live[0] | was[0] | {("sm_103a", 148)})
     rows = sorted(live[1] | was[1])
@@ -17987,9 +18165,28 @@ def test_k1_dgrad_routes_of_0_3_16_change_at_its_keys_alone(monkeypatch):
 
     now = routes()
     with monkeypatch.context() as m:
-        _nondet_dgrad_tables_0315_whole(m)
+        tables_before(m)
         before = routes()
     assert set(now) == set(before) and len(now) == 2 * len(parts) * len(rows) * len(tokens)
+    return now, before, parts
+
+
+def test_k1_dgrad_routes_of_0_3_16_change_at_its_keys_alone(monkeypatch):
+    """The input-gradient routing of version 0.3.16 (``_nondet_tables_0316`` over the live tables of version 0.3.18)
+    against that of version 0.3.15 over every part of this package's input-gradient tables of either version and the
+    148-SM ``sm_103a`` part, every row ``(K, N)`` of their keys (BF16 and FP32 out) and of the promotion ranges, BF16
+    and FP32 ``out`` at each, and the token sweep of every token count of those keys and range ends, one below and one
+    above each and 16300 (CPU views, the part's device facts, nothing planned or launched).  Version 0.3.15 is the four
+    input-gradient tables set whole from the mirrors of this module (``_nondet_dgrad_tables_0315_whole``), not built
+    from the live tables, so a change of a live table outside the keys below and those of ``NONDET_DET_PLAN_0317`` and
+    ``NONDET_DET_PLAN_0318`` shows here.  The route -- the table and key ``_k1_table_call`` names, this package's
+    input-gradient program, its nvjet program and the knobs it hands the deterministic planner -- differs exactly at
+    the keys of ``NONDET_DET_PLAN_0316``, BF16 out, on their part and at their token count: there version 0.3.16 routes
+    to no table (the deterministic plan) and version 0.3.15 to the key's nvjet program, with the knobs of its
+    deterministic program where it had one.  Every other part, row, token count and output dtype routes as in version
+    0.3.15."""
+    _nondet_tables_0316(monkeypatch)  # this package's tables of version 0.3.16: version 0.3.17 is checked below
+    now, before, parts = _k1_dgrad_routes(monkeypatch, _nondet_dgrad_tables_0315_whole)
     changed = {where for where, route in now.items() if route != before[where]}
     assert changed == {(*key, "bf16") for key in NONDET_DET_PLAN_0316}, sorted(changed)
     for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0316.items():
@@ -18056,6 +18253,647 @@ def test_gpu_k1_dgrad_det_plan_keys_of_0_3_16_run_the_deterministic_plan(record_
         ran += 1
     cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
     print(f"NONDET_DET_PLAN_0316 {arch} sm_count={sms}: {ran} keys ran the deterministic plan")
+    assert ran == len(keys)
+
+
+#: The BF16 input-gradient keys of the round of version 0.3.17 on the 212-SM ``sm_107a`` part that missed the bar and
+#: keep their lean_free nvjet program: ``4096 -> 64`` at 16172, 16231 and 16384 tokens and ``5120 -> 64`` at 16172 and
+#: 16231 tokens.  With the keys of ``NONDET_DET_PLAN_0317`` they are the 15 keys of the round, the rows of
+#: ``DET_TILE_0317_ROWS`` at 16172, 16231 and 16384 tokens.
+NONDET_KEPT_0317 = frozenset({*((4096, 64, T) for T in _GLM), (5120, 64, 16172), (5120, 64, 16231)})
+
+
+def test_nondet_tables_0316_are_the_tables_of_0_3_16(monkeypatch):
+    """``_nondet_tables_0316`` puts back exactly the input-gradient entries version 0.3.17 took out: with it
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` is ``K1_DGRAD_NVJET_ROWS_0316`` and :data:`K1_DGRAD_RULES_BY_SM` is
+    ``K1_DGRAD_RULES_ROWS_0316`` (the mirrors of version 0.3.16, entry for entry), the other two input-gradient tables
+    stay as they are, and all four are the tables ``_nondet_dgrad_tables_0316_whole`` sets.  The tables it starts from
+    are those of version 0.3.17 (``_nondet_tables_0317`` over the live tables of version 0.3.18:
+    ``K1_DGRAD_NVJET_ROWS_0317``, ``K1_DGRAD_RULES_ROWS_0317``); the two versions differ at the keys of
+    ``NONDET_DET_PLAN_0317`` alone, all on the 212-SM ``sm_107a`` part, each holding there its entries of version 0.3.16
+    (the lean_free nvjet program at each key, ``kn_n256_tma2_pd2_lw_pro15`` at the 3 indexer_hw keys).  Applying the
+    rollback again in a nested context changes nothing; leaving a context restores the tables of version 0.3.17."""
+    _nondet_tables_0317(monkeypatch)  # this package's tables of version 0.3.17: version 0.3.18 is checked below
+    names = (
+        "K1_DGRAD_NVJET_RULES_BY_SM",
+        "K1_DGRAD_RULES_BY_SM",
+        "K1_DGRAD_PROGRAM_RULES_BY_SM",
+        "K1_DGRAD_PROMO_RANGES_BY_SM",
+    )
+
+    def tables():
+        return tuple({p: dict(t) for p, t in getattr(cake_backend, name).items()} for name in names)
+
+    live = tables()
+    assert live[:2] == (K1_DGRAD_NVJET_ROWS_0317, K1_DGRAD_RULES_ROWS_0317)
+    assert {p: len(t) for p, t in live[1].items()} == K1_DGRAD_ROW_COUNTS_0317
+    with monkeypatch.context() as m:
+        _nondet_tables_0316(m)
+        was = tables()
+        with monkeypatch.context() as again:
+            _nondet_tables_0316(again)
+            assert tables() == was
+        assert tables() == was
+    assert tables() == live
+    assert was[:2] == (K1_DGRAD_NVJET_ROWS_0316, K1_DGRAD_RULES_ROWS_0316) and was[2:] == live[2:]
+    assert {p: len(t) for p, t in was[1].items()} == K1_DGRAD_ROW_COUNTS_0316
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0316_whole(m)
+        assert tables() == was
+    assert tables() == live
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0317.items():
+        what = (arch, sms, K, N, T)
+        assert K1_DGRAD_NVJET_ROWS_0316[(arch, sms)][(K, N, T, "bf16")] == template, what
+        assert K1_DGRAD_RULES_ROWS_0316[(arch, sms)].get((K, N, T, "bf16")) == program, what
+    for now, before, programs in ((live[0], was[0], False), (live[1], was[1], True)):
+        assert set(now) == set(before)
+        for part in now:
+            changed = {k for k in {*now[part], *before[part]} if now[part].get(k) != before[part].get(k)}
+            want = {
+                (K, N, T, "bf16")
+                for (arch, sms, K, N, T), (_, program) in NONDET_DET_PLAN_0317.items()
+                if (arch, sms) == part and (program is not None or not programs)
+            }
+            assert changed == want and not changed & set(now[part]), (part, programs, sorted(changed))
+    assert {(arch, sms) for arch, sms, *_ in NONDET_DET_PLAN_0317} == {("sm_107a", 212)}
+    assert sum(program is not None for _, program in NONDET_DET_PLAN_0317.values()) == 3
+
+
+def test_k1_dgrad_tables_of_0_3_17(monkeypatch):
+    """The keys version 0.3.17 leaves to the deterministic plan (``NONDET_DET_PLAN_0317``): 10 on the 212-SM ``sm_107a``
+    part, each a key of the round's rows (``DET_TILE_0317_ROWS``) at 16172, 16231 or 16384 tokens that version 0.3.16
+    held on the lean_free nvjet program, which no table of this package holds in version 0.3.17
+    (``_nondet_tables_0317``; ``_k1_dgrad_bf16_table``).  The backend's per-part sets ``_NVJET_DGRAD_DET_PLAN_ROWS``
+    hold exactly the keys of ``NONDET_DET_PLAN_0316`` and ``NONDET_DET_PLAN_0317`` (the 152-SM ``sm_100a`` set, less
+    the keys version 0.3.18 adds (``test_k1_dgrad_tables_of_0_3_18``), is empty), and the nvjet table of version
+    0.3.17 holds 38 / 26 / 31 / 23 keys per part (33 on the 212-SM part in version 0.3.16).  Of the round's 15 keys the
+    tables held all in version 0.3.16 and keep those of ``NONDET_KEPT_0317``; on the parts of ``NONDET_ROW_KEYS_0316``
+    the tables hold the keys of these rows at those token counts as in version 0.3.16."""
+    _nondet_tables_0317(monkeypatch)  # this package's tables of version 0.3.17: version 0.3.18 is checked below
+    part = ("sm_107a", 212)
+    keys = set()
+    for arch, sms, K, N, T in NONDET_DET_PLAN_0317:
+        what = (arch, sms, K, N, T)
+        assert (arch, sms) == part, what
+        keys.add((K, N, T))
+        assert (K, N) in DET_TILE_0317_ROWS and T in _GLM, what
+        assert (K, N, T, "bf16") in K1_DGRAD_NVJET_ROWS_0316[part], what
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+    assert len(keys) == 10 and not keys & NONDET_KEPT_0317
+    sets = {("sm_100a", 152): frozenset()}
+    for arch, sms, K, N, T in (*NONDET_DET_PLAN_0316, *NONDET_DET_PLAN_0317):
+        sets[(arch, sms)] = sets.get((arch, sms), frozenset()) | {(K, N, T)}
+    live_sets = dict(cake_backend._NVJET_DGRAD_DET_PLAN_ROWS)
+    # less the 152-SM sm_100a keys of version 0.3.18 (test_k1_dgrad_tables_of_0_3_18)
+    live_sets[("sm_100a", 152)] -= {(K, N, T) for _, _, K, N, T in NONDET_DET_PLAN_0318}
+    assert live_sets == sets
+    nvjet_counts = {("sm_100a", 148): 38, ("sm_100a", 152): 26, ("sm_103a", 152): 31, ("sm_107a", 212): 23}
+    assert {p: len(rows) for p, rows in K1_DGRAD_NVJET_ROWS_0317.items()} == nvjet_counts
+    assert {p: len(rows) for p, rows in cake_backend.K1_DGRAD_NVJET_RULES_BY_SM.items()} == nvjet_counts
+    assert {p: len(rows) for p, rows in K1_DGRAD_NVJET_ROWS_0316.items()} == {**nvjet_counts, part: 33}
+
+    def held(p):
+        return {
+            (K, N, T) for K, N in DET_TILE_0317_ROWS for T in _GLM if _k1_dgrad_bf16_table(*p, K, N, T) is not None
+        }
+
+    parts = (*NONDET_ROW_KEYS_0316, part)
+    now = {p: held(p) for p in parts}
+    with monkeypatch.context() as m:
+        _nondet_tables_0316(m)
+        before = {p: held(p) for p in parts}
+    assert before[part] == {(K, N, T) for K, N in DET_TILE_0317_ROWS for T in _GLM}, sorted(before[part])
+    assert now[part] == NONDET_KEPT_0317 and before[part] - now[part] == keys, sorted(now[part])
+    for p in NONDET_ROW_KEYS_0316:
+        assert now[p] == before[p], p
+
+
+def test_k1_dgrad_det_plan_keys_of_0_3_17_bind_the_deterministic_plan(monkeypatch):
+    """At each key of ``NONDET_DET_PLAN_0317`` on the 212-SM ``sm_107a`` part (CPU views, the part's device facts,
+    nothing launched): no table of this package routes the input gradient (``_k1_table_call`` gives ``None``: no nvjet
+    program, no knobs), the entry point binds the deterministic package's plan of the row field for field -- its
+    128-column start-path program of the row's K step (``DET_TILE_0314_PROGRAMS``), whole tiles, in raster groups of 16
+    (of 32 on ``5120 -> 64`` at 16384 tokens) -- and the generic prepare is the deterministic package's prepared launch
+    of that plan, the launch the round timed as the deterministic plan.  With the tables of version 0.3.16
+    (``_nondet_tables_0316``) the same call bound the lean_free nvjet program on the deterministic planner's plan of
+    :data:`K1_DGRAD_NVJET_DET_PROGRAM` (which that package does not register on ``sm_107a``), another plan, and the
+    generic prepare named that table."""
+    arch, sms = "sm_107a", 212
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, arch)
+    facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+    monkeypatch.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    nvjet_knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    checked = 0
+    for (a, s, K, N, T), (template, _) in sorted(NONDET_DET_PLAN_0317.items()):
+        what = (a, s, K, N, T)
+        assert (a, s) == (arch, sms), what
+        G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+        out = torch.empty(T, K, dtype=bf16)
+        assert cake_backend._k1_table_call(G, W, out, False) is None, what
+        assert cake_backend._k1_dgrad_nvjet_of(G, W, out) is None, what
+        assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+        plan = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+        block_k, group = (32 if N == 32 else 64), (32 if (K, N, T) == (5120, 64, 16384) else 16)
+        assert plan.template == prefix + DET_TILE_0314_PROGRAMS[block_k], (what, plan.template)
+        assert (plan.block_n, plan.block_k, plan.group_m, plan.sk_units) == (128, block_k, group, 0), what
+        entry = _k1_dgrad_entry(G, W, out)
+        assert entry.plan == plan and entry.module_name is None, (what, entry.plan.template, plan.template)
+        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+        det_prepared = det_backend.cake_dense_gemm_det_train_projection_prepare(G, W, out)
+        assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+        assert prepared.plan == det_prepared.plan == plan, what
+        assert prepared.module_name == det_prepared.module_name, what
+        with monkeypatch.context() as before_tables:
+            _nondet_tables_0316(before_tables)
+            held = _k1_dgrad_entry(G, W, out)
+            nvjet_plan = det_backend.cake_dense_gemm_det_train_projection_plan(
+                G, W, out, sm_count=sms, l2_bytes=facts.l2_bytes, transposed_out=False, arch=arch, **nvjet_knobs
+            )[0]
+            assert held.module_name == cake_jit.KERNELS[arch][template], what
+            assert held.plan == nvjet_plan, (what, held.plan.template)
+            assert held.plan.template == prefix + cake_backend.K1_DGRAD_NVJET_DET_PROGRAM, what
+            assert held.plan != plan, what
+            routed = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+            assert isinstance(routed, cake_backend.CakeDenseGemmNondetProgramLaunch), what
+            assert (routed.table, routed.template, routed.own) == (
+                "K1_DGRAD_NVJET_RULES_BY_SM",
+                template,
+                True,
+            ), what
+        checked += 1
+    assert checked == len(NONDET_DET_PLAN_0317) == 10
+
+
+def test_k1_dgrad_kept_keys_of_0_3_17_bind_their_program(monkeypatch):
+    """Every BF16 input-gradient key this package held in version 0.3.16 on the 212-SM ``sm_107a`` part, but those of
+    ``NONDET_DET_PLAN_0317``, keeps its entry and its program (CPU views, the part's device facts, nothing launched):
+    the lean_free nvjet program on the deterministic planner's plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, 23 keys,
+    among them the measured keys that missed the bar (``NONDET_KEPT_0317``); the part's BF16 entries of
+    :data:`K1_DGRAD_RULES_BY_SM` of version 0.3.16 were all under dropped keys.  One token count below and above each
+    of the round's 15 keys, where no table of this package holds the row, the call binds what it bound with the tables
+    of version 0.3.16 (``_nondet_tables_0316``), field for field: the deterministic plan."""
+    arch, sms = part = ("sm_107a", 212)
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, arch)
+    facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+    monkeypatch.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    nvjet = K1_DGRAD_NVJET_ROWS_0316[part]
+    rules = {key for key in K1_DGRAD_RULES_ROWS_0316[part] if key[3] == "bf16"}
+    dropped = {(K, N, T, "bf16") for _, _, K, N, T in NONDET_DET_PLAN_0317}
+    assert rules and rules <= dropped, sorted(rules)
+    kept = sorted(set(nvjet) - dropped)
+    assert {(K, N, T, "bf16") for K, N, T in NONDET_KEPT_0317} <= set(kept)
+    for key in kept:
+        K, N, T, _ = key
+        what = (part, key)
+        G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+        out = torch.empty(T, K, dtype=bf16)
+        assert cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[part][key] == nvjet[key] == _NVJET_FREE, what
+        entry = _k1_dgrad_entry(G, W, out)
+        assert entry.module_name == cake_jit.KERNELS[arch][_NVJET_FREE], what
+        want = det_backend.cake_dense_gemm_det_train_projection_plan(
+            G, W, out, sm_count=sms, l2_bytes=facts.l2_bytes, transposed_out=False, arch=arch, **knobs
+        )[0]
+        assert entry.plan == want, (what, entry.plan.template)
+        assert want.template == prefix + cake_backend.K1_DGRAD_NVJET_DET_PROGRAM, what
+    assert len(kept) == 23, len(kept)
+    neighbours = 0
+    for K, N in DET_TILE_0317_ROWS:
+        W = torch.empty(N, K, dtype=bf16)
+        for t in sorted({T + d for T in _GLM for d in (-1, 1)}):
+            what = (part, K, N, t)
+            G, out = torch.empty(t, N, dtype=bf16), torch.empty(t, K, dtype=bf16)
+            assert _k1_dgrad_bf16_table(arch, sms, K, N, t) is None, what
+            entry = _k1_dgrad_entry(G, W, out)
+            with monkeypatch.context() as before_tables:
+                _nondet_tables_0316(before_tables)
+                before = _k1_dgrad_entry(G, W, out)
+            det = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+            assert entry.module_name is None and before.module_name is None, what
+            assert entry.plan == before.plan == det, (what, entry.plan.template, before.plan.template)
+            neighbours += 1
+    assert neighbours == 6 * len(DET_TILE_0317_ROWS)
+
+
+def test_k1_dgrad_routes_of_0_3_17_change_at_its_keys_alone(monkeypatch):
+    """The input-gradient routing of version 0.3.17 (``_nondet_tables_0317`` over the live tables of version 0.3.18)
+    against that of version 0.3.16 over the sweep of ``_k1_dgrad_routes`` (every part, row, output dtype and token count
+    of this package's input-gradient tables of either version and next to them).  Version 0.3.16 is the four
+    input-gradient tables set whole from the mirrors of this module (``_nondet_dgrad_tables_0316_whole``), not built
+    from the live tables, so a change of a live table outside the keys below and those of ``NONDET_DET_PLAN_0318`` shows
+    here.  The route differs exactly at the keys of ``NONDET_DET_PLAN_0317``, BF16 out, on the 212-SM ``sm_107a`` part
+    and at their token count: there version 0.3.17 routes to no table (the deterministic plan) and version 0.3.16 to
+    the lean_free nvjet program, with the knobs of its deterministic program at the three indexer_hw keys.  Every other
+    part, row, token count and output dtype routes as in version 0.3.16."""
+    _nondet_tables_0317(monkeypatch)  # this package's tables of version 0.3.17: version 0.3.18 is checked below
+    now, before, parts = _k1_dgrad_routes(monkeypatch, _nondet_dgrad_tables_0316_whole)
+    changed = {where for where, route in now.items() if route != before[where]}
+    assert changed == {(*key, "bf16") for key in NONDET_DET_PLAN_0317}, sorted(changed)
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0317.items():
+        where = (arch, sms, K, N, T, "bf16")
+        assert now[where] == (None, None, None, ()), (where, now[where])
+        assert before[where] == (
+            ("K1_DGRAD_NVJET_RULES_BY_SM", (K, N, T, "bf16")),
+            None,
+            cake_jit.KERNELS[arch][template],
+            cake_backend.k1_program_knobs(program) if program else (),
+        ), (where, before[where])
+    # the sweep reaches the routes of every part that has one
+    assert {where[:2] for where, route in now.items() if route[0] is not None} == set(parts) - {("sm_103a", 148)}
+
+
+def test_gpu_k1_dgrad_det_plan_keys_of_0_3_17_run_the_deterministic_plan(record_property):
+    """On the 212-SM ``sm_107a`` part, the part of ``NONDET_DET_PLAN_0317``: the BF16 input gradient of each key through
+    this package's entry point binds the deterministic package's plan of the row (no table of this package holds the
+    key), its 128-column start-path program, and meets the naive BF16 tier against FP64 over the draws, the first draw
+    launched ``1 + RERUNS`` times into NaN-poisoned outputs.  On the last draw's operands the entry point's output and
+    the generic prepared launch's equal the deterministic package's output bit for bit, and so does each of
+    ``RERUNS`` more calls of the entry point into NaN-poisoned outputs; the first key's call runs a program of the
+    deterministic package (by kernel name).  Another part skips."""
+    device, arch, sms = _part_or_skip()
+    keys = sorted((K, N, T) for a, s, K, N, T in NONDET_DET_PLAN_0317 if (a, s) == (arch, sms))
+    if not keys:
+        pytest.skip(f"no key of version 0.3.17 left to the deterministic plan on {arch} with {sms} SMs")
+    dgrad = cake_backend.cake_dense_gemm_nondet_train_projection_dgrad
+    prefix = det_backend._TEMPLATE_PREFIX
+    ran = 0
+    for K, N, T in keys:
+        what = f"dgrad {K} {N} {T} bf16"
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        v = _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_bf16_det_plan_0317",
+            SEED + 190,
+            device,
+            dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.bfloat16,
+        )
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None and entry.module_name is None, what
+        G, W = v.ops
+        want = det_backend._k1_plan(G, W, v.out, transposed_out=False, knobs={})[0]
+        assert entry.plan == want, (what, entry.plan.template, want.template)
+        assert want.template == prefix + DET_TILE_0314_PROGRAMS[32 if N == 32 else 64], (what, want.template)
+        # the same bits as the deterministic package on the last draw's operands, on every repeat
+        det_out = torch.full_like(v.out, float("nan"))
+        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
+        prepared_out = torch.full_like(v.out, float("nan"))
+        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, prepared_out)
+        assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+        assert prepared.plan == want and prepared.launch() is prepared_out, what
+        torch.cuda.synchronize()
+        bits = det_out.view(torch.int16)
+        assert torch.equal(prepared_out.view(torch.int16), bits), what
+        for i in range(RERUNS):
+            v.out.fill_(float("nan"))
+            assert dgrad(G, W, v.out) is v.out
+            torch.cuda.synchronize()
+            assert torch.equal(v.out.view(torch.int16), bits), (what, i)
+        if not ran:
+            _assert_ran_det(lambda G=G, W=W, out=v.out: dgrad(G, W, out))
+        ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"NONDET_DET_PLAN_0317 {arch} sm_count={sms}: {ran} keys ran the deterministic plan")
+    assert ran == len(keys)
+
+
+#: The BF16 input-gradient keys of the round of version 0.3.18 on the 152-SM ``sm_100a`` part (GB200) that missed the
+#: bar and keep their entries: ``4096 -> 48``, ``5120 -> 48`` and the indexer_k ``6144 -> 128`` at 16231 tokens (the
+#: lean nvjet program), ``5120 -> 128`` and ``8192 -> 128`` at 16231 tokens (the lean nvjet program) and at 16384
+#: tokens (``kn_n256_tma1_w8r``).  With the keys of ``NONDET_DET_PLAN_0318`` they are the 30 keys of the round: the keys
+#: of the rows of ``NONDET_ROWS_0316`` at 16172, 16231 and 16384 tokens the part held in version 0.3.17.
+NONDET_KEPT_0318 = frozenset(
+    {
+        *((K, N, 16231) for K, N in ((4096, 48), (5120, 48), (6144, 128))),
+        *((K, 128, T) for K in (5120, 8192) for T in (16231, 16384)),
+    }
+)
+
+
+def test_nondet_tables_0317_are_the_tables_of_0_3_17(monkeypatch):
+    """``_nondet_tables_0317`` puts back exactly the input-gradient entries version 0.3.18 took out: with it
+    :data:`K1_DGRAD_NVJET_RULES_BY_SM` is ``K1_DGRAD_NVJET_ROWS_0317`` and :data:`K1_DGRAD_RULES_BY_SM` is
+    ``K1_DGRAD_RULES_ROWS_0317`` (the mirrors of version 0.3.17, entry for entry), the other two input-gradient tables
+    stay as they are, and all four are the tables ``_nondet_dgrad_tables_0317_whole`` sets.  The live tables are those
+    of version 0.3.18 (``K1_DGRAD_NVJET_ROWS``, ``K1_DGRAD_RULES_ROWS``); the two versions differ at the keys of
+    ``NONDET_DET_PLAN_0318`` alone, all on the 152-SM ``sm_100a`` part, each holding there its entries of version 0.3.17
+    (the lean nvjet program at 10 keys, a deterministic program at 20, both at 7).  Applying the rollback again in a
+    nested context changes nothing; leaving a context restores the tables of version 0.3.18."""
+    names = (
+        "K1_DGRAD_NVJET_RULES_BY_SM",
+        "K1_DGRAD_RULES_BY_SM",
+        "K1_DGRAD_PROGRAM_RULES_BY_SM",
+        "K1_DGRAD_PROMO_RANGES_BY_SM",
+    )
+
+    def tables():
+        return tuple({p: dict(t) for p, t in getattr(cake_backend, name).items()} for name in names)
+
+    live = tables()
+    assert live[:2] == (K1_DGRAD_NVJET_ROWS, K1_DGRAD_RULES_ROWS)
+    assert {p: len(t) for p, t in live[1].items()} == K1_DGRAD_ROW_COUNTS
+    with monkeypatch.context() as m:
+        _nondet_tables_0317(m)
+        was = tables()
+        with monkeypatch.context() as again:
+            _nondet_tables_0317(again)
+            assert tables() == was
+        assert tables() == was
+    assert tables() == live
+    assert was[:2] == (K1_DGRAD_NVJET_ROWS_0317, K1_DGRAD_RULES_ROWS_0317) and was[2:] == live[2:]
+    assert {p: len(t) for p, t in was[1].items()} == K1_DGRAD_ROW_COUNTS_0317
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0317_whole(m)
+        assert tables() == was
+    assert tables() == live
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0318.items():
+        what = (arch, sms, K, N, T)
+        assert template is not None or program is not None, what
+        assert K1_DGRAD_NVJET_ROWS_0317[(arch, sms)].get((K, N, T, "bf16")) == template, what
+        assert K1_DGRAD_RULES_ROWS_0317[(arch, sms)].get((K, N, T, "bf16")) == program, what
+    for now, before, column in ((live[0], was[0], 0), (live[1], was[1], 1)):
+        assert set(now) == set(before)
+        for part in now:
+            changed = {k for k in {*now[part], *before[part]} if now[part].get(k) != before[part].get(k)}
+            want = {
+                (K, N, T, "bf16")
+                for (arch, sms, K, N, T), entries in NONDET_DET_PLAN_0318.items()
+                if (arch, sms) == part and entries[column] is not None
+            }
+            assert changed == want and not changed & set(now[part]), (part, column, sorted(changed))
+    assert {(arch, sms) for arch, sms, *_ in NONDET_DET_PLAN_0318} == {("sm_100a", 152)}
+    assert sum(template is not None for template, _ in NONDET_DET_PLAN_0318.values()) == 10
+    assert sum(program is not None for _, program in NONDET_DET_PLAN_0318.values()) == 20
+    assert sum(None not in entries for entries in NONDET_DET_PLAN_0318.values()) == 7
+
+
+def test_k1_dgrad_tables_of_0_3_18(monkeypatch):
+    """The keys version 0.3.18 leaves to the deterministic plan (``NONDET_DET_PLAN_0318``): 23 on the 152-SM ``sm_100a``
+    part (GB200), each a key of the round's rows (``NONDET_ROWS_0316``) at 16172, 16231 or 16384 tokens that version
+    0.3.17 held -- 10 on the lean nvjet program (7 of them with a deterministic program under it), 13 on a deterministic
+    program of :data:`K1_DGRAD_RULES_BY_SM` alone -- which no table of this package holds now
+    (``_k1_dgrad_bf16_table``).  The backend's per-part sets ``_NVJET_DGRAD_DET_PLAN_ROWS`` hold exactly the nvjet keys
+    of ``NONDET_DET_PLAN_0316``, ``NONDET_DET_PLAN_0317`` and ``NONDET_DET_PLAN_0318``, the nvjet table holds 38 / 16 /
+    31 / 23 keys per part (26 on the 152-SM ``sm_100a`` part in version 0.3.17) and :data:`K1_DGRAD_RULES_BY_SM` 46 rows
+    on that part (66 in version 0.3.17).  Of the round's 30 keys on that part the tables held all in version 0.3.17 and
+    keep those of ``NONDET_KEPT_0318``; on every other part, the 148-SM ``sm_103a`` part and the 212-SM ``sm_107a`` part
+    included, the tables hold the keys of these rows at those token counts as in version 0.3.17.  Version 0.3.17 is
+    the four input-gradient tables set whole from the mirrors of this module (``_nondet_dgrad_tables_0317_whole``),
+    not built from the live tables, so a change of a live table on any part shows here."""
+    part = ("sm_100a", 152)
+    keys = set()
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0318.items():
+        what = (arch, sms, K, N, T)
+        assert (arch, sms) == part, what
+        keys.add((K, N, T))
+        assert (K, N) in NONDET_ROWS_0316 and T in _GLM, what
+        assert K1_DGRAD_NVJET_ROWS_0317[part].get((K, N, T, "bf16")) == template, what
+        assert K1_DGRAD_RULES_ROWS_0317[part].get((K, N, T, "bf16")) == program, what
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+    assert len(keys) == 23 and not keys & NONDET_KEPT_0318
+    sets = {}
+    for plan in (NONDET_DET_PLAN_0316, NONDET_DET_PLAN_0317, NONDET_DET_PLAN_0318):
+        for (arch, sms, K, N, T), (template, _) in plan.items():
+            if template is not None:
+                sets[(arch, sms)] = sets.get((arch, sms), frozenset()) | {(K, N, T)}
+    assert cake_backend._NVJET_DGRAD_DET_PLAN_ROWS == sets
+    assert len(sets[part]) == 10
+    nvjet_counts = {("sm_100a", 148): 38, ("sm_100a", 152): 16, ("sm_103a", 152): 31, ("sm_107a", 212): 23}
+    assert {p: len(rows) for p, rows in K1_DGRAD_NVJET_ROWS.items()} == nvjet_counts
+    assert {p: len(rows) for p, rows in cake_backend.K1_DGRAD_NVJET_RULES_BY_SM.items()} == nvjet_counts
+    assert {p: len(rows) for p, rows in K1_DGRAD_NVJET_ROWS_0317.items()} == {**nvjet_counts, part: 26}
+    assert K1_DGRAD_ROW_COUNTS == {**K1_DGRAD_ROW_COUNTS_0317, part: 46} and K1_DGRAD_ROW_COUNTS_0317[part] == 66
+
+    def held(p):
+        return {
+            (K, N, T) for K, N in NONDET_ROWS_0316 for T in _GLM if _k1_dgrad_bf16_table(*p, K, N, T) is not None
+        }
+
+    parts = (*NONDET_ROW_KEYS_0316, ("sm_103a", 148), ("sm_107a", 212))
+    assert part in parts
+    now = {p: held(p) for p in parts}
+    with monkeypatch.context() as m:
+        _nondet_dgrad_tables_0317_whole(m)  # the mirrors, so that every part is compared, not just this one
+        before = {p: held(p) for p in parts}
+    assert len(before[part]) == 30 and before[part] == keys | NONDET_KEPT_0318, sorted(before[part])
+    assert now[part] == NONDET_KEPT_0318 and before[part] - now[part] == keys, sorted(now[part])
+    for p in parts:
+        if p != part:
+            assert now[p] == before[p], p
+
+
+def test_k1_dgrad_det_plan_keys_of_0_3_18_bind_the_deterministic_plan(monkeypatch):
+    """At each key of ``NONDET_DET_PLAN_0318`` on the 152-SM ``sm_100a`` part (CPU views, the part's device facts,
+    nothing launched): no table of this package routes the input gradient (``_k1_table_call`` gives ``None``: no nvjet
+    program, no knobs), the entry point binds the deterministic package's plan of the row field for field, on that
+    package's program, and the generic prepare is the deterministic package's prepared launch of that plan -- the launch
+    the round timed as the deterministic plan.  With the tables of version 0.3.17 (``_nondet_tables_0317``) the same
+    call bound another plan and program: at the 10 nvjet keys the lean nvjet program on the deterministic planner's plan
+    of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, the generic prepare naming that table; at the other 13 keys the plan of the
+    key's deterministic program of :data:`K1_DGRAD_RULES_BY_SM`, the generic prepare naming that table and program."""
+    arch, sms = "sm_100a", 152
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, arch)
+    facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+    monkeypatch.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    nvjet_knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    checked = {"K1_DGRAD_NVJET_RULES_BY_SM": 0, "K1_DGRAD_RULES_BY_SM": 0}
+    for (a, s, K, N, T), (template, program) in sorted(NONDET_DET_PLAN_0318.items()):
+        what = (a, s, K, N, T)
+        assert (a, s) == (arch, sms), what
+        G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+        out = torch.empty(T, K, dtype=bf16)
+        assert cake_backend._k1_table_call(G, W, out, False) is None, what
+        assert cake_backend._k1_dgrad_nvjet_of(G, W, out) is None, what
+        assert cake_backend._k1_dgrad_knobs_of(G, W, out) == (), what
+        plan = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+        entry = _k1_dgrad_entry(G, W, out)
+        assert entry.plan == plan and entry.module_name is None, (what, entry.plan.template, plan.template)
+        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+        det_prepared = det_backend.cake_dense_gemm_det_train_projection_prepare(G, W, out)
+        assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+        assert prepared.plan == det_prepared.plan == plan, what
+        assert prepared.module_name == det_prepared.module_name, what
+        with monkeypatch.context() as before_tables:
+            _nondet_tables_0317(before_tables)
+            held = _k1_dgrad_entry(G, W, out)
+            routed = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, out)
+            assert isinstance(routed, cake_backend.CakeDenseGemmNondetProgramLaunch), what
+            if template is not None:
+                table = "K1_DGRAD_NVJET_RULES_BY_SM"
+                assert held.module_name == cake_jit.KERNELS[arch][template], what
+                want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=nvjet_knobs)[0]
+                assert held.plan == want, (what, held.plan.template)
+                assert held.plan.template == prefix + cake_backend.K1_DGRAD_NVJET_DET_PROGRAM, what
+                assert (routed.table, routed.template, routed.own) == (table, template, True), what
+            else:
+                table = "K1_DGRAD_RULES_BY_SM"
+                knobs = dict(cake_backend.k1_program_knobs(program))
+                want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=knobs)[0]
+                assert held.module_name is None and held.plan == want, (what, held.plan.template)
+                assert held.plan.template == prefix + program, what
+                assert (routed.table, routed.template, routed.own) == (table, prefix + program, False), what
+            assert held.plan != plan and held.plan.template != plan.template, (what, plan.template)
+        checked[table] += 1
+    assert checked == {"K1_DGRAD_NVJET_RULES_BY_SM": 10, "K1_DGRAD_RULES_BY_SM": 13}, checked
+
+
+def test_k1_dgrad_kept_keys_of_0_3_18_bind_their_program(monkeypatch):
+    """Every BF16 input-gradient key this package held in version 0.3.17 on the 152-SM ``sm_100a`` part, but those of
+    ``NONDET_DET_PLAN_0318``, keeps its entry and its program (CPU views, the part's device facts, nothing launched): a
+    key of ``K1_DGRAD_NVJET_ROWS_0317`` binds the lean nvjet program on the deterministic package's plan of
+    :data:`K1_DGRAD_NVJET_DET_PROGRAM`, a key of ``K1_DGRAD_RULES_ROWS_0317`` alone the deterministic package's plan of
+    the knobs of its program, that program; 24 keys, among them the measured keys that missed the bar
+    (``NONDET_KEPT_0318``), and the BF16 entries of :data:`K1_DGRAD_RULES_BY_SM` under a kept nvjet key keep their
+    program too.  One token count below and above each of the round's keys (the rows of ``NONDET_ROWS_0316`` at 16172,
+    16231 and 16384 tokens), where no table of this package holds the row, the call binds what it bound with the tables
+    of version 0.3.17 set whole from the mirrors of this module (``_nondet_dgrad_tables_0317_whole``, not built from
+    the live tables), field for field: the deterministic plan."""
+    arch, sms = part = ("sm_100a", 152)
+    bf16 = torch.bfloat16
+    prefix = det_backend._TEMPLATE_PREFIX
+    _cpu_k1_launches(monkeypatch, arch)
+    facts = dataclasses.replace(det_backend.device_facts(), arch=arch, sm_count=sms)
+    monkeypatch.setattr(det_backend, "device_facts", lambda device=None, f=facts: f)
+    monkeypatch.setattr(cake_backend, "_k1_index", lambda *views: 0)
+    nvjet_knobs = dict(cake_backend.k1_program_knobs(cake_backend.K1_DGRAD_NVJET_DET_PROGRAM))
+    nvjet = K1_DGRAD_NVJET_ROWS_0317[part]
+    rules = {key: program for key, program in K1_DGRAD_RULES_ROWS_0317[part].items() if key[3] == "bf16"}
+    dropped = {(K, N, T, "bf16") for _, _, K, N, T in NONDET_DET_PLAN_0318}
+    kept = sorted({*nvjet, *rules} - dropped)
+    assert {(K, N, T, "bf16") for K, N, T in NONDET_KEPT_0318} <= set(kept)
+    for key in kept:
+        K, N, T, _ = key
+        what = (part, key)
+        G, W = torch.empty(T, N, dtype=bf16), torch.empty(N, K, dtype=bf16)
+        out = torch.empty(T, K, dtype=bf16)
+        entry = _k1_dgrad_entry(G, W, out)
+        if key in nvjet:
+            assert cake_backend.K1_DGRAD_NVJET_RULES_BY_SM[part][key] == nvjet[key] == _NVJET, what
+            assert entry.module_name == cake_jit.KERNELS[arch][_NVJET], what
+            want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=nvjet_knobs)[0]
+            assert entry.plan == want, (what, entry.plan.template)
+            assert want.template == prefix + cake_backend.K1_DGRAD_NVJET_DET_PROGRAM, what
+        else:
+            program = rules[key]
+            knobs = dict(cake_backend.k1_program_knobs(program))
+            want = det_backend._k1_plan(G, W, out, transposed_out=False, knobs=knobs)[0]
+            assert entry.module_name is None and entry.plan == want, (what, entry.plan.template)
+            assert entry.plan.template == prefix + program, (what, entry.plan.template)
+        if key in rules:
+            assert cake_backend.K1_DGRAD_RULES_BY_SM[part][key] == rules[key], what
+    assert len(kept) == 24, len(kept)
+    neighbours = 0
+    for K, N in NONDET_ROWS_0316:
+        W = torch.empty(N, K, dtype=bf16)
+        for t in sorted({T + d for T in _GLM for d in (-1, 1)}):
+            what = (part, K, N, t)
+            G, out = torch.empty(t, N, dtype=bf16), torch.empty(t, K, dtype=bf16)
+            assert _k1_dgrad_bf16_table(arch, sms, K, N, t) is None, what
+            entry = _k1_dgrad_entry(G, W, out)
+            with monkeypatch.context() as before_tables:
+                _nondet_dgrad_tables_0317_whole(before_tables)
+                before = _k1_dgrad_entry(G, W, out)
+            det = det_backend._k1_plan(G, W, out, transposed_out=False, knobs={})[0]
+            assert entry.module_name is None and before.module_name is None, what
+            assert entry.plan == before.plan == det, (what, entry.plan.template, before.plan.template)
+            neighbours += 1
+    assert neighbours == 6 * len(NONDET_ROWS_0316)
+
+
+def test_k1_dgrad_routes_of_0_3_18_change_at_its_keys_alone(monkeypatch):
+    """The input-gradient routing of version 0.3.18 against that of version 0.3.17 over the sweep of
+    ``_k1_dgrad_routes`` (every part, row, output dtype and token count of this package's input-gradient tables of
+    either version and next to them).  Version 0.3.17 is the four input-gradient tables set whole from the mirrors of
+    this module (``_nondet_dgrad_tables_0317_whole``), not built from the live tables, so a change of a live table
+    outside the keys below shows here.  The route differs exactly at the keys of ``NONDET_DET_PLAN_0318``, BF16 out, on
+    the 152-SM ``sm_100a`` part and at their token count: there version 0.3.18 routes to no table (the deterministic
+    plan) and version 0.3.17 to the lean nvjet program at the 10 nvjet keys, with the knobs of the deterministic program
+    under it at 7 of them, and to the key's deterministic program of :data:`K1_DGRAD_RULES_BY_SM` at the other 13.
+    Every other part, row, token count and output dtype routes as in version 0.3.17."""
+    now, before, parts = _k1_dgrad_routes(monkeypatch, _nondet_dgrad_tables_0317_whole)
+    changed = {where for where, route in now.items() if route != before[where]}
+    assert changed == {(*key, "bf16") for key in NONDET_DET_PLAN_0318}, sorted(changed)
+    for (arch, sms, K, N, T), (template, program) in NONDET_DET_PLAN_0318.items():
+        where = (arch, sms, K, N, T, "bf16")
+        table = "K1_DGRAD_RULES_BY_SM" if template is None else "K1_DGRAD_NVJET_RULES_BY_SM"
+        assert now[where] == (None, None, None, ()), (where, now[where])
+        assert before[where] == (
+            (table, (K, N, T, "bf16")),
+            None,
+            None if template is None else cake_jit.KERNELS[arch][template],
+            cake_backend.k1_program_knobs(program) if program else (),
+        ), (where, before[where])
+    # the sweep reaches the routes of every part that has one
+    assert {where[:2] for where, route in now.items() if route[0] is not None} == set(parts) - {("sm_103a", 148)}
+
+
+def test_gpu_k1_dgrad_det_plan_keys_of_0_3_18_run_the_deterministic_plan(record_property):
+    """On the 152-SM ``sm_100a`` part (GB200), the part of ``NONDET_DET_PLAN_0318``: the BF16 input gradient of each key
+    through this package's entry point binds the deterministic package's plan of the row (no table of this package
+    holds the key) and meets the naive BF16 tier against FP64 over the draws, the first draw launched ``1 + RERUNS``
+    times into NaN-poisoned outputs.  On the last draw's operands the entry point's output and the generic prepared
+    launch's equal the deterministic package's output bit for bit, and so does each of ``RERUNS`` more calls of the
+    entry point into NaN-poisoned outputs; the first key's call runs a program of the deterministic package (by kernel
+    name).  Another part skips."""
+    device, arch, sms = _part_or_skip()
+    keys = sorted((K, N, T) for a, s, K, N, T in NONDET_DET_PLAN_0318 if (a, s) == (arch, sms))
+    if not keys:
+        pytest.skip(f"no key of version 0.3.18 left to the deterministic plan on {arch} with {sms} SMs")
+    dgrad = cake_backend.cake_dense_gemm_nondet_train_projection_dgrad
+    ran = 0
+    for K, N, T in keys:
+        what = f"dgrad {K} {N} {T} bf16"
+        assert _k1_dgrad_bf16_table(arch, sms, K, N, T) is None, what
+        cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+        v = _n5_judge_call(
+            record_property,
+            f"dgrad_{K}_{N}_{T}_bf16_det_plan_0318",
+            SEED + 191,
+            device,
+            dgrad,
+            lambda G, W: G @ W,
+            ((T, N), (N, K)),
+            (T, K),
+            torch.bfloat16,
+        )
+        ((_, entry),) = cake_backend._K1_DET_CACHE.items()
+        assert entry.k1 is not None and entry.module_name is None, what
+        G, W = v.ops
+        want = det_backend._k1_plan(G, W, v.out, transposed_out=False, knobs={})[0]
+        assert entry.plan == want, (what, entry.plan.template, want.template)
+        # the same bits as the deterministic package on the last draw's operands, on every repeat
+        det_out = torch.full_like(v.out, float("nan"))
+        det_backend.cake_dense_gemm_det_train_projection_dgrad(G, W, det_out)
+        prepared_out = torch.full_like(v.out, float("nan"))
+        prepared = cake_backend.cake_dense_gemm_nondet_train_projection_prepare(G, W, prepared_out)
+        assert isinstance(prepared, det_backend.CakeDenseGemmDetProjectionLaunch), (what, type(prepared))
+        assert prepared.plan == want and prepared.launch() is prepared_out, what
+        torch.cuda.synchronize()
+        bits = det_out.view(torch.int16)
+        assert torch.equal(prepared_out.view(torch.int16), bits), what
+        for i in range(RERUNS):
+            v.out.fill_(float("nan"))
+            assert dgrad(G, W, v.out) is v.out
+            torch.cuda.synchronize()
+            assert torch.equal(v.out.view(torch.int16), bits), (what, i)
+        if not ran:
+            _assert_ran_det(lambda G=G, W=W, out=v.out: dgrad(G, W, out))
+        ran += 1
+    cake_backend.cake_dense_gemm_nondet_train_convenience_cache_clear()
+    print(f"NONDET_DET_PLAN_0318 {arch} sm_count={sms}: {ran} keys ran the deterministic plan")
     assert ran == len(keys)
 
 
@@ -19956,12 +20794,14 @@ def _k_major_no_table_row(arch, sms, op, d_in, d_out, T):
 def test_k1_k_major_rows_follow_the_deterministic_tiers_of_0_3_7(monkeypatch):
     """The K-major rows of the deterministic package's version 0.3.7 (its ``ROW_RULE_MIN_T`` tiers on sm_100a and
     sm_103a and the BF16 ranges of its 212-SM ``sm_107a`` ``ROW_RULE_RANGES_BY_SM``), as this package runs them: the
-    BF16 keys of that range table are the four K-major rows of the 212-SM part, and at each cell of
+    BF16 keys of that range table (without the keys version 0.3.17 added, ``_det_tables_0316``) are the four K-major
+    rows of the 212-SM part, and at each cell of
     ``K_MAJOR_MISSED_CELLS`` on its class (CPU views, the class's device facts, nothing launched:
     :func:`_cpu_k1_launches`) the call's layout routes to the deterministic programs, the row has no row of this
     package's tables and the entry point resolves no knobs, so the forward or input-gradient entry point binds the
     deterministic package's plan of the row on the class, field for field, whose longest segment holds at most 128 K
     blocks."""
+    _det_tables_0316(monkeypatch)  # without the 212-SM sm_107a keys of version 0.3.17
     bf16 = torch.bfloat16
     ranged = {
         key for key in det_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)] if not key[3]

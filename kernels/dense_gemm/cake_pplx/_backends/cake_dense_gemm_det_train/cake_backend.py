@@ -2577,6 +2577,24 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # T 16384 - 32768; B200 4096 -> 64 in groups of 2 at T 16172 - 16231.  The other token counts of these rows plan as in
 # version 0.3.14: GB300 4096 -> 32 at T 16232 - 16383 and GB200 4096 -> 64 at T 16173 - 16383 the 256-column program,
 # B200 4096 -> 64 at T 16232 - 16383 the row's ``ROW_RULES`` rule.
+# Version 0.3.17 runs the 128-column start-path programs on five BF16 input gradients of the 212-SM sm_107a part
+# (VR200), which planned the ten-warp programs before (``kn_n256_ht_tma2_lw_pro15`` on 4096 -> 32 and 5120 -> 32,
+# ``kn_n256_tma2_pd3_c1`` on the indexer_hw input gradient 6144 -> 32, 4096 -> 64 and 5120 -> 64): the 32-element
+# program on the -> 32 rows and the 64-element one on the -> 64 rows, each range in the raster group it was measured in.
+# The four start-path programs serve sm_107a with the builds they ship on sm_100a and sm_103a.  Measured at T 16172,
+# 16231 and 16384 on two VR200 nodes with the confirmation round and the bar of version 0.3.15 against the plan of
+# version 0.3.16 (``kn_n256_tma1_w8relf`` in groups of 16, the 128-column program in groups of 16 and 32; of the
+# programs that met the bar the one with the higher lowest node and mode median, ``kn_n256_tma1_w8relf`` and then the
+# smaller group within 0.005); every candidate met the bar at every measured T, and the outputs were equal to that
+# plan's bit for bit on both nodes.  The ranges, with the lowest and highest node and mode medians against the plan
+# before:
+#   * in groups of 16 at T 16172 - 16384: 4096 -> 32 (1.132 to 1.161), 5120 -> 32 (1.107 to 1.146) and indexer_hw (1.075
+#     to 1.135) in 32-element K steps, and 4096 -> 64 (1.084 to 1.117; at T 16231 the group of 32, 1.100, was within
+#     0.005: the smaller group) in 64-element K steps;
+#   * 5120 -> 64 in 64-element K steps in groups of 16 at T 16172 - 16231 (1.087 to 1.105) and of 32 at T 16384 (1.090
+#     to 1.098).
+# The unmeasured token counts inside a range run its program; 5120 -> 64 at T 16232 - 16383 and the other token counts
+# of these rows keep their plan of version 0.3.16.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2625,6 +2643,14 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ('sm_107a', False, False, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 15, "sk_parts": 4}),),
         ('sm_107a', False, True, False, False, False, 5120, 17408, None): ((16, 256, {"pro": 7, "sk_parts": 4}),),
         ('sm_107a', False, True, False, False, False, 4096, 12288, None): ((1, 256, {"pro": 7, "sk_parts": 4}),),
+        ('sm_107a', False, True, False, False, False, 4096, 32, None): ((16172, 16384, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 5120, 32, None): ((16172, 16384, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 6144, 32, None): ((16172, 16384, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 4096, 64, None): ((16172, 16384, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 5120, 64, None): (
+            (16172, 16231, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),
+            (16384, 16384, {**_W8RELF_N128_DGRAD_BF16, "group_m": 32}),
+        ),
     },
     ("sm_103a", 148): {
         **{

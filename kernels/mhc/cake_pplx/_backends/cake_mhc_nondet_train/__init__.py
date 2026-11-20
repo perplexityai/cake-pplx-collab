@@ -68,8 +68,8 @@ forms ``bwd_token__<form>_ho``: ``dpre_next`` into the coefficient VJP,
 ``collapse_backward`` (no workspace; on SM107 the three collapse records are
 that architecture's own forms: ``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``,
 ``collapse_bwd__vjpwa_pfq2``; ``collapse_forward`` runs ``collapse_fwd__m2``
-below 8192 tokens and ``collapse_fwd__m2_xhnone``, the same form without the L2
-evict-first policy on ``X``, from 8192 tokens).  ``handoff_prepare`` is the
+below 6656 tokens and ``collapse_fwd__m2_xhnone``, the same form without the L2
+evict-first policy on ``X``, from 6656 tokens).  ``handoff_prepare`` is the
 autograd node; ``dU`` / ``dpre_next`` from autograd are made contiguous, of their
 dtype and 32-byte aligned before the launch.  No run-to-run bit promise.
 """

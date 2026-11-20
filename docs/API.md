@@ -147,19 +147,19 @@ The backward recomputes `rstd` and the gate from `x` and `z`. With `n = x*rstd`,
 
 ### `cake_pplx.cake_rmsnorm_silu_gate_det_train`
 
-`dw` is summed in FP32 runs of at most 16 rows. Each run is added into a plain FP32 word of its chunk, and each CTA sums its words in a fixed order in FP32. Each CTA's FP32 column sum is added exactly in fixed point, whatever the CTA order, and the total is rounded once to FP32 (no FP64, no two-word sums). The same row count on a device with the same SM count gives the same bits. No call alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py).
+`dw` is summed in FP32 runs of at most 16 rows. Each run is added into a plain FP32 word of its chunk, and each CTA sums its words in a fixed order in FP32. Each CTA's FP32 column sum is added exactly in fixed point, whatever the CTA order, and the total is rounded once to FP32 (no FP64, no two-word sums). The same row count on a device with the same SM count gives the same bits. A call that computes `dw` on up to 256 rows runs one CTA (up to 16 rows) or one thread-block cluster of 16 CTAs (17 to 256 rows), and neither uses a workspace. It forms the same words and rounds their exact sum the same way, so it gives the same bits on any device of at least 4 SMs, whatever the SM count. The CTAs of the cluster wait for each other's `dw` words; the GPU starts all 16 together, once one GPC has room for them. On a MIG instance or a device of fewer than 16 SMs, 17 to 256 rows run the backward of more rows instead, which uses the workspace. Other SM partitions, such as a CUDA green context, are not detected: if no GPC of the partition can hold the 16 CTAs, the cluster launch fails with a CUDA error. No call alerts under deterministic algorithms. There is no KCP module. Source: [`kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py`](../kernels/rmsnorm_silu_gate/cake_pplx/cake_rmsnorm_silu_gate_det_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
 | `cake_rmsnorm_silu_gate_det` | `(x, z, weight, eps=1e-6)` | As above | Autograd. Returns BF16 `y`. Saves only `x`, `z` and `weight`, so it works with checkpointing (`use_reentrant=False`). |
 | `cake_rmsnorm_silu_gate_det_train_forward` | `(x, z, weight, eps=1e-6, *, out=None)` | As above; `out` optional BF16 of `x`'s shape | Returns BF16 `y`. Computes in FP32 with approximate rsqrt/ex2/rcp and one final BF16 rounding. Same inputs give the same bits. |
-| `cake_rmsnorm_silu_gate_det_train_backward` | `(grad_out, x, z, weight, eps=1e-6, *, grad_x=None, grad_z=None, grad_weight=None, accumulate_grad_weight=False, compute_grad_weight=True, workspace=None)` | `grad_out`, `x`, `z` BF16 of one shape, any strides; `grad_weight` BF16 or FP32 `[128]` (a new BF16 tensor by default); `workspace` zero-filled FP32, contiguous, 16-byte aligned | Returns `(grad_x, grad_z, grad_weight)`. The package tests hold `dx`, `dz` and `dw` to the error of the PyTorch BF16 naive implementation (against float64, 32 random draws). `accumulate_grad_weight` adds exactly before rounding and needs `grad_weight`. `compute_grad_weight=False` returns `None` for `dw` and runs a program built without the weight gradient: the same `dx` and `dz` bits as a call that computes it. On SM100 and SM103 up to 768 rows per SM, and on SM107 except where the look-ahead program runs, that program reads and writes no workspace word. A nondet workspace raises `ValueError`. |
+| `cake_rmsnorm_silu_gate_det_train_backward` | `(grad_out, x, z, weight, eps=1e-6, *, grad_x=None, grad_z=None, grad_weight=None, accumulate_grad_weight=False, compute_grad_weight=True, workspace=None)` | `grad_out`, `x`, `z` BF16 of one shape, any strides; `grad_weight` BF16 or FP32 `[128]` (a new BF16 tensor by default); `workspace` zero-filled FP32, contiguous, 16-byte aligned | Returns `(grad_x, grad_z, grad_weight)`. The package tests hold `dx`, `dz` and `dw` to the error of the PyTorch BF16 naive implementation (against float64, 32 random draws). `accumulate_grad_weight` adds exactly before rounding and needs `grad_weight`. `compute_grad_weight=False` returns `None` for `dw` and runs a program built without the weight gradient: the same `dx` and `dz` bits as a call that computes it. On SM100 and SM103 up to 768 rows per SM, and on SM107 except where the look-ahead program runs, that program reads and writes no workspace word. A call that computes `dw` reads and writes no workspace word either up to 16 rows, and from 17 to 256 rows where the cluster runs (not on a MIG instance or a device of fewer than 16 SMs). A nondet workspace raises `ValueError`. |
 
 Other public names:
 
 - `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`.
 - `CakeRMSNormSiLUGateDetFunction`: passes `compute_grad_weight=needs_input_grad[2]`.
-- `cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes(rows, device)`: always 18952 bytes. `..._backward_workspace(rows, device)` returns a zero-filled FP32 buffer, which every backward leaves at zero. The size does not depend on `compute_grad_weight`.
+- `cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes(rows, device)`: always 18952 bytes. `..._backward_workspace(rows, device)` returns a zero-filled FP32 buffer, which every backward leaves at zero. The size does not depend on `compute_grad_weight`. A call that computes `dw` on up to 16 rows, or on 17 to 256 rows where the cluster runs (not on a MIG instance or a device of fewer than 16 SMs), checks a buffer passed to it and does not touch it.
 - `cake_rmsnorm_silu_gate_det_train_reset_workspace(workspace)`: zeroes a buffer on the current stream without a host sync. Needed only for foreign or corrupted buffers. It refuses a nondet workspace.
 - `is_cake_rmsnorm_silu_gate_det_train_supported(device)`.
 
@@ -1760,14 +1760,14 @@ This family has a det module only, with no nondet or KCP module: every output is
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit)` | As above | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. |
+| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit)` | As above | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. In a non-reentrant checkpoint's recomputation, launches the forward after autograd saved them (see Caveats, checkpointing). |
 | `cake_clamped_swiglu_det_train_forward` | `(gate_up_or_gate, up=None, weight=None, *, limit, out=None)` | `out` optional preallocated BF16 `[R, 2304]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. |
 | `cake_clamped_swiglu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, weight=None, *, limit, grad_gate_up_or_gate=None, grad_up=None, grad_weight=None)` | `grad_out` BF16 `[R, 2304]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, 2304]`, or the merged `[R, 4608]` gradient), `grad_up` (two-tensor form only), `grad_weight` contiguous FP32 `[R]` (needs `weight`) | Returns `(d_gate_up, None, d_weight)` for a merged input or `(d_gate, d_up, d_weight)`; `d_weight` is None without `weight`. Not autograd. Unfit output buffers raise `ValueError` (never copied). |
 
 Other public names:
 
 - `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `INTERMEDIATE_SIZE` (2304).
-- `CakeClampedSwiGLUDetFunction`: the autograd class.
+- `CakeClampedSwiGLUDetFunction`: the autograd class, `apply(gate_up_or_gate, up, weight, limit)`. A direct `apply` launches the forward inside the function's `forward`, so a checkpoint always recomputes it.
 - `is_cake_clamped_swiglu_det_train_supported(device)`.
 
 **Options and environment.** `limit` and the optional output buffers are the only keywords. The facade reads no environment variable.
@@ -1788,13 +1788,33 @@ weight = (1.5 * torch.rand(R, device="cuda")).requires_grad_()  # FP32 route wei
 h = cake_clamped_swiglu_det(gate_up, weight=weight, limit=10.0)  # BF16 [R, 2304]
 h.backward(torch.randn_like(h))  # gate_up.grad BF16 [R, 4608], weight.grad FP32 [R]
 
-# Activation checkpointing keeps only the inputs.
-h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, weight, limit=10.0, use_reentrant=False)
+# Activation checkpointing: checkpoint the op together with the down projection.
+w_down = (torch.randn(4096, I, device="cuda") / I**0.5).bfloat16().requires_grad_()  # BF16 [hidden, 2304]
+
+
+def swiglu_down(gate_up, weight, w_down):
+    return torch.nn.functional.linear(cake_clamped_swiglu_det(gate_up, weight=weight, limit=10.0), w_down)
+
+
+y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, weight, w_down, use_reentrant=False)
+y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down projection's weight gradient
 ```
 
 **Caveats.**
 
 - The intermediate width is 2304 only.
+- Checkpointing: the op keeps only its inputs, so checkpointing it alone saves no memory. The down projection keeps `h` for its weight gradient. Checkpoint the op together with the down projection (as in the example) so that `h` is not kept from the forward to the backward, which recomputes it once. A region of the gate/up projection and the op, with the down projection outside, does not keep the projection's `[R, 4608]` output.
+- In the backward of a non-reentrant checkpoint, the recomputation runs with saved-tensors hooks set. There the forward kernel runs after autograd saved the inputs, as for a built-in op; anywhere else (no hooks, or not in a backward, such as the checkpoint's own forward pass) it runs inside the autograd function's `forward`, as up to 0.1.7. With early stop on (the torch default), the recomputation therefore stops before that launch when nothing later in the region saves a tensor. When a later operation saves one, the recomputation runs the forward. The launch and the bits are the same in every case. Per checkpointed region (down projection: `F.linear(h, w_down)`, which saves `h`):
+
+  | Region | Not kept from the forward to the backward | Forward of this op in the backward |
+  |---|---|---|
+  | The op alone (down projection outside) | Nothing (the op keeps its inputs, the down projection `h`) | None (0.1.7: one) |
+  | Gate/up projection, then the op (down projection outside) | The projection's `[R, 4608]` output | None (0.1.7: one); the projection is recomputed |
+  | The op, then the down projection | `h` | One, as in 0.1.7 |
+  | The whole block (gate/up projection, op, down projection) | The projection's output and `h` | One, as in 0.1.7 |
+  | Any region with `use_reentrant=True`, `early_stop=False` (or `set_checkpoint_early_stop(False)`), or a direct `CakeClampedSwiGLUDetFunction.apply` | As above | One, also when its output is dropped |
+
+  A call that Dynamo or `torch.jit.trace` records launches inside `forward`; a checkpoint's recomputation runs with Dynamo disabled. Not tested under `torch.compile`.
 - Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates no weight gradient. An unweighted forward passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
