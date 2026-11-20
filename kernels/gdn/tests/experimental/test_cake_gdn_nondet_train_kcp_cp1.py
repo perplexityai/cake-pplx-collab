@@ -34,7 +34,8 @@ input does not change with the seed), the packed QKV strided view and the contig
 packed QKV row, the packed views and contiguous operands with their hooks and ``retain_grad`` and the gradient layout
 of each form (issue #8367; a CUDA-graph replay alternating the packed and plain views keeps each its own layout), the
 explicit forward / backward entries and autograd (output order ``dq, dk, dv, dbeta, dg``, saved context and replay),
-two caller streams with cached workspaces, the fused output walk and tape-and-output walk and the split forward on the
+two caller streams with cached workspaces, one context's tables on two caller streams (a call waits for their write
+at first use on another stream; a dropped context's tables outlive the reads queued on another stream), the fused output walk and tape-and-output walk and the split forward on the
 same build (test knobs ``fused_o`` / ``fused_o_tape`` 1 / 0), ``save_mode="full"`` without ``save_transfer`` at
 ``P = 2`` and the light form under NaN-filled allocations, ``save_mode="light_akk"`` (the light replay reads the
 forward's ``Akk`` tape: ``fwd_prep_replay_l2n``) and the light form under NaN-filled allocations (with its launch
@@ -50,8 +51,10 @@ broken import fails, never skips) and nothing else from cake_pplx; the tests of 
 
 from __future__ import annotations
 
+import gc
 import json
 import pathlib
+import time
 import warnings
 
 import pytest
@@ -1088,6 +1091,157 @@ def test_per_call_workspace_ticket_slots_follow_the_caller_stream(
     assert captured is None
     assert ticket_sets().keys() == sets.keys()
     assert not failures, failures
+
+
+# --------------------------------------------------------------------------- one context's tables on two caller streams (one GPU)
+
+
+def _overlapping_streams(device):
+    """Two streams whose work overlaps: a launch on the second completes while the first sleeps.  Two streams can share
+    one hardware queue, which runs their work in issue order and hides the ordering under test; such a pair is replaced
+    by the next streams of the pool."""
+    current = torch.cuda.current_stream(device)
+    for _ in range(16):
+        s1, s2 = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+        s1.wait_stream(current)
+        s2.wait_stream(current)
+        woke, probe = torch.cuda.Event(), torch.cuda.Event()
+        with torch.cuda.stream(s1):
+            torch.cuda._sleep(100_000_000)
+            woke.record(s1)
+        with torch.cuda.stream(s2):
+            torch.ones(1, device=device).add_(1)
+            probe.record(s2)
+        probe.synchronize()
+        overlap = not woke.query()
+        torch.cuda.synchronize(device)
+        if overlap:
+            return s1, s2
+    pytest.skip("no two streams of the pool run concurrently on this device")
+
+
+def _context_table_addresses(ctx, HV: int) -> list[int]:
+    """The block address of every device table of ``ctx`` after a call at ``HV`` value heads: the build's tables, the
+    head plan's (with the launch tables cached on it), the walk and chain bundle and the identity tile (an empty table
+    has no block)."""
+    hp = ctx.heads(HV)
+    tables = [
+        *ctx.tables.values(),
+        *ctx.halo_tables.values(),
+        ctx.frag_table,
+        ctx.cu_seqlens_local,
+    ]
+    tables += list(hp.device_tables.values())
+    for key, value in ctx._caches.items():
+        if isinstance(key, tuple) and key[:1] == ("gdn_walk_tables",):
+            tables += list(value.device.values())
+        elif isinstance(key, tuple) and key[:1] == ("kcp_eye",):
+            tables.append(value)
+    assert all(t.is_cuda for t in tables)
+    return sorted(
+        {t.untyped_storage().data_ptr() for t in tables if t.untyped_storage().nbytes()}
+    )
+
+
+def _block_states(addresses) -> dict:
+    """The caching allocator's state of the block holding each address (``active_allocated``, ``active_pending_free``
+    while a stream recorded on a freed tensor may still use it, ``inactive`` once free)."""
+    states = {}
+    for segment in torch.cuda.memory_snapshot():
+        for block in segment["blocks"]:
+            for address in addresses:
+                if block["address"] <= address < block["address"] + block["size"]:
+                    states[address] = block["state"]
+    return states
+
+
+def test_a_call_on_another_stream_waits_for_the_context_tables_written_at_first_use(
+    device,
+) -> None:
+    """One context on two caller streams.  Its device tables are written at first use, on the stream of the first
+    call, by asynchronous copies; a call on another stream must not read them before those writes have run.  Stream
+    s1 sleeps, then its forward on a fresh context writes the tables (queued behind the sleep); the forward on s2,
+    issued next, could run while s1 sleeps (a probe launch on s2 completes) but must stay queued behind the writes.
+    The process is warmed first (a throwaway context of the same shape loads the kernels and leaves the pinned staging
+    blocks cached, so the call on s1 returns at once), and s1's caching-allocator pool is emptied and refilled with
+    zeros, so a read ahead of the writes would see zero tables (in range), never a fault."""
+    cu, heads = [0, 300, 700, 1000], (2, 6)
+    inputs = make_inputs(cu, *heads, seed=draw_seed(SEED, 0))
+    ops = [inputs[n].to(device) for n in OPERANDS]
+    warm = _local_context(cu, device)
+    out, saved = gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, warm)
+    gdn_pkg.cake_gdn_nondet_train_kcp_backward(
+        *ops, warm, inputs["dout"].to(device), saved=saved
+    )
+    torch.cuda.synchronize(device)
+    del warm, out, saved
+    s1, s2 = _overlapping_streams(device)
+    torch.cuda.empty_cache()
+    with torch.cuda.stream(s1):
+        zeros = [
+            torch.zeros((1 << 18,), dtype=torch.int32, device=device) for _ in range(64)
+        ]
+        zeros += [
+            torch.zeros((8 << 20,), dtype=torch.int32, device=device) for _ in range(8)
+        ]
+    s1.synchronize()
+    del zeros
+    ctx = _local_context(cu, device)
+    torch.cuda.synchronize(device)
+    woke, probe, done = torch.cuda.Event(), torch.cuda.Event(), torch.cuda.Event()
+    with torch.cuda.stream(s1):
+        torch.cuda._sleep(2_000_000_000)
+        woke.record(s1)
+        gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, ctx, save_for_backward=False)
+    with torch.cuda.stream(s2):
+        torch.ones(1, device=device).add_(1)
+        probe.record(s2)
+        gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, ctx, save_for_backward=False)
+        done.record(s2)
+    probe.synchronize()
+    time.sleep(
+        0.1
+    )  # time for the call on s2 to finish if it does not wait for the writes
+    asleep, queued = not woke.query(), not done.query()
+    try:
+        assert asleep, "s1 woke before the check (s2 did not run while s1 slept)"
+        assert queued, "the call on s2 ran before the context's table writes on s1"
+    finally:
+        torch.cuda.synchronize(device)
+
+
+def test_a_dropped_context_keeps_its_tables_until_another_streams_reads(device) -> None:
+    """The tables of a context written on the default stream (the build) and on stream s1 (the first call) are read by
+    a call on stream s2 queued behind a sleep.  When the context is dropped meanwhile, the caching allocator must keep
+    each table's block (``active_pending_free``) until s2's launches have read it, so no later allocation can
+    overwrite it, and free it after them (``inactive``)."""
+    if torch.cuda.get_allocator_backend() != "native":
+        pytest.skip("reads the state of the native caching allocator's blocks")
+    cu, heads = [0, 300, 700, 1000], (2, 6)
+    inputs = make_inputs(cu, *heads, seed=draw_seed(SEED, 0))
+    ops = [inputs[n].to(device) for n in OPERANDS]
+    s1, s2 = torch.cuda.Stream(device=device), torch.cuda.Stream(device=device)
+    ctx = _local_context(cu, device)
+    with torch.cuda.stream(s1):
+        gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, ctx, save_for_backward=False)
+    torch.cuda.synchronize(device)
+    addresses = _context_table_addresses(ctx, heads[1])
+    with torch.cuda.stream(s2):
+        torch.cuda._sleep(2_000_000_000)
+        gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, ctx, save_for_backward=False)
+    del ctx
+    gc.collect()
+    try:
+        dropped = _block_states(addresses)
+    finally:
+        torch.cuda.synchronize(device)
+    with torch.cuda.stream(s2):
+        torch.empty(
+            1, device=device
+        )  # an allocation frees the blocks whose recorded uses are done
+    read = _block_states(addresses)
+    assert dropped == dict.fromkeys(addresses, "active_pending_free"), dropped
+    assert read == dict.fromkeys(addresses, "inactive"), read
 
 
 # --------------------------------------------------------------------------- the launch scope (one GPU)
