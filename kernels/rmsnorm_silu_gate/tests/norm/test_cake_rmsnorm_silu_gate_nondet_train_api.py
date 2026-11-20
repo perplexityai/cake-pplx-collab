@@ -2652,15 +2652,23 @@ class _FunctionTensor(torch.Tensor):
         return super().__torch_function__(func, types, args, kwargs or {})
 
 
+# Whether this torch build has dimension names (named tensors; torch 2.14 has
+# none): the cases with names skip without them.
+NAMED_TENSORS = hasattr(torch.Tensor, "refine_names")
+
+
 def _named(t: torch.Tensor) -> torch.Tensor:
     """``t`` with the dimension names ``T``, ``H`` and ``D``."""
+    if not NAMED_TENSORS:
+        pytest.skip("this torch build has no dimension names")
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", UserWarning)
         return t.refine_names("T", "H", "D")
 
 
 def _view_layout(layout: str, device: torch.device) -> torch.Tensor:
-    """A ``[5, 3, 128]`` input of ``layout`` (any dtype other than BF16 by
+    """A ``[T, H, 128]`` input of ``layout`` (``[5, 3, 128]`` but for
+    ``one_token``, ``one_head`` and ``flat``; any dtype other than BF16 by
     name: ``float32``) on ``device``."""
     T, H = 5, 3
     if layout == "contiguous":
@@ -2700,7 +2708,7 @@ def _view_layout(layout: str, device: torch.device) -> torch.Tensor:
     raise ValueError(layout)
 
 
-# Plain BF16 ``[5, 3, 128]`` CUDA inputs: the short path of ``_kernel_view``
+# Plain BF16 ``[T, H, 128]`` CUDA inputs: the short path of ``_kernel_view``
 # reads each in place or copies it (each failed check of the in-place read
 # alone: ``misaligned``, ``token_stride_8``, ``head_stride_8``,
 # ``last_stride_2``).
@@ -2737,40 +2745,47 @@ def test_kernel_view_short_path_matches_every_check(layout) -> None:
     assert torch.equal(view, want)
 
 
-REFUSALS = ["float32", "other_shape", "cpu", "one_dim_short"]
+# ``_kernel_view`` inputs every check refuses (a ValueError): another dtype,
+# shape, device type or device index, a short last dimension.
+KERNEL_VIEW_REFUSALS = ["float32", "other_shape", "cpu", "other_index", "one_dim_short"]
 
 
 def _kernel_view_case(
     case: str, device: torch.device
-) -> tuple[torch.Tensor, torch.Size]:
-    """``(input, shape)`` of a ``_kernel_view`` case off the short path (or
-    ``named``, a contiguous input with dimension names)."""
+) -> tuple[torch.Tensor, torch.Size, torch.device]:
+    """``(input, shape, device)`` of a ``_kernel_view`` case off the short path
+    (or ``named``, a contiguous input with dimension names)."""
     t = _view_layout("contiguous", device)
     if case == "other_shape":
-        return t, torch.Size((5, 4, D))
+        return t, torch.Size((5, 4, D)), device
     if case == "cpu":
-        return t.cpu(), t.shape
+        return t.cpu(), t.shape, device
+    if case == "other_index":
+        # The checks only compare the device: no tensor lives on it.
+        return t, t.shape, torch.device("cuda", device.index + 1)
     if case == "one_dim_short":
         t = t[:, :, : D // 2]
     elif case == "subclass":
         t = torch.nn.Parameter(t, requires_grad=False)
     elif case != "contiguous":
         t = _view_layout(case, device)
-    return t, t.shape
+    return t, t.shape, device
 
 
 @requires_device
 @pytest.mark.parametrize(
     "case",
-    REFUSALS + ["subclass", "function_subclass", "flat", "named", "named_misaligned"],
+    KERNEL_VIEW_REFUSALS
+    + ["subclass", "function_subclass", "flat", "named", "named_misaligned"],
 )
 def test_kernel_view_short_path_refuses_as_every_check(case) -> None:
-    """An input the short path does not take reaches every check: the same
-    error as ``_kernel_view_checked``, or the same result for a subclass, a
-    flat input and an input with dimension names (read in place, or copied
-    as every check copies it)."""
-    device = torch.device("cuda", torch.cuda.current_device())
-    t, shape = _kernel_view_case(case, device)
+    """An input the short path refuses gets the error of every check
+    (``_kernel_view_checked``); a subclass, a flat input and an input with
+    dimension names get its result or its error (an input with names that
+    needs a copy raises as in 0.2.8)."""
+    t, shape, device = _kernel_view_case(
+        case, torch.device("cuda", torch.cuda.current_device())
+    )
     outcomes = []
     for view_of in (backend._kernel_view, backend._kernel_view_checked):
         try:
@@ -2784,22 +2799,22 @@ def test_kernel_view_short_path_refuses_as_every_check(case) -> None:
                     tok,
                     head,
                     type(view),
-                    view.names,
+                    getattr(view, "names", None),
                     view.stride(),
                 )
             )
     assert outcomes[0] == outcomes[1]
-    if case in REFUSALS:
+    if case in KERNEL_VIEW_REFUSALS:
         assert outcomes[0][0] is ValueError
 
 
 @requires_device
 def test_kernel_view_runs_every_check_only_off_the_short_path(monkeypatch) -> None:
     """``_kernel_view`` runs every check (``_kernel_view_checked``) for no
-    plain BF16 ``[T, H, 128]`` CUDA input, read in place (with dimension names
-    or without) or copied, and for every other input: another dtype, shape,
-    device or type, a flat input, and a copy of an input with dimension
-    names."""
+    plain BF16 ``[T, H, 128]`` CUDA input on its device, read in place (with
+    dimension names or without) or copied, and for every other input:
+    another dtype, shape, device or type, a flat input, and an input with
+    dimension names that needs a copy."""
     device = torch.device("cuda", torch.cuda.current_device())
     checked = backend._kernel_view_checked
     calls = []
@@ -2809,15 +2824,17 @@ def test_kernel_view_runs_every_check_only_off_the_short_path(monkeypatch) -> No
         return checked(tensor, name, shape=shape, device=device)
 
     monkeypatch.setattr(backend, "_kernel_view_checked", record)
-    for layout in SHORT_PATH_LAYOUTS + ["named"]:
+    named = ["named"] if NAMED_TENSORS else []
+    for layout in SHORT_PATH_LAYOUTS + named:
         t = _view_layout(layout, device)
         backend._kernel_view(t, layout, shape=t.shape, device=device)
     assert calls == []
-    others = REFUSALS + ["subclass", "function_subclass", "flat", "named_misaligned"]
+    others = KERNEL_VIEW_REFUSALS + ["subclass", "function_subclass", "flat"]
+    others += ["named_misaligned"] if NAMED_TENSORS else []
     for case in others:
-        t, shape = _kernel_view_case(case, device)
+        t, shape, on = _kernel_view_case(case, device)
         try:
-            backend._kernel_view(t, case, shape=shape, device=device)
+            backend._kernel_view(t, case, shape=shape, device=on)
         except (TypeError, ValueError, RuntimeError):
             pass
     assert calls == others
@@ -2825,28 +2842,62 @@ def test_kernel_view_runs_every_check_only_off_the_short_path(monkeypatch) -> No
 
 @requires_device
 @pytest.mark.parametrize(
-    "like", ["bfloat16", "float32", "none", "projection", "head_major", "named"]
+    "like",
+    [
+        "bfloat16",
+        "float32",
+        "none",
+        "projection",
+        "head_major",
+        "function_subclass",
+        "named",
+    ],
 )
 def test_new_output_buffer_is_contiguous_and_aligned(like) -> None:
-    """A new output buffer is a contiguous 32-byte aligned BF16 tensor of the
-    input's shape on its device without dimension names (as ``torch.empty``
-    gives it), whatever ``like`` is."""
+    """A new output buffer is a plain contiguous 32-byte aligned BF16 tensor of
+    the input's shape on its device without dimension names (as
+    ``torch.empty`` gives it), whatever ``like`` is."""
     device = torch.device("cuda", torch.cuda.current_device())
     x = _view_layout("contiguous", device)
-    ref = {
-        "bfloat16": x,
-        "float32": x.float(),
-        "none": None,
-        "projection": _view_layout("projection", device),
-        "head_major": _view_layout("head_major", device),
-        "named": _view_layout("named", device),
-    }[like]
+    if like == "bfloat16":
+        ref = x
+    elif like == "float32":
+        ref = x.float()
+    elif like == "none":
+        ref = None
+    else:
+        ref = _view_layout(like, device)
     out, user = backend._output(None, "grad_x", shape=x.shape, device=device, like=ref)
     assert user is None
     assert type(out) is torch.Tensor and out.dtype == torch.bfloat16
     assert out.shape == x.shape and out.device == device and out.is_contiguous()
     assert out.data_ptr() % (2 * loader.ALIGNMENT_ELEMENTS) == 0
-    assert out.names == (None,) * out.dim()
+    if NAMED_TENSORS:
+        assert out.names == (None,) * out.dim()
+
+
+@requires_device
+def test_launch_placeholder_converts_a_legacy_dlpack_capsule(monkeypatch) -> None:
+    """The empty buffer a launch does not read is converted once to a
+    ``tvm_ffi.Tensor`` from a legacy DLPack capsule (no stream exchange), not
+    from the torch tensor, and reused."""
+    index = torch.cuda.current_device()
+    convert = backend.tvm_ffi.from_dlpack
+    seen = []
+
+    def record(value, *args, **kwargs):
+        seen.append(type(value).__name__)
+        return convert(value, *args, **kwargs)
+
+    monkeypatch.setattr(backend.tvm_ffi, "from_dlpack", record)
+    backend._launch_placeholder.cache_clear()
+    try:
+        held = backend._launch_placeholder(index, torch.bfloat16)
+        assert backend._launch_placeholder(index, torch.bfloat16) is held
+    finally:
+        backend._launch_placeholder.cache_clear()
+    assert seen == ["PyCapsule"]
+    assert isinstance(held, backend.tvm_ffi.Tensor)
 
 
 # The modules that warm rows in L2, by role: the mid and the extra-long

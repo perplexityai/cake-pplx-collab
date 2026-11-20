@@ -442,6 +442,10 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
     sorted(ARCH_BY_CAPABILITY)
 )
 _ALIGNMENT_BYTES = ALIGNMENT_ELEMENTS * 2
+# Whether this torch build has dimension names (named tensors; torch 2.14 has
+# none): without them no tensor carries names, and the short paths of
+# ``_kernel_view`` and ``_output`` skip the test.
+_NAMED_TENSORS = hasattr(torch.Tensor, "has_names")
 # The architectures on which a backward without the weight gradient passes
 # one token of head stride 128 as packed rows (token stride ``H * 128``):
 # those with a cut of the build of packed rows only
@@ -608,7 +612,7 @@ def _kernel_view(
             and tensor.data_ptr() % _ALIGNMENT_BYTES == 0
         ):
             return tensor, tok, head
-        if not tensor.has_names():
+        if not (_NAMED_TENSORS and tensor.has_names()):
             return (
                 tensor.clone(memory_format=torch.contiguous_format),
                 heads * HEAD_DIM if tokens > 1 else 0,
@@ -700,7 +704,7 @@ def _output(
             type(like) is torch.Tensor
             and like.dtype is dtype
             and like.layout is torch.strided
-            and not like.has_names()
+            and not (_NAMED_TENSORS and like.has_names())
         ):
             return torch.empty_like(like, memory_format=torch.contiguous_format), None
         return torch.empty(shape, dtype=dtype, device=device), None
