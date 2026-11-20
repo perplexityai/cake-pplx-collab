@@ -35,9 +35,9 @@ so a zero-weight row gets exactly 0 in ``h``, ``d_gate`` and ``d_up`` and its
 full ``d_weight``.  ``R`` is a run-time value (any ``R >= 0``; ``R = 0``
 returns empty outputs and launches nothing), and so are ``L`` and the weight
 flag: one library per program and architecture serves every call, with no
-recompilation (the row count picks the program).  ``limit`` has no
-default: pass the model's value (``swiglu_limit``, 10.0 for
-DeepSeek-V4.1-Flash) on every call.
+recompilation (the row count picks the program, and in the backward so does
+whether a weight is given).  ``limit`` has no default: pass the model's
+value (``swiglu_limit``, 10.0 for DeepSeek-V4.1-Flash) on every call.
 
 The sigmoid uses the approximate FP32 base-2 exponential and the approximate
 reciprocal with one round-to-nearest Newton step (below the flushed
@@ -69,10 +69,9 @@ Mode rules:
    output bit changes.  With
    ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
    PyTorch then fills each tensor a call allocates with NaN before the
-   kernel writes it: one more fill launch per new output (also the weight
-   gradient an unweighted backward drops) and per copied input.  Output
-   buffers allocated once and passed to every call avoid the fills of the
-   outputs.
+   kernel writes it: one more fill launch per new output and per copied
+   input.  Output buffers allocated once and passed to every call avoid the
+   fills of the outputs.
 4. Autograd: ``CakeClampedSwiGLUDetFunction`` saves only its inputs (the
    gate and up, or the merged tensor, and the weight; no activation) and
    recomputes the activation in the backward: retained state is the inputs.
@@ -80,23 +79,26 @@ Mode rules:
    the function adds no saved state of its own and no activation.  No double
    backward: differentiating gradients computed with ``create_graph=True``
    raises ``RuntimeError``.  No call uses a workspace or keeps state between
-   calls, but for the ignored weight of unweighted calls: one cached
-   one-element FP32 buffer per device, set to 1, which the kernels read and
-   ignore.
+   calls, but for the ignored weight of unweighted forward calls: one cached
+   one-element FP32 buffer per device, set to 1, which the forward kernels
+   read and ignore.  An unweighted backward runs a kernel that takes no
+   weight and writes no weight gradient.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call copies an input or allocates an
 output, so a call refused for its arguments copies, allocates and launches
-nothing.  Each stage has a small-``R`` and a large-``R`` program, chosen by
-``R`` and the device's SM count; a program's library loads (and, without a
+nothing.  The forward and the weighted backward each have a small-``R`` and
+a large-``R`` program, chosen by ``R`` and the device's SM count; the
+unweighted backward has one program, which stores the bits of the weighted
+backward's programs at ``w = 1``.  A program's library loads (and, without a
 prebuilt one, JIT-builds) at its first launch.  Before capturing a CUDA
-graph, run an eager call at each row count the graph captures (or build
-every library of the architecture with the backend's ``specs_for_arch``) so
-that no JIT build happens during capture.  A JIT build needs a CUDA toolkit
-of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for
-``sm_107a``.  This module imports its backend package on first use and reads
-no environment variable.
+graph, run an eager call of each kind the graph captures (weighted and
+unweighted) at each row count it captures (or build every library of the
+architecture with the backend's ``specs_for_arch``) so that no JIT build
+happens during capture.  A JIT build needs a CUDA toolkit of at least 12.8
+for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for ``sm_107a``.  This module
+imports its backend package on first use and reads no environment variable.
 
 Usage::
 
@@ -284,11 +286,11 @@ def cake_clamped_swiglu_det_train_backward(
     -----
     ``d_weight`` is one FP32 word per row: each lane's two FMA chains (even and odd columns) in load order, added,
     then XOR shuffles across the row's 32 lanes, in one fixed order.  It uses the unweighted ``a``, so a zero-weight
-    row keeps its sum.  The kernel writes a weight gradient on every call; an unweighted call allocates it and drops
-    it (``R`` FP32 values).  Every argument is checked before an input is copied or an output allocated.  Under
-    ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
-    PyTorch fills each new output (the dropped weight gradient too) and each copied input with NaN first, one fill
-    launch each; preallocated outputs passed to every call avoid the fills of those outputs.
+    row keeps its sum.  An unweighted call runs a kernel that stores ``d_gate`` and ``d_up`` only (the bits of a
+    weighted call with ``w = 1``): it allocates and writes no weight gradient.  Every argument is checked before an
+    input is copied or an output allocated.  Under ``torch.use_deterministic_algorithms(True)`` with
+    ``torch.utils.deterministic.fill_uninitialized_memory``, PyTorch fills each new output and each copied input with
+    NaN first, one fill launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
     return _backend()._backward(

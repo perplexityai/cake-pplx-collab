@@ -34,12 +34,14 @@ JIT variables):
   stride, a row stride that is not a multiple of 8 elements, a base address
   that is not 16-byte aligned) is copied once to a contiguous tensor.
   ``weight`` is FP32 ``[R]`` (copied once when not contiguous), or ``None``
-  for an unweighted expert (``w = 1``; the kernels then get a cached
+  for an unweighted expert (``w = 1``; the forward kernels then get a cached
   one-element FP32 buffer of the device, set to 1, and read its one element
-  and ignore it).  ``limit`` is ``L``, a positive finite Python number rounded to FP32;
-  it is a launch argument, as are ``R``, the weight flag and the strides, so
-  one library per program and architecture serves every call (the row count
-  picks the program).
+  and ignore it, and the backward runs the unweighted program, which takes no
+  weight).  ``limit`` is ``L``, a positive finite Python number rounded to
+  FP32; it is a launch argument, as are ``R``, the weight flag and the
+  strides, so one library per program and architecture serves every call (the
+  row count picks the program, and in the backward so does whether a weight is
+  given).
 - Checks.  An entry point checks every argument (the limit, the operands'
   types, dtypes, shapes and devices, the output buffers, the ``grad_up`` and
   ``grad_weight`` rules, ``R`` and the device's architecture) before it
@@ -56,52 +58,58 @@ JIT variables):
   change them after the forward) and the upstream gradient; it has no output
   buffer to check.
 - Outputs.  ``h`` is a new contiguous BF16 ``[R, 2304]`` tensor, or the
-  caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout
-  of the inputs: two new contiguous ``[R, 2304]`` tensors, or one new
-  contiguous ``[R, 4608]`` gradient for a merged input.  ``d_weight`` is FP32
-  ``[R]``; the backward kernel writes it for every call, so an unweighted
-  backward allocates it and drops it.  A caller's output buffer must already
-  be a layout the kernels write (2-D, unit last stride, a row stride that is a
+  caller's ``out``.  The backward's ``d_gate`` and ``d_up`` have the layout of
+  the inputs: two new contiguous ``[R, 2304]`` tensors, or one new contiguous
+  ``[R, 4608]`` gradient for a merged input.  ``d_weight`` is FP32 ``[R]`` for
+  a weighted call; an unweighted backward has none, and its program writes
+  none, so it allocates none.  A caller's output buffer must already be a
+  layout the kernels write (2-D, unit last stride, a row stride that is a
   multiple of 8 elements and at least the row width, 16-byte aligned; FP32
   ``[R]`` contiguous for the weight gradient): it is refused with a
   ``ValueError`` otherwise, never copied.  An output must not overlap any
   input or another output (not checked).  A new output is ``torch.empty`` on
   the operands' device (one ``torch.device`` per device index for the
   process): a contiguous plain tensor.
-- Launches.  One kernel per call.  Each stage has two programs
-  (``cake_jit.MODULES``): a small-R program and a large-R program, which runs
-  when ``R`` lies in one of its record's windows of rows per SM on the
-  device's architecture, ``lo * SMs <= R <= hi * SMs`` for a window
-  ``[lo, hi]`` (``cake_jit.route``; the architecture is read once per device
-  and the SM count once per stage and device, and an architecture without a
-  large-R program runs the small-R one at every ``R``).  Both programs of a stage give the same bits for every
-  input, so the route changes no output bit.  CTAs of ``threads / lanes``
-  rows (32 lanes a row; 128 threads and 4 rows, but 256 threads and 8 rows in
-  the large-R forward on SM100 and SM103), one CTA per block of rows on the
-  grid's x axis (``cake_jit.grid``).  ``R == 0`` launches nothing and loads
-  no library; a program's library loads at its first launch.  Every launch
-  is a plain stream-ordered launch on the current torch stream of the
-  operands' device (a tvm-ffi call whose arguments include PyTorch CUDA
-  tensors runs on that stream, a CUDA graph's capture stream during capture;
-  the binding makes the device current): nothing cooperative, no PDL, no
-  dynamic shared memory.  The entry points launch through one launcher per
-  stage and device (``_launcher``), made at the stage's first launch on the
-  device: the route above, the kernel parameters by position in the order
-  every program of the stage takes them (checked once, when the launcher is
-  made), and each program's FFI entry, bound at its first launch.  Nothing
-  here reads device memory, reads an environment variable or synchronizes; the
-  checks read dtypes, shapes, strides, devices and data pointers only.  The
-  host keeps no state between calls but caches of facts a call cannot change
-  (a device's architecture, SM count and launchers, the libraries, the FP32
-  rounding of the last accepted ``limit``, the ignored weight below).
-  Under ``torch.use_deterministic_algorithms(True)`` with
+- Launches.  One kernel per call: the forward runs stage ``fwd``, a weighted
+  backward ``bwd`` and an unweighted backward ``bwd_unweighted``
+  (``cake_jit.MODULES``).  ``fwd`` and ``bwd`` each have two programs: a
+  small-R program and a large-R program, which runs when ``R`` lies in one
+  of its record's windows of rows per SM on the device's architecture,
+  ``lo * SMs <= R <= hi * SMs`` for a window ``[lo, hi]``
+  (``cake_jit.route``; the architecture is read once per device and the SM
+  count once per stage and device, and an architecture without a large-R
+  program runs the small-R one at every ``R``).  ``bwd_unweighted`` has one
+  program, which runs at every ``R``.  Both programs of a stage give the
+  same bits for every input, so the route changes no output bit, and the
+  unweighted program gives the bits of ``bwd`` with the weight flag 0.  In
+  ``fwd`` and ``bwd``, CTAs of ``threads / lanes`` rows (32 lanes a row; 128
+  threads and 4 rows, but 256 threads and 8 rows in the large-R forward on
+  SM100 and SM103), one CTA per block of rows on the grid's x axis; in
+  ``bwd_unweighted``, a warp per (row, run of 768 columns) task, 4 tasks a
+  CTA of 128 threads, ``ceil(3 R / 4)`` CTAs (``cake_jit.grid``).  ``R == 0``
+  launches nothing and loads no library; a program's library loads at its
+  first launch.  Every launch is a plain stream-ordered launch on the current
+  torch stream of the operands' device (a tvm-ffi call whose arguments include
+  PyTorch CUDA tensors runs on that stream, a CUDA graph's capture stream
+  during capture; the binding makes the device current): nothing cooperative,
+  no PDL, no dynamic shared memory.  The entry points launch through one
+  launcher per stage and device (``_launcher``), made at the stage's first
+  launch on the device: the route above, the kernel parameters by position in
+  the order every program of the stage takes them (checked once, when the
+  launcher is made), and each program's FFI entry, bound at its first launch.
+  Nothing here reads device memory, reads an environment variable or
+  synchronizes; the checks read dtypes, shapes, strides, devices and data
+  pointers only.  The host keeps no state between calls but caches of facts a
+  call cannot change (a device's architecture, SM count and launchers, the
+  libraries, the FP32 rounding of the last accepted ``limit``, the forward's
+  ignored weight).  Under ``torch.use_deterministic_algorithms(True)`` with
   ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
   PyTorch fills every tensor it allocates here with NaN before the kernel
   writes it: one more fill launch per new output (``h``; ``d_gate_up``, or
-  ``d_gate`` and ``d_up``; ``d_weight``, also the one an unweighted backward
-  drops) and per copied input.  Output buffers allocated once and passed to
-  every call avoid the fills of the outputs.  The kernels write every element
-  of every output, so a fill never reaches a result.
+  ``d_gate`` and ``d_up``; a weighted call's ``d_weight``) and per copied
+  input.  Output buffers allocated once and passed to every call avoid the
+  fills of the outputs.  The kernels write every element of every output, so
+  a fill never reaches a result.
 - Numerics.  ``g' = min(g, L)`` and ``u' = clamp(u, -L, L)`` from the BF16
   values widened to FP32; ``s = 1 / (1 + 2^(-g' log2 e))`` with the
   approximate base-2 exponential (``ex2.approx.ftz``) and the approximate
@@ -113,7 +121,8 @@ JIT variables):
   ``silu = g' s`` and ``a = silu u'``; ``h = bf16(w a)``, one rounding.
   The backward: ``d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])``
   and ``d_up = bf16((dh w) silu [-L <= u <= L])``, the masks inclusive and
-  taken on the raw inputs, each output rounded once from FP32;
+  taken on the raw inputs, each output rounded once from FP32 (the unweighted
+  program takes ``dh`` itself, the same value as ``dh 1``);
   ``d_weight = sum over c of dh a`` in FP32, from the unweighted ``a`` (no
   division by ``w``, so a zero-weight row keeps its sum).  Every product and
   FMA rounds to nearest without flushing subnormals; nothing is FP64.  A NaN
@@ -274,15 +283,17 @@ def _entry(name: str, arch: str) -> Any:
 
 
 @functools.cache
-def _plan(name: str) -> tuple[Callable[[dict[str, Any]], tuple[Any, ...]], int]:
-    """``(arguments, rows_per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple of
-    its kernel parameters in ``run`` order (:func:`parameters`), and one CTA owns ``rows_per_cta`` rows
-    (``cake_jit.rows_per_cta``)."""
-    return operator.itemgetter(*parameters(name)), cake_jit.rows_per_cta(name)
+def _plan(name: str) -> tuple[Callable[[dict[str, Any]], tuple[Any, ...]], int, int]:
+    """``(arguments, per_row, per_cta)`` of record ``name``, made once per record: ``arguments(values)`` is the tuple
+    of its kernel parameters in ``run`` order (:func:`parameters`), a row is ``per_row`` tasks and one CTA owns
+    ``per_cta`` tasks (``cake_jit.cta_tasks``), so a launch of ``rows`` rows has ``ceil(rows * per_row / per_cta)``
+    CTAs (``cake_jit.grid``)."""
+    per_cta, per_row = cake_jit.cta_tasks(name)
+    return operator.itemgetter(*parameters(name)), per_row, per_cta
 
 
-# A program a launch may run: ``(name, arguments, rows_per_cta)`` (:func:`_plan`).
-_Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int]
+# A program a launch may run: ``(name, arguments, per_row, per_cta)`` (:func:`_plan`).
+_Plan = tuple[str, Callable[[dict[str, Any]], tuple[Any, ...]], int, int]
 
 
 @functools.cache
@@ -306,15 +317,15 @@ def _route(stage: str, device_index: int) -> tuple[int, bytes, _Plan, _Plan, _Pl
 
 def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: int) -> None:
     """Launch the program of ``stage`` for ``rows`` rows (:func:`_route`: the large-R program in its windows, the
-    small-R one at every other row count) with its kernel parameters named in ``values``, on the current torch stream
-    of device ``device_index``.
+    small-R one at every other row count; ``bwd_unweighted`` has one program) with its kernel parameters named in
+    ``values``, on the current torch stream of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
     stream of its device, and the binding makes that device current for the launch.  The grid is
     ``cake_jit.grid(name, rows)`` of the program ``name`` that runs.  The entry points launch through
     :func:`_launcher`, which runs the same program with the same arguments and grid, passed by position."""
     limit, table, small, large, tail = _route(stage, device_index)
-    name, arguments, per_cta = (large if table[rows] else small) if rows < limit else tail
+    name, arguments, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
     try:
         args = arguments(values)
     except KeyError:
@@ -324,7 +335,7 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
         raise
     if rows < 1:
         cake_jit.grid(name, rows)  # raises: a launch needs at least one row
-    _entry(name, device_arch(device_index))(*args, -(-rows // per_cta), 1, 1)
+    _entry(name, device_arch(device_index))(*args, -(-rows * per_row // per_cta), 1, 1)
 
 
 # The kernel parameters the entry points pass to the launcher of each stage, in this order (:func:`_launcher`).
@@ -346,6 +357,20 @@ _ARGUMENTS: dict[str, tuple[str, ...]] = {
         "d_up_stride",
         "limit",
         "weighted",
+    ),
+    "bwd_unweighted": (
+        "gate",
+        "up",
+        "dh",
+        "d_gate",
+        "d_up",
+        "rows",
+        "gate_stride",
+        "up_stride",
+        "dh_stride",
+        "d_gate_stride",
+        "d_up_stride",
+        "limit",
     ),
 }
 
@@ -370,11 +395,11 @@ def _launcher(stage: str, device_index: int) -> Callable[..., None]:
     entries: dict[str, Any] = {}
 
     def launch(rows: int, *arguments: Any) -> None:
-        name, _, per_cta = (large if table[rows] else small) if rows < limit else tail
+        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
         entry = entries.get(name)
         if entry is None:
             entry = entries[name] = _entry(name, arch)
-        entry(*arguments, -(-rows // per_cta), 1, 1)
+        entry(*arguments, -(-rows * per_row // per_cta), 1, 1)
 
     return launch
 
@@ -388,10 +413,11 @@ def _device(device_index: int) -> torch.device:
 
 @functools.cache
 def _ignored_weight(device_index: int) -> torch.Tensor:
-    """The ``w`` of an unweighted launch (``weighted`` 0: the kernels read its one element and ignore it): one
-    one-element FP32 buffer per device for the process, set to 1, made by the first unweighted call on the device.
+    """The ``w`` of an unweighted forward launch (``weighted`` 0: the kernels read its one element and ignore it): one
+    one-element FP32 buffer per device for the process, set to 1, made by the first unweighted forward on the device.
     That call may be a CUDA graph capture: the buffer then lives in the graph's memory pool for the process, and its
-    value is never used.  An unweighted call pays one cache lookup for it."""
+    value is never used.  An unweighted forward pays one cache lookup for it; an unweighted backward runs
+    ``bwd_unweighted``, which takes no weight."""
     return torch.ones(1, dtype=torch.float32, device=torch.device("cuda", device_index))
 
 
@@ -719,9 +745,9 @@ def _backward(
         d_first = torch.empty(rows, cols, dtype=torch.bfloat16, device=device)
     if second is not None and d_second is None:
         d_second = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
-    if d_weight is None:  # an unweighted call drops it
+    if w is not None and d_weight is None:  # an unweighted call has no weight gradient: none is allocated
         d_weight = torch.empty(rows, dtype=torch.float32, device=device)
-    result = (d_first, d_second, None if w is None else d_weight)
+    result = (d_first, d_second, d_weight)
     if rows == 0:
         return result
     # A merged input and its gradient are the gate and d_gate themselves, and views of their second halves.  A single
@@ -735,23 +761,42 @@ def _backward(
     else:
         up_view, up_stride = second, second.stride(0) if many else 0
         d_up, d_up_stride = d_second, d_second.stride(0) if many else 0
+    dh_stride = dh.stride(0) if many else 0
+    if w is None:
+        # The unweighted program: no weight, no weight flag and no weight gradient; the bits of ``bwd`` at ``w = 1``.
+        _launcher("bwd_unweighted", index)(
+            rows,
+            first,
+            up_view,
+            dh,
+            d_first,
+            d_up,
+            rows,
+            gate_stride,
+            up_stride,
+            dh_stride,
+            d_gate_stride,
+            d_up_stride,
+            L,
+        )
+        return result
     _launcher("bwd", index)(
         rows,
         first,
         up_view,
         dh,
-        _ignored_weight(index) if w is None else w,
+        w,
         d_first,
         d_up,
         d_weight,
         rows,
         gate_stride,
         up_stride,
-        dh.stride(0) if many else 0,
+        dh_stride,
         d_gate_stride,
         d_up_stride,
         L,
-        0 if w is None else 1,
+        1,
     )
     return result
 

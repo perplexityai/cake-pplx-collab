@@ -331,7 +331,7 @@ def cake_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         "forward": lambda x: cake_clamped_swiglu_det_train_forward(x.first, x.second, x.weight, limit=x.L),
         "backward": lambda x: cake_clamped_swiglu_det_train_backward(x.dh, x.first, x.second, x.weight, limit=x.L),
         "autograd": lambda first, second, weight, L=x.L: cake_clamped_swiglu_det(first, second, weight, limit=L),
-        "writes_weight_grad": True,  # the kernel writes d_weight on every call
+        "writes_weight_grad": x.weight is not None,  # the unweighted backward's kernel writes no d_weight
         "version": _version("cake-pplx-clamped-swiglu"),
     }
 

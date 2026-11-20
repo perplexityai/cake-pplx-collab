@@ -18,12 +18,14 @@ Backend suite of the Cake deterministic routed-expert clamped SwiGLU training pa
 ``h = bf16(w silu(min(g, L)) clamp(u, -L, L))``, its gradients ``d_gate`` and ``d_up`` with the inclusive clamp masks,
 and the FP32 route-weight gradient ``d_weight = sum dh a``, intermediate width 2304, on SM100, SM103 and SM107.
 
-Without a device: the registry (per stage a small-R program on every architecture and a large-R program with its windows
-of rows per SM on some, each record delivered for its architectures and for no other, the launch facts, the argument
-plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the windows and the
-most rows, on the SM counts of the delivered GPUs; windows that are not ascending, untouching lists of integers refused;
-the small-R program at every row count on an architecture without a large-R one; the SM count read once per stage and
-device, no library loaded), the launch grid of each program and the arguments of a launch in its
+Without a device: the registry (per stage a small-R program on every architecture and, for ``fwd`` and ``bwd``, a
+large-R program with its windows of rows per SM on some; the unweighted backward ``bwd_unweighted`` one program with no
+weight, weight flag or weight gradient; each record delivered for its architectures and for no other, the launch facts,
+the argument plans), the route of a launch by its rows per SM (1 row, one row below, at and above each edge of the
+windows and the most rows, on the SM counts of the delivered GPUs; windows that are not ascending, untouching lists of
+integers refused; the small-R program at every row count on an architecture without a large-R one; the SM count read
+once per stage and device, no library loaded), the launch grid of each program (``ceil(3 R / 4)`` CTAs of
+``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits) and the arguments of a launch in its
 plan's order, the entry points' launcher of a stage and device (made once per stage and device, no library loaded; the
 program, arguments and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused
 for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for an
@@ -36,29 +38,32 @@ and large-R program (each forced through the route) judged against the naive BF1
 (``tests/cake/test_helpers/cake_naive.py``: the error against an FP64 oracle of the same inputs over 32 independent
 draws, in the L2 and the max norm, median and largest, beside the error of the same operation in BF16,
 :mod:`tests.cake.test_helpers.clamped_swiglu_reference`) over row counts 1 to 4097, the merged, two-tensor, strided and
-copied layouts, weighted and unweighted calls, values on the clamp boundary, deep negative gates, the edge of the FP32
-sigmoid, a gate below -87 in each third of every row beside ordinary and boundary values, every BF16 gate, a limit
-between two BF16 values and a small limit.  Beside the judge, exact facts of the contract (no tolerance): the inclusive
-masks (a gradient is 0 exactly where its mask is 0 and passes at ``g = L`` and ``u = +-L``); zero-weight rows give
-exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other weight; the sigmoid's deep path (taken
-by a warp's run of loads with a clamped gate at or below -87) gives the bits of its fast path wherever the clamped gate
-is above -87, in each program; ``d_weight`` sums the FP32 ``a``, and ``h`` is the FP32 product ``w a`` rounded once to
-BF16; ``R = 0`` returns empty outputs and launches nothing; one library per program serves every row count, limit,
-weight flag and layout; the small-R and the large-R programs of a stage give the same bits at and one row above each
-edge of the device's windows, where the route runs the large-R program inside the windows and the small-R one outside;
-the same bits at every call, in every layout, at every row count (a row's outputs do not depend on the other rows), on a
-side stream with no host synchronization, in CUDA graph replays of the small-R and of the large-R programs, under
-``torch.use_deterministic_algorithms`` (where every new output, the dropped weight gradient too, holds PyTorch's NaN
-fill when its kernel launches) and with the current device switched to another GPU (each call runs on its operands'
-device); the autograd function matches the steps bit for bit, saves only its inputs and
-gives the same bits under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a
-saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with
-``create_graph=True`` have the steps' bits and raise when differentiated; inputs the kernels can read are read in place,
-others copied once; unfit outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass
-checks of the common call give the launches of the full checks; every unweighted launch of a device passes one cached
-FP32 buffer, set to 1, as its ignored weight, also when the process's first unweighted call is a CUDA graph capture.  On one fixed draw, the L2 error against
-the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each
-output, and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
+copied layouts, weighted and unweighted calls (the unweighted backward runs ``bwd_unweighted``), values on the clamp
+boundary, deep negative gates, the edge of the FP32 sigmoid, a gate below -87 in each third of every row beside ordinary
+and boundary values, every BF16 gate, a limit between two BF16 values and a small limit.  Beside the judge, exact facts
+of the contract (no tolerance): the inclusive masks (a gradient is 0 exactly where its mask is 0 and passes at ``g = L``
+and ``u = +-L``); zero-weight rows give exactly 0 in ``h``, ``d_gate`` and ``d_up`` and the weight gradient of any other
+weight; the sigmoid's deep path (taken by a warp's run of loads with a clamped gate at or below -87) gives the bits of
+its fast path wherever the clamped gate is above -87, in each program; ``d_weight`` sums the FP32 ``a``, and ``h`` is
+the FP32 product ``w a`` rounded once to BF16; ``R = 0`` returns empty outputs and launches nothing; one library per
+program serves every row count, limit, weight flag and layout; the small-R and the large-R programs of a stage give the
+same bits at and one row above each edge of the device's windows, where the route runs the large-R program inside the
+windows and the small-R one outside; ``bwd_unweighted`` stores the ``d_gate`` and ``d_up`` bits of both ``bwd`` programs
+launched with the weight flag 0 and of a weighted call with weights of 1 (every data kind, NaN and infinities, a gate of
+-88 in one third of a row, three layouts, three limits, 1 to 5 rows, 129, 4097 and the ``bwd`` window edges), and an
+unweighted backward allocates no weight gradient; the same bits at every call, in every layout, at every row count (a
+row's outputs do not depend on the other rows), on a side stream with no host synchronization, in CUDA graph replays of
+the small-R and of the large-R programs, under ``torch.use_deterministic_algorithms`` (where every new output holds
+PyTorch's NaN fill when its kernel launches) and with the current device switched to another GPU (each call runs on its
+operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
+under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a saved-tensors hook as
+rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have
+the steps' bits and raise when differentiated; inputs the kernels can read are read in place, others copied once; unfit
+outputs, operands and limits are refused, before any copy, allocation or launch; the one-pass checks of the common call
+give the launches of the full checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to
+1, as its ignored weight, also when the process's first unweighted forward is a CUDA graph capture.  On one fixed draw,
+the L2 error against the FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16
+rounding of each output, and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
 The suite names its package once, through the shared alias helper, and imports nothing else from ``cake_pplx``.
 """
@@ -87,6 +92,7 @@ import torch.utils.checkpoint
 from tests.cake.test_helpers.cake_naive import norm_errors
 from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake.test_helpers.clamped_swiglu_reference import (
+    DATA,
     SLOW_COLUMNS,
     SLOW_GATE,
     WIDTH,
@@ -112,10 +118,12 @@ PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 ARCH_BY_CAPABILITY = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
-STAGES = ("fwd", "bwd")
+STAGES = ("fwd", "bwd", "bwd_unweighted")
+# The stages with a large-R program on some architecture (``bwd_unweighted`` has one program at every row count).
+WINDOWED = ("fwd", "bwd")
 # Each stage's small-R role (the stage itself) and its large-R role.
 LARGE = "_large"
-ROLES = ("fwd", "fwd_large", "bwd", "bwd_large")
+ROLES = ("fwd", "fwd_large", "bwd", "bwd_large", "bwd_unweighted", "bwd_unweighted_large")
 # The SM counts of the delivered GPUs the routes are checked on.
 SM_COUNTS = (148, 152, 212)
 # The windows of rows per SM in which each stage's large-R program runs (the measured routes; ``None``: no upper
@@ -130,6 +138,8 @@ WINDOWS = {
     },
 }
 LANE_LAYOUT = {"lanes": 32, "rows_per_thread": 1, "width_bits": 128}
+# The build facts of each stage: the lane layout, and in ``bwd_unweighted`` 3 tasks a row (a warp per (row, run)).
+BUILDS = {"fwd": LANE_LAYOUT, "bwd": LANE_LAYOUT, "bwd_unweighted": {**LANE_LAYOUT, "tasks_per_row": 3}}
 # The program a forced launch runs: the small-R or the large-R program of its stage (:func:`_force`).
 PROGRAMS = ("small", "large")
 # The kernel parameters of each stage, in launch order (the kernels' signatures).
@@ -151,6 +161,20 @@ PARAMETERS = {
         "d_up_stride",
         "limit",
         "weighted",
+    ),
+    "bwd_unweighted": (
+        "gate",
+        "up",
+        "dh",
+        "d_gate",
+        "d_up",
+        "rows",
+        "gate_stride",
+        "up_stride",
+        "dh_stride",
+        "d_gate_stride",
+        "d_up_stride",
+        "limit",
     ),
 }
 BUFFERS = {"gate", "up", "w", "h", "dh", "d_gate", "d_up", "d_weight"}
@@ -292,6 +316,12 @@ def _force(patch: pytest.MonkeyPatch, program: str) -> None:
 def _in_windows(windows: list[list[int | None]], sm_count: int, rows: int) -> bool:
     """Whether ``rows`` lies in one of ``windows`` of rows per SM: ``lo * sm_count <= rows <= hi * sm_count``."""
     return any(lo * sm_count <= rows and (hi is None or rows <= hi * sm_count) for lo, hi in windows)
+
+
+def _stages(weighted: bool) -> tuple[str, str]:
+    """The stages of one step, in launch order: the forward, then the weighted backward ``bwd`` or the unweighted
+    backward ``bwd_unweighted``."""
+    return ("fwd", "bwd") if weighted else ("fwd", "bwd_unweighted")
 
 
 def _routed(stage: str, rows: int, device_index: int) -> str:
@@ -486,7 +516,8 @@ def test_registry_records_are_well_formed() -> None:
         build = cake_jit.BUILD_OF[record["stage"]]
         assert tuple(launch["block"]) == (threads, 1, 1) and threads % 32 == 0, name
         assert threads % build["lanes"] == 0, name
-        assert cake_jit.rows_per_cta(name) == threads // build["lanes"] * build["rows_per_thread"], name
+        per_cta = threads // build["lanes"] * build["rows_per_thread"]
+        assert cake_jit.cta_tasks(name) == (per_cta, build.get("tasks_per_row", 1)), name
     # The BF16 stride and alignment rule is one load of the widest build: 8 values and 16 bytes for 128-bit loads.
     widest = max(build["width_bits"] for build in cake_jit.BUILD_OF.values())
     assert cake_jit.VECTOR_ELEMENTS == widest // 16 and cake_jit.ALIGNMENT_BYTES == widest // 8
@@ -501,7 +532,7 @@ def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
                 windows[record["role"]][arch] = row
     assert windows == WINDOWS
     layouts = {stage: dict(build) for stage, build in cake_jit.BUILD_OF.items()}
-    assert layouts == {stage: LANE_LAYOUT for stage in STAGES}
+    assert layouts == BUILDS
 
 
 def test_argument_plans_are_the_kernel_parameters() -> None:
@@ -516,17 +547,73 @@ def test_argument_plans_are_the_kernel_parameters() -> None:
         assert [key for kind, key in record["arg_plan"] if kind == "grid"] == ["grid_x", "grid_y", "grid_z"]
 
 
-def test_grid_is_one_cta_per_block_of_rows() -> None:
+def test_grid_is_one_cta_per_block_of_tasks() -> None:
+    """A CTA owns ``threads / lanes * rows_per_thread`` tasks and a row is ``tasks_per_row`` tasks (a row in ``fwd``
+    and ``bwd``, 3 (row, run) tasks in ``bwd_unweighted``): the grid is ``ceil(rows * tasks_per_row / per_cta)`` CTAs,
+    at most ``2**31 - 1`` at the most rows."""
     for name in cake_jit.MODULES:
-        per_cta = cake_jit.rows_per_cta(name)
+        per_cta, per_row = cake_jit.cta_tasks(name)
         for rows in (1, 2, per_cta - 1, per_cta, per_cta + 1, 129, 4097, 98304, 196608, cake_jit.MAX_ROWS - 1):
             if rows >= 1:
-                assert tuple(cake_jit.grid(name, rows)) == (-(-rows // per_cta), 1, 1), (name, rows)
-        assert cake_jit.grid(name, cake_jit.MAX_ROWS - 1)[0] < 2**31
-        # The kernels round the row count up to whole blocks in 32 bits.
-        assert cake_jit.MAX_ROWS - 1 + per_cta - 1 < 2**31
+                assert tuple(cake_jit.grid(name, rows)) == (-(-rows * per_row // per_cta), 1, 1), (name, rows)
+        assert cake_jit.grid(name, cake_jit.MAX_ROWS - 1)[0] <= 2**31 - 1
+        if per_row == 1:
+            # The fwd and bwd kernels round the row count up to whole blocks in 32 bits.
+            assert cake_jit.MAX_ROWS - 1 + per_cta - 1 < 2**31
         with pytest.raises(ValueError):
             cake_jit.grid(name, 0)
+
+
+# The grid of the unweighted backward, ``ceil(3 R / 4)`` CTAs: row counts with a partial last CTA, the last row counts
+# at which ``3 R`` fits 32 bits and the first past it (the kernel counts its tasks in 64 bits), and the most rows.
+UNWEIGHTED_GRIDS = {
+    1: 1,
+    2: 2,
+    3: 3,
+    4: 3,
+    5: 4,
+    129: 97,
+    4097: 3073,
+    715_827_881: 536_870_911,
+    715_827_882: 536_870_912,
+    715_827_883: 536_870_913,
+    2**31 - 257: 1_610_612_544,
+}
+
+
+def test_the_unweighted_backward_program_and_its_grid(host_device) -> None:
+    """``bwd_unweighted`` has one record, on all three architectures, with no windows and no large-R program, and takes
+    the 12 kernel parameters of :data:`PARAMETERS` (no weight, weight flag or weight gradient), in the order the entry
+    points pass them.  Its grid and the grid of every launch through ``run_module`` and the launcher, on every
+    architecture and SM count, is ``ceil(3 R / 4)`` CTAs (:data:`UNWEIGHTED_GRIDS`): below ``2**31 - 1`` at the most
+    rows, where ``3 R`` is past 32 bits."""
+    names = [name for name, record in cake_jit.MODULES.items() if record["stage"] == "bwd_unweighted"]
+    assert len(names) == 1, names
+    (name,) = names
+    record = cake_jit.MODULES[name]
+    assert record["role"] == "bwd_unweighted" and list(record["arches"]) == list(ARCHES)
+    assert "rows_per_sm_windows" not in record
+    assert cake_jit.PROGRAM_OF["bwd_unweighted"] == dict.fromkeys(ARCHES, name)
+    assert cake_jit.PROGRAM_OF["bwd_unweighted_large"] == {}
+    assert pkg.parameters(name) == PARAMETERS["bwd_unweighted"] == pkg._ARGUMENTS["bwd_unweighted"]
+    assert tuple(record["launch"]["block"]) == (128, 1, 1)
+    assert cake_jit.cta_tasks(name) == (4, 3)
+    assert 3 * (cake_jit.MAX_ROWS - 1) > 2**31 - 1
+    for rows, want in UNWEIGHTED_GRIDS.items():
+        assert want == -(-3 * rows // 4) <= 2**31 - 1, rows
+        assert cake_jit.grid(name, rows) == (want, 1, 1), rows
+    values = {key: f"<{key}>" for key in PARAMETERS["bwd_unweighted"]}
+    for arch in ARCHES:
+        for sm_count in SM_COUNTS:
+            assert cake_jit.route("bwd_unweighted", arch, sm_count) == ((), name, name)
+            host_device.place(arch, sm_count)
+            launch = pkg._launcher("bwd_unweighted", 0)
+            for rows, want in UNWEIGHTED_GRIDS.items():
+                host_device.calls.clear()
+                pkg.run_module("bwd_unweighted", values, rows=rows, device_index=0)
+                launch(rows, *(values[key] for key in PARAMETERS["bwd_unweighted"]))
+                args = (*(values[key] for key in PARAMETERS["bwd_unweighted"]), want, 1, 1)
+                assert host_device.calls == [(name, arch, args)] * 2, (arch, sm_count, rows)
 
 
 def test_launches_pass_the_argument_plan_and_the_grid(host_device) -> None:
@@ -647,7 +734,7 @@ def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monke
         for stage in STAGES:
             pkg._route(stage, 0)
             pkg._route(stage, 1)
-    assert sorted(reads) == [0, 0, 1, 1]
+    assert sorted(reads) == [0] * len(STAGES) + [1] * len(STAGES)
 
 
 @pytest.mark.parametrize("sm_count", SM_COUNTS)
@@ -1064,7 +1151,7 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     """Row counts 1 to 4097 and each edge of the device's windows of each stage and one row past it, both layouts, a
     strided layout, weighted and unweighted calls and three limits load one library per program they run, once: no
     recompilation (``rows``, ``limit``, the weight flag and the strides are launch arguments)."""
-    edges = sorted({edge for stage in STAGES for edge in _device_edges(stage, device.index)})
+    edges = sorted({edge for stage in WINDOWED for edge in _device_edges(stage, device.index)})
     cases = [Case(1), Case(4097), Case(3, "merged", "none", L=7.3), Case(129, "strided", L=1.5), Case(2)]
     cases += [Case(rows, "merged") for edge in edges for rows in (edge, edge + 1)]
     cake_build = cake_package("cake_clamped_swiglu_det_train", "cake_build")
@@ -1086,19 +1173,19 @@ def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
         pkg.load.cache_clear()
         pkg._entry.cache_clear()
     arch = pkg.device_arch(device.index)
-    run = {_routed(stage, case.R, device.index) for case in cases for stage in STAGES}
+    run = {_routed(stage, case.R, device.index) for case in cases for stage in _stages(case.w != "none")}
     assert sorted(loaded) == sorted(pkg.library_name(name, arch) for name in run)
 
 
 @pytest.mark.parametrize("step", [0, 1], ids=["edge", "edge+1"])
-@pytest.mark.parametrize("stage", STAGES)
+@pytest.mark.parametrize("stage", WINDOWED)
 def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, programs_run, monkeypatch) -> None:
     """At and one row above each edge of this device's windows of ``stage`` (the row counts where its route changes
-    program), weighted on rows at the edge of the FP32 sigmoid and unweighted on gates of -88 beside boundary values:
-    the routed launches run the large-R program of ``stage`` inside its windows (one row above the edge below a window,
-    at its ``hi`` edge) and the small-R program outside, and every launch forced to the small-R programs and every
-    launch forced to the large-R programs give the routed call's bits of ``h``, ``d_gate``, ``d_up`` and
-    ``d_weight``."""
+    program), weighted on rows at the edge of the FP32 sigmoid, and on gates of -88 beside boundary values (unweighted
+    for ``fwd``; weighted for ``bwd``, which runs weighted calls only): the routed launches run the large-R program of
+    ``stage`` inside its windows (one row above the edge below a window, at its ``hi`` edge) and the small-R program
+    outside, and every launch forced to the small-R programs and every launch forced to the large-R programs give the
+    routed call's bits of ``h``, ``d_gate``, ``d_up`` and ``d_weight``."""
     edges = _device_edges(stage, device.index)
     small, large = (_program(stage, device.index, program) for program in PROGRAMS)
     if not edges:
@@ -1107,19 +1194,157 @@ def test_the_programs_of_a_stage_give_the_same_bits(stage, step, device, program
         rows = edge + step
         # an even edge is the last row below a window (which starts one row above it), an odd edge the last row in it
         inside = (index % 2 == 0) == (step == 1)
-        for w, data in (("random", "mixed"), ("none", "slow_mixed")):
+        for w, data in (("random", "mixed"), ("none" if stage == "fwd" else "random", "slow_mixed")):
             t = make_inputs(Case(rows, "merged", w, data=data), seed=43, device=device)
+            stages = _stages(w != "none")
             programs_run.clear()
             want = step_outputs(forward, backward, t)
-            assert programs_run == [_routed(s, rows, device.index) for s in STAGES], (rows, w)
-            assert programs_run[STAGES.index(stage)] == (large if inside else small), (rows, w)
+            assert programs_run == [_routed(s, rows, device.index) for s in stages], (rows, w)
+            assert programs_run[stages.index(stage)] == (large if inside else small), (rows, w)
             for program in PROGRAMS:
                 with monkeypatch.context() as patch:
                     _force(patch, program)
                     programs_run.clear()
                     got = step_outputs(forward, backward, t)
-                assert programs_run == [_program(s, device.index, program) for s in STAGES], (program, rows, w)
+                assert programs_run == [_program(s, device.index, program) for s in stages], (program, rows, w)
                 assert_same_outputs(got, want, f"{program} programs, {rows} rows, w={w}")
+
+
+# The inputs of the unweighted backward's bit checks: every judged data kind, NaN and infinities in the gate, the up and
+# ``dh`` (``"nonfinite"``: about 1 % of each, no oracle judges them), and a gate of -88 in one third of each row only, a
+# different third in consecutive rows (``"one_run"``: that run of 768 columns takes the deep-gate sigmoid, the other two
+# the fast one).
+BITS_DATA = (*DATA, "nonfinite", "one_run")
+
+
+def _bits_inputs(data: str, layout: str, rows: int, limit: float, *, seed: int, device) -> types.SimpleNamespace:
+    """Unweighted inputs of ``data`` (:data:`BITS_DATA`) in ``layout``."""
+    base = {"nonfinite": "normal", "one_run": "boundary"}.get(data, data)
+    t = make_inputs(Case(rows, "split", "none", data=base, L=limit), seed=seed, device=device)
+    gate, up, dh = t.gate.clone(), t.up.clone(), t.dh.clone()
+    gen = torch.Generator(device=device).manual_seed(seed + 1)
+    if data == "nonfinite":
+        special = torch.tensor([float("nan"), float("inf"), float("-inf")], device=device)
+        for x in (gate, up, dh):
+            where = torch.rand(x.shape, device=device, generator=gen) < 0.01
+            pick = special[torch.randint(0, 3, x.shape, device=device, generator=gen)].to(x.dtype)
+            x.copy_(torch.where(where, pick, x))
+    elif data == "one_run":
+        r = torch.arange(rows, device=device)
+        gate[r, (r % 3) * (WIDTH // 3) + r % 7] = SLOW_GATE
+    plain = types.SimpleNamespace(R=rows, L=t.L, weight=None, gate=gate, up=up, dh=dh)
+    return _relayout(plain, layout)
+
+
+def _bwd_with_weight_flag_0(t: types.SimpleNamespace, name: str, device) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(d_gate, d_up)`` of the ``bwd`` program ``name`` itself (no route) launched as 0.1.4 and earlier launched an
+    unweighted backward: the weight flag 0, the device's cached one-element weight, and a weight gradient it writes and
+    nobody reads."""
+    merged = t.second is None
+    if merged:
+        d_first = torch.empty(t.R, 2 * WIDTH, dtype=torch.bfloat16, device=device)
+        d_gate, d_up = d_first[:, :WIDTH], d_first[:, WIDTH:]
+    else:
+        d_gate = torch.empty(t.R, WIDTH, dtype=torch.bfloat16, device=device)
+        d_up = torch.empty(t.R, WIDTH, dtype=torch.bfloat16, device=device)
+    values = {
+        "gate": t.gate,
+        "up": t.up,
+        "dh": t.dh,
+        "w": pkg._ignored_weight(device.index),
+        "d_gate": d_gate,
+        "d_up": d_up,
+        "d_weight": torch.empty(t.R, dtype=torch.float32, device=device),
+        "rows": t.R,
+        "gate_stride": t.gate.stride(0),
+        "up_stride": t.up.stride(0),
+        "dh_stride": t.dh.stride(0),
+        "d_gate_stride": d_gate.stride(0),
+        "d_up_stride": d_up.stride(0),
+        "limit": t.L,
+        "weighted": 0,
+    }
+    entry = pkg._entry(name, pkg.device_arch(device.index))
+    entry(*(values[key] for key in pkg.parameters(name)), *cake_jit.grid(name, t.R))
+    return d_gate, d_up
+
+
+def _gradients(d_first: torch.Tensor, d_up) -> tuple[torch.Tensor, torch.Tensor]:
+    """``(d_gate, d_up)`` of a backward's result (a merged gradient split into its halves)."""
+    return (d_first[:, :WIDTH], d_first[:, WIDTH:]) if d_up is None else (d_first, d_up)
+
+
+@pytest.mark.parametrize("layout", ["split", "merged", "strided"])
+@pytest.mark.parametrize("data", BITS_DATA)
+def test_the_unweighted_backward_stores_the_bits_of_bwd(data, layout, device, programs_run) -> None:
+    """An unweighted backward runs ``bwd_unweighted``, and its ``d_gate`` and ``d_up`` are, bit for bit (BF16 compared
+    as int16, so NaN payloads and signed zeros count), those of the small-R and of the large-R ``bwd`` program each
+    launched itself with the weight flag 0 (the unweighted backward of 0.1.4 and earlier), and those of a weighted
+    backward with weights of 1: every data kind, NaN and infinities, a gate of -88 in one third of a row only, limits
+    10, 7.3 and 1.5, 1 to 5 rows (a partial last CTA of tasks), 129 and 4097 rows, and at and one row above each edge of
+    the device's ``bwd`` windows."""
+    arch = pkg.device_arch(device.index)
+    unweighted = cake_jit.PROGRAM_OF["bwd_unweighted"][arch]
+    bwd_programs = list(dict.fromkeys(_program("bwd", device.index, program) for program in PROGRAMS))
+    edges = _device_edges("bwd", device.index)
+    row_counts = sorted({1, 2, 3, 4, 5, 129, 4097} | {edge + step for edge in edges for step in (0, 1)})
+    for rows in row_counts:
+        for limit in (10.0, 7.3, 1.5):
+            t = _bits_inputs(data, layout, rows, limit, seed=rows, device=device)
+            programs_run.clear()
+            d_gate, d_up = _gradients(*backward(t.dh, t.first, t.second, None, limit=limit)[:2])
+            assert programs_run == [unweighted], (rows, programs_run)
+            what = f"{data}, {layout}, {rows} rows, L={limit}"
+            for name in bwd_programs:
+                got = _bwd_with_weight_flag_0(t, name, device)
+                assert_same_bits(d_gate, got[0], f"d_gate of {name} with the weight flag 0: {what}")
+                assert_same_bits(d_up, got[1], f"d_up of {name} with the weight flag 0: {what}")
+            ones = torch.ones(rows, dtype=torch.float32, device=device)
+            programs_run.clear()
+            got = _gradients(*backward(t.dh, t.first, t.second, ones, limit=limit)[:2])
+            assert programs_run == [_routed("bwd", rows, device.index)], (rows, programs_run)
+            assert_same_bits(d_gate, got[0], f"d_gate of a weighted call with weights of 1: {what}")
+            assert_same_bits(d_up, got[1], f"d_up of a weighted call with weights of 1: {what}")
+
+
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_an_unweighted_backward_allocates_no_weight_gradient(layout, device, launches) -> None:
+    """An unweighted backward launches ``bwd_unweighted`` with its 12 kernel parameters (no weight, weight flag or
+    weight gradient) and allocates only its new gradients: none with preallocated gradients, one new merged gradient or
+    two new split ones, with the same bits.  A weighted backward allocates its weight gradient as well."""
+    t = make_inputs(Case(129, layout, "none"), seed=47, device=device)
+    merged = t.second is None
+    d_first = torch.empty(t.R, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
+    d_up = None if merged else torch.empty(t.R, WIDTH, dtype=torch.bfloat16, device=device)
+    ones = torch.ones(t.R, dtype=torch.float32, device=device)
+    want = backward(t.dh, t.first, t.second, None, limit=t.L)  # makes the launcher and loads the library
+    backward(t.dh, t.first, t.second, ones, limit=t.L)
+
+    def allocations() -> int:
+        return torch.cuda.memory_stats(device)["allocation.all.allocated"]
+
+    for preallocated in (True, False):
+        launches.clear()
+        torch.cuda.synchronize(device)
+        before = allocations()
+        if preallocated:
+            got = backward(t.dh, t.first, t.second, None, limit=t.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
+        else:
+            got = backward(t.dh, t.first, t.second, None, limit=t.L)
+        allocated = allocations() - before
+        assert allocated == (0 if preallocated else 1 if merged else 2), (preallocated, allocated)
+        assert got[2] is None
+        assert [(stage, rows, tuple(values)) for stage, rows, values in launches] == [
+            ("bwd_unweighted", t.R, PARAMETERS["bwd_unweighted"])
+        ]
+        for name, found, expected in zip(("d_first", "d_up"), got[:2], want[:2], strict=True):
+            assert (found is None) == (expected is None), name
+            if found is not None:
+                assert_same_bits(found, expected, f"{name}, preallocated={preallocated}")
+    torch.cuda.synchronize(device)
+    before = allocations()
+    backward(t.dh, t.first, t.second, ones, limit=t.L)
+    assert allocations() - before == (2 if merged else 3)
 
 
 @pytest.mark.parametrize(
@@ -1142,11 +1367,12 @@ def test_layouts_give_the_same_bits(w, device) -> None:
         assert_same_outputs(step_outputs(forward, backward, _relayout(t, layout)), want, layout)
 
 
+@pytest.mark.parametrize("w", ["random", "none"])
 @pytest.mark.parametrize("layout", ["split", "merged"])
-def test_rows_do_not_depend_on_the_row_count(layout, device) -> None:
+def test_rows_do_not_depend_on_the_row_count(layout, w, device) -> None:
     """A row's outputs are the same bits whatever the other rows and the row count (each row is computed alone, on
-    the sigmoid path its own gates select)."""
-    t = make_inputs(Case(4097, layout, data="mixed"), seed=9, device=device)
+    the sigmoid path its own gates select), weighted and unweighted."""
+    t = make_inputs(Case(4097, layout, w, data="mixed"), seed=9, device=device)
     full = step_outputs(forward, backward, t)
     for rows in (1, 7, 129, 1000):
         part = step_outputs(forward, backward, _rows(t, rows))
@@ -1154,11 +1380,13 @@ def test_rows_do_not_depend_on_the_row_count(layout, device) -> None:
             assert_same_bits(value, full[name][:rows], f"{name} of the first {rows} rows")
 
 
+@pytest.mark.parametrize("w", ["random", "none"])
 @pytest.mark.parametrize("rows", [98304, 196608])
-def test_large_row_counts(rows, device) -> None:
-    """The issue's row count and twice it: finite outputs, the same bits at a second call, and the first and the last
-    4097 rows the bits of a call on those 4097 rows (views of the inputs, the last ones at a large row offset)."""
-    t = make_inputs(Case(rows, "merged"), seed=31, device=device)
+def test_large_row_counts(rows, w, device) -> None:
+    """The issue's row count and twice it, weighted and unweighted: finite outputs, the same bits at a second call, and
+    the first and the last 4097 rows the bits of a call on those 4097 rows (views of the inputs, the last ones at a
+    large row offset)."""
+    t = make_inputs(Case(rows, "merged", w), seed=31, device=device)
     want = step_outputs(forward, backward, t)
     for name, value in want.items():
         assert bool(value.isfinite().all()), name
@@ -1390,9 +1618,10 @@ def test_side_stream_and_no_host_sync(device) -> None:
 @pytest.mark.parametrize("program", PROGRAMS)
 def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatch) -> None:
     """A weighted merged step and an unweighted two-tensor step (another limit), with preallocated outputs, on the
-    small-R or the large-R program of each stage (forced through the route), run once eagerly at the captured row
-    count, captured once and replayed three times on new inputs copied into the captured tensors: the capture records
-    the forced programs, and each replay gives the bits of eager calls on those inputs."""
+    small-R or the large-R program of each stage (forced through the route; ``bwd_unweighted`` has one), run once
+    eagerly at the captured row count, captured once and replayed three times on new inputs copied into the captured
+    tensors: the capture records the forced programs, and each replay gives the bits of eager calls on those
+    inputs."""
     _force(monkeypatch, program)
     R = 300
     a = make_inputs(Case(R, "merged"), seed=40, device=device)
@@ -1421,7 +1650,8 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         step()
-    assert programs_run == [_program(stage, device.index, program) for stage in STAGES] * 2, program
+    stages = (*_stages(True), *_stages(False))
+    assert programs_run == [_program(stage, device.index, program) for stage in stages], program
     for k in range(3):
         na = make_inputs(Case(R, "merged"), seed=50 + k, device=device)
         nb = make_inputs(Case(R, "split", "none", L=7.3), seed=60 + k, device=device)
@@ -1446,14 +1676,17 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
 
 
 @pytest.mark.parametrize("layout", ["merged", "split"])
-def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, device, launches) -> None:
-    """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted call
-    in the process before (only a weighted call, which loads the libraries; the ignored weight's cache is cleared): the
-    capture makes the device's cached FP32 buffer, both captured launches pass it as their ignored weight, later eager
-    unweighted calls pass the same buffer, and each replay on new inputs copied into the captured tensors gives the
-    bits of eager calls."""
+def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout, device, launches) -> None:
+    """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted forward
+    in the process before (only a weighted call and an eager unweighted backward, which load the libraries; the ignored
+    weight's cache is cleared): the capture makes the device's cached FP32 buffer, the captured forward passes it as its
+    ignored weight and the captured backward runs ``bwd_unweighted``, which takes no weight, weight flag or weight
+    gradient; later eager unweighted forwards pass the same buffer, and each replay on new inputs copied into the
+    captured tensors gives the bits of eager calls."""
     R = 129
     step_outputs(forward, backward, make_inputs(Case(R, layout), seed=70, device=device))
+    warm = make_inputs(Case(R, layout, "none"), seed=69, device=device)
+    backward(warm.dh, warm.first, warm.second, None, limit=warm.L)  # loads the unweighted backward's library
     a = make_inputs(Case(R, layout, "none"), seed=71, device=device)
     first = a.first.clone()
     second = None if a.second is None else a.second.clone()
@@ -1467,16 +1700,17 @@ def test_an_unweighted_step_captured_before_any_eager_unweighted_call(layout, de
     with torch.cuda.graph(graph):
         forward(first, second, None, limit=a.L, out=h)
         backward(dh, first, second, None, limit=a.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
-    assert [stage for stage, _, _ in launches] == ["fwd", "bwd"]
+    assert [stage for stage, _, _ in launches] == ["fwd", "bwd_unweighted"]
     cached = pkg._ignored_weight(first.get_device())
     assert cached.dtype == torch.float32 and tuple(cached.shape) == (1,) and cached.device == first.device
-    for stage, _, values in launches:
-        assert values["weighted"] == 0, stage
-        assert values["w"] is cached, stage
+    (_, _, fwd_values), (_, _, bwd_values) = launches
+    assert fwd_values["weighted"] == 0 and fwd_values["w"] is cached
+    assert tuple(bwd_values) == PARAMETERS["bwd_unweighted"]
     launches.clear()
     forward(first, second, None, limit=a.L)
     backward(dh, first, second, None, limit=a.L)
-    assert [values["w"] is cached for _, _, values in launches] == [True, True]
+    assert [stage for stage, _, _ in launches] == ["fwd", "bwd_unweighted"]
+    assert launches[0][2]["w"] is cached and "w" not in launches[1][2]
     for k in range(3):
         n = make_inputs(Case(R, layout, "none"), seed=80 + k, device=device)
         first.copy_(n.first)
@@ -1530,10 +1764,10 @@ def test_steps_neither_raise_nor_warn_under_deterministic_algorithms(warn_only, 
 def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device, monkeypatch) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
     every output a step allocates holds NaN when its kernel launches (PyTorch filled it): ``h``; ``d_gate_up`` or
-    ``d_gate`` and ``d_up``; ``d_weight``, also the one an unweighted backward drops.  Every new output is
-    ``torch.empty`` on the operands' device, after the one-pass checks (merged, split) and after the full checks
-    (copied); the outputs have the bits of the same calls with the setting off."""
-    outputs = {"fwd": ("h",), "bwd": ("d_gate", "d_up", "d_weight")}
+    ``d_gate`` and ``d_up``; a weighted call's ``d_weight`` (an unweighted backward has none).  Every call allocates its
+    outputs with ``torch.empty`` on the operands' device; the outputs have the bits of the same calls with the setting
+    off."""
+    outputs = {"fwd": ("h",), "bwd": ("d_gate", "d_up", "d_weight"), "bwd_unweighted": ("d_gate", "d_up")}
     seen: list = []
 
     def record(name, values):
@@ -1554,7 +1788,7 @@ def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device
     finally:
         torch.utils.deterministic.fill_uninitialized_memory = fill
         torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
-    assert seen == [(stage, key, True) for stage in STAGES for key in outputs[stage]], seen
+    assert seen == [(stage, key, True) for stage in _stages(w != "none") for key in outputs[stage]], seen
     assert_same_outputs(got, want, f"{layout}, w={w}")
 
 
@@ -1585,7 +1819,7 @@ def test_fit_inputs_are_read_in_place_and_others_copied_once(device, launches) -
     for name, tensor in (("gate", c.gate), ("up", c.up), ("dh", c.dh)):
         assert values[name].data_ptr() != tensor.data_ptr(), name
         assert values[name].is_contiguous() and values[f"{name}_stride"] == WIDTH, name
-    assert values["weighted"] == 0 and values["w"].numel() == 1 and values["w"].dtype == torch.float32
+    assert tuple(values) == PARAMETERS["bwd_unweighted"]  # no weight, weight flag or weight gradient
     assert values["limit"] == fp32(7.3)
 
     one = make_inputs(Case(1, "merged"), seed=2, device=device)
@@ -1668,7 +1902,7 @@ def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, l
                     assert checked, (layout, preallocated)
             what = f"{layout}, preallocated={preallocated}"
             (fast_launches, fast_outputs), (full_launches, full_outputs) = runs
-            assert [stage for stage, _, _ in fast_launches] == ["fwd", "bwd"], what
+            assert [stage for stage, _, _ in fast_launches] == list(_stages(w != "none")), what
             assert fast_launches == full_launches, what
             for got, want in zip(fast_outputs, full_outputs, strict=True):
                 assert (got is None) == (want is None), what
@@ -1868,7 +2102,7 @@ def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkey
     forward(gate, up, weight, limit=L)
     backward(dh, merged, None, None, limit=L)
     assert allocations() > before
-    assert [stage for stage, _, _ in launches] == ["fwd", "bwd"]
+    assert [stage for stage, _, _ in launches] == ["fwd", "bwd_unweighted"]
 
 
 def test_unsupported_devices_raise(device, monkeypatch) -> None:
