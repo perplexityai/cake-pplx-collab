@@ -20,15 +20,18 @@ has the checks and the two references).
 On the CPU: the registry's lead twins mirror the routes, their builds share the
 CUDA floor, the row table is read on the shape alone and passed as views, an ``m_indptr``
 never falls back to a route without its lead twin, ``_bind`` refuses a wrong pairing of
-route and row table, the availability query needs the lead twins, and a sweep
-of architectures and SM counts binds the lead twins with reference 1's plan.  On a GPU:
+route and row table, the availability query needs the lead twins, no BF16 weight
+gradient has an accumulate build, and a sweep of architectures and SM counts binds
+the lead twins with reference 1's plan.  On a GPU (the device's SM count and the bound
+programs recorded as test properties):
 reference 1's bits always and reference 2's where it plans the same, every
-forced stage from an odd row and from row 0 (the split tail with group 0 in it, the
-probed queue split), CUDA graphs over device-copied routings, edges and whole-empty
-chunks with the rows outside poisoned (the ``-0.0`` exception of
-equal values), padded rows, two streams, the bits of the judged ``[E]`` cases, the
-autograd function, accumulation and the binding before row tables
-(negative control).
+forced stage from an odd row and from row 0 (the split tail with group 0 in it, its
+tail reduce wherever a route serves one, the probed queue split), CUDA graphs over
+device-copied routings, edges and whole-empty chunks with the rows outside poisoned
+(the ``-0.0`` exception of equal values), padded rows, two streams (each with its own
+``out``, and both writing disjoint rows of one ``out``), the bits of the judged
+``[E]`` cases, the autograd function, accumulation (main_halves, the wave form and
+the k256 tail, their split tails) and the binding before row tables (negative control).
 """
 
 import pytest
@@ -64,6 +67,7 @@ JUDGED_TESTS = {
     "wgrad": suite.test_wgrad_matches_reference,
 }
 WGRAD_FORMS = tuple(form for form in ds.WGRAD_FORMS if form != "k512_queue")
+ACC_FORMS = tuple(form for form in ds.ACC_FORMS if form != "k512_queue")
 
 
 # ---------------------------------------------------------------------------
@@ -95,6 +99,10 @@ def test_bind_refuses_a_wrong_row_table(monkeypatch):
     ds.check_bind_mismatch(monkeypatch, P)
 
 
+def test_no_bfloat16_accumulate_build():
+    ds.check_no_bfloat16_accumulate_build(P)
+
+
 @pytest.mark.parametrize("op", ds.OPS)
 def test_host_binds_the_lead_twins(op, monkeypatch):
     ds.check_host_binding(monkeypatch, P, op)
@@ -123,8 +131,8 @@ def test_judged_cases_are_the_suite_cases(op):
         ("wgrad", torch.float32),
     ],
 )
-def test_slices_give_both_references_bits(op, out_dtype):
-    ds.check_two_references(P, op, out_dtype or torch.bfloat16)
+def test_slices_give_both_references_bits(op, out_dtype, record_property):
+    ds.check_two_references(P, op, out_dtype or torch.bfloat16, record_property)
 
 
 @pytest.mark.parametrize("out_dtype", ds.OUT_DTYPES)
@@ -134,8 +142,8 @@ def test_plan_divergent_slice_gives_reference_1_bits(out_dtype, record_property)
 
 @pytest.mark.parametrize("form", ds.ROW_FORMS)
 @pytest.mark.parametrize("op", ["fwd", "dgrad"])
-def test_forced_row_stage_slices(op, form, monkeypatch):
-    ds.check_row_form(monkeypatch, P, op, form)
+def test_forced_row_stage_slices(op, form, monkeypatch, record_property):
+    ds.check_row_form(monkeypatch, P, op, form, record_property)
 
 
 @pytest.mark.parametrize("out_dtype", ds.OUT_DTYPES)
@@ -145,8 +153,8 @@ def test_forced_wgrad_form_slices(form, out_dtype, monkeypatch, record_property)
 
 
 @pytest.mark.parametrize("out_dtype", ds.OUT_DTYPES)
-def test_split_tail_holds_group_0(out_dtype, monkeypatch):
-    ds.check_split_tail_holds_group_0(monkeypatch, P, out_dtype)
+def test_split_tail_holds_group_0(out_dtype, monkeypatch, record_property):
+    ds.check_split_tail_holds_group_0(monkeypatch, P, out_dtype, record_property)
 
 
 def test_slice_takes_the_probed_queue_split(monkeypatch):
@@ -179,8 +187,7 @@ def test_edges_with_poisoned_rows(op, out_dtype):
     ds.check_edges(P, op, out_dtype or torch.bfloat16)
 
 
-@pytest.mark.parametrize("route", ["fused", "composed"])
-@pytest.mark.parametrize("out_dtype", ds.OUT_DTYPES)
+@pytest.mark.parametrize("out_dtype,route", ds.ACC_CASES, ids=ds.ACC_IDS)
 def test_whole_empty_accumulate_signed_zero(out_dtype, route, monkeypatch):
     ds.check_empty_accumulate(monkeypatch, P, out_dtype, route)
 
@@ -198,9 +205,10 @@ def test_unaligned_row_padded_slices(op, form, monkeypatch):
     ds.check_row_padded(monkeypatch, P, op, form)
 
 
+@pytest.mark.parametrize("shared_out", [False, True], ids=["own-out", "shared-out"])
 @pytest.mark.parametrize("op", ds.OPS)
-def test_two_streams(op, monkeypatch):
-    ds.check_two_streams(monkeypatch, P, op)
+def test_two_streams(op, shared_out, monkeypatch):
+    ds.check_two_streams(monkeypatch, P, op, shared_out=shared_out)
 
 
 @pytest.mark.parametrize(
@@ -223,10 +231,10 @@ def test_autograd_chunks_of_one_weight():
     ds.check_autograd_chunks(P)
 
 
-@pytest.mark.parametrize("route", ["fused", "composed"])
-@pytest.mark.parametrize("out_dtype", ds.OUT_DTYPES)
-def test_accumulate_slices(out_dtype, route, monkeypatch):
-    ds.check_accumulate(monkeypatch, P, out_dtype, route)
+@pytest.mark.parametrize("form", ACC_FORMS)
+@pytest.mark.parametrize("out_dtype,route", ds.ACC_CASES, ids=ds.ACC_IDS)
+def test_accumulate_slices(out_dtype, route, form, monkeypatch, record_property):
+    ds.check_accumulate(monkeypatch, P, out_dtype, route, form, record_property)
 
 
 @pytest.mark.parametrize("op", ds.OPS)

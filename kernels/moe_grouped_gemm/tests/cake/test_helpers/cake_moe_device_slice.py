@@ -5,10 +5,10 @@ non-deterministic suites share (``tests/experimental/test_cake_moe_grouped_gemm_
 
 A device slice is a call with an ``m_indptr`` row table of ``E + 1`` entries whose first entry is
 above 0: groups ``[e0, e1)`` of a whole row table, ``m_indptr[e0 : e1 + 1]`` (a view of the device
-table) with ``w[e0:e1]``, over the whole ``x`` / ``g``.  The kernels read the rows
-``[m_indptr[0], m_indptr[-1])`` in absolute row numbers and neither read nor write any other row;
-the host binds the lead twin of every route it launches (``cake_jit.lead_route``) and plans the
-launch from the shapes alone, ``sum_m = x.shape[0]``.
+table) with ``w[e0:e1]``, over the whole ``x`` / ``g``.  The kernels compute over the rows
+``[m_indptr[0], m_indptr[-1])`` in absolute row numbers; no other row affects the results or is
+written.  The host binds the lead twin of every route it launches (``cake_jit.lead_route``) and
+plans the launch from the shapes alone, ``sum_m = x.shape[0]``.
 
 Each slice is checked against two references (bits as integer words, :func:`assert_same_bits`):
 
@@ -55,9 +55,19 @@ BIT_VIEWS = {torch.bfloat16: torch.int16, torch.float32: torch.int32}
 SENTINEL = {torch.bfloat16: 0x7F81, torch.float32: 0x7F800B1D}
 NEG_ZERO = {torch.bfloat16: -0x8000, torch.float32: -0x80000000}
 POS_ZERO = 0
-# The archs and SM counts of the CPU sweeps of the host binding.
+# The archs and SM counts of the CPU sweeps of the host binding (B200 148, GB300 152, R200 216 and
+# others); the GPU checks record the device's own count (``sm_count``).
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-SM_COUNTS = (148, 160, 212)
+SM_COUNTS = (148, 152, 160, 208, 212, 216)
+# The accumulating weight gradients the registry builds: ``(out dtype, route)``.  No route serves
+# a fused accumulate of a BF16 output (``check_no_bfloat16_accumulate_build``), so that pair is
+# not a case.
+ACC_CASES = (
+    (torch.float32, "fused"),
+    (torch.float32, "composed"),
+    (torch.bfloat16, "composed"),
+)
+ACC_IDS = ("f32-fused", "f32-composed", "bf16-composed")
 
 
 # ---------------------------------------------------------------------------
@@ -190,6 +200,39 @@ def quiet():
     with warnings.catch_warnings():
         warnings.simplefilter("ignore")
         yield
+
+
+@contextlib.contextmanager
+def no_host_sync():
+    """``torch.cuda.set_sync_debug_mode("error")`` over the block: a CUDA call in it that
+    synchronizes the host with the device raises (restored after the block)."""
+    previous = torch.cuda.get_sync_debug_mode()
+    torch.cuda.set_sync_debug_mode("error")
+    try:
+        yield
+    finally:
+        torch.cuda.set_sync_debug_mode(previous)
+
+
+def launch_record(launch) -> dict[str, Any]:
+    """What a prepared launch binds, for ``record_property`` (``-o junit_family=xunit1`` keeps
+    it): its stages, bound routes and programs, and the plan's k tile, tail and accumulate mode."""
+    plan = launch.plan
+    keys = (
+        "tile_k",
+        "tail_tile_k",
+        "num_tail",
+        "tail_splits",
+        "ordered_tail",
+        "accumulate",
+        "queue_split",
+    )
+    return dict(
+        stages=list(launch.stages),
+        bound_routes=list(launch.bound_routes),
+        bound_programs=list(launch.bound_programs),
+        **{key: plan[key] for key in keys if key in plan},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -687,6 +730,54 @@ def split_tail_n(
     return None
 
 
+def split_tail_served(
+    P: Package, tile: int, stage: str, arch: str, out_dtype
+) -> str | None:
+    """How a weight gradient of k tile ``tile`` and main stage ``stage`` on ``arch`` finishes a
+    split tail (``tail_splits > 1``) under the constants as set: ``"one_launch"`` (the
+    non-deterministic 512-wide k tile's builds, in the same launch), ``"tail_reduce"`` (a second
+    launch: the tail-reduce stage of the route, of the 256-wide k tile's route for
+    ``main_halves_k256t``), or None where no plan splits a tail or no route serves its reduce.
+    Where it is not None, the checks of the form must reach a split tail
+    (:func:`assert_split_tail`)."""
+    cb, c = P.cb, P.constants
+    if not int(c["wgrad_tail_split"]):
+        return None
+    if P.nondet and (
+        cb.wgrad_ordered_tail(tile, arch, c) or cb.wgrad_unordered_tail(tile, arch, c)
+    ):
+        return "one_launch"
+    reduce_tile = cb.K256_TAIL_TILE_K if stage.startswith("main_halves_k256t") else tile
+    route = P.jit.record_name(
+        "wgrad", out_dtype=P.dtype_name(out_dtype), tile_k=reduce_tile
+    )
+    if route in P.jit.ROUTES and P.jit.stage_served(route, "tail_reduce", arch):
+        return "tail_reduce"
+    return None
+
+
+def assert_split_tail(lead, served: str | None, what: str = "") -> None:
+    """The weight gradient ``lead`` splits its tail (``num_tail > 0``, ``tail_splits > 1``) and
+    finishes it as ``served`` says (:func:`split_tail_served`): in its one launch, or in a second
+    launch, the tail reduce (``tail_reduce`` / ``tail_reduce_acc``) of a second bound route."""
+    plan = lead.plan
+    assert served is not None, (what, "a split tail where no route serves one", plan)
+    assert plan["num_tail"] > 0 and plan["tail_splits"] > 1, (what, plan)
+    if served == "one_launch":
+        assert plan["ordered_tail"] or plan["unordered_tail"], (what, plan)
+        assert len(lead.stages) == 1 and plan["launches"] == 1, (
+            what,
+            lead.stages,
+            plan,
+        )
+    else:
+        assert len(lead.stages) == 2 and lead.stages[1].startswith("tail_reduce"), (
+            what,
+            lead.stages,
+        )
+        assert len(lead.bound_routes) == 2, (what, lead.bound_routes)
+
+
 # ---------------------------------------------------------------------------
 # Slice runs
 # ---------------------------------------------------------------------------
@@ -725,13 +816,14 @@ class Slice:
         r0, r1 = self.rows
         return self.lead.out[r0:r1], self.ref1.out[: r1 - r0], self.ref2.out
 
-    def check(self, *, ref2: str = "if_plan_equal") -> int:
-        """After the launches: the rows outside the slice untouched (``Y`` / ``dX``), the slice's
+    def check(self, *, ref2: str = "if_plan_equal", outside: bool = True) -> int:
+        """After the launches: the rows outside the slice untouched (``Y`` / ``dX``; unless
+        ``outside`` is False: an ``out`` other slices write too), the slice's
         bits reference 1's, and reference 2's where ``ref2`` asks: ``"required"`` (its plan must be
         the slice's), ``"if_plan_equal"`` or ``"values"`` (equal values, not bits: the whole-empty
         accumulate).  Returns the elements that differ from reference 2 (0 when its bits hold)."""
         what = f"{self.op} slice [{self.e0}, {self.e1}) rows {self.rows}"
-        if self.op != "wgrad":
+        if self.op != "wgrad" and outside:
             r0, r1 = self.rows
             assert_untouched(self.lead.out[:r0], f"{what}: rows before the slice")
             assert_untouched(self.lead.out[r1:], f"{what}: rows after the slice")
@@ -769,11 +861,14 @@ def build_slice(
     accumulate: bool = False,
     init: Optional[torch.Tensor] = None,
     operands=None,
+    lead_out: torch.Tensor | None = None,
 ) -> Slice:
     """Prepare the slice of groups ``[e0, e1)`` of ``layout`` (operands of ``inputs(layout, device,
     seed)`` unless ``operands`` gives ``(x, w, g, table)``; the rows outside the slice poisoned)
     and its references, and check the lead binding against reference 1 (:func:`assert_lead`).
-    A weight gradient writes into a copy of ``init`` (else :data:`SENTINEL`) per call."""
+    A weight gradient writes into a copy of ``init`` (else :data:`SENTINEL`) per call.  The slice
+    writes into ``lead_out`` where given (an ``out`` of the slice's shape, of :data:`SENTINEL` words
+    unless the caller fills it otherwise)."""
     x, w, g, table = operands if operands is not None else inputs(layout, device, seed)
     r0, r1 = layout.bounds(e0, e1)
     chunk = table[e0 : e1 + 1]
@@ -794,7 +889,7 @@ def build_slice(
             poisoned(g, r0, r1, pad),
             poisoned(x, r0, r1, pad),
             chunk,
-            out=out(),
+            out=out() if lead_out is None else lead_out,
             num_groups=groups,
             **common,
         )
@@ -808,7 +903,9 @@ def build_slice(
             poisoned(a, r0, r1, pad),
             wc,
             chunk,
-            out=sentinel((rows, cols), torch.bfloat16, device),
+            out=sentinel((rows, cols), torch.bfloat16, device)
+            if lead_out is None
+            else lead_out,
         )
         ref1 = prepare(
             padded(a, r0, r1),
@@ -1241,15 +1338,34 @@ def check_bind_mismatch(monkeypatch, P: Package) -> None:
         cb._bind(name, "main", {"not_an_argument": 1}, arch)
 
 
+def check_no_bfloat16_accumulate_build(P: Package) -> None:
+    """No BF16 weight-gradient route, nor its lead twin, has an accumulate stage on any
+    architecture: a BF16 ``out`` accumulates on the composed route only, so :data:`ACC_CASES` has
+    no fused BF16 case (a registry that adds such a build fails here until the case is added)."""
+    jit, cb = P.jit, P.cb
+    for arch in ARCHES:
+        assert not cb.acc_stage_served("bfloat16", arch), arch
+    for tile in (256, 512):
+        name = jit.record_name("wgrad", out_dtype="bfloat16", tile_k=tile)
+        for route in (name, jit.lead_route(name)):
+            stages = [item["name"] for item in jit.ROUTES[route]["stages"]]
+            assert not any(s.endswith(cb.ACC_SUFFIX) for s in stages), (route, stages)
+
+
 # ---------------------------------------------------------------------------
 # GPU checks
 # ---------------------------------------------------------------------------
 
 
-def check_two_references(P: Package, op: str, out_dtype=torch.bfloat16) -> None:
+def check_two_references(
+    P: Package, op: str, out_dtype=torch.bfloat16, record_property=None
+) -> None:
     """Every chunk of :data:`TWO_REF_LAYOUTS` gives reference 1's bits and, its plan being
-    reference 2's, reference 2's bits."""
+    reference 2's, reference 2's bits (on this device's SM count, recorded as ``sm_count``)."""
     device = require(P, op, out_dtype=out_dtype)
+    if record_property is not None:
+        record_property("arch", arch_of(P, device))
+        record_property("sm_count", P.cb.sm_count(device))
     layout = TWO_REF_LAYOUTS[op]
     operands = inputs(layout, device, seed=11)
     for e0, e1 in layout.chunks(TWO_REF_CHUNK):
@@ -1286,10 +1402,12 @@ def check_plan_divergent(P: Package, out_dtype, record_property) -> None:
     record_property("ref2_elements", s.lead.out.numel())
 
 
-def check_row_form(monkeypatch, P: Package, op: str, form: str) -> None:
+def check_row_form(
+    monkeypatch, P: Package, op: str, form: str, record_property
+) -> None:
     """Forward pass and data gradient: under constants that force stage ``form``, slices from an odd first row and
     a one-group slice give reference 1's bits (reference 2's where it plans the same), and the whole
-    table from row 0 gives the ``[E]`` bits."""
+    table from row 0 gives the ``[E]`` bits.  The bound programs are recorded (``bound``)."""
     device = require(P, op)
     arch = arch_of(P, device)
     if not force_row_form(monkeypatch, P, op, form, arch):
@@ -1305,6 +1423,7 @@ def check_row_form(monkeypatch, P: Package, op: str, form: str) -> None:
         s.launch_refs()
         torch.cuda.synchronize(device)
         s.check()
+    record_property("bound", launch_record(s.lead))
     lead, _base = run_from_zero(P, op, layout, device, seed=14)
     assert lead.stages == (form,), lead.stages
 
@@ -1326,8 +1445,10 @@ def check_wgrad_form(
     monkeypatch, P: Package, form: str, out_dtype, record_property
 ) -> None:
     """Weight gradient: under constants that force ``form`` (:data:`WGRAD_FORMS`), a one-group slice
-    whose split tail holds group 0 (where a shape splits it), a three-group slice from an odd row
-    and the whole table from row 0 take the form's main stage and give the references' bits."""
+    whose split tail holds group 0 (required wherever the route finishes a split tail,
+    :func:`split_tail_served`), a three-group slice from an odd row and the whole table from row 0
+    take the form's main stage and give the references' bits.  The split tail's form, layout and
+    bound programs are recorded."""
     device = require(P, "wgrad", out_dtype=out_dtype)
     arch = arch_of(P, device)
     forced = force_wgrad_form(monkeypatch, P, form, arch)
@@ -1337,27 +1458,37 @@ def check_wgrad_form(
     route = P.jit.record_name("wgrad", out_dtype=P.dtype_name(out_dtype), tile_k=tile)
     if not P.jit.stage_served(route, stage, arch):
         pytest.skip(f"{route} serves no {stage} stage on {arch}")
-    k = form_k(P, form)
-    split = split_tail_layout(P, device, arch, form_ks(P, form), out_dtype)
+    k, ks, sms = form_k(P, form), form_ks(P, form), P.cb.sm_count(device)
+    served = split_tail_served(P, tile, stage, arch, out_dtype)
+    split = split_tail_layout(P, device, arch, ks, out_dtype)
+    record_property("sm_count", sms)
+    record_property("split_tail_form", served)
     record_property(
         "split_tail_layout", None if split is None else (split.sizes, split.n, split.k)
     )
+    if served is not None:
+        assert split is not None, (
+            f"{route} {stage} on {arch} ({sms} SMs) finishes a split tail ({served}), but no "
+            f"layout of {SPLIT_ROWS} with K in {ks} splits it"
+        )
     if split is not None:
         s, _ = run_slice(P, "wgrad", split, 1, 2, device, seed=15, out_dtype=out_dtype)
         assert s.lead.stages[0] == stage, (s.lead.stages, stage)
-        assert s.lead.plan["tail_splits"] > 1 and s.lead.plan["num_tail"] > 0, (
-            s.lead.plan
-        )
+        assert_split_tail(s.lead, served, f"{form} split tail")
+        record_property("split_tail_bound", launch_record(s.lead))
     layout = small("wgrad", shape=(512, k))
     s, _ = run_slice(P, "wgrad", layout, 1, 4, device, seed=16, out_dtype=out_dtype)
     assert s.lead.stages[0] == stage, (s.lead.stages, stage)
+    record_property("bound", launch_record(s.lead))
     lead, _base = run_from_zero(
         P, "wgrad", layout, device, seed=17, out_dtype=out_dtype
     )
     assert lead.stages[0] == stage, (lead.stages, stage)
 
 
-def check_split_tail_holds_group_0(monkeypatch, P: Package, out_dtype) -> None:
+def check_split_tail_holds_group_0(
+    monkeypatch, P: Package, out_dtype, record_property
+) -> None:
     """The 512-wide k tile's split tail with group 0 in it: a one-group slice from an odd row whose
     plan splits the tail (the ordered one-launch tail of the non-deterministic package, the tail
     reduce of the deterministic one, both bound as lead twins) gives reference 1's bits."""
@@ -1366,20 +1497,21 @@ def check_split_tail_holds_group_0(monkeypatch, P: Package, out_dtype) -> None:
     form = (
         "k512_main_halves" if arch in P.constants["k512_release_archs"] else "k512_main"
     )
-    if force_wgrad_form(monkeypatch, P, form, arch) is None:
+    forced = force_wgrad_form(monkeypatch, P, form, arch)
+    if forced is None:
         pytest.skip(f"no 512-wide k tile on {arch}")
+    tile, stage = forced
+    served = split_tail_served(P, tile, stage, arch, out_dtype)
+    assert served is not None, (form, arch, "no route finishes a split tail")
     layout = split_tail_layout(P, device, arch, form_ks(P, form), out_dtype)
     assert layout is not None, (
         f"no shape of {SPLIT_ROWS} splits the 512-wide k tile's tail on {arch}"
     )
     s, _ = run_slice(P, "wgrad", layout, 1, 2, device, seed=18, out_dtype=out_dtype)
-    assert s.lead.plan["tail_splits"] > 1, s.lead.plan
-    if P.nondet:
-        assert s.lead.plan["ordered_tail"], s.lead.plan
-    else:
-        assert len(s.lead.bound_routes) == 2, (
-            s.lead.bound_routes
-        )  # main stage, tail reduce
+    assert_split_tail(s.lead, served, f"{form} split tail with group 0")
+    record_property("sm_count", P.cb.sm_count(device))
+    record_property("split_tail_layout", (layout.sizes, layout.n, layout.k))
+    record_property("split_tail_bound", launch_record(s.lead))
 
 
 def check_probed_queue_split(monkeypatch, P: Package) -> None:
@@ -1403,8 +1535,10 @@ def check_probed_queue_split(monkeypatch, P: Package) -> None:
 
 def check_graph(monkeypatch, P: Package, op: str, out_dtype=torch.bfloat16) -> None:
     """A captured slice (``m_indptr[2:7]`` of a device table) replays over routings copied into
-    that table on the device, under ``torch.cuda.set_sync_debug_mode("error")``, and gives each
-    routing's reference 1 bits (a whole-empty slice included) without writing outside its rows."""
+    that table on the device and gives each routing's reference 1 bits (a whole-empty slice
+    included) without writing outside its rows.  The preparation, the first (eager) launch, the
+    copies and the replays run under ``torch.cuda.set_sync_debug_mode("error")``
+    (:func:`no_host_sync`): none synchronizes the host with the device."""
     device = require(P, op, out_dtype=out_dtype)
     fresh_stream_workspaces(monkeypatch, P)
     e0, e1 = GRAPH_CHUNK
@@ -1432,25 +1566,26 @@ def check_graph(monkeypatch, P: Package, op: str, out_dtype=torch.bfloat16) -> N
     prepare = P.prepare[op]
     if op == "wgrad":
         out = sentinel((e1 - e0, n, k), out_dtype, device)
-        lead = prepare(g, x, chunk, out=out, out_dtype=out_dtype, num_groups=e1 - e0)
     else:
         cols = n if op == "fwd" else k
         out = sentinel((GRAPH_ROWS, cols), torch.bfloat16, device)
-        lead = prepare(x if op == "fwd" else g, w[e0:e1], chunk, out=out)
-    lead.launch()  # stream workspaces (and the queue probe) before the capture
+    with no_host_sync():
+        if op == "wgrad":
+            lead = prepare(
+                g, x, chunk, out=out, out_dtype=out_dtype, num_groups=e1 - e0
+            )
+        else:
+            lead = prepare(x if op == "fwd" else g, w[e0:e1], chunk, out=out)
+        lead.launch()  # stream workspaces (and the queue probe) before the capture
     torch.cuda.synchronize(device)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         lead.launch()
     for layout, routed, s in refs:
-        previous = torch.cuda.get_sync_debug_mode()
-        torch.cuda.set_sync_debug_mode("error")
-        try:
+        with no_host_sync():
             buffer.copy_(routed)
             fill_word(lead.out, SENTINEL[lead.out.dtype])
             graph.replay()
-        finally:
-            torch.cuda.set_sync_debug_mode(previous)
         torch.cuda.synchronize(device)
         r0, r1 = layout.bounds(e0, e1)
         what = f"{op} graph replay over {layout.sizes}"
@@ -1482,21 +1617,51 @@ def check_edges(P: Package, op: str, out_dtype=torch.bfloat16) -> None:
             assert_all_word(s.lead.out, POS_ZERO, f"whole-empty chunk [{e0}, {e1})")
 
 
-def accumulate_route(monkeypatch, P: Package, device, out_dtype, route: str) -> None:
-    """Constants under which an accumulating weight gradient takes ``route``: the 512-wide k tile's
-    ``main_halves`` (whose accumulate build the fused route binds) at any rows per group, and for
-    ``composed`` accumulate builds that cannot load; skips where the device has no such route."""
+# The 512-wide k tile forms an accumulating weight gradient is checked on (check_accumulate):
+# main_halves, the wave form (sm_100a / sm_103a), the k256 tail (sm_107a) and the
+# non-deterministic queue walk (sm_100a / sm_103a): every main stage with an accumulate build.
+ACC_FORMS = (
+    "k512_main_halves",
+    "k512_main_wave_halves",
+    "k512_main_halves_k256t",
+    "k512_queue",
+)
+
+
+def accumulate_route(
+    monkeypatch,
+    P: Package,
+    device,
+    out_dtype,
+    route: str,
+    form: str = "k512_main_halves",
+) -> tuple[int, str, str]:
+    """Constants under which an accumulating weight gradient takes ``route`` with the main stage of
+    ``form`` (one of :data:`ACC_FORMS`; the fused route binds that stage's accumulate build) at any
+    rows per group, and for ``composed`` accumulate builds that cannot load; skips where the device
+    has no such form or route.  Returns ``(tile_k, main stage, the stage the launch binds)``."""
     arch = arch_of(P, device)
-    if force_wgrad_form(monkeypatch, P, "k512_main_halves", arch) is None:
-        pytest.skip(f"no main_halves weight gradient on {arch}")
+    forced = force_wgrad_form(monkeypatch, P, form, arch)
+    if forced is None:
+        pytest.skip(f"no {form} weight gradient on {arch}")
+    tile, stage = forced
     if route == "composed":
         monkeypatch.setattr(P.cb, "acc_library_loadable", lambda *args: False)
+        bound = stage
     elif not P.cb.generated_program_available(
         device, "wgrad", out_dtype, accumulate=True
     ):
         pytest.skip(
             f"no fused accumulate build of the {out_dtype} weight gradient here"
         )
+    else:
+        bound = stage + P.cb.ACC_SUFFIX
+    name = P.jit.record_name("wgrad", out_dtype=P.dtype_name(out_dtype), tile_k=tile)
+    if not P.jit.stage_served(name, bound, arch):
+        # main_halves is served wherever the 512-wide k tile is: a gap there is a failure.
+        assert form != ACC_FORMS[0], f"{name} serves no {bound} stage on {arch}"
+        pytest.skip(f"{name} serves no {bound} stage on {arch}")
+    return tile, stage, bound
 
 
 def check_empty_accumulate(monkeypatch, P: Package, out_dtype, route: str) -> None:
@@ -1564,10 +1729,18 @@ def check_row_padded(
 
 
 def check_two_streams(
-    monkeypatch, P: Package, op: str, form: Optional[str] = None
+    monkeypatch,
+    P: Package,
+    op: str,
+    form: Optional[str] = None,
+    *,
+    shared_out: bool = False,
 ) -> None:
     """Two slices launched concurrently on two streams (each with its own stream workspaces;
-    the queue walk where ``form`` forces it) give their references' bits."""
+    the queue walk where ``form`` forces it) give their references' bits.  With ``shared_out``
+    the two slices cover adjacent groups and write one ``out`` (the README's chunks over one
+    output): disjoint rows of one ``Y`` / ``dX``, disjoint groups of one ``dW``; the rows and groups
+    outside both stay untouched."""
     device = require(P, op)
     fresh_stream_workspaces(monkeypatch, P)
     shape = SHAPES[op]
@@ -1583,9 +1756,22 @@ def check_two_streams(
         shape = (512, form_k(P, form))
     layout = small(op, shape=shape)
     operands = inputs(layout, device, seed=24)
+    chunks = ((1, 4), (4, 6)) if shared_out else ((1, 4), (3, 6))
+    shared = None
+    outs: list = [None, None]
+    if shared_out:
+        if op == "wgrad":
+            shared = sentinel(
+                (layout.groups, layout.n, layout.k), torch.bfloat16, device
+            )
+            outs = [shared[e0:e1] for e0, e1 in chunks]
+        else:
+            cols = layout.n if op == "fwd" else layout.k
+            shared = sentinel((layout.rows, cols), torch.bfloat16, device)
+            outs = [shared, shared]
     slices = [
-        build_slice(P, op, layout, e0, e1, device, operands=operands)
-        for e0, e1 in ((1, 4), (3, 6))
+        build_slice(P, op, layout, e0, e1, device, operands=operands, lead_out=out)
+        for (e0, e1), out in zip(chunks, outs, strict=True)
     ]
     if form is not None:
         assert all(s.lead.stages[0] == stage for s in slices), [
@@ -1606,7 +1792,13 @@ def check_two_streams(
             current.wait_stream(stream)
         torch.cuda.synchronize(device)
         for s in slices:
-            s.check()
+            s.check(outside=not shared_out)
+        if shared is not None:
+            lo, hi = chunks[0][0], chunks[-1][1]
+            if op != "wgrad":
+                lo, hi = layout.bounds(lo, hi)
+            assert_untouched(shared[:lo], f"{op} shared out before both slices")
+            assert_untouched(shared[hi:], f"{op} shared out after both slices")
 
 
 def check_autograd_slice(P: Package) -> None:
@@ -1658,21 +1850,38 @@ def check_autograd_chunks(P: Package) -> None:
         assert_all_word(others, POS_ZERO, f"{what}: dW of the other groups")
 
 
-def check_accumulate(monkeypatch, P: Package, out_dtype, route: str) -> None:
+def check_accumulate(
+    monkeypatch,
+    P: Package,
+    out_dtype,
+    route: str,
+    form: str = "k512_main_halves",
+    record_property=None,
+) -> None:
     """A slice accumulating into a finite ``out`` (``main_grad``) on the ``route`` route
-    (``composed`` forced by an unloadable accumulate build) gives the references' bits, the split
-    tail with group 0 included (the 512-wide k tile)."""
+    (``composed`` forced by an unloadable accumulate build) with the main stage of ``form``
+    (:data:`ACC_FORMS`) gives the references' bits, the split tail with group 0 included (required
+    wherever the route finishes a split tail, :func:`split_tail_served`; its bound programs
+    recorded)."""
     device = require(P, "wgrad", out_dtype=out_dtype)
-    accumulate_route(monkeypatch, P, device, out_dtype, route)
-    layout = small("wgrad", shape=(512, 1024))
+    arch = arch_of(P, device)
+    tile, stage, bound = accumulate_route(
+        monkeypatch, P, device, out_dtype, route, form
+    )
+    ks = form_ks(P, form)
+    layout = small("wgrad", shape=(512, ks[0]))
     operands = inputs(layout, device, seed=27)
     cases = [(layout, e0, e1, operands) for e0, e1 in SMALL_CHUNKS]
-    split = split_tail_layout(
-        P, device, arch_of(P, device), (1024, 2048, 4096), out_dtype
-    )
+    served = split_tail_served(P, tile, stage, arch, out_dtype)
+    split = split_tail_layout(P, device, arch, ks, out_dtype)
+    if served is not None:
+        assert split is not None, (
+            f"{form} on {arch} ({P.cb.sm_count(device)} SMs) finishes a split tail "
+            f"({served}), but no layout of {SPLIT_ROWS} with K in {ks} splits it"
+        )
     if split is not None:
         cases.append((split, 1, 2, inputs(split, device, seed=28)))
-    for layout, e0, e1, ops in cases:
+    for index, (layout, e0, e1, ops) in enumerate(cases):
         init = random_like_out(
             (e1 - e0, layout.n, layout.k), out_dtype, device, seed=29
         )
@@ -1690,10 +1899,16 @@ def check_accumulate(monkeypatch, P: Package, out_dtype, route: str) -> None:
                 operands=ops,
             )
         assert s.lead.plan["accumulate"] == route, s.lead.plan
+        assert s.lead.stages[0] == bound, (s.lead.stages, bound)
+        if split is not None and index == len(cases) - 1:
+            assert_split_tail(s.lead, served, f"{form} {route} split tail")
         s.lead.launch()
         s.launch_refs()
         torch.cuda.synchronize(device)
         s.check()
+        if record_property is not None:
+            key = "split_tail_bound" if layout is split else f"bound_{e0}_{e1}"
+            record_property(key, launch_record(s.lead))
 
 
 def check_base_host(monkeypatch, P: Package, op: str) -> None:
