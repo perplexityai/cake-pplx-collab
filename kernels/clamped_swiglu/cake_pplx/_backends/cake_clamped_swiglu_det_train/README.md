@@ -232,11 +232,14 @@ the fills of those outputs.  The kernels write every element of every output, so
   weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
   architecture is still checked at every call, before any allocation.
 - Host path: a common call (plain contiguous operands and outputs of the exact dtypes and shapes on one device, the
-  BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched in one Python frame per step, and the row
-  strides of its contiguous tensors are constants (`4608` or `2304`; 0 for one row), not read.  Any other call takes
-  the full checks, which raise every error and copy what the kernels cannot read; both give the same launch.  The
-  facade binds the backend's step functions and autograd entry (`apply`, then the forward launch) at their first
-  call.
+  BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched by the step function itself, without the
+  full checks.  The step checks the first operand, the weight and `dh` in its own frame, and the `up` of a two-tensor
+  input and each caller-provided output buffer with one helper call each.  So only a merged input with new outputs is
+  checked and launched in exactly one Python frame per step.  The checks keep the order of the full checks: the
+  operands and `dh`, then `limit`, then the output buffers.  The row strides of its contiguous tensors are constants
+  (`4608` or `2304`; 0 for one row), not read.  Any other call takes the full checks, which raise every error and copy
+  what the kernels cannot read; both give the same launch.  The facade binds the backend's step functions and
+  autograd entry (`apply`, then the forward launch) at their first call.
 
 ## Limitations
 

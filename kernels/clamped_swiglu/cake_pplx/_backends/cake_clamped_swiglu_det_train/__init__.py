@@ -50,9 +50,13 @@ JIT variables):
   copies, allocates and launches nothing.  The common call (plain contiguous CUDA tensors of the
   exact dtype and shape on one device, the BF16 ones 16-byte aligned,
   ``0 < R < 2**31 - 256``, output buffers None or plain contiguous tensors) is
-  accepted in one pass over each tensor's metadata and launched in the same
-  frame, one per step; its row strides are not read (a contiguous tensor of
-  more than one row has the stride of its row width).  Any other call takes
+  accepted in one pass over each tensor's metadata and launched by the step
+  itself (:func:`_forward_step`, :func:`_backward_step`): the first operand,
+  the weight and ``dh`` are checked in the step's own frame, the ``up`` of two
+  tensors and each output buffer by one :func:`_plain` call each, in the order
+  of the full checks (the operands and ``dh``, then ``limit``, then the output
+  buffers and their rules); its row strides are not read (a contiguous tensor
+  of more than one row has the stride of its row width).  Any other call takes
   the full checks, which raise every error and mark the inputs to copy.  Both
   give the same launch.  A ``limit`` that is a
   Python float or int equal to the last accepted one reuses its FP32 rounding
@@ -877,13 +881,18 @@ def _backward(
     return result
 
 
-# The common call of a step, checked and launched in one frame (:func:`_forward_step`, :func:`_backward_step`): plain
-# contiguous operands of the exact dtypes and shapes on one CUDA device (the BF16 ones 16-byte aligned), the merged
-# BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None or plain
-# contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  A contiguous tensor of
-# more than one row has the row stride of its row width, so its row stride is that constant and is not read; a single
-# row's strides are 0 (never dereferenced).  Any other call runs :func:`_forward` or :func:`_backward`, whose checks
-# raise every error and mark the inputs to copy; both give the same launch.
+# The common call of a step, checked and launched by the step itself (:func:`_forward_step`, :func:`_backward_step`):
+# plain contiguous operands of the exact dtypes and shapes on one CUDA device (the BF16 ones 16-byte aligned), the
+# merged BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None or
+# plain contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  The first operand,
+# the weight and ``dh`` are checked in the step's own frame, the ``up`` of two tensors and each output buffer by one
+# :func:`_plain` call each, so only a merged input with new outputs is checked and launched in exactly one frame.  The
+# checks keep the order of the full checks: the operands and ``dh``, then ``limit``, then the output buffers and their
+# rules, then the device's architecture; an output buffer that is not plain sends the call, its limit checked, to the
+# full checks.  A contiguous tensor of more than one row has the row stride of its row width, so its row stride is
+# that constant and is not read; a single row's strides are 0 (never dereferenced).  Any other call runs
+# :func:`_forward` or :func:`_backward`, whose checks raise every error and mark the inputs to copy; both give the
+# same launch.
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
 _MERGED_WIDTH = 2 * WIDTH
@@ -898,9 +907,10 @@ def _forward_step(
     held: Optional[_HeldLaunch] = None,
 ) -> torch.Tensor:
     """The forward step's ``h``: the common call checked and launched here, any other call through :func:`_forward`.
-    The checks and the launch are those of :func:`_forward`: the operands, then ``limit``, then ``out``, then the
-    device's architecture, then the new output and the launch.  With ``held`` (the autograd forward of
-    :func:`cake_clamped_swiglu_det`), the launch is kept there and runs when ``held`` is called."""
+    The checks and the launch are those of :func:`_forward`: the operands, then ``limit``, then ``out`` (one that is
+    not plain goes, with the limit checked, to :func:`_forward`), then the device's architecture, then the new output
+    and the launch.  With ``held`` (the autograd forward of :func:`cake_clamped_swiglu_det`), the launch is kept there
+    and runs when ``held`` is called."""
     first = gate_up_or_gate
     if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
         shape = first.shape
@@ -908,20 +918,16 @@ def _forward_step(
             rows = shape[0]
             if 0 < rows < MAX_ROWS and first.is_contiguous() and not first.data_ptr() % ALIGNMENT_BYTES:
                 index = first.get_device()
-                if (
-                    (up is None or _plain(up, _BF16, shape, index))
-                    and (
-                        weight is None
-                        or (
-                            type(weight) is torch.Tensor
-                            and weight.is_cuda
-                            and weight.dtype is _FP32
-                            and weight.shape == (rows,)
-                            and weight.is_contiguous()
-                            and weight.get_device() == index
-                        )
+                if (up is None or _plain(up, _BF16, shape, index)) and (
+                    weight is None
+                    or (
+                        type(weight) is torch.Tensor
+                        and weight.is_cuda
+                        and weight.dtype is _FP32
+                        and weight.shape == (rows,)
+                        and weight.is_contiguous()
+                        and weight.get_device() == index
                     )
-                    and (out is None or _plain(out, _BF16, (rows, WIDTH), index))
                 ):
                     if type(limit) is float or type(limit) is int:  # :func:`_limit`'s cached rounding, inlined
                         value, L = _last_limit
@@ -929,6 +935,9 @@ def _forward_step(
                             L = _limit(limit)
                     else:
                         L = _limit(limit)
+                    if out is not None and not _plain(out, _BF16, (rows, WIDTH), index):
+                        # ``out`` after ``limit``, as in :func:`_forward`, which checks this ``out`` in full.
+                        return _forward(gate_up_or_gate, up, weight, limit, out, held)[0]
                     if _arch_of_index(index) is None:
                         device_arch(index)  # raises: not an exported architecture
                     launch = _launcher("fwd", index)
@@ -987,8 +996,9 @@ def _backward_step(
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """The backward step: the common call checked and launched here, any other call through :func:`_backward`
     (``rounded`` as there).  The checks and the launch are those of :func:`_backward`: the operands and ``grad_out``,
-    then ``limit``, then the output buffers and their rules, then the device's architecture, then the new outputs and
-    the launch (``bwd`` for a weighted call, ``bwd_unweighted`` for an unweighted one)."""
+    then ``limit``, then the output buffers and their rules in its order (a buffer that is not plain, or a broken rule,
+    goes with the limit checked to :func:`_backward`), then the device's architecture, then the new outputs and the
+    launch (``bwd`` for a weighted call, ``bwd_unweighted`` for an unweighted one)."""
     first, dh = gate_up_or_gate, grad_out
     if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
         shape = first.shape
@@ -1026,9 +1036,12 @@ def _backward_step(
                     else:
                         L = _limit(limit)
                     d_first, d_up, d_weight = grad_gate_up_or_gate, grad_up, grad_weight
+                    # In the order of :func:`_backward`: the ``grad_up`` rule, then ``grad_gate_up_or_gate``, then
+                    # ``grad_up``, then the ``grad_weight`` rule, then ``grad_weight``.
                     if (
-                        (d_first is None or _plain(d_first, _BF16, shape, index))
-                        and (d_up is None or (up is not None and _plain(d_up, _BF16, shape, index)))
+                        (d_up is None or up is not None)
+                        and (d_first is None or _plain(d_first, _BF16, shape, index))
+                        and (d_up is None or _plain(d_up, _BF16, shape, index))
                         and (d_weight is None or (weight is not None and _plain(d_weight, _FP32, (rows,), index)))
                     ):
                         if _arch_of_index(index) is None:
@@ -1189,8 +1202,10 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
     """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and
     ``weight``; no activation, no FP32 intermediate) and recomputes the activation in the backward, so
     ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a
-    merged ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked once,
-    in the forward, and its FP32 value is reused by the backward.  The backward has no output buffer, ``grad_up`` or
+    merged ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked in the
+    forward, by the forward step; the autograd forward then reads its FP32 rounding through :func:`_limit` again (the
+    cached pair for a Python float or int; for any other number the limit checks run a second time, on a value that
+    passed them), and the backward reuses that FP32 value.  The backward has no output buffer, ``grad_up`` or
     ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the saved operands
     again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their device, shape or
     layout after the forward without the autograd version check seeing it.  No double backward: differentiating
