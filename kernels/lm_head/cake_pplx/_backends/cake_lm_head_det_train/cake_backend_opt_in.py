@@ -10206,8 +10206,8 @@ class CakeLMHeadDetLogprobOneChunkFunction(CakeLMHeadDetLogprobAutoFunction):
         ctx.hidden_count = hidden
         ctx.gemm_tuning = tuning
         ctx.logprob_dz = dz_arm
-        # the graph's label residuals, behind the forward's launches (:func:`.cake_backend._logprob_graph_rlab`): the
-        # kept logits' first backward stores every row with ``row_grad``, a later one recomputes over the same rows
+        # the graph's label residuals (:func:`.cake_backend._logprob_graph_rlab`): the kept logits' first backward
+        # takes them and stores every row with ``row_grad``, a later one recomputes over the same rows
         ctx.rlab = _main._logprob_graph_rlab(
             X,
             result.row_index,
