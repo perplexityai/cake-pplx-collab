@@ -17302,12 +17302,13 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
         h, misses = g["holder"], be.BINDING_CACHE.misses
         del takes[:], bound[:]
         backward(g)
-        assert be.BINDING_CACHE.misses > misses, (entry.__name__, T)
+        what = (entry.__name__, T, takes)
+        assert be.BINDING_CACHE.misses > misses, what
         if any(x is h for x in bound):
-            assert takes == [g["rows"]] and h.own is not None, (entry.__name__, T, takes)
+            assert takes == [g["rows"]] and h.own is not None, what
         else:
             runner_path += 1
-            assert takes == [] and h.tensor is None and h.own is None, (entry.__name__, T, takes)
+            assert takes == [] and h.tensor is None and h.own is None, what
         del g, h
     monkeypatch.undo()
     assert runner_path >= 1
