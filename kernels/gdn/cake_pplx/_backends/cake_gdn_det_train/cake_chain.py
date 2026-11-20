@@ -591,6 +591,10 @@ class SegmentTable:
     # (``SPLIT_WARM``); None: the other tables
     summary: torch.Tensor | None = None
     num_summary: int = 0
+    # the two rows of ``summary``, the map launch's ``seg_index`` and ``seg_mode``, taken once with the table; None with
+    # ``summary``
+    seg_index: torch.Tensor | None = None
+    seg_mode: torch.Tensor | None = None
 
 
 @dataclass(frozen=True)
@@ -747,6 +751,8 @@ def build_chunk_meta(
         views.append(table[offset : offset + len(part)])
         offset += len(part)
     summary_table = views[extra["summary"]].view(2, -1) if "summary" in extra else None
+    seg_index = summary_table[0] if summary_table is not None else None
+    seg_mode = summary_table[1] if summary_table is not None else None
     segments = [
         SegmentTable(
             seg_chunk_start=views[3 + 3 * i],
@@ -758,6 +764,8 @@ def build_chunk_meta(
             walk=views[extra["walk"]] if i == 0 and "walk" in extra else None,
             summary=summary_table if i == 1 else None,
             num_summary=len(summary) if i == 1 else 0,
+            seg_index=seg_index if i == 1 else None,
+            seg_mode=seg_mode if i == 1 else None,
         )
         for i in range(2)
     ]
@@ -3936,7 +3944,7 @@ def cake_gdn_det_train_backward(
             # seg_state / seg_flag; a sequence's first map is never read)
             _launch(ADJOINT_MAP_STAGE, segs.num_summary, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
                     seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
-                    meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.summary[0], segs.summary[1],
+                    meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.seg_index, segs.seg_mode,
                     warmup_thresh_log2(options), seg_flag)  # fmt: skip
         elif split_tc:
             # the pre-scan with the dv_local tiles of its chunks computed in the CTA (the same seg_state / seg_flag)
