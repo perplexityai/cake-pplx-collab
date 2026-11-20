@@ -2498,8 +2498,9 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # one with the higher lowest node and mode median, the smaller within 0.005); the outputs were equal to that plan's bit
 # for bit at every measured T on both nodes, also where the program changes:
 #   * GB300 (152-SM sm_103a): 4096 -> 32 in groups of 32 at T 16172, 1.019 to 1.029 times faster than the same program
-#     in the default group of 16 (its range of version 0.3.12; T 16173 - 16384 keep it), and at T 32768, 1.040 to
-#     1.050 times faster than the plan of version 0.3.11 (the row's ``ROW_RULES`` rule, a kept cell of version 0.3.12);
+#     in the default group of 16 (its range of version 0.3.12; T 16173 - 16384 keep it up to version 0.3.13,
+#     T 16173 - 16383 since), and at T 32768, 1.040 to 1.050 times faster than the plan of version 0.3.11 (the row's
+#     ``ROW_RULES`` rule, a kept cell of version 0.3.12);
 #     5120 -> 64 in groups of 32 at T 16172, 1.018 to 1.023 times faster than the plan of version 0.3.11 (the row had no
 #     range of version 0.3.12 on this part).  4096 -> 32 at T 16231 and 16384 and 5120 -> 64 at T 16231, 16384 and
 #     32768 keep their plan (all but 4096 -> 32 at T 16231 up to version 0.3.13: below): the group of 32 had medians
