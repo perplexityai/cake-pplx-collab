@@ -160,14 +160,14 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_main_2cta": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_95e4e45dde43783fdf83",
         "launch": {
-            "block": (1, 1, 1),
-            "cluster": (1, 1, 1),
+            "block": (512, 1, 1),
+            "cluster": (2, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 231424,
             "use_pdl": False,
         },
         "library": "cake_fmha_train_95e4e45dde43783fdf83",
@@ -175,14 +175,14 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_main_2cta_causal": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "LSE_log2_gmem"], ["buffer", "dPsum_gmem"], ["buffer", "dK_gmem"], ["buffer", "dV_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_f52478391bbcd6308069",
         "launch": {
-            "block": (1, 1, 1),
-            "cluster": (1, 1, 1),
+            "block": (512, 1, 1),
+            "cluster": (2, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 231424,
             "use_pdl": False,
         },
         "library": "cake_fmha_train_f52478391bbcd6308069",
@@ -220,14 +220,14 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     "bwd_post_pair": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
-        "arg_plan": [],
+        "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["parameter", "seqlen_q"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
         "ffi_entry": "run",
         "kernel_symbol": "kernel_cake_fmha_train_1a125639d68d30b57111",
         "launch": {
-            "block": (1, 1, 1),
+            "block": (128, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 0,
+            "dynamic_smem_bytes": 65536,
             "use_pdl": False,
         },
         "library": "cake_fmha_train_1a125639d68d30b57111",
@@ -252,25 +252,35 @@ RECORD_OF: dict[tuple[int, bool, bool], tuple[str, str, str]] = {
 # (head dim, causal, pair) -> the host sequence of the variant: one library whose ``run`` launches the three records
 # RECORD_OF names for it, in order, in one host call.  Derived by the exporter.
 SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
-    (128, False): {
+    (128, False, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_495bb89b89eb8b41327e",
         "records": ("bwd_pre", "bwd_main", "bwd_post"),
     },
-    (128, True): {
+    (128, True, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_5f9dc314733948320c47",
         "records": ("bwd_pre", "bwd_main_causal", "bwd_post"),
     },
-    (64, False): {
+    (64, False, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_a69536754fc8eb40cf51",
         "records": ("bwd_pre_hd64", "bwd_main_hd64", "bwd_post_hd64"),
     },
-    (64, True): {
+    (64, True, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_f4f0d4f37340ee62f928",
         "records": ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
+    },
+    (128, False, True): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_354c53aa1bd7a12eec41",
+        "records": ("bwd_pre", "bwd_main_2cta", "bwd_post_pair"),
+    },
+    (128, True, True): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_011ecf5b8485c428cdc9",
+        "records": ("bwd_pre", "bwd_main_2cta_causal", "bwd_post_pair"),
     },
 }
 
