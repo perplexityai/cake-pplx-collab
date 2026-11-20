@@ -31,9 +31,10 @@ Arms (each called as ``fn(x, kv, q_weight, k_weight, token_mask)`` through autog
 * ``eager``: the issue formula in eager PyTorch FP32.
 * ``torch_compile_fp64dot`` (optional diagnostic): ``torch_compile`` with ``P`` summed in FP64.
 * ``cake_nondet`` / ``cake_det``: ``cake_pplx.cake_engram_gate_<mode>_train.cake_engram_gate_<mode>_kv`` with the
-  default sum of the dot product (``dot_sum="compensated"``: a compensated FP32 dot product); ``cake_nondet_fp32`` /
-  ``cake_det_fp32``: the same entry with the opt-in ``dot_sum="fp32"`` (the forward sums in one FP32 word; the
-  backward is the same).
+  entry's default sum of the dot product (``dot_sum="fp32"``: one FP32 word); ``cake_nondet_compensated`` /
+  ``cake_det_compensated``: the same entry with the opt-in ``dot_sum="compensated"`` (a compensated FP32 dot
+  product; the backward is the same).  ``cake_nondet_fp32`` / ``cake_det_fp32`` (not run by default) name
+  ``dot_sum="fp32"`` explicitly, for comparisons with a package whose default differs.
 
 Timing boundary (identical for all arms): ``fwd`` = one training forward ``fn(x, kv, qw, kw, mask)`` (weight product,
 output allocation, autograd graph recorded and dropped); ``bwd`` = ``torch.autograd.backward`` of a recorded forward
@@ -96,11 +97,14 @@ FE_BWD_CHUNK = 8192
 FE_FWD_MAX = 64 * 65535
 FE_TOKEN_MULTIPLE = 64
 SCALES = (0.25, 1.0, 2.0, 4.0)
-# The Cake arms: the default sum of the dot product, then the opt-in one-word FP32 forward sum (``dot_sum="fp32"``).
+# The Cake arms: the entry's default sum of the dot product, then the opt-in compensated forward sum
+# (``dot_sum="compensated"``); the arms that name ``dot_sum="fp32"`` (the default) explicitly run on request.
 CAKE_ARMS = ("cake_nondet", "cake_det")
+CAKE_COMPENSATED_ARMS = ("cake_nondet_compensated", "cake_det_compensated")
 CAKE_FP32_ARMS = ("cake_nondet_fp32", "cake_det_fp32")
-DEFAULT_ARMS = CAKE_ARMS + CAKE_FP32_ARMS + ("cudnn_fe", "torch_compile", "torch_compile_tuned", "eager")
-ALL_ARMS = DEFAULT_ARMS + ("cudnn_fe_dev", "torch_compile_fp64dot")
+CAKE_SUM_ARMS = CAKE_COMPENSATED_ARMS + CAKE_FP32_ARMS
+DEFAULT_ARMS = CAKE_ARMS + CAKE_COMPENSATED_ARMS + ("cudnn_fe", "torch_compile", "torch_compile_tuned", "eager")
+ALL_ARMS = DEFAULT_ARMS + CAKE_FP32_ARMS + ("cudnn_fe_dev", "torch_compile_fp64dot")
 DETERMINISTIC_CLAIM = {
     "cudnn_fe": True,
     "cudnn_fe_dev": True,
@@ -110,6 +114,8 @@ DETERMINISTIC_CLAIM = {
     "torch_compile_fp64dot": True,
     "cake_nondet": False,
     "cake_det": True,
+    "cake_nondet_compensated": False,
+    "cake_det_compensated": True,
     "cake_nondet_fp32": False,
     "cake_det_fp32": True,
 }
@@ -498,7 +504,7 @@ def make_arm(name):
         return FeArm(name)
     if name in CAKE_ARMS:
         return CakeArm(name.split("_", 1)[1])
-    if name in CAKE_FP32_ARMS:
+    if name in CAKE_SUM_ARMS:
         _, mode, dot_sum = name.split("_")
         return CakeArm(mode, dot_sum)
     raise ValueError(f"unknown arm {name}")

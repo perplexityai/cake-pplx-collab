@@ -29,7 +29,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gdn | Fixed order today, with no run-to-run promise. Not bitwise det. As with det, the tests record each output's error against an FP64 reference beside the BF16 naive implementation's. | Runs unchanged |
 | mhc | Plain FP32 sums in a fixed order today. No bit promise; not compared bitwise with det. | No alert |
 | mhc_head | Same kernels as det | No alert |
-| engram_gate | `dq_weight` / `dk_weight` add the clusters' partial sums with FP32 atomics; `out`, `dX`, `dK`, `dV` have one fixed order | Backward raises before launch |
+| engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
 | dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
@@ -918,8 +918,8 @@ The backward recomputes `r_h`, `r_k` and `P` from the inputs. It returns `dX`, `
 
 **Sum of the dot product.** The autograd entries and the explicit forward take the keyword-only `dot_sum`. It selects the forward's sum of `P`.
 
-- `dot_sum="compensated"` (the default): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end.
-- `dot_sum="fp32"` (opt-in): one FP32 word. The forward takes about 5-15% less time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: 0.313 ms against 0.329 ms on GB300, 0.174 ms against 0.205 ms on VR200). Where the products nearly cancel, it rounds more output elements away from the correctly rounded result.
+- `dot_sum="fp32"` (the default): one FP32 word.
+- `dot_sum="compensated"` (opt-in): a compensated FP32 dot product. Each product is split by an FMA, each running sum by an error-free two-sum, and the error words are added once at the end. The forward takes about 5-18% more time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: 0.329 ms against 0.313 ms on GB300, 0.205 ms against 0.174 ms on VR200). Where the products nearly cancel, it rounds fewer output elements away from the correctly rounded result.
 
 The backward is the same for both. It recomputes `P` as a compensated dot product, so the gradients do not depend on `dot_sum`. The explicit backward and the workspace query take no `dot_sum`. Another value raises `ValueError`; a value that is not a `str` raises `TypeError`.
 
@@ -930,10 +930,10 @@ The backward is the same for both. It recomputes `P` as a compensated dot produc
 | `out`, random (either `dot_sum`) | 1.448e-3 / 1.457e-3 | 2.896e-3 / 2.914e-3 |
 | `out`, near-cancelling (either `dot_sum`) | 1.661e-3 / 1.669e-3 | 3.321e-3 / 3.338e-3 |
 | `dX`, `dK`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 3.3e-3 / 3.4e-3 |
-| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
+| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.3e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
-The `out` errors of the two forwards agree to four digits. On the near-cancelling draws, `dot_sum="fp32"` rounds 17802 of the 8.19 million output elements away from BF16 of the FP64 result, against 117 for the default. An FP32 evaluation of the formula rounds 21917 of them away.
+The `out` errors of the two forwards agree to four digits. On the near-cancelling draws, the default `dot_sum="fp32"` rounds 17802 of the 8.19 million output elements away from BF16 of the FP64 result, against 117 for `dot_sum="compensated"`. An FP32 evaluation of the formula rounds 21917 of them away.
 
 **Inputs.** `X` BF16 `[T, 4, 5120]`, contiguous. `K` BF16 `[T, 4, 5120]` and `V` BF16 `[T, 5120]`: contiguous, or views of one packed `kv [T, 25600]` (the four keys, then the value). They need a unit column stride, a stream stride of 5120 for `K` and a token stride that is a multiple of 8 elements. `q_weight` and `k_weight` are BF16 or FP32 `[4, 5120]`, each independently. `token_mask` is bool `[T]` or None. `eps` and `clamp_value` are run-time floats (1e-20 and 1e-6 by default). BF16 operands start on a 16-byte boundary. `T >= 0` is a run-time value: no recompilation for a new `T`.
 
@@ -943,9 +943,9 @@ Every sum has one fixed order. Each cluster of the backward writes its own FP32 
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_engram_gate_det` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated")` | As above; any may require grad | Autograd. Returns BF16 `out [T, 4, 5120]`. The node saves the inputs only. Weight gradients come back in each parameter's dtype. |
-| `cake_engram_gate_det_kv` | `(x, kv, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated")` | `kv` BF16 `[T, 25600]` | Autograd on the packed projection output. The backward writes one `dkv [T, 25600]` (no split, no concatenation copy). |
-| `cake_engram_gate_det_train_forward` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="compensated", out=None)` | `out` BF16 `[T, 4, 5120]`, contiguous | Returns `out`. Nothing is saved. |
+| `cake_engram_gate_det` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32")` | As above; any may require grad | Autograd. Returns BF16 `out [T, 4, 5120]`. The node saves the inputs only. Weight gradients come back in each parameter's dtype. |
+| `cake_engram_gate_det_kv` | `(x, kv, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32")` | `kv` BF16 `[T, 25600]` | Autograd on the packed projection output. The backward writes one `dkv [T, 25600]` (no split, no concatenation copy). |
+| `cake_engram_gate_det_train_forward` | `(x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dot_sum="fp32", out=None)` | `out` BF16 `[T, 4, 5120]`, contiguous | Returns `out`. Nothing is saved. |
 | `cake_engram_gate_det_train_backward` | `(dout, x, key, value, q_weight, k_weight, token_mask=None, *, eps=1e-20, clamp_value=1e-6, dx=None, dkey=None, dvalue=None)` | `dout` BF16 `[T, 4, 5120]`, contiguous; `dkey`/`dvalue` may be views of one `dkv [T, 25600]` | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`, the weight gradients FP32. Takes the forward's inputs, not its output; the same after either `dot_sum`. |
 | `cake_engram_gate_det_train_workspace_bytes` | `(T, device=None)` | | Device bytes one backward allocates beside its operands and outputs (see Caveats). |
 
@@ -953,15 +953,15 @@ Other public names: `is_cake_engram_gate_det_train_supported(device=None)`, `Cak
 
 ### `cake_pplx.cake_engram_gate_nondet_train`
 
-The backward adds each cluster's FP32 weight-gradient partial sums into one accumulator with float atomics, so `dq_weight` and `dk_weight` may differ in their last bits run to run. `out`, `dX`, `dK` and `dV` have one fixed order. Under `torch.use_deterministic_algorithms(True)` every backward call that launches raises `RuntimeError` naming the det entry of the same role; with `warn_only=True` it warns once and runs. The forward never alerts. Source: [`kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py`](../kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py).
+This module is nondet by name. `out`, `dX`, `dK` and `dV` have one fixed order, and the contract makes no bit promise for `dq_weight` and `dk_weight`, but the implementation uses det's kernels: each cluster of the backward writes its own FP32 row of weight-gradient partial sums, and a second kernel adds the rows in one order. Adding the clusters' sums into one cleared accumulator with float atomics instead was slower in eager calls and faster only in some CUDA-graph calls with a token mask at 129 to 16384 tokens. It raises no alert. Source: [`kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py`](../kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_engram_gate_nondet` | As det | As det | Autograd. The backward alerts under deterministic algorithms. |
+| `cake_engram_gate_nondet` | As det | As det | Autograd. |
 | `cake_engram_gate_nondet_kv` | As det | As det | Autograd on `kv`; one `dkv` written by the backward. |
-| `cake_engram_gate_nondet_train_forward` | As det | As det | Returns `out`; never alerts. |
-| `cake_engram_gate_nondet_train_backward` | As det | As det | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`; alerts before it allocates or launches. |
-| `cake_engram_gate_nondet_train_workspace_bytes` | `(T, device=None)` | | As det, with one accumulator row instead of one row per cluster. |
+| `cake_engram_gate_nondet_train_forward` | As det | As det | Returns `out`. |
+| `cake_engram_gate_nondet_train_backward` | As det | As det | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`. |
+| `cake_engram_gate_nondet_train_workspace_bytes` | `(T, device=None)` | | As det. |
 
 Other public names: `is_cake_engram_gate_nondet_train_supported(device=None)`, `CakeEngramGateNondetFunction`, `CakeEngramGateNondetKvFunction`, `ARCHES`, `STREAMS`, `HIDDEN`, `KV_WIDTH`.
 
@@ -985,12 +985,12 @@ token_mask = torch.ones(T, dtype=torch.bool, device=dev)
 out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
 out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.grad, k_weight.grad
 # det: cake_pplx.cake_engram_gate_det_train.cake_engram_gate_det_kv
-# opt-in, a faster forward (the same backward): dot_sum="fp32"
+# opt-in, a compensated forward sum (slower; the same backward): dot_sum="compensated"
 ```
 
 **Caveats.**
 
-- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each (det: one per cluster of the backward grid; nondet: one accumulator). The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
+- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each, one per cluster of the backward grid (det and nondet). The workspace query reads the device's architecture and SM count for `T > 0`: a device that is not a CUDA device raises `ValueError`, a CUDA device outside the architectures `RuntimeError`. The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
 - The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - `X`, `dOut` and `dX` must be contiguous. Output rows must not overlap.
 - No double backward.

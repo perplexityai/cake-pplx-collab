@@ -143,7 +143,7 @@ __device__ __forceinline__ float mul_f32_rn_noftz(float a, float b) {
 extern "C" {
 
 __global__ __launch_bounds__(160, LAUNCH_MIN_BLOCKS) __cluster_dims__(4,1,1) void
-kernel_cake_engram_gate_train_a8cb26cf619ca16fe4c9(__nv_bfloat16* __restrict__ dout, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, int* __restrict__ q_weight, int* __restrict__ k_weight, bool* __restrict__ mask, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dkey, __nv_bfloat16* __restrict__ dvalue, float* __restrict__ dw_acc, int T, float eps, float clamp, int wmode, long long q_weight_size_p0, long long q_weight_size_p1, long long k_weight_size_p0, long long k_weight_size_p1, long long key_stride_p0, long long key_stride_p1, long long value_stride_p0, long long dkey_stride_p0, long long dkey_stride_p1, long long dvalue_stride_p0)
+kernel_cake_engram_gate_train_638509badcd8ffb2085c(__nv_bfloat16* __restrict__ dout, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ key, __nv_bfloat16* __restrict__ value, int* __restrict__ q_weight, int* __restrict__ k_weight, bool* __restrict__ mask, __nv_bfloat16* __restrict__ dx, __nv_bfloat16* __restrict__ dkey, __nv_bfloat16* __restrict__ dvalue, float* __restrict__ dw_part, int T, float eps, float clamp, int wmode, long long q_weight_size_p0, long long q_weight_size_p1, long long k_weight_size_p0, long long k_weight_size_p1, long long key_stride_p0, long long key_stride_p1, long long value_stride_p0, long long dkey_stride_p0, long long dkey_stride_p1, long long dvalue_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -2026,11 +2026,18 @@ kernel_cake_engram_gate_train_a8cb26cf619ca16fe4c9(__nv_bfloat16* __restrict__ d
         #pragma unroll
 #if __CUDA_ARCH__ == 1030
         for (int half_10 = 0; half_10 < 2; half_10++) {
-            asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&dw_acc[s_29 * 5120 + col + 4 * half_10])), "f"(dwa[8 * s_29 + 4 * half_10]), "f"(dwa[8 * s_29 + 4 * half_10 + 1]), "f"(dwa[8 * s_29 + 4 * half_10 + 2]), "f"(dwa[8 * s_29 + 4 * half_10 + 3]) : "memory");
 #else
         for (int half_8 = 0; half_8 < 2; half_8++) {
-            asm volatile("red.global.add.v4.f32 [%0], {%1, %2, %3, %4};" :: "l"(reinterpret_cast<uint64_t>(&dw_acc[s_23 * 5120 + col + 4 * half_8])), "f"(dwa[8 * s_23 + 4 * half_8]), "f"(dwa[8 * s_23 + 4 * half_8 + 1]), "f"(dwa[8 * s_23 + 4 * half_8 + 2]), "f"(dwa[8 * s_23 + 4 * half_8 + 3]) : "memory");
 #endif
+            {
+#if __CUDA_ARCH__ == 1030
+                float4 _v4 = make_float4(dwa[8 * s_29 + 4 * half_10 + 0], dwa[8 * s_29 + 4 * half_10 + 1], dwa[8 * s_29 + 4 * half_10 + 2], dwa[8 * s_29 + 4 * half_10 + 3]);
+                *reinterpret_cast<float4*>((dw_part + ((long long)first * 20480ll + (long long)(s_29 * 5120 + col + 4 * half_10))) + 0) = _v4;
+#else
+                float4 _v4 = make_float4(dwa[8 * s_23 + 4 * half_8 + 0], dwa[8 * s_23 + 4 * half_8 + 1], dwa[8 * s_23 + 4 * half_8 + 2], dwa[8 * s_23 + 4 * half_8 + 3]);
+                *reinterpret_cast<float4*>((dw_part + ((long long)first * 20480ll + (long long)(s_23 * 5120 + col + 4 * half_8))) + 0) = _v4;
+#endif
+            }
         }
     }
 }
