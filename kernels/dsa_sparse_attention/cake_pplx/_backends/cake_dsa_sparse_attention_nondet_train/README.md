@@ -14,12 +14,16 @@ SM103 (B300 / GB300) is compiled from the same sources; SM107 (Rubin R200) is
 the acceptance architecture of the packed / strided-layout extension.  On
 `sm_107a` each forward runs its scanner-warp build: the stages `fwd_scan`,
 `nope_fwd_scan` and `nope_fwd_scan_sink` ship for `sm_107a` only, and `fwd` /
-`nope_fwd` / `nope_fwd_sink` ship for `sm_100a` and `sm_103a`; the other stages,
+`nope_fwd` / `nope_fwd_sink` ship for `sm_100a` and `sm_103a`, and so do
+their `with_o_lo=False` builds (`fwd_scan_no_olo`, `nope_fwd_scan_no_olo` and
+`nope_fwd_scan_sink_no_olo` for `sm_107a` only; `fwd_no_olo` / `nope_fwd_no_olo`
+/ `nope_fwd_sink_no_olo` for `sm_100a` and `sm_103a`); the other stages,
 the NoPE sink-gradient stage `nope_bwd_dsink` included (see "Trainable per-head
 sink"), compile from the same sources for all three.  The `sm_107a` libraries need CUDA 13.5 or newer (`min_cuda` 13.5
 in their `build.json` entries).  On `sm_100a` every library needs CUDA 12.9
 or newer (`min_cuda` 12.9) except those of the stages `bwd_delta` /
-`nope_bwd_delta`, `nope_bwd_dsink` and `index_prep`, which need 12.8.  The feature does not
+`nope_bwd_delta` and their `with_o_lo=False` build `bwd_delta_no_olo` /
+`nope_bwd_delta_no_olo`, `nope_bwd_dsink` and `index_prep`, which need 12.8.  The feature does not
 participate in automatic backend selection, autotuning or trace-apply.  Its
 libraries are loaded prebuilt from `aot/` when the package ships them and
 JIT-built through the package's JIT shim from `build.json` otherwise (see
@@ -924,8 +928,8 @@ with_o_lo=False  forward writes out, lse           delta = rowsum(dout * out)   
   lse, None)`, the packed form `(out, lse, None, indices, topk_length)`); a
   step backward takes `o_lo=None` with `with_o_lo=False`.  `o_lo` is `None`
   exactly when `with_o_lo` is `False`: a tensor with `False`, or `None` with
-  `True` on a call with query rows, raises `ValueError` before any other
-  check, plan, allocation or launch.  A default call without query rows
+  `True` on a call with query rows, raises `ValueError` before anything is
+  planned, allocated or launched.  A default call without query rows
   accepts `o_lo=None` (it launches nothing).  A runner prepared with
   `with_o_lo=False` refuses an `o_lo=` tensor; its `o_lo` and the third
   element of `forward()` are `None`.
