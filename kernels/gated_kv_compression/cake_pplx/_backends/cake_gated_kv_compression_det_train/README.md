@@ -83,18 +83,21 @@ reads a contiguous, aligned copy of an incoming gradient of another layout.
 | `pair_table` | `cu_pairs[0] = 0`, `cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`, int32 `[S + 1]`, by one CTA of 1024 threads with a carried running total, 8 documents a thread | `(1, 1, 1)` |
 | `pair_table_small` | the same table by one CTA of 256 threads, one document a thread; launched for `S <= small_docs` (512) | `(1, 1, 1)` |
 | `fwd` | per output row `r < G`: the two token rows, the FP32 math above, one BF16 rounding; rows `r >= cu_pairs[S]` stored as zeros.  Launched for `S <= fuse_docs` (256): the launch builds the pair table itself and does not search: row `r`'s first token is `cu_seqlens[0] + 2 r` plus the number of odd-length documents before its document, counted from `cu_seqlens`, and CTA 0 writes `cu_pairs` | rows `G` |
-| `fwd_unfused` | the same forward without the table build: the document of row `r` by a binary search of the `cu_pairs` the pair-table launch wrote; launched for `S > fuse_docs` | rows `G` |
-| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  On SM100 / SM103 with `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; on SM107 it searches all of `cu_pairs` in one level; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
-| `bwd_small` | the same backward with the search of all of `cu_pairs` in one level, the SM107 program, on SM100 / SM103; launched there for `S <= bwd_small_docs` (26) | rows `G + S` |
+| `fwd_unfused` | the same forward without the table build: the document of row `r` by a search of the `cu_pairs` the pair-table launch wrote, by the 32 lanes of a warp (one probe a lane in each of `ceil(log2(S) / 5)` rounds, no shared memory and no barrier); launched for `S > fuse_docs` | rows `G` |
+| `bwd` | virtual rows `v < G + S`: pair `v` writes the `dC` / `dZ` rows of its two tokens, its document by a binary search of `cu_pairs`.  With `S <= 16384` the search has two levels: each CTA with pair rows copies every 16th entry of `cu_pairs` to shared memory, and a row picks its window of 16 entries there and searches only that window; row `G + s` stores +0.0 into the tail row of document `s` when its length is odd | rows `G + S` |
+| `bwd_small` | the same backward with the search of all of `cu_pairs` in one level; launched for `S <= bwd_small_docs` (26 on SM100 / SM103, 96 on SM107) outside the `bwd_vec4` region | rows `G + S` |
+| `bwd_vec4` | the two-level backward in 128-bit lanes (4 FP32 channels, 128 lanes a row, 2 rows per 256-thread CTA), on SM100 / SM103; launched for `min_tokens <= T <= max_tokens` and `S <= max_docs` (16384 to 32768 tokens and at most 40 documents on SM100, 16384 to 65536 tokens and at most 56 documents on SM103) | rows `G + S` |
 
 Each role has one registry record per architecture it serves.  Each forward role has two,
 one kernel in two schedules, each the faster on its architectures: records `fwd` and
 `fwd_unfused` on SM100 / SM103 read `C` and `Z` in 128-bit lanes (4 FP32 channels, 128
 lanes a row, 2 rows per 256-thread CTA); records `fwd_sm_107a` and `fwd_unfused_sm_107a` on
 SM107 read them in 256-bit lanes (8 channels, 64 lanes a row, 4 rows per CTA).  The
-backward (256-bit lanes) is one kernel with two searches: role `bwd` has two records,
-`bwd` on SM100 / SM103 (two levels) and `bwd_sm_107a` on SM107 (one level), and role
-`bwd_small` one, `bwd_small` on SM100 / SM103, the one-level program of `bwd_sm_107a`.
+backward is one kernel with two searches and two lane widths: role `bwd` (two levels,
+256-bit lanes) has two records of one program, `bwd` on SM100 / SM103 and `bwd_sm_107a` on
+SM107; role `bwd_small` (one level, 256-bit lanes) two records of one program, `bwd_small`
+on SM100 / SM103 and `bwd_small_sm_107a` on SM107; role `bwd_vec4` (two levels, 128-bit
+lanes) two records of one program, `bwd_vec4` on SM100 and `bwd_vec4_sm_103a` on SM103.
 `pair_table` and `pair_table_small` are one record each on all three.  A launch picks the
 record of the operands' device.
 
@@ -103,11 +106,14 @@ A forward call of at most the `fwd` record's `fuse_docs` documents (256;
 to `cu_pairs`, the same bytes.  A forward call of more documents launches a pair table, then
 `fwd_unfused`, which reads it: on B200, GB300 and VR200 it is no slower than `fwd` for those
 packs.  Both forwards write the same bytes.  A backward call launches a pair table (not when
-`pair_offsets` is given, as the autograd backward does) then the backward: on SM100 / SM103
-`bwd_small` for at most `bwd_small_docs` documents (26; `cake_jit.bwd_small_docs`) and `bwd`
-for more, on SM107 `bwd` for every pack.  At 26 documents and fewer the two-level search was
-slower than the one-level one in some packs on B200 or GB300, and above 26 in none measured.
-Both backwards write the same bytes.  The pair table is
+`pair_offsets` is given, as the autograd backward does) then the backward of `T` tokens (the
+rows of `C`) and `S` documents: `bwd_vec4` in the region of its record
+(`cake_jit.bwd_vec4_region`; none on SM107), else `bwd_small` for at most `bwd_small_docs`
+documents (`cake_jit.bwd_small_docs`) and `bwd` for more.  At 26 documents and fewer the
+two-level search was slower than the one-level one in some packs on B200 or GB300, and above
+26 in none measured; on VR200 the one-level search was the faster up to 96 documents.  In its
+region the 128-bit-lane backward was the faster on B200 and GB300.  The three backwards write
+the same bytes.  The pair table is
 `pair_table_small` for at most `small_docs` documents (512; `cake_jit.small_docs`), the
 faster there, and `pair_table` for more; both write the same bytes.  Every launch is a plain
 stream-ordered launch on the current torch stream of the operands' device; nothing
