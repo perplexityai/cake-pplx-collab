@@ -107,9 +107,10 @@ JIT variables):
   approximate base-2 exponential (``ex2.approx.ftz``) and the approximate
   reciprocal plus one round-to-nearest Newton step (the IEEE ``rcp.rn`` of
   every ``1 <= 1 + e < 2^126``); a warp with a clamped gate at or below -87
-  in a run of its loads computes that run with a branch-free exact reciprocal
-  that keeps the subnormal sigmoid (``RN(1 / (1 + e))`` for every ``e``, +0 for an infinite
-  one).  ``silu = g' s`` and ``a = silu u'``; ``h = bf16(w a)``, one rounding.
+  in a run of its loads computes that run with a scaled reciprocal that keeps
+  the subnormal sigmoid (``RN(1 / (1 + e))`` where it is normal, within one
+  subnormal ulp of it where it is subnormal, +0 for an infinite ``e``).
+  ``silu = g' s`` and ``a = silu u'``; ``h = bf16(w a)``, one rounding.
   The backward: ``d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])``
   and ``d_up = bf16((dh w) silu [-L <= u <= L])``, the masks inclusive and
   taken on the raw inputs, each output rounded once from FP32;
