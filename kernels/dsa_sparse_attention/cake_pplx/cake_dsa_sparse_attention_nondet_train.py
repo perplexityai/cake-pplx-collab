@@ -69,9 +69,11 @@ every row's softmax denominator, ``lse`` includes it, and its gradient
 ``dsink`` flows back through autograd (the step backwards return it).
 
 A call without query rows (``T = 0``) launches nothing: the forwards return
-empty ``out`` / ``lse`` / ``o_lo``, the step backwards an empty ``dq`` and a
-zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a sink, a
-zero ``dsink``.
+empty ``out`` / ``lse`` / ``o_lo``; the NoPE step backwards return an empty
+``dq``, a zero FP32 ``dkv`` (``None`` with a tensor ``dkv_acc``) and, with a
+sink, a zero ``dsink``; the rope step backward returns empty ``dq_latent`` /
+``dq_rope`` and zero ``dkv_latent`` / ``dk_rope``, FP32 with ``dkv_fp32=True``
+and BF16 otherwise (``None`` with a tensor ``dkv_acc``).
 
 Their autograd Functions, ``CakeDSASparseAttentionNondetFunction`` (both rope
 entries), ``CakeDSASparseAttentionNondetNopeFunction`` and

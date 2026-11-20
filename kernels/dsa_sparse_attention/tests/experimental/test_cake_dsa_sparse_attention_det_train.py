@@ -2923,6 +2923,51 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 500 + 17 * index)
 
 
+@pytest.mark.parametrize("route", sink_h.SINK_VARLEN_ROUTES)
+def test_nope_sink_varlen_repeats_bit_for_bit(route):
+    """The packed entries with a sink repeat bit for bit on each route of the packed rows: the varlen autograd entry
+    and the step pair (``_sink_varlen_calls``) on the same draw, called again with the same accumulator contents,
+    give the same ``out``, ``lse``, ``o_lo``, ``dq``, accumulator and ``dsink`` bits."""
+    _require_nope_sink_program()
+    T, width = sink_h.SINK_VARLEN_CASES["w640_t1024"]
+    inp = sink_h.make_sink_varlen_inputs(T, width, seed=SINK_SEED + 650)
+    S = inp.total_k
+    dst_map = (torch.arange(S, device="cuda", dtype=torch.int32) // 2).contiguous()
+
+    def flat(calls):
+        got = []
+        for form in ("autograd", "step"):
+            for name, value in sorted(calls[form].items()):
+                got.append((form, name, value.after if name == "dkv_acc" else value))
+        return got
+
+    with pytest.MonkeyPatch.context() as mp:
+        _force_varlen_route(mp, route)
+        assert cake_backend.varlen_index_mode(inp.local) == route
+        runs = []
+        for _ in range(REPEATS):
+            gen = torch.Generator(device="cuda").manual_seed(SINK_SEED + 651)
+            runs.append(
+                flat(
+                    _sink_varlen_calls(
+                        inp,
+                        sink=inp.sink,
+                        dst_map=dst_map,
+                        acc_rows=(S + 1) // 2 + 5,
+                        gen=gen,
+                    )
+                )
+            )
+    first = runs[0]
+    want = {"out", "lse", "o_lo", "dq", "dkv_acc", "dsink"}
+    assert {name for _, name, _ in first} >= want
+    named = {(form, name): value for form, name, value in first}
+    assert float(named["step", "dsink"].abs().sum()) > 0
+    for again in runs[1:]:
+        for (form, name, a), (_, _, b) in zip(again, first, strict=True):
+            assert _same_bits(a, b), (route, form, name)
+
+
 def test_nope_sink_rows_without_a_valid_slot_give_exact_zeros():
     """A call whose every row has no valid slot (``-1`` slots, then slots past ``S``): ``out``, ``o_lo`` and ``dq``
     exactly 0, ``lse`` exactly the sink on every row, no contribution to the accumulator (its bits unchanged) or to

@@ -3148,7 +3148,8 @@ def main():
         default=None,
         choices=list(SINK_ROWS) + list(SINK_VARLEN_ROWS),
         help=f"rows for --sink (default {', '.join(SINK_ROWS)}); the packed rows "
-        f"{', '.join(SINK_VARLEN_ROWS)} (16 documents of 1,024 tokens) also run {ArmCakeNopeVarlenSink.name}",
+        f"{', '.join(SINK_VARLEN_ROWS)} (16 documents of 1,024 tokens) run {ArmCakeNopeVarlenSink.name} "
+        "when --sink-arms names it",
     )
     parser.add_argument(
         "--sink-arms",

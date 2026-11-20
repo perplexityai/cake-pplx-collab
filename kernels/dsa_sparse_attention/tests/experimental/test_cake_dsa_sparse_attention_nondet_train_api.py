@@ -1745,10 +1745,11 @@ def test_nope_step_entries_forward_the_sink(monkeypatch):
         == "backward"
     )
     assert seen["backward"]["sink"] is None and seen["backward"]["num_segments"] == 1
+    cu_k3 = torch.tensor([0, 6, 10, 16], dtype=torch.int32)
     varlen_backward(
-        q, kv, idx, out, out, lse, out, cu_k, topk_length=lengths, sink=sink
+        q, kv, idx, out, out, lse, out, cu_k3, topk_length=lengths, sink=sink
     )
-    assert seen["backward"]["sink"] is sink
+    assert seen["backward"]["sink"] is sink and seen["backward"]["num_segments"] == 3
 
 
 def test_nope_public_entries_hand_num_segments_to_the_backend(monkeypatch):

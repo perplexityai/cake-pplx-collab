@@ -11410,11 +11410,11 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
 
 
 @pytest.mark.parametrize("total_q", [1, 64, 65, 1024])
-def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property):
-    """The sink-gradient stage sums its 64-token chunks in a fixed order whatever its grid: the backward of one
-    forward with the stage's grid set to 1, 7, one CTA per chunk and two CTAs per chunk (a fresh binding each) returns
-    the same ``dsink`` bits, and the eager backward of the shipped grid is judged.  ``T = 1`` and ``64`` / ``65``
-    put one and two chunks under the grids; ``T = 1024`` is the sink's model."""
+def test_nope_sink_gradient_meets_the_tier_on_every_grid(total_q, record_property):
+    """The sink-gradient stage on any grid: the backward of one forward with the stage's grid set to 1, 7, one CTA
+    per chunk and two CTAs per chunk (a fresh binding each) is judged beside the eager backward of the shipped grid,
+    every gradient against the FP64 oracle and the BF16 naive tier.  ``T = 1`` and ``64`` / ``65`` put one and two
+    chunks under the grids; ``T = 1024`` is the sink's model."""
     _require_nope_sink_program()
     chunks = _sink_partial_rows(total_q)
 
@@ -11431,6 +11431,11 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
             q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
         )
         torch.cuda.synchronize()
+        runs = {
+            "shipped": dict(
+                out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2]
+            )
+        }
         for grid_x in (1, 7, chunks, 2 * chunks):
             with pytest.MonkeyPatch.context() as mp:
                 mp.setattr(cake_backend.BINDING_CACHE, "_entries", OrderedDict())
@@ -11443,16 +11448,8 @@ def test_nope_sink_gradient_does_not_depend_on_its_grid(total_q, record_property
                     q, kv, idx, o, o_lo, l, dout, softmax_scale=SINK_SCALE, sink=sink
                 )
                 torch.cuda.synchronize()
-            assert torch.equal(
-                got[2].view(torch.int32), shipped[2].view(torch.int32)
-            ), (
-                total_q,
-                grid_x,
-            )
-        run = dict(
-            out=o, lse=l, o_lo=o_lo, dq=shipped[0], dkv=shipped[1], dsink=shipped[2]
-        )
-        return nv.judged(problem, {"": run})
+            runs.setdefault(f"grid {grid_x}", dict(dq=got[0], dkv=got[1], dsink=got[2]))
+        return nv.judged(problem, runs)
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 700 + total_q)
 

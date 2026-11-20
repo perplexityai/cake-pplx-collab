@@ -387,6 +387,8 @@ class ArmDetNopeSink(nb.ArmCakeNopeSink):
                 backward=True,
                 num_segments=num_segments,
                 dkv_acc=True,
+                # the autograd backward carves its scratch from the saved o_lo
+                o_lo_scratch=True,
                 **({"sink": True} if self.sink is not None else {}),
             )
         )
