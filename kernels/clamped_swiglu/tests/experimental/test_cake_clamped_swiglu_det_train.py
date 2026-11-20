@@ -28,10 +28,10 @@ once per stage and device, no library loaded), the launch grid of each program (
 ``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits) and the arguments of a launch in its
 plan's order, the entry points' launcher of a stage and device (made once per stage and device, no library loaded; the
 program, arguments and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused
-for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for an
-equal float or int; every other limit takes the full checks and their errors), the build manifest (every record's
-library, the recorded source digests), the capability map, the required ``limit`` keyword, the refusal of CPU tensors
-and no environment read outside the JIT shim.
+for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for a
+float, or an int that a float holds exactly, equal to its float value; every other limit takes the full checks and their
+errors), the build manifest (every record's library, the recorded source digests), the capability map, the required
+``limit`` keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) of each stage's small-R
 and large-R program (each forced through the route) judged against the naive BF16 tier
@@ -56,14 +56,29 @@ row's outputs do not depend on the other rows), on a side stream with no host sy
 the small-R and of the large-R programs, under ``torch.use_deterministic_algorithms`` (where every new output holds
 PyTorch's NaN fill when its kernel launches) and with the current device switched to another GPU (each call runs on its
 operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
-under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a saved-tensors hook as
-rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have
-the steps' bits and raise when differentiated; inputs the kernels can read are read in place (a merged input and its
-gradient passed as both halves' tensors with the up's column offset 2304, no view), others copied once; every binding
-refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
-refused, before any copy, allocation or launch; the one-pass checks of the common call give the launches of the full
-checks; every unweighted forward launch of a device passes one cached FP32 buffer, set to 1, as its ignored weight,
-also when the process's first unweighted forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
+under non-reentrant checkpointing; in a backward with saved-tensors hooks set (a non-reentrant checkpoint's
+recomputation), ``cake_clamped_swiglu_det`` launches its forward after autograd saved the inputs (their pack hooks run
+first; anywhere else, for a direct ``apply`` and while compiling or tracing, it launches inside ``forward``), so with
+early stop on a non-reentrant region launches the forward again only when a later operation of the region saves a
+tensor: none for the op alone or the gate/up projection and the op, one for the op with the down projection or the
+whole block (gate/up projection, op, down projection), and one in every region with early stop off, a reentrant
+region or a direct ``apply``, also in a captured CUDA graph, all with the bits of the steps without a checkpoint; the
+autograd backward checks the saved operands again (unpacked by a saved-tensors hook as rows to copy: the steps' bits;
+one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have the steps' bits and raise when
+differentiated; inputs the kernels can read are read in place (a merged input and its gradient passed as both
+halves' tensors with the up's column offset 2304, no view), others copied once; every binding refuses a column offset
+that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
+refused, before any copy, allocation or launch, also when a step refuses a common call itself (its limit or its
+architecture); every spied launch has the grid ``cake_jit.grid`` of its program; the one-pass checks of the common
+call give the launches of the full checks (the program, the grid and every argument), and every call they leave to the
+full checks (each refusal class, a tensor subclass, inputs to copy, no rows, a call that fails only one check of the
+step's own, a tensor on another GPU) gives what it gives without them; a call with two faults raises the error of the
+one the full checks find first; the steps and the autograd function (its backward also with ``create_graph=True``)
+check and launch the common call themselves (no call of the full checks) and pass the row strides of its contiguous
+tensors as constants; one launcher per stage and device, made once by the package's own cache of launchers, serves
+every call; every unweighted forward launch of a device passes one cached FP32
+buffer, set to 1, as its ignored weight, made by the first unweighted forward (no weighted call or backward makes it),
+also when that forward is a CUDA graph capture.  On one fixed draw, the L2 error against the
 FP64 oracle of ``h``, ``d_gate`` and ``d_up`` is below that of the weight applied after a BF16 rounding of each output,
 and the L2 error of ``d_weight`` below that of the sum over the BF16-rounded ``a``.
 
@@ -73,6 +88,7 @@ The suite names its package once, through the shared alias helper, and imports n
 from __future__ import annotations
 
 import ast
+import contextlib
 import fractions
 import functools
 import hashlib
@@ -84,7 +100,7 @@ import subprocess
 import sys
 import types
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -242,14 +258,16 @@ def _manifest_or_skip() -> dict:
 
 
 def _fresh_launchers(patch: pytest.MonkeyPatch) -> None:
-    """The test (or the ``patch`` context) gets its own cache of launchers (``pkg._launcher``): the launchers it makes
-    use its patched route, FFI entries or device, and none of them outlives it or reaches another test."""
+    """The test (or the ``patch`` context) gets its own cache of launchers (``pkg._launcher``, which every launch of
+    the entry points reads, the common call's too): the launchers it makes use its patched route, FFI entries or
+    device, hold their own FFI entries and ignored weight, and none of them outlives it or reaches another test."""
     patch.setattr(pkg, "_launcher", functools.cache(LAUNCHER))
 
 
 def _spy_entries(patch: pytest.MonkeyPatch, record) -> None:
-    """Every launch calls ``record(name, values)`` before the FFI entry of its program ``name``, ``values`` naming the
-    program's parameters (the kernel's, then the column offsets; the grid left out): each entry is wrapped as it is
+    """Every launch calls ``record(name, values, grid)`` before the FFI entry of its program ``name``, ``values``
+    naming the program's parameters (the kernel's, then the column offsets) and ``grid`` its grid, which must be
+    ``cake_jit.grid(name, rows)`` (an ``AssertionError`` out of the launch otherwise): each entry is wrapped as it is
     looked up, and the launchers are made afresh so that they bind the wrapped entries."""
     entry = pkg._entry
 
@@ -257,7 +275,9 @@ def _spy_entries(patch: pytest.MonkeyPatch, record) -> None:
         run, keys = entry(name, arch), pkg.parameters(name)
 
         def recorded(*args):
-            record(name, dict(zip(keys, args[: len(keys)], strict=True)))
+            values, grid = dict(zip(keys, args[: len(keys)], strict=True)), args[len(keys) :]
+            assert grid == cake_jit.grid(name, values["rows"]), (name, values["rows"], grid)
+            record(name, values, grid)
             return run(*args)
 
         return recorded
@@ -272,8 +292,18 @@ def launches(monkeypatch: pytest.MonkeyPatch) -> list:
     then the column offsets)."""
     launched: list = []
     _spy_entries(
-        monkeypatch, lambda name, values: launched.append((cake_jit.MODULES[name]["stage"], values["rows"], values))
+        monkeypatch,
+        lambda name, values, grid: launched.append((cake_jit.MODULES[name]["stage"], values["rows"], values)),
     )
+    return launched
+
+
+@pytest.fixture
+def launch_records(monkeypatch: pytest.MonkeyPatch) -> list:
+    """``(name, rows, values, grid)`` of every launch, in order: the program that runs (the route), the parameters of
+    the launch (``values``, as for ``launches``) and its grid."""
+    launched: list = []
+    _spy_entries(monkeypatch, lambda name, values, grid: launched.append((name, values["rows"], values, grid)))
     return launched
 
 
@@ -281,8 +311,28 @@ def launches(monkeypatch: pytest.MonkeyPatch) -> list:
 def programs_run(monkeypatch: pytest.MonkeyPatch) -> list:
     """The program name of every launch, in order."""
     names: list = []
-    _spy_entries(monkeypatch, lambda name, values: names.append(name))
+    _spy_entries(monkeypatch, lambda name, values, grid: names.append(name))
     return names
+
+
+def _full_checks(patch: pytest.MonkeyPatch) -> list:
+    """The names of the full-check functions each call runs, in order (each still runs): :func:`_forward` and
+    :func:`_backward`, which a step calls for any call it does not check and launch itself, and :func:`_check_tensor`,
+    which the full checks run on every tensor they check.  Empty after a call: the step checked and launched it."""
+    called: list = []
+
+    def counted(name: str):
+        run = getattr(pkg, name)
+
+        def call(*args, **kwargs):
+            called.append(name)
+            return run(*args, **kwargs)
+
+        return call
+
+    for name in ("_forward", "_backward", "_check_tensor"):
+        patch.setattr(pkg, name, counted(name))
+    return called
 
 
 @pytest.fixture
@@ -543,7 +593,7 @@ def test_the_windows_and_the_lane_layout_are_the_measured_ones() -> None:
     assert layouts == BUILDS
 
 
-def test_argument_plans_are_the_kernel_parameters() -> None:
+def test_argument_plans_are_the_kernel_parameters_then_the_column_offsets() -> None:
     """Each record takes its kernel's parameters in order (tensors as buffers, scalars as parameters), then the
     column offsets of ``up`` (and ``d_up``) as parameters, then the grid; the host names every one of them."""
     for name, record in cake_jit.MODULES.items():
@@ -799,10 +849,10 @@ def test_the_launcher_refuses_programs_that_take_another_order(host_device, monk
 
 
 def test_the_limit_check_and_its_cached_rounding(monkeypatch) -> None:
-    """``limit`` is the same FP32 value whatever the calls before passed: a float or an int equal to the last
-    accepted limit gets its cached rounding, and every other value (another number, a bool, a float subclass, a
-    fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the full checks, with their
-    errors, also right after an equal valid limit was cached."""
+    """``limit`` is the same FP32 value whatever the calls before passed: a float, or an int that a float holds exactly,
+    equal to the float value of the last accepted limit gets its cached rounding, and every other value (another number,
+    a bool, a float subclass, a fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the
+    full checks, with their errors, also right after an equal valid limit was cached."""
     monkeypatch.setattr(pkg, "_last_limit", (math.nan, math.nan))
 
     class Limit(float):
@@ -1153,12 +1203,28 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
     for leaf in leaves[1:]:
         if leaf is not None:
             assert leaf.grad.shape == leaf.shape
+    # The held launch (as in a backward, with hooks set) keeps no launch, and a checkpoint launches nothing.
+    made = _held_launches(monkeypatch)
+    with monkeypatch.context() as patch:
+        _as_in_a_backward(patch)
+        leaves = _leaves(t)
+        with torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x):
+            out = clamped_swiglu(*leaves, limit=L)
+        assert out.shape == (0, WIDTH) and out.grad_fn is not None
+        out.sum().backward()
+        assert leaves[0].grad.shape == leaves[0].shape
+    assert len(made) == 1 and not any(made)
+    leaves = _leaves(t)
+    out = torch.utils.checkpoint.checkpoint(clamped_swiglu, *leaves, limit=L, use_reentrant=False)
+    out.sum().backward()
+    assert out.shape == (0, WIDTH) and leaves[0].grad.shape == leaves[0].shape
+    assert len(made) == 2 and not any(made)  # the recomputation's held launch
 
 
 def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
     """Row counts 1 to 4097 and each edge of the device's windows of each stage and one row past it, both layouts, a
     strided layout, weighted and unweighted calls and three limits load one library per program they run, once: no
-    recompilation (``rows``, ``limit``, the weight flag and the strides are launch arguments)."""
+    recompilation (``rows``, ``limit``, the weight flag, the strides and the column offsets are launch arguments)."""
     edges = sorted({edge for stage in WINDOWED for edge in _device_edges(stage, device.index)})
     cases = [Case(1), Case(4097), Case(3, "merged", "none", L=7.3), Case(129, "strided", L=1.5), Case(2)]
     cases += [Case(rows, "merged") for edge in edges for rows in (edge, edge + 1)]
@@ -1259,7 +1325,7 @@ def _bwd_with_weight_flag_0(t: types.SimpleNamespace, name: str, device) -> tupl
         "gate": t.gate,
         "up": t.up,
         "dh": t.dh,
-        "w": pkg._ignored_weight(device.index),
+        "w": pkg._launcher("fwd", device.index).ignored_weight(),
         "d_gate": d_gate,
         "d_up": d_up,
         "d_weight": torch.empty(t.R, dtype=torch.float32, device=device),
@@ -1601,6 +1667,419 @@ def test_double_backward_raises(layout, device) -> None:
         grad.float().sum().backward()
 
 
+# The forward launch of the autograd entry, and the checkpoint recompute.
+
+# The width of the model rows that the gate/up projection reads and the down projection writes, in these tests.
+HIDDEN = 256
+
+
+def _projections(t: types.SimpleNamespace, *, seed: int, device: torch.device) -> types.SimpleNamespace:
+    """BF16 operands of the projections around the clamped SwiGLU on ``t``'s rows: ``x [R, HIDDEN]``, the gate/up
+    weights (one ``[4608, HIDDEN]`` weight for a merged layout, else ``[2304, HIDDEN]`` each, ``wu`` None when
+    merged), the down weight ``wd [HIDDEN, 2304]`` and the upstream gradient ``dy [R, HIDDEN]``."""
+    gen = torch.Generator(device=device).manual_seed(seed)
+
+    def draw(*shape: int, scale: float = 1.0) -> torch.Tensor:
+        return (scale * torch.randn(*shape, device=device, generator=gen)).bfloat16()
+
+    rows = 2 * WIDTH if t.layout == "merged" else WIDTH
+    return types.SimpleNamespace(
+        x=draw(t.R, HIDDEN),
+        wg=draw(rows, HIDDEN, scale=6 / HIDDEN**0.5),
+        wu=None if t.layout == "merged" else draw(rows, HIDDEN, scale=6 / HIDDEN**0.5),
+        wd=draw(HIDDEN, WIDTH, scale=1 / WIDTH**0.5),
+        dy=draw(t.R, HIDDEN),
+    )
+
+
+def _down(h: torch.Tensor, wd: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.linear(h, wd)
+
+
+def _projected(L: float):
+    """The gate/up projection (one merged GEMM or two), then the clamped SwiGLU."""
+
+    def projected(x, wg, wu, weight):
+        first = torch.nn.functional.linear(x, wg)
+        second = None if wu is None else torch.nn.functional.linear(x, wu)
+        return clamped_swiglu(first, second, weight, limit=L)
+
+    return projected
+
+
+def _block(L: float):
+    """The expert's block: the gate/up projection (one merged GEMM or two), the clamped SwiGLU, the down projection."""
+    projected = _projected(L)
+
+    def block(x, wg, wu, weight, wd):
+        return _down(projected(x, wg, wu, weight), wd)
+
+    return block
+
+
+def _kept_leaves(t: types.SimpleNamespace) -> tuple[list, Callable[[], dict]]:
+    """Fresh operands of the inputs ``t`` that keep their layout, and a function giving their gradients keyed as
+    :func:`_autograd_step` keys them: an operand that is a non-contiguous view of a wider buffer (``strided``,
+    ``copied``) is the same view of a fresh leaf of its whole buffer, any other one a fresh leaf of its own (None stays
+    None)."""
+    operands: list = []
+    parts: list = []
+    for x in (t.first, t.second, t.weight):
+        if x is None:
+            operands.append(None)
+            parts.append(None)
+        elif x._base is not None and not x.is_contiguous():
+            base = x._base.detach().clone().requires_grad_(True)
+            operands.append(base.as_strided(x.shape, x.stride(), x.storage_offset()))
+            parts.append((base, x))
+        else:
+            leaf = x.detach().clone().requires_grad_(True)
+            operands.append(leaf)
+            parts.append((leaf, None))
+
+    def gradients() -> dict:
+        found = {}
+        for key, part in zip(("d_first", "d_up", "d_weight"), parts, strict=True):
+            if part is not None:
+                leaf, view = part
+                grad = leaf.grad
+                found[key] = grad if view is None else grad.as_strided(view.shape, view.stride(), view.storage_offset())
+        return found
+
+    return operands, gradients
+
+
+def _held_launches(patch: pytest.MonkeyPatch) -> list:
+    """Every :class:`_HeldLaunch` made from now on (one per call that takes the held launch), in order."""
+    made: list = []
+
+    class Counted(pkg._HeldLaunch):
+        __slots__ = ()
+
+        def __init__(self) -> None:
+            made.append(self)
+            super().__init__()
+
+    patch.setattr(pkg, "_HeldLaunch", Counted)
+    return made
+
+
+def _as_in_a_backward(patch: pytest.MonkeyPatch) -> None:
+    """The package's graph-task query answers "a backward runs" (as in a checkpoint's recomputation)."""
+    patch.setattr(pkg, "_graph_task", lambda: 0)
+
+
+def _in_a_backward(call: Callable[[], object]) -> object:
+    """``call()`` run with grad mode on inside the backward of another autograd function (a backward graph task on this
+    thread, as for a checkpoint's recomputation); its result."""
+    found: list = []
+
+    class Outer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad):
+            assert torch._C._current_graph_task_id() != -1
+            with torch.enable_grad():
+                found.append(call())
+            return grad
+
+    Outer.apply(torch.zeros(1, requires_grad=True)).backward()
+    (result,) = found
+    return result
+
+
+def _recomputed(launched: list, run) -> tuple[int, int]:
+    """``run(mark)`` runs a forward, calls ``mark()`` and runs its backward: the number of ``fwd`` launches before the
+    mark and after it (a forward launched in the backward is a checkpoint recompute)."""
+    marks: list = []
+    run(lambda: marks.append(len(launched)))
+    (mark,) = marks
+    stages = [launch[0] for launch in launched]
+    return stages[:mark].count("fwd"), stages[mark:].count("fwd")
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split", "strided", "copied"])
+def test_a_recomputation_launches_the_forward_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
+    """In a backward with saved-tensors hooks set (where a non-reentrant checkpoint recomputes its region),
+    ``cake_clamped_swiglu_det`` launches its forward kernel after ``_HeldFunction.apply`` returns: every pack hook of
+    the inputs it saves runs before the launch, as for a built-in op, in a real backward too, in the common call and in
+    the full checks' layouts (``strided``, ``copied``: the launch of
+    :func:`_forward`).  Anywhere else it launches inside ``forward``, before the pack hooks, and keeps no launch:
+    without hooks, with hooks outside a backward (a checkpoint's forward pass, activation offloading), for a direct
+    ``apply`` (which takes no fifth argument) and while ``_is_compiling()`` or ``_is_tracing()`` is true.  Under
+    ``torch.no_grad()`` either way launches once and runs no pack hook.  Every way gives the steps' bits, one forward
+    launch and one backward launch."""
+    t = make_inputs(Case(129, layout, w), seed=31, device=device)
+    want = _functional(t)
+    packs = sum(x is not None for x in (t.first, t.second, t.weight))
+    made = _held_launches(monkeypatch)
+
+    def pack(x: torch.Tensor) -> torch.Tensor:
+        launches.append(("pack", None, None))
+        return x
+
+    def run(call, *, in_backward: bool = True, hooks: bool = True) -> list:
+        """The launches and packs of ``call(operands)`` in order (as in a backward unless not asked, with a pack hook
+        unless not asked); then its backward, with the steps' bits and one backward launch."""
+        launches.clear()
+        operands, gradients = _kept_leaves(t)
+        with monkeypatch.context() as patch:
+            if in_backward:
+                _as_in_a_backward(patch)
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x) if hooks else contextlib.nullcontext():
+                h = call(operands)
+        order = [launch[0] for launch in launches]
+        h.backward(t.dh)
+        assert_same_outputs({"h": h.detach(), **gradients()}, want, f"{layout}, {w}: {order}")
+        assert [launch[0] for launch in launches[len(order) :]] == [_stages(t.weight is not None)[1]]
+        return order
+
+    def backend(operands):
+        return clamped_swiglu(*operands, limit=t.L)
+
+    held = ["pack"] * packs + ["fwd"]
+    inside = ["fwd"] + ["pack"] * packs
+    assert run(backend) == held
+    assert _in_a_backward(lambda: run(backend, in_backward=False)) == held
+    assert len(made) == 2 and all(len(kept) == 1 for kept in made)
+    assert run(backend, in_backward=False) == inside  # hooks outside a backward
+    assert run(backend, hooks=False) == ["fwd"]  # a backward without hooks
+    assert run(lambda operands: pkg.CakeClampedSwiGLUDetFunction.apply(*operands, t.L)) == inside
+    with pytest.raises(TypeError):
+        pkg.CakeClampedSwiGLUDetFunction.apply(*_kept_leaves(t)[0], t.L, None)
+    for name in ("_is_compiling", "_is_tracing"):
+        with monkeypatch.context() as patch:
+            patch.setattr(pkg, name, lambda: True)
+            assert run(backend) == inside, name
+    assert len(made) == 2
+
+    for in_backward in (True, False):
+        launches.clear()
+        made.clear()
+        with monkeypatch.context() as patch:
+            if in_backward:
+                _as_in_a_backward(patch)
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x), torch.no_grad():
+                h = clamped_swiglu(*_kept_leaves(t)[0], limit=t.L)
+        assert [launch[0] for launch in launches] == ["fwd"], in_backward  # no pack hook ran: nothing is saved
+        assert len(made) == in_backward
+        assert_same_bits(h, want["h"], f"h under no_grad ({in_backward})")
+        assert not h.requires_grad and h.grad_fn is None
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split", "strided", "copied"])
+def test_which_checkpoint_regions_launch_the_forward_again(layout, w, device, launches, monkeypatch):
+    """Under ``torch.utils.checkpoint``, which regions launch the forward again in the backward.  Non-reentrant with
+    early stop (the default), a region whose last saved tensors are the op's inputs launches none: the op alone (the
+    down projection outside, or ``h`` itself backpropagated) and the gate/up projection with the op (the down
+    projection outside); the recomputation stops when autograd saves the inputs, before the launch.  A region in which
+    a later operation saves a tensor launches one: the op with the down projection (which saves ``h``) and the whole
+    block (gate/up projection, op, down projection).  Early stop off (``early_stop=False`` or
+    ``set_checkpoint_early_stop(False)``), a reentrant checkpoint and a direct ``CakeClampedSwiGLUDetFunction.apply``
+    launch one in every region, also when its output is dropped.  The checkpoint's forward pass keeps no launch; a
+    non-reentrant recomputation takes the held launch once.  Every way launches one forward before the backward and
+    gives the bits of the same steps without a checkpoint, in every layout."""
+    t = make_inputs(Case(129, layout, w), seed=32, device=device)
+    p = _projections(t, seed=33, device=device)
+    checkpoint = torch.utils.checkpoint.checkpoint
+    op = functools.partial(clamped_swiglu, limit=t.L)
+    block = _block(t.L)
+    projected = _projected(t.L)
+    made = _held_launches(monkeypatch)
+
+    def gradients(out: torch.Tensor, leaves: list) -> dict:
+        found = {"out": out.detach()}
+        found.update({f"d{i}": leaf.grad for i, leaf in enumerate(leaves) if leaf is not None})
+        return found
+
+    def op_step(region):
+        """``region(first, second, weight, wd)`` gives the down projection's output; its backward from ``dy``."""
+        results: list = []
+
+        def run(mark):
+            operands, operand_gradients = _kept_leaves(t)
+            wd = p.wd.detach().clone().requires_grad_(True)
+            y = region(*operands, wd)
+            mark()
+            y.backward(p.dy)
+            results.append({"out": y.detach(), **operand_gradients(), "d_wd": wd.grad})
+
+        return run, results
+
+    def counted(run) -> tuple[int, int, int, int]:
+        """The forward launches before and after the mark (:func:`_recomputed`), then the held launches made before
+        it and after it."""
+        made.clear()
+        held: list = []
+
+        def marked(mark):
+            def both():
+                mark()
+                held.append(len(made))
+
+            run(both)
+
+        before, after = _recomputed(launches, marked)
+        (forward_held,) = held
+        return before, after, forward_held, len(made) - forward_held
+
+    def block_step(region):
+        results: list = []
+
+        def run(mark):
+            leaves = [None if x is None else x.detach().clone().requires_grad_(True) for x in (p.x, p.wg, p.wu)]
+            leaves = [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
+            y = region(*leaves)
+            mark()
+            y.backward(p.dy)
+            results.append(gradients(y, leaves))
+
+        return run, results
+
+    def early_stop_off(*leaves):
+        with torch.utils.checkpoint.set_checkpoint_early_stop(False):
+            return _down(checkpoint(op, *leaves[:3], use_reentrant=False), leaves[3])
+
+    # (region, forward launches in the backward, held launches in the backward); none in the forward pass.
+    op_cases = {
+        "no checkpoint": (lambda f, s, w, wd: _down(op(f, s, w), wd), 0, 0),
+        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), 0, 1),
+        "op and the down projection": (
+            lambda f, s, w, wd: checkpoint(lambda *a: _down(op(*a[:3]), a[3]), f, s, w, wd, use_reentrant=False),
+            1,
+            1,
+        ),
+        "op alone, early_stop=False": (
+            lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False, early_stop=False), wd),
+            1,
+            1,
+        ),
+        "op alone, set_checkpoint_early_stop(False)": (early_stop_off, 1, 1),
+        "op alone, reentrant": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=True), wd), 1, 0),
+        "direct apply alone": (
+            lambda f, s, w, wd: _down(
+                checkpoint(pkg.CakeClampedSwiGLUDetFunction.apply, f, s, w, t.L, use_reentrant=False), wd
+            ),
+            1,
+            0,
+        ),
+    }
+    want = None
+    for what, (region, recomputes, held) in op_cases.items():
+        launches.clear()
+        run, results = op_step(region)
+        assert counted(run) == (1, recomputes, 0, held), what
+        if want is None:
+            want = results[0]
+        assert_same_outputs(results[0], want, what)
+
+    block_cases = {
+        "block, no checkpoint": (block, 0, 0),
+        "gate/up projection and the op": (
+            lambda x, wg, wu, w, wd: _down(checkpoint(projected, x, wg, wu, w, use_reentrant=False), wd),
+            0,
+            1,
+        ),
+        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), 1, 1),
+        "block, reentrant": (lambda *a: checkpoint(block, *a, use_reentrant=True), 1, 0),
+        "block, early_stop=False": (lambda *a: checkpoint(block, *a, use_reentrant=False, early_stop=False), 1, 1),
+    }
+    want = None
+    for what, (region, recomputes, held) in block_cases.items():
+        launches.clear()
+        run, results = block_step(region)
+        assert counted(run) == (1, recomputes, 0, held), what
+        if want is None:
+            want = results[0]
+        assert_same_outputs(results[0], want, what)
+
+    launches.clear()
+    operands, operand_gradients = _kept_leaves(t)
+
+    def alone(mark):
+        h = checkpoint(op, *operands, use_reentrant=False)
+        mark()
+        h.backward(t.dh)
+
+    assert counted(alone) == (1, 0, 0, 1)
+    found = operand_gradients()
+    assert_same_outputs(found, {key: _functional(t)[key] for key in found}, "op alone, h backpropagated")
+
+
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_a_cuda_graph_of_a_checkpointed_step_captures_the_recompute_only_when_needed(layout, device, launches):
+    """A checkpointed step (forward, then ``torch.autograd.grad``) captured in one CUDA graph: with the op alone, or
+    the gate/up projection and the op, in the region it captures one forward and one backward launch (no recompute),
+    with the whole block one forward, the recompute and one backward; each replay gives the bits of the eager step
+    without a checkpoint."""
+    t = make_inputs(Case(257, layout), seed=34, device=device)
+    p = _projections(t, seed=35, device=device)
+    checkpoint = torch.utils.checkpoint.checkpoint
+    op = functools.partial(clamped_swiglu, limit=t.L)
+    block = _block(t.L)
+    projected = _projected(t.L)
+    regions = {
+        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), False, 0),
+        "gate/up projection and the op": (
+            lambda x, wg, wu, w, wd: _down(checkpoint(projected, x, wg, wu, w, use_reentrant=False), wd),
+            True,
+            0,
+        ),
+        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), True, 1),
+    }
+
+    def fresh(whole: bool) -> list:
+        """New leaves of the region's operands (the eager reference and the captured step each take their own: a leaf
+        used on the default stream before the capture cannot be captured)."""
+        if whole:
+            leaves = [None if x is None else x.detach().clone().requires_grad_(True) for x in (p.x, p.wg, p.wu)]
+            return [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
+        return [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
+
+    def op_down(f, s, w, wd):
+        return _down(op(f, s, w), wd)
+
+    for what, (region, whole, recomputes) in regions.items():
+        reference = fresh(whole)
+        y = (block if whole else op_down)(*reference)
+        want = [y.detach(), *torch.autograd.grad(y, [x for x in reference if x is not None], p.dy)]
+        leaves = fresh(whole)
+        wants = [leaf for leaf in leaves if leaf is not None]
+        marks: list = []
+
+        def step(mark=lambda: None):
+            y = region(*leaves)
+            mark()
+            return [y.detach(), *torch.autograd.grad(y, wants, p.dy)]
+
+        side = torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            step()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+        launches.clear()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            outs = step(lambda: marks.append(len(launches)))
+        stages = [launch[0] for launch in launches]
+        assert stages[: marks[0]] == ["fwd"], what
+        assert sorted(stages[marks[0] :]) == sorted(["fwd"] * recomputes + [_stages(True)[1]]), what
+        for k in range(2):
+            for out in outs:
+                out.zero_()
+            graph.replay()
+            torch.cuda.synchronize(device)
+            for i, (got, expected) in enumerate(zip(outs, want, strict=True)):
+                assert_same_bits(got, expected, f"{what}: replay {k}, output {i}")
+        marks.clear()
+
+
 def test_side_stream_and_no_host_sync(device) -> None:
     """On a side stream under ``torch.cuda.set_sync_debug_mode("error")``: the steps and an autograd step run without
     synchronizing and give the bits of the default stream."""
@@ -1689,11 +2168,11 @@ def test_cuda_graph_capture_and_replay(program, device, programs_run, monkeypatc
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout, device, launches) -> None:
     """An unweighted forward and backward with preallocated outputs, captured in a CUDA graph with no unweighted forward
-    in the process before (only a weighted call and an eager unweighted backward, which load the libraries; the ignored
-    weight's cache is cleared): the capture makes the device's cached FP32 buffer, the captured forward passes it as its
-    ignored weight and the captured backward runs ``bwd_unweighted``, which takes no weight, weight flag or weight
-    gradient; later eager unweighted forwards pass the same buffer, and each replay on new inputs copied into the
-    captured tensors gives the bits of eager calls."""
+    through the device's launchers before (fresh launchers; only a weighted call and an eager unweighted backward,
+    which load the libraries and make no ignored weight): the capture makes the device's cached FP32 buffer, the
+    captured forward passes it as its ignored weight and the captured backward runs ``bwd_unweighted``, which takes no
+    weight, weight flag or weight gradient; later eager unweighted forwards pass the same buffer, and each replay on new
+    inputs copied into the captured tensors gives the bits of eager calls."""
     R = 129
     step_outputs(forward, backward, make_inputs(Case(R, layout), seed=70, device=device))
     warm = make_inputs(Case(R, layout, "none"), seed=69, device=device)
@@ -1705,15 +2184,16 @@ def test_an_unweighted_step_captured_before_any_eager_unweighted_forward(layout,
     h = torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
     d_first = torch.empty(R, WIDTH if second is not None else 2 * WIDTH, dtype=torch.bfloat16, device=device)
     d_up = None if second is None else torch.empty(R, WIDTH, dtype=torch.bfloat16, device=device)
-    pkg._ignored_weight.cache_clear()
+    assert pkg._launcher("fwd", first.get_device()).weight is None  # a weighted call makes no ignored weight
     launches.clear()
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
         forward(first, second, None, limit=a.L, out=h)
         backward(dh, first, second, None, limit=a.L, grad_gate_up_or_gate=d_first, grad_up=d_up)
     assert [stage for stage, _, _ in launches] == ["fwd", "bwd_unweighted"]
-    cached = pkg._ignored_weight(first.get_device())
-    assert cached.dtype == torch.float32 and tuple(cached.shape) == (1,) and cached.device == first.device
+    cached = pkg._launcher("fwd", first.get_device()).weight
+    assert cached is not None and cached.dtype == torch.float32 and tuple(cached.shape) == (1,)
+    assert cached.device == first.device
     (_, _, fwd_values), (_, _, bwd_values) = launches
     assert fwd_values["weighted"] == 0 and fwd_values["w"] is cached
     assert tuple(bwd_values) == PARAMETERS["bwd_unweighted"]
@@ -1781,7 +2261,7 @@ def test_new_outputs_are_filled_under_deterministic_algorithms(layout, w, device
     outputs = {"fwd": ("h",), "bwd": ("d_gate", "d_up", "d_weight"), "bwd_unweighted": ("d_gate", "d_up")}
     seen: list = []
 
-    def record(name, values):
+    def record(name, values, grid):
         stage = cake_jit.MODULES[name]["stage"]
         for key in outputs[stage]:
             seen.append((stage, key, bool(torch.isnan(values[key]).all())))
@@ -1914,12 +2394,13 @@ def test_the_bindings_refuse_column_offsets_outside_the_row(device) -> None:
 
 
 def _launch_facts(launched: list, caller: set[int]) -> list:
-    """The launches ``(stage, rows, values)`` with each tensor value as its dtype, shape, strides, storage offset and
-    memory: the caller's storage (its address, one of ``caller``) or ``"new"`` (a copy or a new output)."""
+    """The launches ``(name, rows, values, grid)`` (``launch_records``) with each tensor value as its dtype, shape,
+    strides, storage offset and memory: the caller's storage (its address, one of ``caller``) or ``"new"`` (a copy or
+    a new output).  The program (the route) and the grid are facts of the launch too."""
     facts = []
-    for stage, rows, values in launched:
+    for name, rows, values, grid in launched:
         found = {}
-        for name, value in values.items():
+        for key, value in values.items():
             if isinstance(value, torch.Tensor):
                 storage = value.untyped_storage().data_ptr()
                 value = (
@@ -1929,26 +2410,22 @@ def _launch_facts(launched: list, caller: set[int]) -> list:
                     value.storage_offset(),
                     storage if storage in caller else "new",
                 )
-            found[name] = value
-        facts.append((stage, rows, found))
+            found[key] = value
+        facts.append((name, rows, found, tuple(grid)))
     return facts
 
 
 @pytest.mark.parametrize("w", ["random", "none"])
-@pytest.mark.parametrize("rows", [1, 33, 4097])
-def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, launches, monkeypatch) -> None:
+@pytest.mark.parametrize("rows", [1, 2, 33, 4097])
+def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, launch_records, monkeypatch) -> None:
     """With the one-pass checks of the common call on and off (``_FAST_CHECKS``), every layout (merged, two tensors,
     row slices of wider buffers, rows the host copies), with new and with preallocated outputs, gives the same launches
-    (each tensor's dtype, shape, strides, storage offset and memory, the caller's or new; every scalar) and the same
-    output bits.  With them on, a merged or two-tensor call of contiguous tensors runs no full check of any tensor."""
-    checked: list = []
-    check_tensor = pkg._check_tensor
-
-    def counted(tensor, name, *args):
-        checked.append(name)
-        return check_tensor(tensor, name, *args)
-
-    monkeypatch.setattr(pkg, "_check_tensor", counted)
+    (the program the route runs and the grid; each tensor's dtype, shape, strides, storage offset and memory, the
+    caller's or new; every scalar) and the same output bits; each launch runs the program of its stage that the route
+    gives for its rows.  With them on, a merged or two-tensor call of contiguous tensors runs none of the full checks:
+    the forward and the backward step each check and launch it themselves (no call of :func:`_forward`,
+    :func:`_backward` or :func:`_check_tensor`)."""
+    checked = _full_checks(monkeypatch)
     t = make_inputs(Case(rows, "split", w, data="mixed"), seed=27, device=device)
     for layout in ("merged", "split", "strided", "copied"):
         x = _relayout(t, layout)
@@ -1965,7 +2442,7 @@ def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, l
             runs = []
             for fast in (True, False):
                 monkeypatch.setattr(pkg, "_FAST_CHECKS", fast)
-                launches.clear()
+                launch_records.clear()
                 checked.clear()
                 found = [forward(x.first, x.second, x.weight, limit=t.L, out=h)]
                 found += backward(
@@ -1979,19 +2456,413 @@ def test_one_pass_checks_give_the_launches_of_the_full_checks(rows, w, device, l
                     grad_weight=d_weight,
                 )
                 outputs = [None if tensor is None else tensor.clone() for tensor in found]
-                runs.append((_launch_facts(launches, caller), outputs))
+                runs.append((_launch_facts(launch_records, caller), outputs))
                 if fast and layout in ("merged", "split"):
                     assert not checked, (layout, preallocated, checked)
                 elif not fast:
-                    assert checked, (layout, preallocated)
+                    assert "_check_tensor" in checked, (layout, preallocated, checked)
             what = f"{layout}, preallocated={preallocated}"
             (fast_launches, fast_outputs), (full_launches, full_outputs) = runs
-            assert [stage for stage, _, _ in fast_launches] == list(_stages(w != "none")), what
+            stages = _stages(w != "none")
+            assert [cake_jit.MODULES[name]["stage"] for name, _, _, _ in fast_launches] == list(stages), what
+            for stage, (name, _, _, grid) in zip(stages, fast_launches, strict=True):
+                assert name == _routed(stage, rows, device.index), (what, stage, name)
+                assert grid == cake_jit.grid(name, rows), (what, name, grid)
             assert fast_launches == full_launches, what
             for got, want in zip(fast_outputs, full_outputs, strict=True):
                 assert (got is None) == (want is None), what
                 if got is not None:
                     assert_same_bits(got, want, what)
+
+
+class _Subclass(torch.Tensor):
+    """A tensor subclass: the full checks take it (``isinstance``), the one-pass checks leave it to them (exact
+    types)."""
+
+
+def _odd_calls(t: types.SimpleNamespace, device) -> dict:
+    """Calls the one-pass checks of the common call leave to the full checks, each the plain call ``t`` with one
+    argument changed (``(first, second, weight, dh, out, grads)``, ``grads`` the backward's output keywords): refused
+    for a type, a dtype, a device, a shape, an output rule or the row count, or valid and launched by the full checks
+    (a tensor subclass, a non-contiguous or misaligned input, which is copied, a row slice of a wider output, no
+    rows).  Some fail only one check of the step's own (a contiguous ``dh`` that is not 16-byte aligned beside an
+    aligned, contiguous first operand; contiguous operands of another width; a contiguous, misaligned up or output),
+    so that check alone sends them to the full checks."""
+    first, second, weight, dh = t.first, t.second, t.weight, t.dh
+    merged, rows, cols = second is None, t.R, t.first.shape[1]
+
+    def misaligned(x: torch.Tensor) -> torch.Tensor:
+        buffer = torch.empty(x.numel() + 8, dtype=x.dtype, device=x.device)
+        view = buffer[1 : 1 + x.numel()].view(x.shape)
+        view.copy_(x)
+        return view
+
+    def misaligned_empty(*shape: int) -> torch.Tensor:
+        return misaligned(torch.zeros(*shape, dtype=torch.bfloat16, device=device))
+
+    def many(x: torch.Tensor) -> torch.Tensor:
+        return x[:1].expand(cake_jit.MAX_ROWS, *x.shape[1:])
+
+    calls = {
+        "plain": (first, second, weight, dh, None, {}),
+        "an FP16 first operand": (first.half(), second, weight, dh, None, {}),
+        "an FP32 dh": (first, second, weight, dh.float(), None, {}),
+        "a 3-D first operand": (first[None], second, weight, dh, None, {}),
+        "a first operand of another width": (first[:, :-8], second, weight, dh, None, {}),
+        "a list as the first operand": ([1.0], second, weight, dh, None, {}),
+        "dh one row short": (first, second, weight, dh[:-1], None, {}),
+        "dh on the CPU": (first, second, weight, dh.cpu(), None, {}),
+        "a subclass first operand": (first.as_subclass(_Subclass), second, weight, dh, None, {}),
+        "a subclass dh": (first, second, weight, dh.as_subclass(_Subclass), None, {}),
+        "a misaligned first operand and dh": (misaligned(first), second, weight, misaligned(dh), None, {}),
+        "a contiguous, misaligned dh": (first, second, weight, misaligned(dh), None, {}),
+        "contiguous operands of another width": (
+            first[:, :-8].contiguous(),
+            None if merged else second[:, :-8].contiguous(),
+            weight,
+            dh,
+            None,
+            {},
+        ),
+        "a contiguous, misaligned out and gradient": (
+            first,
+            second,
+            weight,
+            dh,
+            misaligned_empty(rows, WIDTH),
+            {"grad_gate_up_or_gate": misaligned_empty(rows, cols)},
+        ),
+        "no rows": (
+            first[:0],
+            None if merged else second[:0],
+            None if weight is None else weight[:0],
+            dh[:0],
+            None,
+            {},
+        ),
+        "too many rows": (
+            many(first),
+            None if merged else many(second),
+            None if weight is None else many(weight),
+            many(dh),
+            None,
+            {},
+        ),
+        "an out of another shape": (first, second, weight, dh, torch.empty_like(dh)[:-1], {}),
+        "a row slice of a wider out": (
+            first,
+            second,
+            weight,
+            dh,
+            torch.empty(rows, WIDTH + 16, dtype=torch.bfloat16, device=device)[:, 8 : 8 + WIDTH],
+            {"grad_gate_up_or_gate": torch.empty(rows, cols + 16, dtype=torch.bfloat16, device=device)[:, 8:-8]},
+        ),
+        "a gradient of another shape": (
+            first,
+            second,
+            weight,
+            dh,
+            None,
+            {"grad_gate_up_or_gate": torch.empty(rows + 1, cols, dtype=torch.bfloat16, device=device)},
+        ),
+    }
+    if merged:
+        calls["a grad_up with a merged input"] = (first, second, weight, dh, None, {"grad_up": torch.empty_like(dh)})
+    else:
+        calls["an up one row short"] = (first, second[:-1], weight, dh, None, {})
+        calls["an FP32 up"] = (first, second.float(), weight, dh, None, {})
+        calls["a subclass up"] = (first, second.as_subclass(_Subclass), weight, dh, None, {})
+        calls["a contiguous, misaligned up"] = (first, misaligned(second), weight, dh, None, {})
+        grad_up = misaligned_empty(rows, WIDTH)
+        calls["a contiguous, misaligned grad_up"] = (first, second, weight, dh, None, {"grad_up": grad_up})
+    if weight is None:
+        grad_weight = torch.empty(rows, device=device)
+        calls["a grad_weight without a weight"] = (first, second, None, dh, None, {"grad_weight": grad_weight})
+    else:
+        calls["a weight on the CPU"] = (first, second, weight.cpu(), dh, None, {})
+        calls["a BF16 weight"] = (first, second, weight.bfloat16(), dh, None, {})
+        calls["a weight one row short"] = (first, second, weight[:-1], dh, None, {})
+        calls["a subclass weight"] = (first, second, weight.as_subclass(_Subclass), dh, None, {})
+        strided = torch.empty(2 * rows, device=device)[::2]
+        strided.copy_(weight)
+        calls["a strided weight"] = (first, second, strided, dh, None, {})
+        calls["a grad_weight of another length"] = (
+            first,
+            second,
+            weight,
+            dh,
+            None,
+            {"grad_weight": torch.empty(rows + 1, device=device)},
+        )
+    return calls
+
+
+def _calls_across_two_gpus(t: types.SimpleNamespace, other: torch.device) -> dict:
+    """Calls of the inputs ``t`` with one tensor on the GPU ``other`` (as :func:`_odd_calls` gives them): ``dh``, the
+    first operand, the up, the weight or an output buffer.  A step that takes that tensor with one on the first GPU
+    refuses the call for mixed devices; a forward does not take ``dh``, and the forward of a merged unweighted input
+    moved to ``other`` runs there."""
+    first, second, weight, dh = t.first, t.second, t.weight, t.dh
+    rows, cols = t.R, first.shape[1]
+
+    def new(*shape: int, dtype: torch.dtype = torch.bfloat16) -> torch.Tensor:
+        return torch.zeros(*shape, dtype=dtype, device=other)
+
+    calls = {
+        "dh on the other GPU": (first, second, weight, dh.to(other), None, {}),
+        "the first operand on the other GPU": (first.to(other), second, weight, dh, None, {}),
+        "an out and a gradient on the other GPU": (
+            first,
+            second,
+            weight,
+            dh,
+            new(rows, WIDTH),
+            {"grad_gate_up_or_gate": new(rows, cols)},
+        ),
+    }
+    if second is not None:
+        calls["an up on the other GPU"] = (first, second.to(other), weight, dh, None, {})
+        calls["a grad_up on the other GPU"] = (first, second, weight, dh, None, {"grad_up": new(rows, WIDTH)})
+    if weight is not None:
+        calls["a weight on the other GPU"] = (first, second, weight.to(other), dh, None, {})
+        grad_weight = new(rows, dtype=torch.float32)
+        calls["a grad_weight on the other GPU"] = (first, second, weight, dh, None, {"grad_weight": grad_weight})
+    return calls
+
+
+def _same_with_and_without_one_pass_checks(calls: dict, limit: float, launch_records: list, patch) -> int:
+    """Each call of ``calls`` (``(first, second, weight, dh, out, grads)``, as :func:`_odd_calls` gives them) at
+    ``limit``, as a forward and as a backward step, gives with the one-pass checks on what it gives with them off:
+    the same exception (type and message) and no launch, or the same launches (:func:`_launch_facts`: the program, the
+    grid, each tensor's dtype, shape, strides, storage offset and memory; every scalar) and the same output bits.
+    Returns the number of step calls compared."""
+
+    def outcome(call, caller: set[int]) -> tuple:
+        launch_records.clear()
+        try:
+            found = call()
+        except (TypeError, ValueError, RuntimeError) as e:
+            return ("raised", type(e), str(e), _launch_facts(launch_records, caller))
+        found = found if isinstance(found, tuple) else (found,)
+        return ("ran", _launch_facts(launch_records, caller), [None if x is None else x.clone() for x in found])
+
+    checked = 0
+    for what, (first, second, weight, dh, out, grads) in calls.items():
+        tensors = [x for x in (first, second, weight, dh, out, *grads.values()) if isinstance(x, torch.Tensor)]
+        caller = {x.untyped_storage().data_ptr() for x in tensors}
+        steps = {
+            "forward": functools.partial(forward, first, second, weight, limit=limit, out=out),
+            "backward": functools.partial(backward, dh, first, second, weight, limit=limit, **grads),
+        }
+        for step, call in steps.items():
+            runs = []
+            for fast in (True, False):
+                patch.setattr(pkg, "_FAST_CHECKS", fast)
+                runs.append(outcome(call, caller))
+            (kind, *got), (want_kind, *want) = runs
+            assert kind == want_kind, (what, step, runs)
+            if kind == "raised":
+                assert got[:2] == want[:2] and got[2] == want[2] == [], (what, step, got, want)
+            else:
+                assert got[0] == want[0], (what, step)
+                for a, b in zip(got[1], want[1], strict=True):
+                    assert (a is None) == (b is None), (what, step)
+                    if a is not None:
+                        assert_same_bits(a, b, f"{what}, {step}")
+            checked += 1
+    return checked
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_one_pass_checks_leave_every_other_call_to_the_full_checks(
+    layout, w, device, launch_records, monkeypatch
+) -> None:
+    """Each kind of call the one-pass checks do not take (:func:`_odd_calls`: a type, a dtype, a device, a shape, an
+    output rule or ``R >= MAX_ROWS`` refused; a tensor subclass, a non-contiguous or misaligned input, a row slice of a
+    wider output or no rows, valid; calls that fail one check of the step's own only), as a forward and as a backward
+    step, gives with the one-pass checks on what it gives with them off: the same exception (type and message) and no
+    launch, or the same launches (the program and the grid; each tensor's dtype, shape, strides, storage offset and
+    memory; every scalar) and the same output bits."""
+    t = make_inputs(Case(33, layout, w), seed=31, device=device)
+    calls = _odd_calls(t, device)
+    checked = _same_with_and_without_one_pass_checks(calls, t.L, launch_records, monkeypatch)
+    assert checked == 2 * len(calls) >= 2 * 21, checked
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_one_pass_checks_leave_calls_across_two_gpus_to_the_full_checks(
+    layout, w, device, launch_records, monkeypatch
+) -> None:
+    """With two GPUs, each call with one tensor on the other GPU (:func:`_calls_across_two_gpus`: ``dh``, the first
+    operand, the up, the weight, an output buffer), as a forward and as a backward step, gives with the one-pass checks
+    on what it gives with them off: the same exception (type and message) and no launch, or the same launches and
+    bits."""
+    if torch.cuda.device_count() < 2:
+        pytest.skip("needs two GPUs")
+    other = torch.device("cuda", 1 if device.index != 1 else 0)
+    t = make_inputs(Case(33, layout, w), seed=32, device=device)
+    calls = _calls_across_two_gpus(t, other)
+    checked = _same_with_and_without_one_pass_checks(calls, t.L, launch_records, monkeypatch)
+    assert checked == 2 * len(calls) >= 2 * 3, checked
+
+
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_the_one_pass_checks_refuse_in_the_order_of_the_full_checks(
+    layout, device, launch_records, monkeypatch
+) -> None:
+    """A call with two faults, one of them an output buffer whose metadata check raises (:func:`_plain` patched to
+    raise ``RuntimeError`` for it, as reading the metadata of a tensor of some layouts can), raises with the one-pass
+    checks on and off the error of the fault the full checks find first, and launches nothing: a bad ``limit`` before
+    the forward's ``out`` and the backward's output buffers, and the ``grad_up`` rule of a merged input before
+    ``grad_gate_up_or_gate``.  With a valid limit, the step's own checks do reach that buffer."""
+    t = make_inputs(Case(33, layout), seed=33, device=device)
+    rows, cols = t.R, t.first.shape[1]
+    h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+    d_first = torch.empty(rows, cols, dtype=torch.bfloat16, device=device)
+    plain = pkg._plain
+
+    def unreadable(tensor, *args):
+        if tensor is h or tensor is d_first:
+            raise RuntimeError("the metadata of this output cannot be read")
+        return plain(tensor, *args)
+
+    monkeypatch.setattr(pkg, "_plain", unreadable)
+    first, second, weight, dh = t.first, t.second, t.weight, t.dh
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        forward(first, second, weight, limit=t.L, out=h)
+    with pytest.raises(RuntimeError, match="cannot be read"):
+        backward(dh, first, second, weight, limit=t.L, grad_gate_up_or_gate=d_first)
+    calls = {
+        "a negative limit and an unreadable out": (
+            "limit",
+            lambda: forward(first, second, weight, limit=-1.0, out=h),
+        ),
+        "an integer limit past every float and an unreadable out": (
+            "limit",
+            lambda: forward(first, second, None, limit=10**400, out=h),
+        ),
+        "a NaN limit and an unreadable gradient": (
+            "limit",
+            lambda: backward(dh, first, second, weight, limit=float("nan"), grad_gate_up_or_gate=d_first),
+        ),
+    }
+    if second is None:
+        calls["a grad_up with a merged input and an unreadable gradient"] = (
+            "grad_up",
+            lambda: backward(dh, first, None, weight, limit=t.L, grad_gate_up_or_gate=d_first, grad_up=dh),
+        )
+    for what, (match, call) in calls.items():
+        raised = []
+        for fast in (True, False):
+            monkeypatch.setattr(pkg, "_FAST_CHECKS", fast)
+            launch_records.clear()
+            with pytest.raises(ValueError, match=match) as e:
+                call()
+            assert launch_records == [], (what, fast)
+            raised.append(str(e.value))
+        assert raised[0] == raised[1], (what, raised)
+
+
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device, launches, monkeypatch) -> None:
+    """The common call passes the row strides of its contiguous tensors as constants, without reading them: at 2, 33
+    and 4097 rows, with new and with preallocated outputs, in the steps, in an autograd and a checkpointed autograd
+    step and in gradients computed with ``create_graph=True``, every ``<name>_stride`` of every launch is ``stride(0)``
+    of the tensor ``<name>`` it passes (the merged tensor's for its up half, the merged gradient's for ``d_up``), and at
+    1 row each is 0.  Every one of these calls, the autograd function's forward and backward too (also the backward
+    that records the gradients' graph, through ``_Gradients``), is checked by the step itself and launched there (the
+    checkpoint's recomputation, in the backward, keeps its launch for :func:`_held` and stops before it): none of the
+    full checks runs (no call of :func:`_forward`, :func:`_backward` or :func:`_check_tensor`)."""
+    checked = _full_checks(monkeypatch)
+    for rows in (1, 2, 33, 4097):
+        t = make_inputs(Case(rows, layout, w), seed=19, device=device)
+        merged = t.second is None
+        launches.clear()
+        step_outputs(forward, backward, t)
+        h = torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        d_first = torch.empty(rows, 2 * WIDTH if merged else WIDTH, dtype=torch.bfloat16, device=device)
+        d_up = None if merged else torch.empty(rows, WIDTH, dtype=torch.bfloat16, device=device)
+        d_weight = None if t.weight is None else torch.empty(rows, device=device)
+        forward(t.first, t.second, t.weight, limit=t.L, out=h)
+        grads = {"grad_gate_up_or_gate": d_first, "grad_up": d_up, "grad_weight": d_weight}
+        backward(t.dh, t.first, t.second, t.weight, limit=t.L, **grads)
+        assert not checked, (rows, "steps", checked)
+        _autograd_step(t)
+        assert not checked, (rows, "autograd step", checked)
+        _autograd_step(t, checkpoint=True)
+        assert not checked, (rows, "checkpointed autograd step", checked)
+        leaves = _leaves(t)
+        wants = [leaf for leaf in leaves if leaf is not None]
+        grads = torch.autograd.grad(clamped_swiglu(*leaves, limit=t.L), wants, t.dh, create_graph=True)
+        assert all(grad.requires_grad for grad in grads), rows  # the backward ran through ``_Gradients``
+        assert not checked, (rows, "autograd step with create_graph=True", checked)
+        # The checkpointed step launches no recompute: the op alone is the region (in the recomputation the forward
+        # runs after autograd saved the inputs, so the recomputation stops before it).
+        assert len(launches) == 2 + 2 + 2 + 2 + 2, (rows, [stage for stage, _, _ in launches])
+        for stage, launched_rows, values in launches:
+            assert launched_rows == rows
+            strides = {key: value for key, value in values.items() if key.endswith("_stride")}
+            assert len(strides) == {"fwd": 3, "bwd": 5, "bwd_unweighted": 5}[stage], (stage, strides)
+            for key, value in strides.items():
+                tensor = values[key.removesuffix("_stride")]
+                assert value == (tensor.stride(0) if rows > 1 else 0), (rows, stage, key, value, tensor.stride())
+                assert rows == 1 or value == tensor.shape[1], (rows, stage, key)  # contiguous rows
+
+
+def test_one_launcher_per_stage_and_device_serves_every_call(device, monkeypatch, request) -> None:
+    """Every call on a device, the one-pass checks' and the full checks', weighted and unweighted, the steps and the
+    autograd function, launches through the device's one launcher per stage (``pkg._launcher``), made once, at the
+    stage's first launch: the test counts every :class:`_Launcher` made (by the package's own cache of launchers,
+    emptied before the calls and again after the test) and every FFI entry looked up (:func:`_entry`, which a launcher
+    calls once per program), so a step that made its own launcher or looked up its own entry at a call, or a cache
+    that dropped a launcher, would count more.  Only an unweighted forward makes the forward launcher's ignored weight:
+    weighted calls and backward steps leave it None, and every later unweighted forward passes the same buffer."""
+    made: list = []
+    looked_up: list = []
+    entry = pkg._entry
+
+    class Counted(pkg._Launcher):
+        def __init__(self, stage: str, index: int) -> None:
+            made.append((stage, index))
+            super().__init__(stage, index)
+
+    def counted_entry(name: str, arch: str):
+        looked_up.append(name)
+        return entry(name, arch)
+
+    monkeypatch.setattr(pkg, "_Launcher", Counted)
+    monkeypatch.setattr(pkg, "_entry", counted_entry)
+    # The package's own cache (``pkg._launcher``, whose body reads ``_Launcher`` from the module), not
+    # :func:`_fresh_launchers`: emptied here, so it makes every launcher of the calls below, and after the test, so no
+    # counted launcher outlives it.
+    pkg._launcher.cache_clear()
+    request.addfinalizer(pkg._launcher.cache_clear)
+    index = device.index
+    weighted = [make_inputs(Case(33, layout), seed=17, device=device) for layout in ("merged", "split", "strided")]
+    for _ in range(2):
+        for t in weighted:
+            step_outputs(forward, backward, t)
+            _autograd_step(t)
+            _autograd_step(t, checkpoint=True)
+            u = types.SimpleNamespace(**{**vars(t), "weight": None})
+            backward(u.dh, u.first, u.second, None, limit=u.L)
+    assert sorted(made) == [("bwd", index), ("bwd_unweighted", index), ("fwd", index)], made
+    assert pkg._launcher("fwd", index).weight is None
+    unweighted = [make_inputs(Case(33, layout, "none"), seed=18, device=device) for layout in ("merged", "copied")]
+    buffers = set()
+    for _ in range(2):
+        for t in unweighted:
+            step_outputs(forward, backward, t)
+            _autograd_step(t, checkpoint=True)
+            buffers.add(id(pkg._launcher("fwd", index).weight))
+    assert sorted(made) == [("bwd", index), ("bwd_unweighted", index), ("fwd", index)], made
+    assert looked_up and len(looked_up) == len(set(looked_up)), looked_up
+    weight = pkg._launcher("fwd", index).weight
+    assert len(buffers) == 1 and weight is not None and id(weight) in buffers
+    assert weight.dtype == torch.float32 and tuple(weight.shape) == (1,) and float(weight) == 1.0
 
 
 def test_preallocated_outputs(device) -> None:
@@ -2110,10 +2981,15 @@ def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkey
     """Beside inputs the kernels cannot read (row strides that are not multiples of 8 elements, copied when the call is
     valid), a bad argument of each kind (the limit, a dtype, a shape, a device, an output buffer, the ``grad_up`` and
     ``grad_weight`` rules, the row count, the architecture) is refused before the call copies an input, allocates an
-    output or launches a kernel: the caching allocator counts no allocation and nothing launches.  The same inputs in a
-    valid call are copied and launched."""
+    output or launches a kernel: the caching allocator counts no allocation and nothing launches.  So are the limit and
+    the architecture refusals of common calls (plain, contiguous, aligned merged and two-tensor operands, weighted and
+    unweighted, forward and backward steps), which the steps raise themselves (no call of the full checks), and no
+    refused call makes the forward launcher's ignored weight.  The same inputs in a valid call are copied and
+    launched."""
     R = 33
     t = make_inputs(Case(R, "copied"), seed=3, device=device)
+    p = make_inputs(Case(R, "split"), seed=4, device=device)
+    m = make_inputs(Case(R, "merged"), seed=5, device=device)
     gate, up, weight, dh = t.gate, t.up, t.weight, t.dh
     merged = torch.zeros(R, 2 * WIDTH + 3, dtype=torch.bfloat16, device=device)[:, : 2 * WIDTH]
     up32 = torch.zeros(R, WIDTH, device=device)
@@ -2153,6 +3029,32 @@ def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkey
         "too many rows": (ValueError, lambda: forward(huge_gate, huge_up, None, limit=L)),
         "too many rows, merged": (ValueError, lambda: backward(dh, huge_merged, None, None, limit=L)),
     }
+    # Refused in the steps' own checks of the common call: the limit, then (below) the architecture.
+    common = {
+        "a negative limit, a common call": (ValueError, lambda: forward(p.gate, p.up, None, limit=-1.0)),
+        "a NaN limit, a common merged call": (ValueError, lambda: forward(m.first, None, m.weight, limit=math.nan)),
+        "a tensor limit, a common merged call": (TypeError, lambda: forward(m.first, None, None, limit=tensor_limit)),
+        "an integer limit past every float, a common backward": (
+            ValueError,
+            lambda: backward(p.dh, p.gate, p.up, p.weight, limit=10**400),
+        ),
+        "a fraction limit past every float, a common merged backward": (
+            ValueError,
+            lambda: backward(m.dh, m.first, None, None, limit=fractions.Fraction(10**400)),
+        ),
+    }
+    common_arch = {
+        "another architecture, a common call": (RuntimeError, lambda: forward(p.gate, p.up, None, limit=L)),
+        "another architecture, a common merged call": (RuntimeError, lambda: forward(m.first, None, m.weight, limit=L)),
+        "another architecture, a common backward": (
+            RuntimeError,
+            lambda: backward(p.dh, p.gate, p.up, p.weight, limit=L),
+        ),
+        "another architecture, a common merged backward": (
+            RuntimeError,
+            lambda: backward(m.dh, m.first, None, None, limit=L),
+        ),
+    }
 
     def allocations() -> int:
         return torch.cuda.memory_stats(device)["allocation.all.allocated"]
@@ -2174,6 +3076,10 @@ def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkey
     before = allocations()
     refuse(calls)
     with monkeypatch.context() as patch:
+        checked = _full_checks(patch)
+        refuse(common)
+        assert not checked, checked
+    with monkeypatch.context() as patch:
         patch.setattr(pkg, "_arch_of_index", lambda index: None)
         refuse(
             {
@@ -2181,8 +3087,12 @@ def test_refused_calls_copy_allocate_and_launch_nothing(device, launches, monkey
                 "another architecture, merged": (RuntimeError, lambda: backward(dh, merged, None, None, limit=L)),
             }
         )
+        checked = _full_checks(patch)
+        refuse(common_arch)
+        assert not checked, checked
     assert allocations() == before, "a refused call allocated a copy or an output"
     assert launches == []
+    assert pkg._launcher("fwd", device.index).weight is None, "a refused call made the ignored weight"
     forward(gate, up, weight, limit=L)
     backward(dh, merged, None, None, limit=L)
     assert allocations() > before

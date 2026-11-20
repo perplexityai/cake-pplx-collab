@@ -29,7 +29,13 @@ forms ``bwd_token__<form>_ho``), and the standalone collapse routes
 ``collapse_forward`` / ``collapse_backward`` (no workspace); every output
 repeats bit for bit for a given token count on a given device.  On SM107 the
 three collapse records are that architecture's own forms with the same bits
-(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``).
+(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``);
+``collapse_forward`` runs ``collapse_fwd__m2`` below 6656 tokens and
+``collapse_fwd__m2_xhnone`` (the same form without the L2 evict-first policy on
+``X``, the same bits) from 6656 tokens; ``collapse_backward`` runs
+``collapse_bwd__vjpwa`` (the same VJP without the L2 prefetch, the same bits)
+from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` at every other token
+count.
 """
 
 from __future__ import annotations

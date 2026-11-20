@@ -37,14 +37,19 @@ Host design (every switch is a keyword; no environment variable):
   MXFP8 without the scales, 1 to 262,144 on sm_107a; in place: 1 to 262,144
   on sm_107a only); for MXFP8 without the scales on sm_100a and sm_103a, the
   wide program (128-thread CTAs, tiles of 512 vectors) above those sizes (out
-  of place from 131,073 vectors, in place from 262,145, both to
-  2,147,483,136); else the main
-  program (64-thread CTAs, tiles of 128 vectors, 256 on sm_107a).  The grid
-  is the ``tiles`` rule of ``cake_jit.launch_grid``: one CTA per tile once
-  the tiles pass 2.5 waves of resident CTAs (32 per SM, 16 on sm_107a; 8 and
-  4 for the small program), else the resident CTAs, at most one per tile,
-  walk the tiles; the wide program always launches one CTA per tile.  It does not read device memory on the host and does not
-  synchronize.  A call with no elements launches nothing.
+  of place from 131,073 vectors to 2,147,483,136, in place from 262,145 to
+  33,554,431); for MXFP4 and MXFP8 on sm_100a and sm_103a, the large program
+  (1024-thread CTAs, tiles of 2,048 vectors) at the largest sizes (in place
+  from 4,194,304 vectors, from 33,554,432 for MXFP8 without the scales, and
+  out of place from 8,388,608 for MXFP8 with the scales only, all to
+  2,147,481,600); else the main program (64-thread CTAs, tiles of 128
+  vectors, 256 on sm_107a).  The grid is the ``tiles`` rule of
+  ``cake_jit.launch_grid``: one CTA per tile once the tiles pass 2.5 waves of
+  resident CTAs (32 per SM, 16 on sm_107a; 8 and 4 for the small program),
+  else the resident CTAs, at most one per tile, walk the tiles; the wide and
+  the large programs always launch one CTA per tile.  It does not read device
+  memory on the host and does not synchronize.  A call with no elements
+  launches nothing.
 - Every output repeats bit for bit for identical inputs: each group is
   quantized by its own threads, and nothing is summed (``README.md``).
 """

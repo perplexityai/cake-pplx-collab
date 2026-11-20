@@ -74,8 +74,10 @@ share whose bits differ (``bits_differ``).
 
 Stages: ``fwd`` (one forward), ``bwd`` (one backward from ``gate``, ``up``, ``weight`` and ``dh``), ``fwd+bwd`` (the
 two in sequence), and ``ckpt`` (an autograd step under ``torch.utils.checkpoint(..., use_reentrant=False,
-preserve_rng_state=False)``: the forward, then the backward that replays it; nothing here draws random numbers), for
-the arms with an autograd form.  Every stage runs once untimed (compilation, plans, caches) before its timers; for
+preserve_rng_state=False)``: the forward, then the backward, whose recomputation replays the forward of every arm but
+``cake``; nothing here draws random numbers), for the arms with an autograd form.  ``cake``'s recomputation of the op
+alone stops before its forward launch (from 0.1.8: the forward runs after autograd saved the inputs), so its ``ckpt``
+step runs one forward and one backward.  Every stage runs once untimed (compilation, plans, caches) before its timers; for
 ``torch_compile`` the record also holds the Dynamo cache entries of the stage's code objects and the graphs Dynamo
 compiled while the kept timers ran (0; a stage timed again says how many the first timing compiled).
 
@@ -84,7 +86,8 @@ Timers (``--timers``):
 * ``cupti``: CUPTI kernel activity (``torch.profiler``) with a cold L2 (``flush.fill_`` of twice the L2 before every
   call, not counted), the summed GPU time of the call's kernels, copies and fills; median of 100 calls after 10
   warm-up calls.  The bandwidth column is the operation's DRAM bytes (each input read once, each output written once)
-  over this time.
+  over this time; for ``ckpt``, the forward's bytes count twice for an arm whose backward replays it, once for
+  ``cake``.
 * ``eager``: CUDA events around ``--loop`` back-to-back calls with a warm L2, per call; median of ``--rounds`` samples
   after ``--warmup`` samples.  It includes the host's issue time when the call is host-bound.
 * ``graph``: the same ``--loop`` calls captured in one CUDA graph and replayed, timed the same way.
@@ -291,9 +294,9 @@ def make_inputs(
     return x
 
 
-def dram_bytes(x: types.SimpleNamespace, stage: str, *, writes_weight_grad: bool) -> int:
+def dram_bytes(x: types.SimpleNamespace, stage: str, *, writes_weight_grad: bool, replays_forward: bool = True) -> int:
     """The bytes a stage (or one graph of the cuDNN composite backward) moves to and from DRAM when each input is read
-    once and each output written once."""
+    once and each output written once; ``ckpt`` counts the forward twice when its backward replays it."""
     bf16_rows = x.R * I * 2
     weight = x.R * 4 if x.weight is not None else 0
     forward = 3 * bf16_rows + weight  # gate, up, weight in; h out
@@ -302,7 +305,7 @@ def dram_bytes(x: types.SimpleNamespace, stage: str, *, writes_weight_grad: bool
         "fwd": forward,
         "bwd": backward,
         "fwd+bwd": forward + backward,
-        "ckpt": 2 * forward + backward,
+        "ckpt": (2 if replays_forward else 1) * forward + backward,
         "bwd pointwise": 5 * bf16_rows + weight,  # gate, up, dh, weight in; d_gate, d_up out
         "bwd reduction": 3 * bf16_rows + x.R * 4,  # gate, up, dh in; d_weight out
     }[stage]
@@ -323,7 +326,8 @@ def _outputs(x: types.SimpleNamespace, h: Optional[torch.Tensor], grads: Optiona
 
 # ----------------------------------------------------------------------------------------------------------------
 # Arms: ``forward(x) -> h``, ``backward(x) -> (d_first, d_up or None, d_weight or None)`` (a merged gradient as
-# ``d_first``), and ``autograd(first, second, weight) -> h`` or None
+# ``d_first``), and ``autograd(first, second, weight) -> h`` or None; ``ckpt_replays_forward`` False when the ``ckpt``
+# stage's backward does not replay the forward (default True)
 
 
 def cake_arm(x: types.SimpleNamespace) -> dict[str, Any]:
@@ -332,6 +336,7 @@ def cake_arm(x: types.SimpleNamespace) -> dict[str, Any]:
         "backward": lambda x: cake_clamped_swiglu_det_train_backward(x.dh, x.first, x.second, x.weight, limit=x.L),
         "autograd": lambda first, second, weight, L=x.L: cake_clamped_swiglu_det(first, second, weight, limit=L),
         "writes_weight_grad": x.weight is not None,  # the unweighted backward's kernel writes no d_weight
+        "ckpt_replays_forward": False,  # the recomputation of the op alone stops before its forward launch
         "version": _version("cake-pplx-clamped-swiglu"),
     }
 
@@ -1056,7 +1061,12 @@ def _time_call(
     else:
         counts = " and ".join(str(count) for count in compiled_while)
         return {"unavailable": f"Dynamo compiled {counts} graph(s) while the timers ran, in both timings"}
-    moved = dram_bytes(x, stage, writes_weight_grad=arm["writes_weight_grad"])
+    moved = dram_bytes(
+        x,
+        stage,
+        writes_weight_grad=arm["writes_weight_grad"],
+        replays_forward=arm.get("ckpt_replays_forward", True),
+    )
     entry: dict[str, Any] = {"ms": times, "dram_bytes": moved}
     if isinstance(times.get("cupti"), float):
         entry["cupti_gbs"] = moved / times["cupti"] / 1e6

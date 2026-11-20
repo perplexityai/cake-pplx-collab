@@ -49,11 +49,21 @@ JIT variables):
   copies an input or allocates an output, so a call refused for its arguments
   copies, allocates and launches nothing.  The common call (plain contiguous CUDA tensors of the
   exact dtype and shape on one device, the BF16 ones 16-byte aligned,
-  ``0 < R < 2**31 - 256``) is accepted in one pass over each tensor's
-  metadata; any other call takes the full checks, which raise every error and
-  mark the inputs to copy.  Both give the same launch.  A ``limit`` that is a
-  Python float or int equal to the last accepted one reuses its FP32 rounding
-  (one cached pair); any other ``limit`` takes the full limit checks.  The
+  ``0 < R < 2**31 - 256``, output buffers None or plain contiguous tensors) is
+  accepted in one pass over each tensor's metadata and launched by the step
+  itself (:func:`_forward_step`, :func:`_backward_step`; in a checkpoint's
+  recomputation the autograd forward keeps that launch for :func:`_held`, see
+  Checkpointing): the first operand,
+  the weight and ``dh`` are checked in the step's own frame, the ``up`` of two
+  tensors and each output buffer by one :func:`_plain` call each, in the order
+  of the full checks (the operands and ``dh``, then ``limit``, then the output
+  buffers and their rules); its row strides are not read (a contiguous tensor
+  of more than one row has the stride of its row width).  Any other call takes
+  the full checks, which raise every error and mark the inputs to copy.  Both
+  give the same launch.  A ``limit`` that is a
+  Python float, or an int that a float holds exactly, equal to the float value
+  of the last accepted one reuses its FP32 rounding (one cached pair); any
+  other ``limit`` takes the full limit checks.  The
   autograd function's backward reuses the forward's FP32 ``L`` and checks the
   saved operands again (a saved-tensors hook or a ``.data`` assignment can
   change them after the forward) and the upstream gradient; it has no output
@@ -98,8 +108,10 @@ JIT variables):
   launcher per stage and device (``_launcher``), made at the stage's first
   launch on the device: the route above, the kernel parameters and the column
   offsets of ``up`` (and ``d_up``) by position in the order every program of
-  the stage takes them (checked once, when the launcher is made), and each
-  program's FFI entry, bound at its first launch.  Nothing here reads device
+  the stage takes them (checked once, when the launcher is made), each
+  program's FFI entry, bound at its first launch, the device of the new
+  outputs and, in ``fwd``, the ignored weight, made by the first unweighted
+  forward on the device.  Nothing here reads device
   memory, reads an environment variable or synchronizes; the checks read
   dtypes, shapes, strides, devices and data pointers only.  The host keeps no
   state between calls but caches of facts a call cannot change (a device's
@@ -149,6 +161,36 @@ JIT variables):
   the function adds no saved state of its own and no activation.  The
   gradients have no derivative of their own: when the autograd engine records
   them (``create_graph=True``), differentiating them raises ``RuntimeError``.
+- Checkpointing.  The backward of a non-reentrant checkpoint recomputes its
+  region with saved-tensors hooks set.  There (a backward running on the
+  thread, ``torch._C._current_graph_task_id() != -1``, and saved-tensors hooks
+  set), :func:`cake_clamped_swiglu_det` applies :class:`_HeldFunction`, whose
+  ``forward`` checks the arguments and allocates ``h`` but keeps the launch in
+  its fifth argument (a :class:`_HeldLaunch`); :func:`_held` launches the
+  forward kernel after ``apply`` returns.  So autograd saves the inputs (runs
+  the recomputation's pack hooks) before the kernel runs, as for a built-in
+  op: PyTorch packs a custom function's saved tensors only after its
+  ``forward`` returns.  With early stop on (the default), the recomputation
+  stops once it has saved again every tensor the region saved.  It ends
+  before the launch when these inputs are the region's last saved tensors
+  (the op alone, or the gate/up projection and the op, with the down
+  projection outside the region), and launches the forward when a later
+  operation of the region saves a tensor (the down projection saves ``h``; so
+  does the whole expert block).  Anywhere else (no hooks, the checkpoint's own
+  forward pass, activation offloading outside a backward)
+  :class:`CakeClampedSwiGLUDetFunction` launches inside ``forward``, as in
+  0.1.7.  A reentrant checkpoint (it sets no hooks), early stop off (the
+  recomputation runs to its end) and a direct
+  ``CakeClampedSwiGLUDetFunction.apply`` recompute the forward in every
+  region.  A call that Dynamo or ``torch.jit.trace`` records launches inside
+  ``forward``; a checkpoint's recomputation runs with Dynamo disabled.  Not
+  tested under ``torch.compile``.  The launch, its arguments and its bits are
+  the same in every case.  Checkpointing the op alone saves no memory: it
+  keeps only its inputs anyway, and the down projection keeps ``h`` for its
+  weight gradient.  A region of the gate/up projection and the op does not
+  keep the projection's ``[R, 4608]`` output (the op's input) from the forward
+  to the backward; one that also holds the down projection does not keep
+  ``h``.
 - Mode: the mode is part of the name (``det``).  Every output is elementwise
   or a sum within one row in one fixed order, so every launch gives the same
   bits for the same inputs on the same architecture, whatever the row count
@@ -187,8 +229,9 @@ INTERMEDIATE_SIZE: int = WIDTH
 
 _WHAT = "Cake clamped SwiGLU training"
 
-# Whether an entry point first tries the one-pass checks of the common call (:func:`_fast_operands`, :func:`_plain`);
-# off, every call takes the full checks.  The launches are the same either way.
+# Whether an entry point first tries the one-pass checks of the common call (:func:`_forward_step`,
+# :func:`_backward_step`, :func:`_fast_operands`, :func:`_plain`); off, every call takes the full checks.  The launches
+# are the same either way.
 _FAST_CHECKS = True
 
 
@@ -384,50 +427,76 @@ _ARGUMENTS: dict[str, tuple[str, ...]] = {
 }
 
 
-@functools.cache
-def _launcher(stage: str, device_index: int) -> Callable[..., None]:
-    """``launch(rows, *arguments)`` of ``stage`` on device ``device_index``, made once per stage and device: for
-    ``rows >= 1`` rows it runs the program :func:`run_module` runs (:func:`_route`) with ``arguments``, the kernel
-    parameters in the order of ``_ARGUMENTS[stage]``, then the grid ``cake_jit.grid(name, rows)``.  Both programs of
-    the stage are checked to take their parameters in that order when the launcher is made, so a launch builds no dict
-    of the arguments, and it looks up only its program's FFI entry, bound by the launcher at the program's first
-    launch (no library loads when the launcher is made).  The entry points check the device's architecture at every
-    call before they allocate; a launcher is made only for an exported architecture."""
-    limit, table, small, large, tail = _route(stage, device_index)
-    for name in dict.fromkeys((small[0], large[0])):
-        if parameters(name) != _ARGUMENTS[stage]:
-            raise RuntimeError(
-                f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
-                f"{_ARGUMENTS[stage]}"
-            )
-    arch = device_arch(device_index)
-    entries: dict[str, Any] = {}
+class _Launcher:
+    """The launch of one stage on one device (:func:`_launcher`): ``launch(rows, *arguments)`` runs, for ``rows >= 1``
+    rows, the program :func:`run_module` runs (:func:`_route`) with ``arguments``, the kernel parameters in the order
+    of ``_ARGUMENTS[stage]``, then the grid ``cake_jit.grid(name, rows)``.  It holds what every launch of the stage on
+    the device reads: ``device``, the device of the new outputs (one ``torch.device`` per device for the process:
+    ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``); ``route``, :func:`_route` of
+    the stage and device; ``entries``, each program's FFI entry, bound through :func:`_entry` at the program's first
+    launch (:meth:`entry`; no library loads when the launcher is made); and ``weight``, the ignored weight of the
+    unweighted forward launches on the device (:meth:`ignored_weight`; ``fwd`` only, None until the first one).  Both
+    programs of the stage are checked to take their parameters in that order when the launcher is made, so a launch
+    builds no dict of the arguments.  The common calls of the entry points read these fields and launch in their own
+    frame (:func:`_forward_step`, :func:`_backward_step`), as ``launch`` does; the autograd forward of a checkpoint's
+    recomputation keeps its launch for :func:`_held` instead (:class:`_HeldLaunch`)."""
 
-    def launch(rows: int, *arguments: Any) -> None:
-        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
-        entry = entries.get(name)
+    __slots__ = ("arch", "device", "entries", "route", "weight")
+
+    def __init__(self, stage: str, device_index: int) -> None:
+        self.route = _route(stage, device_index)
+        _, _, small, large, _ = self.route
+        for name in dict.fromkeys((small[0], large[0])):
+            if parameters(name) != _ARGUMENTS[stage]:
+                raise RuntimeError(
+                    f"record {name}: parameters {parameters(name)} are not in the order the host passes them, "
+                    f"{_ARGUMENTS[stage]}"
+                )
+        self.arch = device_arch(device_index)
+        self.device = _device(device_index)
+        self.entries: dict[str, Any] = {}
+        self.weight: Optional[torch.Tensor] = None
+
+    def entry(self, name: str) -> Any:
+        """The FFI entry of program ``name`` on the device's architecture, looked up once (:func:`_entry`)."""
+        entry = self.entries.get(name)
         if entry is None:
-            entry = entries[name] = _entry(name, arch)
+            entry = self.entries[name] = _entry(name, self.arch)
+        return entry
+
+    def ignored_weight(self) -> torch.Tensor:
+        """The ``w`` of an unweighted forward launch (``weighted`` 0: the kernels read its one element and ignore it):
+        one one-element FP32 buffer per device for the process, set to 1, made by the first unweighted forward on the
+        device and by no other call (a weighted call or a backward fills no buffer).  That call may be a CUDA graph
+        capture: the buffer then lives in the graph's memory pool for the process, and its value is never used.  An
+        unweighted backward runs ``bwd_unweighted``, which takes no weight."""
+        weight = self.weight
+        if weight is None:
+            weight = self.weight = torch.ones(1, dtype=torch.float32, device=self.device)
+        return weight
+
+    def __call__(self, rows: int, *arguments: Any) -> None:
+        limit, table, small, large, tail = self.route
+        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit else tail
+        entry = self.entries.get(name)
+        if entry is None:
+            entry = self.entry(name)
         entry(*arguments, -(-rows * per_row // per_cta), 1, 1)
 
-    return launch
+
+@functools.cache
+def _launcher(stage: str, device_index: int) -> _Launcher:
+    """The launcher of ``stage`` on device ``device_index`` (:class:`_Launcher`), made once per stage and device at
+    the stage's first launch on the device.  The entry points check the device's architecture at every call before
+    they allocate; a launcher is made only for an exported architecture."""
+    return _Launcher(stage, device_index)
 
 
 @functools.cache
 def _device(device_index: int) -> torch.device:
-    """CUDA device ``device_index``, one object per device for the process: the device of the new outputs of a common
-    call.  ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``."""
+    """CUDA device ``device_index``, one object per device for the process: the device of the new outputs of a call
+    (``_Launcher.device``)."""
     return torch.device("cuda", device_index)
-
-
-@functools.cache
-def _ignored_weight(device_index: int) -> torch.Tensor:
-    """The ``w`` of an unweighted forward launch (``weighted`` 0: the kernels read its one element and ignore it): one
-    one-element FP32 buffer per device for the process, set to 1, made by the first unweighted forward on the device.
-    That call may be a CUDA graph capture: the buffer then lives in the graph's memory pool for the process, and its
-    value is never used.  An unweighted forward pays one cache lookup for it; an unweighted backward runs
-    ``bwd_unweighted``, which takes no weight."""
-    return torch.ones(1, dtype=torch.float32, device=torch.device("cuda", device_index))
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -443,8 +512,9 @@ _last_limit: tuple[float, float] = (math.nan, math.nan)
 def _limit(limit: Any) -> float:
     """``limit`` rounded to FP32 (the kernels' ``L``): a positive finite Python number.  A tensor is refused, as
     reading it would synchronize the host.  A ``float`` or ``int`` (exact types: no bool, no subclass) equal to the
-    last accepted limit returns its rounding: an equal float or int has the same Python float value (Python compares an
-    int and a float exactly), so the same rounding.  Any other value takes the checks below."""
+    Python float value of the last accepted limit returns its rounding: Python compares an int and a float exactly, so
+    an equal value has that float value and the same rounding.  An int that a float cannot hold exactly (such as
+    ``2**53 + 1``) equals no float, so it takes the checks below at every call, as does any other value."""
     global _last_limit
     if type(limit) is float or type(limit) is int:
         value, rounded = _last_limit
@@ -658,10 +728,16 @@ def _read(
 
 
 def _forward(
-    gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: Optional[torch.Tensor]
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
 ) -> tuple[torch.Tensor, float]:
     """The forward step and its FP32 ``L``: every argument checked, then the copies of the inputs the kernels cannot
-    read, the new output and the launch."""
+    read, the new output and the launch (with ``held``, a :class:`_HeldLaunch`, appended there as ``(launcher,
+    arguments)`` for :func:`_held` to run)."""
     fast = _fast_operands(gate_up_or_gate, up, weight) if _FAST_CHECKS else None
     if fast is None:
         device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
@@ -688,11 +764,12 @@ def _forward(
         up_tensor, up_stride, up_col = first, gate_stride, WIDTH
     else:
         up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
-    _launcher("fwd", index)(
+    launch = _launcher("fwd", index)
+    arguments = (
         rows,
         first,
         up_tensor,
-        _ignored_weight(index) if w is None else w,
+        launch.ignored_weight() if w is None else w,
         h,
         rows,
         gate_stride,
@@ -702,6 +779,10 @@ def _forward(
         0 if w is None else 1,
         up_col,
     )
+    if held is None:
+        launch(*arguments)
+    else:
+        held.append((launch, arguments))
     return h, L
 
 
@@ -817,6 +898,276 @@ def _backward(
     return result
 
 
+# The common call of a step, checked and launched by the step itself (:func:`_forward_step`, :func:`_backward_step`;
+# the autograd forward of a checkpoint's recomputation keeps the launch for :func:`_held`):
+# plain contiguous operands of the exact dtypes and shapes on one CUDA device (the BF16 ones 16-byte aligned), the
+# merged BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None
+# or plain contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  The first
+# operand, the weight and ``dh`` are checked in the step's own frame, the ``up`` of two tensors and each output buffer
+# by one :func:`_plain` call each, so only a merged input with new outputs, whose limit is a Python float, or an int
+# that a float holds exactly, equal to the float value of the last accepted limit, is checked and launched in exactly
+# one Python frame per step once the host caches are filled (any other limit adds one :func:`_limit` call; a call that
+# fills a host cache, such as the first launch of a program on a device, adds the calls that fill it).  The checks
+# keep the order of the full checks: the operands and ``dh``, then ``limit``, then the output buffers and their rules,
+# then the device's architecture; an output buffer that is not plain sends the call, its limit checked, to the full
+# checks.  A contiguous tensor of more than one row has the row stride of its row width, so its row stride is that
+# constant and is not read; a single row's strides are 0 (never dereferenced).  Any other call runs :func:`_forward`
+# or :func:`_backward`, whose checks raise every error and mark the inputs to copy; both give the same launch.
+_BF16 = torch.bfloat16
+_FP32 = torch.float32
+_MERGED_WIDTH = 2 * WIDTH
+
+
+def _forward_step(
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
+) -> torch.Tensor:
+    """The forward step's ``h``: the common call checked and launched here, any other call through :func:`_forward`.
+    The checks and the launch are those of :func:`_forward`: the operands, then ``limit``, then ``out`` (one that is
+    not plain goes, with the limit checked, to :func:`_forward`), then the device's architecture, then the new output
+    and the launch.  With ``held`` (the autograd forward of a checkpoint's recomputation, :class:`_HeldFunction`), the
+    launch is appended there as ``(entry, arguments)`` instead, for :func:`_held` to run."""
+    first = gate_up_or_gate
+    if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
+        shape = first.shape
+        if len(shape) == 2 and shape[1] == (_MERGED_WIDTH if up is None else WIDTH):
+            rows = shape[0]
+            if 0 < rows < MAX_ROWS and first.is_contiguous() and not first.data_ptr() % ALIGNMENT_BYTES:
+                index = first.get_device()
+                if (up is None or _plain(up, _BF16, shape, index)) and (
+                    weight is None
+                    or (
+                        type(weight) is torch.Tensor
+                        and weight.is_cuda
+                        and weight.dtype is _FP32
+                        and weight.shape == (rows,)
+                        and weight.is_contiguous()
+                        and weight.get_device() == index
+                    )
+                ):
+                    if type(limit) is float or type(limit) is int:  # :func:`_limit`'s cached rounding, inlined
+                        value, L = _last_limit
+                        if limit != value:
+                            L = _limit(limit)
+                    else:
+                        L = _limit(limit)
+                    if out is not None and not _plain(out, _BF16, (rows, WIDTH), index):
+                        # ``out`` after ``limit``, as in :func:`_forward`, which checks this ``out`` in full.
+                        return _forward(gate_up_or_gate, up, weight, limit, out, held)[0]
+                    if _arch_of_index(index) is None:
+                        device_arch(index)  # raises: not an exported architecture
+                    launch = _launcher("fwd", index)
+                    if out is None:
+                        out = torch.empty(rows, WIDTH, dtype=_BF16, device=launch.device)
+                    if weight is None:
+                        weight, weighted = launch.weight, 0
+                        if weight is None:
+                            weight = launch.ignored_weight()
+                    else:
+                        weighted = 1
+                    # The gate and the up share the row stride: the merged tensor's (passed as both, the up from
+                    # column 2304) or the two tensors' 2304.
+                    stride, out_stride = (shape[1], WIDTH) if rows > 1 else (0, 0)
+                    limit_rows, table, small, large, tail = launch.route
+                    name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit_rows else tail
+                    entry = launch.entries.get(name)
+                    if entry is None:
+                        entry = launch.entry(name)
+                    if up is None:
+                        up, up_col = first, WIDTH
+                    else:
+                        up_col = 0
+                    if held is not None:  # the same arguments as the launch below, kept for :func:`_held`
+                        held.append(
+                            (
+                                entry,
+                                (
+                                    first,
+                                    up,
+                                    weight,
+                                    out,
+                                    rows,
+                                    stride,
+                                    stride,
+                                    out_stride,
+                                    L,
+                                    weighted,
+                                    up_col,
+                                    -(-rows * per_row // per_cta),
+                                    1,
+                                    1,
+                                ),
+                            )
+                        )
+                        return out
+                    entry(
+                        first,
+                        up,
+                        weight,
+                        out,
+                        rows,
+                        stride,
+                        stride,
+                        out_stride,
+                        L,
+                        weighted,
+                        up_col,
+                        -(-rows * per_row // per_cta),
+                        1,
+                        1,
+                    )
+                    return out
+    return _forward(gate_up_or_gate, up, weight, limit, out, held)[0]
+
+
+def _backward_step(
+    grad_out: Any,
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    grad_gate_up_or_gate: Optional[torch.Tensor],
+    grad_up: Optional[torch.Tensor],
+    grad_weight: Optional[torch.Tensor],
+    rounded: bool,
+) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """The backward step: the common call checked and launched here, any other call through :func:`_backward`
+    (``rounded`` as there).  The checks and the launch are those of :func:`_backward`: the operands and ``grad_out``,
+    then ``limit``, then the output buffers and their rules in its order (a buffer that is not plain, or a broken rule,
+    goes with the limit checked to :func:`_backward`), then the device's architecture, then the new outputs and the
+    launch (``bwd`` for a weighted call, ``bwd_unweighted`` for an unweighted one)."""
+    first, dh = gate_up_or_gate, grad_out
+    if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
+        shape = first.shape
+        if len(shape) == 2 and shape[1] == (_MERGED_WIDTH if up is None else WIDTH):
+            rows, cols = shape
+            if 0 < rows < MAX_ROWS and first.is_contiguous() and not first.data_ptr() % ALIGNMENT_BYTES:
+                index = first.get_device()
+                if (
+                    (up is None or _plain(up, _BF16, shape, index))
+                    and (
+                        weight is None
+                        or (
+                            type(weight) is torch.Tensor
+                            and weight.is_cuda
+                            and weight.dtype is _FP32
+                            and weight.shape == (rows,)
+                            and weight.is_contiguous()
+                            and weight.get_device() == index
+                        )
+                    )
+                    and type(dh) is torch.Tensor
+                    and dh.is_cuda
+                    and dh.dtype is _BF16
+                    and dh.shape == (rows, WIDTH)
+                    and dh.is_contiguous()
+                    and dh.get_device() == index
+                    and not dh.data_ptr() % ALIGNMENT_BYTES
+                ):
+                    if rounded:
+                        L = limit
+                    elif type(limit) is float or type(limit) is int:  # :func:`_limit`'s cached rounding, inlined
+                        value, L = _last_limit
+                        if limit != value:
+                            L = _limit(limit)
+                    else:
+                        L = _limit(limit)
+                    d_first, d_up, d_weight = grad_gate_up_or_gate, grad_up, grad_weight
+                    # In the order of :func:`_backward`: the ``grad_up`` rule, then ``grad_gate_up_or_gate``, then
+                    # ``grad_up``, then the ``grad_weight`` rule, then ``grad_weight``.
+                    if (
+                        (d_up is None or up is not None)
+                        and (d_first is None or _plain(d_first, _BF16, shape, index))
+                        and (d_up is None or _plain(d_up, _BF16, shape, index))
+                        and (d_weight is None or (weight is not None and _plain(d_weight, _FP32, (rows,), index)))
+                    ):
+                        if _arch_of_index(index) is None:
+                            device_arch(index)  # raises: not an exported architecture
+                        launch = _launcher("bwd_unweighted" if weight is None else "bwd", index)
+                        device = launch.device
+                        if d_first is None:
+                            d_first = torch.empty(rows, cols, dtype=_BF16, device=device)
+                        if up is not None and d_up is None:
+                            d_up = torch.empty(rows, WIDTH, dtype=_BF16, device=device)
+                        if weight is not None and d_weight is None:
+                            d_weight = torch.empty(rows, dtype=_FP32, device=device)
+                        result = (d_first, d_up, d_weight)
+                        # The gate, the up and their gradients share the row stride: the merged tensors' (each
+                        # passed as both halves, the up halves from column 2304) or the two tensors' 2304.
+                        stride, dh_stride = (cols, WIDTH) if rows > 1 else (0, 0)
+                        if up is None:
+                            up, d_up, col = first, d_first, WIDTH
+                        else:
+                            col = 0
+                        limit_rows, table, small, large, tail = launch.route
+                        name, _, per_row, per_cta = (large if table[rows] else small) if rows < limit_rows else tail
+                        entry = launch.entries.get(name)
+                        if entry is None:
+                            entry = launch.entry(name)
+                        blocks = -(-rows * per_row // per_cta)
+                        if weight is None:
+                            # The unweighted program: no weight, no weight flag and no weight gradient; the bits of
+                            # ``bwd`` at ``w = 1``.
+                            entry(
+                                first,
+                                up,
+                                dh,
+                                d_first,
+                                d_up,
+                                rows,
+                                stride,
+                                stride,
+                                dh_stride,
+                                stride,
+                                stride,
+                                L,
+                                col,
+                                col,
+                                blocks,
+                                1,
+                                1,
+                            )
+                        else:
+                            entry(
+                                first,
+                                up,
+                                dh,
+                                weight,
+                                d_first,
+                                d_up,
+                                d_weight,
+                                rows,
+                                stride,
+                                stride,
+                                dh_stride,
+                                stride,
+                                stride,
+                                L,
+                                1,
+                                col,
+                                col,
+                                blocks,
+                                1,
+                                1,
+                            )
+                        return result
+    return _backward(
+        grad_out,
+        gate_up_or_gate,
+        up,
+        weight,
+        limit,
+        grad_gate_up_or_gate,
+        grad_up,
+        grad_weight,
+        rounded=rounded,
+    )
+
+
 def cake_clamped_swiglu_det_train_forward(
     gate_up_or_gate: torch.Tensor,
     up: Optional[torch.Tensor] = None,
@@ -827,7 +1178,7 @@ def cake_clamped_swiglu_det_train_forward(
 ) -> torch.Tensor:
     """Forward step: ``h = bf16(weight * silu(min(gate, L)) * clamp(up, -L, L))``, one rounding (see the module and
     the facade's documentation)."""
-    return _forward(gate_up_or_gate, up, weight, limit, out)[0]
+    return _forward_step(gate_up_or_gate, up, weight, limit, out)
 
 
 def cake_clamped_swiglu_det_train_backward(
@@ -843,7 +1194,9 @@ def cake_clamped_swiglu_det_train_backward(
 ) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
     """Backward step: ``(d_gate_up, None, d_weight)`` for a merged input, ``(d_gate, d_up, d_weight)`` for two
     tensors; ``d_weight`` is None without a weight (see the module and the facade's documentation)."""
-    return _backward(grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight)
+    return _backward_step(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
+    )
 
 
 class _Gradients(torch.autograd.Function):
@@ -854,7 +1207,7 @@ class _Gradients(torch.autograd.Function):
 
     @staticmethod
     def forward(ctx, grad_h, gate_up_or_gate, up, weight, limit):
-        return _backward(grad_h, gate_up_or_gate, up, weight, limit, None, None, None, rounded=True)
+        return _backward_step(grad_h, gate_up_or_gate, up, weight, limit, None, None, None, True)
 
     @staticmethod
     def backward(ctx, *grads):
@@ -863,22 +1216,40 @@ class _Gradients(torch.autograd.Function):
         )
 
 
+class _HeldLaunch(list):
+    """The forward launch of one autograd call in a checkpoint's recomputation, kept from :class:`_HeldFunction`'s
+    ``forward`` until ``apply`` returns: the step appends one ``(launcher, arguments)`` item, which :func:`_held` then
+    runs (no item when the step launched nothing, ``R == 0``).  A list with no Python method: keeping and running the
+    launch are C list operations."""
+
+    __slots__ = ()
+
+
 class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
-    """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and
-    ``weight``; no activation, no FP32 intermediate) and recomputes the activation in the backward, so
-    ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a
-    merged ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked once,
-    in the forward, and its FP32 value is reused by the backward.  The backward has no output buffer, ``grad_up`` or
-    ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the saved operands
-    again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their device, shape or
-    layout after the forward without the autograd version check seeing it.  No double backward: differentiating
-    gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
+    """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and ``weight``;
+    no activation, no FP32 intermediate) and recomputes the activation in the backward, so
+    ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a merged
+    ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked in the forward,
+    by the forward step; the autograd forward then reads its FP32 rounding through :func:`_limit` again (the cached pair
+    for a Python float, or an int that a float holds exactly; for any other number the limit checks run a second time,
+    on a value that passed them), and the backward reuses that FP32 value.  The backward has no output buffer,
+    ``grad_up`` or ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the
+    saved operands again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their
+    device, shape or layout after the forward without the autograd version check seeing it.  No double backward:
+    differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
+
+    ``apply(gate_up_or_gate, up, weight, limit)`` launches the forward kernel inside ``forward``.  PyTorch packs a
+    custom function's saved tensors (its saved-tensors hooks run) only after ``forward`` returns, so a checkpoint's
+    recomputation of a direct ``apply`` runs that launch even when its output is dropped.  In a checkpoint's
+    recomputation :func:`cake_clamped_swiglu_det` applies :class:`_HeldFunction` instead, which launches after the
+    inputs are saved."""
 
     @staticmethod
     def forward(ctx, gate_up_or_gate, up, weight, limit):
-        h, L = _forward(gate_up_or_gate, up, weight, limit, None)
+        h = _forward_step(gate_up_or_gate, up, weight, limit, None)
         ctx.save_for_backward(gate_up_or_gate, up, weight)
-        ctx.limit = L
+        # The FP32 rounding the step used (its cached pair for a float, or an int that a float holds exactly).
+        ctx.limit = _limit(limit)
         return h
 
     @staticmethod
@@ -887,7 +1258,7 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
         if torch.is_grad_enabled():  # create_graph=True: the gradients' own backward raises
             grads = _Gradients.apply(grad_h, gate_up_or_gate, up, weight, ctx.limit)
         else:
-            grads = _backward(grad_h, gate_up_or_gate, up, weight, ctx.limit, None, None, None, rounded=True)
+            grads = _backward_step(grad_h, gate_up_or_gate, up, weight, ctx.limit, None, None, None, True)
         d_first, d_up, d_weight = grads
         need_first, need_up, need_weight = ctx.needs_input_grad[:3]
         return (
@@ -898,6 +1269,53 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
         )
 
 
+class _HeldFunction(CakeClampedSwiGLUDetFunction):
+    """:class:`CakeClampedSwiGLUDetFunction` whose ``forward`` checks the arguments and allocates ``h`` but keeps the
+    launch in its fifth argument, a :class:`_HeldLaunch`, for :func:`_held` to run after ``apply`` returns (after
+    autograd saved the inputs); the same saved state and backward (no gradient for the fifth argument)."""
+
+    @staticmethod
+    def forward(ctx, gate_up_or_gate, up, weight, limit, held):
+        h = _forward_step(gate_up_or_gate, up, weight, limit, None, held)
+        ctx.save_for_backward(gate_up_or_gate, up, weight)
+        ctx.limit = _limit(limit)
+        return h
+
+    @staticmethod
+    def backward(ctx, grad_h):
+        return (*CakeClampedSwiGLUDetFunction.backward(ctx, grad_h), None)
+
+
+_apply = CakeClampedSwiGLUDetFunction.apply
+_held_apply = _HeldFunction.apply
+# The id of the backward graph task running on this thread, -1 outside a backward (torch's checkpoint reads it the
+# same way), and the innermost saved-tensors hooks, a (pack, unpack) pair or None.  Without either function (another
+# torch) its stand-in answers "in a backward" / "hooks set", so the calls it decides take the held launch.
+_graph_task = getattr(torch._C, "_current_graph_task_id", None) or (lambda: 0)
+_hooks = getattr(torch._C._autograd, "_top_saved_tensors_default_hooks", None) or (lambda ignore_is_tracing: ())
+_is_compiling = torch.compiler.is_compiling
+_is_tracing = torch._C._is_tracing
+
+
+def _held(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tensor:
+    """:func:`cake_clamped_swiglu_det` with positional arguments in a backward with saved-tensors hooks set (a
+    non-reentrant checkpoint's recomputation): :class:`_HeldFunction` applied with a :class:`_HeldLaunch`, then the
+    kept forward launch.  ``apply`` saves the inputs (runs their pack hooks) before it returns, so a recomputation with
+    early stop on (the default) ends inside ``apply``, before the launch, when these inputs are the last tensors its
+    region saves: the recomputed ``h`` would be dropped.  When a later operation of the region saves a tensor (the down
+    projection saves ``h``), the recomputation continues and launches it.  A call that Dynamo or ``torch.jit.trace``
+    records applies :class:`CakeClampedSwiGLUDetFunction` (the launch inside ``forward``: a trace records ``apply``
+    only)."""
+    if _is_compiling() or _is_tracing():
+        return _apply(gate_up_or_gate, up, weight, limit)
+    held = _HeldLaunch()
+    h = _held_apply(gate_up_or_gate, up, weight, limit, held)
+    if held:
+        launch, arguments = held[0]
+        launch(*arguments)
+    return h
+
+
 def cake_clamped_swiglu_det(
     gate_up_or_gate: torch.Tensor,
     up: Optional[torch.Tensor] = None,
@@ -905,9 +1323,12 @@ def cake_clamped_swiglu_det(
     *,
     limit: float,
 ) -> torch.Tensor:
-    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the
-    arguments."""
-    return CakeClampedSwiGLUDetFunction.apply(gate_up_or_gate, up, weight, limit)
+    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments
+    (the forward launched inside ``forward``); in a backward with saved-tensors hooks set (a non-reentrant
+    checkpoint's recomputation), :func:`_held`: the forward kernel launched after autograd saved the inputs."""
+    if _graph_task() == -1 or _hooks(False) is None:
+        return _apply(gate_up_or_gate, up, weight, limit)
+    return _held(gate_up_or_gate, up, weight, limit)
 
 
 __all__ = [

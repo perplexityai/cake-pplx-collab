@@ -19,17 +19,32 @@ limitations under the License.
 Times the forward, the backward and the whole training step (forward +
 backward, wrapper-inclusive) of ``cake_pplx._backends.cake_dsa_sparse_attention_nondet_train`` on
 the GLM-5.2 geometry (64 query heads, 512 latent + 64 rope, 512 value
-dimensions, top-k 2048, BF16) over eighteen representative rows: one causal
+dimensions, top-k 2048, BF16) over nineteen representative rows: one causal
 document of 4k .. 128k tokens, context-parallel tails (4k queries over 64k /
 128k keys), packed context-parallel all-gather-KV problems (32k queries over
-256k keys as 1 .. 32 equal documents, and eight skewed documents) and
+256k keys as 1 .. 32 equal documents, and eight skewed documents), a short
+packed row (``pk4k_N8``: eight documents of 512 queries over 16k keys each) and
 CP-rank spreads (32k queries over 64k / 128k / 192k keys), plus the GLM-5.2
 trainer rows (``packed_glm_a`` -- the recorded eight-segment
 batch, ``packed_glm_b``, ``packed_glm_a_s704``, ``tail_2123x67923``,
 ``doc_16231``, ``doc_4095``, ``doc_4097``).  Optional baselines when
 importable: FlashMLA sparse forward + cuDNN frontend sparse attention backward
-(``flash_mla``, ``cudnn.DSA``) and the FA sparse-MLA kernels
+(``flash_mla``, ``cudnn.DSA``), the cuDNN frontend's native sparse attention
+forward + backward (``cudnn_fe``) and the FA sparse-MLA kernels
 (``flash_attn.cute.flash_attn_varlen_func`` with ``gather_kv_indices``).
+
+Opt-in mode.  The arms ``cake``, ``cake_nope``, ``cake_nope_sink`` and
+``cake_nope_varlen_sink`` have ``*_no_olo`` twins (``cake_no_olo``, ``cake_nope_no_olo``,
+``cake_nope_sink_no_olo``, ``cake_nope_varlen_sink_no_olo``): the same calls with ``with_o_lo=False``, so the
+forward writes no ``o_lo`` and the backward forms its delta from the BF16 ``out``.
+A package without the keyword records them as skipped.  The ``*_aa`` arms
+(``cake_aa``, ``cake_nope_aa``, ``cake_nope_sink_aa``, ``cake_nope_varlen_sink_aa``)
+are A/A twins of the default arms: the same calls on their own runner or leaves,
+the noise control of a run.  The default arm lists are unchanged; name these arms
+to run them.  ``cudnn_fe`` / ``cudnn_fe_nope`` (and ``cudnn_fe_nope_sink`` on the
+sink rows) take the frontend's ``lse`` (``+inf`` on a row without a valid slot)
+as the Cake ``lse`` (``-inf`` there) inside the timed forward; their backward
+takes the frontend's own ``lse``.
 
 Layouts.  Every row can run in the trainer's packed / strided
 layouts (``--q-layout``, ``--kv-stride``, ``--dkv-acc``, ``--dkv-dst-map``;
@@ -73,8 +88,10 @@ version: the RoPE entry fed zero rope operands, with the zero fills, the index c
 and the ``dkv_acc[:, :512]`` slice inside the timed step), ``fa4_nope`` (the FA sparse-MLA
 kernels through autograd, ``k is v`` and an explicit scale), ``fa4_nope_a2`` (the same
 kernels through their private forward / sparse-MLA backward entries with a preallocated
-fp32 ``dv``; the faster FA form per row is the baseline) and ``flashmla_cudnn_nope`` (the
-512 / 512 geometry when the packages accept it).  Every NoPE arm reports the training
+fp32 ``dv``; the faster FA form per row is the baseline), ``flashmla_cudnn_nope`` (the
+512 / 512 geometry when the packages accept it) and, when named, ``cake_nope_no_olo``,
+``cake_nope_aa`` and ``cudnn_fe_nope`` (the frontend's native forward + backward on the
+same geometry; hole rows are skipped, their stable-compaction twins are its rows).  Every NoPE arm reports the training
 forward, the no-grad forward, the whole-row and the chunked backward, the step, the
 recompute step (two forwards + backward), the peak memory, the workspace and -- for the
 Cake arms -- the planner's backward key passes (``key_passes``: the whole row and each
@@ -112,7 +129,8 @@ the packed entry ``cake_dsa_sparse_attention_nondet_nope_varlen`` through autogr
 as ``cake_nope_sink``.  ``cake_nope_sink`` and ``cudnn_fe_nope_sink`` run on the row's global rows, offset outside the
 timed region (the frontend's index operand is global over the packed ``kv``; it has no per-document argument).  The
 default ``--sink`` rows and arms are the flat rows and the two arms above; name the packed rows and
-``cake_nope_varlen_sink`` to run them.
+``cake_nope_varlen_sink`` to run them.  The opt-in twins ``cake_nope_sink_no_olo`` / ``cake_nope_varlen_sink_no_olo``
+and the A/A twins ``cake_nope_sink_aa`` / ``cake_nope_varlen_sink_aa`` run when named in ``--sink-arms``.
 
 Usage::
 
@@ -128,6 +146,10 @@ Usage::
     python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --sink --sink-rows sink_varlen_w640_t16384 \\
         sink_varlen_w128_t16384 --sink-arms cake_nope_varlen_sink,cake_nope_sink,cudnn_fe_nope_sink \\
         --sink-variants sink --json varlen-sink.json
+    python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --rows packed_N8 pk4k_N8 nope_glm53_a \\
+        --arms cake,cake_no_olo,cake_aa,cudnn_fe,cake_nope,cake_nope_no_olo,cudnn_fe_nope --json no-olo.json
+    python benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --sink --sink-arms \\
+        cake_nope_sink,cake_nope_sink_no_olo,cudnn_fe_nope_sink --json no-olo-sink.json
 """
 
 import argparse
@@ -187,6 +209,8 @@ for _N in (1, 2, 4, 8, 16, 32):
     ROWS[f"packed_N{_N}"] = ([32768 // _N] * _N, [262144 // _N] * _N)
 _RATIOS = [1, 1, 2, 2, 4, 4, 8, 10]
 ROWS["skewed8"] = ([1024 * r for r in _RATIOS], [8192 * r for r in _RATIOS])
+# a short packed row: 4096 queries as eight documents of 512 queries over 16,384 keys each (one 4096-query chunk)
+ROWS["pk4k_N8"] = ([512] * 8, [16384] * 8)
 for _s in (65536, 131072, 196608):
     ROWS[f"spread_32k_{_s}"] = ([32768], [_s])
 # GLM-5.2 trainer rows.  packed_glm_a is the recorded batch: eight
@@ -836,6 +860,26 @@ def resolve_layout(row, args):
 # ---------------------------------------------------------------------------
 
 
+def _mode(with_o_lo):
+    """Keywords that select an arm's mode: none for the default (the calls are the same as before, so the default
+    arms also run on a package without ``with_o_lo``), ``with_o_lo=False`` for the opt-in arms."""
+    return {} if with_o_lo else {"with_o_lo": False}
+
+
+def _require_no_olo(device, program=None):
+    """Refuse an opt-in arm with ``RuntimeError("skipped: ...")`` (recorded as the arm's reason) where the package
+    has no ``with_o_lo`` keyword or the program serves no ``with_o_lo=False`` forward and backward on the device's
+    architecture.  ``program=None`` is the RoPE record."""
+    available = cake_backend.generated_program_available
+    if "with_o_lo" not in inspect.signature(available).parameters:
+        raise RuntimeError("skipped: this package has no with_o_lo keyword")
+    kw = {} if program is None else dict(program=program)
+    if not available(device, backward=True, with_o_lo=False, **kw):
+        raise RuntimeError(
+            f"skipped: no with_o_lo=False stages for {cake_backend.arch_for(device)}"
+        )
+
+
 class ArmCake:
     """The Cake kernels.
 
@@ -853,12 +897,16 @@ class ArmCake:
     """
 
     name = "cake"
+    # the default mode: the forward writes ``o_lo`` and the backward reads it (``ArmCakeNoOlo``: ``with_o_lo=False``)
+    with_o_lo = True
 
     def __init__(self, inp, layout):
         self.inp, self.layout = inp, layout
         device = inp.q_latent.device
+        if not self.with_o_lo:
+            _require_no_olo(device)
         self.backward_available = cake_backend.generated_program_available(
-            device, backward=True
+            device, backward=True, **_mode(self.with_o_lo)
         )
         self.runner = None
         if not layout.trainer:
@@ -874,6 +922,7 @@ class ArmCake:
                 softmax_scale=DEFAULT_SCALE,
                 backward=self.backward_available,
                 num_segments=self.num_segments,
+                **_mode(self.with_o_lo),
             )
             return
         self.q_latent = layout.q_latent.detach().requires_grad_()
@@ -903,6 +952,9 @@ class ArmCake:
                 module=self.runner.module_name,
                 stages=list(self.runner.stages),
                 entry="prepare_dsa_train",
+                with_o_lo=self.with_o_lo,
+                # the forward launch key(s) the runner runs (the mode's forward stage)
+                forward_stages=list(getattr(self.runner, "forward_stages", ())),
                 # the backward plan: the segment count it was planned with, its key-range passes and launches
                 num_segments=self.num_segments,
                 key_passes=self.runner.key_passes,
@@ -914,6 +966,7 @@ class ArmCake:
             module=module_name,
             stages=list(cake_jit.registered_stages()),
             entry="cake_dsa_sparse_attention_nondet_varlen",
+            with_o_lo=self.with_o_lo,
             layout=self.layout.describe(),
         )
         if self.layout.dkv_acc:
@@ -958,6 +1011,7 @@ class ArmCake:
             return_lse=True,
             dkv_acc=dkv_acc,
             dkv_dst_map=layout.dst_map,
+            **_mode(self.with_o_lo),
         )
         return dict(out=out, lse=lse, dkv_acc=dkv_acc)
 
@@ -990,6 +1044,20 @@ class ArmCake:
         else:
             res.update(dkv_latent=grads[2], dk_rope=grads[3])
         return res
+
+
+class ArmCakeNoOlo(ArmCake):
+    """The ``cake`` arm with ``with_o_lo=False`` (the prepared runner in the default layout, the public varlen entry
+    in the trainer layout): the forward writes no ``o_lo`` and the backward forms its delta from the BF16 ``out``."""
+
+    name = "cake_no_olo"
+    with_o_lo = False
+
+
+class ArmCakeAA(ArmCake):
+    """The A/A twin of ``cake``: the same calls on its own runner or autograd leaves (the noise control of a run)."""
+
+    name = "cake_aa"
 
 
 class ArmFlashMLACudnn:
@@ -1183,10 +1251,111 @@ class ArmFA4:
         return res
 
 
+class _CudnnFeNative:
+    """The cuDNN frontend's native sparse attention: ``sparse_attention_forward_wrapper`` and
+    ``DSA.sparse_attention_backward_wrapper`` (the frontend's default, non-deterministic backward), on the index
+    glue of the ``flashmla_cudnn`` arms (valid slots first with ``topk_length``, ``-1`` replaced by 0 past it).  The
+    kv / index ranks the forward accepts are probed once at construction, outside the timed region.  The frontend's
+    ``lse`` is ``+inf`` on a row without a valid slot, where the Cake ``lse`` is ``-inf``: inside the timed forward
+    that ``+inf`` becomes ``-inf`` in ``lse``; the backward takes the frontend's own ``lse`` (``fe_lse``)."""
+
+    rank3 = None
+
+    def _fe_init(self):
+        import cudnn
+        from cudnn import DSA
+        from cudnn.deepseek_sparse_attention.sparse_attention_forward.api import (
+            sparse_attention_forward_wrapper,
+        )
+
+        self.cudnn, self.DSA, self._fwd = cudnn, DSA, sparse_attention_forward_wrapper
+
+    def _fe_forward(self, q, kv, scale):
+        kw = dict(topk_length=self.inp.topk_length, softmax_scale=scale)
+        idx = self.idx_cudnn
+        if self.rank3 is None:
+            last = None
+            for rank3 in (False, True):
+                try:
+                    res = self._fwd(
+                        q,
+                        kv.unsqueeze(1) if rank3 else kv,
+                        idx.unsqueeze(1) if rank3 else idx,
+                        **kw,
+                    )
+                    torch.cuda.synchronize()
+                    self.rank3 = rank3
+                    break
+                except Exception as exc:  # noqa: BLE001 - the other rank may be the accepted one
+                    last = exc
+            else:
+                raise RuntimeError(
+                    f"the frontend forward refused both kv / index ranks: {type(last).__name__}: {last}"
+                )
+        else:
+            rank3 = self.rank3
+            res = self._fwd(
+                q,
+                kv.unsqueeze(1) if rank3 else kv,
+                idx.unsqueeze(1) if rank3 else idx,
+                **kw,
+            )
+        lse = res["lse"].masked_fill(torch.isposinf(res["lse"]), float("-inf"))
+        return dict(out=res["out"], lse=lse, fe_lse=res["lse"])
+
+    def versions(self):
+        backend = getattr(self.cudnn, "backend_version", None)
+        return dict(
+            cudnn_frontend=getattr(self.cudnn, "__version__", None),
+            cudnn_backend=backend() if callable(backend) else None,
+            torch_cudnn=torch.backends.cudnn.version(),
+            forward="sparse_attention_forward_wrapper",
+            backward="DSA.sparse_attention_backward_wrapper (default, non-deterministic)",
+            kv_index_rank3=self.rank3,
+            lse="frontend lse, +inf (no valid slot) to -inf, inside the timed forward",
+            backward_lse="the frontend lse",
+        )
+
+
+class ArmCudnnFe(_CudnnFeNative, ArmFlashMLACudnn):
+    """The cuDNN frontend's native DSA forward and backward on the RoPE rows (:class:`_CudnnFeNative`), with the
+    layout glue and the backward of ``flashmla_cudnn``: one packed ``q [T, 64, 576]`` and ``kv [S, 576]`` (built once
+    in the default layout, inside the timed step in the trainer layout), cuDNN's bf16 ``dkv`` upcast-accumulated
+    into the caller's fp32 ``dkv_acc`` in the trainer layout."""
+
+    name = "cudnn_fe"
+
+    def __init__(self, inp, layout):
+        self._fe_init()
+        self.inp, self.layout = inp, layout
+        device = inp.q_latent.device
+        if not layout.trainer:
+            self.q = torch.cat([inp.q_latent, inp.q_rope], dim=-1)
+            self.kv = torch.cat([inp.kv_latent, inp.k_rope], dim=-1)
+            self.dq = torch.empty_like(self.q)
+            self.dkv = torch.zeros_like(self.kv)
+        self.sink = torch.full(
+            (NUM_HEADS,), float("-inf"), dtype=torch.float32, device=device
+        )
+        self.idx_cudnn = inp.idx_global.clamp_min(0).contiguous()
+        self.forward()  # the rank probe and the first build, outside the timed region
+        torch.cuda.synchronize()
+
+    def forward(self):
+        q, kv = self._packed()
+        return dict(q=q, kv=kv, **self._fe_forward(q, kv, DEFAULT_SCALE))
+
+    def backward(self, st):
+        return ArmFlashMLACudnn.backward(self, dict(st, lse=st["fe_lse"]))
+
+
 ARMS = {
     ArmCake.name: ArmCake,
     ArmFlashMLACudnn.name: ArmFlashMLACudnn,
     ArmFA4.name: ArmFA4,
+    ArmCakeNoOlo.name: ArmCakeNoOlo,
+    ArmCakeAA.name: ArmCakeAA,
+    ArmCudnnFe.name: ArmCudnnFe,
 }
 
 
@@ -1330,6 +1499,8 @@ class ArmCakeNope:
     """
 
     name = "cake_nope"
+    # the default mode (``ArmCakeNopeNoOlo``: ``with_o_lo=False``)
+    with_o_lo = True
 
     def __init__(self, inp, chunk=NOPE_CHUNK):
         from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
@@ -1340,6 +1511,8 @@ class ArmCakeNope:
         )
 
         program = getattr(cake_jit, "NOPE_PROGRAM", None)
+        if program is not None and not self.with_o_lo:
+            _require_no_olo(inp.q.device, program)
         if program is None or not cake_backend.generated_program_available(
             inp.q.device, backward=True, program=program
         ):
@@ -1377,6 +1550,7 @@ class ArmCakeNope:
         return dict(
             module=self.program,
             entry="cake_dsa_sparse_attention_nondet_nope_varlen",
+            with_o_lo=self.with_o_lo,
             # the route the whole-row backward takes (the environment override resolved)
             dkv_direct=_record_dkv_direct(
                 *row, program=self.program, dkv_direct=forced
@@ -1399,6 +1573,7 @@ class ArmCakeNope:
             softmax_scale=DEFAULT_NOPE_SCALE,
             return_lse=True,
             dkv_acc=dkv_acc,
+            **_mode(self.with_o_lo),
         )
 
     def forward(self):
@@ -1452,10 +1627,16 @@ class ArmCakeNope:
         if fwd is None or bwd is None:
             return None
         inp = self.inp
+        mode = _mode(self.with_o_lo)
         if self.eager is None:
             idx, length = _globalize(inp.idx_local, inp.cu_seqlens_q, inp.cu_seqlens_k)
             out, lse, o_lo = fwd(
-                inp.q, inp.kv, idx, topk_length=length, softmax_scale=DEFAULT_NOPE_SCALE
+                inp.q,
+                inp.kv,
+                idx,
+                topk_length=length,
+                softmax_scale=DEFAULT_NOPE_SCALE,
+                **mode,
             )
             chunks = []
             for q0, q1, cu_q, cu_k, segments in _chunk_bounds(inp, self.chunk):
@@ -1472,13 +1653,15 @@ class ArmCakeNope:
                 inp.kv,
                 idx_c,
                 e["out"][q0:q1],
-                e["o_lo"][q0:q1],
+                # ``with_o_lo=False``: the forward returned no o_lo, the backward takes None
+                None if e["o_lo"] is None else e["o_lo"][q0:q1],
                 e["lse"][q0:q1],
                 inp.dout[q0:q1],
                 topk_length=len_c,
                 softmax_scale=DEFAULT_NOPE_SCALE,
                 dkv_acc=dkv_acc,
                 num_segments=segments,
+                **mode,
             )
         return dict(dkv=dkv_acc)
 
@@ -1499,6 +1682,21 @@ class ArmCakeNope:
                 dkv_direct=_dkv_direct_from_environment(),
             )
         )
+
+
+class ArmCakeNopeNoOlo(ArmCakeNope):
+    """The ``cake_nope`` arm with ``with_o_lo=False`` (the no-grad forward and the chunked backward's eager
+    ``forward_nope`` / ``backward_nope`` too): the forward writes no ``o_lo`` and the backward forms its delta from
+    the BF16 ``out``."""
+
+    name = "cake_nope_no_olo"
+    with_o_lo = False
+
+
+class ArmCakeNopeAA(ArmCakeNope):
+    """The A/A twin of ``cake_nope``: the same calls on its own autograd leaves (the noise control of a run)."""
+
+    name = "cake_nope_aa"
 
 
 class ArmCakeRopeBridge:
@@ -1897,12 +2095,45 @@ class ArmFlashMLACudnnNope:
         return None
 
 
+class ArmCudnnFeNope(_CudnnFeNative, ArmFlashMLACudnnNope):
+    """The cuDNN frontend's native DSA forward and backward on the NoPE rows (:class:`_CudnnFeNative`; the 512 / 512
+    geometry, global indices), with the backward glue of ``flashmla_cudnn_nope``: a strided ``dout`` copied to a
+    contiguous array and cuDNN's bf16 ``dkv`` upcast-added into a fresh fp32 accumulator, inside the timed backward.
+    Hole rows are skipped (the frontend takes valid-first rows); their stable-compaction twin rows are its rows."""
+
+    name = "cudnn_fe_nope"
+
+    def __init__(self, inp):
+        if getattr(inp, "has_holes", False):
+            raise RuntimeError(
+                "skipped: hole rows (the frontend takes valid-first rows with topk_length; "
+                "run the row's stable-compaction twin)"
+            )
+        self._fe_init()
+        self.inp = inp
+        self.sink = torch.full(
+            (NUM_HEADS,), float("-inf"), dtype=torch.float32, device=inp.q.device
+        )
+        self.idx_cudnn = inp.idx_global.clamp_min(0).contiguous()
+        self.forward()  # the rank probe and the first build, outside the timed region
+        torch.cuda.synchronize()
+
+    def forward(self):
+        return self._fe_forward(self.inp.q, self.inp.kv, DEFAULT_NOPE_SCALE)
+
+    def backward(self, st):
+        return ArmFlashMLACudnnNope.backward(self, dict(st, lse=st["fe_lse"]))
+
+
 NOPE_ARMS = {
     ArmCakeNope.name: ArmCakeNope,
     ArmCakeRopeBridge.name: ArmCakeRopeBridge,
     ArmFA4Nope.name: ArmFA4Nope,
     ArmFA4NopeA2.name: ArmFA4NopeA2,
     ArmFlashMLACudnnNope.name: ArmFlashMLACudnnNope,
+    ArmCakeNopeNoOlo.name: ArmCakeNopeNoOlo,
+    ArmCakeNopeAA.name: ArmCakeNopeAA,
+    ArmCudnnFeNope.name: ArmCudnnFeNope,
 }
 
 
@@ -2196,6 +2427,8 @@ def run_perf(args, results):
         # the largest problems (doc_131072 is exactly 2**34 query x key pairs) take --steps-128k
         args.steps if inp.total_q * inp.total_k < 2**34 else args.steps_128k,
     )
+    # the RoPE rows run the RoPE arms of --arms (the nope_* rows run its NoPE arms)
+    rope_arms = [a for a in args.arms if a in ARMS]
     for row in args.rows:
         if row in NOPE_ROWS:
             run_perf_nope_row(row, args, results)
@@ -2226,7 +2459,7 @@ def run_perf(args, results):
         )
         if layout.trainer:
             print(f"{row:22s} layout {json.dumps(layout.describe())}", flush=True)
-        for name in args.arms:
+        for name in rope_arms:
             arm, error = _arm_or_error(ARMS[name], inp, layout)
             if arm is None:
                 entry["arms"][name] = dict(error=error)
@@ -2647,6 +2880,8 @@ class ArmCakeNopeSink:
     inside the timed backward, ``dq`` and (with the sink) ``dsink`` from one ``autograd.grad``."""
 
     name = "cake_nope_sink"
+    # the default mode (the ``*_no_olo`` twins: ``with_o_lo=False``)
+    with_o_lo = True
 
     def __init__(self, inp, variant):
         from cake_pplx.cake_dsa_sparse_attention_nondet_train import (
@@ -2655,11 +2890,16 @@ class ArmCakeNopeSink:
 
         program = cake_jit.NOPE_PROGRAM
         device = inp.q.device
+        if not self.with_o_lo:
+            _require_no_olo(device, program)
         if not cake_backend.generated_program_available(
             device, backward=True, program=program
         ):
             raise RuntimeError("skipped: nope stems not installed")
         stage = getattr(cake_jit, "NOPE_SINK_FORWARD_STAGE", None)
+        if stage and not self.with_o_lo:
+            # the sink forward the opt-in mode runs in place of the default one
+            stage = getattr(cake_jit, "NO_OLO_STAGES", {}).get(stage)
         arch = cake_backend.arch_for(device)
         # the stage that serves the sink forward on this architecture (its scanner-warp build on sm_107a)
         served = stage and cake_jit.stage_for(stage, arch, program)
@@ -2680,6 +2920,7 @@ class ArmCakeNopeSink:
         return dict(
             entry="cake_dsa_sparse_attention_nondet_nope",
             sink=self.sink is not None,
+            with_o_lo=self.with_o_lo,
             index_route=cake_backend.nope_flat_index_mode(inp.total_q, self.width),
         )
 
@@ -2693,6 +2934,7 @@ class ArmCakeNopeSink:
             sink=self.sink,
             return_lse=True,
             dkv_acc=dkv_acc,
+            **_mode(self.with_o_lo),
         )
 
     def forward(self):
@@ -2751,6 +2993,7 @@ class ArmCakeNopeVarlenSink(ArmCakeNopeSink):
         return dict(
             entry="cake_dsa_sparse_attention_nondet_nope_varlen",
             sink=self.sink is not None,
+            with_o_lo=self.with_o_lo,
             index_route=mode(inp.local) if mode else None,
             num_docs=inp.num_segments,
             causal=False,
@@ -2771,6 +3014,7 @@ class ArmCakeNopeVarlenSink(ArmCakeNopeSink):
             sink=self.sink,
             return_lse=True,
             dkv_acc=dkv_acc,
+            **_mode(self.with_o_lo),
         )
 
     def workspace(self):
@@ -2787,6 +3031,33 @@ class ArmCakeNopeVarlenSink(ArmCakeNopeSink):
                 sink=self.sink is not None,
             )
         )
+
+
+class ArmCakeNopeSinkNoOlo(ArmCakeNopeSink):
+    """The ``cake_nope_sink`` arm with ``with_o_lo=False``: the forward writes no ``o_lo`` and the backward forms its
+    delta (and ``dsink``) from the BF16 ``out``."""
+
+    name = "cake_nope_sink_no_olo"
+    with_o_lo = False
+
+
+class ArmCakeNopeVarlenSinkNoOlo(ArmCakeNopeVarlenSink):
+    """The ``cake_nope_varlen_sink`` arm with ``with_o_lo=False`` (as :class:`ArmCakeNopeSinkNoOlo`)."""
+
+    name = "cake_nope_varlen_sink_no_olo"
+    with_o_lo = False
+
+
+class ArmCakeNopeSinkAA(ArmCakeNopeSink):
+    """The A/A twin of ``cake_nope_sink`` (the noise control of a run)."""
+
+    name = "cake_nope_sink_aa"
+
+
+class ArmCakeNopeVarlenSinkAA(ArmCakeNopeVarlenSink):
+    """The A/A twin of ``cake_nope_varlen_sink`` (the noise control of a run)."""
+
+    name = "cake_nope_varlen_sink_aa"
 
 
 def _lse_with_sink(lse, sink):
@@ -2924,6 +3195,10 @@ SINK_ARMS = {
     ArmCakeNopeSink.name: ArmCakeNopeSink,
     ArmCudnnFeNopeSink.name: ArmCudnnFeNopeSink,
     ArmCakeNopeVarlenSink.name: ArmCakeNopeVarlenSink,
+    ArmCakeNopeSinkNoOlo.name: ArmCakeNopeSinkNoOlo,
+    ArmCakeNopeVarlenSinkNoOlo.name: ArmCakeNopeVarlenSinkNoOlo,
+    ArmCakeNopeSinkAA.name: ArmCakeNopeSinkAA,
+    ArmCakeNopeVarlenSinkAA.name: ArmCakeNopeVarlenSinkAA,
 }
 # the arms --sink runs by default
 SINK_ARMS_DEFAULT = (ArmCakeNopeSink.name, ArmCudnnFeNopeSink.name)
@@ -3084,9 +3359,10 @@ def main():
     parser.add_argument(
         "--arms",
         default="cake,flashmla_cudnn,fa4",
-        help="RoPE arms (cake, flashmla_cudnn, fa4) and / or NoPE arms (cake_nope, "
-        "cake_rope_bridge, fa4_nope, flashmla_cudnn_nope); nope_* rows run the NoPE arms "
-        f"named here, else all of them ({NOPE_ARMS_DEFAULT})",
+        help=f"RoPE arms ({', '.join(ARMS)}) and / or NoPE arms ({', '.join(NOPE_ARMS)}); "
+        "the *_no_olo arms run with with_o_lo=False, the *_aa arms are A/A twins of the default arms; "
+        "the RoPE rows run the RoPE arms named here, the nope_* rows the NoPE arms named here, else "
+        f"{NOPE_ARMS_DEFAULT}",
     )
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument(
