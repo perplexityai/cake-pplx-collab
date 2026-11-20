@@ -1440,7 +1440,7 @@ out.float().square().sum().backward()  # every gradient repeats bit for bit
 - The flat forms apply no positional mask; the index rows alone define the key set. The varlen forms mask only with `causal=True`.
 - Out-of-range `dkv_dst_map` values are caught only with `check_dst_map` or the environment variable.
 - In NoPE without `dkv_acc`, the FP32 `dkv` is cast to BF16. To keep FP32, use `dkv_acc` or `cake_backend.backward_nope`.
-- The NoPE sink (every NoPE entry of both modules) adds one saved tensor for the backward: the reference to the caller's `sink`. The backward workspace grows by `ceil(T/64) * 256 + 4` bytes of `dsink` scratch. In a head whose sink is far above every score, the true `out` and `dq` are below the smallest BF16 subnormal and come out as 0.
+- The NoPE sink (every NoPE entry of both modules) adds one saved tensor for the backward: the reference to the caller's `sink`. The backward workspace grows by `ceil(T/64) * 256 + 256` bytes of `dsink` scratch: `ceil(T/64) * 256` bytes of FP32 partials and a 4-byte counter, each region aligned to 256 bytes. In a head whose sink is far above every score, the true `out` and `dq` are below the smallest BF16 subnormal and come out as 0.
 - In nondet, deterministic preparation (the `dout` copy, the binding plan and the JIT load) may run before the alert is raised.
 - The binding cache keys differ. Det binds by geometry (shape, stride, dtype, alignment, scale). Nondet binds by `data_ptr`, shape, stride, dtype and scale.
 - The det backward reuses the saved `o_lo` storage as its integer accumulator when `S_dst` is up to about `27.7*T` rows, and allocates otherwise. A second backward with `retain_graph=True` recomputes the forward first.

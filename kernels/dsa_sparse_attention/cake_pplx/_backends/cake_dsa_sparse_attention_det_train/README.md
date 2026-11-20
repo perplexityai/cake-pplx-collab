@@ -358,7 +358,8 @@ non-deterministic package (see its README, "Trainable per-head sink"):
   reference to the caller's `sink` (the eighth saved tensor), and a second
   backward through the same graph (`retain_graph=True`) replays the sink
   forward with it.  The workspace grows by `ceil(T / 64) * 256 + 4` bytes
-  before alignment (`dsa_nope_train_workspace_size(..., sink=True)`).  The
+  before alignment and `ceil(T / 64) * 256 + 256` after it
+  (`dsa_nope_train_workspace_size(..., sink=True)`).  The
   binding keys end with the sink's geometry, so a sink call and a call
   without one never share a plan.
 * A call without query rows (`T = 0`) launches nothing and gives a zero

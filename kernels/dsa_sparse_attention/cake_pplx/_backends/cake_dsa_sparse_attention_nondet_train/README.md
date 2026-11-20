@@ -859,6 +859,7 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   reference to the caller's `sink` (`ctx.save_for_backward`, so non-reentrant
   checkpointing releases and recomputes it like the others).  The workspace
   grows by the sink-gradient scratch, `ceil(T / 64) * 256 + 4` bytes
+  before alignment and `ceil(T / 64) * 256 + 256` after it
   (`dsa_nope_train_workspace_size(..., sink=True)`, the regions
   `dsink_partial` / `dsink_ticket` of `workspace_layout_nope`); `dsink [64]`
   is an output.
