@@ -362,7 +362,7 @@ DIRECT_ROWS_OF_RECORD = {
         ),
         ("fwd", 712, 760): (
             4097,
-            20480,
+            16384,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd", 768, 768): (
