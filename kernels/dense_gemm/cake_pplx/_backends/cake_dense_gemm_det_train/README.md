@@ -11,7 +11,8 @@ eight-warp CTA form of the GEMM (one program, measured on GB200); SM103 (B300 /
 GB300) ships its own builds of the same programs and, for six input-gradient
 rows, the eight-warp CTA form in two programs; both also ship the start-path
 eight-warp programs for BF16 input gradients of their 148- and 152-SM parts, on
-128 x 256 and 128 x 128 pair tiles (`cake_jit.KERNELS` lists the registered architectures).  A device whose architecture the registry does not
+128 x 256 and 128 x 128 pair tiles, and SM107 all four with the same builds, of which the two on the
+128 x 128 tile run five BF16 input gradients of its 212-SM part (`cake_jit.KERNELS` lists the registered architectures).  A device whose architecture the registry does not
 list raises `NotImplementedError` naming the missing instance;
 `is_cake_dense_gemm_det_train_supported(device)` reports whether a device is a supported architecture.  The
 backend does not participate in automatic backend selection, autotuning or trace-apply.  Its libraries are
@@ -355,7 +356,9 @@ lists (`sm_100a`, `sm_103a` and `sm_107a`); the eight-warp form ships for
 `sm_100a` and `sm_103a` (`_w8r`, `_w8rs`, the two batched `_w8rs` programs, the start-path `_w8rel` / `_w8relf`,
 which the token ranges of version 0.3.12 name, and `_n128_tma1_w8relf` / `_n128_k32_tma1_w8relf`, the `w8relf`
 program on the 128 x 128 tile in 64- and 32-element K steps, which those of version 0.3.14 name; `sm_100a` also the
-knob-free `_w8`); every program the measured
+knob-free `_w8`), and for `sm_107a` the start-path `_w8rel` / `_w8relf` and the two 128 x 128 programs, built as on
+`sm_100a` and `sm_103a`; the 212-SM token ranges of version 0.3.17 name the two 128 x 128 programs, and no `sm_107a`
+rule names `_w8rel` / `_w8relf` (they run there only when a caller forces their form); every program the measured
 `sm_100a` / `sm_103a` rules name is registered, so the registry fallback only
 serves a caller that forces a template no export generated.  An entry point raises
 `NotImplementedError` naming the missing instance for a template that no
