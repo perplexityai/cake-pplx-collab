@@ -272,11 +272,21 @@ def _check_family_layout(arch: str, hidden: int, residual: bool, sms: int) -> in
             single = record["workspace_rule"]["kind"] == "claim_sum_f32"
             part = record["workspace_rule"]["kind"] == "claim_part_f32"
             singles += single
+            # a record whose kernel runs beside a side stream that keeps SMs (the
+            # det package's one-row-per-stage pairs) spells their count: its
+            # slots, grid and workspace bound count the other SMs, and a device
+            # without more SMs than that is refused
+            free = rule.get("free_sms", 0)
+            if free >= sms:
+                with pytest.raises(ValueError, match="free_sms"):
+                    loader.workspace_layout(record, 4096, device_index=0)
+                continue
             for rows in (1, 2, 7, 64, 257, 1000, 4096, 16385, 65536):
                 layout = loader.workspace_layout(record, rows, device_index=0)
                 # the chunk table's slots: ``table_slots_per_sm`` per SM where the
                 # record spells it (a table cut finer than the grid), else the grid's
-                slots = rule.get("table_slots_per_sm", rule["ctas_per_sm"]) * sms
+                per_sm = rule.get("table_slots_per_sm", rule["ctas_per_sm"])
+                slots = per_sm * (sms - free)
                 assert layout["slots"] == slots
                 table = loader.chunk_table(
                     rows, slots, rule["rows_per_issue"], *loader.chunk_taper(rule)
@@ -304,7 +314,7 @@ def _check_family_layout(arch: str, hidden: int, residual: bool, sms: int) -> in
                     # row per CTA of every launch up to ``rows`` (the grid's bound)
                     row_bytes = record["workspace_rule"]["part_row_bytes"]
                     grid = loader.launch_grid(record, rows, device_index=0)[0]
-                    ctas = rule["ctas_per_sm"] * sms
+                    ctas = rule["ctas_per_sm"] * (sms - free)
                     assert layout["grid"] == grid
                     assert layout["counters_offset"] == loader.SINGLE_COUNTERS_OFFSET
                     assert 4 * layout["counters"] <= loader.SINGLE_COUNTERS_BYTES
@@ -341,11 +351,97 @@ def _check_family_layout(arch: str, hidden: int, residual: bool, sms: int) -> in
                 assert not ("table_slots_per_sm" in rule and "col_tasks" in rule), name
                 grid = loader.launch_grid(record, rows, device_index=0)
                 assert grid == (
-                    min(rule["ctas_per_sm"] * sms, len(table) + tasks),
+                    min(rule["ctas_per_sm"] * (sms - free), len(table) + tasks),
                     1,
                     1,
                 )
     return singles
+
+
+def _det_loader():
+    try:
+        return cake_package("cake_rmsnorm_det_train", "cake_jit")
+    except Exception:  # noqa: BLE001 - a vendored copy may come without it
+        return None
+
+
+def _every_sm(rule: dict) -> dict:
+    """A grid rule without the SMs it leaves to a side stream (``free_sms``)."""
+    return {key: value for key, value in rule.items() if key != "free_sms"}
+
+
+@pytest.mark.parametrize("sms", (148, 152, 160, 132))
+def test_a_hosted_det_pair_runs_the_det_host_plan(
+    sms: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A deterministic-pair main kernel this package hosts (the same program
+    digits as a record of the deterministic package on the same architecture,
+    the same grid rule) gets the deterministic package's host plan: its
+    ``(n_chunks, slots)``, launch grid and partial capacity, ``free_sms``
+    included.  A hosted pair whose record spells no ``free_sms`` where the
+    deterministic record spells some (the same grid rule otherwise) runs on
+    every SM: the deterministic host plan of that record without
+    ``free_sms``."""
+
+    det = _det_loader()
+    if det is None:
+        pytest.skip("the deterministic package is not importable beside this one")
+    monkeypatch.setattr(loader, "sm_count", lambda device_index: sms)
+    monkeypatch.setattr(det, "sm_count", lambda device_index: sms)
+    det_rules: dict[tuple[str, str], list[dict]] = {}
+    for record in det.MODULES.values():
+        if record["grid_rule"]["kind"] != "claimed_chunks":
+            continue
+        for arch in record["arches"]:
+            det_rules.setdefault((arch, record["kernel"][-20:]), []).append(record)
+    checked = free_checked = every_sm_checked = 0
+    for name, record in sorted(loader.MODULES.items()):
+        rule = record["grid_rule"]
+        if (
+            rule["kind"] != "claimed_chunks"
+            or (record["workspace_rule"] or {}).get("kind") != "chunk_partials"
+        ):
+            continue
+        for arch in record["arches"]:
+            sources = det_rules.get((arch, record["kernel"][-20:]), [])
+            twins = [twin for twin in sources if twin["grid_rule"] == rule]
+            if rule.get("free_sms", 0):
+                # a record leaving SMs out is the det package's pair with its slot plan
+                assert twins, (name, arch, rule)
+            # a pair launched on every SM: the det record without the SMs its
+            # slot plan leaves out
+            stripped = [
+                {**twin, "grid_rule": _every_sm(twin["grid_rule"])}
+                for twin in sources
+                if twin["grid_rule"].get("free_sms", 0)
+            ]
+            every_sm = [twin for twin in stripped if twin["grid_rule"] == rule]
+            on_every_sm = not twins and bool(every_sm)
+            if on_every_sm:
+                twins = every_sm
+            if not twins:
+                continue
+            twin = twins[0]
+            left_out = rule.get("free_sms", 0)
+            assert loader.launch_sms(rule, device_index=0) == sms - left_out, name
+            for rows in (1, 7, 257, 1185, 4096, 16231, 36864, 131073, 221184):
+                assert loader.chunking(record, rows, device_index=0) == det.chunking(
+                    twin, rows, device_index=0
+                ), (name, arch, rows)
+                assert loader.launch_grid(
+                    record, rows, device_index=0
+                ) == det.launch_grid(twin, rows, device_index=0), (name, arch, rows)
+                want = det.partial_capacity(twin, rows, device_index=0)
+                got = loader.partial_capacity(record, rows, device_index=0)
+                assert got == want, (name, arch, rows)
+            checked += 1
+            free_checked += bool(left_out)
+            every_sm_checked += on_every_sm
+    assert checked
+    print(
+        f"hosted det pairs checked: {checked} (leaving SMs out: {free_checked}, "
+        f"on every SM: {every_sm_checked})"
+    )
 
 
 @pytest.mark.parametrize("sms", SM_COUNTS)
