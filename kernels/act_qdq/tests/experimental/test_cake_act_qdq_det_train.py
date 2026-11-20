@@ -25,16 +25,17 @@ reaches, and random inputs of the model shapes (2-D, 3-D and 4-D, 1 to 4097
 rows, widths 16 to 4096, a width of 96; each released call site at 8192
 rows).  Each runs out of place and in place,
 with and without the scale output, and every program also runs directly on
-grids of 1 and 3 CTAs.  Calls on each side of each bound of the small and the
-wide programs' size ranges (the wide range up to its lower bound) run the
-program their route names there, and every program of the route gives the
-rule's bits on those inputs.  The suite also checks: out-of-place calls leave ``x``
-unchanged; caller ``out`` and ``scales`` buffers; five repeated calls bit for
-bit; argument validation; no launch for empty inputs; CUDA graph replay; no
-rebuild on a new shape; ``torch.utils.checkpoint`` through a straight-through
-function; steady-state calls without host synchronization; no
-deterministic-algorithms alert; the zero workspace; the registry and the
-``build.json`` contract; and no FP64 in the CUDA sources.
+grids of 1 and 3 CTAs.  Calls on each side of each bound of the small, the
+wide and the large programs' size ranges (each bound up to 33,554,432
+vectors) run the program their route names there, and every program of the
+route gives the rule's bits on those inputs.  The suite also checks:
+out-of-place calls leave ``x`` unchanged; caller ``out`` and ``scales``
+buffers; five repeated calls bit for bit; argument validation; no launch for
+empty inputs; CUDA graph replay; no rebuild on a new shape;
+``torch.utils.checkpoint`` through a straight-through function; steady-state
+calls without host synchronization; no deterministic-algorithms alert; the
+zero workspace; the registry and the ``build.json`` contract; and no FP64 in
+the CUDA sources.
 
 This suite exercises the backend package alone: it names the package once,
 through ``tests.cake.test_helpers.cake_package``, and imports nothing else from
@@ -74,16 +75,33 @@ SMALL_VECTORS = {
     "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
 }
 # The wide program of MXFP8 without the scales, on sm_100a and sm_103a only: from above the main and small programs'
-# sizes to the last n_vecs whose tile count (n_vecs + 511) fits in signed 32 bits.
+# sizes, out of place to the last n_vecs whose tile count (n_vecs + 511) fits in signed 32 bits, in place to the last
+# below the large range.
 WIDE_ROUTE = "mxfp8_e8m0_g32"
 WIDE_LAST = 2**31 - 512
 WIDE_VECTORS = {
-    "sm_100a": {"in_place": (262145, WIDE_LAST), "out_of_place": (131073, WIDE_LAST)},
-    "sm_103a": {"in_place": (262145, WIDE_LAST), "out_of_place": (131073, WIDE_LAST)},
+    "sm_100a": {"in_place": (262145, 33554431), "out_of_place": (131073, WIDE_LAST)},
+    "sm_103a": {"in_place": (262145, 33554431), "out_of_place": (131073, WIDE_LAST)},
 }
-# Per route, its ranged programs (name suffix -> vectors): the small program of every route, and the wide one, below
-# which that route's small range ends on sm_100a and sm_103a.
-RANGED = {f"{fmt}{suffix}": {"_small": SMALL_VECTORS} for fmt in FORMATS for suffix in ("", "_scales")} | {
+# The large program of each MXFP4 and MXFP8 route, on sm_100a and sm_103a only: in place from 4,194,304 vectors (from
+# 33,554,432 for MXFP8 without the scales, above the wide range), out of place from 8,388,608 for MXFP8 with the scales
+# only, each to the last n_vecs whose tile count (n_vecs + 2047) fits in signed 32 bits.
+LARGE_LAST = 2**31 - 2048
+LARGE_VECTORS = {
+    kind: {arch: {"in_place": (low, LARGE_LAST), "out_of_place": out_of_place} for arch in ("sm_100a", "sm_103a")}
+    for kind, low, out_of_place in (
+        ("mxfp4_e8m0_g32", 4194304, None),
+        ("mxfp4_e8m0_g32_scales", 4194304, None),
+        ("mxfp8_e8m0_g32", 33554432, None),
+        ("mxfp8_e8m0_g32_scales", 4194304, (8388608, LARGE_LAST)),
+    )
+}
+# Per route, its ranged programs in the route's order (name suffix -> vectors): the small program of every route, the
+# wide one, below which that route's small range ends on sm_100a and sm_103a, and the large one.
+RANGED = {
+    kind: {"_small": SMALL_VECTORS} | ({"_large": LARGE_VECTORS[kind]} if kind in LARGE_VECTORS else {})
+    for kind in (f"{fmt}{suffix}" for fmt in FORMATS for suffix in ("", "_scales"))
+} | {
     WIDE_ROUTE: {
         "_small": {
             **SMALL_VECTORS,
@@ -91,10 +109,11 @@ RANGED = {f"{fmt}{suffix}": {"_small": SMALL_VECTORS} for fmt in FORMATS for suf
             "sm_103a": {"in_place": None, "out_of_place": (65537, 131072)},
         },
         "_wide": WIDE_VECTORS,
+        "_large": LARGE_VECTORS[WIDE_ROUTE],
     }
 }
 CALLS = ("out_of_place", "in_place")
-# The grid rules of the main, the small and the wide programs.
+# The grid rules of the main, the small, the wide and the large programs.
 MAIN_RULE = {
     "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
     "kind": "tiles",
@@ -116,9 +135,16 @@ WIDE_RULE = {
     "tile_vectors": {"sm_100a": 512, "sm_103a": 512},
     "vector_elements": 8,
 }
-# The largest n_vecs the size-boundary test launches at: a range bound above it (the wide range's last) is checked by
-# the registry tests only.
-BOUNDARY_LIMIT = 524292
+LARGE_RULE = {
+    "ctas_per_sm": {"sm_100a": 2, "sm_103a": 2},
+    "kind": "tiles",
+    "persist_waves": 0,
+    "tile_vectors": {"sm_100a": 2048, "sm_103a": 2048},
+    "vector_elements": 8,
+}
+# The largest n_vecs the size-boundary test launches at, where the large range of MXFP8 without the scales begins in
+# place: a range bound above it (the last of the wide and the large ranges) is checked by the registry tests only.
+BOUNDARY_LIMIT = 33554432
 
 
 def _expected(arch: str, kind: str, call: str, n_vecs: int) -> str:
@@ -340,10 +366,10 @@ def test_every_program_runs_on_any_grid() -> None:
 @pytest.mark.parametrize("fmt", FORMATS)
 def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool, monkeypatch) -> None:
     """Inputs of width 32 just inside and just outside each bound of each ranged program's range for the call's kind
-    (the out-of-place range where the kind has none; up to :data:`BOUNDARY_LIMIT` vectors): the call launches the
-    program its route names for that size and kind (also with an ``out`` buffer: a view of ``x``'s bytes is in place,
-    another tensor is not), and each program of the route, launched directly in the same kind, gives the rule's bits
-    too."""
+    (the out-of-place range where the kind has none, and no bound where neither kind has one; up to
+    :data:`BOUNDARY_LIMIT` vectors): the call launches the program its route names for that size and kind (also with
+    an ``out`` buffer: a view of ``x``'s bytes is in place, another tensor is not), and each program of the route,
+    launched directly in the same kind, gives the rule's bits too."""
     arch, call = _arch(), CALLS[inplace]
     run_module, launched = loader.run_module, []
 
@@ -732,18 +758,43 @@ def test_routes_select_a_program_by_size(monkeypatch) -> None:
         got = loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=65537, in_place=in_place)
         assert got == want, in_place
     # MXFP8 without the scales on sm_100a: the small range ends where the wide one begins out of place; in place the
-    # main program runs up to the wide range; sm_107a has no wide program
+    # main program runs up to the wide range, and the large range begins where the wide one ends; the main program runs
+    # above both; sm_107a has no wide program
     for n_vecs, in_place, want in (
         (131072, False, "mxfp8_e8m0_g32_small"),
         (131073, False, "mxfp8_e8m0_g32_wide"),
         (262144, True, "mxfp8_e8m0_g32"),
         (262145, True, "mxfp8_e8m0_g32_wide"),
+        (33554431, True, "mxfp8_e8m0_g32_wide"),
+        (33554432, True, "mxfp8_e8m0_g32_large"),
+        (33554432, False, "mxfp8_e8m0_g32_wide"),
+        (LARGE_LAST, True, "mxfp8_e8m0_g32_large"),
+        (LARGE_LAST + 1, True, "mxfp8_e8m0_g32"),
         (WIDE_LAST + 1, False, "mxfp8_e8m0_g32"),
     ):
         got = loader.selected_module("sm_100a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=n_vecs, in_place=in_place)
         assert got == want, (n_vecs, in_place)
     got = loader.selected_module("sm_107a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1 << 20, in_place=False)
     assert got == "mxfp8_e8m0_g32"
+    # the large programs on sm_103a: in place from 4,194,304 vectors for MXFP4 and for MXFP8 with the scales, out of
+    # place for MXFP8 with the scales only, from 8,388,608; FP4 and sm_107a have none
+    for fmt, scale_out, n_vecs, in_place, want in (
+        ("mxfp4_e8m0_g32", False, 4194303, True, "mxfp4_e8m0_g32"),
+        ("mxfp4_e8m0_g32", False, 4194304, True, "mxfp4_e8m0_g32_large"),
+        ("mxfp4_e8m0_g32", False, 4194304, False, "mxfp4_e8m0_g32"),
+        ("mxfp4_e8m0_g32", True, 4194304, True, "mxfp4_e8m0_g32_scales_large"),
+        ("mxfp4_e8m0_g32", True, LARGE_LAST, True, "mxfp4_e8m0_g32_scales_large"),
+        ("mxfp4_e8m0_g32", True, LARGE_LAST + 1, True, "mxfp4_e8m0_g32_scales"),
+        ("mxfp8_e8m0_g32", True, 4194303, True, "mxfp8_e8m0_g32_scales"),
+        ("mxfp8_e8m0_g32", True, 4194304, True, "mxfp8_e8m0_g32_scales_large"),
+        ("mxfp8_e8m0_g32", True, 8388607, False, "mxfp8_e8m0_g32_scales"),
+        ("mxfp8_e8m0_g32", True, 8388608, False, "mxfp8_e8m0_g32_scales_large"),
+        ("fp4_e4m3_g16", False, 1 << 24, True, "fp4_e4m3_g16"),
+    ):
+        got = loader.selected_module("sm_103a", fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=in_place)
+        assert got == want, (fmt, scale_out, n_vecs, in_place)
+    got = loader.selected_module("sm_107a", "mxfp4_e8m0_g32", scale_out=False, n_vecs=1 << 24, in_place=True)
+    assert got == "mxfp4_e8m0_g32"
     with pytest.raises(ValueError, match="format"):
         loader.selected_module("sm_100a", "nvfp4", scale_out=False, n_vecs=1, in_place=False)
     with pytest.raises(ValueError, match="route"):
@@ -757,6 +808,9 @@ def test_routes_select_a_program_by_size(monkeypatch) -> None:
     monkeypatch.setitem(loader.ROUTES["sm_107a"], "mxfp8_e8m0_g32", ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_wide"])
     with pytest.raises(RuntimeError, match="does not serve that route"):
         loader.selected_module("sm_107a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1, in_place=False)
+    monkeypatch.setitem(loader.ROUTES["sm_107a"], "mxfp4_e8m0_g32", ["mxfp4_e8m0_g32", "mxfp4_e8m0_g32_large"])
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.selected_module("sm_107a", "mxfp4_e8m0_g32", scale_out=False, n_vecs=1, in_place=False)
     # two ranges that hold one size are a registry error
     small = loader.MODULES["mxfp8_e8m0_g32_small"]
     monkeypatch.setitem(
@@ -798,6 +852,14 @@ def test_launch_grid() -> None:
             assert loader.launch_grid(wide, n_vecs=n_vecs, sm_count=148, arch=arch) == (-(-n_vecs // 512), 1, 1)
     with pytest.raises(ValueError, match="no tile for sm_107a"):
         loader.launch_grid(wide, n_vecs=1, sm_count=148, arch="sm_107a")
+    # the large programs: one CTA per tile of 2,048 vectors at every size
+    for kind in LARGE_VECTORS:
+        large = loader.MODULES[kind + "_large"]
+        for arch in ("sm_100a", "sm_103a"):
+            for n_vecs in (1, 2048, 2049, 2 * 148 * 2048, 4194304, LARGE_LAST):
+                assert loader.launch_grid(large, n_vecs=n_vecs, sm_count=148, arch=arch) == (-(-n_vecs // 2048), 1, 1)
+        with pytest.raises(ValueError, match="no tile for sm_107a"):
+            loader.launch_grid(large, n_vecs=1, sm_count=148, arch="sm_107a")
 
 
 @pytest.mark.cpu_only
@@ -820,20 +882,21 @@ def test_registry_records_reference_the_build_manifest() -> None:
     for name, record in loader.MODULES.items():
         kind = loader.route_name(record["format"], scale_out=record["scale_out"])
         suffix = name.removeprefix(kind)
-        small, wide = suffix == "_small", suffix == "_wide"
+        small, wide, large = suffix == "_small", suffix == "_wide", suffix == "_large"
         assert suffix in ("", *RANGED[kind]), name
-        assert ("vectors" in record) == (small or wide), name
-        if small or wide:
+        assert ("vectors" in record) == (small or wide or large), name
+        if small or wide or large:
             assert record["vectors"] == RANGED[kind][suffix], name
         assert re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
-        assert tuple(record["arches"]) == (("sm_100a", "sm_103a") if wide else loader.ARCHES), name
+        assert tuple(record["arches"]) == (("sm_100a", "sm_103a") if wide or large else loader.ARCHES), name
         assert record["ffi_entry"] == "run", name
-        assert record["grid_rule"] == (SMALL_RULE if small else WIDE_RULE if wide else MAIN_RULE), name
+        rule = SMALL_RULE if small else WIDE_RULE if wide else LARGE_RULE if large else MAIN_RULE
+        assert record["grid_rule"] == rule, name
         assert record["grid_rule"]["vector_elements"] == loader.VECTOR, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
         launch = record["launch"]
-        assert tuple(launch["block"]) == (256 if small else 128 if wide else 64, 1, 1), name
+        assert tuple(launch["block"]) == (256 if small else 128 if wide else 1024 if large else 64, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         assert launch["dynamic_smem_bytes"] == 0, name
