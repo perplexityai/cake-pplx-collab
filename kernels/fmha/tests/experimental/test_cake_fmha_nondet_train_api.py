@@ -33,8 +33,9 @@ not fit is PyTorch's ``torch.OutOfMemoryError``; under ``torch.use_deterministic
 empty gradients and alerts nothing; the launches run on the current stream without synchronizing; a call
 captured in a CUDA graph replays to results that meet the tier; a device outside the exported architectures is a
 ``RuntimeError``; with two devices, operands on the device that is not current give results there that meet the tier,
-and operands on two devices are a ``ValueError``.  The package promises no bits: no test compares two runs bit for
-bit. """
+and operands on two devices are a ``ValueError``.  The stream, graph and second-device checks run on both routes of
+head dimension 128 (the 1-CTA main kernel and the pair route's 2-CTA main kernel).  The package promises no bits: no
+test compares two runs bit for bit. """
 
 from __future__ import annotations
 
@@ -70,6 +71,10 @@ VARIANT_IDS = ["d128", "d128_causal", "d64", "d64_causal"]
 ALERT = f"{ENTRY} does not have a deterministic implementation"
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000
+# Head-dimension 128 calls on both routes: 384 keys (an odd key-block count, the 1-CTA route) and 512 keys (the pair
+# route: the 2-CTA main kernel and the pair-row postprocess, where the architecture's PAIR_ROUTE takes it).
+ROUTE_CASES = (Case(2, 3, 256, 384), Case(2, 3, 256, 512))
+ROUTE_IDS = ("one_cta", "pair")
 
 
 def _backend():
@@ -461,12 +466,13 @@ def test_an_empty_batch_launches_nothing_and_alerts_nothing(causal) -> None:
         assert value.is_contiguous(), name
 
 
-def test_runs_on_the_current_stream_without_synchronizing() -> None:
+@pytest.mark.parametrize("case", ROUTE_CASES, ids=ROUTE_IDS)
+def test_runs_on_the_current_stream_without_synchronizing(case) -> None:
     """On a side stream, behind a long sleep kernel that precedes the write of ``dout`` (NaN until then): the call
     returns while the sleep still runs (no synchronization), and its gradients are finite (every launch read ``dout``
-    after the write, on the current stream)."""
+    after the write, on the current stream), on both routes."""
     device = _device_or_skip()
-    x = make_inputs(Case(2, 3, 256, 384), 128, causal=False, seed=21, device=device)
+    x = make_inputs(case, 128, causal=False, seed=21, device=device)
     dout = torch.full_like(x.dout, math.nan)
     side = torch.cuda.Stream(device)
     side.wait_stream(torch.cuda.current_stream(device))
@@ -483,15 +489,16 @@ def test_runs_on_the_current_stream_without_synchronizing() -> None:
     assert_backward_contract("on a side stream", x, _grads(*got))
 
 
-def test_a_call_captured_in_a_cuda_graph_replays(record_property) -> None:
+@pytest.mark.parametrize("case", ROUTE_CASES, ids=ROUTE_IDS)
+def test_a_call_captured_in_a_cuda_graph_replays(case, record_property) -> None:
     """A call captured in a CUDA graph (its launches go to the capture stream): after its gradients are filled with
-    NaN, the replay writes every element and the results meet the tier."""
+    NaN, the replay writes every element and the results meet the tier, on both routes."""
     device = _device_or_skip()
-    x = make_inputs(Case(2, 3, 256, 384), 128, causal=False, seed=31, device=device)
+    x = make_inputs(case, 128, causal=False, seed=31, device=device)
     api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)  # loads the libraries before a capture
 
     def draw(seed: int):
-        x = make_inputs(Case(2, 3, 256, 384), 128, causal=False, seed=seed, device=device)
+        x = make_inputs(case, 128, causal=False, seed=seed, device=device)
         graph = torch.cuda.CUDAGraph()
         with torch.cuda.graph(graph):
             got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
@@ -546,9 +553,11 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 
-def test_operands_on_another_device(record_property) -> None:
-    """With two devices: operands on the device that is not current give gradients on that device that meet the tier;
-    operands on two devices are a ``ValueError``."""
+@pytest.mark.parametrize("case", (Case(2, 3, 256), Case(2, 3, 256, 384)), ids=("pair", "one_cta"))
+def test_operands_on_another_device(case, record_property) -> None:
+    """With two devices: operands on the device that is not current give gradients on that device that meet the tier,
+    on both routes of head dimension 128 (256 keys: the pair route where ``PAIR_ROUTE`` takes it; 384: the 1-CTA
+    route); operands on two devices are a ``ValueError``."""
     _device_or_skip()
     if torch.cuda.device_count() < 2:
         pytest.skip("needs a second CUDA device")
@@ -560,7 +569,7 @@ def test_operands_on_another_device(record_property) -> None:
     try:
 
         def draw(seed: int):
-            x = make_inputs(Case(2, 3, 256), 128, causal=False, seed=seed, device=other)
+            x = make_inputs(case, 128, causal=False, seed=seed, device=other)
             assert torch.cuda.current_device() == 0
             got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
             return judged_backward(x, {"other": _grads(*got)})

@@ -21,7 +21,8 @@ Every record of ``MODULES`` is one mechanically exported program: a CUDA
 device translation unit plus a tvm-ffi binding, compiled once per
 architecture.  A record is keyed by its stage name for the head-dimension 128
 build (non-causal for ``bwd_main``), or ``<stage>_<variant>`` for the other
-builds of the stage, and carries the host plan: the ``stage`` it serves, the
+builds of the stage (``bwd_main_2cta[_causal]`` and ``bwd_post_pair`` are the
+pair route's), and carries the host plan: the ``stage`` it serves, the
 architectures it is delivered for and the ``run`` entry.  The derived leaves
 (``library``, ``kernel_symbol``, ``launch``, ``arg_plan``) are written by the
 exporter from the rendered binding; ``library`` is the program identity
@@ -40,6 +41,14 @@ one fixed order.  Every launch is a plain stream-ordered launch: nothing
 cooperative, no PDL.  Every kernel runs on the grid ``(S / 128, H, B)``: S is
 the query length for ``bwd_pre`` and ``bwd_post`` and the key length for
 ``bwd_main``.
+
+The pair route (head dimension 128, key length a multiple of 256): the main
+stage is the 2-CTA kernel (``bwd_main_2cta`` / ``bwd_main_2cta_causal``,
+clusters of two CTAs along x: one CTA pair per 256 keys), which adds the dQ
+tiles in the pair-row order, and the postprocess is the build that reads that
+order (``bwd_post_pair``).  The two change together: the other postprocess
+would read the pair-row order as the tile order.  :func:`variant` picks the
+route of a call.
 """
 
 from __future__ import annotations
@@ -149,6 +158,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_1f0c2f01d6f6b42a6b60",
         "stage": "bwd_main",
     },
+    "bwd_main_2cta": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_95e4e45dde43783fdf83",
+        "launch": {
+            "block": (1, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_95e4e45dde43783fdf83",
+        "stage": "bwd_main",
+    },
+    "bwd_main_2cta_causal": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_f52478391bbcd6308069",
+        "launch": {
+            "block": (1, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_f52478391bbcd6308069",
+        "stage": "bwd_main",
+    },
     "bwd_post": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [["buffer", "dQ_accum"], ["buffer", "dQ"], ["parameter", "seqlen_q"], ["parameter", "softmax_scale"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
@@ -179,20 +218,40 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_7057c4c605e7b2cc2436",
         "stage": "bwd_post",
     },
+    "bwd_post_pair": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_1a125639d68d30b57111",
+        "launch": {
+            "block": (1, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_1a125639d68d30b57111",
+        "stage": "bwd_post",
+    },
 }
 
-# (head dim, causal) -> the records of the three stages, in launch order.  The
-# preprocess and the postprocess do not depend on the mask.
-RECORD_OF: dict[tuple[int, bool], tuple[str, str, str]] = {
-    (128, False): ("bwd_pre", "bwd_main", "bwd_post"),
-    (128, True): ("bwd_pre", "bwd_main_causal", "bwd_post"),
-    (64, False): ("bwd_pre_hd64", "bwd_main_hd64", "bwd_post_hd64"),
-    (64, True): ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
+# (head dim, causal, pair) -> the records of the three stages, in launch order.
+# The preprocess depends on the head dimension only; the postprocess reads the
+# dQ accumulator in the order of the variant's main stage: the pair-row order
+# of the 2-CTA main kernels (``pair`` True, head dimension 128 only) or the
+# tile order of the others.
+RECORD_OF: dict[tuple[int, bool, bool], tuple[str, str, str]] = {
+    (128, False, False): ("bwd_pre", "bwd_main", "bwd_post"),
+    (128, True, False): ("bwd_pre", "bwd_main_causal", "bwd_post"),
+    (64, False, False): ("bwd_pre_hd64", "bwd_main_hd64", "bwd_post_hd64"),
+    (64, True, False): ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
+    (128, False, True): ("bwd_pre", "bwd_main_2cta", "bwd_post_pair"),
+    (128, True, True): ("bwd_pre", "bwd_main_2cta_causal", "bwd_post_pair"),
 }
 
-# (head dim, causal) -> the host sequence of the variant: one library whose ``run`` launches the three records
+# (head dim, causal, pair) -> the host sequence of the variant: one library whose ``run`` launches the three records
 # RECORD_OF names for it, in order, in one host call.  Derived by the exporter.
-SEQUENCES: dict[tuple[int, bool], dict[str, Any]] = {
+SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
     (128, False): {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "library": "cake_fmha_train_495bb89b89eb8b41327e",
@@ -225,3 +284,17 @@ def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> t
         raise ValueError(f"unknown stage {stage!r}; the stages are {list(STAGES)}")
     rows = seqlen_kv if stage == "bwd_main" else seqlen_q
     return (rows // BLOCK, heads, batch)
+
+
+# Architecture -> whether the head-dimension 128 calls whose key length is a
+# multiple of 2 * BLOCK take the pair route there (:func:`variant`).
+PAIR_ROUTE: dict[str, bool] = {"sm_100a": True, "sm_103a": True, "sm_107a": True}
+
+
+def variant(D: int, causal: bool, seqlen_kv: int, arch: str) -> tuple[int, bool, bool]:
+    """The ``RECORD_OF`` key of a call on ``arch``: ``(D, causal, pair)``.
+    ``pair`` is True for the pair route: head dimension 128, a key length that
+    is a multiple of ``2 * BLOCK`` (a CTA pair of the 2-CTA main kernel covers
+    two key blocks) and ``PAIR_ROUTE[arch]``.  ``arch`` is one of ``ARCHES``."""
+    pair = D == 128 and seqlen_kv % (2 * BLOCK) == 0 and PAIR_ROUTE[arch]
+    return (D, bool(causal), pair)
