@@ -89,6 +89,12 @@ bits; they were the bits of the call that computes a BF16 weight gradient,
 from which they now differ in their last bits in the one-cluster bands and,
 on SM103, in the fused band.  Every other call, and every call on SM107,
 runs the program and gives the bits of 0.2.8.
+Version 0.2.10 changes nothing in this package and no bits: the
+deterministic package's backward that computes the weight gradient runs, up
+to 16 rows, a program of one CTA and, from 17 to 256 rows on a device of at
+least 16 SMs that is not a MIG instance, a program of one cluster of 16
+CTAs, neither of which uses a workspace, with the same ``dx``, ``dz`` and
+``dw`` bits on a device of at least 4 SMs.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

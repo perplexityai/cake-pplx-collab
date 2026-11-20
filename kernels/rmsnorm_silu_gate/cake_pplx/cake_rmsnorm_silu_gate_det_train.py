@@ -28,7 +28,8 @@ returns BF16 ``dx`` and ``dz`` and the weight
 gradient summed over every token and head (FP32 runs of at most 16 rows summed
 into plain FP32 words of each chunk, the words added exactly in fixed point,
 the sum rounded once to FP32), so repeated calls with the same row
-count on a device with the same SM count return the same bits.  The autograd
+count on a device with the same SM count return the same bits (up to 256 rows
+on any device of at least 4 SMs).  The autograd
 function saves only its inputs, which keeps
 ``torch.utils.checkpoint(..., use_reentrant=False)`` free of FP32 temporaries.
 No call synchronizes the host or the device; ``T`` and ``H`` are runtime values.
@@ -50,19 +51,30 @@ where the naive implementation's is 0.  No output has an error budget of its
 own.  The forward's CTAs each walk at most two
 blocks of 16 rows, and the backward's CTAs, past one wave, claim chunks of row
 blocks from a counter, so a CTA that becomes resident late takes only the
-blocks left.  A backward with ``compute_grad_weight=False`` runs a program
-built without the weight gradient: ``dx`` and ``dz`` are the bits of the
-call that computes it.  On SM100 and SM103 up to 768 rows per SM, and on
-SM107 except where the look-ahead program runs, its CTAs walk their row
-blocks with no claim, no ticket and no workspace: 128-thread CTAs over
-8-row blocks where ``grad_out``, ``x`` and ``z`` hold packed rows (head
-stride 128 and token stride ``H * 128``; also one token of head stride 128,
+blocks left.  A backward that computes the weight gradient on up to 256 rows
+runs, with no workspace, one CTA (up to 16 rows) or one thread-block cluster
+of 16 CTAs (17 to 256 rows, on a device that reports at least 16 SMs and is
+not a MIG instance; elsewhere the backward above, on the workspace), CTA
+``c`` taking row block ``c``: the same bits as the backward above on a device
+of at least 4 SMs.  Other SM partitions, such as a CUDA green context, are
+not detected: if no GPC of the partition can hold the 16 CTAs, the cluster
+launch fails with a CUDA error.  A backward with
+``compute_grad_weight=False`` runs a program built without the weight
+gradient: ``dx`` and ``dz`` are the bits of the call that computes it.  On
+SM100 and SM103 up to 768 rows per SM, and on SM107 except where the
+look-ahead program runs, its CTAs walk their row blocks with no claim, no
+ticket and no workspace: 128-thread CTAs over 8-row blocks where
+``grad_out``, ``x`` and ``z`` hold packed rows (head stride 128 and token
+stride ``H * 128``; also one token of head stride 128,
 on SM107 only up to 192 rows per SM; and a build for packed rows only up to
 128 rows per SM on SM100 and SM103 and up to 192 on SM107), and on other
 layouts up to 32 rows per SM on SM100 and SM103 and up to 96 on SM107,
 256-thread CTAs over 16-row blocks on other layouts past that; on SM100 and
 SM103 past the 768-row cut the claimed program runs on the workspace.  No
-kernel waits for another CTA or grid.
+kernel waits for another CTA or grid but the cluster of up to 256 rows, whose
+CTAs wait for the weight-gradient words their peers push to them: the GPU
+starts its 16 CTAs together, once one GPC has room for all of them, so none
+waits for a CTA that is not running.
 Beside a kernel on another stream that holds ``k`` of the ``N`` SMs, the
 forward takes at most ``N / (N - k)`` times its time alone, plus the share of
 one CTA's row blocks in the call, plus 0.02 (a CTA whose slot that kernel
@@ -318,7 +330,9 @@ def cake_rmsnorm_silu_gate_det_train_backward(
     each chunk, the words added exactly in fixed point whatever the order of
     the CTAs, and the sum rounded once to FP32 (then to BF16
     for a BF16 gradient): the same row count on a device with the same SM count
-    gives the same bits.
+    gives the same bits, and up to 256 rows (one CTA, or one cluster of 16 CTAs
+    that wait for each other's words where the device runs clusters, else the
+    role's module) on any device of at least 4 SMs.
 
     Parameters
     ----------
@@ -349,7 +363,11 @@ def cake_rmsnorm_silu_gate_det_train_backward(
         Zero-filled FP32 workspace of at least
         :func:`cake_rmsnorm_silu_gate_det_train_backward_workspace_bytes` bytes,
         contiguous and 16-byte aligned, left zero by the call; the stream's
-        own workspace when omitted.  A workspace of the non-deterministic
+        own workspace when omitted.  A call that computes the weight
+        gradient reads and writes none up to 16 rows, and from 17 to 256 rows
+        on a device that runs the cluster (at least 16 SMs, not a MIG
+        instance); a ``workspace`` passed to it is checked and left as it is.
+        A workspace of the non-deterministic
         package is refused (``ValueError``), also in a call with no rows.
         The call keeps a weak reference to a caller's workspace and its checked
         buffers (``torch.utils.swap_tensors`` refuses a tensor with a weak
