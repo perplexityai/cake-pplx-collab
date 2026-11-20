@@ -18526,8 +18526,9 @@ def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
             assert own is not None and own[1][1].device.index == other
             assert own[0] is be._RLAB_POOL[be._CUDA_GET_STREAM(other)]
             assert int(torch.count_nonzero(own[1][1])) == 0
-            h = be._GraphRlab(own[1][1], True, own)
-            del h, own
+            # a holder that owns the entry puts it back when it is freed (here at once)
+            be._GraphRlab(own[1][1], True, own)
+            del own
             gc.collect()
             assert len(_pool_free(be)) == 1
         assert be._graph_rlab(16, True, torch.device("cuda", other)) is None

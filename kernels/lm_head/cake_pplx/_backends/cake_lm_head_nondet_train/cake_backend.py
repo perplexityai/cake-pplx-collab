@@ -12356,20 +12356,17 @@ def _logprob_graph_rlab(
         recompute = _TOP_SAVED_HOOKS(False) is not None and _checkpoint_recomputation()
     if recompute:
         return None
-    if (
-        _zero_dlogp_skip(X.device, row_index, backend, dz_arm, need_dx, fused_dx)
-        or (
-            problem is not None
-            and _logprob_vm_eligible(
-                problem,
-                X,
-                rows,
-                backend=backend,
-                need_dw=need_dw,
-                dz_arm=dz_arm,
-                tuning=tuning,
-                temperature=temperature,
-            )
+    if _zero_dlogp_skip(X.device, row_index, backend, dz_arm, need_dx, fused_dx) or (
+        problem is not None
+        and _logprob_vm_eligible(
+            problem,
+            X,
+            rows,
+            backend=backend,
+            need_dw=need_dw,
+            dz_arm=dz_arm,
+            tuning=tuning,
+            temperature=temperature,
         )
     ):
         return _GraphRlab()
