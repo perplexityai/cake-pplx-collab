@@ -30,9 +30,9 @@ caller outputs (the gradients in the halves of one buffer); every documented ``V
 empty problems launch nothing and return empty or zero-filled outputs; the launches run on the current stream without
 synchronizing; a captured CUDA graph replays to the bits of the eager call; ``torch.use_deterministic_algorithms(True)``
 changes nothing; a forward launches the pair table only past 256 documents (its kernel builds the table of fewer);
-every backward path launches ``bwd`` for more than ``bwd_small_docs`` documents (26 on SM100 / SM103, 125 on SM107) and
-at most ``bwd_max_docs`` (no bound on SM100 / SM103, 16384 on SM107), else ``bwd_small``, and every backward role
-gives the same bits;
+every backward path launches ``bwd_warp`` for more than ``bwd_warp_docs`` documents (16384), else ``bwd`` for more
+than ``bwd_small_docs`` documents (26 on SM100 / SM103, 125 on SM107) and at most ``bwd_max_docs`` (no bound on SM100 /
+SM103, 16384 on SM107), else ``bwd_small``, and every backward role gives the same bits;
 the autograd nodes save their inputs and the pair table only, compute only the requested gradients, read an incoming
 gradient of any layout, and replay bit for bit under ``torch.utils.checkpoint(..., use_reentrant=False)``; a device
 outside the delivered architectures is a ``RuntimeError`` and a device of capability (10, 7) is served; with two
@@ -651,10 +651,12 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
     assert_bitwise(explicit, out.detach(), f"{pack.id}: out")
 
 
-# The backward's bounds on each architecture: the most documents of ``bwd_small`` below ``bwd``, and the most documents
-# of ``bwd`` (``None``: no bound), above which ``bwd_small`` runs again.
+# The backward's bounds on each architecture: the most documents of ``bwd_small`` below ``bwd``, the most documents
+# of ``bwd`` (``None``: no bound), above which ``bwd_small`` runs again, and the most documents of either, above which
+# ``bwd_warp`` runs.
 BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 125}
 BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
+BWD_WARP_DOCS = {"sm_100a": 16384, "sm_103a": 16384, "sm_107a": 16384}
 # Packs on either side of the documents bounds (26, 125 and 16384) and of the forward's fused bound (256 documents):
 # one document, 16, 26, 27, 124, 125, 126, 256, 257, 16384, 16385 and 32769 documents of 0 to 6 tokens; and log-normal
 # packs of 16383 to 65536 tokens on either side of the documents bounds (the role does not depend on the tokens).
@@ -665,25 +667,40 @@ BWD_BOUND_PACKS = (
     ),
     *(
         Pack(lognormal_lengths(T, S, T + S))
-        for T, S in ((16383, 26), (16384, 27), (16384, 124), (16384, 125), (16384, 126), (65536, 125), (65536, 126))
+        for T, S in (
+            (16383, 26),
+            (16384, 27),
+            (16384, 124),
+            (16384, 125),
+            (16384, 126),
+            (65536, 125),
+            (65536, 126),
+            (32768, 16384),
+            (32768, 16385),
+            (65536, 16385),
+        )
     ),
 )
 
 
 @pytest.mark.parametrize("pack", BWD_BOUND_PACKS, ids=[p.id for p in BWD_BOUND_PACKS])
 def test_every_backward_runs_the_role_of_its_documents(pack, launches) -> None:
-    """A backward of ``S`` documents launches ``bwd`` for ``bwd_small_docs < S <= bwd_max_docs`` (26 on sm_100a /
-    sm_103a and 125 on sm_107a; no bound on sm_100a / sm_103a and 16384 on sm_107a), else ``bwd_small``.  The rule
-    holds on the three backward paths: the explicit backward without ``pair_offsets`` (after a pair table), with them
-    (alone), and the autograd backward (alone, on its forward's table).  The three give the same ``dC`` and ``dZ``
-    bits, and so does a launch of the other backward role, on the same table."""
+    """A backward of ``S`` documents launches ``bwd_warp`` for ``S > bwd_warp_docs`` (16384), else ``bwd`` for
+    ``bwd_small_docs < S <= bwd_max_docs`` (26 on sm_100a / sm_103a and 125 on sm_107a; no bound on sm_100a / sm_103a
+    and 16384 on sm_107a), else ``bwd_small``.  The rule holds on the three backward paths: the explicit backward
+    without ``pair_offsets`` (after a pair table), with them (alone), and the autograd backward (alone, on its forward's
+    table).  The three give the same ``dC`` and ``dZ`` bits, and so does a launch of every other backward role served
+    on the architecture (``bwd_warp4`` on sm_100a / sm_103a among them), on the same table."""
     device = _device_or_skip()
     jit = _jit()
     arch = jit.device_arch(device.index)
     assert jit.bwd_small_docs(arch) == BWD_SMALL_DOCS[arch]
     assert jit.bwd_max_docs(arch) == BWD_MAX_DOCS[arch]
+    assert jit.bwd_warp_docs(arch) == BWD_WARP_DOCS[arch]
     high = BWD_MAX_DOCS[arch]
     role = "bwd" if BWD_SMALL_DOCS[arch] < pack.S and (high is None or pack.S <= high) else "bwd_small"
+    if pack.S > BWD_WARP_DOCS[arch]:
+        role = "bwd_warp"
     table_role = "pair_table_small" if pack.S <= 512 else "pair_table"
     forward = ["fwd"] if pack.S <= 256 else [table_role, "fwd_unfused"]
     x = make_inputs(pack, seed=59, device=device, layout="halves")
@@ -708,8 +725,10 @@ def test_every_backward_runs_the_role_of_its_documents(pack, launches) -> None:
         ("autograd dz", auto_dz, dz),
     ):
         assert_bitwise(got, want, f"{pack.id}: {name}")
-    served = [name for name in ("bwd", "bwd_small") if arch in jit.ROLE_ARCHES.get(name, jit.ARCHES)]
-    assert served == ["bwd", "bwd_small"]
+    served = [
+        name for name in ("bwd", "bwd_small", "bwd_warp", "bwd_warp4") if arch in jit.ROLE_ARCHES.get(name, jit.ARCHES)
+    ]
+    assert served == ["bwd", "bwd_small", "bwd_warp", *(["bwd_warp4"] if arch != "sm_107a" else [])]
     for other in served:
         if other == role:
             continue
@@ -818,8 +837,8 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: ``build.json`` holds an ``sm_107a``
     library for every record that serves it, one per role served there, the forwards' being ``fwd_sm_107a`` and
-    ``fwd_unfused_sm_107a`` and the backwards' ``bwd_sm_107a`` (for 126 to 16384 documents) and ``bwd_small_sm_107a``
-    (for the others) (nothing is built or launched here)."""
+    ``fwd_unfused_sm_107a`` and the backwards' ``bwd_sm_107a`` (for 126 to 16384 documents), ``bwd_warp`` (for more)
+    and ``bwd_small_sm_107a`` (for the others); no ``bwd_warp4`` (nothing is built or launched here)."""
     jit = _jit()
     path = Path(jit.__file__).parent / "build.json"
     if not path.is_file():
@@ -833,7 +852,7 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         jit.device_arch.cache_clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
     roles = [role for role in jit.ROLES if "sm_107a" in jit.ROLE_ARCHES.get(role, jit.ARCHES)]
-    assert roles == ["pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small"]
+    assert roles == ["pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp"]
     assert sorted(entry["name"] for entry in entries) == sorted(
         f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in roles
     )
@@ -843,6 +862,8 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     assert jit.role_record("bwd_small", "sm_107a") == "bwd_small_sm_107a"
     assert jit.bwd_small_docs("sm_107a") == 125
     assert jit.bwd_max_docs("sm_107a") == 16384
+    assert jit.role_record("bwd_warp", "sm_107a") == "bwd_warp"
+    assert jit.bwd_warp_docs("sm_107a") == 16384
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 
