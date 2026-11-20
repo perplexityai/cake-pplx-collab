@@ -909,7 +909,11 @@ with_o_lo=False  forward writes out, lse           delta = rowsum(dout * out)   
   cuDNN's DSA backward uses, so on peaked rows the gradient error grows to
   that class.  The main, compaction, cast and sink-gradient stages are the
   default ones (`dsink` follows the twin's `delta`).  `out` and `lse` have
-  the same accuracy in both modes.
+  the same accuracy in both modes.  The sink tests bound each head's `dsink`
+  error by `5e-3 * max |dsink_ref|`; `with_o_lo=False` derives `delta` from
+  the BF16 `out`, so its per-head `dsink` bound is 1.5 times the default
+  (`7.5e-3 * max |dsink_ref|`), and every other bound and the naive BF16 tier
+  are the same in both modes.
 * No `o_lo` is allocated, written or saved: 64 KiB less written and saved per
   query token (2 GiB at `T = 32,768`).  The kernels' `o_lo` operand is a
   cached zero-size BF16 placeholder chosen from the plan's mode alone, and

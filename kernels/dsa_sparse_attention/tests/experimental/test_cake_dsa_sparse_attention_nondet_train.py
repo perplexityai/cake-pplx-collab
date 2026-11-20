@@ -11357,9 +11357,10 @@ def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
     output -- ``out``, ``lse``, ``o_sum``, ``dq``, the accumulator's increment and ``dsink`` -- is judged against the
     FP64 oracle beside the BF16 naive tier (the calls without a sink against the problem without one), the contract
     holds (``lse`` the sink on the row without a valid slot, zero ``out`` / ``dq`` there, ``dsink`` exactly 0 on the
-    ``-inf`` head, every output finite), and the acceptance bounds hold (:func:`_assert_sink_bounds`).  Each call's
-    ``out`` ratios (:func:`_sink_out_ratios`: ``e``, raw, floor and the rows with more than :data:`SINK_MANY_KEYS`
-    valid slots) are recorded (``sink_out_ratios``) and printed, one line per call."""
+    ``-inf`` head, every output finite), and the acceptance bounds of the mode hold (:func:`_assert_sink_bounds`; the
+    per-head ``dsink`` bound is :func:`sink_h.sink_dsink_head_bound`).  Each call's ``out`` ratios
+    (:func:`_sink_out_ratios`: ``e``, raw, floor and the rows with more than :data:`SINK_MANY_KEYS` valid slots) are
+    recorded (``sink_out_ratios``) and printed, one line per call."""
     _require_nope_sink_program()
     T, width, make_kw, key_passes = SINK_CASES[case]
 
@@ -11397,7 +11398,7 @@ def test_nope_sink_meets_the_naive_tier_and_the_acceptance_bounds(
                 f"sink out {case} draw {j} {form}: e {r['e']:.4f} raw {r['raw']:.4f} "
                 f"floor {r['floor']:.4f} rows over {SINK_MANY_KEYS} valid slots {r['many_keys']:.4f}"
             )
-        _assert_sink_bounds(found, oracle, out_ratios)
+        _assert_sink_bounds(found, oracle, out_ratios, with_o_lo=with_o_lo)
         return found, oracle, naive
 
     nv.judge_draws(
@@ -11502,7 +11503,8 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
     (:func:`sink_h.make_sink_varlen_inputs`), and an accumulator whose destination rows each receive two key rows:
     the varlen autograd entry and the step pair, with the sink and without it.  Every output is judged against the
     FP64 oracle of the global rows beside the BF16 naive tier, the contract holds, and the acceptance bounds of the
-    flat entries hold (:func:`sink_h.assert_sink_bounds`); each call's ``out`` ratios are recorded and printed."""
+    flat entries in the mode hold (:func:`sink_h.assert_sink_bounds`); each call's ``out`` ratios are recorded and
+    printed."""
     _require_nope_sink_program()
     T, width = sink_h.SINK_VARLEN_CASES[case]
     index = sorted(sink_h.SINK_VARLEN_CASES).index(case)
@@ -11549,10 +11551,106 @@ def test_nope_sink_varlen_meets_the_naive_tier_and_the_acceptance_bounds(
                 f"sink varlen out {case} {route} draw {j} {form}: e {r['e']:.4f} raw {r['raw']:.4f} "
                 f"floor {r['floor']:.4f} rows over {SINK_MANY_KEYS} valid slots {r['many_keys']:.4f}"
             )
-        _assert_sink_bounds(found, oracle, out_ratios)
+        _assert_sink_bounds(found, oracle, out_ratios, with_o_lo=with_o_lo)
         return found, oracle, naive
 
     nv.judge_draws(record_property, draw, seed=SINK_SEED + 500 + 17 * index)
+
+
+def _sink_bound_outputs(change: str):
+    """``found``, ``oracle`` and ``out_ratios`` of one form, ``"autograd"`` (CPU, FP64), that meet every acceptance
+    bound of the sink, with ``change`` applied: ``"out e"``, ``"dq"``, ``"dkv_acc"``, ``"lse"``, ``"lse -inf"``,
+    ``"dominant lse"`` and ``"dsink rel-L2"`` each just outside one bound (the ``e`` ratio 1.111, a rel-L2 1.2 x the
+    call's without a sink, an ``lse`` error 1e-3 over a bound of about 4.1e-4, a finite ``lse`` where the reference
+    is ``-inf``, 1e-5 on the dominant head, every head of ``dsink`` off by 4.9e-3 x ``max |dsink_ref|``), and
+    ``"dsink head <f>"`` one head of ``dsink`` off by ``f`` x ``max |dsink_ref|`` (rel-L2 below 1.3e-3)."""
+    gen = torch.Generator().manual_seed(11)
+    rows, heads = 6, sink_h.NUM_HEADS
+    dominant = max(nope_ref.SINK_SPECIAL_HEADS, key=nope_ref.SINK_SPECIAL_HEADS.get)
+    found, oracle = {}, {}
+    for name in ("dq", "dkv_acc"):
+        ref = torch.randn(rows, 32, generator=gen, dtype=torch.float64)
+        noise = 1e-3 * torch.randn(rows, 32, generator=gen, dtype=torch.float64)
+        scale = 1.2 if change == name else 1.0
+        oracle["sink autograd " + name] = oracle["no sink autograd " + name] = ref
+        found["no sink autograd " + name] = ref + noise
+        found["sink autograd " + name] = ref + scale * noise
+    lse = 10.0 + torch.randn(rows, heads, generator=gen, dtype=torch.float64)
+    oracle["no sink autograd lse"] = lse
+    found["no sink autograd lse"] = lse + 1e-4
+    ref = lse.clone()
+    ref[:, dominant] = nope_ref.SINK_SPECIAL_HEADS[dominant]
+    ref[0, 0] = float("-inf")
+    got = ref.clone()
+    if change == "lse":
+        got[1, 3] += 1e-3
+    elif change == "lse -inf":
+        got[0, 0] = 0.0
+    elif change == "dominant lse":
+        got[:, dominant] += 1e-5
+    oracle["sink autograd lse"], found["sink autograd lse"] = ref, got
+    want = torch.linspace(0.5, 1.0, heads, dtype=torch.float64)
+    want[0] = 0.0
+    dsink = want.clone()
+    if change == "dsink rel-L2":
+        dsink += 4.9e-3
+    elif change.startswith("dsink head "):
+        dsink[5] += float(change.split()[-1])
+    oracle["sink autograd dsink"], found["sink autograd dsink"] = want, dsink
+    e = 1.111 if change == "out e" else 1.0
+    return found, oracle, {"autograd": dict(e=e, raw=e, floor=1.0, many_keys=1.0)}
+
+
+@pytest.mark.cpu_only
+def test_only_the_per_head_dsink_bound_depends_on_the_mode():
+    """The acceptance bounds of the sink by mode: every head's ``dsink`` error within 5e-3 x ``max |dsink_ref|`` as
+    shipped (the default of :func:`sink_h.assert_sink_bounds`, which the deterministic suite uses) and 7.5e-3 x under
+    ``with_o_lo=False`` (:func:`sink_h.sink_dsink_head_bound`: that mode derives ``delta`` from the BF16 ``out``);
+    every other bound keeps its value, and on CPU outputs just outside one bound each
+    (:func:`_sink_bound_outputs`) both modes give the same verdict with the same message, except on the per-head
+    ``dsink`` bound: a head off by 6e-3 or 7.4e-3 x fails as shipped and passes under ``with_o_lo=False``."""
+    assert sink_h.SINK_DSINK_HEAD == 5e-3 and sink_h.SINK_DSINK_HEAD_NO_OLO == 7.5e-3
+    assert sink_h.sink_dsink_head_bound(True) == 5e-3
+    assert sink_h.sink_dsink_head_bound(False) == 7.5e-3
+    mode = inspect.signature(sink_h.assert_sink_bounds).parameters["with_o_lo"]
+    assert mode.kind is inspect.Parameter.KEYWORD_ONLY and mode.default is True
+    assert sink_h.SINK_REL_L2_FACTOR == 1.1 and sink_h.SINK_LSE_FACTOR == 4.0
+    assert sink_h.SINK_LSE_REL == 1e-6 and sink_h.SINK_DSINK_REL_L2 == 5e-3
+    # change -> the message part of the failure as shipped and under with_o_lo=False
+    # (None: the bounds hold)
+    head = "autograd dsink: a head's error"
+    expected = {
+        "none": (None, None),
+        "out e": ("autograd out: e", "autograd out: e"),
+        "dq": ("autograd dq: rel-L2", "autograd dq: rel-L2"),
+        "dkv_acc": ("autograd dkv_acc: rel-L2", "autograd dkv_acc: rel-L2"),
+        "lse": ("autograd lse: an error exceeds", "autograd lse: an error exceeds"),
+        "lse -inf": ("autograd lse: non-finite", "autograd lse: non-finite"),
+        "dominant lse": ("lse of the dominant head", "lse of the dominant head"),
+        "dsink rel-L2": ("autograd dsink: rel-L2", "autograd dsink: rel-L2"),
+        "dsink head 4.9e-3": (None, None),
+        "dsink head 6e-3": (head, None),
+        "dsink head 7.4e-3": (head, None),
+        "dsink head 7.6e-3": (head, head),
+    }
+    for change, want in expected.items():
+        got = []
+        for with_o_lo in (True, False):
+            found, oracle, out_ratios = _sink_bound_outputs(change)
+            try:
+                sink_h.assert_sink_bounds(
+                    found, oracle, out_ratios, with_o_lo=with_o_lo
+                )
+                got.append(None)
+            except AssertionError as exc:
+                got.append(str(exc))
+        for message, part in zip(got, want):
+            if part is None:
+                assert message is None, (change, got)
+            else:
+                assert message is not None and part in message, (change, got)
+        if not change.startswith("dsink head "):
+            assert got[0] == got[1], (change, got)
 
 
 @pytest.mark.parametrize("total_q", [1, 64, 65, 1024])
