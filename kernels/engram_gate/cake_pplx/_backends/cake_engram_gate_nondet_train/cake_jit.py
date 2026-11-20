@@ -33,12 +33,12 @@ The stages, in launch order: ``fwd`` (per token and stream, the RMS of the
 stream and of its key, the weighted dot product, the signed square-root gate
 and ``out = bf16(x + gate * value)``; nothing is saved for the backward),
 ``bwd`` (recomputes the forward sums from the inputs; writes dX, dK, dV
-and adds each cluster's FP32 weight-gradient partial sums into one host-zeroed
-``[4, 5120]`` accumulator with float atomics) and ``dw_reduce`` (reads the
-accumulator as one partial row and writes ``dq_weight = dw * k_weight`` and
-``dk_weight = dw * q_weight`` in FP32).  The clusters reach the accumulator in
-arrival order, so the weight gradients are not bitwise reproducible run to run;
-out, dX, dK and dV have one fixed order.
+and one FP32 row of the weight-gradient partial sums per cluster,
+``[clusters, 4, 5120]``, every row written in full) and ``dw_reduce`` (sums the
+partial rows in one fixed order and writes ``dq_weight = dw * k_weight`` and
+``dk_weight = dw * q_weight`` in FP32).  Every record is the deterministic
+package's program under this package's library name; the package promises no
+bits run to run.
 
 The ``fwd`` and ``bwd`` kernels give each token to one cluster of four CTAs
 (each CTA owns 1280 of the 5120 columns of every stream) and walk the tokens

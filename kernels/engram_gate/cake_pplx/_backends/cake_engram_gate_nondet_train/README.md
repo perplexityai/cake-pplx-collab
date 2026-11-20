@@ -122,17 +122,19 @@ forward takes about 5-18% more time, depending on the GPU (`T = 16384`, FP32 wei
   statistics are saved.
 - Forward workspace: none. The forward kernel reads BF16 and FP32 weights as stored and forms their FP32 product
   itself; a forward call is one launch.
-- Backward workspace: one FP32 `[4, 5120]` weight-gradient accumulator (80 KiB, zeroed per call);
-  `cake_engram_gate_nondet_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32 weights as
-  stored and write the autograd weight gradients in each parameter's dtype.
+- Backward workspace: one FP32 `[4, 5120]` row of weight-gradient partial sums per cluster of the backward grid
+  (80 KiB each); `cake_engram_gate_nondet_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32
+  weights as stored and write the autograd weight gradients in each parameter's dtype.
 
 ## Determinism
 
-The clusters add their weight-gradient partial sums into one FP32 accumulator with float atomics, in arrival order:
-`dq_weight` and `dk_weight` may differ in their last bits run to run. `out`, `dx`, `dkey` and `dvalue` have one fixed
-order. Under `torch.use_deterministic_algorithms(True)` every backward call that launches raises PyTorch's
-`RuntimeError`, naming the entry of `cake_pplx.cake_engram_gate_det_train` of the same role; with `warn_only=True` it
-warns once and runs. The forward never alerts; a backward over no token neither launches nor alerts.
+`out`, `dx`, `dkey` and `dvalue` have one fixed order; `dq_weight` and `dk_weight` promise no bits run to run. The
+package launches the kernels of `cake_pplx.cake_engram_gate_det_train` under its own library names: each cluster
+writes its own row of weight-gradient partial sums, and `dw_reduce` adds the rows in one order. Adding the clusters'
+sums into one cleared FP32 accumulator with float atomics instead, counting the clear, was slower on B200, GB200,
+GB300 and VR200 in eager calls, and faster only in some CUDA-graph calls with a token mask at 129 to 16384 tokens.
+Nothing reads `torch.use_deterministic_algorithms`: no launch adds in an order that changes run to run, so nothing
+alerts.
 
 ## Limitations
 

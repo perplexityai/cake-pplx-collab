@@ -86,11 +86,10 @@ GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
 DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 # The entries that take ``dot_sum``: the forward's sum (the backward is the same for both).
 SUM_ENTRIES = ("cake_engram_gate_nondet", "cake_engram_gate_nondet_kv", "cake_engram_gate_nondet_train_forward")
-# The gradients with one fixed order (the weight gradients are summed with atomics).
+# The gradients with one fixed order (the weight gradients promise no bits).
 EXACT_GRADS = ("dx", "dkey", "dvalue")
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000
-ALERT = "adds the weight gradients with float atomics"
 
 
 def _backend():
@@ -358,9 +357,9 @@ def _gpu_activities(call) -> Optional[list[str]]:
     return names or None
 
 
-# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward runs the
-# accumulator's clear, ``bwd_dot2`` and ``dw_reduce``.
-LAUNCHES = {"forward": 1, "backward": 3}
+# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward launches
+# ``bwd_dot2`` and ``dw_reduce``.
+LAUNCHES = {"forward": 1, "backward": 2}
 
 
 @pytest.mark.parametrize("weights", ("fp32", "bf16", "mixed"))
@@ -368,7 +367,7 @@ LAUNCHES = {"forward": 1, "backward": 3}
 def test_launches_per_call(packed, weights) -> None:
     """CUPTI's count of the GPU activities of one forward and one backward call (autograd and explicit), for every
     pair of weight dtypes, with no cast, product or copy of a weight and no cast of a weight gradient: the forward runs
-    ``fwd`` alone and the backward 3."""
+    ``fwd`` alone and the backward 2."""
     device = _device_or_skip()
     layout = "kv" if packed else "contiguous"
     ns = make_inputs(129, seed=61, device=device, weights=weights, mask="some", layout=layout)
@@ -716,34 +715,41 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 # On SM100 / SM103 / SM107: determinism, streams, graphs, checkpoint, memory
 
 
-def test_deterministic_mode_raises_the_alert_in_the_backward_only() -> None:
-    """Under ``torch.use_deterministic_algorithms(True)``: the forward runs; the backward of every entry raises
-    PyTorch's ``RuntimeError`` naming the deterministic package's entry, before it launches."""
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+def test_deterministic_mode_changes_nothing(dot_sum) -> None:
+    """Under ``torch.use_deterministic_algorithms(True)``, strict or ``warn_only``: nothing alerts or warns, and the
+    output and the gradients with one fixed order are the bits of a call outside the mode (autograd, packed and
+    explicit entries)."""
     device = _device_or_skip()
-    ns = make_inputs(16, seed=23, device=device, weights="bf16", mask="some", layout="kv")
-    x, key, value, kv, qw, kw = _leaves(ns)
-    with _torch_deterministic(warn_only=False):
-        out = api.cake_engram_gate_nondet(x, key, value, qw, kw, ns.token_mask)
-        packed = api.cake_engram_gate_nondet_kv(x, kv, qw, kw, ns.token_mask)
-        api.cake_engram_gate_nondet_train_forward(ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train\.cake_engram_gate_det\b"):
-            out.backward(ns.dout)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train\.cake_engram_gate_det_kv\b"):
-            packed.backward(ns.dout)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train_backward\b"):
-            api.cake_engram_gate_nondet_train_backward(ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
+    ns = make_inputs(1031, seed=19, device=device, weights="bf16", mask="some", layout="kv")
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+    first = _autograd(ns, dot_sum=dot_sum)
+    explicit = api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _torch_deterministic(warn_only=False):
+            second = _autograd(ns, dot_sum=dot_sum)
+            strict = api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
+        with _torch_deterministic(warn_only=True):
+            third = _autograd(ns, packed=True, dot_sum=dot_sum)
+    for name in ("out", *EXACT_GRADS):
+        assert _same_bits(first[name], second[name]), name
+        assert _same_bits(first[name], third[name]), name
+    for k in range(3):
+        assert _same_bits(explicit[k], strict[k]), k
 
 
-def test_warn_only_warns_once_and_runs(record_property) -> None:
-    """With ``warn_only=True`` the backward warns once per call and runs; the results meet the tier."""
+def test_warn_only_runs_without_an_alert_and_meets_the_tier(record_property) -> None:
+    """With ``warn_only=True`` the backward runs without a deterministic-algorithms warning; the results meet the
+    tier."""
     device = _device_or_skip()
 
     def run(ns):
         with _torch_deterministic(warn_only=True), warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             got = _autograd(ns)
-        alerts = [w for w in caught if ALERT in str(w.message)]
-        assert len(alerts) == 1, [str(w.message) for w in caught]
+        alerts = [w for w in caught if "deterministic" in str(w.message)]
+        assert not alerts, [str(w.message) for w in alerts]
         return got
 
     def make(seed):

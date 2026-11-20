@@ -268,7 +268,7 @@ def test_stage_launchers_pass_every_kernel_parameter(acc, masked, monkeypatch) -
         clamp_value=1e-6,
         clusters=clusters,
     )
-    rows = 1  # the accumulator
+    rows = clusters  # one partial row per cluster
     dw = torch.zeros(rows, STREAMS, HIDDEN)
     cake_backend.launch_bwd(
         cake_jit.record("bwd"),

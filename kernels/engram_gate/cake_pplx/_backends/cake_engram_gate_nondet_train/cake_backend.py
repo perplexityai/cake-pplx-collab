@@ -34,18 +34,18 @@ and each BF16 output rounded once, at its store::
     gate = sigmoid(copysign(sqrt(max(|dot|, clamp_value)), dot))   (0 on a masked token)
     out[t, s] = bf16(h + gate v)
 
-One forward call launches ``fwd`` alone.  One backward call clears its
-accumulator, then launches ``bwd`` and ``dw_reduce``, back to back.  Every
-kernel reads ``q_weight`` and ``k_weight`` as stored, BF16 or FP32, as the
-32-bit words of each (:func:`_words`) with a mode word (:func:`_wmode`):
-``fwd`` and ``bwd`` form the FP32 product ``w`` once per CTA (each BF16 value
-widened exactly, one FP32 multiply per column, the bits of
-``q_weight.float() * k_weight.float()``).  ``bwd`` recomputes ``r_h``, ``r_k`` and ``P``
-from the inputs (the forward keeps nothing beyond its inputs) and writes
-``dx``, ``dkey`` and ``dvalue`` and the FP32 weight-gradient partial sums
-``dw = sum_t c h k``.  ``dw_reduce`` writes ``dq_weight = dw * k_weight`` and
-``dk_weight = dw * q_weight``: in FP32 for the explicit backward, in each
-parameter's dtype (rounded once, as ``.to(dtype)`` rounds) for autograd.
+One forward call launches ``fwd`` alone.  One backward call launches ``bwd``
+and ``dw_reduce``, back to back.  Every kernel reads ``q_weight`` and
+``k_weight`` as stored, BF16 or FP32, as the 32-bit words of each
+(:func:`_words`) with a mode word (:func:`_wmode`): ``fwd`` and ``bwd`` form
+the FP32 product ``w`` once per CTA (each BF16 value widened exactly, one
+FP32 multiply per column, the bits of ``q_weight.float() * k_weight.float()``).
+``bwd`` recomputes ``r_h``, ``r_k`` and ``P`` from the inputs (the forward
+keeps nothing beyond its inputs) and writes ``dx``, ``dkey`` and ``dvalue``
+and the FP32 weight-gradient partial sums ``dw = sum_t c h k``.  ``dw_reduce``
+writes ``dq_weight = dw * k_weight`` and ``dk_weight = dw * q_weight``: in
+FP32 for the explicit backward, in each parameter's dtype (rounded once, as
+``.to(dtype)`` rounds) for autograd.
 ``key`` and ``value`` (and ``dkey`` and ``dvalue``) may be views into one packed
 ``[T, 25600]`` buffer: the kernels read their token strides.  A masked token
 (``token_mask[t]`` False) gives ``out[t] = x[t]`` and ``dx[t] = dout[t]``
@@ -70,21 +70,22 @@ operands' device: nothing cooperative.  Nothing here reads an environment
 variable, reads device memory or synchronizes; grids and buffer sizes come
 from tensor shapes, the architecture and the SM count.
 
-This is the non-deterministic package of its family: ``bwd`` adds each
-cluster's weight-gradient partial sums into one FP32 accumulator with float
-atomics, in arrival order, so ``dq_weight`` and ``dk_weight`` may differ in
-their last bits run to run; ``out``, ``dx``, ``dkey`` and ``dvalue`` have one
-fixed order.  Every backward call that launches raises PyTorch's
-deterministic-algorithms alert first (:func:`_alert_nondeterministic`); the
-forward never does.
+This is the non-deterministic package of its family: ``out``, ``dx``,
+``dkey`` and ``dvalue`` have one fixed order, and ``dq_weight`` and
+``dk_weight`` promise no bits run to run.  It launches the deterministic
+package's kernels under its own library names: each cluster writes its own
+row of weight-gradient partial sums and ``dw_reduce`` adds the rows in one
+fixed order.  Adding the clusters' sums into one cleared row with float
+atomics instead was slower in eager calls and faster only in some CUDA-graph
+calls with a token mask at 129 to 16384 tokens.  Nothing reads torch's
+deterministic mode: no launch adds in an order that changes run to run, so
+nothing alerts.
 """
 
 from __future__ import annotations
 
 import functools
-import inspect
 import math
-import warnings
 from typing import Any, Optional, Union
 
 import torch
@@ -154,7 +155,6 @@ _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 _PACKAGE = __name__.rpartition(".")[0]
 # The public module the entry points are documented under.
 _MODULE = "cake_pplx.cake_engram_gate_nondet_train"
-_DET_MODULE = "cake_pplx.cake_engram_gate_det_train"
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -302,7 +302,7 @@ _STAGE_PARAMETERS: dict[str, tuple[str, ...]] = {
         "dx",
         "dkey",
         "dvalue",
-        "dw_acc",
+        "dw_part",
         "T",
         "eps",
         "clamp",
@@ -383,9 +383,9 @@ def launch_bwd(
 ) -> None:
     """Launch the backward record ``name`` over ``T = x.shape[0] >= 1`` tokens on ``clusters`` four-CTA clusters:
     ``dx`` (BF16 ``[T, 4, 5120]``, contiguous), ``dkey`` and ``dvalue`` (BF16, laid out as ``key`` and ``value``)
-    and the FP32 ``[1, 4, 5120]`` accumulator ``dw`` (zeroed by the caller), into which each cluster adds its sum of
-    ``c h k`` over its tokens.  ``q_weight`` and ``k_weight`` are the weights' 32-bit words (:func:`_words`) and
-    ``wmode`` their mode (:func:`_wmode`)."""
+    and ``dw``, FP32 ``[clusters, 4, 5120]``: row ``c`` is cluster ``c``'s sum of ``c h k`` over its tokens, written
+    in full (zero for a cluster without a token).  ``q_weight`` and ``k_weight`` are the weights' 32-bit words
+    (:func:`_words`) and ``wmode`` their mode (:func:`_wmode`)."""
     grid = cake_jit.CLUSTER_CTAS * int(clusters)
     args = (dout, x, key, value, q_weight, k_weight, mask, dx, dkey, dvalue, dw)
     scalars = (int(x.shape[0]), float(eps), float(clamp_value), int(wmode))
@@ -408,52 +408,6 @@ def launch_dw_reduce(
     weight is BF16 (:func:`_wmode`), bits 2 and 3 whether ``dq`` and ``dk`` are BF16 (each rounded once) or FP32."""
     args = (dw, q_weight, k_weight, dq, dk, int(dw.shape[0]), int(wmode), *cake_jit.dw_reduce_grid())
     _run(name, "dw_reduce", dw.get_device(), args)
-
-
-# ----------------------------------------------------------------------------------------------------------------
-# torch.use_deterministic_algorithms(True)
-
-
-def _caller_stacklevel() -> int:
-    """The ``stacklevel`` of the nearest frame outside this package, ``cake_pplx`` and torch's autograd, for a
-    warning issued by the function that calls this one: the caller of the entry point, also through the facade and
-    autograd."""
-    frame = inspect.currentframe()
-    level = 0
-    while frame is not None:
-        parent = frame.f_back
-        level += 1
-        if parent is not None:
-            name = str(parent.f_globals.get("__name__", ""))
-            if not (
-                name == _PACKAGE
-                or name.startswith(_PACKAGE + ".")
-                or name == "cake_pplx"
-                or name.startswith("cake_pplx.")
-                or name.startswith("torch.")
-            ):
-                return level
-        frame = parent
-    return 2
-
-
-def _alert_nondeterministic(api: str, det_api: str) -> None:
-    """PyTorch's alert for an operation without a deterministic implementation, when torch's deterministic algorithms
-    are enabled: a ``RuntimeError`` naming ``det_api``, the deterministic package's entry of the same role, or a
-    ``UserWarning`` under ``torch.use_deterministic_algorithms(True, warn_only=True)`` after which this package's
-    backward runs (never the deterministic package's); nothing otherwise.  Called by every backward call that
-    launches, after the checks and before it allocates or launches anything.  A backward over no token launches
-    nothing and does not alert; the forward never alerts."""
-    if not torch.are_deterministic_algorithms_enabled():
-        return
-    message = (
-        f"{_MODULE}.{api} adds the weight gradients with float atomics, so they are not bitwise reproducible run to "
-        f"run, but torch.use_deterministic_algorithms(True) is in effect; call {_DET_MODULE}.{det_api}"
-    )
-    if torch.is_deterministic_algorithms_warn_only_enabled():
-        warnings.warn(f"{message}; running this package's kernels", UserWarning, stacklevel=_caller_stacklevel())
-        return
-    raise RuntimeError(message)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -647,17 +601,21 @@ def _wmode(q: torch.dtype, k: torch.dtype, dq: torch.dtype = torch.float32, dk: 
 
 def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.device, int, str, None] = None) -> int:
     """Bytes of device memory one backward call over ``T`` tokens on ``device`` (None: the current CUDA device)
-    allocates beside its operands and outputs: the ``[4, 5120]`` FP32 weight-gradient accumulator, 80 KiB (0 for
-    ``T == 0``), and a copy of a weight that is not contiguous or not 16-byte aligned (none otherwise: the kernels
-    read the weights in place, in their dtypes).  A forward call allocates its output alone (and such a copy); the
-    state kept for the backward is the inputs alone.  The backward, and so its workspace, is the same for either
-    ``dot_sum`` of the forward."""
+    allocates beside its operands and outputs: the ``[clusters, 4, 5120]`` FP32 weight-gradient partial rows (one
+    per cluster of the backward grid), 80 KiB each (0 for ``T == 0``), and a copy of a weight that is not contiguous
+    or not 16-byte aligned (none otherwise: the kernels read the weights in place, in their dtypes).  A forward call
+    allocates its output alone (and such a copy); the state kept for the backward is the inputs alone.  The backward,
+    and so its workspace, is the same for either ``dot_sum`` of the forward."""
     T = int(T)
     if T < 0:
         raise ValueError(f"T must be non-negative, got {T}")
     if T == 0:
         return 0
-    return _ROW_BYTES
+    index = _device_index(device)
+    if index is None:
+        raise ValueError(f"device must be a CUDA device, got {device}")
+    parts = cake_jit.clusters(cake_jit.record("bwd"), T, device_arch(index), sm_count(index))
+    return _ROW_BYTES * parts
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -749,7 +707,7 @@ def _launch_backward(
     built before the first launch, so the launches go out back to back."""
     device = x.device
     if T == 0:
-        # No token: nothing to launch and nothing to alert; zero weight gradients.
+        # No token: nothing to launch; zero weight gradients.
         empty = functools.partial(torch.empty, dtype=torch.bfloat16, device=device)
         return (
             empty((0, STREAMS, HIDDEN)) if dx is None else dx,
@@ -759,8 +717,7 @@ def _launch_backward(
             torch.zeros((STREAMS, HIDDEN), dtype=dk_dtype, device=device),
         )
     index = device.index
-    device_arch(index)  # RuntimeError on a device outside ARCHES, before the alert
-    _alert_nondeterministic(api, api.replace("nondet", "det"))
+    device_arch(index)  # RuntimeError on a device outside ARCHES
     if dx is None:
         dx = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
     if dkey is None:
@@ -770,8 +727,8 @@ def _launch_backward(
     # One backward for either forward sum: it recomputes P as a compensated dot product.
     name = _BWD_RECORD
     clusters = _clusters(name, T, index)
-    # The accumulator the clusters add into, cleared right before the backward.
-    dw = torch.empty((1, STREAMS, HIDDEN), dtype=torch.float32, device=device)
+    # One row per cluster, each written in full by its cluster.
+    dw = torch.empty((clusters, STREAMS, HIDDEN), dtype=torch.float32, device=device)
     dq = torch.empty((STREAMS, HIDDEN), dtype=dq_dtype, device=device)
     dk = torch.empty((STREAMS, HIDDEN), dtype=dk_dtype, device=device)
     # The weights as stored (their 32-bit words), the product formed in the kernels.
@@ -780,7 +737,6 @@ def _launch_backward(
     grid = cake_jit.CLUSTER_CTAS * clusters
     bwd = (dout, x, key, value, qw, kw, _mask(token_mask), dx, dkey, dvalue, dw, T, eps, clamp_value, wmode & 3)
     finish = (dw, qw, kw, dq.view(torch.int32), dk.view(torch.int32), int(dw.shape[0]), wmode)
-    dw.zero_()
     _run(name, "bwd", index, (*bwd, grid, 1, 1))
     _run(_DW_REDUCE_RECORD, "dw_reduce", index, (*finish, *_DW_REDUCE_GRID))
     return dx, dkey, dvalue, dq, dk
@@ -833,9 +789,8 @@ def cake_engram_gate_nondet_train_backward(
     may be (caller views into one ``[T, 25600]`` gradient buffer are written in place), allocated when not given;
     ``dq_weight`` and ``dk_weight`` FP32 ``[4, 5120]``.  ``T == 0`` returns zero weight gradients and launches
     nothing.
-    ``dq_weight`` and ``dk_weight`` are summed with float atomics: under ``torch.use_deterministic_algorithms(True)``
-    the call raises PyTorch's ``RuntimeError`` before it launches (``warn_only=True``: one ``UserWarning``, then it
-    runs).
+    ``dq_weight`` and ``dk_weight`` promise no bits run to run; nothing consults
+    ``torch.use_deterministic_algorithms``.
     """
     return _backward(
         dout,
@@ -923,8 +878,6 @@ class CakeEngramGateNondetFunction(torch.autograd.Function):
     ``dot_sum``.  The saved set is the inputs alone (``ctx.save_for_backward``; ``eps`` and ``clamp_value`` on
     ``ctx``): the backward recomputes the norms and the dot product (compensated, whatever the forward's sum), so a
     checkpointed forward keeps nothing alive.  The weight gradients are returned in each parameter's dtype.
-    The backward raises PyTorch's deterministic-algorithms alert (naming
-    ``cake_pplx.cake_engram_gate_det_train.cake_engram_gate_det``); the forward never does.
     """
 
     @staticmethod

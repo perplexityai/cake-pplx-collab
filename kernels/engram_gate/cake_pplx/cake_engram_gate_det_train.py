@@ -376,8 +376,8 @@ def cake_engram_gate_det_train_workspace_bytes(T: int, device: Union[torch.devic
         The token count.
     device : torch.device, int or str, optional
         The CUDA device (None: the current one).
-        The number of partial rows follows its architecture and SM count (``RuntimeError`` on a device outside
-        ``ARCHES``).
+        The number of partial rows follows its architecture and SM count: ``ValueError`` for a device that is not
+        a CUDA device, ``RuntimeError`` on a CUDA device outside ``ARCHES``.
 
     Returns
     -------

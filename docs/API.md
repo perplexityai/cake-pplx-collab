@@ -29,7 +29,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | gdn | Fixed order today, with no run-to-run promise. Not bitwise det. As with det, the tests record each output's error against an FP64 reference beside the BF16 naive implementation's. | Runs unchanged |
 | mhc | Plain FP32 sums in a fixed order today. No bit promise; not compared bitwise with det. | No alert |
 | mhc_head | Same kernels as det | No alert |
-| engram_gate | `dq_weight` / `dk_weight` add the clusters' partial sums with FP32 atomics; `out`, `dX`, `dK`, `dV` have one fixed order | Backward raises before launch |
+| engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
 | fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
 | dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
@@ -953,15 +953,15 @@ Other public names: `is_cake_engram_gate_det_train_supported(device=None)`, `Cak
 
 ### `cake_pplx.cake_engram_gate_nondet_train`
 
-The backward adds each cluster's FP32 weight-gradient partial sums into one accumulator with float atomics, so `dq_weight` and `dk_weight` may differ in their last bits run to run. `out`, `dX`, `dK` and `dV` have one fixed order. Under `torch.use_deterministic_algorithms(True)` every backward call that launches raises `RuntimeError` naming the det entry of the same role; with `warn_only=True` it warns once and runs. The forward never alerts. Source: [`kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py`](../kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py).
+This module is nondet by name. `out`, `dX`, `dK` and `dV` have one fixed order, and the contract makes no bit promise for `dq_weight` and `dk_weight`, but the implementation uses det's kernels: each cluster of the backward writes its own FP32 row of weight-gradient partial sums, and a second kernel adds the rows in one order. Adding the clusters' sums into one cleared accumulator with float atomics instead was slower in eager calls and faster only in some CUDA-graph calls with a token mask at 129 to 16384 tokens. It raises no alert. Source: [`kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py`](../kernels/engram_gate/cake_pplx/cake_engram_gate_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_engram_gate_nondet` | As det | As det | Autograd. The backward alerts under deterministic algorithms. |
+| `cake_engram_gate_nondet` | As det | As det | Autograd. |
 | `cake_engram_gate_nondet_kv` | As det | As det | Autograd on `kv`; one `dkv` written by the backward. |
-| `cake_engram_gate_nondet_train_forward` | As det | As det | Returns `out`; never alerts. |
-| `cake_engram_gate_nondet_train_backward` | As det | As det | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`; alerts before it allocates or launches. |
-| `cake_engram_gate_nondet_train_workspace_bytes` | `(T, device=None)` | | As det, with one accumulator row instead of one row per cluster. |
+| `cake_engram_gate_nondet_train_forward` | As det | As det | Returns `out`. |
+| `cake_engram_gate_nondet_train_backward` | As det | As det | Returns `(dx, dkey, dvalue, dq_weight, dk_weight)`. |
+| `cake_engram_gate_nondet_train_workspace_bytes` | `(T, device=None)` | | As det. |
 
 Other public names: `is_cake_engram_gate_nondet_train_supported(device=None)`, `CakeEngramGateNondetFunction`, `CakeEngramGateNondetKvFunction`, `ARCHES`, `STREAMS`, `HIDDEN`, `KV_WIDTH`.
 
@@ -990,7 +990,7 @@ out.backward(torch.randn_like(out))      # x.grad, kv.grad [T, 25600], q_weight.
 
 **Caveats.**
 
-- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each (det: one per cluster of the backward grid; nondet: one accumulator). The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
+- State kept for the backward: the inputs only. Workspace of a backward call: the FP32 `[4, 5120]` weight-gradient partial rows, 80 KiB each, one per cluster of the backward grid (det and nondet). The workspace query reads the device's architecture and SM count for `T > 0`: a device that is not a CUDA device raises `ValueError`, a CUDA device outside the architectures `RuntimeError`. The backward reads BF16 and FP32 weights as stored, and the autograd entries get their weight gradients in each parameter's dtype from the kernel (one rounding, as `.to(dtype)` rounds). A forward is one kernel launch: it reads BF16 and FP32 weights as stored and allocates its output alone.
 - The forward and the backward run one cluster of four CTAs per token, persistently: `min(T, resident clusters)` clusters, where the resident clusters come from a table measured per architecture, SM count and CTAs per SM of the program (for example 148 for the forward on a 152-SM GB300). A device the table does not hold runs 0.85 of `CTAs per SM * SM count / 4` clusters. The grid changes the speed and, in det, the order of the weight-gradient sums (their last bits); one device uses one grid per token count.
 - `X`, `dOut` and `dX` must be contiguous. Output rows must not overlap.
 - No double backward.

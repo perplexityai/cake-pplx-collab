@@ -64,13 +64,11 @@ autograd), :func:`cake_engram_gate_nondet_train_workspace_bytes` and
 resolve to the backend's objects on first access.
 
 The mode is part of the name: no entry takes a ``deterministic`` keyword
-(passing one is a ``TypeError``).  The backward adds the weight-gradient
-partial sums of the clusters with float atomics, so ``dq_weight`` and
-``dk_weight`` may differ in their last bits run to run; under
-``torch.use_deterministic_algorithms(True)`` every backward call that
-launches raises PyTorch's ``RuntimeError`` naming the deterministic package's
-entry (``warn_only=True``: one ``UserWarning``, then this package runs).  The
-forward never consults the mode.
+(passing one is a ``TypeError``).  ``out``, ``dx``, ``dkey`` and ``dvalue``
+have one fixed order; ``dq_weight`` and ``dk_weight`` promise no bits run to
+run.  The package launches the deterministic package's kernels under its own
+names (every sum in one fixed order), so nothing consults
+``torch.use_deterministic_algorithms`` (there is nothing to alert about).
 
 A stable API (``@cake_api``; no ``ExperimentalWarning``) of thin wrappers:
 the checks, the launch plan, the autograd Functions and the generated kernels
@@ -212,13 +210,11 @@ def cake_engram_gate_nondet(
         than above; ``eps`` or ``clamp_value`` is not finite and non-negative; ``dot_sum`` is another value.
     RuntimeError
         The device is not one of ``ARCHES``.
-        In the backward under ``torch.use_deterministic_algorithms(True)`` (``warn_only=True``: a warning).
 
     Notes
     -----
-    The weight gradients are summed with float atomics: under ``torch.use_deterministic_algorithms(True)`` the
-    backward raises before it launches.  ``T == 0`` launches nothing, gives zero weight gradients and does not
-    alert.
+    The weight gradients promise no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.
+    ``T == 0`` launches nothing and gives zero weight gradients.
     """
     return _pkg().cake_engram_gate_nondet(
         x, key, value, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
@@ -261,7 +257,7 @@ def cake_engram_gate_nondet_kv(
 
     Notes
     -----
-    The backward raises PyTorch's alert under ``torch.use_deterministic_algorithms(True)``.
+    The weight gradients promise no bits run to run; ``torch.use_deterministic_algorithms`` is not consulted.
     """
     return _pkg().cake_engram_gate_nondet_kv(
         x, kv, q_weight, k_weight, token_mask, eps=eps, clamp_value=clamp_value, dot_sum=dot_sum
@@ -350,13 +346,11 @@ def cake_engram_gate_nondet_train_backward(
     ------
     ValueError, RuntimeError
         As in :func:`cake_engram_gate_nondet`.
-        ``RuntimeError`` also under ``torch.use_deterministic_algorithms(True)`` (``warn_only=True``: a warning).
 
     Notes
     -----
-    ``dq_weight`` and ``dk_weight`` are summed with float atomics; under ``torch.use_deterministic_algorithms(True)``
-    the call raises before it allocates or launches anything.  ``T == 0`` launches nothing, returns zero weight
-    gradients and does not alert.
+    ``dq_weight`` and ``dk_weight`` promise no bits run to run; ``torch.use_deterministic_algorithms`` is not
+    consulted.  ``T == 0`` launches nothing and returns zero weight gradients.
     """
     return _pkg().cake_engram_gate_nondet_train_backward(
         dout,
@@ -384,13 +378,15 @@ def cake_engram_gate_nondet_train_workspace_bytes(T: int, device: Union[torch.de
         The token count.
     device : torch.device, int or str, optional
         The CUDA device (None: the current one).
+        The number of partial rows follows its architecture and SM count: ``ValueError`` for a device that is not
+        a CUDA device, ``RuntimeError`` on a CUDA device outside ``ARCHES``.
 
     Returns
     -------
-    80 KiB (``4 * 5120`` FP32), the ``[4, 5120]`` FP32 weight-gradient accumulator; 0 for ``T == 0``.  The backward
-    reads BF16 and FP32 weights as stored (a weight that is not contiguous or not 16-byte aligned is copied first).  A
-    forward call reads them the same way and allocates its output alone, and the state kept for the backward is the
-    inputs alone.
+    80 KiB (``4 * 5120`` FP32) for each ``[4, 5120]`` partial row of the weight gradient (one per cluster of the
+    backward grid); 0 for ``T == 0``.  The backward reads BF16 and FP32 weights as stored (a weight that is not
+    contiguous or not 16-byte aligned is copied first).  A forward call reads them the same way and allocates its
+    output alone, and the state kept for the backward is the inputs alone.
 
     Notes
     -----
