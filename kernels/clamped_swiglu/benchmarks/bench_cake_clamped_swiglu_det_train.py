@@ -65,7 +65,7 @@ outputs):
 Every arm runs on identical inputs: ``gate`` and ``up`` ``6 x`` unit normals, ``dh`` a unit normal (BF16) and the FP32
 route weight ``1.5 x U[0, 1)`` (``--unweighted``: none).  ``--deep-gate`` sets the gates at columns 0, 768 and 1536
 of every row to ``-88`` (BF16): every group of columns that Cake's kernels vote over holds one, so every warp of
-Cake's kernels takes its deep-gate sigmoid (``sigmoid_scaled``).  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor
+Cake's kernels takes its deep-gate sigmoid (the scaled reciprocal).  ``--layouts``: ``merged`` (one ``[R, 2I]`` tensor
 and one ``[R, 2I]`` gradient) and ``split`` (two ``[R, I]`` tensors and gradients).  Every arm allocates its outputs
 inside the timed call; compilation, graph and plan building happen before timing.  Each arm's outputs are compared
 with Cake's: the largest absolute difference, the share of elements whose values differ (``values_differ``, with

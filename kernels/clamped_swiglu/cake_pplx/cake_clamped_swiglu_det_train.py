@@ -42,15 +42,16 @@ DeepSeek-V4.1-Flash) on every call.
 The sigmoid uses the approximate FP32 base-2 exponential and the approximate
 reciprocal with one round-to-nearest Newton step (below the flushed
 reciprocal's range a scaled reciprocal, within one subnormal ulp); every
-product rounds to nearest without flushing subnormals, and nothing is FP64.  The tests hold ``h``, ``d_gate``, ``d_up``
-and ``d_weight`` to the PyTorch BF16 naive implementation of the same
-operation (the clamps written as selects, so autograd gives the inclusive
-masks; the FP32 weight kept FP32; the gradients from PyTorch autograd), each
-against a float64 reference computed from the BF16 inputs: over 32 random
-inputs of a case, in the L2 and in the max norm of the error, the median and
-the largest error of each output are at most 1.005 times the naive
-implementation's, and 0 on every input where the naive implementation's is
-0.  No output has an error budget of its own.
+product rounds to nearest without flushing subnormals, and nothing is FP64.
+The tests hold ``h``, ``d_gate``, ``d_up`` and ``d_weight`` to the PyTorch
+BF16 naive implementation of the same operation (the clamps written as
+selects, so autograd gives the inclusive masks; the FP32 weight kept FP32;
+the gradients from PyTorch autograd), each against a float64 reference
+computed from the BF16 inputs: over 32 random inputs of a case, in the L2
+and in the max norm of the error, the median and the largest error of each
+output are at most 1.005 times the naive implementation's, and 0 on every
+input where the naive implementation's is 0.  No output has an error budget
+of its own.
 
 Mode rules:
 

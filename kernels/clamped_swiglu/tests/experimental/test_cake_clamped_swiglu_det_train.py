@@ -1402,7 +1402,7 @@ def test_large_row_counts(rows, w, device) -> None:
 @pytest.mark.parametrize("program", PROGRAMS)
 @pytest.mark.parametrize("layout", ["split", "merged"])
 @pytest.mark.parametrize("w", ["random", "none"])
-def test_the_exact_sigmoid_gives_the_bits_of_the_fast_one(layout, w, program, device, monkeypatch) -> None:
+def test_the_deep_sigmoid_gives_the_bits_of_the_fast_one(layout, w, program, device, monkeypatch) -> None:
     """In each stage's small-R and large-R program (forced through the route), on ordinary and boundary values whose
     clamped gates are all above -87 (the sigmoid's fast path everywhere), a gate of -88 at columns 0, 768 and 1536 of
     every row (one in each third: every run takes the deep path, the row of a one-run program and each run of 768

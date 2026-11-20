@@ -91,18 +91,17 @@ A window changes 0.1.1's route only where forced small/large sweeps showed the o
 0.5 % on that architecture, with both weighted and unweighted inputs.  In these sweeps the route was forced to each
 program, and both were timed at fixed row counts on B200, GB300 and VR200, with warm L2 (CUDA graph) and cold L2
 (CUPTI).  The inputs were weighted, unweighted and deep-gate (every warp takes the deep-gate sigmoid, exact before
-0.1.4).  The sweeps timed the backward alone and in forward + backward and checkpointed steps.  They timed the
-forward alone with merged and split
-inputs, and in those steps only on GB300 with a split input.  They have no forward + backward or checkpointed timing for
-the B200 forward change (96 to 112 rows per SM).  There only the release A/B of 0.1.2 against 0.1.1 covers those steps,
-and it marks none of them slower: on the graph and CUPTI timers the highest ratio of 0.1.2's time to 0.1.1's is 1.006,
-with cold L2 at 111.99 rows per SM, within noise.  Below, small/large is the small-R program's time over the large-R
-one's.  The bounds are whole numbers of rows per SM and run the large-R program, as 0.1.1's cut did.  So a window also
-holds rows where the small-R program measures faster in some cases.  For example: the backward alone at the bounds 12,
-32 and 48 rows per SM and at 36; the forward + backward and checkpointed steps at 35 rows per SM on `sm_107a`
-(small/large 0.977-0.996); every measured case from about 20.25 to 21 and from 40.5 to 41 rows per SM; and the forward
-with the deep-gate input (small/large 0.815-0.957 inside the forward windows).  These rows ran the large-R program in
-0.1.1 too, so nothing changes for them.
+0.1.4).  The sweeps timed the backward alone and in forward + backward and checkpointed steps.  They timed the forward
+alone with merged and split inputs, and in those steps only on GB300 with a split input.  They have no forward +
+backward or checkpointed timing for the B200 forward change (96 to 112 rows per SM).  There only the release A/B of
+0.1.2 against 0.1.1 covers those steps, and it marks none of them slower: on the graph and CUPTI timers the highest
+ratio of 0.1.2's time to 0.1.1's is 1.006, with cold L2 at 111.99 rows per SM, within noise.  Below, small/large is the
+small-R program's time over the large-R one's.  The bounds are whole numbers of rows per SM and run the large-R program,
+as 0.1.1's cut did.  So a window also holds rows where the small-R program measures faster in some cases.  For example:
+the backward alone at the bounds 12, 32 and 48 rows per SM and at 36; the forward + backward and checkpointed steps at
+35 rows per SM on `sm_107a` (small/large 0.977-0.996); every measured case from about 20.25 to 21 and from 40.5 to 41
+rows per SM; and the forward with the deep-gate input (small/large 0.815-0.957 inside the forward windows).  These rows
+ran the large-R program in 0.1.1 too, so nothing changes for them.
 
 Both backward programs run 4 rows a CTA: the small-R one fits 3 CTAs on an SM (12 rows per SM a wave), the large-R one 5
 (20 rows).  Above 12 and up to 20 rows per SM, and above 36 and up to 40, the small-R program runs twice the waves of
@@ -169,9 +168,9 @@ architecture serves every call.
 - `s = 1 / (1 + 2^(-g' log2 e))`: the approximate base-2 exponential (`ex2.approx.ftz`; `1 + 2^t` absorbs a flushed
   subnormal `2^t`) and the approximate reciprocal plus one round-to-nearest Newton step, which is the IEEE `rcp.rn` of
   every `1 <= d < 2^126`.  A warp with a clamped gate at or below -87 in a run of its loads computes that run with a
-  scaled reciprocal: the Newton reciprocal of `d 2^-126`, times `2^-126` with one rounding.  That is `RN(1 / d)`
-  where the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.3 and earlier rounded it exactly,
-  with four more instructions per element), +0 for an infinite `d`.
+  scaled reciprocal: the Newton reciprocal of `d 2^-126`, times `2^-126` with one rounding.  That is `RN(1 / d)` where
+  the sigmoid is normal and within one subnormal ulp of it where it is subnormal (0.1.3 and earlier rounded it exactly,
+  at the cost of more instructions per element), +0 for an infinite `d`.
 - `silu = g' s`, `a = silu u'`, `h = bf16(w a)`: one rounding.
 - `d_gate = bf16(((dh w) u') (silu (1 - s) + s) [g <= L])` (one FMA for `silu (1 - s) + s`) and
   `d_up = bf16((dh w) silu [-L <= u <= L])`, each mask a factor of 1 or 0, each output rounded once.  The unweighted
