@@ -224,8 +224,9 @@ def test_capabilities_map_to_the_three_architectures(monkeypatch):
 
 
 def test_package_identity_and_build_identity():
-    """``build.json`` and the registry name the package; every library stem is a ``cake_fmha_train`` program built
-    for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the registry's library names are the stems of ``build.json``."""
+    """``build.json`` and the registry name the package; every library stem is a ``cake_fmha_train`` program or host
+    sequence built for ``sm_100a``, ``sm_103a`` and ``sm_107a``, and the registry's library names are the stems of
+    ``build.json``."""
     jit = _backend("cake_jit")
     assert jit.PACKAGE == BACKEND
     assert jit.LIBRARY_PREFIX == "cake_fmha_train"
@@ -235,8 +236,9 @@ def test_package_identity_and_build_identity():
     manifest = json.loads(path.read_text())
     assert manifest["package"] == BACKEND
     names = {entry["name"] for entry in manifest["libraries"]}
-    assert names == {f"{rec['library']}_{arch}" for rec in jit.MODULES.values() for arch in rec["arches"]}
+    libraries = (*jit.MODULES.values(), *jit.SEQUENCES.values())
+    assert names == {f"{rec['library']}_{arch}" for rec in libraries for arch in rec["arches"]}
     assert all(re.fullmatch(r"cake_fmha_train_[0-9a-f]{20}_sm_10[037]a", name) for name in names), sorted(names)
     assert {entry["arch"] for entry in manifest["libraries"]} == set(ARCHES)
-    stems = {rec["library"] for rec in jit.MODULES.values()}
-    assert len(stems) == len(jit.MODULES) and len(names) == len(stems) * len(ARCHES)
+    stems = {rec["library"] for rec in libraries}
+    assert len(stems) == len(libraries) and len(names) == len(stems) * len(ARCHES)

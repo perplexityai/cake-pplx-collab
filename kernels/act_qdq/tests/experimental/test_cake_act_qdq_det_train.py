@@ -25,7 +25,10 @@ reaches, and random inputs of the model shapes (2-D, 3-D and 4-D, 1 to 4097
 rows, widths 16 to 4096, a width of 96; each released call site at 8192
 rows).  Each runs out of place and in place,
 with and without the scale output, and every program also runs directly on
-grids of 1 and 3 CTAs.  The suite also checks: out-of-place calls leave ``x``
+grids of 1 and 3 CTAs.  Calls on each side of each bound of the small and the
+wide programs' size ranges (the wide range up to its lower bound) run the
+program their route names there, and every program of the route gives the
+rule's bits on those inputs.  The suite also checks: out-of-place calls leave ``x``
 unchanged; caller ``out`` and ``scales`` buffers; five repeated calls bit for
 bit; argument validation; no launch for empty inputs; CUDA graph replay; no
 rebuild on a new shape; ``torch.utils.checkpoint`` through a straight-through
@@ -64,6 +67,68 @@ FORMATS = reference.FORMATS
 REPEATS = 5
 # The minimum CUDA toolkit of every library, per architecture.
 MIN_CUDA = {"sm_100a": "12.9", "sm_103a": "12.9", "sm_107a": "13.5"}
+# Per architecture and kind of call, the inclusive n_vecs range of a route's small program (None: no size).
+SMALL_VECTORS = {
+    "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)},
+    "sm_103a": {"in_place": None, "out_of_place": (65537, 524288)},
+    "sm_107a": {"in_place": (1, 262144), "out_of_place": (1, 262144)},
+}
+# The wide program of MXFP8 without the scales, on sm_100a and sm_103a only: from above the main and small programs'
+# sizes to the last n_vecs whose tile count (n_vecs + 511) fits in signed 32 bits.
+WIDE_ROUTE = "mxfp8_e8m0_g32"
+WIDE_LAST = 2**31 - 512
+WIDE_VECTORS = {
+    "sm_100a": {"in_place": (262145, WIDE_LAST), "out_of_place": (131073, WIDE_LAST)},
+    "sm_103a": {"in_place": (262145, WIDE_LAST), "out_of_place": (131073, WIDE_LAST)},
+}
+# Per route, its ranged programs (name suffix -> vectors): the small program of every route, and the wide one, below
+# which that route's small range ends on sm_100a and sm_103a.
+RANGED = {f"{fmt}{suffix}": {"_small": SMALL_VECTORS} for fmt in FORMATS for suffix in ("", "_scales")} | {
+    WIDE_ROUTE: {
+        "_small": {
+            **SMALL_VECTORS,
+            "sm_100a": {"in_place": None, "out_of_place": (65537, 131072)},
+            "sm_103a": {"in_place": None, "out_of_place": (65537, 131072)},
+        },
+        "_wide": WIDE_VECTORS,
+    }
+}
+CALLS = ("out_of_place", "in_place")
+# The grid rules of the main, the small and the wide programs.
+MAIN_RULE = {
+    "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
+    "kind": "tiles",
+    "persist_waves": 2.5,
+    "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
+    "vector_elements": 8,
+}
+SMALL_RULE = {
+    "ctas_per_sm": {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4},
+    "kind": "tiles",
+    "persist_waves": 2.5,
+    "tile_vectors": {"sm_100a": 512, "sm_103a": 512, "sm_107a": 512},
+    "vector_elements": 8,
+}
+WIDE_RULE = {
+    "ctas_per_sm": {"sm_100a": 10, "sm_103a": 10},
+    "kind": "tiles",
+    "persist_waves": 0,
+    "tile_vectors": {"sm_100a": 512, "sm_103a": 512},
+    "vector_elements": 8,
+}
+# The largest n_vecs the size-boundary test launches at: a range bound above it (the wide range's last) is checked by
+# the registry tests only.
+BOUNDARY_LIMIT = 524292
+
+
+def _expected(arch: str, kind: str, call: str, n_vecs: int) -> str:
+    """The program of route ``kind`` a ``call`` of ``n_vecs`` vectors runs on ``arch``: the ranged program whose range
+    holds ``n_vecs``, else the main one."""
+    for suffix, vectors in RANGED[kind].items():
+        span = vectors.get(arch, {}).get(call)
+        if span is not None and span[0] <= n_vecs <= span[1]:
+            return kind + suffix
+    return kind
 
 
 def _supported() -> bool:
@@ -251,23 +316,77 @@ def test_every_program_runs_on_any_grid() -> None:
     and on the host's grid, out of place and in place."""
     arch = _arch()
     for kind, names in loader.ROUTES[arch].items():
-        (name,) = names
-        record = loader.MODULES[name]
-        fmt = record["format"]
-        x0 = reference.randn_input((4097, 96), fmt, seed=41)
-        want = reference.qdq(x0, fmt)
-        n_vecs = x0.numel() // loader.VECTOR
-        for grid in ((1, 1, 1), (3, 1, 1), None):
-            for inplace in (False, True):
-                x = x0.clone()
+        for name in names:
+            record = loader.MODULES[name]
+            fmt = record["format"]
+            x0 = reference.randn_input((4097, 96), fmt, seed=41)
+            want = reference.qdq(x0, fmt)
+            n_vecs = x0.numel() // loader.VECTOR
+            for grid in ((1, 1, 1), (3, 1, 1), None):
+                for inplace in (False, True):
+                    x = x0.clone()
+                    y = x if inplace else torch.full_like(x0, float("nan"))
+                    values = {"x": x, "y": y, "n_vecs": n_vecs}
+                    s = None
+                    if record["scale_out"]:
+                        s = torch.full(_scale_shape(tuple(x0.shape), fmt), float("nan"), device="cuda")
+                        values["scales"] = s
+                    loader.run_module(name, values, device_index=0, grid=grid)
+                    _check(f"{kind} {name} grid={grid} inplace={inplace}", want, y, s)
+
+
+@gpu
+@pytest.mark.parametrize("inplace", (False, True), ids=CALLS)
+@pytest.mark.parametrize("fmt", FORMATS)
+def test_calls_at_the_size_boundaries_match_the_rule(fmt: str, inplace: bool, monkeypatch) -> None:
+    """Inputs of width 32 just inside and just outside each bound of each ranged program's range for the call's kind
+    (the out-of-place range where the kind has none; up to :data:`BOUNDARY_LIMIT` vectors): the call launches the
+    program its route names for that size and kind (also with an ``out`` buffer: a view of ``x``'s bytes is in place,
+    another tensor is not), and each program of the route, launched directly in the same kind, gives the rule's bits
+    too."""
+    arch, call = _arch(), CALLS[inplace]
+    run_module, launched = loader.run_module, []
+
+    def spy(name, values, **kwargs):
+        launched.append(name)
+        return run_module(name, values, **kwargs)
+
+    monkeypatch.setattr(loader, "run_module", spy)
+    for scale_out in (False, True):
+        kind = loader.route_name(fmt, scale_out=scale_out)
+        sizes = set()
+        for vectors in RANGED[kind].values():
+            span = vectors.get(arch, {}).get(call) or vectors.get(arch, {}).get("out_of_place")
+            if span is None:
+                continue
+            first, last = -(-span[0] // 4) * 4, span[1] // 4 * 4  # a width-32 row is 4 vectors
+            sizes |= {first, first - 4, last, last + 4}
+        for n_vecs in sorted(n for n in sizes if 0 < n <= BOUNDARY_LIMIT):
+            x0 = reference.randn_input((n_vecs // 4, 32), fmt, seed=n_vecs % 1000)
+            want = reference.qdq(x0, fmt)
+            chosen = loader.selected_module(arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=inplace)
+            assert chosen == _expected(arch, kind, call, n_vecs), (arch, n_vecs, inplace, chosen)
+            launched.clear()
+            y, s = _call(x0, fmt, inplace=inplace, return_scales=scale_out)
+            assert launched == [chosen], (arch, n_vecs, inplace, launched)
+            _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} call ({chosen})", want, y, s)
+            x = x0.clone()
+            out = x.view(x.shape) if inplace else torch.empty_like(x)
+            launched.clear()
+            result = forward(x, format=fmt, out=out, return_scales=scale_out)
+            y, s = result if scale_out else (result, None)
+            assert launched == [chosen], (arch, n_vecs, inplace, "out", launched)
+            _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} out= call ({chosen})", want, y, s)
+            for name in loader.ROUTES[arch][kind]:
+                x = x0.clone() if inplace else x0
                 y = x if inplace else torch.full_like(x0, float("nan"))
                 values = {"x": x, "y": y, "n_vecs": n_vecs}
                 s = None
-                if record["scale_out"]:
+                if scale_out:
                     s = torch.full(_scale_shape(tuple(x0.shape), fmt), float("nan"), device="cuda")
                     values["scales"] = s
-                loader.run_module(name, values, device_index=0, grid=grid)
-                _check(f"{kind} {name} grid={grid} inplace={inplace}", want, y, s)
+                loader.run_module(name, values, device_index=0)
+                _check(f"{fmt} n_vecs={n_vecs} inplace={inplace} {name}", want, y, s)
 
 
 # --------------------------------------------------------------------------- outputs, buffers and repeats
@@ -435,7 +554,7 @@ def test_cuda_graph_replays_match_eager(fmt: str) -> None:
 @gpu
 def test_changing_shapes_do_not_rebuild() -> None:
     arch = _arch()
-    for name in loader.MODULES:
+    for name in {name for names in loader.ROUTES[arch].values() for name in names}:
         loader.load(name, arch)
     loaded_before = loader.load.cache_info().misses
     for shape in ((1, 32), (17, 96), (129, 512), (4097, 128), (65, 32, 128), (17, 8, 4096), (3, 5, 7, 64)):
@@ -580,24 +699,71 @@ def test_constants() -> None:
 
 
 @pytest.mark.cpu_only
-def test_routes_select_one_program_per_format() -> None:
+def test_routes_select_a_program_by_size(monkeypatch) -> None:
     for capability, arch in ((10, 0), "sm_100a"), ((10, 3), "sm_103a"), ((10, 7), "sm_107a"):
         assert loader.arch_for_capability(capability) == arch
     assert loader.arch_for_capability((9, 0)) is None
     assert loader.arch_for_capability((12, 0)) is None
     for arch in loader.ARCHES:
+        spans = [
+            span
+            for ranged in RANGED.values()
+            for vectors in ranged.values()
+            for span in vectors.get(arch, {}).values()
+            if span is not None
+        ]
+        sizes = {1, loader.MAX_VECTORS} | {n for low, high in spans for n in (low - 1, low, high, high + 1)}
         chosen = set()
-        for fmt in FORMATS:
-            for scale_out in (False, True):
-                name = loader.selected_module(arch, fmt, scale_out=scale_out)
-                record = loader.MODULES[name]
-                assert record["format"] == fmt and record["scale_out"] is scale_out, name
-                chosen.add(name)
-        assert chosen == set(loader.MODULES), arch
+        for call in CALLS:
+            for fmt in FORMATS:
+                for scale_out in (False, True):
+                    kind = loader.route_name(fmt, scale_out=scale_out)
+                    for n_vecs in sorted(n for n in sizes if 0 < n <= loader.MAX_VECTORS):
+                        name = loader.selected_module(
+                            arch, fmt, scale_out=scale_out, n_vecs=n_vecs, in_place=call == "in_place"
+                        )
+                        record = loader.MODULES[name]
+                        assert record["format"] == fmt and record["scale_out"] is scale_out, name
+                        assert name == _expected(arch, kind, call, n_vecs), (arch, call, n_vecs, name)
+                        chosen.add(name)
+        assert chosen == {name for names in loader.ROUTES[arch].values() for name in names}, arch
+    # in place, sm_100a runs the main program inside the out-of-place small range
+    for in_place, want in ((False, "fp4_e4m3_g16_small"), (True, "fp4_e4m3_g16")):
+        got = loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=65537, in_place=in_place)
+        assert got == want, in_place
+    # MXFP8 without the scales on sm_100a: the small range ends where the wide one begins out of place; in place the
+    # main program runs up to the wide range; sm_107a has no wide program
+    for n_vecs, in_place, want in (
+        (131072, False, "mxfp8_e8m0_g32_small"),
+        (131073, False, "mxfp8_e8m0_g32_wide"),
+        (262144, True, "mxfp8_e8m0_g32"),
+        (262145, True, "mxfp8_e8m0_g32_wide"),
+        (WIDE_LAST + 1, False, "mxfp8_e8m0_g32"),
+    ):
+        got = loader.selected_module("sm_100a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=n_vecs, in_place=in_place)
+        assert got == want, (n_vecs, in_place)
+    got = loader.selected_module("sm_107a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1 << 20, in_place=False)
+    assert got == "mxfp8_e8m0_g32"
     with pytest.raises(ValueError, match="format"):
-        loader.selected_module("sm_100a", "nvfp4", scale_out=False)
+        loader.selected_module("sm_100a", "nvfp4", scale_out=False, n_vecs=1, in_place=False)
     with pytest.raises(ValueError, match="route"):
         loader.route_modules("sm_90a", "fp4_e4m3_g16")
+    monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales"])
+    with pytest.raises(RuntimeError, match="one main record and its ranged records"):
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1, in_place=False)
+    monkeypatch.setitem(loader.ROUTES["sm_100a"], "fp4_e4m3_g16", ["fp4_e4m3_g16", "fp4_e4m3_g16_scales_small"])
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.selected_module("sm_100a", "fp4_e4m3_g16", scale_out=False, n_vecs=1, in_place=False)
+    monkeypatch.setitem(loader.ROUTES["sm_107a"], "mxfp8_e8m0_g32", ["mxfp8_e8m0_g32", "mxfp8_e8m0_g32_wide"])
+    with pytest.raises(RuntimeError, match="does not serve that route"):
+        loader.selected_module("sm_107a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=1, in_place=False)
+    # two ranges that hold one size are a registry error
+    small = loader.MODULES["mxfp8_e8m0_g32_small"]
+    monkeypatch.setitem(
+        small, "vectors", {**small["vectors"], "sm_100a": {"in_place": None, "out_of_place": (65537, 524288)}}
+    )
+    with pytest.raises(RuntimeError, match="all hold n_vecs=131073"):
+        loader.selected_module("sm_100a", "mxfp8_e8m0_g32", scale_out=False, n_vecs=131073, in_place=False)
 
 
 @pytest.mark.cpu_only
@@ -619,6 +785,19 @@ def test_launch_grid() -> None:
         ), arch
     with pytest.raises(ValueError, match="no tile for sm_90a"):
         loader.launch_grid(record, n_vecs=1, sm_count=148, arch="sm_90a")
+    small = loader.MODULES["mxfp8_e8m0_g32_small"]
+    for arch, resident in (("sm_100a", 8 * 148), ("sm_103a", 8 * 148), ("sm_107a", 4 * 148)):
+        assert loader.launch_grid(small, n_vecs=512, sm_count=148, arch=arch) == (1, 1, 1), arch
+        assert loader.launch_grid(small, n_vecs=513, sm_count=148, arch=arch) == (2, 1, 1), arch
+        high = SMALL_VECTORS[arch]["out_of_place"][1]
+        assert loader.launch_grid(small, n_vecs=high, sm_count=148, arch=arch) == (min(high // 512, resident), 1, 1)
+    # the wide program: one CTA per tile of 512 vectors at every size
+    wide = loader.MODULES["mxfp8_e8m0_g32_wide"]
+    for arch in ("sm_100a", "sm_103a"):
+        for n_vecs in (1, 512, 513, 131073, 20 * 148 * 512, WIDE_LAST):
+            assert loader.launch_grid(wide, n_vecs=n_vecs, sm_count=148, arch=arch) == (-(-n_vecs // 512), 1, 1)
+    with pytest.raises(ValueError, match="no tile for sm_107a"):
+        loader.launch_grid(wide, n_vecs=1, sm_count=148, arch="sm_107a")
 
 
 @pytest.mark.cpu_only
@@ -635,24 +814,26 @@ def test_registry_records_reference_the_build_manifest() -> None:
     for arch, routes in loader.ROUTES.items():
         assert set(routes) == set(loader.KINDS), arch
         for kind, names in routes.items():
-            assert names == [kind], (arch, kind)
+            ranged = [kind + suffix for suffix, vectors in RANGED[kind].items() if arch in vectors]
+            assert names == [kind, *ranged], (arch, kind)
     referenced = set()
     for name, record in loader.MODULES.items():
-        assert name == loader.route_name(record["format"], scale_out=record["scale_out"]), name
+        kind = loader.route_name(record["format"], scale_out=record["scale_out"])
+        suffix = name.removeprefix(kind)
+        small, wide = suffix == "_small", suffix == "_wide"
+        assert suffix in ("", *RANGED[kind]), name
+        assert ("vectors" in record) == (small or wide), name
+        if small or wide:
+            assert record["vectors"] == RANGED[kind][suffix], name
         assert re.fullmatch(r"cake_act_qdq_[0-9a-f]{20}", record["library"]), name
         assert record["kernel_symbol"] == f"kernel_{record['library']}", name
-        assert tuple(record["arches"]) == loader.ARCHES, name
+        assert tuple(record["arches"]) == (("sm_100a", "sm_103a") if wide else loader.ARCHES), name
         assert record["ffi_entry"] == "run", name
-        assert record["grid_rule"] == {
-            "ctas_per_sm": {"sm_100a": 32, "sm_103a": 32, "sm_107a": 16},
-            "kind": "tiles",
-            "persist_waves": 2.5,
-            "tile_vectors": {"sm_100a": 128, "sm_103a": 128, "sm_107a": 256},
-            "vector_elements": loader.VECTOR,
-        }, name
+        assert record["grid_rule"] == (SMALL_RULE if small else WIDE_RULE if wide else MAIN_RULE), name
+        assert record["grid_rule"]["vector_elements"] == loader.VECTOR, name
         assert record["group"] == loader.GROUP_SIZES[record["format"]], name
         launch = record["launch"]
-        assert tuple(launch["block"]) == (64, 1, 1), name
+        assert tuple(launch["block"]) == (256 if small else 128 if wide else 64, 1, 1), name
         assert tuple(launch["cluster"]) == (1, 1, 1), name
         assert launch["cooperative"] is False and launch["use_pdl"] is False, name
         assert launch["dynamic_smem_bytes"] == 0, name
@@ -693,7 +874,7 @@ _COMMENTS = re.compile(r"/\*.*?\*/|//[^\n]*", re.DOTALL)
 
 @pytest.mark.cpu_only
 def test_kernel_sources_hold_no_fp64() -> None:
-    """No CUDA source of the package uses FP64 (comments aside): every step of the rule is exact in FP32."""
+    """No CUDA source of the package uses FP64 (comments aside): every step of the rule is exact in FP32 or BF16."""
     package = Path(cake_build.__file__).parent
     sources = sorted((package / "csrc").glob("*.cu"))
     assert sources, "the package has no CUDA sources"

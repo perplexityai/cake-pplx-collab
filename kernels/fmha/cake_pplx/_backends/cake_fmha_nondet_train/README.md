@@ -68,9 +68,13 @@ scores, `dP`, `dK`, `dV`, `dQ` and the row sums; `P` and `dS` are rounded to
 BF16 only as MMA operands.  Every launch is a plain stream-ordered launch:
 nothing cooperative, no PDL.
 
-Each call allocates its outputs and an FP32 workspace from PyTorch's caching
-allocator: `dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
-(`B * H * Sq` elements each).
+The three launches run in one host call: each variant has a host sequence
+library (`SEQUENCES` in `cake_jit.py`) whose `build.json` entries compile the
+three kernel units with a host unit that launches them in order.  Each call
+allocates its outputs and an FP32 workspace from PyTorch's caching allocator:
+`dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
+(`B * H * Sq` elements each).  The host call takes the workspace through the
+tvm-ffi environment allocator, on the current stream.
 
 ## Determinism
 
@@ -98,3 +102,36 @@ with `B == 0` returns empty gradients and does not alert.
   boundary and `lse` on a 4-byte boundary.  A violation is a `ValueError`
   before any launch.
 - No build for any architecture other than SM100, SM103 and SM107.
+
+## Tests
+
+The tests are in `tests/experimental/` of the family: the backend
+(`test_cake_fmha_nondet_train.py`), the public module
+(`test_cake_fmha_nondet_train_api.py`) and the names
+(`test_cake_fmha_nondet_train_names.py`).  Run them against the installed
+distribution as [`ARCHITECTURE.md`](../../../../../ARCHITECTURE.md)
+describes; without a supported device the device tests skip.
+
+Twelve tests observe the kernels that one backward call launches through
+`torch.profiler`: `test_the_backward_launches_the_records_of_its_variant`
+and `test_the_backward_without_run_launches_the_same_records`.  The profiler
+records kernels only with a CUPTI that supports the device.  On `sm_107a`,
+CUPTI 13.0.85 (the one torch 2.14.1+cu130 installs) records no kernel
+(`CUPTI_ERROR_INVALID_DEVICE`); CUPTI 13.5.25 records them.  Each of
+these tests first profiles a plain torch operation on the device.  When the
+profiler records no kernel for it, the test runs its other checks without
+the profiler, then skips the kernel observation with the reason
+`torch.profiler records no CUDA kernel on this device (CUPTI); install a
+CUPTI that supports it`.
+
+To observe the kernels on `sm_107a`, install CUPTI 13.5.25 into a separate
+directory and preload it:
+
+```bash
+pip install --target DIR nvidia-cuda-cupti==13.5.25
+LD_PRELOAD=DIR/nvidia/cu13/lib/libcupti.so.13 \
+  python -m pytest -p no:cacheprovider tests/experimental/test_cake_fmha_nondet_train.py
+```
+
+Installing it into the torch environment instead replaces the CUPTI that
+torch pins.
