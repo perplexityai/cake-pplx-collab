@@ -12149,7 +12149,9 @@ _CUDA_GET_STREAM = getattr(torch._C, "_cuda_getCurrentStream", None)
 _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
 
 
-def _rlab_stream(streams: dict[int, torch.cuda.Stream], index: int) -> torch.cuda.Stream:
+def _rlab_stream(
+    streams: dict[int, torch.cuda.Stream], index: int
+) -> torch.cuda.Stream:
     """The holding stream of ``streams`` on device ``index``, created on first use."""
     stream = streams.get(index)
     if stream is None:

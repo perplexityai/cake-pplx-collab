@@ -18853,7 +18853,8 @@ def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, w
 
     dX, dW = step(False)
     assert cake_backend.DX_CAST_FOLD_STAGE not in bound
-    assert any(s in cake_backend.DX_SLAB_SUM_STAGES for s in bound) and all(hi <= lo for lo, hi in ranges)
+    assert any(s in cake_backend.DX_SLAB_SUM_STAGES for s in bound)
+    assert all(hi <= lo for lo, hi in ranges)
     dX_w, dW_w = step(True)
     assert torch.equal(_bits(dX_w), _bits(dX))
     assert torch.equal(_bits(dW_w), _bits(dW))
