@@ -42,8 +42,8 @@ sm_100a / sm_103a record under its own name, on sm_107a only, with the same laun
 (``rows_per_cta`` 4: ``ceil(5 T / 4)`` CTAs in place of ``ceil(5 T / 2)``), and ``collapse_bwd__vjpwa_pfq2`` (the
 VJP staged by ``cp.async`` with an L2 prefetch of a later token) keeps the grid ``T`` and the dynamic shared memory.
 The base collapse records ship on sm_100a and sm_103a only.  On sm_107a ``collapse_forward`` holds two records chosen by
-the token count alone (``rows_between``, :data:`COLLAPSE_FWD_BAND`): ``collapse_fwd__m2`` up to 8191 tokens and
-``collapse_fwd__m2_xhnone`` from :data:`BAND_T` = 8192 tokens, the ``collapse_fwd__m2`` record under its own name (the
+the token count alone (``rows_between``, :data:`COLLAPSE_FWD_BAND`): ``collapse_fwd__m2`` up to 6655 tokens and
+``collapse_fwd__m2_xhnone`` from :data:`BAND_T` = 6656 tokens, the ``collapse_fwd__m2`` record under its own name (the
 same form reading ``X`` without the L2 evict-first policy) with every other fact the same.
 """
 
@@ -93,12 +93,12 @@ COLLAPSE_RECORD_ARCHES = {
 # its one record of COLLAPSE_RECORDS at every token count.
 COLLAPSE_FWD_BAND = {
     "sm_107a": (
-        ("collapse_fwd__m2", 0, 8191),
-        ("collapse_fwd__m2_xhnone", 8191, None),
+        ("collapse_fwd__m2", 0, 6655),
+        ("collapse_fwd__m2_xhnone", 6655, None),
     ),
 }
 # The first token count of sm_107a's ``collapse_fwd__m2_xhnone``.
-BAND_T = 8192
+BAND_T = 6656
 # Sub-tokens (token column parts) per CTA of the two collapse forwards' grids: ceil(5 T / rows_per_cta) CTAs.
 COLLAPSE_ROWS_PER_CTA = {"sm_100a": 2, "sm_103a": 2, "sm_107a": 4}
 BOARDS = (("sm_100a", 148), ("sm_103a", 152), ("sm_107a", 216))
@@ -131,6 +131,9 @@ ROWS = (
     2049,
     4096,
     4097,
+    6655,
+    6656,
+    6657,
     8191,
     8192,
     8193,
@@ -321,7 +324,7 @@ def test_collapse_records(mode: str, arch: str) -> None:
         assert tuple(rec["launch"]["block"]) == (256, 1, 1)
     assert bwd["select_rule"] is None
     # the forward: one record at every token count, or on sm_107a a token-count band of two records (rows_between,
-    # T <= 8191 / T >= 8192); the record above the edge is the one below under its own name, with every other fact the
+    # T <= 6655 / T >= 6656); the record above the edge is the one below under its own name, with every other fact the
     # same (the same form without the L2 evict-first policy on X)
     if arch in COLLAPSE_FWD_BAND:
         band = COLLAPSE_FWD_BAND[arch]
@@ -444,7 +447,7 @@ def test_the_sm107a_collapse_forward_band_reads_the_token_count_only(
     if mode == "det":
         paths += [{"path": path} for path in reg.PDL_PATHS]
     edge = (BAND_T - 2, BAND_T - 1, BAND_T, BAND_T + 1)
-    for rows in (1, 2, 4096, 6144, *edge, 16384, 65536, 131072):
+    for rows in (1, 2, 4096, 6144, *edge, 7168, 8191, 8192, 8193, 16384, 65536, 131072):
         want = (low if rows < BAND_T else high,)
         for path in paths:
             for iters in (20, 7):

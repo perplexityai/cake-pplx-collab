@@ -270,8 +270,8 @@ sm_100a / sm_103a records), and ``collapse_bwd__vjpwa_pfq2__h5120`` fills the
 VJP's shared-memory stage by ``cp.async`` and prefetches a later token's rows
 into L2 (the same grid and dynamic shared memory).  On sm_107a
 ``collapse_forward_h5120`` holds two records selected by the token count
-(``rows_between``): ``collapse_fwd__m2__h5120`` up to 8191 tokens and
-``collapse_fwd__m2_xhnone__h5120`` from 8192 tokens, the same form reading
+(``rows_between``): ``collapse_fwd__m2__h5120`` up to 6655 tokens and
+``collapse_fwd__m2_xhnone__h5120`` from 6656 tokens, the same form reading
 ``X`` without the L2 evict-first policy (the same outputs bit for bit, grid and
 launch facts; the same PDL edge ``K4->C``).  At hidden 5120 on
 sm_107a the token owner's programs of record are ``ao22_rae7_pd1_ntr_iu`` for
@@ -8261,7 +8261,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "collapse_fwd",
         "select_rule": {
             "above": 0,
-            "at_most": 8191,
+            "at_most": 6655,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -8308,7 +8308,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "collapse_fwd",
         "select_rule": {
-            "above": 8191,
+            "above": 6655,
             "at_most": None,
             "kind": "rows_between",
         },
