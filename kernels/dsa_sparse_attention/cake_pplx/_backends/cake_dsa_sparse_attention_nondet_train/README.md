@@ -28,7 +28,9 @@ JIT-built through the package's JIT shim from `build.json` otherwise (see
 ## Mode and names
 
 The module name states the mode and no entry point takes a `deterministic=`
-keyword.  This is the `nondet` package: the backward adds the dK / dV
+keyword (`with_o_lo`, see "Without the output residual", chooses whether the
+forward writes `o_lo` and how the backward forms `delta`; it is not a
+determinism switch).  This is the `nondet` package: the backward adds the dK / dV
 contributions with unordered FP32 atomics, and the package does not promise that
 any output repeats bit for bit, from run to run or across routes, views,
 layouts, streams or kernels running beside it.
@@ -44,8 +46,8 @@ the binding's row-length vector) and the validation of `dkv_acc` /
 `dkv_dst_map`.  It never falls back to another package.  A
 backward without query rows launches nothing and does not alert.  The
 deterministic package `cake_pplx.cake_dsa_sparse_attention_det_train` has
-the same entry points (`det` in place of `nondet`); its outputs repeat bit for
-bit run to run.
+the same entry points (`det` in place of `nondet`, without `with_o_lo`); its
+outputs repeat bit for bit run to run.
 
 The tests judge the accuracy of every floating output against an FP64
 reference: over 32 random inputs per case, the error of each output, in the L2
@@ -144,6 +146,9 @@ out = cake_dsa_sparse_attention_nondet_varlen(
   `lse = -inf`.  The autograd wrapper also keeps the BF16 output residual
   `o_lo = bf16(fp32(O) - bf16(O))`; the backward forms
   `delta = rowsum(dO * (O + O_lo))` in FP32 from the BF16 output and it.
+  With `with_o_lo=False` no `o_lo` is computed, stored or saved and the
+  backward forms `delta = rowsum(dO * O)` from the BF16 output alone (see
+  "Without the output residual").
 * Backward: `dq_latent`, `dq_rope` (computed once per row),
   `dkv_latent [S, 512]`, `dk_rope [S, 64]` (FP32 `red.global`
   accumulation, then a cast to natural-layout BF16).  BF16 MMA operands, FP32
@@ -226,7 +231,8 @@ context-parallel window):
   synchronizes).  The autograd `Function`s save every tensor their forward
   produces for the backward -- `out`, `lse`, `o_lo`, the index rows, the
   lengths -- through `ctx.save_for_backward` (a fixed list with a zero-size
-  placeholder for an absent `topk_length`, so non-reentrant
+  placeholder for an absent `topk_length`, and for `o_lo` under
+  `with_o_lo=False`, so non-reentrant
   `torch.utils.checkpoint` can match the recomputed tensors by position) and
   keep nothing else of size on `ctx`: after a checkpointed forward the entries
   retain ~0 MiB.  Saved-tensor hooks such as
@@ -483,8 +489,11 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
 * `fwd`: one CTA per query token gathers its top-k keys once (TMA gather) and
   produces `out`, the natural-log `lse` and the BF16 output residual `o_lo`.
   On `sm_107a` its scanner-warp build `fwd_scan` (416 threads) runs in its
-  place, with the same arguments, grid and outputs.
-* `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp.
+  place, with the same arguments, grid and outputs.  Under `with_o_lo=False`
+  its twin `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`) runs instead: same
+  arguments and grid, `out` and `lse` only.
+* `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp
+  (`bwd_delta_no_olo` under `with_o_lo=False`: `delta = rowsum(dO * O)`).
 * `bwd_main`: one CTA per query token (20 warps: gather, compute, reduce, MMA,
   load and metadata roles) recomputes S and P from the BF16 Q and the gathered
   K, forms dP and dS, accumulates dQ / dQ_rope in tensor memory (written once
@@ -644,9 +653,10 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   valid slot + 1 by default, bitwise `offset_gather_kv_indices`; `compact=True`
   the compacted rows and counts, with an optional `topk_length` cut),
   `prepare_dsa_nope_train` / `DSANopeTrainRunner`, `dsa_nope_train_workspace_size`,
-  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (13 forward inputs,
-  `sink` last and optional; gradients for `q`, `kv` and a `sink`).  The binding cache is shared; the NoPE keys are
-  tagged (`"nope_fwd"` / `"nope_bwd"`, and `"nope_bwd_prediction"` for the
+  `validate_dsa_nope_inputs`, `CakeDSASparseAttentionNondetNopeFunction` (14 forward inputs,
+  `sink` and `with_o_lo` last and optional; gradients for `q`, `kv` and a `sink`).  The binding cache is shared; the
+  NoPE keys are tagged (`"nope_fwd"` / `"nope_bwd"`, `"nope_fwd_no_olo"` / `"nope_bwd_no_olo"` under
+  `with_o_lo=False`, and `"nope_bwd_prediction"` for the
   autograd backward's predictions) and never collide with the rope keys.
 * `dkv` semantics.  Fresh (no `dkv_acc`): `backward_nope` returns a new natural
   FP32 `[S, 512]` buffer -- filled by the natural-layout main stage adding into
@@ -668,7 +678,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   tensor or a zero-argument callable producing it (or an `(accumulator,
   dkv_dst_map)` pair) at backward time, as for the rope entries.  Both NoPE
   autograd `Function`s save every produced backward operand -- the saved
-  outputs, `o_lo`, the global index rows, the lengths -- through
+  outputs, `o_lo` (a zero-size placeholder under `with_o_lo=False`), the global
+  index rows, the lengths -- through
   `ctx.save_for_backward` (seven tensors in a fixed order) and keep only
   options, geometry keys and the caller-owned accumulator on `ctx`, so a
   checkpointed forward retains nothing.
@@ -732,7 +743,8 @@ out = cake_dsa_sparse_attention_nondet_nope_varlen(
   `dout` of the predicted layout the backward's host work before its first
   launch is the layout checks of the saved rows and `dout`, the operands, the
   `delta` allocation and the delta stage's values -- no key completion and no
-  cache lookup.  The delta stage reads only `dout`, `out` and `o_lo` and launches
+  cache lookup.  The delta stage reads only `dout`, `out` and `o_lo` (`dout`
+  and `out` under `with_o_lo=False`) and launches
   first; the `dq` allocation, the other fresh buffers, the main stage's values
   and the zero fills of the FP32 buffers the call owns follow while it runs,
   then the main (and cast) stages.  Every check precedes the delta launch, and
@@ -811,7 +823,7 @@ Per row `t` and head `h`, over the valid slots `j`:
 s_j      = softmax_scale * <q[t,h], kv_j>
 lse[t,h] = log(sum_j exp(s_j) + exp(sink[h]))      # the sink is not scaled
 out      = BF16(sum_j exp(s_j - lse) * kv_j)       # the sink has no value term
-delta    = <dout[t,h], out + o_lo>
+delta    = <dout[t,h], out + o_lo>                  # <dout[t,h], out> under with_o_lo=False
 dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
 ```
 
@@ -846,7 +858,7 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   `(dq, None, dsink)` with a tensor `dkv_acc`; the packed step backward sums
   `dsink` over all packed rows of the call.  The autograd entries return
   `dsink` as the gradient of `sink` (the flat entry's thirteenth input, the
-  packed Function's sixteenth); the prepared runner's `backward()` returns
+  packed Function's sixteenth; `None` for the `with_o_lo` input after it); the prepared runner's `backward()` returns
   `(dq, dkv, dsink)`.  `lse` stays non-differentiable.  A call without query
   rows (`T = 0`) launches nothing on every architecture and gives a zero
   `dsink`.
@@ -866,6 +878,67 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
 * The deterministic package takes the same `sink` on its NoPE entries, with
   the same stages and the same `dsink` order.
 
+## Without the output residual (`with_o_lo=False`)
+
+Every entry -- the four autograd entries, the three step forwards and the
+three step backwards, and in this backend `forward`, `backward`,
+`forward_nope`, `backward_nope`, `forward_nope_varlen`, both
+`prepare_*` runners and the three autograd `Function`s -- takes `with_o_lo`, a
+keyword-only Python `bool` (default `True`; anything else raises
+`ValueError`).  No environment variable sets it: it chooses the accuracy class
+of the gradients and stays visible at the call site.
+
+```text
+with_o_lo=True   forward writes out, lse, o_lo     delta = rowsum(dout * (out + o_lo))   FP32
+with_o_lo=False  forward writes out, lse           delta = rowsum(dout * out)            FP32
+```
+
+* `True` (default) is the behaviour of every earlier release: the same stages,
+  libraries, binding keys and saved tensors.  `o_lo` keeps the gradients
+  accurate on peaked rows (rows whose softmax puts almost all weight on one
+  key).
+* `False` runs the twins of `cake_jit.NO_OLO_STAGES` in place of the forward
+  and the delta stage: `fwd_no_olo`, `nope_fwd_no_olo` and
+  `nope_fwd_sink_no_olo` on `sm_100a` / `sm_103a` (their scanner-warp builds
+  `fwd_scan_no_olo`, `nope_fwd_scan_no_olo` and `nope_fwd_scan_sink_no_olo` on
+  `sm_107a`), and `bwd_delta_no_olo` / `nope_bwd_delta_no_olo` (one library
+  shared by both programs, every architecture).  The forward twins take the
+  default stage's arguments, grid and launch geometry and leave the `o_lo`
+  operand unwritten; the delta twin reads `dout` and `out` alone, the form
+  cuDNN's DSA backward uses, so on peaked rows the gradient error grows to
+  that class.  The main, compaction, cast and sink-gradient stages are the
+  default ones (`dsink` follows the twin's `delta`).  `out` and `lse` have
+  the same accuracy in both modes.
+* No `o_lo` is allocated, written or saved: 64 KiB less written and saved per
+  query token (2 GiB at `T = 32,768`).  The kernels' `o_lo` operand is a
+  cached zero-size BF16 placeholder chosen from the plan's mode alone, and
+  the autograd `Function`s keep their saved-list length and order (the `o_lo`
+  slot holds a zero-size placeholder), so non-reentrant checkpointing still
+  matches by position.  The workspace layouts are the same in both modes.
+* Step entries: the step forwards return `None` in the `o_lo` slot (`(out,
+  lse, None)`, the packed form `(out, lse, None, indices, topk_length)`); a
+  step backward takes `o_lo=None` with `with_o_lo=False`.  `o_lo` is `None`
+  exactly when `with_o_lo` is `False`: a tensor with `False`, or `None` with
+  `True` on a call with query rows, raises `ValueError` before any other
+  check, plan, allocation or launch.  A default call without query rows
+  accepts `o_lo=None` (it launches nothing).  A runner prepared with
+  `with_o_lo=False` refuses an `o_lo=` tensor; its `o_lo` and the third
+  element of `forward()` are `None`.
+* Binding keys: the first slot gains `_no_olo` (`"fwd_no_olo"`,
+  `"bwd_no_olo"`, `"rope_varlen_fwd_no_olo"`, `"nope_fwd_no_olo"`,
+  `"nope_bwd_no_olo"`); every other slot keeps its position and every default
+  key is unchanged.  The NoPE autograd backward's prediction keys carry the
+  tag through `key[:7]`.
+* Autograd `apply`: `with_o_lo` is the last input of each `Function` (the rope
+  `Function`'s sixteenth after `launched`, the flat NoPE `Function`'s
+  fourteenth after `sink`, the packed NoPE `Function`'s seventeenth after
+  `sink`); the entries pass it only when it is `False`, so a default call
+  applies the same inputs as before.  Each backward returns one gradient per
+  input it received.
+* A checkout whose record lacks a twin for the device's architecture raises
+  `NotImplementedError` naming the twin and the architecture;
+  `generated_program_available(..., with_o_lo=False)` is `False` there.
+
 ## Layout of this package
 
 * `cake_jit.py` -- the `MODULES` registry (one record per program, the rope
@@ -879,17 +952,22 @@ dsink[h] = -sum_t exp(sink[h] - lse[t,h]) * delta[t,h]
   program)` loads through `cake_build`.  Stages of the two programs that
   share a kernel name the same library stem.  A stage entry may narrow the
   record's architectures with its own `arches` (`fwd_scan` / `nope_fwd_scan` /
-  `nope_fwd_scan_sink`: `sm_107a`; `fwd` / `nope_fwd` / `nope_fwd_sink`:
-  `sm_100a`, `sm_103a`); `SCAN_STAGES` and
+  `nope_fwd_scan_sink` and their twins `fwd_scan_no_olo` /
+  `nope_fwd_scan_no_olo` / `nope_fwd_scan_sink_no_olo`: `sm_107a`; `fwd` /
+  `nope_fwd` / `nope_fwd_sink` and their twins `fwd_no_olo` /
+  `nope_fwd_no_olo` / `nope_fwd_sink_no_olo`: `sm_100a`, `sm_103a`);
+  `NO_OLO_STAGES` maps each default forward and delta stage to its
+  `with_o_lo=False` twin; `SCAN_STAGES` and
   `stage_for` resolve a forward on `sm_107a` to its scanner-warp stage, and
   `library_name` returns that stage's library.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
   package (byte-identical copies) and this package's build manifest (schema
   `cake-build/1`, written by the export): one entry per `<library>_<arch>`
-  (nineteen libraries over fifteen kernel sources, four of them compiled a
-  second time with `-DDKV_NATURAL=1`; sixteen on each architecture: the three
-  scanner-warp forwards on `sm_107a` only, and `fwd` / `nope_fwd` /
-  `nope_fwd_sink` on `sm_100a` and `sm_103a`) with
+  (twenty-six libraries over twenty-two kernel sources, four of them compiled
+  a second time with `-DDKV_NATURAL=1`; twenty on each architecture, sixty
+  entries: the six scanner-warp forwards on `sm_107a` only, and `fwd` /
+  `nope_fwd` / `nope_fwd_sink` and their `_no_olo` twins on `sm_100a` and
+  `sm_103a`) with
   its translation
   units, digests, nvcc flags (`--use_fast_math` per stage, plus the natural
   variants' specialization defines), closure digest and `aot/<name>.so`
@@ -928,12 +1006,17 @@ backward preprocess, backward main (single-pass and key-range-pass form with
 its compaction, each with its natural-layout direct-accumulation variant) and
 cast stages plus the key-range-pass and direct-accumulation policies, exported
 from the kernel snapshot named in the pull request, and the NoPE program's
-record with its thirteen stages (the forward and, on `sm_107a`, its
+record with its eighteen stages (the forward and, on `sm_107a`, its
 scanner-warp build `nope_fwd_scan`; the delta, compaction and cast kernels
 shared with the rope program; the trainable-sink stages `nope_fwd_sink` (on
-`sm_107a` its scanner-warp build `nope_fwd_scan_sink`) and `nope_bwd_dsink`)
+`sm_107a` its scanner-warp build `nope_fwd_scan_sink`) and `nope_bwd_dsink`;
+the five `with_o_lo=False` twins `nope_fwd_no_olo`, `nope_bwd_delta_no_olo`,
+`nope_fwd_scan_no_olo`, `nope_fwd_sink_no_olo` and
+`nope_fwd_scan_sink_no_olo`)
 and its own key-range-pass and
-direct-accumulation policies (see "NoPE (zero-rope) program").
+direct-accumulation policies (see "NoPE (zero-rope) program").  The rope
+record also carries the twins `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`)
+and `bwd_delta_no_olo` (see "Without the output residual").
 
 Tests: `tests/experimental/test_cake_dsa_sparse_attention_nondet_train.py` (the backend suite: imports
 only this package; skips without a registered program or a compute capability
