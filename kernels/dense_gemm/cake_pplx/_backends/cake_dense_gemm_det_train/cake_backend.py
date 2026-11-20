@@ -186,8 +186,13 @@ W8_FORMS = (
     "w8r",
     "w8rs",
     "w8",
-)  # the eight-warp CTA form of the input-gradient GEMM (instance_key field 37; ``_w8r`` / ``_w8rs`` / ``_w8`` symbols;
-# ``w8`` = the knob-free program)
+    "w8rel",
+    "w8relf",
+)  # the eight-warp CTA form of the input-gradient GEMM (instance_key field 37; ``_w8r`` / ``_w8rs`` / ``_w8`` /
+# ``_w8rel`` / ``_w8relf`` symbols; ``w8`` = the knob-free program, ``w8rel`` = the ``w8r`` program with the start path,
+# ``w8relf`` = the same with the epilogue's TMEM free)
+# the eight-warp forms with the start path: no batch raster and no store hint
+_W8_START_FORMS = ("w8rel", "w8relf")
 PD_CHOICES = (
     0,
     1,
@@ -720,21 +725,30 @@ def instance_key(
     odd chunks (warp - 2) steps), so each per-item eight-store burst becomes a seven-step ramp; the stores and
     bytes are unchanged.  A step count >= 0 that needs that drain (``slots`` > 0, ``pd`` 2, no fp32 output);
     every other field is unchanged and the OFF form renders byte-identical.  ``form`` (field 37 = LAST, symbol
-    ``_w8r`` / ``_w8rs`` / ``_w8`` directly after ``_pro<n>`` and before the diag tokens; "" = the ten-warp pipeline
+    ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf`` directly after ``_pro<n>`` and before the diag tokens;
+    "" = the ten-warp pipeline
     of every other program) selects the eight-warp CTA form of the same GEMM: ``w8r`` = four epilogue warps, a
     loader, a scheduler and the MMA warp on CTA-pair 256 x 256 tiles over six 32 KiB stages, whole tiles through
     cluster-launch-control items, the BF16 output through the TMA store and the raster quotients resolved by four
     fast divisors the host passes (``fd_tiles_l`` / ``fd_tiles_g`` / ``fd_group`` / ``fd_last``), with the
     accumulator released by every epilogue warp after its last read; ``w8rs`` = the same with the loader's elected
     lane issuing the cluster-launch-control queries (no scheduler warp); ``w8`` = the knob-free program of the form
-    (sm_100a): the scheduler warp issues the queries and the accumulator is released once per tile.  It is refused
+    (sm_100a): the scheduler warp issues the queries and the accumulator is released once per tile; ``w8rel`` = the
+    ``w8r`` program with the start path (sm_100a and sm_103a): the loader's elected lane prefetches the first item's
+    first K-step boxes into L2 in the prologue, the pair's landing barriers are armed and waited on at cluster scope,
+    each role waits on the cluster rendezvous just before its first operation that needs the peer CTA and the MMA
+    warp allocates the pair's TMEM itself at the constant base 0; ``w8relf`` = the same with the epilogue freeing the
+    TMEM under the last item's store drain (both keep every ring, item, MMA and summation order of ``w8r``: its
+    bits).  It is refused
     with every field it cannot
     carry: a layout other than ``kn``, an fp32 or transposed output, the single-CTA form, a tile other than the
     128 x 256 pair tile, an epilogue other than the one-slot TMA store, a narrow B panel, a box cap, any tail or
     raster form (``sk_exact`` / ``sk_first`` / ``sk_sync`` / ``sk_slab`` / ``htail`` / ``cgrp`` / ``batch_group`` /
     ``stt`` / ``ovl`` / ``ovr`` / ``park``) and any pair-program knob off its plain value (``pd`` / ``pro`` / ``lw`` /
     ``mg`` / ``sw`` / a non-default stage count / ``hints`` / ``pf`` / ``sh`` / ``store_hint`` / ``store_ef`` /
-    ``quad_store`` / ``f32_v8``); the OFF form renders byte-identical.  ``kser`` (field 38 = LAST, symbol ``_ks<P>``
+    ``quad_store`` / ``f32_v8``); the head-interleaved batch raster G > 1 and, with it, the ``evict_last`` store hint
+    (the batched MLA programs' knobs) are admitted with the other forms and refused with ``w8rel`` / ``w8relf``;
+    the OFF form renders byte-identical.  ``kser`` (field 38 = LAST, symbol ``_ks<P>``
     directly after ``_sw<n>`` and before ``_pro<n>``; 0 = off) is the serpentine K walk of the pair programs: the load
     warp walks the K blocks of a whole-K item (every K block of its tile in one item) whose item index lies in an odd
     block of P items descending, so a wave of P pairs starts on the K end the previous wave left in L2; the MMA warp is
@@ -1098,6 +1112,7 @@ def instance_key(
         or sh
         or store_hint not in ("none", "evict_last")
         or (store_hint != "none" and batch_group <= 1)
+        or (form in _W8_START_FORMS and (batch_group or store_hint != "none"))
         or store_ef
         or quad_store
         or f32_v8
@@ -1105,11 +1120,12 @@ def instance_key(
         # the eight-warp CTA form is written for the kn bf16 row-major 128 x 256 pair tile with the one-slot TMA-store
         # epilogue, whole tiles and none of the pair programs' pipeline knobs (the kernel's frozen configurations); the
         # head-interleaved batch raster (``batch_group`` G > 1) and, with it, the ``evict_last`` store hint are the
-        # kernel's own knobs (the batched MLA programs)
+        # kernel's own knobs (the batched MLA programs), which the start path of ``w8rel`` / ``w8relf`` excludes
         raise ValueError(
             f"form (the eight-warp CTA form) must be one of {W8_FORMS} on the kn bf16 row-major 128 x 256 pair tile "
             f"with the one-slot TMA-store epilogue, the default stage count, plain hints and no tail, raster (but a "
-            f"batch group G > 1) or pipeline knob (but the evict_last store hint with a batch group); got "
+            f"batch group G > 1 outside {_W8_START_FORMS}) or pipeline knob (but the evict_last store hint with a "
+            f"batch group); got "
             f"form={form!r}, a_mn={a_mn}, b_mn={b_mn}, out_f32={out_f32}, out_t={out_t}, "
             f"cta1={cta1}, block_n={block_n}, cta_rows={cta_rows}, epi={epi!r}, slots={slots}, b_swz={b_swz}, "
             f"box_rows={box_rows}, stages={stages}, hints={hints}, pd={pd}, pro={pro}, lw={lw}, mg={mg}, sw={sw}, "
@@ -1298,8 +1314,8 @@ def instance_symbol(key: tuple) -> str:
     ``_pro`` (``lw``); ``_mg`` directly after ``_lw`` for the whole-tile tile resolve (``mg``); ``_sw<n>`` directly
     after ``_mg`` for the paced output stores (``sw``, absent when 0); ``_ks<P>`` directly after ``_sw<n>`` for the
     serpentine K walk (``kser``, absent when 0); ``_kc<KC>`` directly after ``_ks<P>`` and before ``_pro<n>`` for the
-    promoted chunks (``promote_blocks``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` directly after
-    ``_pro<n>`` and before the diag tokens for the eight-warp CTA form (``form``, absent when "")).
+    promoted chunks (``promote_blocks``, absent when 0); ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``
+    directly after ``_pro<n>`` and before the diag tokens for the eight-warp CTA form (``form``, absent when "")).
     [Cake ``instance_symbol``]"""
     (
         a_mn,
@@ -2254,13 +2270,19 @@ ROW_RULE_MIN_T: dict[tuple, tuple[tuple[int, dict], ...]] = {
 # ``(arch, sm_count) -> {key: rule}`` (keys as ``ROW_RULES``).  Such a rule replaces the row's rule on that part alone:
 # the architecture's other parts, its child architectures (``RULE_PARENT``) and every other token count keep the row's
 # ``ROW_RULES`` entry.  The 148-SM sm_100a entries are the fp32 input gradients 4096 -> 32 / 48 / 64 / 128,
-# 5120 -> 32 / 48 / 64 / 128 and 8192 -> 128 and the fp32 6144 -> 128 input gradient, at the token counts measured on
-# B200: the single-CTA program with 128-column tiles, two TMA-store slots and four stages, over the raster group of the
-# row's rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output
-# equal to that plan's bit for bit at every measured key.  Since version 0.3.8 the 148- and 152-SM sm_103a parts and
-# the 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and
-# 8192 -> 128, on 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below);
-# since version 0.3.9 the 152-SM sm_103a part runs it in raster groups of 2 on 8192 -> 128 at T 16231 - 16384.
+# 5120 -> 32 / 48 / 64 / 128 and the fp32 6144 -> 128 input gradient, at the token counts measured on B200: the
+# single-CTA program with 128-column tiles, two TMA-store slots and four stages, over the raster group of the row's
+# rule (16; 2 on 6144 -> 128).  Against the row's plan on two B200 parts: 1.02 to 1.06 times faster, the output equal
+# to that plan's bit for bit at every measured key.  Since version 0.3.8 the 148- and 152-SM sm_103a parts and the
+# 152-SM sm_100a part run the same rule on these rows (on 148-SM sm_103a parts all but 5120 -> 128 and 8192 -> 128, on
+# 152-SM sm_100a parts all but 8192 -> 128) over token ranges (``ROW_RULE_RANGES_BY_SM`` below); since version 0.3.9
+# the 152-SM sm_103a part runs it in raster groups of 2 on 8192 -> 128 at T 16231 - 16384.  Version 0.3.10 runs it in
+# small raster groups over token ranges of the 148-SM parts (below): on 148-SM sm_103a parts also on 8192 -> 128; on
+# 148-SM sm_100a parts on 8192 -> 128 instead of its two keys here (T 16231 and 16384, raster groups of 16) and on
+# 5120 -> 128 and 6144 -> 128 at T 16384 - 32768, beyond the token counts of their keys here.  Version 0.3.11 runs it
+# in small raster groups over more token ranges of the 152-SM sm_100a part (below): on 8192 -> 128 at T 16172 and
+# 16231 - 32768, on 5120 -> 128 at T 16231 (between its two ranges of version 0.3.8) and on 6144 -> 128 at
+# T 16231 - 16384 (after its range of version 0.3.8 at T 16172).
 # fmt: off
 _SM100A_148_DGRAD_F32 = {"block_n": 128, "epi": 'tma', "slots": 2, "stages": 4, "cta1": True}
 ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
@@ -2276,7 +2298,6 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
                 (5120, 48, (16231, 16384)),
                 (5120, 64, (16231, 16384)),
                 (5120, 128, (16231,)),
-                (8192, 128, (16231, 16384)),
             )
             for T in Ts
         },
@@ -2353,7 +2374,8 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #     5120 -> 128 and 8192 -> 128): 4096 -> 32 / 48 / 64 / 128 and 5120 -> 32 / 48 / 64 at T 16172 - 16384,
 #     5120 -> 128 at T 16172 and at T 16384 (two ranges of one token count each), 6144 -> 128 at T 16172 alone;
 #     1.021 to 1.063 times faster.  6144 -> 128 missed the bar at T 16231 and 16384 (it met it in three of the four
-#     node and mode pairs) and 8192 -> 128 at T 16172 and 16384: they keep their plan there.
+#     node and mode pairs) and 8192 -> 128 at T 16172 and 16384: they kept their plan there up to version 0.3.10
+#     (version 0.3.11 runs both in small raster groups there: below).
 # Version 0.3.9 runs two GB300 (152-SM sm_103a) FP32 input gradients of that program in raster groups of 2 row tiles,
 # measured on two GB300 nodes against the plan of version 0.3.8 (the same program in raster groups of 16) with the
 # paired rounds above: the indexer_hw input gradient 6144 -> 32 (whose plan before is its ``ROW_RULES`` rule of
@@ -2362,6 +2384,74 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # plan there), and 8192 -> 128 at T 16231 - 16384, 1.063 to 1.071 times faster (at T 16172 the plan before was more
 # than 1% off a second copy of itself in three of the four pairs, so T 16172 - 16230 keep the group of 16).  The raster
 # group changes which tiles run side by side, not the sum of any tile: the outputs were equal bit for bit.
+# Version 0.3.10 runs that program in small raster groups on B300 (148-SM sm_103a) and B200 (148-SM sm_100a) FP32 input
+# gradients, measured at T 8192, 16231, 16384 and 32768 on two nodes of each part against the plan of version 0.3.9
+# with the paired rounds above (groups of 2 and 4, of 4 and 8 on the B300 indexer_hw row; of two groups that met the
+# bar the faster, the smaller within 0.005); the outputs were equal to that plan's bit for bit at every measured T:
+#   * B300: 8192 -> 128 in groups of 2 at T 8192 - 32768, 1.027 to 1.052 times faster than the plan before
+#     (``kn_n256_f32_tma2_pd2_pro15``); the indexer_hw input gradient 6144 -> 32 in groups of 4 at T 8192 alone, 1.015
+#     to 1.018 times faster than the same program in groups of 16 (at T 16231 - 32768 the groups missed the bar).
+#     5120 -> 128 keeps its plan: at T 8192 both groups met the bar, but the plan before was more than 1% off a second
+#     copy of itself in one of the four node and mode pairs, and at T 16231 - 32768 they missed it;
+#   * B200: 8192 -> 128 in groups of 2 at T 8192 - 32768 (instead of its part rules of groups of 16 at T 16231 and
+#     16384 and ``kn_n256_f32_tma2_pd2_pro15`` elsewhere), 1.038 to 1.078 times faster; 5120 -> 128 and the indexer_k
+#     input gradient 6144 -> 128 in groups of 2 at T 16384 - 32768 (plans before ``kn_n256_f32_tma2_pd2_pro15`` and
+#     ``kn_n128_f32_tma1_pro7``), 1.020 to 1.027 and 1.015 to 1.025 times faster (at T 8192 and 16231 the groups
+#     missed the bar, or on 6144 -> 128 at T 16231 are its part rule already); indexer_hw 6144 -> 32 in groups of 4 at
+#     T 16231 and of 2 at T 32768, 1.015 to 1.019 and 1.019 to 1.020 times faster (at T 8192 and 16384 it missed it).
+# Version 0.3.11 runs that program in small raster groups on GB200 (152-SM sm_100a) FP32 input gradients, measured at
+# T 16172, 16231, 16384 and 32768 on two GB200 nodes against the plan of version 0.3.10 with the paired rounds and the
+# bar of version 0.3.10 (groups of 2 and 4; of two groups that met the bar the one with the higher lowest node and
+# mode median, the smaller within 0.005); the outputs were equal to that plan's bit for bit at every measured T on both
+# nodes, also where the program changes (as in version 0.3.8, the plan before sums each output element's K in the
+# same order):
+#   * the indexer_hw input gradient 6144 -> 32 in groups of 2 at T 16172 - 32768, 1.030 to 1.042 times faster than
+#     the same program in the default group of 16 (the row's ``ROW_RULES`` rule);
+#   * 8192 -> 128 in groups of 4 at T 16172 and of 2 at T 16231 - 32768, 1.037 to 1.070 times faster than
+#     ``kn_n256_f32_tma2_pd2_pro15``;
+#   * 5120 -> 128 in groups of 2 at T 16231 alone, 1.055 to 1.064 times faster than ``kn_n256_f32_tma2_pd2_pro15``.
+#     At T 16172 and 16384 (its ranges of version 0.3.8, the group of 16) the groups missed the bar (medians 1.006 to
+#     1.019), and at T 32768 too (0.983 to 1.006): these keep their plan;
+#   * the indexer_k input gradient 6144 -> 128 in groups of 2 at T 16231 - 16384, 1.017 to 1.024 times faster than
+#     ``kn_n128_f32_tma1_pro7``.  At T 16172 its range of version 0.3.8 runs the group of 2 already; at T 32768 the
+#     groups missed the bar (medians 1.012 to 1.016, not every node and mode pair a win) and the row keeps its plan.
+# Version 0.3.12 runs the start-path eight-warp programs on the BF16 input gradients 4096 -> 32 / 48 / 64 / 128,
+# 5120 -> 32 / 48 / 64 / 128, 8192 -> 128, indexer_hw 6144 -> 32 and indexer_k 6144 -> 128 on 148- and 152-SM sm_100a
+# and sm_103a parts: ``kn_n256_tma1_w8relf`` (``_W8RELF_DGRAD_BF16``), on GB200 5120 -> 48 at T 32768
+# ``kn_n256_tma1_w8rel`` (``_W8REL_DGRAD_BF16``).  They were measured at T 16172, 16231, 16384 and 32768 on two nodes of
+# each part (B200, GB200, B300 and GB300) against the plan of version 0.3.11 with the paired rounds and the bar of
+# version 0.3.10 (of two forms that met the bar the one with the higher lowest node and mode median, ``w8relf`` within
+# 0.005); the outputs were equal to that plan's bit for bit at every measured T on both nodes.  A range runs from one
+# measured T to another and holds no measured T that missed the bar; its plans were 1.021 to 1.091 times faster than
+# the plan before on B200, 1.020 to 1.095 on GB200, 1.017 to 1.094 on B300 and 1.015 to 1.077 on GB300 (the lowest and
+# highest node and mode medians).  On sm_100a a range replaces the GB T-exact rule of 4096 -> 48 (``_tma1_w8r``) at
+# T 16231 on both parts and at T 16384 on 148 SMs.  A range's rule holds for its form: a caller that forces another
+# form (the ten-warp program included) plans with the row's rule without the part tables, as in version 0.3.11.
+# Neither form met the bar at these, which keep their plan:
+#   * B200: 4096 -> 64 at T 16172 and 16231 (medians 1.048 to 1.077, but a paired win in one or two of the four node
+#     and mode pairs), and 5120 -> 128, 8192 -> 128 and indexer_k at T 32768 (0.999 to 1.018);
+#   * GB200: 4096 -> 48 and 5120 -> 128 at T 16384 (1.019 to 1.061, a paired win in three of the four pairs);
+#   * B300: 4096 -> 48, 8192 -> 128 and indexer_k at T 32768 (1.000 to 1.013);
+#   * GB300: 5120 -> 64 and 8192 -> 128 at every measured T (0.995 to 1.026), and 4096 -> 32 and indexer_k at T 32768
+#     (1.001 to 1.017); 5120 -> 64 at T 16172 and 4096 -> 32 at T 32768 kept their plan up to version 0.3.12 (version
+#     0.3.13 runs both in raster groups of 32 there: below).
+# Version 0.3.13 runs the start-path program ``kn_n256_tma1_w8relf`` in raster groups of 32 or 2 row tiles on three BF16
+# input gradients of the 152-SM parts, each range at one measured T: the rule of version 0.3.12 (``_W8RELF_DGRAD_BF16``)
+# with ``group_m``.  Measured at T 16172, 16231, 16384 and 32768 on two nodes of each part against the plan of version
+# 0.3.12 with the paired rounds and the bar of version 0.3.10 (groups of 32 and 64 on GB300, of 2 and 4 on GB200; of two
+# groups that met the bar the one with the higher lowest node and mode median, the smaller within 0.005); the outputs
+# were equal to that plan's bit for bit at every measured T on both nodes, also where the program changes:
+#   * GB300 (152-SM sm_103a): 4096 -> 32 in groups of 32 at T 16172, 1.019 to 1.029 times faster than the same program
+#     in the default group of 16 (its range of version 0.3.12; T 16173 - 16384 keep it), and at T 32768, 1.040 to
+#     1.050 times faster than the plan of version 0.3.11 (the row's ``ROW_RULES`` rule, a kept cell of version 0.3.12);
+#     5120 -> 64 in groups of 32 at T 16172, 1.018 to 1.023 times faster than the plan of version 0.3.11 (the row had no
+#     range of version 0.3.12 on this part).  4096 -> 32 at T 16231 and 16384 and 5120 -> 64 at T 16231, 16384 and
+#     32768 keep their plan: the group of 32 had medians of 1.002 to 1.029 but a paired win in two or three of the four
+#     node and mode pairs, the group of 64 medians of 0.979 to 1.020 and a paired win in at most one;
+#   * GB200 (152-SM sm_100a): 5120 -> 32 in groups of 2 at T 32768, 1.015 to 1.021 times faster than the same program
+#     in the default group of 16 (its range of version 0.3.12 keeps T 16172 - 32767).  4096 -> 32 and the indexer_hw
+#     input gradient 6144 -> 32 at every measured T and 5120 -> 32 at T 16172, 16231 and 16384 keep their plan: the
+#     groups had medians of 0.999 to 1.023 and a paired win in at most three of the four pairs.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2389,6 +2479,8 @@ _SM107A_212_F32_V8 = {"epi": 'reg', "f32_v8": True, "pro": 15}
 _SM107A_212_F32_V8_SK2 = {"epi": 'reg', "f32_v8": True, "sk_parts": 2, "pro": 15}
 _SM107A_212_F32_M256_HT = {"cta_rows": 256, "htail": True}
 _SM107A_212_F32_M256_SK3 = {"cta_rows": 256, "sk_parts": 3}
+_W8REL_DGRAD_BF16 = {"form": 'w8rel', "epi": 'tma', "slots": 1, "sk": False}
+_W8RELF_DGRAD_BF16 = {"form": 'w8relf', "epi": 'tma', "slots": 1, "sk": False}
 ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, dict], ...]]] = {
     ("sm_107a", 212): {
         ('sm_107a', True, True, True, False, False, 12288, None, 4096): ((4096, 16384, _SM107A_212_F32_SKS),),
@@ -2418,6 +2510,24 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             )
         },
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_103a', False, True, True, False, False, 8192, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_103a', False, True, True, False, False, 6144, 32, None): ((8192, 8192, {**_SM100A_148_DGRAD_F32, "group_m": 4}),),
+        **{
+            ('sm_103a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 32, 16172, 32768),
+                (4096, 48, 16172, 16384),
+                (4096, 64, 16172, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 64, 16172, 32768),
+                (5120, 128, 16172, 32768),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+                (8192, 128, 16172, 16384),
+            )
+        },
     },
     ("sm_103a", 152): {
         **{
@@ -2439,6 +2549,25 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
         ),
         ('sm_103a', False, True, True, False, False, 6144, 128, None): ((16172, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
         ('sm_103a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {"block_n": 128, "slots": 2, "stages": 4, "cta1": True, "group_m": 2}),),
+        ('sm_103a', False, True, False, False, False, 4096, 32, None): (
+            (16172, 16172, {**_W8RELF_DGRAD_BF16, "group_m": 32}),
+            (16173, 16384, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, {**_W8RELF_DGRAD_BF16, "group_m": 32}),
+        ),
+        ('sm_103a', False, True, False, False, False, 5120, 64, None): ((16172, 16172, {**_W8RELF_DGRAD_BF16, "group_m": 32}),),
+        **{
+            ('sm_103a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 48, 16172, 32768),
+                (4096, 64, 16172, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 128, 16172, 32768),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+            )
+        },
     },
     ("sm_100a", 152): {
         **{
@@ -2453,8 +2582,73 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
                 (5120, 64),
             )
         },
-        ('sm_100a', False, True, True, False, False, 5120, 128, None): ((16172, 16172, dict(_SM100A_148_DGRAD_F32)), (16384, 16384, dict(_SM100A_148_DGRAD_F32))),
-        ('sm_100a', False, True, True, False, False, 6144, 128, None): ((16172, 16172, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_100a', False, True, True, False, False, 5120, 128, None): (
+            (16172, 16172, dict(_SM100A_148_DGRAD_F32)),
+            (16231, 16231, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+            (16384, 16384, dict(_SM100A_148_DGRAD_F32)),
+        ),
+        ('sm_100a', False, True, True, False, False, 6144, 128, None): (
+            (16172, 16172, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+            (16231, 16384, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+        ),
+        ('sm_100a', False, True, True, False, False, 8192, 128, None): (
+            (16172, 16172, {**_SM100A_148_DGRAD_F32, "group_m": 4}),
+            (16231, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+        ),
+        ('sm_100a', False, True, True, False, False, 6144, 32, None): ((16172, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        **{
+            ('sm_100a', False, True, False, False, False, N, K, None): ((16172, 32768, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K in (
+                (4096, 32),
+                (4096, 64),
+                (4096, 128),
+                (5120, 64),
+                (6144, 32),
+                (6144, 128),
+                (8192, 128),
+            )
+        },
+        ('sm_100a', False, True, False, False, False, 5120, 32, None): (
+            (16172, 32767, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, {**_W8RELF_DGRAD_BF16, "group_m": 2}),
+        ),
+        ('sm_100a', False, True, False, False, False, 4096, 48, None): (
+            (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
+        ),
+        ('sm_100a', False, True, False, False, False, 5120, 48, None): (
+            (16172, 16384, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8REL_DGRAD_BF16)),
+        ),
+        ('sm_100a', False, True, False, False, False, 5120, 128, None): (
+            (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
+            (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
+        ),
+    },
+    ("sm_100a", 148): {
+        ('sm_100a', False, True, True, False, False, 8192, 128, None): ((8192, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_100a', False, True, True, False, False, 5120, 128, None): ((16384, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_100a', False, True, True, False, False, 6144, 128, None): ((16384, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),),
+        ('sm_100a', False, True, True, False, False, 6144, 32, None): (
+            (16231, 16231, {**_SM100A_148_DGRAD_F32, "group_m": 4}),
+            (32768, 32768, {**_SM100A_148_DGRAD_F32, "group_m": 2}),
+        ),
+        **{
+            ('sm_100a', False, True, False, False, False, N, K, None): ((lo, hi, dict(_W8RELF_DGRAD_BF16)),)
+            for N, K, lo, hi in (
+                (4096, 32, 16172, 32768),
+                (4096, 48, 16172, 32768),
+                (4096, 64, 16384, 32768),
+                (4096, 128, 16172, 32768),
+                (5120, 32, 16172, 32768),
+                (5120, 48, 16172, 32768),
+                (5120, 64, 16172, 32768),
+                (5120, 128, 16172, 16384),
+                (6144, 32, 16172, 32768),
+                (6144, 128, 16172, 16384),
+                (8192, 128, 16172, 16384),
+            )
+        },
     },
 }
 # fmt: on
@@ -3032,11 +3226,12 @@ class CakeDenseGemmDetProjectionPlan:
     # the bf16 TMA-store pd-2 drain delays its bulk tensor store issue - a program knob, no launch argument, no plan
     # arithmetic (0 = off)
     sw: int = 0
-    # the eight-warp CTA form (instance_key field 37, ``_w8r`` / ``_w8rs`` / ``_w8``; "" = the ten-warp pipeline): the
-    # same GEMM through four epilogue warps, a loader, a scheduler (``w8r``; ``w8`` = the knob-free program without the
-    # early accumulator release) or the loader's elected lane in its place (``w8rs``) and the MMA warp, whole kn bf16
-    # TMA-store tiles only; a program knob that adds the raster's four fast divisors to the launch (``_k1_values``) and
-    # changes no plan arithmetic
+    # the eight-warp CTA form (instance_key field 37, ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``; "" =
+    # the ten-warp pipeline): the same GEMM through four epilogue warps, a loader, a scheduler (``w8r``; ``w8`` = the
+    # knob-free program without the early accumulator release; ``w8rel`` / ``w8relf`` = ``w8r`` with the start path,
+    # ``w8relf`` with the epilogue's TMEM free) or the loader's elected lane in its place (``w8rs``) and the MMA warp,
+    # whole kn bf16 TMA-store tiles only; a program knob that adds the raster's four fast divisors to the launch
+    # (``_k1_values``) and changes no plan arithmetic
     form: str = ""
     # the serpentine K walk (instance_key field 38, ``_ks<P>``): the load warp walks the K blocks of a whole-K item in
     # an odd block of P items descending (P = ``sm_pairs``: the wave guard keeps the rule's value on devices with P
@@ -3444,13 +3639,16 @@ def cake_dense_gemm_det_train_projection_plan(
     pd-2 drain (a caller-forced register epilogue or ``slots`` 0, another ``pd``, the fp32 output) or is the
     single-CTA form; a caller-forced ``sw`` is admitted or refused by ``instance_key`` (the kernel's refusal: a step
     count >= 0 on that drain only).  It changes neither a launch argument nor the plan arithmetic.  ``form``
-    (``_w8r`` / ``_w8rs`` / ``_w8``) is the row's eight-warp CTA form - taken from the rule (the six sm_103a
+    (``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``) is the row's eight-warp CTA form - taken from the
+    rule (the six sm_103a
     input-gradient rules that carry it, 4096 -> 48, 4096 -> 512, 4096 -> 1024, 5120 -> 512, 5120 -> 1024 and the
     kv_a 6144 -> 576, and the five sm_100a input-gradient rules, 4096 -> 512, 4096 -> 1024, 5120 -> 512,
-    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows) and dropped where the plan is not
+    5120 -> 1024 and the kv_a 6144 -> 576, name whole-tile kn bf16 TMA-store rows; the start-path forms ``w8rel`` /
+    ``w8relf`` are named by the token ranges of version 0.3.12) and dropped where the plan is not
     whole-tile or a caller forces a pipeline,
     tile, output, epilogue, tail or raster
-    knob (the row's program above the form runs the plan asked for); where it survives, the rule's pair-program knobs
+    knob, or where a start-path form meets the rule's batch raster (the row's program above the form runs the plan
+    asked for); where it survives, the rule's pair-program knobs
     (``pd`` / ``pro`` / ``lw`` / ``mg`` / ``sw`` / ``stages`` / ``hints`` / ``pf`` / ``sh`` / ``store_hint`` /
     ``store_ef`` / ``quad_store`` / ``f32_v8``) are cleared before the key: the eight-warp programs carry none of them.
     A caller-forced ``form`` is admitted or refused by ``instance_key`` and refused on a plan with stream-K units.  It
@@ -3543,7 +3741,22 @@ def cake_dense_gemm_det_train_projection_plan(
     before, measured faster on two B300, two GB300 and two GB200 nodes; on every other part and token count these rows
     plan as before.  Since version 0.3.9 the 152-SM sm_103a ranges run that program in raster groups of 2 on 8192 -> 128
     at T 16231 - 16384 and on the indexer_hw input gradient 6144 -> 32 at T 16172 - 32768 (the same bits, measured
-    faster on two GB300 nodes)."""
+    faster on two GB300 nodes).  Since version 0.3.10 the 148-SM sm_103a ranges also run it in raster groups of 2 on
+    8192 -> 128 at T 8192 - 32768 and of 4 on indexer_hw 6144 -> 32 at T 8192, and the 148-SM sm_100a ranges in groups
+    of 2 on 8192 -> 128 at T 8192 - 32768, 5120 -> 128 and 6144 -> 128 at T 16384 - 32768 and 6144 -> 32 at T 32768,
+    and of 4 on 6144 -> 32 at T 16231 (the same bits, measured faster on two B300 and two B200 nodes).  Since version
+    0.3.11 the 152-SM sm_100a ranges also run it in raster groups of 2 on the indexer_hw input gradient 6144 -> 32 at
+    T 16172 - 32768, on 8192 -> 128 at T 16231 - 32768, on 5120 -> 128 at T 16231 and on 6144 -> 128 at
+    T 16231 - 16384, and of 4 on 8192 -> 128 at T 16172 (the same bits, measured faster on two GB200 nodes).  Since
+    version 0.3.12 the 148- and 152-SM sm_100a and sm_103a ranges also plan the BF16 input gradients
+    4096 -> 32 / 48 / 64 / 128, 5120 -> 32 / 48 / 64 / 128, 8192 -> 128 and 6144 -> 32 / 128 with the start-path
+    eight-warp program ``kn_n256_tma1_w8relf`` (on 152-SM sm_100a parts 5120 -> 48 at T 32768 with
+    ``kn_n256_tma1_w8rel``; on 152-SM sm_103a parts all but 5120 -> 64 and 8192 -> 128 up to version 0.3.12), at
+    T 16172 - 32768 or narrower per row and part (the same bits, measured faster on two nodes of each part); a caller
+    that forces another ``form`` there plans with the row's rule without the part tables.  Since version 0.3.13 the
+    152-SM sm_103a ranges run that program in raster groups of 32 on 4096 -> 32 at T 16172 and 32768 and on
+    5120 -> 64 at T 16172, and the 152-SM sm_100a ranges in raster groups of 2 on 5120 -> 32 at T 32768 (the same bits,
+    measured faster on two GB300 and two GB200 nodes)."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
@@ -3697,6 +3910,19 @@ def cake_dense_gemm_det_train_projection_plan(
         if _use_rules
         else dict(ARCH_RULE_DEFAULTS.get(arch, {}))
     )
+    if (
+        _use_rules
+        and form is not None
+        and str(form or "") != rule.get("form", str(form or ""))
+    ):
+        # package-only: a part rule or token range that names a CTA form (the start-path ranges of version 0.3.12)
+        # holds for that form alone; a caller that forces another form (``""``, the ten-warp program, included) plans
+        # with the row's rule without the part tables, the rule its knobs were chosen against
+        outside = row_rule(
+            arch, a_mn, b_mn, out.dtype == torch.float32, transposed_out, L > 1, N, K, M
+        )
+        if outside.get("form") != rule["form"]:
+            rule = outside
     if cta_rows is None:
         cta_rows = rule.get("cta_rows", default_cta_rows(M, N, K))
     elif int(cta_rows) != rule.get("cta_rows", default_cta_rows(M, N, K)):
@@ -3871,9 +4097,9 @@ def cake_dense_gemm_det_train_projection_plan(
     kser = int(rule.get("kser", 0))
     rule_form = form is None
     if form is None:
-        # the eight-warp CTA form of the row's rule (the ``_w8r`` / ``_w8rs`` / ``_w8`` programs): the whole-tile
-        # guard before ``instance_key`` drops it from a plan that is not whole-tile or that a caller shaped with a
-        # tile, output, epilogue, tail, raster or pipeline knob
+        # the eight-warp CTA form of the row's rule (the ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf``
+        # programs): the whole-tile guard before ``instance_key`` drops it from a plan that is not whole-tile or that a
+        # caller shaped with a tile, output, epilogue, tail, raster or pipeline knob
         form = rule.get("form", "")
     form = str(form or "")
     if form not in ("", *W8_FORMS):
@@ -4174,10 +4400,11 @@ def cake_dense_gemm_det_train_projection_plan(
     # The whole-tile guard of ``form``: the eight-warp programs run whole kn bf16 128 x 256 pair tiles through the
     # one-slot TMA-store epilogue under the kernel's cluster-tile bound, with none of the pair programs' pipeline knobs.
     # A rule's ``form`` yields where the plan or a caller-forced knob breaks that (stream-K units, the single-CTA form,
-    # another tile, output class or epilogue, a tail or raster form, a forced pipeline knob - ``_W8_FIXED``): the row's
-    # program above the form runs the plan asked for.  Where it survives, the rule-derived pair-program knobs are
-    # cleared: the eight-warp programs carry none of them.  A caller-forced ``form`` reaches ``instance_key`` with the
-    # caller's knobs and is refused there (the stream-K units here).
+    # another tile, output class or epilogue, a tail or raster form, a forced pipeline knob - ``_W8_FIXED`` - or, for
+    # the start-path forms ``w8rel`` / ``w8relf``, the rule's batch raster): the row's program above the form runs the
+    # plan asked for.  Where it survives, the rule-derived pair-program knobs are cleared: the eight-warp programs carry
+    # none of them.  A caller-forced ``form`` reaches ``instance_key`` with the caller's knobs and is refused there
+    # (the stream-K units here).
     if form and rule_form:
         if (
             not whole_tiles
@@ -4197,6 +4424,7 @@ def cake_dense_gemm_det_train_projection_plan(
             or exact_plan is not None
             or sync_plan is not None
             or batch_group == 1
+            or (batch_group and form in _W8_START_FORMS)
             or any(_caller_knobs.get(k) is not None for k in _W8_FIXED)
         ):
             form = ""
@@ -4679,8 +4907,9 @@ def _template_class(tokens: tuple[str, ...]) -> tuple[str, bool, bool]:
 
 
 def _template_form(tokens: tuple[str, ...]) -> str:
-    """The eight-warp CTA form token of a symbol (``w8r`` / ``w8rs`` / ``w8``), "" for the ten-warp programs: a class of its
-    own for the registry fallback (a ten-warp row never falls onto an eight-warp program, nor the reverse)."""
+    """The eight-warp CTA form token of a symbol (``w8r`` / ``w8rs`` / ``w8`` / ``w8rel`` / ``w8relf``), "" for the
+    ten-warp programs: a class of its own for the registry fallback (a ten-warp row never falls onto an eight-warp
+    program, nor the reverse)."""
     return next((token for token in tokens if token in W8_FORMS), "")
 
 
@@ -4697,9 +4926,10 @@ def _template_knobs(
     ``_lw`` = the load-warp prelude form, ``_mg`` = the whole-tile tile resolve, ``_sw<n>`` = the paced output stores,
     ``_ks<P>`` = the serpentine K walk - an ``instance_key`` field the planner reads from the rule only,
     ``_kc128`` = ``promote=True``, the promoted twin, and ``promote=False`` without the token,
-    ``_w8r`` / ``_w8rs`` / ``_w8`` = the eight-warp CTA form); a single-CTA program leaves ``pro`` to
-    the planner (``instance_key`` refuses a forced one).  ``None`` for a symbol outside the family or carrying a token
-    the planner never emits (``_box<rows>``, a promoted chunk other than :data:`K1_PROMOTE_BLOCKS`, diagnostics)."""
+    ``_w8r`` / ``_w8rs`` / ``_w8`` / ``_w8rel`` / ``_w8relf`` = the eight-warp CTA form); a single-CTA program leaves
+    ``pro`` to the planner (``instance_key`` refuses a forced one).  ``None`` for a symbol outside the family or
+    carrying a token the planner never emits (``_box<rows>``, a promoted chunk other than :data:`K1_PROMOTE_BLOCKS`,
+    diagnostics)."""
     tokens = _template_tokens(template)
     if tokens is None or len(tokens) < 2:
         return None
@@ -4846,7 +5076,10 @@ def _registry_variants(
         if _template_class(tokens) != _template_class(wanted):
             continue
         if bool(_template_form(tokens)) != bool(_template_form(wanted)):
-            continue  # the eight-warp CTA form is a class of its own (its programs fall back onto each other only)
+            # the eight-warp CTA form is a class of its own (its programs fall back onto each other only).  Only a
+            # caller-forced form plans in it (the rule-free base names no form), and the caller's form wins over a
+            # variant's (``_merge_fallback_knobs``): a variant lends its other knobs, never its form
+            continue
         knobs = _template_knobs(candidate, sk_exact_parts=sk_exact_parts)
         if (
             knobs is None

@@ -909,6 +909,171 @@ def test_varlen_multi_segment_row_plans_single_pass(record_property):
     nv.judge_draws(record_property, case, seed=SEED + 751)
 
 
+def _rope_host_views():
+    """The four rope operands of :func:`_host_inputs` as the slices of its packed query and key rows (CPU)."""
+    q, kv, idx = _host_inputs()
+    rope = (q[..., :D_LATENT], q[..., D_LATENT:], kv[:, :D_LATENT], kv[:, D_LATENT:])
+    return rope, idx
+
+
+def test_rope_public_entries_hand_num_segments_to_the_backend(monkeypatch):
+    """The flat rope entry and the rope step backward hand ``num_segments`` to the backend as a Python ``int``: 1 by
+    default (the one-segment plan), the caller's count when given, with every other keyword as before."""
+    seen = {}
+
+    def flat(q_latent, q_rope, kv_latent, k_rope, indices, **kwargs):
+        seen["flat"] = kwargs
+        return "flat"
+
+    def backward(*args, **kwargs):
+        seen["backward"] = (len(args), kwargs)
+        return "backward"
+
+    monkeypatch.setattr(cake_backend, "cake_dsa_sparse_attention_nondet", flat)
+    monkeypatch.setattr(cake_backend, "backward", backward)
+    monkeypatch.delenv(public_api.DKV_DIRECT_ENV, raising=False)
+    monkeypatch.delenv(public_api.CHECK_DST_MAP_ENV, raising=False)
+    rope, idx = _rope_host_views()
+    flat_default = dict(
+        topk_length=None,
+        softmax_scale=None,
+        return_lse=False,
+        key_passes=None,
+        dkv_acc=None,
+        dkv_dst_map=None,
+        num_segments=1,
+        dkv_direct=None,
+        check_dst_map=False,
+    )
+    assert cake_dsa_sparse_attention_nondet(*rope, idx) == "flat"
+    assert seen["flat"] == flat_default
+    cake_dsa_sparse_attention_nondet(*rope, idx, num_segments=8, key_passes=2)
+    assert seen["flat"] == dict(flat_default, num_segments=8, key_passes=2)
+    assert type(seen["flat"]["num_segments"]) is int
+    _, step_backward = _step_entries("rope")
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    assert step_backward(*rope, idx, out, out, lse, out) == "backward"
+    step_default = dict(
+        topk_length=None,
+        softmax_scale=None,
+        dkv_fp32=False,
+        key_passes=None,
+        dkv_acc=None,
+        dkv_dst_map=None,
+        num_segments=1,
+        dkv_direct=None,
+        check_dst_map=False,
+    )
+    assert seen["backward"] == (9, step_default)
+    step_backward(*rope, idx, out, out, lse, out, num_segments=3)
+    assert seen["backward"] == (9, dict(step_default, num_segments=3))
+    assert type(seen["backward"][1]["num_segments"]) is int
+
+
+@pytest.mark.parametrize("bad", [0, -1, True, 2.0, "2", torch.tensor(2)], ids=repr)
+def test_rope_public_entries_refuse_a_bad_num_segments(monkeypatch, bad):
+    """``num_segments`` is a host count: ``bool``, a float, a string, a tensor (whose value would need a device
+    synchronization) and a count below 1 raise ``ValueError`` naming it before the backend is reached."""
+
+    def refuse(*args, **kwargs):
+        raise AssertionError("a bad num_segments must not reach the backend")
+
+    monkeypatch.setattr(cake_backend, "cake_dsa_sparse_attention_nondet", refuse)
+    monkeypatch.setattr(cake_backend, "backward", refuse)
+    rope, idx = _rope_host_views()
+    out = torch.zeros(8, NUM_HEADS, D_LATENT, dtype=torch.bfloat16)
+    lse = torch.zeros(8, NUM_HEADS)
+    _, step_backward = _step_entries("rope")
+    with pytest.raises(ValueError, match="num_segments"):
+        cake_dsa_sparse_attention_nondet(*rope, idx, num_segments=bad)
+    with pytest.raises(ValueError, match="num_segments"):
+        step_backward(*rope, idx, out, out, lse, out, num_segments=bad)
+
+
+def test_flat_entry_with_num_segments_plans_the_varlen_pass(record_property):
+    """The flat rope entry (through autograd) and the rope step pair with ``num_segments=2`` on the global rows of a
+    packed two-segment row that the policy would split into whole-row passes as one segment (T = 2 x 128, S = 2 x
+    65,536 keys, top-k 128: one token chunk, at the ``sm_107a`` key floor) plan the single-pass backward of the varlen
+    entry on the same rows; without the count the flat entry keeps the policy's passes for the device's architecture.
+    The four calls (``out``, ``lse`` and every gradient) are judged on the same draw."""
+    record, stages = _require_key_pass_program()
+    device = torch.device("cuda")
+    arch = cake_backend.arch_for(device)
+    T, S, topk = 256, 131072, 128
+    default_passes = _rule_passes(record, T, S, topk=topk, arch=arch)
+    # the row would take whole-row passes as one segment, on every architecture
+    assert default_passes > 1
+    assert plan_key_passes(record, stages, T, S, topk, arch=arch) == default_passes
+    assert plan_key_passes(record, stages, T, S, topk, num_segments=2, arch=arch) == 1
+    cache = cake_backend.BINDING_CACHE
+
+    def backward_plans():
+        return [b.plan for b in cache._entries.values() if b.plan.backward]
+
+    def case(s, j):
+        inp = make_inputs([128, 128], [65536, 65536], seed=s, topk=topk)
+        args = (inp.q_latent, inp.q_rope, inp.kv_latent, inp.k_rope)
+        plans = {}
+
+        def autograd(**kw):
+            leaves = [t.detach().clone().requires_grad_() for t in args]
+            if "cu" in kw:
+                kw.pop("cu")
+                out, lse = cake_dsa_sparse_attention_nondet_varlen(
+                    *leaves,
+                    inp.idx_local,
+                    inp.cu_seqlens_q,
+                    inp.cu_seqlens_k,
+                    inp.max_seqlen_q,
+                    inp.max_seqlen_k,
+                    return_lse=True,
+                )
+            else:
+                out, lse = cake_dsa_sparse_attention_nondet(
+                    *leaves, inp.idx_global, return_lse=True, **kw
+                )
+            grads = torch.autograd.grad(out, leaves, inp.dout)
+            torch.cuda.synchronize()
+            return dict(out=out.detach(), lse=lse.detach(), **_rope_grads(grads))
+
+        def step(**kw):
+            forward, step_backward = _step_entries("rope")
+            out, lse, o_lo = forward(*args, inp.idx_global)
+            grads = step_backward(*args, inp.idx_global, out, o_lo, lse, inp.dout, **kw)
+            torch.cuda.synchronize()
+            return dict(out=out, lse=lse, o_lo=o_lo, **_rope_grads(grads))
+
+        calls = {}
+        for name, fn in (
+            ("varlen", lambda: autograd(cu=True)),
+            ("flat num_segments=2", lambda: autograd(num_segments=2)),
+            ("step num_segments=2", lambda: step(num_segments=2)),
+            ("flat default", lambda: autograd()),
+        ):
+            if j == 0:
+                cache.clear()
+            calls[name] = fn()
+            if j == 0:
+                plans[name] = backward_plans()
+        if j == 0:
+            assert [len(p) for p in plans.values()] == [1, 1, 1, 1], plans.keys()
+            varlen = plans["varlen"][0]
+            assert varlen.key_passes == 1
+            assert not any(isinstance(k, tuple) for k in varlen.backward_order)
+            for name in ("flat num_segments=2", "step num_segments=2"):
+                plan = plans[name][0]
+                assert plan.key_passes == 1, name
+                assert plan.backward_order == varlen.backward_order, name
+            assert plans["flat default"][0].key_passes == default_passes
+            assert any(
+                isinstance(k, tuple) for k in plans["flat default"][0].backward_order
+            )
+        return nv.judged(nv.rope_problem(inp), calls)
+
+    nv.judge_draws(record_property, case, seed=SEED + 753)
+
+
 @pytest.mark.parametrize("offset", [1, 8, 13])
 def test_indices_view_inside_a_storage_through_forward_backward_and_autograd(
     offset, record_property

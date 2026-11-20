@@ -27,9 +27,9 @@ back to BF16.  Three formats:
 
 The outputs equal the FP64 rule bit for bit (true division, round to nearest
 even, signed zeros, saturation and the amax floors); the backend
-``README.md`` gives the rule and why FP32 steps reach it.  Every output
-repeats bit for bit for identical inputs: each group is quantized on its own,
-and nothing is summed.
+``README.md`` gives the rule and why the FP32 and BF16 steps reach it.
+Every output repeats bit for bit for identical inputs: each group is
+quantized on its own, and nothing is summed.
 
 Naming rules:
 
