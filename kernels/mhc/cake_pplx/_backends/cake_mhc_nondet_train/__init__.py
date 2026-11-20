@@ -69,9 +69,12 @@ forms ``bwd_token__<form>_ho``: ``dpre_next`` into the coefficient VJP,
 that architecture's own forms: ``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``,
 ``collapse_bwd__vjpwa_pfq2``; ``collapse_forward`` runs ``collapse_fwd__m2``
 below 6656 tokens and ``collapse_fwd__m2_xhnone``, the same form without the L2
-evict-first policy on ``X``, from 6656 tokens).  ``handoff_prepare`` is the
-autograd node; ``dU`` / ``dpre_next`` from autograd are made contiguous, of their
-dtype and 32-byte aligned before the launch.  No run-to-run bit promise.
+evict-first policy on ``X``, from 6656 tokens; ``collapse_backward`` runs
+``collapse_bwd__vjpwa``, the same VJP without the L2 prefetch, from 384 to 640
+tokens and ``collapse_bwd__vjpwa_pfq2`` at every other token count).
+``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
+are made contiguous, of their dtype and 32-byte aligned before the launch.  No
+run-to-run bit promise.
 """
 
 from __future__ import annotations
