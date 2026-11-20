@@ -7124,7 +7124,10 @@ def test_batched_arena_content_never_reaches_a_result(device, manifest) -> None:
     the zero-filled default arena's results bit for bit (the forward, the backward from the light and the tape
     sets, a light set on the tape workspace, the forward without a saved set), including a row whose light set
     carries the states (the groups read the saved tensors, not the arena; pass 2 never touches the arena's
-    ``seg_state`` it is bound to at ``write_ht = 0``)."""
+    ``seg_state`` it is bound to at ``write_ht = 0``).  That row saves the states only from ``S >= 384 * NSEG`` on,
+    and the segment count grows with the device's SMs (at 212 SMs NSEG = 212 needs 81408 tokens), so its first
+    document grows as :func:`_saving_pack` gives it on this device and stays alone in the first group."""
+    big = _saving_pack((40000, 20000, 20000, 1000), 4, device)
     cases = (
         ((63, 1, 65, 30), 2, "light", 1, {"batch_tokens": 95}),
         ((100, 640, 77, 1000, 129), 2, "light", 3, {"batch_tokens": 1000}),
@@ -7137,7 +7140,7 @@ def test_batched_arena_content_never_reaches_a_result(device, manifest) -> None:
         ),
         ((63, 1, 65), 64, "light", 3, {"batch_tokens": 129, "max_docs_per_batch": 1}),
         ((100, 640, 77, 1000, 129), 2, "tape", 2, {"batch_tokens": 1000}),
-        ((40000, 20000, 20000, 1000), 4, "light", 4, {"batch_tokens": 40000}),
+        (big, 4, "light", 4, {"batch_tokens": big[0]}),
     )
     for lengths, heads, save_mode, t, kw in cases:
         S, N = sum(lengths), len(lengths)
