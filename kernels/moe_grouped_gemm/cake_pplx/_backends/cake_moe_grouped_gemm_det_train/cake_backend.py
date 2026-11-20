@@ -16,14 +16,49 @@ limitations under the License.
 Cake backend: ragged BF16 MoE grouped GEMM (SM100 / SM103 / SM107).
 
 Three operations over ``E`` groups of rows described by an int32 **device**
-tensor ``offs[E]`` of cumulative end offsets (never read on the host):
+row table (never read on the host): ``offs[E]``, the cumulative end offsets,
+or ``m_indptr[E + 1]``, the first row of every group and the end of the last.
+Group ``e`` is the rows ``[lo[e], hi[e])`` of the row operands, in absolute
+row numbers: ``hi[e] = offs[e]``, ``lo[0] = 0`` and ``lo[e] = offs[e-1]`` for
+``offs``; ``lo[e] = m_indptr[e]`` and ``hi[e] = m_indptr[e + 1]`` for
+``m_indptr``, whose first entry may be above 0 (a device slice of the rows,
+row tables below):
 
-The slice lower bound is ``0`` for ``e == 0`` and ``offs[e-1]`` for ``e > 0``.
-For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]``.
+* ``fwd``:   ``Y[lo[e]:hi[e]]  = X[lo[e]:hi[e]] @ W[e].T``
+* ``dgrad``: ``dX[lo[e]:hi[e]] = G[lo[e]:hi[e]] @ W[e]``
+* ``wgrad``: ``dW[e] = G[lo[e]:hi[e]].T @ X[lo[e]:hi[e]]`` (bf16 or fp32 output)
 
-* ``fwd``:   ``Y[offs[e-1]:offs[e]]  = X[offs[e-1]:offs[e]] @ W[e].T``
-* ``dgrad``: ``dX[offs[e-1]:offs[e]] = G[offs[e-1]:offs[e]] @ W[e]``
-* ``wgrad``: ``dW[e] = G[offs[e-1]:offs[e]].T @ X[offs[e-1]:offs[e]]`` (bf16 or fp32 output)
+Rows outside ``[lo[0], hi[E - 1])`` are neither read nor written.  The
+entries are nondecreasing row numbers of the operands, at most ``sum_m``.
+
+Row tables.  The host tells the two forms apart by the shape alone: an int32
+vector of ``E + 1`` entries is an ``m_indptr`` (``E = w.shape[0]`` for the
+forward and the data gradient; the weight gradient reads one only when
+``num_groups=E`` is given, and without it reads ``E + 1`` entries as ``E + 1``
+end offsets).  An ``m_indptr`` binds the lead twin of the route
+(``cake_jit.lead_route``): the same stages, built to read ``m_begin =
+m_indptr[:1]``, a view that the kernels read on the device at every launch, so
+a prepared launch and a CUDA graph that captured it follow a new first entry
+as they follow new ends.  ``offs`` binds the route itself.  Either way the
+stages and the plan are the route's, and the plan comes from host-known
+shapes: ``sum_m`` is ``x.shape[0]``, every row, not the rows of the slice.  So
+a device-slice call (the whole ``x``, a slice ``m_indptr[e0:e1 + 1]`` of a
+larger table) gives the bits of the host-offset call over its rows (the rows
+``[m_indptr[e0], m_indptr[e1])`` of ``x``, the ends less ``m_indptr[e0]``) when
+the two calls plan the same; where they do not (the rows per group cross a
+threshold of the plan, such as ``k512_min_rows_per_group``), it gives the bits
+of that host-offset call with its rows padded by rows of no group to the same
+``sum_m``, which plans the same.  Both are deterministic.  An ``m_indptr``
+whose first entry is 0 gives the bits of the ``[E]`` form ``m_indptr[1:]``,
+which binds the route itself at no extra cost: the twins read ``m_begin`` once
+per role and can be slightly slower (most on a launch with a split tail
+reduce), so a caller whose table starts at 0 can pass ``m_indptr[1:]``.  A
+process JIT-compiles a twin at its first call where the package ships no
+prebuilt build of it, as for any program.  A weight gradient with
+``accumulate=True`` whose slice has no row (``m_indptr[0] == m_indptr[E]``)
+still launches, as the host does not read the rows: its add of exact zeros
+turns a ``-0.0`` of ``out`` into ``+0.0`` (an equal value), which the
+host-offset call, with no row, leaves as it is.
 
 Every launch is one persistent cluster kernel (one CTA pair per SM pair); the
 weight gradient adds one ordered fp32 tail-reduce kernel when the tiles of its
@@ -181,6 +216,8 @@ from .cake_jit import (
     HOST_PLAN_CONSTANTS,
     PROGRAMS,
     ROUTES,
+    lead_route,
+    lead_route_served,
     library_name,
     load_module,
     program_registered,
@@ -362,15 +399,18 @@ def generated_program_available(
     *,
     accumulate: bool = False,
 ) -> bool:
-    """True when this checkout registers the program of ``op`` for ``device``.
+    """True when this checkout registers the program of ``op`` for ``device``: a route of ``op``
+    and its lead twin (``cake_jit.lead_route``), so that both row-table forms run, ``offs[E]`` and
+    ``m_indptr[E + 1]`` (module docstring, row tables).
 
     With ``accumulate=True`` (weight gradient only): True when the 512-wide k tile route of
     ``out_dtype`` (either output dtype when None; False for a dtype the weight gradient does not
     write) serves the accumulate build of a main stage on the device's architecture whose library
-    can load (:func:`acc_library_loadable`), that is when some weight gradient into an ``out`` of
-    that dtype can take the fused route (``plan["accumulate"] == "fused"``; a call whose plan splits
-    its tail also needs the ``TAIL_REDUCE_ACC`` build of its tail's route, :func:`wgrad_accumulate_mode`);
-    the composed route needs only the overwrite programs."""
+    can load (:func:`acc_library_loadable`), on the route and on its lead twin, that is when some
+    weight gradient into an ``out`` of that dtype can take the fused route
+    (``plan["accumulate"] == "fused"``; a call whose plan splits its tail also needs the
+    ``TAIL_REDUCE_ACC`` build of its tail's route, :func:`wgrad_accumulate_mode`); the composed
+    route needs only the overwrite programs."""
     _require_flag(accumulate, "accumulate", "generated_program_available")
     if accumulate and op != "wgrad":
         raise ValueError(
@@ -381,12 +421,20 @@ def generated_program_available(
         return False
     name = _DTYPE_NAMES.get(out_dtype) if out_dtype is not None else None
     if not accumulate:
-        return program_registered(op, arch, out_dtype=name)
+        return program_registered(op, arch, out_dtype=name, lead=True)
     if out_dtype is not None and name is None:
         return False
     for dtype in (name,) if name else ("bfloat16", "float32"):
         route, stages = _acc_stages(dtype, arch)
-        if any(acc_library_loadable(route, stage, arch) for stage in stages):
+        if not lead_route_served(route, arch):
+            continue
+        twin = lead_route(route)
+        if any(
+            stage_served(twin, stage, arch)
+            and acc_library_loadable(route, stage, arch)
+            and acc_library_loadable(twin, stage, arch)
+            for stage in stages
+        ):
             return True
     return False
 
@@ -876,6 +924,8 @@ def wgrad_accumulate_mode(
     for the route ``name``, main stage ``stage`` and k tile ``tile_k`` the overwrite of the same output dtype
     selects on ``arch`` (module docstring, accumulate mode).  ``reduce_name`` is the route whose
     tail-reduce stage sums the plan's split tail (``tail_splits > 1``), None when the tail is not split.
+    Both are the routes the launch binds: their lead twins for an ``m_indptr`` row table (module
+    docstring, row tables), whose builds are the ones that must load.
 
     ``("fused", None)`` when every condition holds; else ``("composed", reason)`` with the first that fails:
     ``"tile_k"`` (not the 512-wide k tile), ``"stage"`` (the route serves no ``stage + ACC_SUFFIX`` on
@@ -943,6 +993,79 @@ STREAM_WORKSPACES = ("sched", "wave_sync")
 # them.)
 OPERAND_ALIASES = {"A_rows": "A", "B_rows": "B"}
 ROW_BASE_READ_ARCHS = ("sm_107a",)
+# The argument a lead twin takes after ``offs`` (module docstring, row tables): the first entry of an
+# ``m_indptr[E + 1]`` row table, a one-element view of it.
+M_BEGIN = "m_begin"
+# The arguments each host binding passes to ``_bind`` (besides ``grid``): the forward pass and the data
+# gradient (``_prepare_row_op``), the weight gradient's main stage and its tail reduce
+# (``cake_moe_grouped_gemm_det_train_prepare_wgrad``).  ``_bind`` refuses any other, and passes ``m_begin``
+# only to a program whose argument plan names it (a lead twin).
+HOST_ARGUMENTS: dict[str, frozenset[str]] = {
+    "row_op": frozenset(
+        (
+            "A",
+            "B",
+            "C",
+            "offs",
+            M_BEGIN,
+            "num_groups",
+            "sum_m",
+            "N",
+            "K",
+            "ldc",
+            "c0",
+            "c1",
+        )
+    ),
+    "wgrad": frozenset(
+        (
+            "A",
+            "B",
+            "C",
+            "offs",
+            M_BEGIN,
+            "tensormap_workspace",
+            "partials",
+            "tail_splits",
+            "raster_rows",
+            "num_groups",
+            "sum_m",
+            "N",
+            "K",
+            "ldc",
+            "stride_e",
+            "lda",
+            "ldb",
+            "wave_mode",
+        )
+    ),
+    "tail_reduce": frozenset(
+        (
+            "partials",
+            "C",
+            "offs",
+            M_BEGIN,
+            "num_groups",
+            "N",
+            "K",
+            "ldc",
+            "stride_e",
+            "num_clusters",
+            "tail_splits",
+            "raster_rows",
+        )
+    ),
+}
+
+
+def host_binding(op: str, stage: str) -> str:
+    """The host binding (a key of ``HOST_ARGUMENTS``) that binds ``stage`` of a route of ``op``: the tail
+    reduce's for ``TAIL_REDUCE`` and its accumulate build, else the weight gradient's or the row op's."""
+    if stage in (TAIL_REDUCE, TAIL_REDUCE_ACC):
+        return "tail_reduce"
+    return "wgrad" if op == "wgrad" else "row_op"
+
+
 # Stream workspaces (module docstring): one buffer per (kind, device index,
 # CUDA stream handle), created on the first launch on that stream.
 _stream_workspaces: dict[tuple[str, int, int], torch.Tensor] = {}
@@ -1186,6 +1309,10 @@ class _Launch:
     # (sched, c0, c1) argument positions of a launch that passes the probed queue
     # split of its kept scheduler workspace (module docstring), else empty.
     split_slots: tuple[int, ...] = ()
+    # The route and the program ``_bind`` bound (the lead twin route and program for
+    # an ``m_indptr`` row table).
+    route: str = ""
+    program: str = ""
 
 
 @dataclass(frozen=True)
@@ -1205,7 +1332,12 @@ class CakeMoEGroupedGemmDetLaunch:
     Prepare a new launch when a shape, dtype or tensor binding changes.
     ``plan`` records the host decisions (grid, queue split, k tile, tail
     split, raster, wave mode, launch count); ``stages`` names the bound stages
-    of the route in launch order.  The scheduler and wave workspaces are the
+    of the route in launch order.  ``record_name`` is the route the host
+    planned on; ``bound_routes`` and ``bound_programs`` name the route and the
+    program each launch binds: that route (the 256-wide k tile's for the split
+    tail of ``main_halves_k256t``) for ``offs[E]``, its lead twin and the twins
+    of its programs for ``m_indptr[E + 1]`` (module docstring, row tables).
+    The scheduler and wave workspaces are the
     current stream's (module docstring), resolved at every launch, as is the
     probed queue split where ``plan["queue_split"]`` is ``"probed"``.
 
@@ -1246,6 +1378,16 @@ class CakeMoEGroupedGemmDetLaunch:
     add_from: Optional[torch.Tensor] = field(default=None, repr=False)
     # Fused accumulate: the programs wrote ``out`` in place; bump its version counter after the launch.
     bump_version: bool = False
+
+    @property
+    def bound_routes(self) -> tuple[str, ...]:
+        """The route each launch binds, in launch order (empty when nothing launches)."""
+        return tuple(item.route for item in self.launches)
+
+    @property
+    def bound_programs(self) -> tuple[str, ...]:
+        """The program each launch binds, in launch order (empty when nothing launches)."""
+        return tuple(item.program for item in self.launches)
 
     def launch(self) -> torch.Tensor:
         if self.zero_fill:
@@ -1297,16 +1439,32 @@ def _span_view(t: torch.Tensor) -> torch.Tensor:
     return t.as_strided((span,), (1,))
 
 
-def _end_offsets(offs: torch.Tensor, num_groups: int) -> torch.Tensor:
-    """Accept ``offs[E]`` (cumulative end offsets) or ``m_indptr[E + 1]`` (leading 0).
-
-    Both forms are the ``torch._grouped_mm`` / ``grouped_mm_bf16`` conventions;
-    the ``[E + 1]`` form is reduced to its ``[E]`` end-offset view on the device
-    (no copy, no host read).
-    """
+def _row_table(
+    offs: torch.Tensor, num_groups: int
+) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
+    """``(ends, m_begin)`` of a row table (module docstring, row tables): ``(offs, None)`` for
+    ``offs[E]`` (cumulative end offsets) and ``(m_indptr[1:], m_indptr[:1])`` for an int32
+    ``m_indptr[E + 1]``, two views (no copy, no host read; the kernels read both on the device at
+    every launch).  The shape alone decides; any other tensor is returned as is for
+    ``_check_offs`` to refuse."""
     if offs.dtype == torch.int32 and offs.ndim == 1 and offs.numel() == num_groups + 1:
-        return offs[1:]
-    return offs
+        return offs[1:], offs[:1]
+    return offs, None
+
+
+def _bound_route(name: str, m_begin: Optional[torch.Tensor], arch: str) -> str:
+    """The route a preparation binds: ``name`` for ``offs[E]``, its lead twin for an ``m_indptr`` row
+    table (``m_begin`` given).  An ``m_indptr`` on a registry without the twin for ``arch`` is refused
+    (``NotImplementedError``): the route's programs would read group 0 from row 0."""
+    if m_begin is None:
+        return name
+    if not lead_route_served(name, arch):
+        raise NotImplementedError(
+            f"an m_indptr row table binds the lead twin of route {name!r} ({lead_route(name)!r}), which "
+            f"this checkout does not register for {arch}; pass the [E] end offsets m_indptr[1:] when "
+            "m_indptr[0] is 0"
+        )
+    return lead_route(name)
 
 
 def _check_offs(offs: torch.Tensor, num_groups: int) -> None:
@@ -1364,9 +1522,27 @@ def _bind(
     plan names after a stream workspace kind is left to ``CakeMoEGroupedGemmDetLaunch.launch``; with ``split`` so
     are ``c0`` / ``c1``, which a launch replaces by the probed split of its ``sched`` once known, and the
     queue probe is built here.  An argument of ``OPERAND_ALIASES`` the plan names gets the operand it
-    aliases (``_row_base``)."""
+    aliases (``_row_base``).  Refused with ``KeyError``: a keyword that ``HOST_ARGUMENTS`` does not list
+    for the stage's host binding, ``m_begin`` given to a program that does not take it or missing for
+    one that does (an ``m_indptr`` row table binds the lead twins, ``offs[E]`` the route's programs),
+    and an argument of the plan the keywords do not give."""
     binding = stage_binding(name, stage, arch)
     program = PROGRAMS[binding["program"]]
+    host = host_binding(ROUTES[name]["op"], stage)
+    unlisted = set(kwargs) - {"grid"} - HOST_ARGUMENTS[host]
+    if unlisted:
+        raise KeyError(
+            f"the host binding of route {name!r}, stage {stage!r} passes {sorted(unlisted)}, which "
+            f"HOST_ARGUMENTS[{host!r}] does not list"
+        )
+    takes_m_begin = any(arg == M_BEGIN for _kind, arg in program["arg_plan"])
+    if takes_m_begin != (M_BEGIN in kwargs):
+        raise KeyError(
+            f"generated program {binding['program']!r} (route {name!r}, stage {stage!r}) "
+            f"{'takes' if takes_m_begin else 'does not take'} {M_BEGIN!r}, but the host binding "
+            f"{'does not pass' if takes_m_begin else 'passes'} it: an m_indptr row table binds the "
+            "lead twin of a route, an [E] row table the route itself"
+        )
     grid = dict(zip(("grid_x", "grid_y", "grid_z"), kwargs["grid"], strict=True))
     arguments: list[Any] = []
     slots: list[tuple[int, str]] = []
@@ -1396,6 +1572,8 @@ def _bind(
         arguments=tuple(arguments),
         workspace_slots=tuple(slots),
         split_slots=split_slots,
+        route=name,
+        program=binding["program"],
     )
 
 
@@ -1469,7 +1647,7 @@ def _prepare_row_op(
                 f"dgrad needs K % {block_n} == 0 and N % {block_k} == 0 (got N={n}, K={k})"
             )
         out_cols = k
-    offs = _end_offsets(offs, num_groups)
+    offs, m_begin = _row_table(offs, num_groups)
     _check_offs(offs, num_groups)
     device = _check_device({a_name: a, "w": w, "offs": offs})
     if out is None:
@@ -1490,6 +1668,8 @@ def _prepare_row_op(
         )
     arch = arch_for(device)
     name = select_module(op, arch)
+    # The stage and the plan are the route's; an m_indptr row table binds its lead twin.
+    bound = _bound_route(name, m_begin, arch)
     stage, tile_n = select_row_stage(
         name, op, n, k, arch, c, sum_m=sum_m, num_groups=num_groups
     )
@@ -1520,7 +1700,9 @@ def _prepare_row_op(
         c1=plan["c1"],
         grid=plan["grid"],
     )
-    launch = _bind(name, stage, kwargs, arch, split=plan["queue_split"] == "probed")
+    if m_begin is not None:
+        kwargs[M_BEGIN] = m_begin
+    launch = _bind(bound, stage, kwargs, arch, split=plan["queue_split"] == "probed")
     return _finish(op, name, plan, out, (stage,), [launch], [])
 
 
@@ -1533,7 +1715,8 @@ def cake_moe_grouped_gemm_det_train_prepare_forward(
     """Prepare ``Y[sum_m, N] = grouped X @ W[e].T`` (bf16 in, bf16 out).
 
     ``x``: ``[sum_m, K]`` bf16; ``w``: ``[E, N, K]`` bf16; ``offs``: int32
-    ``[E]`` device end offsets; ``N % 256 == 0``, ``K % 64 == 0`` (the
+    ``[E]`` device end offsets or ``m_indptr`` ``[E + 1]`` (module docstring,
+    row tables); ``N % 256 == 0``, ``K % 64 == 0`` (the
     512-column tile when ``N % 512 == 0`` on the architectures of
     ``wide_fwd_archs``, its L2 evict-first twin where ``fwd_lwh_ef`` or
     ``fwd_evict_first`` holds for ``K``, its 3 / 3 head / tail twin where
@@ -1553,7 +1736,8 @@ def cake_moe_grouped_gemm_det_train_prepare_dgrad(
     """Prepare ``dX[sum_m, K] = grouped G @ W[e]`` (W read in place; bf16 in, bf16 out).
 
     ``g``: ``[sum_m, N]`` bf16; ``w``: ``[E, N, K]`` bf16; ``offs``: int32
-    ``[E]`` device end offsets; ``K % 256 == 0``, ``N % 64 == 0`` (the
+    ``[E]`` device end offsets or ``m_indptr`` ``[E + 1]`` (module docstring,
+    row tables); ``K % 256 == 0``, ``N % 64 == 0`` (the
     512-column tile when ``K % 512 == 0`` on the architectures of
     ``wide_dgrad_archs``, its L2 evict-first twin where ``dgrad_evict_first``
     holds for ``K``, ``sum_m`` and ``E``, its 3 / 3 head / tail twin where
@@ -1656,7 +1840,8 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
 
     ``g``: ``[sum_m, N]`` bf16; ``x``: ``[sum_m, K]`` bf16; ``offs``: int32
     ``[E]`` device end offsets (``E = offs.numel()`` unless ``num_groups`` is
-    given, in which case an ``m_indptr`` of ``E + 1`` entries is accepted too);
+    given, in which case an ``m_indptr`` of ``E + 1`` entries is accepted too,
+    whose first entry may be above 0: module docstring, row tables);
     ``N % 256 == 0`` and ``K`` a multiple of the selected k tile (256, or 512
     when it is chosen).  Empty groups produce exact zeros.  ``out_dtype``
     defaults to the dtype of ``out`` (bf16 when neither is given).
@@ -1678,7 +1863,9 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
     ``plan["accumulate_reason"]`` says why); both give the same bits, and
     every other plan key is the overwrite's (module docstring, accumulate
     mode).  No row (``sum_m == 0``) launches nothing and leaves ``out``
-    unchanged.  Each ``launch()`` and each replay of a graph that captured it
+    unchanged; an ``m_indptr`` slice with no row launches (its add of zeros
+    turns a ``-0.0`` of ``out`` into ``+0.0``: module docstring, row tables).
+    Each ``launch()`` and each replay of a graph that captured it
     adds again; keep the launch alive while such a graph may replay.
     """
     _require_flag(
@@ -1704,10 +1891,11 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
     sum_mx, k = (int(v) for v in x.shape)
     if sum_mx != sum_m:
         raise ValueError(f"g has {sum_m} rows but x has {sum_mx}")
+    m_begin = None
     if num_groups is None:
         num_groups = int(offs.numel())
     else:
-        offs = _end_offsets(offs, int(num_groups))
+        offs, m_begin = _row_table(offs, int(num_groups))
     _check_offs(offs, num_groups)
     device = _check_device({"g": g, "x": x, "offs": offs})
     out_dtype = out_dtype or (out.dtype if out is not None else torch.bfloat16)
@@ -1765,6 +1953,10 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
         if k256_tail
         else name
     )
+    # The stages and the plan are the routes'; an m_indptr row table binds their lead twins, the
+    # main stage's and the tail reduce's alike (module docstring, row tables).
+    bound = _bound_route(name, m_begin, arch)
+    bound_reduce = _bound_route(reduce_name, m_begin, arch)
     reduce_threads = 0
     if stage_served(reduce_name, TAIL_REDUCE, arch):
         reduce_program = PROGRAMS[
@@ -1787,12 +1979,13 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
     if accumulate:
         # The route, the tile, the stage and the plan are the overwrite's (the twin's); only the
         # binding differs (module docstring, accumulate mode).
+        # The builds the launch binds: the lead twins' for an m_indptr row table.
         mode, reason = wgrad_accumulate_mode(
-            name,
+            bound,
             main_stage,
             tile_k,
             arch,
-            reduce_name=reduce_name if plan["tail_splits"] > 1 else None,
+            reduce_name=bound_reduce if plan["tail_splits"] > 1 else None,
             aligned=_accumulate_aligned(out),
         )
         if reason == "min_cuda":
@@ -1864,9 +2057,11 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
         wave_mode=plan["wave_mode"],
         grid=plan["grid"],
     )
+    if m_begin is not None:
+        main_kwargs[M_BEGIN] = m_begin
     suffix = ACC_SUFFIX if mode == "fused" else ""
     stages = [main_stage + suffix]
-    launches = [_bind(name, stages[0], main_kwargs, arch)]
+    launches = [_bind(bound, stages[0], main_kwargs, arch)]
     if splits > 1:
         reduce_kwargs = dict(
             partials=partials,
@@ -1882,8 +2077,10 @@ def cake_moe_grouped_gemm_det_train_prepare_wgrad(
             raster_rows=plan["raster_rows"],
             grid=plan["tail_reduce_grid"],
         )
+        if m_begin is not None:
+            reduce_kwargs[M_BEGIN] = m_begin
         stages.append(TAIL_REDUCE + suffix)
-        launches.append(_bind(reduce_name, stages[-1], reduce_kwargs, arch))
+        launches.append(_bind(bound_reduce, stages[-1], reduce_kwargs, arch))
     return _finish(
         "wgrad",
         name,
@@ -1914,10 +2111,11 @@ def grouped_det_mm_bf16_cake(
 
     ``out[m_indptr[e]:m_indptr[e + 1]] = a[m_indptr[e]:m_indptr[e + 1]] @ b[e].T``
     with ``a`` ``[cum_m, K]`` bf16, ``b`` ``[E, N, K]`` bf16 and ``m_indptr``
-    ``[E + 1]`` int32 on the device (read by the kernel, never on the host).
+    ``[E + 1]`` int32 on the device (read by the kernel, never on the host;
+    ``m_indptr[0]`` may be above 0: module docstring, row tables).
     Only bfloat16 outputs are produced and there is no tactic index; rows of
-    ``a`` past ``m_indptr[-1]`` are left untouched in ``out``.  This function
-    emits no warning.
+    ``a`` before ``m_indptr[0]`` and past ``m_indptr[-1]`` are left untouched
+    in ``out``.  This function emits no warning.
     """
     if out is not None:
         out_dtype = out.dtype

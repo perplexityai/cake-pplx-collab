@@ -29,17 +29,18 @@ from . import cake_build
 # host binding, shared by every architecture in ``arches`` (genuine
 # per-architecture lowering differences live inside the source under exact
 # ``__CUDA_ARCH__`` regions) -- with its architecture-free ``library`` stem, FFI
-# entry, argument plan and launch shape.  What to compile (the translation
+# entry, argument plan and launch shape (a lead twin's record also names, in
+# ``twin_of``, the program it twins; below).  What to compile (the translation
 # units, the compile flags, the per-architecture closure digest) is recorded in
 # ``build.json`` (see ``cake_build``), whose entry for a program is
 # ``<library>[<specialization tag>]_<arch>``; a program is built once per
 # (architecture, compile-line specialization), prebuilt under ``aot/`` or by
 # the package's JIT shim.
 #
-# ``ROUTES``: one record per public route -- ``fwd``, ``dgrad`` and
-# ``wgrad_{bf16,f32}_k{256,512}`` -- naming its architectures and
-# ordered stages.  Each stage binds a program and the compile-line
-# specializations the loader defines for it (the weight-gradient tail-reduce
+# ``ROUTES``: one record per route -- the public routes ``fwd``, ``dgrad`` and
+# ``wgrad_{bf16,f32}_k{256,512}`` and the lead twin of each (below) -- naming
+# its architectures and ordered stages.  Each stage binds a program and the
+# compile-line specializations the loader defines for it (the weight-gradient tail-reduce
 # program takes the k width of the partials it sums, ``WGRAD_TILE``, from the
 # route's tile instead of carrying one source per tile; the weight-gradient
 # programs take their output element width, ``WGRAD_OUT`` = 16 for bf16 or 32
@@ -99,6 +100,20 @@ from . import cake_build
 # per group (``N * K``, the down projection) splits its tile queues by the
 # probed SM pairs of each locality domain instead of evenly (``cake_backend``,
 # stream workspaces).
+#
+# The lead routes: beside each public route ``ROUTES`` holds its lead twin
+# ``<route>_lead`` (``LEAD_SUFFIX``, ``lead_route``; not a public route) with
+# the route's op, architectures, stage names and specializations, whose every
+# stage binds the ``offs_lead`` twin of the program the route binds there
+# (``lead_twin``: the ``PROGRAMS`` record ``<program>_lead`` whose ``twin_of``
+# names the program).  A twin takes its program's argument
+# plan with the ``m_begin`` buffer after ``offs``: the first entry of an
+# ``m_indptr[E + 1]`` row table, read on the device, so that group 0 starts at
+# row ``m_indptr[0]`` instead of row 0; on the rows ``[m_begin, sum_m)`` it
+# gives the bits of its program launched over ``offs - m_begin`` with the same
+# grid and scalars.  The host binds the lead route for an ``m_indptr`` row
+# table and the route itself for ``[E]`` end offsets; it selects the stages and
+# plans the launch on the route either way (``cake_backend``, row tables).
 PROGRAMS: dict[str, dict[str, Any]] = {
     "cake_moe_grouped_det_gemm_09a336207c15c131f5dc": {
         "library": "cake_moe_grouped_det_gemm_09a336207c15c131f5dc",
@@ -1146,6 +1161,36 @@ HOST_PLAN_CONSTANTS: dict[str, Any] = {
 
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 OPS = ("fwd", "dgrad", "wgrad")
+# The name suffix of a route's lead twin (the lead routes, above).
+LEAD_SUFFIX = "_lead"
+
+
+def lead_route(name: str) -> str:
+    """The lead twin of route ``name``: the route whose stages bind the ``offs_lead`` twins of its
+    programs (``lead_twin``), which the host binds for an ``m_indptr[E + 1]`` row table."""
+    if is_lead_route(name):
+        raise ValueError(f"route {name!r} is a lead route; it has no lead twin")
+    return name + LEAD_SUFFIX
+
+
+def is_lead_route(name: str) -> bool:
+    """True for the name of a lead twin route (``lead_route``)."""
+    return name.endswith(LEAD_SUFFIX)
+
+
+def lead_route_served(name: str, arch: str) -> bool:
+    """True when this checkout registers the lead twin of route ``name`` for ``arch``."""
+    route = ROUTES.get(lead_route(name))
+    return route is not None and arch in route["arches"]
+
+
+def lead_twin(program: str) -> str:
+    """The ``offs_lead`` twin of ``program``: the ``PROGRAMS`` record ``<program>_lead``
+    whose ``twin_of`` names ``program`` (``KeyError`` for a program without one)."""
+    twin = program + LEAD_SUFFIX
+    if PROGRAMS.get(twin, {}).get("twin_of") != program:
+        raise KeyError(f"program {program!r} has no lead twin in PROGRAMS")
+    return twin
 
 
 def record_name(
@@ -1173,24 +1218,33 @@ def program_registered(
     *,
     out_dtype: Optional[str] = None,
     tile_k: Optional[int] = None,
+    lead: bool = False,
 ) -> bool:
     """True when this checkout registers a route of ``op`` for ``arch``.
 
     For the weight gradient with ``tile_k=None`` any k tile of ``out_dtype``
-    counts; ``out_dtype=None`` accepts either output dtype.
+    counts; ``out_dtype=None`` accepts either output dtype.  With ``lead=True`` a
+    route counts only when its lead twin (``lead_route``) is registered for
+    ``arch`` too: then both row-table forms, ``[E]`` and ``m_indptr[E + 1]``, run.
     """
     if arch not in ARCHES:
         return False
     if op != "wgrad":
-        route = ROUTES.get(record_name(op))
-        return route is not None and arch in route["arches"]
-    dtypes = (out_dtype,) if out_dtype else ("bfloat16", "float32")
-    tiles = (tile_k,) if tile_k else (256, 512)
-    for dtype in dtypes:
-        for tile in tiles:
-            route = ROUTES.get(record_name(op, out_dtype=dtype, tile_k=tile))
-            if route is not None and arch in route["arches"]:
-                return True
+        names = [record_name(op)]
+    else:
+        dtypes = (out_dtype,) if out_dtype else ("bfloat16", "float32")
+        tiles = (tile_k,) if tile_k else (256, 512)
+        names = [
+            record_name(op, out_dtype=dtype, tile_k=tile)
+            for dtype in dtypes
+            for tile in tiles
+        ]
+    for name in names:
+        route = ROUTES.get(name)
+        if route is None or arch not in route["arches"]:
+            continue
+        if not lead or lead_route_served(name, arch):
+            return True
     return False
 
 

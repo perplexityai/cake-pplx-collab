@@ -40,7 +40,9 @@ limitations under the License.
 # package is cheap.  The package imports only itself, ``torch`` and
 # ``tvm_ffi`` (the JIT fallback of ``cake_build`` imports the package's JIT
 # shim ``_cake_pplx_jit`` inside ``try/except ImportError``).
-# ``offs`` may be given as ``[E]`` end offsets or as ``m_indptr`` ``[E + 1]``.
+# ``offs`` may be given as ``[E]`` end offsets or as ``m_indptr`` ``[E + 1]``,
+# whose first entry may be above 0 (a device slice of the rows: ``cake_backend``,
+# row tables).
 
 from __future__ import annotations
 
@@ -82,7 +84,12 @@ def cake_moe_grouped_gemm_det_train_forward(
     """``Y[offs[e-1]:offs[e]] = X[offs[e-1]:offs[e]] @ W[e].T`` for every group ``e``.
 
     The slice lower bound is ``0`` for ``e == 0`` and ``offs[e-1]`` for ``e > 0``.
-    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]``.
+    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
+    the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
+    slice of the rows, in absolute row numbers.  Rows outside
+    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
+    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
+    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
 
     Parameters
     ----------
@@ -91,9 +98,9 @@ def cake_moe_grouped_gemm_det_train_forward(
     w : torch.Tensor
         ``[E, N, K]`` bfloat16 weights, one ``[N, K]`` matrix per group.
     offs : torch.Tensor
-        ``[E]`` int32 cumulative end offsets on the device (``offs[-1] == sum_m``),
-        or ``m_indptr`` ``[E + 1]`` with a leading 0; read by the kernel, never
-        on the host.
+        ``[E]`` int32 cumulative end offsets on the device (``offs[-1] <= sum_m``),
+        or ``m_indptr`` ``[E + 1]`` (``m_indptr[0]`` may be above 0); read by the
+        kernel, never on the host.
     out : Optional[torch.Tensor]
         ``[sum_m, N]`` bfloat16 output (allocated when omitted); may be row-padded.
 
@@ -122,7 +129,12 @@ def cake_moe_grouped_gemm_det_train_dgrad(
     """``dX[offs[e-1]:offs[e]] = G[offs[e-1]:offs[e]] @ W[e]`` for every group ``e``.
 
     The slice lower bound is ``0`` for ``e == 0`` and ``offs[e-1]`` for ``e > 0``.
-    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]``.
+    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
+    the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
+    slice of the rows, in absolute row numbers.  Rows outside
+    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
+    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
+    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
 
     ``g`` is ``[sum_m, N]`` bfloat16, ``w`` is ``[E, N, K]`` bfloat16 and is
     read in place (no transpose copy), ``offs`` is ``[E]`` int32 device end
@@ -147,11 +159,17 @@ def cake_moe_grouped_gemm_det_train_wgrad(
     """``dW[e] = G[offs[e-1]:offs[e]].T @ X[offs[e-1]:offs[e]]`` for every group ``e``.
 
     The slice lower bound is ``0`` for ``e == 0`` and ``offs[e-1]`` for ``e > 0``.
-    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]``.
+    For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
+    the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
+    slice of the rows, in absolute row numbers.  Rows outside
+    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
+    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
+    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
 
     ``g`` is ``[sum_m, N]`` bfloat16, ``x`` is ``[sum_m, K]`` bfloat16,
     ``offs`` is ``[E]`` int32 device end offsets (``E = offs.numel()``; pass
-    ``num_groups=E`` to hand in ``m_indptr`` ``[E + 1]`` instead) and ``out``
+    ``num_groups=E`` to hand in ``m_indptr`` ``[E + 1]`` instead; without
+    ``num_groups`` an ``[E + 1]`` tensor is read as ``E + 1`` end offsets) and ``out``
     is ``[E, N, K]`` in ``out_dtype`` (bfloat16 or float32; defaults to the
     dtype of ``out``, else bfloat16).  fp32 accumulation, bitwise deterministic, exact zeros for empty
     groups.  ``N % 256 == 0`` and ``K`` a multiple of the selected k tile (256,
