@@ -1760,14 +1760,14 @@ This family has a det module only, with no nondet or KCP module: every output is
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit)` | As above | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. |
+| `cake_clamped_swiglu_det` | `(gate_up_or_gate, up=None, weight=None, *, limit)` | As above | Autograd. Returns contiguous BF16 `h [R, 2304]`, the down projection's input. A merged input's gradient is one `[R, 4608]` tensor; `weight=None` has no weight gradient; `limit` gets none. Saves only its inputs. In a non-reentrant checkpoint's recomputation, launches the forward after autograd saved them (see Caveats, checkpointing). |
 | `cake_clamped_swiglu_det_train_forward` | `(gate_up_or_gate, up=None, weight=None, *, limit, out=None)` | `out` optional preallocated BF16 `[R, 2304]` (the layout rules above, rows not overlapping) | Returns `h` (`out` when given). Not autograd. `R == 0` returns an empty `h` without a launch. |
 | `cake_clamped_swiglu_det_train_backward` | `(grad_out, gate_up_or_gate, up=None, weight=None, *, limit, grad_gate_up_or_gate=None, grad_up=None, grad_weight=None)` | `grad_out` BF16 `[R, 2304]`; optional preallocated outputs: `grad_gate_up_or_gate` (`d_gate [R, 2304]`, or the merged `[R, 4608]` gradient), `grad_up` (two-tensor form only), `grad_weight` contiguous FP32 `[R]` (needs `weight`) | Returns `(d_gate_up, None, d_weight)` for a merged input or `(d_gate, d_up, d_weight)`; `d_weight` is None without `weight`. Not autograd. Unfit output buffers raise `ValueError` (never copied). |
 
 Other public names:
 
 - `ARCHES`, `SUPPORTED_COMPUTE_CAPABILITIES`, `INTERMEDIATE_SIZE` (2304).
-- `CakeClampedSwiGLUDetFunction`: the autograd class.
+- `CakeClampedSwiGLUDetFunction`: the autograd class, `apply(gate_up_or_gate, up, weight, limit)`. A direct `apply` launches the forward inside the function's `forward`, so a checkpoint always recomputes it.
 - `is_cake_clamped_swiglu_det_train_supported(device)`.
 
 **Options and environment.** `limit` and the optional output buffers are the only keywords. The facade reads no environment variable.
@@ -1788,13 +1788,33 @@ weight = (1.5 * torch.rand(R, device="cuda")).requires_grad_()  # FP32 route wei
 h = cake_clamped_swiglu_det(gate_up, weight=weight, limit=10.0)  # BF16 [R, 2304]
 h.backward(torch.randn_like(h))  # gate_up.grad BF16 [R, 4608], weight.grad FP32 [R]
 
-# Activation checkpointing keeps only the inputs.
-h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, weight, limit=10.0, use_reentrant=False)
+# Activation checkpointing: checkpoint the op together with the down projection.
+w_down = (torch.randn(4096, I, device="cuda") / I**0.5).bfloat16().requires_grad_()  # BF16 [hidden, 2304]
+
+
+def swiglu_down(gate_up, weight, w_down):
+    return torch.nn.functional.linear(cake_clamped_swiglu_det(gate_up, weight=weight, limit=10.0), w_down)
+
+
+y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, weight, w_down, use_reentrant=False)
+y.backward(torch.randn_like(y))  # the backward recomputes h once, for the down projection's weight gradient
 ```
 
 **Caveats.**
 
 - The intermediate width is 2304 only.
+- Checkpointing: the op keeps only its inputs, so checkpointing it alone saves no memory. The down projection keeps `h` for its weight gradient. Checkpoint the op together with the down projection (as in the example) so that `h` is not kept from the forward to the backward, which recomputes it once. A region of the gate/up projection and the op, with the down projection outside, does not keep the projection's `[R, 4608]` output.
+- In the backward of a non-reentrant checkpoint, the recomputation runs with saved-tensors hooks set. There the forward kernel runs after autograd saved the inputs, as for a built-in op; anywhere else (no hooks, or not in a backward, such as the checkpoint's own forward pass) it runs inside the autograd function's `forward`, as up to 0.1.7. With early stop on (the torch default), the recomputation therefore stops before that launch when nothing later in the region saves a tensor. When a later operation saves one, the recomputation runs the forward. The launch and the bits are the same in every case. Per checkpointed region (down projection: `F.linear(h, w_down)`, which saves `h`):
+
+  | Region | Not kept from the forward to the backward | Forward of this op in the backward |
+  |---|---|---|
+  | The op alone (down projection outside) | Nothing (the op keeps its inputs, the down projection `h`) | None (0.1.7: one) |
+  | Gate/up projection, then the op (down projection outside) | The projection's `[R, 4608]` output | None (0.1.7: one); the projection is recomputed |
+  | The op, then the down projection | `h` | One, as in 0.1.7 |
+  | The whole block (gate/up projection, op, down projection) | The projection's output and `h` | One, as in 0.1.7 |
+  | Any region with `use_reentrant=True`, `early_stop=False` (or `set_checkpoint_early_stop(False)`), or a direct `CakeClampedSwiGLUDetFunction.apply` | As above | One, also when its output is dropped |
+
+  A call that Dynamo or `torch.jit.trace` records launches inside `forward`; a checkpoint's recomputation runs with Dynamo disabled. Not tested under `torch.compile`.
 - Workspace: none. Retained state of the autograd function: its inputs only (references, no copy). An unweighted backward allocates no weight gradient. An unweighted forward passes, as the ignored weight, one cached one-element FP32 buffer per device, set to 1.
 - Under `torch.use_deterministic_algorithms(True)` with `torch.utils.deterministic.fill_uninitialized_memory` (on by default), PyTorch fills every tensor a call allocates with NaN before the kernel writes it: one more fill launch per new output and per copied input. Output buffers allocated once and passed to every call avoid the fills of those outputs. The bits do not change.
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`. No MXFP8 or FP4 output.
