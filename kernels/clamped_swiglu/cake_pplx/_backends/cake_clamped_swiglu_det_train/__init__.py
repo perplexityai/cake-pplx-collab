@@ -154,6 +154,28 @@ JIT variables):
   the function adds no saved state of its own and no activation.  The
   gradients have no derivative of their own: when the autograd engine records
   them (``create_graph=True``), differentiating them raises ``RuntimeError``.
+- Checkpointing.  :func:`cake_clamped_swiglu_det` launches its forward kernel
+  after ``CakeClampedSwiGLUDetFunction.apply`` returns: ``forward`` checks the
+  arguments and allocates ``h`` but keeps the launch (:class:`_HeldLaunch`,
+  passed as an internal fifth argument), so autograd saves the inputs (runs
+  their pack hooks) before the kernel runs, as for a built-in op.  PyTorch
+  packs a custom function's saved tensors only after its ``forward`` returns,
+  wherever ``forward`` calls ``save_for_backward``.  Under
+  ``torch.utils.checkpoint(..., use_reentrant=False)`` with early stop on (the
+  default), the recomputation in the backward stops once it has saved again
+  every tensor the region saved, so it ends before the launch when these
+  inputs are the region's last saved tensors (the op checkpointed alone, whose
+  recomputed ``h`` nothing reads), and launches the forward when a later
+  operation of the region saves a tensor (the down projection saves ``h``; so
+  does the whole expert block).  A reentrant checkpoint, early stop off and a direct
+  ``apply`` (which launches inside ``forward``) recompute the forward in every
+  region, and so does a call under ``torch.compile`` or ``torch.jit.trace``
+  (the launch then stays inside ``forward``: a trace records ``apply`` only).
+  The launch, its arguments and its bits are the same in every case.
+  Checkpointing the op alone saves no memory: it keeps only its inputs anyway,
+  and the down projection keeps ``h`` for its weight gradient.  A region that
+  also holds the down projection does not keep ``h`` from the forward to the
+  backward, which recomputes it.
 - Mode: the mode is part of the name (``det``).  Every output is elementwise
   or a sum within one row in one fixed order, so every launch gives the same
   bits for the same inputs on the same architecture, whatever the row count
@@ -689,10 +711,16 @@ def _read(
 
 
 def _forward(
-    gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: Optional[torch.Tensor]
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
 ) -> tuple[torch.Tensor, float]:
     """The forward step and its FP32 ``L``: every argument checked, then the copies of the inputs the kernels cannot
-    read, the new output and the launch."""
+    read, the new output and the launch (kept in ``held`` when given, which launches it later:
+    :class:`_HeldLaunch`)."""
     fast = _fast_operands(gate_up_or_gate, up, weight) if _FAST_CHECKS else None
     if fast is None:
         device, rows, first, second, w, copies = _operands(gate_up_or_gate, up, weight)
@@ -720,7 +748,7 @@ def _forward(
     else:
         up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
     launch = _launcher("fwd", index)
-    launch(
+    (launch if held is None else held.hold(launch))(
         rows,
         first,
         up_tensor,
@@ -861,10 +889,18 @@ _FP32 = torch.float32
 _MERGED_WIDTH = 2 * WIDTH
 
 
-def _forward_step(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: Optional[torch.Tensor]) -> torch.Tensor:
+def _forward_step(
+    gate_up_or_gate: Any,
+    up: Any,
+    weight: Any,
+    limit: Any,
+    out: Optional[torch.Tensor],
+    held: Optional[_HeldLaunch] = None,
+) -> torch.Tensor:
     """The forward step's ``h``: the common call checked and launched here, any other call through :func:`_forward`.
     The checks and the launch are those of :func:`_forward`: the operands, then ``limit``, then ``out``, then the
-    device's architecture, then the new output and the launch."""
+    device's architecture, then the new output and the launch.  With ``held`` (the autograd forward of
+    :func:`cake_clamped_swiglu_det`), the launch is kept there and runs when ``held`` is called."""
     first = gate_up_or_gate
     if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
         shape = first.shape
@@ -916,6 +952,8 @@ def _forward_step(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: O
                         up, up_col = first, WIDTH
                     else:
                         up_col = 0
+                    if held is not None:
+                        entry = held.hold(entry)
                     entry(
                         first,
                         up,
@@ -933,7 +971,7 @@ def _forward_step(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any, out: O
                         1,
                     )
                     return out
-    return _forward(gate_up_or_gate, up, weight, limit, out)[0]
+    return _forward(gate_up_or_gate, up, weight, limit, out, held)[0]
 
 
 def _backward_step(
@@ -1124,6 +1162,29 @@ class _Gradients(torch.autograd.Function):
         )
 
 
+class _HeldLaunch:
+    """The forward launch of one :func:`cake_clamped_swiglu_det` call, kept from the autograd forward until ``apply``
+    returns: the step calls :meth:`hold` with its launch callable and calls what it returns with the launch's
+    arguments; calling the held launch then runs that launch (nothing when the step launched nothing, ``R == 0``)."""
+
+    __slots__ = ("arguments", "launch")
+
+    def __init__(self) -> None:
+        self.launch: Optional[Callable[..., Any]] = None
+
+    def hold(self, launch: Callable[..., Any]) -> Callable[..., None]:
+        self.launch = launch
+        return self._keep
+
+    def _keep(self, *arguments: Any) -> None:
+        self.arguments = arguments
+
+    def __call__(self) -> None:
+        launch = self.launch
+        if launch is not None:
+            launch(*self.arguments)
+
+
 class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
     """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and
     ``weight``; no activation, no FP32 intermediate) and recomputes the activation in the backward, so
@@ -1133,11 +1194,24 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
     ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the saved operands
     again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their device, shape or
     layout after the forward without the autograd version check seeing it.  No double backward: differentiating
-    gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
+    gradients computed with ``create_graph=True`` raises ``RuntimeError``.
+
+    ``apply(gate_up_or_gate, up, weight, limit)`` launches the forward kernel inside ``forward``.  PyTorch packs a
+    custom function's saved tensors (its saved-tensors hooks run) only after ``forward`` returns, so under a
+    non-reentrant checkpoint the recomputation runs that launch even when its output is not used.
+    :func:`cake_clamped_swiglu_det` passes a fifth argument, an internal :class:`_HeldLaunch`: ``forward`` then checks
+    the arguments and allocates ``h`` but keeps the launch, which the caller runs after ``apply`` returns, so the
+    inputs are saved before the kernel runs, as for a built-in op.  Any other fifth argument but ``None`` (such as a
+    ``True`` / ``False`` mode) raises ``TypeError``."""
 
     @staticmethod
-    def forward(ctx, gate_up_or_gate, up, weight, limit):
-        h = _forward_step(gate_up_or_gate, up, weight, limit, None)
+    def forward(ctx, gate_up_or_gate, up, weight, limit, _launch=None):
+        if _launch is not None and type(_launch) is not _HeldLaunch:
+            raise TypeError(
+                "CakeClampedSwiGLUDetFunction.apply(gate_up_or_gate, up, weight, limit) takes no fifth argument (an "
+                f"internal slot of cake_clamped_swiglu_det; the module has no mode argument), got {_launch!r}"
+            )
+        h = _forward_step(gate_up_or_gate, up, weight, limit, None, _launch)
         ctx.save_for_backward(gate_up_or_gate, up, weight)
         ctx.limit = _limit(limit)  # the FP32 rounding the step used (its cached pair for a float or int)
         return h
@@ -1156,7 +1230,27 @@ class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
             d_up if need_up else None,
             d_weight if need_weight else None,
             None,
+            None,  # the fifth argument, when given (a trailing None is dropped for a call with four)
         )
+
+
+_apply = CakeClampedSwiGLUDetFunction.apply
+
+
+def _autograd(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tensor:
+    """:func:`cake_clamped_swiglu_det` with positional arguments: :class:`CakeClampedSwiGLUDetFunction` applied with
+    a :class:`_HeldLaunch`, which then launches the forward kernel.  ``apply`` saves the inputs (runs their pack
+    hooks) before it returns, so a non-reentrant checkpoint's recomputation with early stop on (the default) ends
+    inside ``apply``, before this launch, when these inputs are the last tensors its region saves: the recomputed
+    ``h`` would be dropped.  When a later operation of the region saves a tensor (the down projection saves ``h``),
+    the recomputation continues and launches it.  Under ``torch.compile`` or ``torch.jit.trace`` the launch stays inside
+    ``forward`` (a trace records ``apply`` only)."""
+    if torch.compiler.is_compiling() or torch.jit.is_tracing():
+        return _apply(gate_up_or_gate, up, weight, limit)
+    launch = _HeldLaunch()
+    h = _apply(gate_up_or_gate, up, weight, limit, launch)
+    launch()
+    return h
 
 
 def cake_clamped_swiglu_det(
@@ -1166,9 +1260,9 @@ def cake_clamped_swiglu_det(
     *,
     limit: float,
 ) -> torch.Tensor:
-    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the
-    arguments."""
-    return CakeClampedSwiGLUDetFunction.apply(gate_up_or_gate, up, weight, limit)
+    """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments,
+    the forward kernel launched after autograd saved the inputs (:func:`_autograd`)."""
+    return _autograd(gate_up_or_gate, up, weight, limit)
 
 
 __all__ = [

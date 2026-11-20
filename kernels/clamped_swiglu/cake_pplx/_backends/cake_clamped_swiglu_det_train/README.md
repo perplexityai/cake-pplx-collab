@@ -29,9 +29,24 @@ h.backward(dh)  # gate_up.grad: BF16 [R, 4608]; w.grad: FP32 [R]
 h = cake_clamped_swiglu_det(gate, up, w, limit=10.0)
 h_shared = cake_clamped_swiglu_det(gate_up_shared, limit=10.0)
 
-# under activation checkpointing: only the inputs are kept
-h = torch.utils.checkpoint.checkpoint(cake_clamped_swiglu_det, gate_up, None, w, limit=10.0, use_reentrant=False)
+# activation checkpointing: checkpoint the op together with the down projection (w_down: BF16 [hidden, 2304])
+def swiglu_down(gate_up, w, w_down):
+    return torch.nn.functional.linear(cake_clamped_swiglu_det(gate_up, weight=w, limit=10.0), w_down)
+
+y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, w, w_down, use_reentrant=False)
 ```
+
+The op saves only its inputs, so checkpointing it alone saves no memory: the down projection keeps `h` for its weight
+gradient.  A region that also holds the down projection does not keep `h` from the forward to the backward, which
+recomputes it.  `cake_clamped_swiglu_det` launches its forward kernel after autograd saved its inputs, as a built-in
+op does.  So in a non-reentrant region with early stop on (the torch default), the recomputation stops before that
+launch when nothing later in the region saves a tensor: the op checkpointed alone adds no forward to the backward.
+When a later operation saves one (the down projection above saves `h`; so does the whole expert block), the
+recomputation runs the forward.
+A reentrant checkpoint, `early_stop=False` (or `set_checkpoint_early_stop(False)`), `torch.compile`, `torch.jit.trace`
+and a direct `CakeClampedSwiGLUDetFunction.apply` run the recomputed forward in every region, also when its output is
+dropped.  0.1.7 and earlier launched the forward inside the autograd function's `forward`, before autograd saved the
+inputs, so every checkpoint recomputation ran it.  The launch and the bits do not change.
 
 The steps without autograd, `cake_clamped_swiglu_det_train_forward` and `cake_clamped_swiglu_det_train_backward`,
 take the same operands and optional preallocated outputs (`out=`, `grad_gate_up_or_gate=`, `grad_up=`,
@@ -209,8 +224,9 @@ the fills of those outputs.  The kernels write every element of every output, so
   forward kernels read it and ignore it.
 - Retained state of the autograd function: its inputs only (`gate` and `up` or the merged tensor, and `weight`),
   references with no copy: `R * 4608 * 2 + R * 4` bytes of tensors the caller already holds.  No activation is saved;
-  the backward recomputes it.  The backward reuses the forward's FP32 `limit` and checks the saved inputs again, since
-  a saved-tensors hook or a `.data` assignment can change them after the forward.
+  the backward recomputes it.  So a checkpoint around the op alone saves no memory (see Usage).  The backward reuses
+  the forward's FP32 `limit` and checks the saved inputs again, since a saved-tensors hook or a `.data` assignment can
+  change them after the forward.
 - Host caches, none of which changes an output bit: per device, its architecture, its SM count, its `torch.device`
   and one launcher per stage (the route, each program's FFI entry bound at its first launch, and in `fwd` the ignored
   weight above); per process, the loaded libraries and the FP32 rounding of the last accepted `limit`.  The
@@ -219,13 +235,15 @@ the fills of those outputs.  The kernels write every element of every output, so
   BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched in one Python frame per step, and the row
   strides of its contiguous tensors are constants (`4608` or `2304`; 0 for one row), not read.  Any other call takes
   the full checks, which raise every error and copy what the kernels cannot read; both give the same launch.  The
-  facade binds the backend's step functions and autograd `apply` at their first call.
+  facade binds the backend's step functions and autograd entry (`apply`, then the forward launch) at their first
+  call.
 
 ## Limitations
 
 - The intermediate width is 2304 only (a compile-time width of the kernels).
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
-  under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
+  under `torch.compile` or `torch.jit.trace`; under either, `cake_clamped_swiglu_det` launches its forward inside the
+  autograd function's `forward`, so a checkpoint recomputes it in every region.  No MXFP8 or FP4 output.
 - A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
   does the weight, as an unweighted backward runs its own program.  Before capturing a CUDA graph, run an eager call of
   each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the

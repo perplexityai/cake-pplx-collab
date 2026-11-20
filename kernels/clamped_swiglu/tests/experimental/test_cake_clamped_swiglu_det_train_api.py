@@ -17,10 +17,11 @@ Tests of the public surface of the Cake routed-expert clamped SwiGLU training ke
 ``cake_pplx.cake_clamped_swiglu_det_train`` facade.  The facade's entry points are pass-throughs to
 ``cake_pplx._backends.cake_clamped_swiglu_det_train``: the same signatures (``limit`` a required keyword everywhere)
 and the same bits as the backend; its autograd class and constants are the backend's objects, and its entries call the
-backend's step functions and autograd ``apply``, bound at their first call.  The mode rules of the
-deterministic package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked without a device), and
-``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns in any call.  The facade
-reads no environment variable.  The numerical contract is ``test_cake_clamped_swiglu_det_train.py``'s.
+backend's step functions and autograd entry (``apply``, then the forward launch), bound at their first call.  The
+mode rules of the deterministic package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked
+without a device), and ``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns
+in any call.  The facade reads no environment variable.  The numerical contract is
+``test_cake_clamped_swiglu_det_train.py``'s.
 """
 
 from __future__ import annotations
@@ -105,7 +106,8 @@ def test_det_entry_points_take_no_mode_keyword(namespace: str, name: str) -> Non
 @pytest.mark.parametrize("mode", [True, False, None], ids=["true", "false", "none"])
 def test_a_mode_keyword_is_a_type_error(mode) -> None:
     """Every entry point of both namespaces raises ``TypeError`` for a ``deterministic`` keyword before it reads any
-    argument (no device needed), and the autograd function takes no fifth input."""
+    argument (no device needed), and the autograd function takes no fifth input but its internal launch slot: a mode
+    there raises ``TypeError`` before any argument is read."""
     x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
     dh = torch.zeros(4, I, dtype=torch.bfloat16)
     for module in NAMESPACES.values():
@@ -121,7 +123,11 @@ def test_a_mode_keyword_is_a_type_error(mode) -> None:
             with pytest.raises(TypeError, match="deterministic"):
                 run()
     forward_params = list(inspect.signature(CakeClampedSwiGLUDetFunction.forward).parameters)
-    assert forward_params == ["ctx", "gate_up_or_gate", "up", "weight", "limit"]
+    assert forward_params == ["ctx", "gate_up_or_gate", "up", "weight", "limit", "_launch"]
+    assert inspect.signature(CakeClampedSwiGLUDetFunction.forward).parameters["_launch"].default is None
+    if mode is not None:
+        with pytest.raises(TypeError, match="fifth argument"):
+            CakeClampedSwiGLUDetFunction.apply(x, None, None, L, mode)
 
 
 def test_limit_is_required_everywhere() -> None:
@@ -170,8 +176,8 @@ def test_facade_refuses_what_the_backend_refuses(name: str) -> None:
 
 def test_the_facade_binds_the_backend_functions_at_their_first_call() -> None:
     """Without a device: after a first call of each facade entry (each refused for a CPU operand), the facade's steps
-    and autograd entry call the backend's own step functions and autograd ``apply``, bound to globals of the facade
-    (no cache lookup per call)."""
+    and autograd entry call the backend's own step functions and positional autograd entry (``apply``, then the
+    forward launch), bound to globals of the facade (no cache lookup per call)."""
     dh = torch.zeros(4, I, dtype=torch.bfloat16)
     x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
     for call in (
@@ -183,7 +189,7 @@ def test_the_facade_binds_the_backend_functions_at_their_first_call() -> None:
             call()
     assert facade._step_forward is backend._forward_step
     assert facade._step_backward is backend._backward_step
-    assert facade._apply == backend.CakeClampedSwiGLUDetFunction.apply
+    assert facade._autograd is backend._autograd
 
 
 def test_the_facade_reads_no_environment_variable() -> None:

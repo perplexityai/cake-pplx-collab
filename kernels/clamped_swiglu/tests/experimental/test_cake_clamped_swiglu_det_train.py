@@ -56,9 +56,15 @@ row's outputs do not depend on the other rows), on a side stream with no host sy
 the small-R and of the large-R programs, under ``torch.use_deterministic_algorithms`` (where every new output holds
 PyTorch's NaN fill when its kernel launches) and with the current device switched to another GPU (each call runs on its
 operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
-under non-reentrant checkpointing, its backward checks the saved operands again (unpacked by a saved-tensors hook as
-rows to copy: the steps' bits; one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have
-the steps' bits and raise when differentiated; inputs the kernels can read are read in place (a merged input and its
+under non-reentrant checkpointing; ``cake_clamped_swiglu_det`` launches its forward after autograd saved the inputs
+(their pack hooks run first; a direct ``apply``, and the entry under ``torch.compile`` or ``torch.jit.trace``, launch
+inside ``forward``), so a checkpoint's backward launches the forward again only where the recomputed ``h`` is saved:
+none for the op alone in a non-reentrant region with early stop, one for the op with the down projection, the whole
+block (gate/up projection, op, down projection), early stop off, a reentrant region or a direct ``apply``, also in a
+captured CUDA graph, all with the bits of the steps without a checkpoint; the autograd backward checks the saved
+operands again (unpacked by a saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and
+gradients computed with ``create_graph=True`` have the steps' bits and raise when differentiated; inputs the kernels
+can read are read in place (a merged input and its
 gradient passed as both halves' tensors with the up's column offset 2304, no view), others copied once; every binding
 refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
 refused, before any copy, allocation or launch; the one-pass checks of the common call give the launches of the full
@@ -1603,6 +1609,283 @@ def test_double_backward_raises(layout, device) -> None:
     (grad,) = torch.autograd.grad(loss, leaves[0], create_graph=True)
     with pytest.raises(RuntimeError, match="no double backward"):
         grad.float().sum().backward()
+
+
+# The forward launch of the autograd entry, and the checkpoint recompute.
+
+# The width of the model rows that the gate/up projection reads and the down projection writes, in these tests.
+HIDDEN = 256
+
+
+def _projections(t: types.SimpleNamespace, *, seed: int, device: torch.device) -> types.SimpleNamespace:
+    """BF16 operands of the projections around the clamped SwiGLU on ``t``'s rows: ``x [R, HIDDEN]``, the gate/up
+    weights (one ``[4608, HIDDEN]`` weight for a merged layout, else ``[2304, HIDDEN]`` each, ``wu`` None when
+    merged), the down weight ``wd [HIDDEN, 2304]`` and the upstream gradient ``dy [R, HIDDEN]``."""
+    gen = torch.Generator(device=device).manual_seed(seed)
+
+    def draw(*shape: int, scale: float = 1.0) -> torch.Tensor:
+        return (scale * torch.randn(*shape, device=device, generator=gen)).bfloat16()
+
+    rows = 2 * WIDTH if t.layout == "merged" else WIDTH
+    return types.SimpleNamespace(
+        x=draw(t.R, HIDDEN),
+        wg=draw(rows, HIDDEN, scale=6 / HIDDEN**0.5),
+        wu=None if t.layout == "merged" else draw(rows, HIDDEN, scale=6 / HIDDEN**0.5),
+        wd=draw(HIDDEN, WIDTH, scale=1 / WIDTH**0.5),
+        dy=draw(t.R, HIDDEN),
+    )
+
+
+def _down(h: torch.Tensor, wd: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.linear(h, wd)
+
+
+def _block(L: float):
+    """The expert's block: the gate/up projection (one merged GEMM or two), the clamped SwiGLU, the down projection."""
+
+    def block(x, wg, wu, weight, wd):
+        first = torch.nn.functional.linear(x, wg)
+        second = None if wu is None else torch.nn.functional.linear(x, wu)
+        return _down(clamped_swiglu(first, second, weight, limit=L), wd)
+
+    return block
+
+
+def _recomputed(launched: list, run) -> tuple[int, int]:
+    """``run(mark)`` runs a forward, calls ``mark()`` and runs its backward: the number of ``fwd`` launches before the
+    mark and after it (a forward launched in the backward is a checkpoint recompute)."""
+    marks: list = []
+    run(lambda: marks.append(len(launched)))
+    (mark,) = marks
+    stages = [launch[0] for launch in launched]
+    return stages[:mark].count("fwd"), stages[mark:].count("fwd")
+
+
+@pytest.mark.parametrize(
+    ("layout", "w"), [("merged", "random"), ("split", "random"), ("merged", "none"), ("split", "none")]
+)
+def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
+    """``cake_clamped_swiglu_det`` launches its forward kernel after ``CakeClampedSwiGLUDetFunction.apply`` returns:
+    every pack hook of the inputs it saves runs before the launch, as for a built-in op.  A direct ``apply`` with four
+    arguments launches inside ``forward``, before the pack hooks, and so does ``cake_clamped_swiglu_det`` while
+    ``torch.compiler.is_compiling()`` or ``torch.jit.is_tracing()`` is true.  Under ``torch.no_grad()`` it launches
+    once and saves nothing.  Every way gives the steps' bits, one forward launch and one backward launch."""
+    t = make_inputs(Case(129, layout, w), seed=31, device=device)
+    want = _functional(t)
+    packs = sum(x is not None for x in (t.first, t.second, t.weight))
+
+    def pack(x: torch.Tensor) -> torch.Tensor:
+        launches.append(("pack", None, None))
+        return x
+
+    def run(call) -> list:
+        launches.clear()
+        leaves = _leaves(t)
+        with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x):
+            h = call(leaves)
+        order = [launch[0] for launch in launches]
+        h.backward(t.dh)
+        found = {"h": h.detach(), "d_first": leaves[0].grad}
+        if leaves[1] is not None:
+            found["d_up"] = leaves[1].grad
+        if leaves[2] is not None:
+            found["d_weight"] = leaves[2].grad
+        assert_same_outputs(found, want, "autograd")
+        assert [launch[0] for launch in launches[len(order) :]] == [_stages(t.weight is not None)[1]]
+        return order
+
+    held = ["pack"] * packs + ["fwd"]
+    inside = ["fwd"] + ["pack"] * packs
+    assert run(lambda leaves: clamped_swiglu(*leaves, limit=t.L)) == held
+    assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L)) == inside
+    assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L, None)) == inside
+
+    def patched(module, name: str):
+        """The call with ``module.name()`` true during the forward only."""
+
+        def call(leaves):
+            with monkeypatch.context() as patch:
+                patch.setattr(module, name, lambda: True)
+                return clamped_swiglu(*leaves, limit=t.L)
+
+        return call
+
+    assert run(patched(torch.compiler, "is_compiling")) == inside
+    assert run(patched(torch.jit, "is_tracing")) == inside
+
+    launches.clear()
+    with torch.no_grad():
+        h = clamped_swiglu(*_leaves(t), limit=t.L)
+    assert [launch[0] for launch in launches] == ["fwd"]
+    assert_same_bits(h, want["h"], "h under no_grad")
+    assert not h.requires_grad and h.grad_fn is None
+
+
+@pytest.mark.parametrize(
+    ("layout", "w"), [("merged", "random"), ("split", "random"), ("merged", "none"), ("split", "none")]
+)
+def test_a_checkpoint_recomputes_the_forward_only_when_its_output_is_saved(layout, w, device, launches):
+    """Under ``torch.utils.checkpoint``, the backward launches the forward again only where the recomputed ``h`` is
+    used.  Non-reentrant with early stop (the default), checkpointing the op alone (the down projection outside, or
+    ``h`` itself backpropagated) launches no forward in the backward: the inputs are the last tensors the region
+    saves, and the recomputation stops when autograd saves them, before the launch.  It launches one when the region
+    also holds the down projection (which saves ``h``) or the whole block (gate/up projection, op, down projection),
+    with early stop off (``early_stop=False`` or ``set_checkpoint_early_stop(False)``), under a reentrant checkpoint,
+    and for a direct ``CakeClampedSwiGLUDetFunction.apply``.  Every way launches one forward before the backward and
+    gives the bits of the same steps without a checkpoint."""
+    t = make_inputs(Case(129, layout, w), seed=32, device=device)
+    p = _projections(t, seed=33, device=device)
+    checkpoint = torch.utils.checkpoint.checkpoint
+    op = functools.partial(clamped_swiglu, limit=t.L)
+    block = _block(t.L)
+
+    def gradients(out: torch.Tensor, leaves: list) -> dict:
+        found = {"out": out.detach()}
+        found.update({f"d{i}": leaf.grad for i, leaf in enumerate(leaves) if leaf is not None})
+        return found
+
+    def op_step(region):
+        """``region(first, second, weight, wd)`` gives the down projection's output; its backward from ``dy``."""
+        results: list = []
+
+        def run(mark):
+            leaves = [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
+            y = region(*leaves)
+            mark()
+            y.backward(p.dy)
+            results.append(gradients(y, leaves))
+
+        return run, results
+
+    def block_step(region):
+        results: list = []
+
+        def run(mark):
+            leaves = [None if x is None else x.detach().clone().requires_grad_(True) for x in (p.x, p.wg, p.wu)]
+            leaves = [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
+            y = region(*leaves)
+            mark()
+            y.backward(p.dy)
+            results.append(gradients(y, leaves))
+
+        return run, results
+
+    def early_stop_off(*leaves):
+        with torch.utils.checkpoint.set_checkpoint_early_stop(False):
+            return _down(checkpoint(op, *leaves[:3], use_reentrant=False), leaves[3])
+
+    op_cases = {
+        "no checkpoint": (lambda f, s, w, wd: _down(op(f, s, w), wd), 0),
+        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), 0),
+        "op and the down projection": (
+            lambda f, s, w, wd: checkpoint(lambda *a: _down(op(*a[:3]), a[3]), f, s, w, wd, use_reentrant=False),
+            1,
+        ),
+        "op alone, early_stop=False": (
+            lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False, early_stop=False), wd),
+            1,
+        ),
+        "op alone, set_checkpoint_early_stop(False)": (early_stop_off, 1),
+        "op alone, reentrant": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=True), wd), 1),
+        "direct apply alone": (
+            lambda f, s, w, wd: _down(
+                checkpoint(pkg.CakeClampedSwiGLUDetFunction.apply, f, s, w, t.L, use_reentrant=False), wd
+            ),
+            1,
+        ),
+    }
+    want = None
+    for what, (region, recomputes) in op_cases.items():
+        launches.clear()
+        run, results = op_step(region)
+        assert _recomputed(launches, run) == (1, recomputes), what
+        if want is None:
+            want = results[0]
+        assert_same_outputs(results[0], want, what)
+
+    block_cases = {
+        "block, no checkpoint": (block, 0),
+        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), 1),
+        "block, reentrant": (lambda *a: checkpoint(block, *a, use_reentrant=True), 1),
+        "block, early_stop=False": (lambda *a: checkpoint(block, *a, use_reentrant=False, early_stop=False), 1),
+    }
+    want = None
+    for what, (region, recomputes) in block_cases.items():
+        launches.clear()
+        run, results = block_step(region)
+        assert _recomputed(launches, run) == (1, recomputes), what
+        if want is None:
+            want = results[0]
+        assert_same_outputs(results[0], want, what)
+
+    launches.clear()
+    leaves = _leaves(t)
+
+    def alone(mark):
+        h = checkpoint(op, *leaves, use_reentrant=False)
+        mark()
+        h.backward(t.dh)
+
+    assert _recomputed(launches, alone) == (1, 0)
+    assert_same_bits(leaves[0].grad, _functional(t)["d_first"], "op alone, h backpropagated")
+
+
+@pytest.mark.parametrize("layout", ["merged", "split"])
+def test_a_cuda_graph_of_a_checkpointed_step_captures_the_recompute_only_when_needed(layout, device, launches):
+    """A checkpointed step (forward, then ``torch.autograd.grad``) captured in one CUDA graph: with the op alone in
+    the region it captures one forward and one backward launch (no recompute), with the whole block one forward, the
+    recompute and one backward; each replay gives the bits of the eager step without a checkpoint."""
+    t = make_inputs(Case(257, layout), seed=34, device=device)
+    p = _projections(t, seed=35, device=device)
+    checkpoint = torch.utils.checkpoint.checkpoint
+    op = functools.partial(clamped_swiglu, limit=t.L)
+    block = _block(t.L)
+    regions = {
+        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), False, 0),
+        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), True, 1),
+    }
+    for what, (region, whole, recomputes) in regions.items():
+        if whole:
+            leaves = [None if x is None else x.detach().clone().requires_grad_(True) for x in (p.x, p.wg, p.wu)]
+            leaves = [*leaves, _leaves(t)[2], p.wd.detach().clone().requires_grad_(True)]
+            plain = block
+        else:
+            leaves = [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
+
+            def plain(f, s, w, wd):
+                return _down(op(f, s, w), wd)
+
+        wants = [leaf for leaf in leaves if leaf is not None]
+        y = plain(*leaves)
+        want = [y.detach(), *torch.autograd.grad(y, wants, p.dy)]
+        marks: list = []
+
+        def step(mark=lambda: None):
+            y = region(*leaves)
+            mark()
+            return [y.detach(), *torch.autograd.grad(y, wants, p.dy)]
+
+        side = torch.cuda.Stream(device)
+        side.wait_stream(torch.cuda.current_stream(device))
+        with torch.cuda.stream(side):
+            step()
+        torch.cuda.current_stream(device).wait_stream(side)
+        torch.cuda.synchronize(device)
+        launches.clear()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            outs = step(lambda: marks.append(len(launches)))
+        stages = [launch[0] for launch in launches]
+        assert stages[: marks[0]] == ["fwd"], what
+        assert sorted(stages[marks[0] :]) == sorted(["fwd"] * recomputes + [_stages(True)[1]]), what
+        for k in range(2):
+            for out in outs:
+                out.zero_()
+            graph.replay()
+            torch.cuda.synchronize(device)
+            for i, (got, expected) in enumerate(zip(outs, want, strict=True)):
+                assert_same_bits(got, expected, f"{what}: replay {k}, output {i}")
+        marks.clear()
 
 
 def test_side_stream_and_no_host_sync(device) -> None:
