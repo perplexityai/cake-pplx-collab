@@ -5892,11 +5892,17 @@ class _Launch:
         self.entry(*self.arguments)
 
     def templated(self) -> "_Launch":
-        """Copy whose tensor arguments are ``None`` placeholders (holds no tensor)."""
+        """Copy whose tensor arguments are ``None`` placeholders (holds no tensor): ``replace(self, arguments=...)``
+        -- every other field the same object -- formed as a copy of the fields (the class has no ``__post_init__``),
+        which a binding forms for each of its launches."""
         arguments = list(self.arguments)
         for index, _ in self.slots:
             arguments[index] = None
-        return replace(self, arguments=tuple(arguments))
+        copy = object.__new__(type(self))
+        state = copy.__dict__
+        state.update(self.__dict__)
+        state["arguments"] = tuple(arguments)
+        return copy
 
     def arguments_for(self, values: dict[str, Any]) -> list:
         """The argument list with every slot filled from ``values`` (fails closed on a missing one)."""
