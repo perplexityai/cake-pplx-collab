@@ -28,8 +28,9 @@ row tables below):
 * ``dgrad``: ``dX[lo[e]:hi[e]] = G[lo[e]:hi[e]] @ W[e]``
 * ``wgrad``: ``dW[e] = G[lo[e]:hi[e]].T @ X[lo[e]:hi[e]]`` (bf16 or fp32 output)
 
-Rows outside ``[lo[0], hi[E - 1])`` are neither read nor written.  The
-entries are nondecreasing row numbers of the operands, at most ``sum_m``.
+Rows outside ``[lo[0], hi[E - 1])`` do not affect the results and are not
+written.  The entries are nondecreasing row numbers of the operands, at most
+``sum_m``.
 
 Row tables.  The host tells the two forms apart by the shape alone: an int32
 vector of ``E + 1`` entries is an ``m_indptr`` (``E = w.shape[0]`` for the

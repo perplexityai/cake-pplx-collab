@@ -55,9 +55,11 @@ cake_moe_grouped_gemm_det_train_forward(x, w[e0:e1], chunk, out=y)  # writes row
 dw = cake_moe_grouped_gemm_det_train_wgrad(g, x, chunk, num_groups=e1 - e0)
 ```
 
-- Rows outside `[m_indptr[0], m_indptr[E])` are neither read nor written: the
-  forward and the data gradient leave those rows of `out` as they are. The
-  entries must be nondecreasing row numbers of the operands, at most `sum_m`.
+- Rows outside `[m_indptr[0], m_indptr[E])` do not affect the results and are
+  not written: the forward and the data gradient leave those rows of `out` as
+  they are, so slices of disjoint rows may write one `out`, also from different
+  streams. The entries must be nondecreasing row numbers of the operands, at
+  most `sum_m`.
 - The weight gradient reads the `[E + 1]` form only with `num_groups=E`;
   without it, `E + 1` entries are `E + 1` end offsets.
 - The kernels read `m_indptr[0]` on the device at every launch: a prepared

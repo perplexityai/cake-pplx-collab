@@ -87,9 +87,10 @@ def cake_moe_grouped_gemm_det_train_forward(
     For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
     the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
     slice of the rows, in absolute row numbers.  Rows outside
-    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
-    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
-    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
+    ``[m_indptr[0], m_indptr[E])`` do not affect the results and are not
+    written.  The package README (device slices) gives the bits of a slice,
+    its cost, and the ``[E]`` form ``m_indptr[1:]`` that a table starting at 0
+    can pass at no extra cost.
 
     Parameters
     ----------
@@ -132,9 +133,10 @@ def cake_moe_grouped_gemm_det_train_dgrad(
     For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
     the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
     slice of the rows, in absolute row numbers.  Rows outside
-    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
-    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
-    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
+    ``[m_indptr[0], m_indptr[E])`` do not affect the results and are not
+    written.  The package README (device slices) gives the bits of a slice,
+    its cost, and the ``[E]`` form ``m_indptr[1:]`` that a table starting at 0
+    can pass at no extra cost.
 
     ``g`` is ``[sum_m, N]`` bfloat16, ``w`` is ``[E, N, K]`` bfloat16 and is
     read in place (no transpose copy), ``offs`` is ``[E]`` int32 device end
@@ -162,9 +164,10 @@ def cake_moe_grouped_gemm_det_train_wgrad(
     For ``m_indptr`` input, ``offs`` in these formulas means ``m_indptr[1:]`` and
     the lower bound of group 0 is ``m_indptr[0]``, which may be above 0: a device
     slice of the rows, in absolute row numbers.  Rows outside
-    ``[m_indptr[0], m_indptr[E])`` are neither read nor written.  The package
-    README (device slices) gives the bits of a slice, its cost, and the ``[E]``
-    form ``m_indptr[1:]`` that a table starting at 0 can pass at no extra cost.
+    ``[m_indptr[0], m_indptr[E])`` do not affect the results and are not
+    written.  The package README (device slices) gives the bits of a slice,
+    its cost, and the ``[E]`` form ``m_indptr[1:]`` that a table starting at 0
+    can pass at no extra cost.
 
     ``g`` is ``[sum_m, N]`` bfloat16, ``x`` is ``[sum_m, K]`` bfloat16,
     ``offs`` is ``[E]`` int32 device end offsets (``E = offs.numel()``; pass

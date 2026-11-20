@@ -1604,7 +1604,7 @@ All three accumulate in FP32. The weight gradient has an optional accumulate mod
 
 **Device slices.** `m_indptr[0]` may be above 0. For example, pass the full `x` / `g` and `m_indptr_all[e0:e1+1]` to run experts `e0 .. e1-1` as one chunk.
 
-- Rows outside `[m_indptr[0], m_indptr[E])` are neither read nor written. There is no copy and no host read: the kernels read `m_indptr[0]` on the device at every launch and every CUDA Graph replay.
+- Rows outside `[m_indptr[0], m_indptr[E])` do not affect the results and are not written. There is no copy and no host read: the kernels read `m_indptr[0]` on the device at every launch and every CUDA Graph replay.
 - The weight gradient reads `m_indptr [E+1]` only with `num_groups=E`. Without it, `E+1` entries are `E+1` end offsets.
 - The `m_indptr` form binds the lead twins of the programs. A twin is JIT-compiled at its first call if it is not prebuilt. The twins can be slightly slower. When `m_indptr[0] == 0`, pass `m_indptr[1:]` (the `[E]` form): it binds the original programs at no extra cost and gives the same bits.
 - Bits: the plan uses `sum_m = x.shape[0]`, all rows. A slice gives the bits of the host-offset call on `x[m_indptr[0]:m_indptr[E]]` when the two plans are equal. Otherwise it gives the bits of that call padded with rows of no group to the same `sum_m`.
