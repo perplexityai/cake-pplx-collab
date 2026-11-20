@@ -17478,7 +17478,7 @@ def test_device_graph_rlab_pool(glm_weight, monkeypatch):
 
 
 _RLAB_POOL_PLACEMENT_SCRIPT = """
-import json, sys, torch
+import gc, json, sys, torch
 sys.path.insert(0, {root!r})
 from torch.utils._python_dispatch import TorchDispatchMode
 from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
@@ -17520,15 +17520,29 @@ def holder(lp):
 
 
 W = make_inputs(1, seed={seed}, device="cuda", ignore_frac=0.0).W
-for T in (32, 16, 256, 32, 1, 300, 16):
-    inp = make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+steps = (32, 16, 256, 32, 1, 300, 16)
+inputs = {{
+    T: make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+    for T in sorted(set(steps))
+}}
+# the first backward of a call key (the tensors' addresses are part of it) may run the runner's own path (its own
+# residuals, no holder bound) and remembers the binding: one call per key first, then the free lists and the request
+# log start empty, so that every logged graph's backward binds its holder
+for T in sorted(set(steps)):
+    inp = inputs[T]
     X = inp.X.detach().requires_grad_(True)
     Wg = inp.W.detach().requires_grad_(True)
-    # the first backward of a call key (new tensors: a new key) runs the runner's own path (its own residuals, no
-    # holder bound) and remembers the binding: one call first, so that both logged graphs' backwards bind their holders
     warm = be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake")
     torch.autograd.backward([warm], [inp.dlogp])
     del warm
+gc.collect()
+torch.cuda.synchronize()
+be._RLAB_POOL.clear()
+del requests[:]
+for T in steps:
+    inp = inputs[T]
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
     with Log():
         lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
         hs = [holder(lp) for lp in lps]
@@ -17620,8 +17634,8 @@ def test_device_graph_rlab_pool_placement(glm_weight):
     the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the same
     offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request two buffers
     only where a step's rows pass the capacity the steps before left (rows rounded up to 128), where the per-call path
-    requests one per graph.  Each step runs one call first: a key's first backward runs the runner's own path, which
-    binds no holder."""
+    requests one per graph.  Each call key runs one call first (a key's first backward may run the runner's own path,
+    which binds no holder); the free lists and the request count start empty after it."""
     _check_graph_rlab_pool_placement(
         "cake_lm_head_det_train", "cake_lm_head_det_train_logprob"
     )
