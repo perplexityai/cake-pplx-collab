@@ -28,10 +28,10 @@ once per stage and device, no library loaded), the launch grid of each program (
 ``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits) and the arguments of a launch in its
 plan's order, the entry points' launcher of a stage and device (made once per stage and device, no library loaded; the
 program, arguments and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused
-for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for an
-equal float or int; every other limit takes the full checks and their errors), the build manifest (every record's
-library, the recorded source digests), the capability map, the required ``limit`` keyword, the refusal of CPU tensors
-and no environment read outside the JIT shim.
+for a program that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for a
+float, or an int that a float holds exactly, equal to its float value; every other limit takes the full checks and their
+errors), the build manifest (every record's library, the recorded source digests), the capability map, the required
+``limit`` keyword, the refusal of CPU tensors and no environment read outside the JIT shim.
 
 On SM100 / SM103 / SM107, every training output (``h``, ``d_gate``, ``d_up`` and ``d_weight``) of each stage's small-R
 and large-R program (each forced through the route) judged against the naive BF16 tier
@@ -841,10 +841,10 @@ def test_the_launcher_refuses_programs_that_take_another_order(host_device, monk
 
 
 def test_the_limit_check_and_its_cached_rounding(monkeypatch) -> None:
-    """``limit`` is the same FP32 value whatever the calls before passed: a float or an int equal to the last
-    accepted limit gets its cached rounding, and every other value (another number, a bool, a float subclass, a
-    fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the full checks, with their
-    errors, also right after an equal valid limit was cached."""
+    """``limit`` is the same FP32 value whatever the calls before passed: a float, or an int that a float holds exactly,
+    equal to the float value of the last accepted limit gets its cached rounding, and every other value (another number,
+    a bool, a float subclass, a fraction, a tensor, a string, a non-finite, non-positive or too large number) takes the
+    full checks, with their errors, also right after an equal valid limit was cached."""
     monkeypatch.setattr(pkg, "_last_limit", (math.nan, math.nan))
 
     class Limit(float):

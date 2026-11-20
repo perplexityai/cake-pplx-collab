@@ -59,8 +59,9 @@ JIT variables):
   of more than one row has the stride of its row width).  Any other call takes
   the full checks, which raise every error and mark the inputs to copy.  Both
   give the same launch.  A ``limit`` that is a
-  Python float or int equal to the last accepted one reuses its FP32 rounding
-  (one cached pair); any other ``limit`` takes the full limit checks.  The
+  Python float, or an int that a float holds exactly, equal to the float value
+  of the last accepted one reuses its FP32 rounding (one cached pair); any
+  other ``limit`` takes the full limit checks.  The
   autograd function's backward reuses the forward's FP32 ``L`` and checks the
   saved operands again (a saved-tensors hook or a ``.data`` assignment can
   change them after the forward) and the upstream gradient; it has no output
@@ -478,8 +479,9 @@ _last_limit: tuple[float, float] = (math.nan, math.nan)
 def _limit(limit: Any) -> float:
     """``limit`` rounded to FP32 (the kernels' ``L``): a positive finite Python number.  A tensor is refused, as
     reading it would synchronize the host.  A ``float`` or ``int`` (exact types: no bool, no subclass) equal to the
-    last accepted limit returns its rounding: an equal float or int has the same Python float value (Python compares an
-    int and a float exactly), so the same rounding.  Any other value takes the checks below."""
+    Python float value of the last accepted limit returns its rounding: Python compares an int and a float exactly, so
+    an equal value has that float value and the same rounding.  An int that a float cannot hold exactly (such as
+    ``2**53 + 1``) equals no float, so it takes the checks below at every call, as does any other value."""
     global _last_limit
     if type(limit) is float or type(limit) is int:
         value, rounded = _last_limit
@@ -858,15 +860,15 @@ def _backward(
 # merged BF16 ``[R, 4608]`` input or two BF16 ``[R, 2304]`` tensors, ``0 < R < MAX_ROWS``, and outputs that are None
 # or plain contiguous tensors of their shapes: what :func:`_fast_operands` and :func:`_plain` accept.  The first
 # operand, the weight and ``dh`` are checked in the step's own frame, the ``up`` of two tensors and each output buffer
-# by one :func:`_plain` call each, so only a merged input with new outputs, whose limit is the last accepted Python
-# float or int, is checked and launched in exactly one Python frame per step once the host caches are filled (any
-# other limit adds one :func:`_limit` call; a call that fills a host cache, such as the first launch of a program on a
-# device, adds the calls that fill it).  The checks keep the order of the full checks: the operands and ``dh``, then
-# ``limit``, then the output buffers and their rules, then the device's architecture; an output buffer that is not
-# plain sends the call, its limit checked, to the full checks.  A contiguous tensor of more than one row has the row
-# stride of its row width, so its row stride is that constant and is not read; a single row's strides are 0 (never
-# dereferenced).  Any other call runs :func:`_forward` or :func:`_backward`, whose checks raise every error and mark
-# the inputs to copy; both give the same launch.
+# by one :func:`_plain` call each, so only a merged input with new outputs, whose limit is a Python float, or an int
+# that a float holds exactly, equal to the float value of the last accepted limit, is checked and launched in exactly
+# one Python frame per step once the host caches are filled (any other limit adds one :func:`_limit` call; a call that
+# fills a host cache, such as the first launch of a program on a device, adds the calls that fill it).  The checks
+# keep the order of the full checks: the operands and ``dh``, then ``limit``, then the output buffers and their rules,
+# then the device's architecture; an output buffer that is not plain sends the call, its limit checked, to the full
+# checks.  A contiguous tensor of more than one row has the row stride of its row width, so its row stride is that
+# constant and is not read; a single row's strides are 0 (never dereferenced).  Any other call runs :func:`_forward`
+# or :func:`_backward`, whose checks raise every error and mark the inputs to copy; both give the same launch.
 _BF16 = torch.bfloat16
 _FP32 = torch.float32
 _MERGED_WIDTH = 2 * WIDTH
@@ -1140,23 +1142,24 @@ class _Gradients(torch.autograd.Function):
 
 
 class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
-    """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and
-    ``weight``; no activation, no FP32 intermediate) and recomputes the activation in the backward, so
-    ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a
-    merged ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked in the
-    forward, by the forward step; the autograd forward then reads its FP32 rounding through :func:`_limit` again (the
-    cached pair for a Python float or int; for any other number the limit checks run a second time, on a value that
-    passed them), and the backward reuses that FP32 value.  The backward has no output buffer, ``grad_up`` or
-    ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the saved operands
-    again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their device, shape or
-    layout after the forward without the autograd version check seeing it.  No double backward: differentiating
-    gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
+    """Autograd of :func:`cake_clamped_swiglu_det`: saves only its inputs (``gate_up_or_gate``, ``up`` and ``weight``;
+    no activation, no FP32 intermediate) and recomputes the activation in the backward, so
+    ``torch.utils.checkpoint(..., use_reentrant=False)`` sees only the inputs as saved state.  The gradient of a merged
+    ``[R, 4608]`` input is one ``[R, 4608]`` tensor; ``limit`` gets no gradient.  ``limit`` is checked in the forward,
+    by the forward step; the autograd forward then reads its FP32 rounding through :func:`_limit` again (the cached pair
+    for a Python float, or an int that a float holds exactly; for any other number the limit checks run a second time,
+    on a value that passed them), and the backward reuses that FP32 value.  The backward has no output buffer,
+    ``grad_up`` or ``grad_weight`` to check; it checks the upstream gradient and, in the same one pass as a step, the
+    saved operands again: a saved-tensors hook (activation offloading) or a ``.data`` assignment can change their
+    device, shape or layout after the forward without the autograd version check seeing it.  No double backward:
+    differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``."""
 
     @staticmethod
     def forward(ctx, gate_up_or_gate, up, weight, limit):
         h = _forward_step(gate_up_or_gate, up, weight, limit, None)
         ctx.save_for_backward(gate_up_or_gate, up, weight)
-        ctx.limit = _limit(limit)  # the FP32 rounding the step used (its cached pair for a float or int)
+        # The FP32 rounding the step used (its cached pair for a float, or an int that a float holds exactly).
+        ctx.limit = _limit(limit)
         return h
 
     @staticmethod

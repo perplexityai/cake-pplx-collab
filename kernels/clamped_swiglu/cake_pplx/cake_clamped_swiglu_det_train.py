@@ -353,8 +353,9 @@ def cake_clamped_swiglu_det(
     -----
     Saves only the inputs and recomputes the activation in the backward (no activation retained; works under
     ``torch.utils.checkpoint(..., use_reentrant=False)``).  ``limit`` is checked in the forward (twice there for a
-    number that is not a Python float or int), not in the backward, which reuses its FP32 rounding.  No double
-    backward: differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
+    number that is neither a Python float nor an int that a float holds exactly), not in the backward, which reuses
+    its FP32 rounding.  No double backward: differentiating gradients computed with ``create_graph=True`` raises
+    ``RuntimeError``.
     """
 
     return _apply(gate_up_or_gate, up, weight, limit)
