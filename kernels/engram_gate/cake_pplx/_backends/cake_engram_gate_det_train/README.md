@@ -112,8 +112,8 @@ The gradients are those of the one backward. The `out` errors of the two forward
 `dot_sum="fp32"` rounds more output elements away from the correctly rounded (BF16 of FP64) result where the products
 nearly cancel: 17802 of the 8.19 million output elements of the near-cancelling draws, against 117 for the default
 (an FP32 evaluation of the formula: 21917); 152 against 113 on the random draws. The `"fp32"` forward takes about
-5-10% less time, depending on the GPU (`T = 16384`, FP32 weights: B200 0.320 ms against 0.347 ms, GB200 0.309 ms
-against 0.332 ms, GB300 0.313 ms against 0.329 ms, VR200 0.197 ms against 0.218 ms).
+5-15% less time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: B200 0.320 ms against 0.348 ms,
+GB200 0.309 ms against 0.330 ms, GB300 0.313 ms against 0.329 ms, VR200 0.174 ms against 0.205 ms).
 
 ## Workspace and retained state
 

@@ -108,7 +108,7 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(int mbar_addr, uint32_
 extern "C" {
 
 __global__ __launch_bounds__(512, LAUNCH_MIN_BLOCKS) void
-kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, __nv_bfloat16* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
+kernel_cake_rmsnorm_train_a8eb754739a1589de3ec(__nv_bfloat16* __restrict__ g, __nv_bfloat16* __restrict__ x, float* __restrict__ w, float* __restrict__ r, __nv_bfloat16* __restrict__ dx, float* __restrict__ dw, float* __restrict__ partial, unsigned int* __restrict__ counters, __nv_bfloat16* __restrict__ g_h, int T, int n_chunks, int rows_per_chunk, long long g_stride_p0, long long x_stride_p0, long long g_h_stride_p0)
 {
     const int tid = threadIdx.x;
     const int warp = make_warp_uniform(tid / 32);
@@ -167,7 +167,6 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
     __syncthreads();
 
     // === Task calls (declaration order) ===
-    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
     long long g_stride = g_stride_p0;
     long long x_stride = x_stride_p0;
     long long gh_stride = g_h_stride_p0;
@@ -232,17 +231,30 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
     }
     int ring = (int)stage_buf_addr;
     int my_g = ring + rg * 8192 + tir * 16;
-    unsigned int ww[8];
+    float wf[16];
     #pragma unroll
     for (int v = 0; v < 2; v++) {
         int wcol = (v * 256 + tir) * 8;
         {
-            const uint4* _vptr_2 = reinterpret_cast<const uint4*>(w + (unsigned long long)wcol);
-            uint4* _vdst_2 = reinterpret_cast<uint4*>(&ww[v * 4]);
-            #pragma unroll
-            for (int _blk = 0; _blk < 1; _blk++) {
-                _vdst_2[_blk] = _vptr_2[_blk];
-            }
+            unsigned _ldv8_2_0;
+            unsigned _ldv8_2_1;
+            unsigned _ldv8_2_2;
+            unsigned _ldv8_2_3;
+            unsigned _ldv8_2_4;
+            unsigned _ldv8_2_5;
+            unsigned _ldv8_2_6;
+            unsigned _ldv8_2_7;
+            asm volatile(
+                "ld.global.v8.b32 {%0, %1, %2, %3, %4, %5, %6, %7}, [%8];"
+                : "=r"(_ldv8_2_0), "=r"(_ldv8_2_1), "=r"(_ldv8_2_2), "=r"(_ldv8_2_3), "=r"(_ldv8_2_4), "=r"(_ldv8_2_5), "=r"(_ldv8_2_6), "=r"(_ldv8_2_7) : "l"((const void*)(w + ((unsigned long long)wcol))) : "memory");
+            wf[v * 8 + 0] = __uint_as_float(_ldv8_2_0);
+            wf[v * 8 + 1] = __uint_as_float(_ldv8_2_1);
+            wf[v * 8 + 2] = __uint_as_float(_ldv8_2_2);
+            wf[v * 8 + 3] = __uint_as_float(_ldv8_2_3);
+            wf[v * 8 + 4] = __uint_as_float(_ldv8_2_4);
+            wf[v * 8 + 5] = __uint_as_float(_ldv8_2_5);
+            wf[v * 8 + 6] = __uint_as_float(_ldv8_2_6);
+            wf[v * 8 + 7] = __uint_as_float(_ldv8_2_7);
         }
     }
     int rng[2];
@@ -412,24 +424,10 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
         int desc_step = ps[2];
         desc_n += desc_step;
     }
-    float wf[16];
-    #pragma unroll
-    for (int p = 0; p < 8; p++) {
-        unsigned int wwd = ww[p];
-        wf[2 * p] = __uint_as_float(wwd << 16);
-        wf[2 * p + 1] = __uint_as_float(wwd & 4294901760u);
-    }
     float acc[16];
     #pragma unroll
     for (int j = 0; j < 16; j++) {
         acc[j] = 0.0f;
-    }
-    #pragma unroll
-    for (int vz = 0; vz < 2; vz++) {
-        #pragma unroll
-        for (int ez = 0; ez < 8; ez++) {
-            fold_sm[rg * 4096 + (vz * 8 + ez) * 256 + tir] = 0.0f;
-        }
     }
     int n_cons = 0;
     int g_step = 0;
@@ -687,26 +685,6 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
             }
             r_cur = r_nxt;
             g_step += 1;
-            if ((k + 1 & 7) == 0) {
-                #pragma unroll
-                for (int vb = 0; vb < 2; vb++) {
-                    #pragma unroll
-                    for (int eb = 0; eb < 8; eb++) {
-                        int sb = rg * 4096 + (vb * 8 + eb) * 256 + tir;
-                        fold_sm[sb] = fold_sm[sb] + acc[vb * 8 + eb];
-                        acc[vb * 8 + eb] = 0.0f;
-                    }
-                }
-            }
-        }
-        #pragma unroll
-        for (int vt = 0; vt < 2; vt++) {
-            #pragma unroll
-            for (int et = 0; et < 8; et++) {
-                int st = rg * 4096 + (vt * 8 + et) * 256 + tir;
-                fold_sm[st] = fold_sm[st] + acc[vt * 8 + et];
-                acc[vt * 8 + et] = 0.0f;
-            }
         }
         int entry_1_3 = n_cons % 5;
         int _parity_dbar_3 = (int)((unsigned int)n_cons / 5 % 2);
@@ -726,15 +704,6 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
         nd[2] = _warp_redux_27;
         int cid_f = nd[0];
         unsigned long long pbase = (unsigned long long)cid_f * 4096ull;
-        __syncthreads();
-        #pragma unroll
-        for (int vr = 0; vr < 2; vr++) {
-            #pragma unroll
-            for (int er = 0; er < 8; er++) {
-                acc[vr * 8 + er] = fold_sm[rg * 4096 + (vr * 8 + er) * 256 + tir];
-            }
-        }
-        __syncthreads();
         #pragma unroll
         for (int v_4 = 0; v_4 < 2; v_4++) {
             int fcol = (v_4 * 256 + tir) * 8;
@@ -771,14 +740,6 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
                 "st.global.v8.b32 [%0], {%1, %2, %3, %4, %5, %6, %7, %8};"
                 :: "l"((void*)(partial + (pbase + (unsigned long long)pcol))), "r"(_stv8_28_0), "r"(_stv8_28_1), "r"(_stv8_28_2), "r"(_stv8_28_3), "r"(_stv8_28_4), "r"(_stv8_28_5), "r"(_stv8_28_6), "r"(_stv8_28_7) : "memory");
         }
-        __syncthreads();
-        #pragma unroll
-        for (int vz2 = 0; vz2 < 2; vz2++) {
-            #pragma unroll
-            for (int ez2 = 0; ez2 < 8; ez2++) {
-                fold_sm[rg * 4096 + (vz2 * 8 + ez2) * 256 + tir] = 0.0f;
-            }
-        }
         #pragma unroll
         for (int j2 = 0; j2 < 16; j2++) {
             acc[j2] = 0.0f;
@@ -803,6 +764,7 @@ kernel_cake_rmsnorm_train_e9e21bbe4fa478075868(__nv_bfloat16* __restrict__ g, __
         ce = nd[2];
         n_cons += 1;
     }
+    asm volatile("griddepcontrol.launch_dependents;" ::: "memory");
 
     // Cleanup
     __syncthreads();

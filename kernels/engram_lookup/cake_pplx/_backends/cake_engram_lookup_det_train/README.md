@@ -50,7 +50,8 @@ out_m = cake_engram_lookup_det_train_forward(w, s, ids)             # int64 [N] 
 | Workspace | 0 bytes: the call allocates only `out` (`row_ids.numel() * 512` bytes) |
 | Retained state | None |
 | Empty `row_ids` | Empty `out`, no launch, before the device's architecture is looked up |
-| Programs | One per architecture (record `lookup`), for both layouts and every `row_ids` shape |
+| Programs | Two per architecture, each for both layouts and every `row_ids` shape: `lookup_small` for at most `SMALL_MAX_POSITIONS` looked-up rows (`cake_jit.py`), `lookup` above. Both write the same bytes. |
+| First call on a device | Loads both libraries (prebuilt or JIT-built) and launches both programs on its operands: first the one its row count does not pick, then its own. Both write the same bytes, so the output is the same. The first launch of a kernel on a device loads its module there (CUDA's lazy module loading), so no later call on the device loads a library or a module, whichever program it launches. Make this call outside a CUDA graph capture; a capture after it, in either program, loads nothing. A call captured before it launches its own program only and readies nothing; the next call outside a capture does the readying. |
 | Minimum CUDA | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` (`build.json`); an older local toolkit raises `RuntimeError` when the library is built |
 | Row ids | In `[0, R)`. An id outside (a negative id included) stops the launch with a device-side trap before its row is read: the call or the next synchronizing CUDA call raises, and the CUDA context is unusable afterwards. The host checks no id (that would synchronize). |
 
@@ -60,7 +61,18 @@ A violation of the operand rules is a `ValueError` before any launch.
 
 One call launches one kernel on the current torch stream of the operands'
 device, a plain stream-ordered launch: nothing cooperative, no PDL, no shared
-memory.  A CTA has 8 warps; a warp handles 4 consecutive looked-up rows per
+memory.  The first call on a device launches two (both programs, see the
+contract table).  The call picks one of two programs by the number of looked-up rows:
+the small program (record `lookup_small`) for at most `SMALL_MAX_POSITIONS`
+rows, the main program (record `lookup`) above.  They compute every element
+the same way and write the same bytes, so the choice changes no output bit,
+and a row id gives the same bytes on either side of the threshold.  A call
+captured in a CUDA graph keeps the program its row count picked at capture.
+The main program is the bandwidth one: in the packed layout it keeps a row's
+code lines in L1 for the row's scale load, and it issues every code load of a
+step before the step's scale loads.  The small program is the latency one: it
+has no layout test, and each code load is followed by its row's scale load,
+the shorter path that a lookup of a few rows waits on.  A CTA has 8 warps; a warp handles 4 consecutive looked-up rows per
 step and walks the rows grid-stride, so any grid covers every row.  For each
 row a lane reads 8 value bytes and the scale byte of its 32-column group,
 decodes them to FP32, multiplies in FP32 and stores 16 bytes of BF16.  The
@@ -86,8 +98,9 @@ to nearest even), the value of the FP64 product rounded to BF16:
   `0x7F` and `0xFF` are NaN.  `-0 * scale` is `-0`.
 
 The tests check every one of the 65,536 (E4M3 code, E8M0 byte) pairs bit for
-bit against an FP64 reference, in both layouts.  That check is stricter than
-a comparison with an error budget: the error is 0 for every element.
+bit against an FP64 reference, in both layouts and through both programs.
+That check is stricter than a comparison with an error budget: the error is 0
+for every element.
 
 ## Determinism
 
