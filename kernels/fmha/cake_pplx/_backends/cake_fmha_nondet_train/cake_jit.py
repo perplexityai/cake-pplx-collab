@@ -190,6 +190,31 @@ RECORD_OF: dict[tuple[int, bool], tuple[str, str, str]] = {
     (64, True): ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
 }
 
+# (head dim, causal) -> the host sequence of the variant: one library whose ``run`` launches the three records
+# RECORD_OF names for it, in order, in one host call.  Derived by the exporter.
+SEQUENCES: dict[tuple[int, bool], dict[str, Any]] = {
+    (128, False): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_495bb89b89eb8b41327e",
+        "records": ("bwd_pre", "bwd_main", "bwd_post"),
+    },
+    (128, True): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_5f9dc314733948320c47",
+        "records": ("bwd_pre", "bwd_main_causal", "bwd_post"),
+    },
+    (64, False): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_a69536754fc8eb40cf51",
+        "records": ("bwd_pre_hd64", "bwd_main_hd64", "bwd_post_hd64"),
+    },
+    (64, True): {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "library": "cake_fmha_train_f4f0d4f37340ee62f928",
+        "records": ("bwd_pre_hd64", "bwd_main_hd64_causal", "bwd_post_hd64"),
+    },
+}
+
 
 def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> tuple[int, int, int]:
     """The launch grid of ``stage``: one CTA per 128-row block of one (head,

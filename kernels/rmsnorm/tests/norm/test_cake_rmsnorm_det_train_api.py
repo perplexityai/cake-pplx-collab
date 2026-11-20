@@ -52,8 +52,11 @@ WIDTHS = (
     (4096, 1e-5),
     (2048, 1e-6),
     (1536, 1e-6),
+    (1280, 1e-20),
+    (1024, 1e-6),
     (512, 1e-6),
     (256, 1e-6),
+    (128, 1e-20),
 )
 HIDDEN_SIZES = tuple(hidden for hidden, _eps in WIDTHS)
 EPS = {hidden: eps for hidden, eps in WIDTHS}
@@ -151,15 +154,23 @@ def test_facade_entry_points_match_the_backend(hidden: int) -> None:
 # architecture set ("SM100 / SM103:") and the calls ("none": no call): "the
 # residual-fused H <h> backward" (every token count; "... above <t> tokens":
 # every program window above ``t``) or "the forward / backward of H <h> above
-# <t> tokens" (every program window above ``t``).
+# <t> tokens" (every program window above ``t``), the latter possibly followed by
+# "(except with BF16 / FP32 weights from <a> to <b> tokens)": the windows of
+# that weight dtype between ``a`` and ``b`` start (the stall test's
+# ``WHOLE_SM_STARTS``).
 _WHOLE_SM_ITEM = re.compile(
     r"the residual-fused H (\d+) backward(?: above (\d+) tokens)?"
     r"|the (forward|backward) of H (\d+) above (\d+) tokens"
+    r"(?: \(except with (BF16|FP32) weights from (\d+) to (\d+) tokens\))?"
 )
 
 
-def _documented_whole_sm() -> dict[str, set[tuple[str, int, bool, int]]]:
-    """``arch -> {(kind, hidden, residual, above)}`` from the facade docstring."""
+def _documented_whole_sm(
+    starts: dict[str, set[tuple[str, int, bool, str, int, int]]] | None = None,
+) -> dict[str, set[tuple[str, int, bool, int]]]:
+    """``arch -> {(kind, hidden, residual, above)}`` from the facade docstring;
+    its "except" clauses go to ``starts`` (``arch -> {(kind, hidden, residual,
+    w dtype, above, at_most)}``)."""
     import cake_pplx.cake_rmsnorm_det_train as facade
 
     out: dict[str, set[tuple[str, int, bool, int]]] = {}
@@ -176,20 +187,31 @@ def _documented_whole_sm() -> dict[str, set[tuple[str, int, bool, int]]]:
                 kind,
                 hidden,
                 above,
+                except_dtype,
+                except_above,
+                except_at_most,
             ) in _WHOLE_SM_ITEM.findall(text):
                 if residual_hidden:
                     entries.add(
                         ("bwd", int(residual_hidden), True, int(residual_above or 0))
                     )
                 else:
-                    entries.add(
-                        (
-                            "fwd" if kind == "forward" else "bwd",
-                            int(hidden),
-                            False,
-                            int(above),
-                        )
+                    entry = (
+                        "fwd" if kind == "forward" else "bwd",
+                        int(hidden),
+                        False,
+                        int(above),
                     )
+                    entries.add(entry)
+                    if except_dtype and starts is not None:
+                        starts.setdefault(f"sm_{sm[2:]}a", set()).add(
+                            (
+                                *entry[:3],
+                                {"BF16": "bf16", "FP32": "f32"}[except_dtype],
+                                int(except_above),
+                                int(except_at_most),
+                            )
+                        )
     return out
 
 
@@ -198,10 +220,24 @@ def test_documented_whole_sm_calls_match_the_program_table() -> None:
     listed call names a shipped route of that architecture whose token
     threshold is an edge of the route's program windows (with BF16 and FP32
     weights alike), and the lists are the stall test's ``WHOLE_SM`` table, which
-    checks them on the device."""
-    from tests.norm.test_cake_rmsnorm_det_train_stall import WHOLE_SM
+    checks them on the device; an "except" clause names, for its weight dtype, two
+    edges of the route's program windows, and the clauses are the stall test's
+    ``WHOLE_SM_STARTS``."""
+    from tests.norm.test_cake_rmsnorm_det_train_stall import WHOLE_SM, WHOLE_SM_STARTS
 
-    documented = _documented_whole_sm()
+    starts: dict[str, set[tuple[str, int, bool, str, int, int]]] = {}
+    documented = _documented_whole_sm(starts)
+    assert starts == {arch: set(entries) for arch, entries in WHOLE_SM_STARTS.items()}
+    for arch, entries in starts.items():
+        for kind, hidden, residual, w_dtype, low, high in entries:
+            edges = {
+                edge
+                for above, at_most, _library in cake_rmsnorm_det_train_program_windows(
+                    arch, hidden, kind, residual, w_dtype
+                )
+                for edge in (above, at_most)
+            }
+            assert {low, high} <= edges, (arch, kind, hidden, w_dtype, low, high)
     assert set(documented) == set(loader.ARCHES)
     for arch, entries in documented.items():
         assert entries == set(WHOLE_SM[arch]), arch

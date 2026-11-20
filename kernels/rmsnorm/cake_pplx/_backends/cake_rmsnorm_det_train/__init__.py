@@ -400,7 +400,7 @@ def _backward_module_records(
 
 def _workspace_record(
     arch: str, hidden: int, residual: bool, rows: int, w_dtype: str = "bf16"
-) -> dict:
+) -> dict | None:
     """The backward module that sizes the partial / counter workspace for ``rows`` tokens.
 
     Every main backward module of a pair (the record owning a
@@ -409,18 +409,26 @@ def _workspace_record(
     switches modules on the row count is sized by the module with the largest
     partial capacity, whose layout every pair module of the route shares.  A
     column-task module (``claim_sum_f32``) binds no partial rows and does not
-    size them.
+    size them: a route of column-task modules alone has no owner
+    (``None``), and its workspace holds the counters alone.
     """
 
+    records = _backward_module_records(arch, hidden, residual, w_dtype)
     owners = [
         record
-        for record in _backward_module_records(arch, hidden, residual, w_dtype)
+        for record in records
         if (record.get("workspace_rule") or {}).get("kind") == "chunk_partials"
     ]
     if not owners:
+        if all(
+            (record.get("workspace_rule") or {}).get("kind") == "claim_sum_f32"
+            for record in records
+        ):
+            return None
         raise RuntimeError(
             f"the exported backward route for hidden={hidden} declares "
-            "no workspace owner; expected at least one"
+            "no workspace owner beside modules that are not column tasks; "
+            "expected at least one"
         )
     return max(
         owners,
@@ -475,10 +483,12 @@ def cake_rmsnorm_det_train_backward_workspace_bytes(
     (the partial's high and low part) for a module whose workspace rule
     spells ``partial_rows`` 2, among the modules a call of at most ``rows``
     tokens can launch.  A column-task module (the small token counts of a
-    route, workspace rule ``claim_sum_f32``) uses the counters alone.  The size grows with
-    ``rows`` and a buffer sized for ``rows`` serves every call with at most
-    that many tokens.  The counters must be zero on first use (allocate with
-    ``torch.zeros`` or use :func:`cake_rmsnorm_det_train_backward_workspace`); the
+    route, workspace rule ``claim_sum_f32``) uses the counters alone, and so
+    does every call of a route of column-task modules alone.  The size never
+    decreases as ``rows`` grows and a buffer sized for ``rows`` serves every
+    call with at most that many tokens.  The counters must be zero on first
+    use (allocate with ``torch.zeros`` or use
+    :func:`cake_rmsnorm_det_train_backward_workspace`); the
     kernels leave them zero, so the same buffer is reusable across calls and
     CUDA Graph replays without host writes.  The buffer serves the BF16-weight
     and the FP32-weight route of the width alike.
@@ -898,9 +908,10 @@ def cake_rmsnorm_det_train_backward(
     # per pipeline step); the partial capacity is the route's.  The main kernel
     # claims the chunks from the counters and writes one partial row per chunk;
     # the dw reduce record launched after it folds the ``n_chunks`` rows.  A
-    # column-task module (the small token counts of a route) runs alone: its
-    # CTAs claim the column tasks and the chunks, store ``dx`` by row and
-    # ``dw`` by column, each column summed in a fixed order.
+    # column-task module (the small token counts of a route, every token count
+    # of a route of column tasks alone) runs alone: its CTAs claim the column
+    # tasks and the chunks, store ``dx`` by row and ``dw`` by column, each
+    # column summed in a fixed order.
     partial, counters, layout = _workspace_views(
         workspace, launched[0], rows=rows, device=device, owner=owner
     )
