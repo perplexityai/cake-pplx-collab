@@ -18189,13 +18189,24 @@ for T in (32, 16, 256, 32, 1):
         torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
         del lps
     torch.cuda.synchronize()
+# A device address differs between two processes (each lays out its own virtual address space); the caching
+# allocator's placement is the segment, numbered in the order the log first reaches it, and the offset in it.
 segs = torch.cuda.memory_snapshot()
 stream = be._RLAB_STREAMS[torch.cuda.current_device()].cuda_stream
-in_holding = [
-    any(s["stream"] == stream and 0 <= p - s["address"] < s["total_size"] for s in segs)
-    for p in held
-]
-print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, in_holding=in_holding)))
+order = {{}}
+
+
+def where(p):
+    for s in segs:
+        if 0 <= p - s["address"] < s["total_size"]:
+            kind = "holding" if s["stream"] == stream else "default" if s["stream"] == 0 else "other"
+            return [order.setdefault(s["address"], len(order)), p - s["address"], s["total_size"], kind]
+    return None
+
+
+rows = [[op, shape, where(p)] for op, shape, p in rows]
+held = [where(p) for p in held]
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held)))
 """
 
 
@@ -18203,8 +18214,9 @@ def test_device_graph_rlab_fast_switch_placement(glm_weight, tmp_path):
     """The fast holding-stream switch places every block as the ``torch.cuda.stream`` context does: two fresh
     processes run the same log-probability forwards (two graphs alive at a time) and backwards at 32, 16, 256, 32 and
     1 rows, one with each switch, and every CUDA tensor an operator returns -- the compact rows, the logits, the
-    statistics, every buffer of the forward and the backward -- and every graph's label residuals lie at the same
-    address in both, the residuals in the holding stream's segment."""
+    statistics, every buffer of the forward and the backward -- and every graph's label residuals lie in the same
+    caching-allocator segment at the same offset in both (a device address itself differs between processes), the
+    residuals in a segment of the holding stream."""
     _require_program(entry="logprob")
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env = dict(
@@ -18233,7 +18245,8 @@ def test_device_graph_rlab_fast_switch_placement(glm_weight, tmp_path):
         line = [x for x in proc.stdout.splitlines() if x.startswith("PLACEMENT ")][-1]
         got[context] = json.loads(line[len("PLACEMENT ") :])
     fast, context = got[False], got[True]
-    assert fast["held"] and all(fast["in_holding"]) and all(context["in_holding"])
+    for held in (fast["held"], context["held"]):
+        assert held and all(h is not None and h[3] == "holding" for h in held)
     assert fast["held"] == context["held"]
     assert len(fast["rows"]) == len(context["rows"])
     for a, b in zip(fast["rows"], context["rows"], strict=True):
