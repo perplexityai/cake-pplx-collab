@@ -18726,9 +18726,10 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch, entry):
     in the flat BF16 dX cast's fold program -- in the loss entry's dX finalize, in the log-probability backward's
     in-loop cast -- and launches no fold-alone slab sum on those chunks: bitwise the ``loss``, ``logp``, ``dX`` and
     ``dW`` of the same call with the fold left to the slab sums (the cast-fold range forced empty: the previous
-    launches)."""
+    launches).  A device whose slice rule gives the shape no one-slice chunk skips."""
     _require_program(entry=entry)
-    inp = make_inputs(2048, seed=SEED + 97, device=CUDA, V=16384, ignore_frac=0.0)
+    # H 8192 at 4096 rows in one chunk: a one-slice dX chunk under the B200 slice rule
+    inp = make_inputs(4096, seed=SEED + 97, device=CUDA, H=8192, ignore_frac=0.0)
     assert bool(inp.valid.all())
     bound = []
     for mod in (cake_backend, opt_in):
@@ -18743,11 +18744,23 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch, entry):
         off.configure(enabled=False)
         monkeypatch.setattr(mod, "BINDING_CACHE", off)
     kw = dict(entry=entry, backend="cake")
-    folded = _run(inp, 1024, **kw)
+    ranges = []
+    real_range = cake_backend._cast_fold_range
+
+    def range_spy(plan):
+        out = real_range(plan)
+        if not plan.compact:
+            ranges.append(out)
+        return out
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
+    folded = _run(inp, 4096, **kw)
+    if not any(hi > lo for lo, hi in ranges):
+        pytest.skip("this device's dX slice rule gives the shape no one-slice chunk")
     with_fold = list(bound)
     bound.clear()
     monkeypatch.setattr(cake_backend, "_cast_fold_range", lambda plan: (0, 0))
-    plain = _run(inp, 1024, **kw)
+    plain = _run(inp, 4096, **kw)
     without = list(bound)
     fold_stage = cake_backend.DX_CAST_FOLD_STAGE
     slab_stages = set(cake_backend.DX_SLAB_SUM_STAGES)
