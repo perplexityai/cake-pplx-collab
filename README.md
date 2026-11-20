@@ -116,6 +116,7 @@ The KCP (context-parallel) route of causal_conv1d uses the KCP context object th
 | engram_lookup | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | act_qdq | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | clamped_swiglu | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
+| dsa_sparse_attention | Validated on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) |
 | gated_kv_compression | GPU suites and benchmark run on NVIDIA B200 (`sm_100a`), GB300 (`sm_103a`) and VR200 (`sm_107a`) with CUDA 13.5, against the acceptance criteria of issue #76 |
 | Not run | Tests that need more than 4 GPUs |
 | Release tags | Planned, not created yet |
