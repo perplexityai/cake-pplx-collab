@@ -140,12 +140,12 @@ from ._cake_pplx_api_clamped_swiglu import cake_api
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
 # imported on first use.  The steps and the autograd entry call the backend's
-# own step functions and positional autograd entry (``apply``; with
-# saved-tensors hooks set, then the forward launch), which the backend
+# own step functions, ``CakeClampedSwiGLUDetFunction.apply`` and, with
+# saved-tensors hooks set, its held-launch autograd entry, which the backend
 # functions of the same names call: the same work, one Python call fewer per
 # call.  Each is bound to a global of this module at its first call
-# (:func:`_step_forward`, :func:`_step_backward`, :func:`_autograd`), so a
-# later call reads no cache.
+# (:func:`_step_forward`, :func:`_step_backward`, :func:`_apply`,
+# :func:`_autograd`), so a later call reads no cache.
 
 
 @functools.cache
@@ -169,12 +169,25 @@ def _step_backward(*arguments: Any) -> tuple[torch.Tensor, Optional[torch.Tensor
     return _step_backward(*arguments)
 
 
+def _apply(*arguments: Any) -> torch.Tensor:
+    """The backend's ``CakeClampedSwiGLUDetFunction.apply``; the first call imports the backend and binds this global
+    to it."""
+    global _apply
+    _apply = _backend().CakeClampedSwiGLUDetFunction.apply
+    return _apply(*arguments)
+
+
 def _autograd(*arguments: Any) -> torch.Tensor:
-    """The backend's autograd entry (``CakeClampedSwiGLUDetFunction.apply``; with saved-tensors hooks set, then the
-    forward launch); the first call imports the backend and binds this global to it."""
+    """The backend's held-launch autograd entry (``CakeClampedSwiGLUDetFunction.apply``, then the forward launch), for
+    a call with saved-tensors hooks set; the first call imports the backend and binds this global to it."""
     global _autograd
     _autograd = _backend()._autograd
     return _autograd(*arguments)
+
+
+# The innermost saved-tensors hooks, a (pack, unpack) pair, or None when none are set: read as torch's own checkpoint
+# reads them.  Without this function (another torch) every autograd call takes the held-launch entry.
+_saved_tensors_hooks = getattr(torch._C._autograd, "_top_saved_tensors_default_hooks", None)
 
 
 # The backend package's own objects (the autograd class and the constants),
@@ -377,6 +390,8 @@ def cake_clamped_swiglu_det(
     gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
+    if _saved_tensors_hooks is not None and _saved_tensors_hooks(False) is None:
+        return _apply(gate_up_or_gate, up, weight, limit)  # no pack hook to run: the forward launches in place
     return _autograd(gate_up_or_gate, up, weight, limit)
 
 

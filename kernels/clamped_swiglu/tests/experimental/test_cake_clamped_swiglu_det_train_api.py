@@ -17,7 +17,8 @@ Tests of the public surface of the Cake routed-expert clamped SwiGLU training ke
 ``cake_pplx.cake_clamped_swiglu_det_train`` facade.  The facade's entry points are pass-throughs to
 ``cake_pplx._backends.cake_clamped_swiglu_det_train``: the same signatures (``limit`` a required keyword everywhere)
 and the same bits as the backend; its autograd class and constants are the backend's objects, and its entries call the
-backend's step functions and autograd entry (``apply``, then the forward launch), bound at their first call.  The
+backend's step functions, ``apply`` and, with saved-tensors hooks set, the held-launch autograd entry, bound at their
+first call.  The
 mode rules of the deterministic package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked
 without a device), and ``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns
 in any call.  The facade reads no environment variable.  The numerical contract is
@@ -175,20 +176,28 @@ def test_facade_refuses_what_the_backend_refuses(name: str) -> None:
 
 
 def test_the_facade_binds_the_backend_functions_at_their_first_call() -> None:
-    """Without a device: after a first call of each facade entry (each refused for a CPU operand), the facade's steps
-    and autograd entry call the backend's own step functions and positional autograd entry (``apply``, then the
-    forward launch), bound to globals of the facade (no cache lookup per call)."""
+    """Without a device: after a first call of each facade entry (each refused for a CPU operand; the autograd entry
+    without and with saved-tensors hooks), the facade's steps and autograd entry call the backend's own step
+    functions, ``CakeClampedSwiGLUDetFunction.apply`` (no hooks) and the held-launch autograd entry (hooks set), bound
+    to globals of the facade (no cache lookup per call)."""
     dh = torch.zeros(4, I, dtype=torch.bfloat16)
     x = torch.zeros(4, 2 * I, dtype=torch.bfloat16)
+
+    def hooked():
+        with torch.autograd.graph.saved_tensors_hooks(lambda t: t, lambda t: t):
+            facade.cake_clamped_swiglu_det(x, limit=L)
+
     for call in (
         lambda: facade.cake_clamped_swiglu_det_train_forward(x, limit=L),
         lambda: facade.cake_clamped_swiglu_det_train_backward(dh, x, limit=L),
         lambda: facade.cake_clamped_swiglu_det(x, limit=L),
+        hooked,
     ):
         with pytest.raises(ValueError):
             call()
     assert facade._step_forward is backend._forward_step
     assert facade._step_backward is backend._backward_step
+    assert facade._apply is backend.CakeClampedSwiGLUDetFunction.apply
     assert facade._autograd is backend._autograd
 
 

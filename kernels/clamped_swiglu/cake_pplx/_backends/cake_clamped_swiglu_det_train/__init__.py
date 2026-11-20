@@ -1263,20 +1263,15 @@ _saved_tensors_hooks = getattr(torch._C._autograd, "_top_saved_tensors_default_h
 
 
 def _autograd(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.Tensor:
-    """:func:`cake_clamped_swiglu_det` with positional arguments.  With saved-tensors hooks set (a non-reentrant
-    checkpoint sets them for its forward and its recomputation; so does activation offloading),
-    :class:`CakeClampedSwiGLUDetFunction` is applied with a :class:`_HeldLaunch`, which then launches the forward
-    kernel.  ``apply`` saves the inputs (runs their pack hooks) before it returns, so a non-reentrant checkpoint's
+    """:func:`cake_clamped_swiglu_det` with positional arguments and saved-tensors hooks set (a non-reentrant
+    checkpoint sets them for its forward and its recomputation; so does activation offloading):
+    :class:`CakeClampedSwiGLUDetFunction` applied with a :class:`_HeldLaunch`, which then launches the forward kernel.
+    ``apply`` saves the inputs (runs their pack hooks) before it returns, so a non-reentrant checkpoint's
     recomputation with early stop on (the default) ends inside ``apply``, before this launch, when these inputs are the
     last tensors its region saves: the recomputed ``h`` would be dropped.  When a later operation of the region saves a
-    tensor (the down projection saves ``h``), the recomputation continues and launches it.  Without hooks no pack hook
-    runs and nothing can stop the call, so ``apply`` launches inside ``forward``, without the holder's host work.  Under
-    ``torch.compile`` or ``torch.jit.trace`` the launch stays inside ``forward`` (a trace records ``apply`` only)."""
-    if (
-        torch.compiler.is_compiling()
-        or (_saved_tensors_hooks is not None and _saved_tensors_hooks(False) is None)
-        or torch.jit.is_tracing()
-    ):
+    tensor (the down projection saves ``h``), the recomputation continues and launches it.  Under ``torch.compile`` or
+    ``torch.jit.trace`` the launch stays inside ``forward`` (a trace records ``apply`` only)."""
+    if torch.compiler.is_compiling() or torch.jit.is_tracing():
         return _apply(gate_up_or_gate, up, weight, limit)
     launch = _HeldLaunch()
     h = _apply(gate_up_or_gate, up, weight, limit, launch)
@@ -1292,7 +1287,10 @@ def cake_clamped_swiglu_det(
     limit: float,
 ) -> torch.Tensor:
     """Differentiable routed-expert clamped SwiGLU: :class:`CakeClampedSwiGLUDetFunction` applied to the arguments;
-    with saved-tensors hooks set, the forward kernel launched after autograd saved the inputs (:func:`_autograd`)."""
+    with saved-tensors hooks set, the forward kernel launched after autograd saved the inputs (:func:`_autograd`).
+    Without hooks no pack hook runs and nothing can stop the call, so ``apply`` launches inside ``forward``."""
+    if _saved_tensors_hooks is not None and _saved_tensors_hooks(False) is None:
+        return _apply(gate_up_or_gate, up, weight, limit)
     return _autograd(gate_up_or_gate, up, weight, limit)
 
 

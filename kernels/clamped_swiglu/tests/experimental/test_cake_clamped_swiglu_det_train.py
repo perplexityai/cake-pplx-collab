@@ -91,6 +91,7 @@ import ast
 import fractions
 import functools
 import hashlib
+import importlib
 import inspect
 import json
 import math
@@ -123,6 +124,7 @@ from tests.cake.test_helpers.clamped_swiglu_reference import (
 from tests.cake.test_helpers.clamped_swiglu_reference import outputs as step_outputs
 
 pkg = cake_package("cake_clamped_swiglu_det_train")
+facade_clamped_swiglu = importlib.import_module("cake_pplx.cake_clamped_swiglu_det_train").cake_clamped_swiglu_det
 cake_jit = cake_package("cake_clamped_swiglu_det_train", "cake_jit")
 
 forward = pkg.cake_clamped_swiglu_det_train_forward
@@ -1708,9 +1710,9 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
     ``CakeClampedSwiGLUDetFunction.apply`` returns: every pack hook of the inputs it saves runs before the launch, as
     for a built-in op.  A direct ``apply`` with four arguments launches inside ``forward``, before the pack hooks, and
     so does ``cake_clamped_swiglu_det`` while ``torch.compiler.is_compiling()`` or ``torch.jit.is_tracing()`` is true.
-    Without hooks it makes no held launch and ``forward`` launches (with no way to read the hooks, every call holds its
-    launch).  Under ``torch.no_grad()`` it launches once and saves nothing.  Every way gives the steps' bits, one
-    forward launch and one backward launch."""
+    Without hooks it makes no held launch and ``forward`` launches, from the backend and from the facade (with no way
+    to read the hooks, every call holds its launch).  Under ``torch.no_grad()`` it launches once and saves nothing.
+    Every way gives the steps' bits, one forward launch and one backward launch."""
     t = make_inputs(Case(129, layout, w), seed=31, device=device)
     want = _functional(t)
     packs = sum(x is not None for x in (t.first, t.second, t.weight))
@@ -1767,12 +1769,14 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
     assert len(made) == 1
 
     assert pkg._saved_tensors_hooks is None or pkg._saved_tensors_hooks(False) is None  # no hooks set here
-    for hooks in (pkg._saved_tensors_hooks, None):  # the torch function, then no way to read the hooks
+    for hooks, entry in [(pkg._saved_tensors_hooks, call) for call in (clamped_swiglu, facade_clamped_swiglu)] + [
+        (None, clamped_swiglu)  # no way to read the hooks
+    ]:
         monkeypatch.setattr(pkg, "_saved_tensors_hooks", hooks)
         made.clear()
         launches.clear()
         leaves = _leaves(t)
-        h = clamped_swiglu(*leaves, limit=t.L)
+        h = entry(*leaves, limit=t.L)
         assert len(made) == (hooks is None), hooks
         assert [launch[0] for launch in launches] == ["fwd"], hooks
         h.backward(t.dh)
