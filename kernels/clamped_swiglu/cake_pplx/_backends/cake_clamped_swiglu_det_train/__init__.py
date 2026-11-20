@@ -727,7 +727,7 @@ def _forward(
     held: Optional[_HeldLaunch] = None,
 ) -> tuple[torch.Tensor, float]:
     """The forward step and its FP32 ``L``: every argument checked, then the copies of the inputs the kernels cannot
-    read, the new output and the launch (kept in ``held`` when given, which launches it later:
+    read, the new output and the launch (kept in ``held`` when given, for :func:`_autograd` to run:
     :class:`_HeldLaunch`)."""
     fast = _fast_operands(gate_up_or_gate, up, weight) if _FAST_CHECKS else None
     if fast is None:
@@ -756,7 +756,9 @@ def _forward(
     else:
         up_tensor, up_stride, up_col = second, second.stride(0) if many else 0, 0
     launch = _launcher("fwd", index)
-    (launch if held is None else held.hold(launch))(
+    if held is not None:
+        held.launch, launch = launch, held.keep
+    launch(
         rows,
         first,
         up_tensor,
@@ -916,7 +918,7 @@ def _forward_step(
     The checks and the launch are those of :func:`_forward`: the operands, then ``limit``, then ``out`` (one that is
     not plain goes, with the limit checked, to :func:`_forward`), then the device's architecture, then the new output
     and the launch.  With ``held`` (the autograd forward of :func:`cake_clamped_swiglu_det`), the launch is kept there
-    and runs when ``held`` is called."""
+    for :func:`_autograd` to run."""
     first = gate_up_or_gate
     if _FAST_CHECKS and type(first) is torch.Tensor and first.is_cuda and first.dtype is _BF16:
         shape = first.shape
@@ -968,7 +970,7 @@ def _forward_step(
                     else:
                         up_col = 0
                     if held is not None:
-                        entry = held.hold(entry)
+                        held.launch, entry = entry, held.keep
                     entry(
                         first,
                         up,
@@ -1183,25 +1185,15 @@ class _Gradients(torch.autograd.Function):
 
 class _HeldLaunch:
     """The forward launch of one :func:`cake_clamped_swiglu_det` call, kept from the autograd forward until ``apply``
-    returns: the step calls :meth:`hold` with its launch callable and calls what it returns with the launch's
-    arguments; calling the held launch then runs that launch (nothing when the step launched nothing, ``R == 0``)."""
+    returns: the step stores its launch callable in ``launch`` and calls :meth:`keep` with the launch's arguments in
+    its place; :func:`_autograd` then runs ``launch(*arguments)`` (no launch when the step launched nothing,
+    ``R == 0``)."""
 
-    __slots__ = ("arguments", "launch")
+    launch: Optional[Callable[..., Any]] = None
+    arguments: tuple = ()
 
-    def __init__(self) -> None:
-        self.launch: Optional[Callable[..., Any]] = None
-
-    def hold(self, launch: Callable[..., Any]) -> Callable[..., None]:
-        self.launch = launch
-        return self._keep
-
-    def _keep(self, *arguments: Any) -> None:
+    def keep(self, *arguments: Any) -> None:
         self.arguments = arguments
-
-    def __call__(self) -> None:
-        launch = self.launch
-        if launch is not None:
-            launch(*self.arguments)
 
 
 class CakeClampedSwiGLUDetFunction(torch.autograd.Function):
@@ -1271,11 +1263,13 @@ def _autograd(gate_up_or_gate: Any, up: Any, weight: Any, limit: Any) -> torch.T
     last tensors its region saves: the recomputed ``h`` would be dropped.  When a later operation of the region saves a
     tensor (the down projection saves ``h``), the recomputation continues and launches it.  Under ``torch.compile`` or
     ``torch.jit.trace`` the launch stays inside ``forward`` (a trace records ``apply`` only)."""
-    if torch.compiler.is_compiling() or torch.jit.is_tracing():
+    if torch.compiler.is_compiling() or torch._C._is_tracing():
         return _apply(gate_up_or_gate, up, weight, limit)
-    launch = _HeldLaunch()
-    h = _apply(gate_up_or_gate, up, weight, limit, launch)
-    launch()
+    held = _HeldLaunch()
+    h = _apply(gate_up_or_gate, up, weight, limit, held)
+    launch = held.launch
+    if launch is not None:
+        launch(*held.arguments)
     return h
 
 

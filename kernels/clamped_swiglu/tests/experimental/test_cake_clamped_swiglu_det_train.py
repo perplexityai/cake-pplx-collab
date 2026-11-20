@@ -1709,7 +1709,7 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
     """With saved-tensors hooks set, ``cake_clamped_swiglu_det`` launches its forward kernel after
     ``CakeClampedSwiGLUDetFunction.apply`` returns: every pack hook of the inputs it saves runs before the launch, as
     for a built-in op.  A direct ``apply`` with four arguments launches inside ``forward``, before the pack hooks, and
-    so does ``cake_clamped_swiglu_det`` while ``torch.compiler.is_compiling()`` or ``torch.jit.is_tracing()`` is true.
+    so does ``cake_clamped_swiglu_det`` while ``torch.compiler.is_compiling()`` or ``torch._C._is_tracing()`` is true.
     Without hooks it makes no held launch and ``forward`` launches, from the backend and from the facade (with no way
     to read the hooks, every call holds its launch).  Under ``torch.no_grad()`` it launches once and saves nothing.
     Every way gives the steps' bits, one forward launch and one backward launch."""
@@ -1765,7 +1765,7 @@ def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w
         return call
 
     assert run(patched(torch.compiler, "is_compiling")) == inside
-    assert run(patched(torch.jit, "is_tracing")) == inside
+    assert run(patched(torch._C, "_is_tracing")) == inside
     assert len(made) == 1
 
     assert pkg._saved_tensors_hooks is None or pkg._saved_tensors_hooks(False) is None  # no hooks set here
