@@ -18,7 +18,9 @@ Tests of the public surface of the Cake routed-expert clamped SwiGLU training ke
 ``cake_pplx._backends.cake_clamped_swiglu_det_train``: the same signatures (``limit`` a required keyword everywhere)
 and the same bits as the backend; its autograd class and constants are the backend's objects, and its entries call the
 backend's step functions, ``apply`` and, in a backward with saved-tensors hooks set, the held-launch entry, bound at
-their first call.  The
+their first call.  Through the facade, the forward of a checkpoint's recomputation launches after autograd saved its
+inputs (one held launch; none at ``R = 0``), and a real non-reentrant checkpoint of the op alone launches no forward in
+the backward.  The
 mode rules of the deterministic package: no entry point takes a ``deterministic`` keyword (``TypeError``, checked
 without a device), and ``torch.use_deterministic_algorithms(True)`` (strict or ``warn_only``) neither raises nor warns
 in any call.  The facade reads no environment variable.  The numerical contract is
@@ -28,6 +30,8 @@ in any call.  The facade reads no environment variable.  The numerical contract 
 from __future__ import annotations
 
 import ast
+import contextlib
+import functools
 import inspect
 import warnings
 from pathlib import Path
@@ -70,6 +74,43 @@ def determinism_setting():
     torch.use_deterministic_algorithms(False)
     yield
     torch.use_deterministic_algorithms(enabled, warn_only=warn_only)
+
+
+@pytest.fixture
+def events(monkeypatch) -> list:
+    """The stage of every backend launch (``fwd``, ``bwd`` or ``bwd_unweighted``) in order, beside the tests' own
+    ``"pack"`` marks: each FFI entry is wrapped as a launcher looks it up, and the launchers are made afresh."""
+    found: list = []
+    entry = backend._entry
+
+    def spy(name, arch):
+        run, stage = entry(name, arch), backend.cake_jit.MODULES[name]["stage"]
+
+        def recorded(*args):
+            found.append(stage)
+            return run(*args)
+
+        return recorded
+
+    monkeypatch.setattr(backend, "_entry", spy)
+    monkeypatch.setattr(backend, "_launcher", functools.cache(backend._launcher.__wrapped__))
+    return found
+
+
+@pytest.fixture
+def held(monkeypatch) -> list:
+    """Every held launch the backend makes (one per call that keeps its forward launch), in order."""
+    made: list = []
+
+    class Counted(backend._HeldLaunch):
+        __slots__ = ()
+
+        def __init__(self) -> None:
+            made.append(self)
+            super().__init__()
+
+    monkeypatch.setattr(backend, "_HeldLaunch", Counted)
+    return made
 
 
 def _inputs(rows: int, *, seed: int, merged: bool = True, weighted: bool = True):
@@ -269,3 +310,101 @@ def test_deterministic_algorithms_neither_raise_nor_warn(warn_only: bool, determ
     assert len(got) == len(want)
     for i, (a, b) in enumerate(zip(got, want, strict=True)):
         assert torch.equal(a, b), i
+
+
+@requires_device
+@pytest.mark.parametrize(("merged", "weighted"), [(True, True), (False, True), (True, False)])
+def test_the_facade_launches_a_recomputed_forward_after_autograd_saved_the_inputs(
+    merged: bool, weighted: bool, events, held, monkeypatch
+) -> None:
+    """Through the facade, as in a backward with saved-tensors hooks set (a non-reentrant checkpoint's recomputation;
+    the facade's graph-task query answers "a backward runs"), the forward launches after the pack hooks of its inputs,
+    through one held launch; with hooks outside a backward, and in a backward without hooks, it launches inside
+    ``forward`` (before the pack hooks), with no held launch.  Every way gives the steps' bits and one backward launch;
+    at ``R = 0`` the held call launches nothing."""
+    first, second, w, dh = _inputs(129, seed=21, merged=merged, weighted=weighted)
+    want_h = cake_clamped_swiglu_det_train_forward(first, second, w, limit=L)
+    want = cake_clamped_swiglu_det_train_backward(dh, first, second, w, limit=L)
+    packs = sum(t is not None for t in (first, second, w))
+    bwd = "bwd" if weighted else "bwd_unweighted"
+
+    def pack(x: torch.Tensor) -> torch.Tensor:
+        events.append("pack")
+        return x
+
+    def run(operands, grad, *, in_backward: bool, hooks: bool):
+        leaves = [None if t is None else t.clone().requires_grad_(True) for t in operands]
+        events.clear()
+        with monkeypatch.context() as patch:
+            if in_backward:
+                patch.setattr(facade, "_graph_task", lambda: 0)
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x) if hooks else contextlib.nullcontext():
+                h = cake_clamped_swiglu_det(*leaves, limit=L)
+        order = list(events)
+        h.backward(grad)
+        return order, events[len(order) :], h, [None if t is None else t.grad for t in leaves]
+
+    cases = (
+        (True, True, ["pack"] * packs + ["fwd"], 1),
+        (False, True, ["fwd"] + ["pack"] * packs, 0),
+        (True, False, ["fwd"], 0),
+    )
+    for in_backward, hooks, expected, holds in cases:
+        held.clear()
+        order, after, h, grads = run((first, second, w), dh, in_backward=in_backward, hooks=hooks)
+        assert order == expected, (in_backward, hooks, order)
+        assert after == [bwd], (in_backward, hooks, after)
+        assert len(held) == holds, (in_backward, hooks)
+        assert torch.equal(h, want_h)
+        for got, ref in zip(grads, want, strict=True):
+            assert (got is None and ref is None) or torch.equal(got, ref)
+
+    first, second, w, dh = _inputs(0, seed=22, merged=merged, weighted=weighted)
+    held.clear()
+    order, after, h, grads = run((first, second, w), dh, in_backward=True, hooks=True)
+    assert order == ["pack"] * packs and after == []
+    assert len(held) == 1 and not held[0]
+    assert h.shape == (0, I) and grads[0].shape == first.shape
+
+
+@requires_device
+@pytest.mark.parametrize(("merged", "weighted"), [(True, True), (False, True), (True, False)])
+def test_a_checkpoint_through_the_facade_launches_the_forward_again_only_when_needed(
+    merged: bool, weighted: bool, events
+) -> None:
+    """Through the facade under ``torch.utils.checkpoint`` (early stop on): the op alone, its down projection outside,
+    launches no forward in the backward (``use_reentrant=False``); the op with the down projection, which saves ``h``,
+    launches one, and so does the op alone in a reentrant region.  Each launches one forward before the backward and
+    one backward launch, with the bits of the same step without a checkpoint."""
+    first, second, w, _ = _inputs(129, seed=23, merged=merged, weighted=weighted)
+    g = torch.Generator(device="cuda").manual_seed(24)
+    wd = (torch.randn(256, I, device="cuda", generator=g) / I**0.5).bfloat16()
+    dy = torch.randn(129, 256, device="cuda", generator=g).bfloat16()
+    checkpoint = torch.utils.checkpoint.checkpoint
+    op = functools.partial(cake_clamped_swiglu_det, limit=L)
+    down = torch.nn.functional.linear
+    bwd = "bwd" if weighted else "bwd_unweighted"
+    regions = {
+        "no checkpoint": (lambda f, s, u, d: down(op(f, s, u), d), 0),
+        "op alone": (lambda f, s, u, d: down(checkpoint(op, f, s, u, use_reentrant=False), d), 0),
+        "op and the down projection": (
+            lambda f, s, u, d: checkpoint(lambda *a: down(op(*a[:3]), a[3]), f, s, u, d, use_reentrant=False),
+            1,
+        ),
+        "op alone, reentrant": (lambda f, s, u, d: down(checkpoint(op, f, s, u, use_reentrant=True), d), 1),
+    }
+    want = None
+    for what, (region, recomputes) in regions.items():
+        leaves = [None if t is None else t.clone().requires_grad_(True) for t in (first, second, w, wd)]
+        events.clear()
+        y = region(*leaves)
+        before = list(events)
+        y.backward(dy)
+        after = events[len(before) :]
+        assert before == ["fwd"], (what, before)
+        assert sorted(after) == sorted(["fwd"] * recomputes + [bwd]), (what, after)
+        got = [y.detach()] + [t.grad for t in leaves if t is not None]
+        if want is None:
+            want = got
+        for a, b in zip(got, want, strict=True):
+            assert torch.equal(a, b), what

@@ -92,7 +92,6 @@ import contextlib
 import fractions
 import functools
 import hashlib
-import importlib
 import inspect
 import json
 import math
@@ -125,8 +124,6 @@ from tests.cake.test_helpers.clamped_swiglu_reference import (
 from tests.cake.test_helpers.clamped_swiglu_reference import outputs as step_outputs
 
 pkg = cake_package("cake_clamped_swiglu_det_train")
-facade = importlib.import_module("cake_pplx.cake_clamped_swiglu_det_train")
-facade_clamped_swiglu = facade.cake_clamped_swiglu_det
 cake_jit = cake_package("cake_clamped_swiglu_det_train", "cake_jit")
 
 forward = pkg.cake_clamped_swiglu_det_train_forward
@@ -1210,19 +1207,18 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
     made = _held_launches(monkeypatch)
     with monkeypatch.context() as patch:
         _as_in_a_backward(patch)
-        for entry in (clamped_swiglu, facade_clamped_swiglu):
-            leaves = _leaves(t)
-            with torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x):
-                out = entry(*leaves, limit=L)
-            assert out.shape == (0, WIDTH) and out.grad_fn is not None
-            out.sum().backward()
-            assert leaves[0].grad.shape == leaves[0].shape
-    assert len(made) == 2 and not any(made)
+        leaves = _leaves(t)
+        with torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x):
+            out = clamped_swiglu(*leaves, limit=L)
+        assert out.shape == (0, WIDTH) and out.grad_fn is not None
+        out.sum().backward()
+        assert leaves[0].grad.shape == leaves[0].shape
+    assert len(made) == 1 and not any(made)
     leaves = _leaves(t)
     out = torch.utils.checkpoint.checkpoint(clamped_swiglu, *leaves, limit=L, use_reentrant=False)
     out.sum().backward()
     assert out.shape == (0, WIDTH) and leaves[0].grad.shape == leaves[0].shape
-    assert len(made) == 3 and not any(made)  # the recomputation's held launch
+    assert len(made) == 2 and not any(made)  # the recomputation's held launch
 
 
 def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
@@ -1769,9 +1765,8 @@ def _held_launches(patch: pytest.MonkeyPatch) -> list:
 
 
 def _as_in_a_backward(patch: pytest.MonkeyPatch) -> None:
-    """The backend's and the facade's graph-task query answer "a backward runs" (as in a checkpoint's recomputation)."""
+    """The package's graph-task query answers "a backward runs" (as in a checkpoint's recomputation)."""
     patch.setattr(pkg, "_graph_task", lambda: 0)
-    patch.setattr(facade, "_graph_task", lambda: 0)
 
 
 def _in_a_backward(call: Callable[[], object]) -> object:
@@ -1811,8 +1806,8 @@ def _recomputed(launched: list, run) -> tuple[int, int]:
 def test_a_recomputation_launches_the_forward_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
     """In a backward with saved-tensors hooks set (where a non-reentrant checkpoint recomputes its region),
     ``cake_clamped_swiglu_det`` launches its forward kernel after ``_HeldFunction.apply`` returns: every pack hook of
-    the inputs it saves runs before the launch, as for a built-in op, from the backend and from the facade, in a real
-    backward too, in the common call and in the full checks' layouts (``strided``, ``copied``: the launch of
+    the inputs it saves runs before the launch, as for a built-in op, in a real backward too, in the common call and in
+    the full checks' layouts (``strided``, ``copied``: the launch of
     :func:`_forward`).  Anywhere else it launches inside ``forward``, before the pack hooks, and keeps no launch:
     without hooks, with hooks outside a backward (a checkpoint's forward pass, activation offloading), for a direct
     ``apply`` (which takes no fifth argument) and while ``_is_compiling()`` or ``_is_tracing()`` is true.  Under
@@ -1846,19 +1841,13 @@ def test_a_recomputation_launches_the_forward_after_autograd_saved_the_inputs(la
     def backend(operands):
         return clamped_swiglu(*operands, limit=t.L)
 
-    def front(operands):
-        return facade_clamped_swiglu(*operands, limit=t.L)
-
     held = ["pack"] * packs + ["fwd"]
     inside = ["fwd"] + ["pack"] * packs
     assert run(backend) == held
-    assert run(front) == held
     assert _in_a_backward(lambda: run(backend, in_backward=False)) == held
-    assert len(made) == 3 and all(len(kept) == 1 for kept in made)
+    assert len(made) == 2 and all(len(kept) == 1 for kept in made)
     assert run(backend, in_backward=False) == inside  # hooks outside a backward
-    assert run(front, in_backward=False) == inside
     assert run(backend, hooks=False) == ["fwd"]  # a backward without hooks
-    assert run(front, hooks=False) == ["fwd"]
     assert run(lambda operands: pkg.CakeClampedSwiGLUDetFunction.apply(*operands, t.L)) == inside
     with pytest.raises(TypeError):
         pkg.CakeClampedSwiGLUDetFunction.apply(*_kept_leaves(t)[0], t.L, None)
@@ -1866,8 +1855,7 @@ def test_a_recomputation_launches_the_forward_after_autograd_saved_the_inputs(la
         with monkeypatch.context() as patch:
             patch.setattr(pkg, name, lambda: True)
             assert run(backend) == inside, name
-            assert run(front) == inside, name
-    assert len(made) == 3
+    assert len(made) == 2
 
     for in_backward in (True, False):
         launches.clear()
