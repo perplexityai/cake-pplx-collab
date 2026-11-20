@@ -1016,7 +1016,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_gdn_train_aa4bcb291b491239d72c",
+        "kernel_symbol": "kernel_cake_gdn_train_734e5972d5b3478964d5",
         "launch": {
             "block": (512, 1, 1),
             "cluster": (1, 1, 1),
@@ -1024,7 +1024,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 227840,
             "use_pdl": False,
         },
-        "library": "cake_gdn_train_aa4bcb291b491239d72c",
+        "library": "cake_gdn_train_734e5972d5b3478964d5",
         "stage": "fwd_ho_a",
     },
     "fwd_fused": {
