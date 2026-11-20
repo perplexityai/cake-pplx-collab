@@ -66,6 +66,27 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 64] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (64, 128] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (128, 1024] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (1024, 8192] | 0c581a13 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (8192, 12288] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (12288, 24576] | 5e32dd88 | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
+| `bwd_w32_h1024` | (1, 1024] | 744d7429 | column task | - | - |
+| `bwd_w32_h1024` | (1024, 8192] | 561bea88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (8192, 12288] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (12288, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (512, 4096] | 12bbedff | plain | row-strided slots | 59474336 (chain) |
+| `bwd_h1280` | (4096, inf) | c646e097 | plain | row-strided slots | 59474336 (chain) |
 | `bwd_h1536` | (0, 1] | f6233ff8 | column task | - | - |
 | `bwd_h1536` | (1, 768] | 4176a24f | column task | - | - |
 | `bwd_h1536` | (768, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 9b727c2c (tree) |
@@ -136,6 +157,36 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 64] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (64, 128] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (128, 1024] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (1024, 1536] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (1536, 2048] | 5e32dd88 | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_h1024` | (2048, 4096] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (4096, 8192] | 5e32dd88 | plain | row-strided slots | 4830a91c (chain, column-split) |
+| `bwd_h1024` | (8192, 12288] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (12288, 24576] | 5e32dd88 | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (0, 1] | 153f8119 | column task | - | - |
+| `bwd_w32_h1024` | (1, 1024] | 744d7429 | column task | - | - |
+| `bwd_w32_h1024` | (1024, 1536] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (1536, 2048] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_w32_h1024` | (2048, 16384] | ba8feeec | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_w32_h1024` | (16384, 24576] | ba8feeec | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_w32_h1024` | (24576, inf) | 58305d0f | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (512, 2048] | 12bbedff | plain | row-strided slots | 59474336 (chain) |
+| `bwd_h1280` | (2048, inf) | c646e097 | plain | row-strided slots | 59474336 (chain) |
+| `bwd_w32_h1280` | (0, 1] | 103805d9 | column task | - | - |
+| `bwd_w32_h1280` | (1, 128] | 8d8ef930 | column task | - | - |
+| `bwd_w32_h1280` | (128, 512] | e476d0b2 | column task | - | - |
+| `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 59474336 (chain) |
+| `bwd_w32_h1280` | (4096, inf) | c66b8cbd | plain | row-strided slots | 59474336 (chain) |
 | `bwd_h1536` | (0, 1] | e254714a | column task | - | - |
 | `bwd_h1536` | (1, 31] | 4aef8d1f | column task | - | - |
 | `bwd_h1536` | (31, 214] | 4aef8d1f | column task | - | - |
@@ -193,6 +244,26 @@ first eight hex digits of the program name.
 
 | Route | Rows `T` | Program | Partial sums | Chunk table | Reduce |
 | --- | --- | --- | --- | --- | --- |
+| `bwd_h1024` | (0, 1] | 2dc3fb26 | column task | - | - |
+| `bwd_h1024` | (1, 8] | 5ad5f096 | column task | - | - |
+| `bwd_h1024` | (8, 1536] | 89fa3e96 | column task | - | - |
+| `bwd_h1024` | (1536, 2048] | 0c581a13 | plain | row-strided slots | 4830a91c (chain, column-split) |
+| `bwd_h1024` | (2048, 24576] | 5e32dd88 | plain | row-strided slots | 3b5dc80e (chain) |
+| `bwd_h1024` | (24576, inf) | 4294c01f | plain | row-strided slots | e21352ee (chain, column-split) |
+| `bwd_h128` | (0, 1024] | 93466008 | column task | - | - |
+| `bwd_h128` | (1024, inf) | 401a018c | column task | - | - |
+| `bwd_h1280` | (0, 1] | 8895b022 | column task | - | - |
+| `bwd_h1280` | (1, 128] | a5f2942d | column task | - | - |
+| `bwd_h1280` | (128, 512] | 809235a3 | column task | - | - |
+| `bwd_h1280` | (512, 8192] | 12bbedff | plain | row-strided slots | 849ee5d8 (chain, column-split) |
+| `bwd_h1280` | (8192, 16384] | c646e097 | plain | row-strided slots | 382c8727 (chain, column-split) |
+| `bwd_h1280` | (16384, inf) | c646e097 | plain | row-strided slots | 55c35305 (chain, column-split) |
+| `bwd_w32_h1280` | (0, 1] | 103805d9 | column task | - | - |
+| `bwd_w32_h1280` | (1, 128] | 8d8ef930 | column task | - | - |
+| `bwd_w32_h1280` | (128, 512] | e476d0b2 | column task | - | - |
+| `bwd_w32_h1280` | (512, 4096] | 80956d25 | plain | row-strided slots | 849ee5d8 (chain, column-split) |
+| `bwd_w32_h1280` | (4096, 16384] | c66b8cbd | plain | row-strided slots | 382c8727 (chain, column-split) |
+| `bwd_w32_h1280` | (16384, inf) | c66b8cbd | plain | row-strided slots | 55c35305 (chain, column-split) |
 | `bwd_h1536` | (0, 1] | c3b1b46a | column task | - | - |
 | `bwd_h1536` | (1, 576] | 1207b056 | column task | - | - |
 | `bwd_h1536` | (576, 1024] | 7dc29629 | plain | tail_div 12, max_halving 5 | 628248fe (tree) |
