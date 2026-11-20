@@ -7161,6 +7161,7 @@ def cake_dense_gemm_nondet_train_projection_plan(
     mg: Optional[bool] = _UNSET,
     sw: Optional[int] = _UNSET,
     form: Optional[str] = _UNSET,
+    block_k: Optional[int] = _UNSET,
     arch: str = _UNSET,
 ) -> Any:
     """Validate the views and plan the K1 launch: a weight-gradient layout (both operands MN-major) is planned for
@@ -7171,8 +7172,8 @@ def cake_dense_gemm_nondet_train_projection_plan(
     ``CakeDenseGemmDetProjectionPlan``).  The other keyword-only knobs are the deterministic planner's public ones
     (``sm_count`` and ``l2_bytes`` included): a knob the caller gives reaches that planner as given, and
     ``transposed_out``, ``arch`` and ``sm_count`` also apply to this package's plan; a knob the caller does not give
-    takes the deterministic planner's default.  ``promote=None`` or ``False`` never reaches the deterministic planner
-    (:func:`_routing_knobs`)."""
+    takes the deterministic planner's default (``block_k``, the K step of its 128-column start-path program, among
+    them).  ``promote=None`` or ``False`` never reaches the deterministic planner (:func:`_routing_knobs`)."""
     # must stay the first statement: ``locals()`` holds only the parameters here
     knobs = _given_knobs(locals())
     if _route(_k1_layout(A, B)) == "det":
