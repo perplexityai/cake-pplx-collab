@@ -21,7 +21,13 @@ The backward is ONE ordinary launch whose CTAs add their ``dweight`` /
 ``dbias`` rows into zeroed accumulators with unordered global reductions (the
 backward of the deterministic package
 (:mod:`cake_pplx.cake_causal_conv1d_det_train`) is a main launch plus a
-fixed-order reduce launch).  This module never runs the deterministic package.
+fixed-order reduce launch).  At the rows of the backend's
+``cake_jit.SM_WIDE_ROWS`` (the default backward route at C = 520 to 608 from
+S = 24576 on sm_100a and from S = 20480 on sm_103a, at C = 520 to 680 from
+S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
+the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
+busy on another stream can delay it.  This module never runs the
+deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
@@ -111,7 +117,9 @@ streams.  The CTAs of each channel tile split its tokens among themselves at
 any grid size, so ``dx`` is computed the same way and
 ``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
-grid).
+grid).  At the rows of ``cake_jit.SM_WIDE_ROWS`` the SM-wide program holds
+one CTA per SM, so ``bwd_grid_mult`` times the SM count runs in that many
+waves of CTAs.
 
 Name map (the deterministic package -> the non-deterministic package)::
 
