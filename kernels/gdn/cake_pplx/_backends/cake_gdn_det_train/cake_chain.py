@@ -1553,17 +1553,21 @@ def _sdt_selected(meta: ChunkMeta, segs: SegmentTable, num_v_heads: int, device_
 # ``DVL32_ARCHS``) forms the segment maps the stitch composes with ``dhu_tc2_dvl32_gm`` on the architectures of
 # ``ADJOINT_MAP_ARCHS`` (off value ``()``) instead of the register pre-scan ``SDT_PRESCAN``: one CTA per (entry, value
 # head) over the table's ``summary`` entries (every segment but each sequence's first, whose map the stitch never
-# reads; built on the host with the table, mode ``SPLIT_WARM``).  Each CTA walks two states with the tcgen05 scan of
-# ``dhu_tc2_dvl32`` and stores the segment's map ``[B | M]`` into ``seg_state`` (``B`` from zero with ``do``, ``M``
-# from the identity) under the pre-scan's warm-up bound and threshold (:func:`warmup_thresh_log2`): where the running
-# sum of a segment's log2 chunk decays from its start falls below the threshold before its end, the map keeps only the
-# chunks up to there, ``B`` alone, and ``seg_flag`` is 0; elsewhere the whole segment and 1.  The workspaces, the
-# stitch, pass 2 (one launch, or the two groups beside the fused tail), the tails and the tables are unchanged; the
-# table prices of :func:`tc_plan_pricing` and :func:`chain_plan_pricing` still price the register pre-scan.  The maps
-# add the FP32 ``dv_local`` values where the pre-scan rounds its tiles to BF16, so where a map carries state across a
-# segment boundary (slowly decaying gates) dk / dv / dg / dbeta / dh0 take other bits than with the pre-scan; o, dq
-# and the final state keep theirs, and each form is bitwise run to run.  The stage follows host facts only
-# (:func:`split_map_stage`); the maps' extent follows the gates through the warm-up bound, as the pre-scan's does.
+# reads; built on the host with the table, mode ``SPLIT_WARM``).  Each CTA walks two states in one pass with the
+# tcgen05 scan of ``dhu_tc2_dvl32`` and stores the segment's map ``[B | M]`` into ``seg_state`` (``B`` from zero with
+# ``do``, ``M`` from the identity) with the pre-scan's warm-up threshold (:func:`warmup_thresh_log2`): where the
+# running sum of a segment's log2 chunk decays from its start falls below the threshold before its last chunk, the map
+# keeps only the chunks up to there, ``B`` alone, and ``seg_flag`` is 0; elsewhere the whole segment and 1.  The rule
+# is not the pre-scan's bound: where the sum first falls below the threshold in the last chunk the pre-scan keeps
+# ``B`` alone (``seg_flag`` 0) and this map is whole, and from a segment's 65th chunk on the running sum adds the
+# chunk decays in another order than the pre-scan's, so at a near tie the two can end a map at different chunks.  The
+# workspaces, the stitch, pass 2 (one launch, or the two groups beside the fused tail), the tails and the tables are
+# unchanged; the table prices of :func:`tc_plan_pricing` and :func:`chain_plan_pricing` still price the register
+# pre-scan.  The maps add the FP32 ``dv_local`` values where the pre-scan rounds its tiles to BF16, so where a map
+# carries state into the segment before it (slowly decaying gates) dk / dv / dg / dbeta / dh0 take other bits than
+# with the pre-scan; o, dq and the final state keep theirs, and each form is bitwise run to run.  The stage follows
+# host facts only (:func:`split_map_stage`); the maps' extent follows the gates through the warm-up threshold, as the
+# pre-scan's does.
 ADJOINT_MAP_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 ADJOINT_MAP_STAGE = "dhu_tc2_dvl32_gm"
 # the mode bit of a map entry: bound the map by the warm-up threshold and write its seg_flag
@@ -3927,8 +3931,9 @@ def cake_gdn_det_train_backward(
             table, "b_seg_flag", (segs.num_segments, num_v_heads), torch.int32, device
         )
         if split_tc and segs.summary is not None and map_stage == ADJOINT_MAP_STAGE:
-            # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, under
-            # the pre-scan's warm-up bound (the same seg_state / seg_flag; a sequence's first map is never read)
+            # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, with
+            # the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the whole map; the same
+            # seg_state / seg_flag; a sequence's first map is never read)
             _launch(ADJOINT_MAP_STAGE, segs.num_summary, num_v_heads, 1, qn, kn, w, do, g_cs, dht32, dh, dv2, dh0,
                     seg_state, meta.chunk_start, meta.chunk_len, segs.seg_chunk_start, segs.seg_seq,
                     meta.seq_chunk_start, num_heads, num_v_heads, 0, 0, scale, segs.summary[0], segs.summary[1],

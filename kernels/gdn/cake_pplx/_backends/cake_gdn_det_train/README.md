@@ -140,16 +140,19 @@ runs the register pass.  Groups of two keep `tail_g2` and `dhu_tc2`.
 In the second pass of a split plan on `dhu_tc2_dvl32`, on `sm_100a`, `sm_103a`
 and `sm_107a` (`ADJOINT_MAP_ARCHS`), the segment maps that the stitch composes
 come from `dhu_tc2_dvl32_gm` instead of the register pre-scan: one CTA per
-segment and value head walks the segment twice with the `dhu_tc2_dvl32` scan
-(once from zero with `do`, once from the identity without it) and stores its
-map.  It skips the first segment of each sequence, whose map the stitch does
-not read, and keeps the pre-scan's warm-up bound: a segment whose gate sum
-falls below the threshold keeps only the chunks up to there.  The maps carry
-the FP32 `dv_local` values, so where a map carries state into the next segment
-(slowly decaying gates) `dk`, `dv`, `dg`, `dbeta` and the initial-state
-gradient take other bits than with the pre-scan; `o`, `dq` and the final state
-keep theirs, and the gradients repeat bit for bit.  The segment table, the
-stitch, the second pass, the tails and the route rules are unchanged.
+segment and value head walks two states in one pass with the `dhu_tc2_dvl32`
+scan (one from zero with `do`, one from the identity without it) and stores
+the segment's map.  It skips the first segment of each sequence, whose map the
+stitch does not read, and uses the pre-scan's warm-up threshold: a segment
+whose gate sum falls below the threshold before its last chunk keeps only the
+chunks up to there.  A map whose bound falls in its last chunk is kept whole,
+where the pre-scan keeps only those chunks (other bits there).  The maps carry
+the FP32 `dv_local` values, so where a map carries state into the segment
+before it (slowly decaying gates) `dk`, `dv`, `dg`, `dbeta` and the
+initial-state gradient take other bits than with the pre-scan; `o`, `dq` and
+the final state keep theirs, and the gradients repeat bit for bit.  The segment
+table, the stitch, the second pass, the tails and the route rules are
+unchanged.
 
 On the host-table route, a call with FP32 `beta`, `use_qk_l2norm_in_kernel`,
 `HV <= 3 * H` and no `prep`, `scan_config` or `segment_chunks` pin runs one of
