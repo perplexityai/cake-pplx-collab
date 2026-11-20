@@ -5686,7 +5686,7 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd_bias", 576, 576): (1, 4096),
         ("fwd_bias", 584, 632): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
-        ("fwd_bias", 704, 704): (1, 16384),
+        ("fwd_bias", 704, 704): (1, 16392),
         ("fwd_bias", 712, 768): (1, 16384),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
@@ -5700,11 +5700,12 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
         ("fwd", 576, 632): (1, 2048),
-        ("fwd", 640, 696): (1, 4096),
+        ("fwd", 640, 688): (1, 4096),
+        ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
         ("fwd", 720, 760): (1, 8192),
-        ("fwd_bias", 584, 640): (1, 4096),
+        ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
         ("fwd_bias", 720, 728): (13824, 16383),
         ("fwd_bias", 736, 736): (14336, 16383),
@@ -5800,7 +5801,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("fwd_bias", 704, 704): (
-            16385,
+            16393,
             20480,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
@@ -5836,9 +5837,14 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             24576,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
-        ("fwd", 640, 696): (
+        ("fwd", 640, 688): (
             4097,
             24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 696, 696): (
+            4097,
+            20480,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd", 704, 704): (
@@ -5857,7 +5863,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd_bias", 584, 640): (
-            4097,
+            4105,
             16384,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
