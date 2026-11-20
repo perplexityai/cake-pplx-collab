@@ -3245,10 +3245,18 @@ def _run_default_ws_rank(
             blocks the allocator has cached, not on the form alone.  The forward runs once unmeasured first, so the
             measured one follows a forward of its own form: on GB300 the requested peak of the first
             ``default_ws=0`` ring forward after the kept-workspace ring forwards was 256 KiB - 1 MiB per rank below
-            that of every later one."""
+            that of every later one.  A block freed while another stream still had a use recorded on it stays in
+            ``requested_bytes`` until the allocator processes that stream's event, which it does at its next
+            allocation: inside the measured forward that late release would be subtracted from the forward's own
+            high-water.  On B200 the ring hop pool (256 KiB on rank 3) that the kept workspace of the ring forwards
+            before the measurement parks at the end of its call was released that way inside the measured
+            ``default_ws=0`` forward, whose value then fell 256 KiB below its own high-water on every draw after the
+            first.  ``empty_cache`` after the synchronize completes every such release first, so ``before`` counts
+            live tensors only and the value is the forward's own high-water."""
             fwd(None, **kw)
             gc.collect()
             torch.cuda.synchronize(device)
+            torch.cuda.empty_cache()
             before = torch.cuda.memory_stats(device)
             torch.cuda.reset_peak_memory_stats(device)
             out, _saved = fwd(None, **kw)
