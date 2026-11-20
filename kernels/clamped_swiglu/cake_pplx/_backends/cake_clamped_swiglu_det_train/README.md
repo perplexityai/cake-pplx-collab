@@ -37,17 +37,23 @@ y = torch.utils.checkpoint.checkpoint(swiglu_down, gate_up, w, w_down, use_reent
 ```
 
 The op saves only its inputs, so checkpointing it alone saves no memory: the down projection keeps `h` for its weight
-gradient.  A region that also holds the down projection does not keep `h` from the forward to the backward, which
-recomputes it.  With saved-tensors hooks set (a non-reentrant checkpoint sets them), `cake_clamped_swiglu_det`
-launches its forward kernel after autograd saved its inputs, as a built-in op does.  So in a non-reentrant region with
+gradient.  In the backward of a non-reentrant checkpoint, the recomputation runs with saved-tensors hooks set; there
+`cake_clamped_swiglu_det` launches its forward kernel after autograd saved its inputs, as a built-in op does.  So with
 early stop on (the torch default), the recomputation stops before that launch when nothing later in the region saves a
-tensor: the op checkpointed alone adds no forward to the backward.  When a later operation saves one (the down
-projection above saves `h`; so does the whole expert block), the recomputation runs the forward.  Without hooks the
-autograd function's `forward` launches, as before.
-A reentrant checkpoint, `early_stop=False` (or `set_checkpoint_early_stop(False)`), `torch.compile`, `torch.jit.trace`
-and a direct `CakeClampedSwiGLUDetFunction.apply` run the recomputed forward in every region, also when its output is
-dropped.  0.1.7 and earlier launched the forward inside the autograd function's `forward`, before autograd saved the
-inputs, so every checkpoint recomputation ran it.  The launch and the bits do not change.
+tensor, and runs the forward when a later operation saves one.  Anywhere else (no hooks, or not in a backward, such as
+the checkpoint's own forward pass) the autograd function's `forward` launches, as up to 0.1.7.  The launch and the bits
+are the same in every case.  Per checkpointed region (down projection: `F.linear(h, w_down)`, which saves `h`):
+
+| Region | Not kept from the forward to the backward | Forward of this op in the backward |
+|---|---|---|
+| The op alone (down projection outside) | Nothing (the op keeps its inputs, the down projection `h`) | None (0.1.7: one) |
+| Gate/up projection, then the op (down projection outside) | The projection's `[R, 4608]` output | None (0.1.7: one); the projection is recomputed |
+| The op, then the down projection (above) | `h` | One, as in 0.1.7 |
+| The whole block (gate/up projection, op, down projection) | The projection's output and `h` | One, as in 0.1.7 |
+| Any region with `use_reentrant=True`, `early_stop=False` (or `set_checkpoint_early_stop(False)`), or a direct `CakeClampedSwiGLUDetFunction.apply` | As above | One, also when its output is dropped |
+
+A call that Dynamo or `torch.jit.trace` records launches inside `forward`; a checkpoint's recomputation runs with Dynamo
+disabled.  Not tested under `torch.compile`.
 
 The steps without autograd, `cake_clamped_swiglu_det_train_forward` and `cake_clamped_swiglu_det_train_backward`,
 take the same operands and optional preallocated outputs (`out=`, `grad_gate_up_or_gate=`, `grad_up=`,
@@ -234,7 +240,8 @@ the fills of those outputs.  The kernels write every element of every output, so
   architecture is still checked at every call, before any allocation.
 - Host path: a common call (plain contiguous operands and outputs of the exact dtypes and shapes on one device, the
   BF16 ones 16-byte aligned, `0 < R < 2**31 - 256`) is checked and launched by the step function itself, without the
-  full checks.  The step checks the first operand, the weight and `dh` in its own frame, and the `up` of a two-tensor
+  full checks (the autograd forward of a checkpoint's recomputation keeps that launch and runs it after `apply`
+  returns, see Usage).  The step checks the first operand, the weight and `dh` in its own frame, and the `up` of a two-tensor
   input and each caller-provided output buffer with one helper call each.  So only a merged input with new outputs,
   whose limit is a Python float, or an int that a float holds exactly, equal to the float value of the last accepted
   limit, is checked and launched in exactly one Python frame per step once the host caches above are filled (any other
@@ -242,15 +249,15 @@ the fills of those outputs.  The kernels write every element of every output, so
   adds the calls that fill it).  The checks keep the order of the full checks: the operands and `dh`, then `limit`,
   then the output buffers.  The row strides of its contiguous tensors are constants (`4608` or `2304`; 0 for one row),
   not read.  Any other call takes the full checks, which raise every error and copy what the kernels cannot read; both
-  give the same launch.  The facade binds the backend's step functions and autograd entry (`apply`; with
-  saved-tensors hooks set, then the forward launch) at their first call.
+  give the same launch.  The facade binds the backend's step functions and autograd entries (`apply`; in a backward
+  with saved-tensors hooks set, the held-launch entry) at their first call.
 
 ## Limitations
 
 - The intermediate width is 2304 only (a compile-time width of the kernels).
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
-  under `torch.compile` or `torch.jit.trace`; under either, `cake_clamped_swiglu_det` launches its forward inside the
-  autograd function's `forward`, so a checkpoint recomputes it in every region.  No MXFP8 or FP4 output.
+  under `torch.compile` or `torch.jit.trace`: a call that Dynamo or the tracer records launches its forward inside the
+  autograd function's `forward`; a checkpoint's recomputation runs with Dynamo disabled.  No MXFP8 or FP4 output.
 - A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
   does the weight, as an unweighted backward runs its own program.  Before capturing a CUDA graph, run an eager call of
   each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the

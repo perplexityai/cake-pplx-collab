@@ -56,18 +56,18 @@ row's outputs do not depend on the other rows), on a side stream with no host sy
 the small-R and of the large-R programs, under ``torch.use_deterministic_algorithms`` (where every new output holds
 PyTorch's NaN fill when its kernel launches) and with the current device switched to another GPU (each call runs on its
 operands' device); the autograd function matches the steps bit for bit, saves only its inputs and gives the same bits
-under non-reentrant checkpointing; with saved-tensors hooks set, ``cake_clamped_swiglu_det`` launches its forward
-after autograd saved the inputs (their pack hooks run first; without hooks, a direct ``apply``, and the entry under
-``torch.compile`` or ``torch.jit.trace``, launch inside ``forward``), so a checkpoint's backward launches the forward
-again only where the recomputed ``h`` is saved: none for the op alone in a non-reentrant region with early stop, one
-for the op with the down projection, the whole
-block (gate/up projection, op, down projection), early stop off, a reentrant region or a direct ``apply``, also in a
-captured CUDA graph, all with the bits of the steps without a checkpoint; the autograd backward checks the saved
-operands again (unpacked by a saved-tensors hook as rows to copy: the steps' bits; one row short: ``ValueError``), and
-gradients computed with ``create_graph=True`` have the steps' bits and raise when differentiated; inputs the kernels
-can read are read in place (a merged input and its
-gradient passed as both halves' tensors with the up's column offset 2304, no view), others copied once; every binding
-refuses a column offset that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
+under non-reentrant checkpointing; in a backward with saved-tensors hooks set (a non-reentrant checkpoint's
+recomputation), ``cake_clamped_swiglu_det`` launches its forward after autograd saved the inputs (their pack hooks run
+first; anywhere else, for a direct ``apply`` and while compiling or tracing, it launches inside ``forward``), so with
+early stop on a non-reentrant region launches the forward again only when a later operation of the region saves a
+tensor: none for the op alone or the gate/up projection and the op, one for the op with the down projection or the
+whole block (gate/up projection, op, down projection), and one in every region with early stop off, a reentrant
+region or a direct ``apply``, also in a captured CUDA graph, all with the bits of the steps without a checkpoint; the
+autograd backward checks the saved operands again (unpacked by a saved-tensors hook as rows to copy: the steps' bits;
+one row short: ``ValueError``), and gradients computed with ``create_graph=True`` have the steps' bits and raise when
+differentiated; inputs the kernels can read are read in place (a merged input and its gradient passed as both
+halves' tensors with the up's column offset 2304, no view), others copied once; every binding refuses a column offset
+that is negative, not a multiple of 8 or past the row; unfit outputs, operands and limits are
 refused, before any copy, allocation or launch, also when a step refuses a common call itself (its limit or its
 architecture); every spied launch has the grid ``cake_jit.grid`` of its program; the one-pass checks of the common
 call give the launches of the full checks (the program, the grid and every argument), and every call they leave to the
@@ -88,6 +88,7 @@ The suite names its package once, through the shared alias helper, and imports n
 from __future__ import annotations
 
 import ast
+import contextlib
 import fractions
 import functools
 import hashlib
@@ -100,7 +101,7 @@ import subprocess
 import sys
 import types
 import warnings
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -124,7 +125,8 @@ from tests.cake.test_helpers.clamped_swiglu_reference import (
 from tests.cake.test_helpers.clamped_swiglu_reference import outputs as step_outputs
 
 pkg = cake_package("cake_clamped_swiglu_det_train")
-facade_clamped_swiglu = importlib.import_module("cake_pplx.cake_clamped_swiglu_det_train").cake_clamped_swiglu_det
+facade = importlib.import_module("cake_pplx.cake_clamped_swiglu_det_train")
+facade_clamped_swiglu = facade.cake_clamped_swiglu_det
 cake_jit = cake_package("cake_clamped_swiglu_det_train", "cake_jit")
 
 forward = pkg.cake_clamped_swiglu_det_train_forward
@@ -1204,6 +1206,23 @@ def test_no_rows_return_empty_outputs_and_launch_nothing(layout, w, device, monk
     for leaf in leaves[1:]:
         if leaf is not None:
             assert leaf.grad.shape == leaf.shape
+    # The held launch (as in a backward, with hooks set) keeps no launch, and a checkpoint launches nothing.
+    made = _held_launches(monkeypatch)
+    with monkeypatch.context() as patch:
+        _as_in_a_backward(patch)
+        for entry in (clamped_swiglu, facade_clamped_swiglu):
+            leaves = _leaves(t)
+            with torch.autograd.graph.saved_tensors_hooks(lambda x: x, lambda x: x):
+                out = entry(*leaves, limit=L)
+            assert out.shape == (0, WIDTH) and out.grad_fn is not None
+            out.sum().backward()
+            assert leaves[0].grad.shape == leaves[0].shape
+    assert len(made) == 2 and not any(made)
+    leaves = _leaves(t)
+    out = torch.utils.checkpoint.checkpoint(clamped_swiglu, *leaves, limit=L, use_reentrant=False)
+    out.sum().backward()
+    assert out.shape == (0, WIDTH) and leaves[0].grad.shape == leaves[0].shape
+    assert len(made) == 3 and not any(made)  # the recomputation's held launch
 
 
 def test_one_library_per_program_serves_every_call(device, monkeypatch) -> None:
@@ -1681,15 +1700,100 @@ def _down(h: torch.Tensor, wd: torch.Tensor) -> torch.Tensor:
     return torch.nn.functional.linear(h, wd)
 
 
-def _block(L: float):
-    """The expert's block: the gate/up projection (one merged GEMM or two), the clamped SwiGLU, the down projection."""
+def _projected(L: float):
+    """The gate/up projection (one merged GEMM or two), then the clamped SwiGLU."""
 
-    def block(x, wg, wu, weight, wd):
+    def projected(x, wg, wu, weight):
         first = torch.nn.functional.linear(x, wg)
         second = None if wu is None else torch.nn.functional.linear(x, wu)
-        return _down(clamped_swiglu(first, second, weight, limit=L), wd)
+        return clamped_swiglu(first, second, weight, limit=L)
+
+    return projected
+
+
+def _block(L: float):
+    """The expert's block: the gate/up projection (one merged GEMM or two), the clamped SwiGLU, the down projection."""
+    projected = _projected(L)
+
+    def block(x, wg, wu, weight, wd):
+        return _down(projected(x, wg, wu, weight), wd)
 
     return block
+
+
+def _kept_leaves(t: types.SimpleNamespace) -> tuple[list, Callable[[], dict]]:
+    """Fresh operands of the inputs ``t`` that keep their layout, and a function giving their gradients keyed as
+    :func:`_autograd_step` keys them: an operand that is a non-contiguous view of a wider buffer (``strided``,
+    ``copied``) is the same view of a fresh leaf of its whole buffer, any other one a fresh leaf of its own (None stays
+    None)."""
+    operands: list = []
+    parts: list = []
+    for x in (t.first, t.second, t.weight):
+        if x is None:
+            operands.append(None)
+            parts.append(None)
+        elif x._base is not None and not x.is_contiguous():
+            base = x._base.detach().clone().requires_grad_(True)
+            operands.append(base.as_strided(x.shape, x.stride(), x.storage_offset()))
+            parts.append((base, x))
+        else:
+            leaf = x.detach().clone().requires_grad_(True)
+            operands.append(leaf)
+            parts.append((leaf, None))
+
+    def gradients() -> dict:
+        found = {}
+        for key, part in zip(("d_first", "d_up", "d_weight"), parts, strict=True):
+            if part is not None:
+                leaf, view = part
+                grad = leaf.grad
+                found[key] = grad if view is None else grad.as_strided(view.shape, view.stride(), view.storage_offset())
+        return found
+
+    return operands, gradients
+
+
+def _held_launches(patch: pytest.MonkeyPatch) -> list:
+    """Every :class:`_HeldLaunch` made from now on (one per call that takes the held launch), in order."""
+    made: list = []
+
+    class Counted(pkg._HeldLaunch):
+        __slots__ = ()
+
+        def __init__(self) -> None:
+            made.append(self)
+            super().__init__()
+
+    patch.setattr(pkg, "_HeldLaunch", Counted)
+    return made
+
+
+def _as_in_a_backward(patch: pytest.MonkeyPatch) -> None:
+    """The backend's and the facade's graph-task query answer "a backward runs" (as in a checkpoint's recomputation)."""
+    patch.setattr(pkg, "_graph_task", lambda: 0)
+    patch.setattr(facade, "_graph_task", lambda: 0)
+
+
+def _in_a_backward(call: Callable[[], object]) -> object:
+    """``call()`` run with grad mode on inside the backward of another autograd function (a backward graph task on this
+    thread, as for a checkpoint's recomputation); its result."""
+    found: list = []
+
+    class Outer(torch.autograd.Function):
+        @staticmethod
+        def forward(ctx, x):
+            return x.clone()
+
+        @staticmethod
+        def backward(ctx, grad):
+            assert torch._C._current_graph_task_id() != -1
+            with torch.enable_grad():
+                found.append(call())
+            return grad
+
+    Outer.apply(torch.zeros(1, requires_grad=True)).backward()
+    (result,) = found
+    return result
 
 
 def _recomputed(launched: list, run) -> tuple[int, int]:
@@ -1702,114 +1806,103 @@ def _recomputed(launched: list, run) -> tuple[int, int]:
     return stages[:mark].count("fwd"), stages[mark:].count("fwd")
 
 
-@pytest.mark.parametrize(
-    ("layout", "w"), [("merged", "random"), ("split", "random"), ("merged", "none"), ("split", "none")]
-)
-def test_the_autograd_forward_launches_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
-    """With saved-tensors hooks set, ``cake_clamped_swiglu_det`` launches its forward kernel after
-    ``CakeClampedSwiGLUDetFunction.apply`` returns: every pack hook of the inputs it saves runs before the launch, as
-    for a built-in op.  A direct ``apply`` with four arguments launches inside ``forward``, before the pack hooks, and
-    so does ``cake_clamped_swiglu_det`` while ``torch.compiler.is_compiling()`` or ``torch._C._is_tracing()`` is true.
-    Without hooks it makes no held launch and ``forward`` launches, from the backend and from the facade (with no way
-    to read the hooks, every call holds its launch).  Under ``torch.no_grad()`` it launches once and saves nothing.
-    Every way gives the steps' bits, one forward launch and one backward launch."""
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split", "strided", "copied"])
+def test_a_recomputation_launches_the_forward_after_autograd_saved_the_inputs(layout, w, device, launches, monkeypatch):
+    """In a backward with saved-tensors hooks set (where a non-reentrant checkpoint recomputes its region),
+    ``cake_clamped_swiglu_det`` launches its forward kernel after ``_HeldFunction.apply`` returns: every pack hook of
+    the inputs it saves runs before the launch, as for a built-in op, from the backend and from the facade, in a real
+    backward too, in the common call and in the full checks' layouts (``strided``, ``copied``: the launch of
+    :func:`_forward`).  Anywhere else it launches inside ``forward``, before the pack hooks, and keeps no launch:
+    without hooks, with hooks outside a backward (a checkpoint's forward pass, activation offloading), for a direct
+    ``apply`` (which takes no fifth argument) and while ``_is_compiling()`` or ``_is_tracing()`` is true.  Under
+    ``torch.no_grad()`` either way launches once and runs no pack hook.  Every way gives the steps' bits, one forward
+    launch and one backward launch."""
     t = make_inputs(Case(129, layout, w), seed=31, device=device)
     want = _functional(t)
     packs = sum(x is not None for x in (t.first, t.second, t.weight))
-    made: list = []
-
-    class Counted(pkg._HeldLaunch):
-        __slots__ = ()
-
-        def __init__(self) -> None:
-            made.append(self)
-            super().__init__()
-
-    monkeypatch.setattr(pkg, "_HeldLaunch", Counted)
+    made = _held_launches(monkeypatch)
 
     def pack(x: torch.Tensor) -> torch.Tensor:
         launches.append(("pack", None, None))
         return x
 
-    def run(call) -> list:
+    def run(call, *, in_backward: bool = True, hooks: bool = True) -> list:
+        """The launches and packs of ``call(operands)`` in order (as in a backward unless not asked, with a pack hook
+        unless not asked); then its backward, with the steps' bits and one backward launch."""
         launches.clear()
-        leaves = _leaves(t)
-        with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x):
-            h = call(leaves)
+        operands, gradients = _kept_leaves(t)
+        with monkeypatch.context() as patch:
+            if in_backward:
+                _as_in_a_backward(patch)
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x) if hooks else contextlib.nullcontext():
+                h = call(operands)
         order = [launch[0] for launch in launches]
         h.backward(t.dh)
-        found = {"h": h.detach(), "d_first": leaves[0].grad}
-        if leaves[1] is not None:
-            found["d_up"] = leaves[1].grad
-        if leaves[2] is not None:
-            found["d_weight"] = leaves[2].grad
-        assert_same_outputs(found, want, "autograd")
+        assert_same_outputs({"h": h.detach(), **gradients()}, want, f"{layout}, {w}: {order}")
         assert [launch[0] for launch in launches[len(order) :]] == [_stages(t.weight is not None)[1]]
         return order
 
+    def backend(operands):
+        return clamped_swiglu(*operands, limit=t.L)
+
+    def front(operands):
+        return facade_clamped_swiglu(*operands, limit=t.L)
+
     held = ["pack"] * packs + ["fwd"]
     inside = ["fwd"] + ["pack"] * packs
-    assert run(lambda leaves: clamped_swiglu(*leaves, limit=t.L)) == held
-    assert len(made) == 1
-    assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L)) == inside
-    assert run(lambda leaves: pkg.CakeClampedSwiGLUDetFunction.apply(*leaves, t.L, None)) == inside
+    assert run(backend) == held
+    assert run(front) == held
+    assert _in_a_backward(lambda: run(backend, in_backward=False)) == held
+    assert len(made) == 3 and all(len(kept) == 1 for kept in made)
+    assert run(backend, in_backward=False) == inside  # hooks outside a backward
+    assert run(front, in_backward=False) == inside
+    assert run(backend, hooks=False) == ["fwd"]  # a backward without hooks
+    assert run(front, hooks=False) == ["fwd"]
+    assert run(lambda operands: pkg.CakeClampedSwiGLUDetFunction.apply(*operands, t.L)) == inside
+    with pytest.raises(TypeError):
+        pkg.CakeClampedSwiGLUDetFunction.apply(*_kept_leaves(t)[0], t.L, None)
+    for name in ("_is_compiling", "_is_tracing"):
+        with monkeypatch.context() as patch:
+            patch.setattr(pkg, name, lambda: True)
+            assert run(backend) == inside, name
+            assert run(front) == inside, name
+    assert len(made) == 3
 
-    def patched(module, name: str):
-        """The call with ``module.name()`` true during the forward only."""
-
-        def call(leaves):
-            with monkeypatch.context() as patch:
-                patch.setattr(module, name, lambda: True)
-                return clamped_swiglu(*leaves, limit=t.L)
-
-        return call
-
-    assert run(patched(torch.compiler, "is_compiling")) == inside
-    assert run(patched(torch._C, "_is_tracing")) == inside
-    assert len(made) == 1
-
-    assert pkg._saved_tensors_hooks is None or pkg._saved_tensors_hooks(False) is None  # no hooks set here
-    for hooks, entry in [(pkg._saved_tensors_hooks, call) for call in (clamped_swiglu, facade_clamped_swiglu)] + [
-        (None, clamped_swiglu)  # no way to read the hooks
-    ]:
-        monkeypatch.setattr(pkg, "_saved_tensors_hooks", hooks)
-        made.clear()
+    for in_backward in (True, False):
         launches.clear()
-        leaves = _leaves(t)
-        h = entry(*leaves, limit=t.L)
-        assert len(made) == (hooks is None), hooks
-        assert [launch[0] for launch in launches] == ["fwd"], hooks
-        h.backward(t.dh)
-        assert_same_bits(h, want["h"], f"h without hooks ({hooks})")
-        assert_same_bits(leaves[0].grad, want["d_first"], f"d_first without hooks ({hooks})")
-        if hooks is None:
-            assert run(lambda leaves: clamped_swiglu(*leaves, limit=t.L)) == held
-
-    launches.clear()
-    with torch.no_grad():
-        h = clamped_swiglu(*_leaves(t), limit=t.L)
-    assert [launch[0] for launch in launches] == ["fwd"]
-    assert_same_bits(h, want["h"], "h under no_grad")
-    assert not h.requires_grad and h.grad_fn is None
+        made.clear()
+        with monkeypatch.context() as patch:
+            if in_backward:
+                _as_in_a_backward(patch)
+            with torch.autograd.graph.saved_tensors_hooks(pack, lambda x: x), torch.no_grad():
+                h = clamped_swiglu(*_kept_leaves(t)[0], limit=t.L)
+        assert [launch[0] for launch in launches] == ["fwd"], in_backward  # no pack hook ran: nothing is saved
+        assert len(made) == in_backward
+        assert_same_bits(h, want["h"], f"h under no_grad ({in_backward})")
+        assert not h.requires_grad and h.grad_fn is None
 
 
-@pytest.mark.parametrize(
-    ("layout", "w"), [("merged", "random"), ("split", "random"), ("merged", "none"), ("split", "none")]
-)
-def test_a_checkpoint_recomputes_the_forward_only_when_its_output_is_saved(layout, w, device, launches):
-    """Under ``torch.utils.checkpoint``, the backward launches the forward again only where the recomputed ``h`` is
-    used.  Non-reentrant with early stop (the default), checkpointing the op alone (the down projection outside, or
-    ``h`` itself backpropagated) launches no forward in the backward: the inputs are the last tensors the region
-    saves, and the recomputation stops when autograd saves them, before the launch.  It launches one when the region
-    also holds the down projection (which saves ``h``) or the whole block (gate/up projection, op, down projection),
-    with early stop off (``early_stop=False`` or ``set_checkpoint_early_stop(False)``), under a reentrant checkpoint,
-    and for a direct ``CakeClampedSwiGLUDetFunction.apply``.  Every way launches one forward before the backward and
-    gives the bits of the same steps without a checkpoint."""
+@pytest.mark.parametrize("w", ["random", "none"])
+@pytest.mark.parametrize("layout", ["merged", "split", "strided", "copied"])
+def test_which_checkpoint_regions_launch_the_forward_again(layout, w, device, launches, monkeypatch):
+    """Under ``torch.utils.checkpoint``, which regions launch the forward again in the backward.  Non-reentrant with
+    early stop (the default), a region whose last saved tensors are the op's inputs launches none: the op alone (the
+    down projection outside, or ``h`` itself backpropagated) and the gate/up projection with the op (the down
+    projection outside); the recomputation stops when autograd saves the inputs, before the launch.  A region in which
+    a later operation saves a tensor launches one: the op with the down projection (which saves ``h``) and the whole
+    block (gate/up projection, op, down projection).  Early stop off (``early_stop=False`` or
+    ``set_checkpoint_early_stop(False)``), a reentrant checkpoint and a direct ``CakeClampedSwiGLUDetFunction.apply``
+    launch one in every region, also when its output is dropped.  The checkpoint's forward pass keeps no launch; a
+    non-reentrant recomputation takes the held launch once.  Every way launches one forward before the backward and
+    gives the bits of the same steps without a checkpoint, in every layout."""
     t = make_inputs(Case(129, layout, w), seed=32, device=device)
     p = _projections(t, seed=33, device=device)
     checkpoint = torch.utils.checkpoint.checkpoint
     op = functools.partial(clamped_swiglu, limit=t.L)
     block = _block(t.L)
+    projected = _projected(t.L)
+    made = _held_launches(monkeypatch)
 
     def gradients(out: torch.Tensor, leaves: list) -> dict:
         found = {"out": out.detach()}
@@ -1821,13 +1914,31 @@ def test_a_checkpoint_recomputes_the_forward_only_when_its_output_is_saved(layou
         results: list = []
 
         def run(mark):
-            leaves = [*_leaves(t), p.wd.detach().clone().requires_grad_(True)]
-            y = region(*leaves)
+            operands, operand_gradients = _kept_leaves(t)
+            wd = p.wd.detach().clone().requires_grad_(True)
+            y = region(*operands, wd)
             mark()
             y.backward(p.dy)
-            results.append(gradients(y, leaves))
+            results.append({"out": y.detach(), **operand_gradients(), "d_wd": wd.grad})
 
         return run, results
+
+    def counted(run) -> tuple[int, int, int, int]:
+        """The forward launches before and after the mark (:func:`_recomputed`), then the held launches made before
+        it and after it."""
+        made.clear()
+        held: list = []
+
+        def marked(mark):
+            def both():
+                mark()
+                held.append(len(made))
+
+            run(both)
+
+        before, after = _recomputed(launches, marked)
+        (forward_held,) = held
+        return before, after, forward_held, len(made) - forward_held
 
     def block_step(region):
         results: list = []
@@ -1846,74 +1957,91 @@ def test_a_checkpoint_recomputes_the_forward_only_when_its_output_is_saved(layou
         with torch.utils.checkpoint.set_checkpoint_early_stop(False):
             return _down(checkpoint(op, *leaves[:3], use_reentrant=False), leaves[3])
 
+    # (region, forward launches in the backward, held launches in the backward); none in the forward pass.
     op_cases = {
-        "no checkpoint": (lambda f, s, w, wd: _down(op(f, s, w), wd), 0),
-        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), 0),
+        "no checkpoint": (lambda f, s, w, wd: _down(op(f, s, w), wd), 0, 0),
+        "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), 0, 1),
         "op and the down projection": (
             lambda f, s, w, wd: checkpoint(lambda *a: _down(op(*a[:3]), a[3]), f, s, w, wd, use_reentrant=False),
+            1,
             1,
         ),
         "op alone, early_stop=False": (
             lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False, early_stop=False), wd),
             1,
+            1,
         ),
-        "op alone, set_checkpoint_early_stop(False)": (early_stop_off, 1),
-        "op alone, reentrant": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=True), wd), 1),
+        "op alone, set_checkpoint_early_stop(False)": (early_stop_off, 1, 1),
+        "op alone, reentrant": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=True), wd), 1, 0),
         "direct apply alone": (
             lambda f, s, w, wd: _down(
                 checkpoint(pkg.CakeClampedSwiGLUDetFunction.apply, f, s, w, t.L, use_reentrant=False), wd
             ),
             1,
+            0,
         ),
     }
     want = None
-    for what, (region, recomputes) in op_cases.items():
+    for what, (region, recomputes, held) in op_cases.items():
         launches.clear()
         run, results = op_step(region)
-        assert _recomputed(launches, run) == (1, recomputes), what
+        assert counted(run) == (1, recomputes, 0, held), what
         if want is None:
             want = results[0]
         assert_same_outputs(results[0], want, what)
 
     block_cases = {
-        "block, no checkpoint": (block, 0),
-        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), 1),
-        "block, reentrant": (lambda *a: checkpoint(block, *a, use_reentrant=True), 1),
-        "block, early_stop=False": (lambda *a: checkpoint(block, *a, use_reentrant=False, early_stop=False), 1),
+        "block, no checkpoint": (block, 0, 0),
+        "gate/up projection and the op": (
+            lambda x, wg, wu, w, wd: _down(checkpoint(projected, x, wg, wu, w, use_reentrant=False), wd),
+            0,
+            1,
+        ),
+        "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), 1, 1),
+        "block, reentrant": (lambda *a: checkpoint(block, *a, use_reentrant=True), 1, 0),
+        "block, early_stop=False": (lambda *a: checkpoint(block, *a, use_reentrant=False, early_stop=False), 1, 1),
     }
     want = None
-    for what, (region, recomputes) in block_cases.items():
+    for what, (region, recomputes, held) in block_cases.items():
         launches.clear()
         run, results = block_step(region)
-        assert _recomputed(launches, run) == (1, recomputes), what
+        assert counted(run) == (1, recomputes, 0, held), what
         if want is None:
             want = results[0]
         assert_same_outputs(results[0], want, what)
 
     launches.clear()
-    leaves = _leaves(t)
+    operands, operand_gradients = _kept_leaves(t)
 
     def alone(mark):
-        h = checkpoint(op, *leaves, use_reentrant=False)
+        h = checkpoint(op, *operands, use_reentrant=False)
         mark()
         h.backward(t.dh)
 
-    assert _recomputed(launches, alone) == (1, 0)
-    assert_same_bits(leaves[0].grad, _functional(t)["d_first"], "op alone, h backpropagated")
+    assert counted(alone) == (1, 0, 0, 1)
+    found = operand_gradients()
+    assert_same_outputs(found, {key: _functional(t)[key] for key in found}, "op alone, h backpropagated")
 
 
 @pytest.mark.parametrize("layout", ["merged", "split"])
 def test_a_cuda_graph_of_a_checkpointed_step_captures_the_recompute_only_when_needed(layout, device, launches):
-    """A checkpointed step (forward, then ``torch.autograd.grad``) captured in one CUDA graph: with the op alone in
-    the region it captures one forward and one backward launch (no recompute), with the whole block one forward, the
-    recompute and one backward; each replay gives the bits of the eager step without a checkpoint."""
+    """A checkpointed step (forward, then ``torch.autograd.grad``) captured in one CUDA graph: with the op alone, or
+    the gate/up projection and the op, in the region it captures one forward and one backward launch (no recompute),
+    with the whole block one forward, the recompute and one backward; each replay gives the bits of the eager step
+    without a checkpoint."""
     t = make_inputs(Case(257, layout), seed=34, device=device)
     p = _projections(t, seed=35, device=device)
     checkpoint = torch.utils.checkpoint.checkpoint
     op = functools.partial(clamped_swiglu, limit=t.L)
     block = _block(t.L)
+    projected = _projected(t.L)
     regions = {
         "op alone": (lambda f, s, w, wd: _down(checkpoint(op, f, s, w, use_reentrant=False), wd), False, 0),
+        "gate/up projection and the op": (
+            lambda x, wg, wu, w, wd: _down(checkpoint(projected, x, wg, wu, w, use_reentrant=False), wd),
+            True,
+            0,
+        ),
         "block": (lambda *a: checkpoint(block, *a, use_reentrant=False), True, 1),
     }
 
@@ -2657,7 +2785,8 @@ def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device
     step and in gradients computed with ``create_graph=True``, every ``<name>_stride`` of every launch is ``stride(0)``
     of the tensor ``<name>`` it passes (the merged tensor's for its up half, the merged gradient's for ``d_up``), and at
     1 row each is 0.  Every one of these calls, the autograd function's forward and backward too (also the backward
-    that records the gradients' graph, through ``_Gradients``), is checked and launched by the step itself: none of the
+    that records the gradients' graph, through ``_Gradients``), is checked by the step itself and launched there (the
+    checkpoint's recomputation, in the backward, keeps its launch for :func:`_held` and stops before it): none of the
     full checks runs (no call of :func:`_forward`, :func:`_backward` or :func:`_check_tensor`)."""
     checked = _full_checks(monkeypatch)
     for rows in (1, 2, 33, 4097):
@@ -2682,8 +2811,8 @@ def test_the_common_call_passes_the_row_strides_of_its_tensors(layout, w, device
         grads = torch.autograd.grad(clamped_swiglu(*leaves, limit=t.L), wants, t.dh, create_graph=True)
         assert all(grad.requires_grad for grad in grads), rows  # the backward ran through ``_Gradients``
         assert not checked, (rows, "autograd step with create_graph=True", checked)
-        # The checkpointed step launches no recompute: the op alone is the region (the forward runs after autograd
-        # saved the inputs, so the recomputation stops before it).
+        # The checkpointed step launches no recompute: the op alone is the region (in the recomputation the forward
+        # runs after autograd saved the inputs, so the recomputation stops before it).
         assert len(launches) == 2 + 2 + 2 + 2 + 2, (rows, [stage for stage, _, _ in launches])
         for stage, launched_rows, values in launches:
             assert launched_rows == rows
