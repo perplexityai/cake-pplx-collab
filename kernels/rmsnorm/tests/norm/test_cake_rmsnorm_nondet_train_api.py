@@ -62,7 +62,16 @@ from tests.cake.test_helpers.cake_jit_warmup import build_jit_specs
 from tests.norm.test_helpers import cake_rmsnorm_train_reference as ref
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
-WIDTHS = ((6144, 1e-5), (4096, 1e-5), (2048, 1e-6), (1536, 1e-6), (512, 1e-6))
+WIDTHS = (
+    (6144, 1e-5),
+    (4096, 1e-5),
+    (2048, 1e-6),
+    (1536, 1e-6),
+    (1280, 1e-20),
+    (1024, 1e-6),
+    (512, 1e-6),
+    (128, 1e-20),
+)
 HIDDEN_SIZES = tuple(hidden for hidden, _eps in WIDTHS)
 EPS = {hidden: eps for hidden, eps in WIDTHS}
 SEED = 8066

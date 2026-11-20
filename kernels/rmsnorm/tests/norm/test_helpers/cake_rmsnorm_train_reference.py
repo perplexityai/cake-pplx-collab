@@ -40,7 +40,18 @@ from tests.cake.test_helpers import cake_naive
 #: The independent random inputs each case is judged over.
 DRAWS = cake_naive.DRAWS
 # The contract eps of every width.
-EPS = {6144: 1e-5, 5120: 1e-6, 4096: 1e-5, 2048: 1e-6, 1536: 1e-6, 512: 1e-6, 256: 1e-6}
+EPS = {
+    6144: 1e-5,
+    5120: 1e-6,
+    4096: 1e-5,
+    2048: 1e-6,
+    1536: 1e-6,
+    1280: 1e-20,
+    1024: 1e-6,
+    512: 1e-6,
+    256: 1e-6,
+    128: 1e-20,
+}
 W_DTYPES = {"bf16": torch.bfloat16, "f32": torch.float32}
 # Rows per block of the float64 oracles and the BF16 naive backward (a whole-T
 # float64 copy of [65536, 6144] is 3.2 GB per tensor).

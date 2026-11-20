@@ -85,8 +85,11 @@ WIDTHS = (
     (4096, 1e-5),
     (2048, 1e-6),
     (1536, 1e-6),
+    (1280, 1e-20),
+    (1024, 1e-6),
     (512, 1e-6),
     (256, 1e-6),
+    (128, 1e-20),
 )
 EPS = {hidden: eps for hidden, eps in WIDTHS}
 # (hidden, residual): every backward route of the package.

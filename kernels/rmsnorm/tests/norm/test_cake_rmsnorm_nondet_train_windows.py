@@ -54,7 +54,7 @@ forward = pkg.cake_rmsnorm_nondet_train_forward
 backward = pkg.cake_rmsnorm_nondet_train_backward
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
-HIDDEN_SIZES = (256, 512, 1536, 2048, 4096, 5120, 6144)
+HIDDEN_SIZES = (128, 256, 512, 1024, 1280, 1536, 2048, 4096, 5120, 6144)
 W_TOKENS = ("bf16", "f32")
 # The largest token count measured in an unbounded window.
 MAX_TOKENS = 65536

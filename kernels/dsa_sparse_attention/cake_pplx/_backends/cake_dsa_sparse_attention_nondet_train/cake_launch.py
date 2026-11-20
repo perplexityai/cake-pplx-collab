@@ -886,6 +886,34 @@ STAGE_ARGS: dict[str, list[str]] = {
         "grid_y",
         "grid_z",
     ],
+    "nope_fwd_scan_sink": [
+        "q_latent",
+        "kv_latent",
+        "out",
+        "o_lo",
+        "lse",
+        "sink",
+        "indices",
+        "topk_length",
+        "num_queries",
+        "num_kv",
+        "topk",
+        "idx_stride",
+        "indices_offset",
+        "has_topk_length",
+        "derive_length",
+        "scale_log2",
+        "cu_seqlens_q",
+        "cu_seqlens_k",
+        "indices_out",
+        "num_docs",
+        "search_iters",
+        "causal",
+        "convert",
+        "grid_x",
+        "grid_y",
+        "grid_z",
+    ],
 }
 LAUNCH = {
     "fwd": fwd,
@@ -909,6 +937,7 @@ LAUNCH = {
     "nope_fwd_scan": nope_fwd,
     "nope_fwd_sink": nope_fwd_sink,
     "nope_bwd_dsink": nope_bwd_dsink,
+    "nope_fwd_scan_sink": nope_fwd_sink,
 }
 GRID = {
     "fwd": fwd_grid,
@@ -932,4 +961,5 @@ GRID = {
     "nope_fwd_scan": fwd_grid,
     "nope_fwd_sink": fwd_grid,
     "nope_bwd_dsink": nope_bwd_dsink_grid,
+    "nope_fwd_scan_sink": fwd_grid,
 }
