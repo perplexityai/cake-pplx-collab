@@ -35,9 +35,9 @@ so a zero-weight row gets exactly 0 in ``h``, ``d_gate`` and ``d_up`` and its
 full ``d_weight``.  ``R`` is a run-time value (any ``R >= 0``; ``R = 0``
 returns empty outputs and launches nothing), and so are ``L`` and the weight
 flag: one library per program and architecture serves every call, with no
-recompilation (the row count picks the program).  ``limit`` has no
-default: pass the model's value (``swiglu_limit``, 10.0 for
-DeepSeek-V4.1-Flash) on every call.
+recompilation (the row count picks the program, and in the backward so does
+whether a weight is given).  ``limit`` has no default: pass the model's
+value (``swiglu_limit``, 10.0 for DeepSeek-V4.1-Flash) on every call.
 
 The sigmoid uses the approximate FP32 base-2 exponential and the approximate
 reciprocal with one round-to-nearest Newton step (below the flushed
@@ -93,12 +93,12 @@ a large-``R`` program, chosen by ``R`` and the device's SM count; the
 unweighted backward has one program, which stores the bits of the weighted
 backward's programs at ``w = 1``.  A program's library loads (and, without a
 prebuilt one, JIT-builds) at its first launch.  Before capturing a CUDA
-graph, run an eager call at each row count the graph captures (or build
-every library of the architecture with the backend's ``specs_for_arch``) so
-that no JIT build happens during capture.  A JIT build needs a CUDA toolkit
-of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for
-``sm_107a``.  This module imports its backend package on first use and reads
-no environment variable.
+graph, run an eager call of each kind the graph captures (weighted and
+unweighted) at each row count it captures (or build every library of the
+architecture with the backend's ``specs_for_arch``) so that no JIT build
+happens during capture.  A JIT build needs a CUDA toolkit of at least 12.8
+for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for ``sm_107a``.  This module
+imports its backend package on first use and reads no environment variable.
 
 Usage::
 

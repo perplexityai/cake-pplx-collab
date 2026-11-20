@@ -214,6 +214,7 @@ the fills of those outputs.  The kernels write every element of every output, so
 - The intermediate width is 2304 only (a compile-time width of the kernels).
 - No double backward: differentiating gradients computed with `create_graph=True` raises `RuntimeError`.  Not tested
   under `torch.compile` or `torch.jit.trace`.  No MXFP8 or FP4 output.
-- A program's library builds at its first launch, and the row count picks the program (see Programs).  Before
-  capturing a CUDA graph, run an eager call at each row count the graph captures, or build every library of the
+- A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
+  does the weight, as an unweighted backward runs its own program.  Before capturing a CUDA graph, run an eager call of
+  each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the
   architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).

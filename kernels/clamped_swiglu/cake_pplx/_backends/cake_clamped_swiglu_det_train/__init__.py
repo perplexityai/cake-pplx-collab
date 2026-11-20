@@ -39,8 +39,9 @@ JIT variables):
   and ignore it, and the backward runs the unweighted program, which takes no
   weight).  ``limit`` is ``L``, a positive finite Python number rounded to
   FP32; it is a launch argument, as are ``R``, the weight flag and the
-  strides, so one library per program and architecture serves every call
-  (the row count picks the program).
+  strides, so one library per program and architecture serves every call (the
+  row count picks the program, and in the backward so does whether a weight is
+  given).
 - Checks.  An entry point checks every argument (the limit, the operands'
   types, dtypes, shapes and devices, the output buffers, the ``grad_up`` and
   ``grad_weight`` rules, ``R`` and the device's architecture) before it
