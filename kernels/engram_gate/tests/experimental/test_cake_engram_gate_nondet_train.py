@@ -53,7 +53,7 @@ cake_jit = cake_package(PACKAGE, "cake_jit")
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-RECORDS = ("bwd_dot2", "dw_reduce", "fwd_dot2", "fwd_f32")
+RECORDS = ("bwd_dot2", "bwd_dot2_stage", "dw_reduce", "fwd_dot2", "fwd_f32")
 # The summations of the dot product each stage ships: the forward both, the backward the compensated one only.
 ACC_MODES = {"fwd": ("f32", "dot2"), "bwd": ("dot2",)}
 FWD_ACCS = ACC_MODES["fwd"]
@@ -139,7 +139,17 @@ def test_each_dot_sum_has_a_forward_record_and_one_backward_serves_both() -> Non
         with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
             cake_backend._dot_acc(bad)
     assert cake_jit.record("bwd", "dot2") == cake_jit.record("bwd") == "bwd_dot2"
-    assert cake_jit.MODULES["bwd_dot2"]["stage"] == "bwd"
+    assert cake_jit.MODULES["bwd_dot2"]["stage"] == cake_jit.MODULES["bwd_dot2_stage"]["stage"] == "bwd"
+    # the two backward programs: a call with a token mask always launches bwd_dot2; a call without one launches
+    # bwd_dot2_stage from STAGE_BWD_MIN_TOKENS tokens on the architectures where it is the faster one
+    assert cake_jit.STAGE_BWD_ARCHES <= set(ARCHES)
+    least = cake_jit.STAGE_BWD_MIN_TOKENS
+    for arch in ARCHES:
+        for T in (1, least - 1, least, 2**31 - 1):
+            assert cake_jit.backward_record(arch, masked=True, T=T) == "bwd_dot2"
+            staged = arch in cake_jit.STAGE_BWD_ARCHES and T >= least
+            want = "bwd_dot2_stage" if staged else "bwd_dot2"
+            assert cake_jit.backward_record(arch, masked=False, T=T) == want, (arch, T)
     assert "bwd_f32" not in cake_jit.MODULES
     with pytest.raises(ValueError, match=r"unknown acc 'f32' for 'bwd'; it ships \['dot2'\]"):
         cake_jit.record("bwd", "f32")
@@ -167,17 +177,21 @@ MEASURED = {
     ("sm_100a", 148, "fwd_dot2"): 142,
     ("sm_100a", 148, "fwd_f32"): 142,
     ("sm_100a", 148, "bwd_dot2"): 104,
+    ("sm_100a", 148, "bwd_dot2_stage"): 104,
     ("sm_100a", 152, "fwd_dot2"): 148,
     ("sm_100a", 152, "fwd_f32"): 148,
     ("sm_100a", 152, "bwd_dot2"): 110,
+    ("sm_100a", 152, "bwd_dot2_stage"): 110,
     ("sm_103a", 152, "fwd_dot2"): 148,
     ("sm_103a", 152, "fwd_f32"): 148,
     ("sm_103a", 152, "bwd_dot2"): 110,
+    ("sm_103a", 152, "bwd_dot2_stage"): 110,
     ("sm_107a", 212, "fwd_dot2"): 184,
     ("sm_107a", 212, "fwd_f32"): 184,
     ("sm_107a", 212, "bwd_dot2"): 138,
+    ("sm_107a", 212, "bwd_dot2_stage"): 138,
 }
-PERSISTENT_RECORDS = ("bwd_dot2", "fwd_dot2", "fwd_f32")
+PERSISTENT_RECORDS = ("bwd_dot2", "bwd_dot2_stage", "fwd_dot2", "fwd_f32")
 
 
 def test_the_resident_cluster_table_holds_the_measured_devices() -> None:

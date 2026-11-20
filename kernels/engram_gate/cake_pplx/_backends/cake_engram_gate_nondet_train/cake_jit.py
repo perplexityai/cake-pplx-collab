@@ -51,9 +51,14 @@ summed in one of two ways: ``dot2`` as a compensated FP32 dot product (each
 product split with an FMA, each running sum with an error-free two-sum, the
 error words summed in FP32 and added once at the end) or ``f32`` in one FP32
 word.  ``fwd`` ships both (``fwd_f32`` the default, ``fwd_dot2`` opt-in);
-``bwd`` ships ``bwd_dot2`` only, which serves either forward (it recomputes
-``P`` from the inputs).  Every other sum is one FP32 word.  Nothing launches
-cooperatively.
+``bwd`` sums ``P`` as ``dot2`` only, which serves either forward (it recomputes
+``P`` from the inputs), in two programs with the same bits: ``bwd_dot2`` and
+``bwd_dot2_stage``, which also stages the next token's ``dout``, ``x`` and
+``key`` slices in shared memory by ``cp.async``.  A call without a token mask
+of at least :data:`STAGE_BWD_MIN_TOKENS` tokens on an architecture of
+:data:`STAGE_BWD_ARCHES` launches ``bwd_dot2_stage``, every other call
+``bwd_dot2`` (:func:`backward_record`).  Every other sum is
+one FP32 word.  Nothing launches cooperatively.
 """
 
 from __future__ import annotations
@@ -91,6 +96,21 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": False,
         },
         "library": "cake_engram_gate_train_638509badcd8ffb2085c",
+        "stage": "bwd",
+    },
+    "bwd_dot2_stage": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dout"], ["buffer", "x"], ["buffer", "key"], ["buffer", "value"], ["buffer", "q_weight"], ["buffer", "k_weight"], ["buffer", "mask"], ["buffer", "dx"], ["buffer", "dkey"], ["buffer", "dvalue"], ["buffer", "dw_part"], ["parameter", "T"], ["parameter", "eps"], ["parameter", "clamp"], ["parameter", "wmode"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_engram_gate_train_f432570962d690736ab8",
+        "launch": {
+            "block": (160, 1, 1),
+            "cluster": (4, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 74240,
+            "use_pdl": False,
+        },
+        "library": "cake_engram_gate_train_f432570962d690736ab8",
         "stage": "bwd",
     },
     "dw_reduce": {
@@ -145,7 +165,14 @@ CLUSTER_CTAS = 4
 # CTAs per SM each ``fwd`` / ``bwd`` program holds at once: the launch bound of
 # its build, which its register count reaches on every architecture (its
 # threads and shared memory would allow more).
-CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3}
+CTAS_PER_SM = {"fwd_f32": 4, "fwd_dot2": 4, "bwd_dot2": 3, "bwd_dot2_stage": 3}
+# The backward program a call launches (:func:`backward_record`): the two give the
+# same bits; ``bwd_dot2_stage`` is the faster one in a call without a token mask
+# of at least ``STAGE_BWD_MIN_TOKENS`` tokens on these architectures, and the
+# slower one or no faster one everywhere else (a call with a mask tensor, even an
+# all-true one, fewer tokens, or another architecture).
+STAGE_BWD_ARCHES: frozenset[str] = frozenset({"sm_103a"})
+STAGE_BWD_MIN_TOKENS = 4096
 # Whole four-CTA clusters one device holds at once, by the CTAs per SM of a
 # program: (architecture, SM count) -> {CTAs per SM: clusters}, as
 # ``cudaOccupancyMaxActiveClusters`` reported them (spread cluster scheduling,
@@ -185,6 +212,15 @@ def record(stage: str, acc: str = "dot2") -> str:
     if acc not in ACC_MODES[stage]:
         raise ValueError(f"unknown acc {acc!r} for {stage!r}; it ships {list(ACC_MODES[stage])}")
     return f"{stage}_{acc}"
+
+
+def backward_record(arch: str, masked: bool, T: int) -> str:
+    """The ``bwd`` record a backward call of ``T`` tokens launches on ``arch``:
+    ``bwd_dot2_stage`` for a call without a token mask (``masked`` False) of at
+    least :data:`STAGE_BWD_MIN_TOKENS` tokens on an architecture of
+    :data:`STAGE_BWD_ARCHES`, else ``bwd_dot2``.  Both give the same bits."""
+    staged = not masked and T >= STAGE_BWD_MIN_TOKENS and arch in STAGE_BWD_ARCHES
+    return "bwd_dot2_stage" if staged else "bwd_dot2"
 
 
 def resident_clusters(record_name: str, arch: str, sm_count: int) -> int:

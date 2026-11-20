@@ -343,6 +343,42 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
         assert launched == ["fwd_f32", "bwd_dot2", "dw_reduce"], "the default is the one-word FP32 sum"
 
 
+@pytest.mark.parametrize("T", (1, 129, 4096))
+def test_a_call_without_a_mask_launches_the_backward_of_its_architecture(T, monkeypatch) -> None:
+    """Without a token mask the backward launches ``bwd_dot2_stage`` from ``STAGE_BWD_MIN_TOKENS`` tokens on an
+    architecture of ``STAGE_BWD_ARCHES`` and ``bwd_dot2`` otherwise; an all-true mask tensor launches ``bwd_dot2``.
+    The two calls give the same bits of every gradient (an all-true mask is no mask), so the two backward programs
+    agree on the call's inputs."""
+    device = _device_or_skip()
+    backend = _backend()
+    launched: list[str] = []
+    entry = backend._entry
+
+    def recording(name, arch):
+        run = entry(name, arch)
+
+        def call(*args):
+            launched.append(name)
+            return run(*args)
+
+        return call
+
+    monkeypatch.setattr(backend, "_entry", recording)
+    ns = make_inputs(T, seed=71, device=device, weights="bf16", mask="none", layout="kv")
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
+    unmasked = api.cake_engram_gate_nondet_train_backward(ns.dout, *args, None)
+    staged = backend.device_arch(device.index) in backend.cake_jit.STAGE_BWD_ARCHES
+    staged = staged and T >= backend.cake_jit.STAGE_BWD_MIN_TOKENS
+    assert launched == ["bwd_dot2_stage" if staged else "bwd_dot2", "dw_reduce"]
+    launched.clear()
+    kept = torch.ones(T, dtype=torch.bool, device=device)
+    masked = api.cake_engram_gate_nondet_train_backward(ns.dout, *args, kept)
+    assert launched == ["bwd_dot2", "dw_reduce"]
+    for name, a, b in zip(GRADS, unmasked, masked):
+        if name in EXACT_GRADS:
+            assert _same_bits(a, b), name
+
+
 def _gpu_activities(call) -> Optional[list[str]]:
     """The names of the GPU activities (kernels, memsets, copies) ``call`` runs, as CUPTI reports them through
     ``torch.profiler``; None when the profiler sees no GPU activity at all (its CUPTI does not serve the device)."""
