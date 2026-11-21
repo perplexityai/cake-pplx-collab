@@ -4998,7 +4998,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
         ),
         ("fwd_bias", 784, 896): (
             8193,
-            16384,
+            14336,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
     },
