@@ -320,6 +320,10 @@ call that neither of the two takes runs the third, the prep forward (below).
   most 1.10 x the split one and its sequences x `HV` CTAs fill at least 0.65
   of the SMs; this route then runs it.
 
+In 0.2.5 `wy_a` is built from newer kernel source under the same program
+name: each compute warp owns the ring slots of its parity.  Routes, launch
+records and output bits are those of 0.2.4.
+
 On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
 (GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
 the `(8, 24)` pair (63-chunk pieces); on all four GPUs the 64 x 4,096-token
