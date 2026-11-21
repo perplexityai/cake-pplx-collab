@@ -85,6 +85,25 @@ deterministic package's forward runs, on short inputs whose rows are
 packed (contiguous `x` and `z`, or one token of head stride 128) up to a cut
 of rows per SM (on SM107 not from 17 to 32 rows), a program of one row block
 per CTA with no loop, with the same `y` bits.
+Version 0.2.12 keeps the `y` bits of every call that 0.2.11 ran correctly:
+on `sm_100a` and `sm_103a` the forward of packed rows (contiguous `x` and
+`z`, or one token of head stride 128) up to 4 rows per SM on `sm_100a` and
+12 on `sm_103a` runs a 32-lane build of the tiny forward (`fwd_l32_tiny`:
+two lanes to each group of 8 elements, one 4-row block per 128-thread CTA)
+with the tiny forward's sum of squares, so its `y` bits; the tiny forward
+runs from there up to 36 rows per SM (past these cuts, with the rows in L2,
+the 32-lane build's twice as many CTAs make it slower than the tiny
+forward), and `sm_107a` runs the forward of 0.2.11.
+A forward of `x` or `z` broadcast over more than one
+token (token stride 0) runs the band of other layouts
+(`STRIDED_FORWARD_BANDS`) where the band of packed rows runs a program that
+reads packed rows at their linear offsets: 0.2.11 refused such a call in
+the tiny forward's band (up to 36 rows per SM on `sm_100a` and `sm_103a` and
+65 on `sm_107a`: the tiny forward takes contiguous `x` and `z` only, so a
+`ValueError`), and on `sm_107a` past 280 rows per SM its pipelined forward
+of packed rows read rows past the broadcast token.  At every other row
+count such a call runs, as in 0.2.11, the program of packed rows, which
+reads the token stride.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -278,7 +297,10 @@ device.
 The forward programs associate a row's sum of squares differently, on FP32
 FMA chains (the lanes of `.f32x2` FMA chains where a program runs two or
 four): the tiny and the short forward run four 2-term chains of 16 lanes
-added in pairs, then folded by XOR shuffles 1, 2, 4, 8; the mid forward, the
+added in pairs, then folded by XOR shuffles 1, 2, 4, 8, and the 32-lane tiny
+forward the same chains on its 16 lane pairs (both lanes of a pair sum the
+same 8 elements), then folds them by XOR shuffles 2, 4, 8, 16: the same
+additions, so the tiny forward's bits; the mid forward, the
 extra-long forward but on `sm_100a` and the pipelined forward on `sm_107a`
 four 4-term chains of 8 lanes added in pairs, then folded by 1, 2, 4; the
 plain forward and the pipelined forward on `sm_100a` and `sm_103a` two
@@ -291,6 +313,7 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | role | program | runs |
 | --- | --- | --- |
 | `fwd_tiny` | forward of packed rows, 128 threads, 16 lanes a row, one CTA per 8-row block (not persistent), the short forward's arithmetic and bits | its band of `FORWARD_BANDS` (packed rows) |
+| `fwd_l32_tiny` (`sm_100a`, `sm_103a`) | the tiny forward with 32 lanes a row (two lanes to each group of 8 elements, each lane the outputs of its 4), 128 threads, one CTA per 4-row block (not persistent), the tiny forward's sum of squares, so the short forward's bits | its band of `FORWARD_BANDS` (packed rows) |
 | `fwd_short` | forward, 256 threads, 16 lanes a row, one CTA per 16-row block (not persistent) | its band of `STRIDED_FORWARD_BANDS` (other layouts) |
 | `fwd` | plain forward, 64 threads, 8 lanes a row, one CTA per 8-row block (not persistent) | the call role; its band of `STRIDED_FORWARD_BANDS` (other layouts, past the persistent forwards' bands) |
 | `fwd_mid` | whole waves of 6 CTAs per SM (as many waves as the rows need), each CTA at most 2 blocks of 16 rows | its forward bands |
@@ -327,6 +350,7 @@ the 20 hex digits shown):
 | --- | --- | --- | --- |
 | `fwd` | `786ee0cda6a87f643bf8` | `786ee0cda6a87f643bf8` | `786ee0cda6a87f643bf8` |
 | `fwd_tiny` | `242b29d118997473fc3e` | `242b29d118997473fc3e` | `242b29d118997473fc3e` |
+| `fwd_l32_tiny` | `b9af069174152aae5f62` | `b9af069174152aae5f62` | (none) |
 | `fwd_short` | `7b542c846911aca66512` | `7b542c846911aca66512` | `7b542c846911aca66512` |
 | `fwd_mid` | `33ef19a28735b3e470b3` | `33ef19a28735b3e470b3` | `33ef19a28735b3e470b3` |
 | `fwd_long` | `0dc2a8df1f94d878ccbb` | (not routed) | (not routed) |
@@ -360,7 +384,11 @@ The forward bands (rows per SM: a call of `rows` rows on a device of `SMs`
 SMs runs the first band with `rows <= last * SMs`): `FORWARD_BANDS` where `x`
 and `z` hold packed rows (row `n` at element `128 n`, as contiguous
 `[T, H, 128]` and `[T * H, 128]` inputs do) and there are fewer than
-`PACKED_ROWS` (2^24) rows, `STRIDED_FORWARD_BANDS` otherwise.  The cuts
+`PACKED_ROWS` (2^24) rows, `STRIDED_FORWARD_BANDS` otherwise.  An `x` or
+`z` broadcast over more than one token (token stride 0) counts as packed rows,
+but where its band of packed rows runs a program that reads the rows at their
+linear offsets (a tiny forward, or on `sm_107a` the pipelined forward of
+packed rows) it runs the band of other layouts.  The cuts
 follow the checkpointed training step (two forwards and the backward) on
 every architecture: the pipelined forward loads `x` and `z` with the L2
 `evict_first` policy, so where the rows fit in L2 it is faster alone but
@@ -373,14 +401,19 @@ about 3.5 % slower.  Other layouts run the plain forward (`fwd`) past the
 persistent forwards' bands: where measured there (from 1000 rows per SM on
 `sm_100a` and `sm_103a`, from 520 on `sm_107a`) it is the fastest forward
 alone and makes the step 1 % .. 6 % faster; no band of other layouts runs a
-pipelined forward.  The tiny and the short forward end where beside a kernel
-holding 16 SMs they still end no later than the deterministic package's
-forward.  The bands:
+pipelined forward.  The tiny forwards and the short forward end where beside
+a kernel holding 16 SMs they still end no later than the deterministic
+package's forward as it routes the rows.  The 32-lane tiny forward
+(`sm_100a` and `sm_103a`), which has that package's tiny row blocks and so
+twice as many CTAs as the tiny forward, ends at 4 rows per SM on `sm_100a`,
+past which CUDA Graph replays of back-to-back calls run it up to about 1.5 %
+slower than the tiny forward, and at 12 on `sm_103a`, past which, with the
+rows in L2, it is slower.  The bands:
 
 | architecture | packed rows (rows per SM) | other layouts (rows per SM) |
 | --- | --- | --- |
-| `sm_100a` | 1-36 `tiny`, 37-85 `pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, 521-6500 `pipe`, past 6500 `mid` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
-| `sm_103a` | 1-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
+| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, 521-6500 `pipe`, past 6500 `mid` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
+| `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
 | `sm_107a` | 1-65 `tiny`, 66-175 `mid`, 176-280 `xlong`, past 280 `pipe_packed` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 
 The backward bands (`BACKWARD_BANDS`, in order: a call of `rows` rows on a
