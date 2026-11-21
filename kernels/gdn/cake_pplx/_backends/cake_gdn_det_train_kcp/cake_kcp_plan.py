@@ -439,7 +439,9 @@ def upload_tables(
 # far.  A call on the stream of a write has nothing to wait for.  Under a CUDA stream capture nothing is noted, sealed
 # or waited for: a capturing stream cannot wait for an event recorded outside the capture, and ``torch.cuda.graph``
 # synchronizes the device before it captures.  Streams are keyed by ``torch._C._cuda_getCurrentStream`` -- ``(stream id,
-# device index, device type)`` --, the stream objects made once per key.
+# device index, device type)`` --, the stream objects made once per key.  The steady state costs one raw stream handle
+# and one set lookup per call: a stream that has nothing to wait for (it has seen every sealed write, and no other
+# stream holds an open one) is kept by its raw handle in the context's ``ready`` set, which every note empties.
 
 _TABLE_WRITES = (
     "kcp_table_writes",
@@ -464,6 +466,16 @@ _stream_key = (
 )  # the same key, no object
 
 
+def _current_raw_stream(index: int) -> int:
+    """The raw handle (``cudaStream_t``) of the current stream of device ``index``."""
+    return torch.cuda.current_stream(index).cuda_stream
+
+
+_raw_stream = (
+    getattr(torch._C, "_cuda_getCurrentRawStream", None) or _current_raw_stream
+)  # the same handle, no object
+
+
 def _stream(key: tuple[int, int, int]) -> torch.cuda.Stream:
     """The stream object of ``key``."""
     s = _STREAMS.get(key)
@@ -477,18 +489,22 @@ def _stream(key: tuple[int, int, int]) -> torch.cuda.Stream:
 
 
 class _TableWrites:
-    """The table writes of one context: ``writes`` the sealed ones in issue order -- ``(stream key, event, tables)``,
-    one event after the writes of a call on that stream --, ``open`` the tables written and not sealed yet per stream
-    key, and ``seen`` the number of sealed writes each reader stream has processed."""
+    """The table writes of one context, its tables on device ``index``: ``writes`` the sealed ones in issue order --
+    ``(stream key, event, tables)``, one event after the writes of a call on that stream --, ``open`` the tables written
+    and not sealed yet per stream key, ``seen`` the number of sealed writes each reader stream has processed, and
+    ``ready`` the raw handles of the streams of that device with nothing to wait for (each has processed every sealed
+    write and no other stream holds an open one; emptied by every note)."""
 
-    __slots__ = ("open", "seen", "writes")
+    __slots__ = ("index", "open", "ready", "seen", "writes")
 
-    def __init__(self) -> None:
+    def __init__(self, index: int) -> None:
+        self.index = index
         self.writes: list[
             tuple[tuple[int, int, int], torch.cuda.Event, list[torch.Tensor]]
         ] = []
         self.open: dict[tuple[int, int, int], list[torch.Tensor]] = {}
         self.seen: dict[tuple[int, int, int], int] = {}
+        self.ready: set[int] = set()
 
     def seal(self) -> None:
         """One event per stream with open writes, recorded on that stream."""
@@ -512,10 +528,12 @@ def _note_table_write(ctx: object, tables) -> None:
         or _capturing()
     ):
         return
-    key = _stream_key(tables[0].get_device())
+    index = tables[0].get_device()
+    key = _stream_key(index)
     log = caches.get(_TABLE_WRITES)
     if log is None:
-        log = caches[_TABLE_WRITES] = _TableWrites()
+        log = caches[_TABLE_WRITES] = _TableWrites(index)
+    log.ready.clear()  # the other streams have a write to wait for now
     noted = log.open.get(key)
     if noted is None:
         log.open[key] = tables
@@ -526,25 +544,38 @@ def _note_table_write(ctx: object, tables) -> None:
 def _seal_table_writes(ctx: object) -> None:
     """After the last table write of a call: one event per stream with writes noted since the last seal (one dict
     lookup when there are none)."""
-    caches = getattr(ctx, "_caches", None)
-    log = caches.get(_TABLE_WRITES) if isinstance(caches, dict) else None
+    try:
+        log = ctx._caches.get(_TABLE_WRITES)
+    except AttributeError:  # no context cache
+        return
     if log is not None and log.open and not _capturing():
         log.seal()
 
 
 def _use_context_tables(ctx: object, device: torch.device) -> None:
     """Before a call's first launch on the current stream: wait for the context's table writes on other streams that
-    this stream has not seen, and record the use of those tables on it (one dict lookup when nothing is new)."""
-    caches = getattr(ctx, "_caches", None)
-    log = caches.get(_TABLE_WRITES) if isinstance(caches, dict) else None
-    if log is None or device.type != "cuda":
+    this stream has not seen, and record the use of those tables on it (a raw handle and a set lookup when nothing is
+    new)."""
+    try:
+        log = ctx._caches.get(_TABLE_WRITES)
+    except AttributeError:  # no context cache
+        return
+    if log is None:
+        return
+    raw = _raw_stream(log.index)
+    if raw in log.ready or device.type != "cuda":
         return
     current = _stream_key(
         device.index if device.index is not None else torch.cuda.current_device()
     )
     seen, n = log.seen.get(current, 0), len(log.writes)
     other = log.open and (len(log.open) > 1 or current not in log.open)
-    if (seen == n and not other) or _capturing():
+    if seen == n and not other:
+        # nothing new: the next calls on this stream stop at ``ready`` (its raw handle on the tables' device)
+        if current[1] == log.index:
+            log.ready.add(raw)
+        return
+    if _capturing():
         return
     if other:  # writes on another stream that no call sealed: sealed now (this stream's own stay open)
         mine = log.open.pop(current, None)
