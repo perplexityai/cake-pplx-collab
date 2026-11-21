@@ -70,20 +70,24 @@ serves every later forward call of one stream, CUDA Graph replays included.  A
 caller may own it (``workspace=``); otherwise the package keeps one zeroed
 buffer per (device, current stream), and a call inside a CUDA Graph capture
 allocates a zeroed buffer of its own.  Two launches that may run at once need
-two buffers.  From release 0.2.5, at C = 576 to 768, inside the token range of
-a row of the backend's ``cake_jit.FALLBACK_ROWS`` or ``DIRECT_ROWS`` (by
-architecture and route), the forward runs a static program on the route's tile
-plan or a direct program on channel tiles of its own with at most one CTA per
-token block; neither takes counters, so such a call zeroes and uses no buffer,
-eager or captured, and a passed ``workspace`` is checked and not read.  Each
-row gives its own token range.  From release 0.2.6, every architecture and
-route has a row at each ``C`` = 576 to 768 (0.2.5 had none for sm_100a
-``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a
-``fwd`` at C = 768).  For most ``C`` the first range starts at S = 1.  The
-sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336)
-and have only a static range.  Outside a row's range, and where an
-architecture, route and ``C`` have no row, the forward takes its counters from
-the workspace, as in 0.2.4.  Every forward program writes the same ``y`` bits.
+two buffers.  At C = 512 to 1024 from release 0.2.10 (from release 0.2.5 to
+0.2.9 at C = 576 to 768), inside the token range of a row of the backend's
+``cake_jit.FALLBACK_ROWS`` or ``DIRECT_ROWS`` (by architecture and route), the
+forward runs a static program on the route's tile plan or a direct program on
+channel tiles of its own with at most one CTA per token block; neither takes
+counters, so such a call zeroes and uses no buffer, eager or captured, and a
+passed ``workspace`` is checked and not read.  Each row gives its own token
+range.  From release 0.2.10, every architecture and route has a row at each
+``C`` = 512 to 1024 (0.2.6 to 0.2.9: at each ``C`` = 576 to 768; 0.2.5 had
+none for sm_100a ``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at C = 576 and
+712, and sm_103a ``fwd`` at C = 768).  For most ``C`` the first range starts
+at S = 1.  A row in ``FALLBACK_ROWS`` only runs the static program over its
+whole range: the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632 run it
+from S = 1 to 24576.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at
+S = 13824 (C = 736: 14336) and have only a static range.  Outside a row's
+range, and where an architecture, route and ``C`` have no row, the forward
+takes its counters from the workspace, as in 0.2.4.  Every forward program
+writes the same ``y`` bits.
 
 Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
 ``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and

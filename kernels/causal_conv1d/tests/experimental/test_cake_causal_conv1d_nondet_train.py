@@ -75,7 +75,7 @@ programmatic dependent launch, through autograd and checkpointing, beside a kern
 another stream, and beside the deterministic package's SM-wide program in one process.  The forward's narrow rows of
 C 520 to 568 (every one, at the row's token floor and one token below it), the ``fwd_bias`` rows with BF16 taps (their
 own floor and single-tile ranges on sm_103a), and a CUDA Graph capture at a forward row's floor after an eager call one
-token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 576 to 768, one token range per key): at
+token below it.  The forward keys of ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` (C 512 to 1024, one token range per key): at
 S 1000 inside a range and on both sides of each range's ends the static, direct or dynamic program the tables name, the
 static and direct programs with no ``work`` counters, every ``y`` judged (the route's static program on the same inputs
 too), with ``enable_pdl`` 0 and 1, on two streams and under CUDA Graph replay (no fill node at a static or direct row);
@@ -305,10 +305,12 @@ LARGE_CASE = (262401, 8192, "perf")
 # The large case's inputs and outputs (x, dy, y, dx: 4 x 4.3 GB), its float64 oracle of y and dx (2 x 17.2 GB) and
 # the naive tier's BF16 y and dx with their blocks (about 4 x 4.3 GB), with headroom.
 LARGE_CASE_FREE_BYTES = 96 * 2**30
+# ``GRAPH_CASES[2]`` is the small row of the capture buffer tests: C 384, below the forward keys (C 512 to 1024), so
+# that its forward takes token-chunk counters.
 GRAPH_CASES = (
     (65, 256, (64, 1)),
     (5, 136, (2, 0, 3)),
-    (1000, 512, "perf"),
+    (1000, 384, "perf"),
     (4097, 1280, (1000, 0, 3, 3094)),
     (4097, 2560, (1000, 0, 3, 3094)),
 )
@@ -2794,14 +2796,22 @@ FLOOR_CAPTURE_C = 528
 
 
 def test_forward_capture_at_a_floor_after_an_eager_call_below_it(fresh_pool) -> None:
-    """An eager forward one token below a narrow row's floor (C 528: its row plan is cached, the package's pre-zeroed
-    forward buffers sized for its one tile), then a CUDA Graph capture of the forward at the floor (six tiles, six
-    times the counter words) with no eager call at the floor: the captured call takes the plan of the floor from the
-    cached row, finds no pre-zeroed buffer large enough and zeroes its own (one fill node, counted in
-    ``_CAPTURE_FILL_FALLBACKS``); after an eager call at the floor, a second capture takes a pre-zeroed buffer (no
-    fill node, no fallback).  Every replay of both graphs is judged against the naive tier."""
+    """With the forward keys removed (:func:`_forward_rules_only`: the row's floor is the dynamic program's, and on
+    sm_100a / sm_103a C 528's key holds it), an eager forward one token below a narrow row's floor (C 528: its row
+    plan is cached, the package's pre-zeroed forward buffers sized for its one tile), then a CUDA Graph capture of the
+    forward at the floor (six tiles, six times the counter words) with no eager call at the floor: the captured call
+    takes the plan of the floor from the cached row, finds no pre-zeroed buffer large enough and zeroes its own (one
+    fill node, counted in ``_CAPTURE_FILL_FALLBACKS``); after an eager call at the floor, a second capture takes a
+    pre-zeroed buffer (no fill node, no fallback).  Every replay of both graphs is judged against the naive tier."""
 
     _require_route("bwd")
+    with _forward_rules_only(_arch()):
+        _forward_capture_at_a_floor()
+
+
+def _forward_capture_at_a_floor() -> None:
+    """The body of :func:`test_forward_capture_at_a_floor_after_an_eager_call_below_it`."""
+
     arch, device = _arch(), _device()
     C = FLOOR_CAPTURE_C
     floor = loader.forward_narrow_min_s(arch, C // 8, route="fwd")
@@ -3490,7 +3500,7 @@ def test_more_captures_than_the_pool_keep_no_capture_memory(fresh_pool, monkeypa
 
 def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypatch) -> None:
     """The pre-zeroed backward buffers hold the largest need of the eager calls that omitted ``workspace=``: an eager
-    backward at C 1280 with a caller-owned workspace fills no pool, one at C 512 without one fills it at C 512's
+    backward at C 1280 with a caller-owned workspace fills no pool, one at C 384 without one fills it at C 384's
     size.  A backward captured at C 1280 needs more: it takes no buffer (the idle ones stay as they were), zeroes one
     of its own (one fill node, one fallback) and the package keeps no reference to it; the replays are judged against
     the naive tier, with that buffer zero after each."""
@@ -3533,7 +3543,7 @@ def test_capture_larger_than_the_pool_zeroes_its_own_buffer(fresh_pool, monkeypa
 
 
 def test_pool_growth_releases_smaller_buffers_and_keeps_graphs_apart(fresh_pool) -> None:
-    """The pool grows with the eager need.  Graph G1, captured at C 512, takes one buffer per kind; eager steps at
+    """The pool grows with the eager need.  Graph G1, captured at C 384, takes one buffer per kind; eager steps at
     C 1280 and then C 2560 on another stream (their programs launched once before on caller-owned workspaces; the
     steps in the hold launch no other program), held on the device until the checks end (:func:`_stream_held`: their
     zero fills and readiness copies wait; the host never waits for the stream), each raise the pool size: the idle
@@ -3868,8 +3878,9 @@ def test_cudagraph_tree_with_more_backward_nodes_than_the_pool(fresh_pool, monke
     _assert_tables_hold_only_pool_buffers()
 
 
-# The shape of the PDL tests (each route's forward and backward take package workspaces there).
-PDL_CASE = (1000, 512, "perf")
+# The shape of the PDL tests (each route's forward and backward take package workspaces there: C 384 is below the
+# forward keys).
+PDL_CASE = (1000, 384, "perf")
 # GPU clock cycles of the ``torch.cuda._sleep`` in front of a PDL test's producer or reader kernels, so the package's
 # launch is queued while they wait to run.
 PDL_SLEEP_CYCLES = 20_000_000
