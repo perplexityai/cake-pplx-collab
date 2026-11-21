@@ -101,8 +101,11 @@ large-R record's windows: `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (b
 has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads the
 architecture once per device and the SM count once per stage and device.  Per stage and device it makes one table
 with an entry per row count up to the fine window's last row count or the last large-R edge, whichever is larger.  A
-call compares `R` with that table's length and reads one entry; a call of more rows runs the program of the last
-window.  An architecture without a fine or a large-R program of a stage runs the small-R one in its place.
+call compares `R` with that table's length and reads one entry.  A call of more rows runs the large-R program when
+the stage's last large-R window has no upper bound (`fwd` and `bwd`), and the small-R program otherwise
+(`bwd_unweighted`, which has no large-R program).  An architecture without a fine or a large-R program of a stage runs
+the small-R one in its place.  A fine window may reach at most 64 rows per SM (`cake_jit.MAX_FINE_ROWS_PER_SM`), so
+the table stays small.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
@@ -208,8 +211,9 @@ CTAs in the small-R `bwd_unweighted` program, `ceil(9 R / 4)` CTAs in `fwd_fine`
 in `bwd_fine` (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`; the `bwd_unweighted`, `fwd_fine` and
 `bwd_unweighted_fine` kernels count their tasks in 64 bits and stride over the blocks).  No routed launch has more than
 `2**31 - 1` CTAs (`cake_jit.MAX_GRID`): `cake_jit.fine` refuses a fine window whose last row count needs more, and
-`cake_jit.grid` caps only a fine program launched at more rows than its window holds.  A row or a task past `R` loads
-the last row and stores nothing.  The programs of a stage
+`cake_jit.grid` caps only a fine program launched at more rows than its window holds.  `bwd_fine` counts its rows in
+32 bits, so it takes at most `2**30` rows; the route sends it at most `2 * SMs`.  A row or a task past `R` loads the
+last row and stores nothing.  The programs of a stage
 compute each element with the same FP32 operations (the deep-gate sigmoid gives the fast one's bits wherever the fast
 one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's columns in
 load order with the same lanes.  In `bwd_fine`, warps 1 to 8 hand their `dh` words and activations to warp 0 in shared

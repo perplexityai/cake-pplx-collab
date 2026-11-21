@@ -330,10 +330,21 @@ ALIGNMENT_BYTES = 2 * VECTOR_ELEMENTS
 MAX_ROWS = 2**31 - 256
 # The largest grid a launch takes (the bindings refuse a larger one).  Below ``MAX_ROWS`` rows, every small-R and
 # large-R program and ``bwd_fine`` (``rows`` CTAs) stay below it.  A grid of ``ceil(9 rows / 4)`` CTAs (the
-# ``fwd_fine`` and ``bwd_unweighted_fine`` programs) passes it from about 954 M rows.  :func:`fine` refuses a window
-# whose last row count needs a larger grid, so a routed launch never reaches this cap.  Those two kernels count their
+# ``fwd_fine`` and ``bwd_unweighted_fine`` programs) passes it from about 954 M rows.  Those two kernels count their
 # tasks and blocks in 64 bits and stride over the blocks by the grid, so :func:`grid` caps a launch of more rows here.
+# ``bwd_fine`` counts its rows in 32 bits: its row loop (``row += gridDim.x``) stays in range only while the row
+# count plus the grid is at most ``2**31``, so on its grid of ``rows`` CTAs it takes at most ``2**30`` rows.  The route
+# sends it at most ``2 * sm_count`` rows (its window ``[0, 2]``).  :func:`fine` refuses a fine window past
+# :data:`MAX_FINE_ROWS_PER_SM` rows per SM and one whose last row count needs a grid past this cap, so a routed launch
+# never reaches the cap and every fine program stays far below these 32-bit limits.
 MAX_GRID = 2**31 - 1
+
+# The most rows per SM a fine window may reach (its ``hi``).  The fine programs are for the fewest rows: the shipped
+# windows end at 2 to 8 rows per SM.  64 is 8 times the largest of them, room for a retune.  The bound keeps the route
+# small: the package's route table holds one entry per row count up to the fine window's last row count, so at most
+# ``64 * sm_count`` entries for the fine window (13,568 on 212 SMs).  It also keeps a fine grid far below the 32-bit
+# limits above (``bwd_fine``: at most ``64 * sm_count`` CTAs and rows).
+MAX_FINE_ROWS_PER_SM = 64
 
 
 def route(stage: str, arch: str, sm_count: int) -> tuple[tuple[int, ...], str, str]:
@@ -370,9 +381,12 @@ def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
     the program ``name``, the stage's fine role, ahead of :func:`route`.  Its record's ``rows_per_sm_windows[arch]``
     is one window ``[0, hi]`` with an integer ``hi >= 1``, so ``last = hi * sm_count``.  The window must end below
     the first window of the stage's large-R program (``hi`` below its ``lo``: ``last`` at most the first edge of
-    :func:`route`), so the fine program never takes a row count that :func:`route` gives the large-R one.  Its grid at
-    ``last`` rows must not pass :data:`MAX_GRID`, so a routed launch's grid is :func:`grid`'s, never capped.  Without a
-    fine program on ``arch``, ``last`` is 0 (no launch runs it) and ``name`` is the stage's small-R program."""
+    :func:`route`), so the fine program never takes a row count that :func:`route` gives the large-R one.  ``hi``
+    must be at most :data:`MAX_FINE_ROWS_PER_SM`, so the package's route table stays small.  Its grid at ``last`` rows
+    must not pass :data:`MAX_GRID`, so a routed launch's grid is :func:`grid`'s, never capped.  ``bwd_fine`` counts
+    its rows in 32 bits and takes at most ``2**30`` rows (:data:`MAX_GRID`); with its window ``[0, 2]`` the route
+    sends it at most ``2 * sm_count`` rows.  Without a fine program on ``arch``, ``last`` is 0 (no launch runs it) and
+    ``name`` is the stage's small-R program."""
     name = PROGRAM_OF[stage + FINE].get(arch)
     if name is None:
         return 0, PROGRAM_OF[stage][arch]
@@ -392,6 +406,11 @@ def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
         raise RuntimeError(
             f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} reaches the first large-R window of {stage!r}, "
             f"from {edges[0] + 1} rows on {sm_count} SMs"
+        )
+    if windows[0][1] > MAX_FINE_ROWS_PER_SM:
+        raise RuntimeError(
+            f"{name}: rows_per_sm_windows[{arch!r}] {windows!r} passes {MAX_FINE_ROWS_PER_SM} rows per SM, the most a "
+            "fine window may reach"
         )
     per_cta, per_row = cta_tasks(name)
     if -(-last * per_row // per_cta) > MAX_GRID:

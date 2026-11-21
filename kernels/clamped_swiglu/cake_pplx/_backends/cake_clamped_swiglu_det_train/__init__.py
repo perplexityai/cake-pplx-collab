@@ -388,9 +388,13 @@ def run_module(stage: str, values: dict[str, Any], *, rows: int, device_index: i
     then the column offsets) named in ``values``, on the current torch stream of device ``device_index``.
 
     The first argument of every record is a CUDA tensor of that device: tvm-ffi runs the call on PyTorch's current
-    stream of its device, and the binding makes that device current for the launch.  The grid is
-    ``cake_jit.grid(name, rows)`` of the program ``name`` that runs.  The entry points launch through
-    :func:`_launcher`, which runs the same program with the same arguments and grid, passed by position."""
+    stream of its device, and the binding makes that device current for the launch.  The grid is the uncapped
+    ``ceil(rows * per_row / per_cta)`` CTAs of the program ``name`` that runs (:func:`_plan`).  It equals
+    ``cake_jit.grid(name, rows)`` at every routed row count (``cake_jit.fine`` refuses a fine window whose grid passes
+    ``cake_jit.MAX_GRID``).  The two differ only when ``fwd_fine`` or ``bwd_unweighted_fine`` is forced past its
+    window to more than about 954 M rows: ``cake_jit.grid`` caps there, and the binding refuses the uncapped grid.  The
+    entry points launch through :func:`_launcher`, which runs the same program with the same arguments and grid, passed
+    by position."""
     limit, plans, tail = _route(stage, device_index)
     name, arguments, per_row, per_cta = plans[rows] if rows < limit else tail
     try:
@@ -450,7 +454,7 @@ _ARGUMENTS: dict[str, tuple[str, ...]] = {
 class _Launcher:
     """The launch of one stage on one device (:func:`_launcher`): ``launch(rows, *arguments)`` runs, for ``rows >= 1``
     rows, the program :func:`run_module` runs (:func:`_route`) with ``arguments``, the kernel parameters in the order
-    of ``_ARGUMENTS[stage]``, then the grid ``cake_jit.grid(name, rows)``.  It holds what every launch of the stage on
+    of ``_ARGUMENTS[stage]``, then the uncapped grid of :func:`run_module`.  It holds what every launch of the stage on
     the device reads: ``device``, the device of the new outputs (one ``torch.device`` per device for the process:
     ``torch.empty`` on it costs about a third of the host time of ``Tensor.new_empty``); ``route``, :func:`_route` of
     the stage and device; ``entries``, each program's FFI entry, bound through :func:`_entry` at the program's first

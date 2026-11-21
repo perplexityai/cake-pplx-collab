@@ -24,10 +24,11 @@ rows per SM on some; the unweighted backward ``bwd_unweighted`` with no weight, 
 record delivered for its architectures and for no other, the launch facts, the argument plans), the route of a launch by
 its rows per SM (1 row, one row below, at and above each edge of the windows and the most rows, on the SM counts of the
 delivered GPUs; windows that are not ascending, untouching lists of integers refused, and a fine window that is not one
-window from 0 or that reaches the first large-R window; the small-R program at every row count on an architecture
-without a fine or a large-R one; the SM count read once per stage and device, no library loaded), the launch grid of
-each program (``ceil(3 R / 4)`` CTAs of ``bwd_unweighted`` up to the most rows, where ``3 R`` passes 32 bits;
-``ceil(9 R / 4)`` CTAs of a fine program, at most ``2**31 - 1``) and the arguments of a launch in its plan's order, the
+window from 0, that reaches the first large-R window, that passes 64 rows per SM or whose grid passes ``2**31 - 1``;
+the small-R program at every row count on an architecture without a fine or a large-R one; the SM count read once per
+stage and device, no library loaded), the launch grid of each program (``ceil(3 R / 4)`` CTAs of ``bwd_unweighted`` up
+to the most rows, where ``3 R`` passes 32 bits; ``ceil(9 R / 4)`` CTAs of ``fwd_fine`` and ``bwd_unweighted_fine``, at
+most ``2**31 - 1``; ``R`` CTAs of 288 threads of ``bwd_fine``) and the arguments of a launch in its plan's order, the
 entry points' launcher of a stage and device (made once per stage and device, no library loaded; the program, arguments
 and grid of ``run_module`` at every edge row count, each program's FFI entry looked up once; refused for a program
 that takes its parameters in another order), the cached FP32 rounding of the last limit (used only for a
@@ -895,9 +896,10 @@ def test_the_route_refuses_fine_windows_that_are_no_route(stage, row, message, h
     """A fine record's windows on an architecture must be one ``[0, hi]`` list with an integer ``hi >= 1`` that ends
     below the first window of the stage's large-R record (``hi`` below its ``lo``): any other row is a ``RuntimeError``
     naming the record, from ``cake_jit.fine`` and from the package's route (the launcher is not made).  ``hi`` one
-    below that ``lo`` is a route."""
+    below that ``lo``, or ``MAX_FINE_ROWS_PER_SM`` when that is smaller, is a route."""
     fine = cake_jit.PROGRAM_OF[stage + FINE]["sm_100a"]
-    for hi, accepted in ((WINDOWS[stage + LARGE]["sm_100a"][0][0] - 1, True), (None, False)):
+    below = min(WINDOWS[stage + LARGE]["sm_100a"][0][0] - 1, cake_jit.MAX_FINE_ROWS_PER_SM)
+    for hi, accepted in ((below, True), (None, False)):
         windows = [[0, hi]] if accepted else row
         record = {**cake_jit.MODULES[fine], "rows_per_sm_windows": {"sm_100a": windows}}
         monkeypatch.setitem(cake_jit.MODULES, fine, record)
@@ -921,7 +923,9 @@ def test_the_fine_programs_and_their_grids() -> None:
     """Each stage has one fine record, on all three architectures, with the parameters of the stage's other programs
     in the same order.  ``fwd_fine`` and ``bwd_unweighted_fine`` run a warp per (row, load) task, 4 tasks a CTA of 128
     threads, ``ceil(9 R / 4)`` CTAs, at most ``2**31 - 1`` (past it from about 954 M rows; the kernels count in 64 bits
-    and stride over the blocks).  ``bwd_fine`` runs a CTA of 288 threads (9 warps) per row, ``R`` CTAs."""
+    and stride over the blocks).  ``bwd_fine`` runs a CTA of 288 threads (9 warps) per row, ``R`` CTAs; it counts its
+    rows in 32 bits, so it takes at most ``2**30`` rows (the grids below are counts only; the route sends it at most
+    ``2 * SMs`` rows)."""
     facts = {"fwd": ((128, 1, 1), (4, 9)), "bwd": ((288, 1, 1), (9, 9)), "bwd_unweighted": ((128, 1, 1), (4, 9))}
     for stage, (block, tasks) in facts.items():
         names = [name for name, record in cake_jit.MODULES.items() if record["role"] == stage + FINE]
@@ -944,25 +948,62 @@ def test_the_fine_programs_and_their_grids() -> None:
         assert cake_jit.grid(name, first + 1) == (2**31 - 1, 1, 1)
 
 
-def test_the_route_refuses_a_fine_window_whose_grid_passes_the_largest(monkeypatch) -> None:
-    """A fine record's window whose last row count needs more than ``MAX_GRID`` CTAs is a ``RuntimeError`` naming the
-    record (``bwd_unweighted`` has no large-R window to bound it), so the grid of a routed launch, ``ceil(9 R / 4)``
-    CTAs, is never capped; the largest ``hi`` whose last row count fits is a route."""
-    fine = cake_jit.PROGRAM_OF["bwd_unweighted_fine"]["sm_100a"]
-    per_cta, per_row = cake_jit.cta_tasks(fine)
-    most = cake_jit.MAX_GRID * per_cta // (per_row * 148)  # the largest hi whose last row count fits the grid
+@pytest.mark.parametrize("stage", ["fwd", "bwd_unweighted"])
+def test_the_route_refuses_a_fine_window_past_the_most_rows_per_sm(stage, host_device, monkeypatch) -> None:
+    """A fine record's window ``[0, hi]`` with ``hi`` past ``MAX_FINE_ROWS_PER_SM`` (64) is a ``RuntimeError`` naming
+    the record, from ``cake_jit.fine`` and from the package's route (the launcher is not made), also where no large-R
+    window bounds it (``bwd_unweighted``; ``fwd``, whose first large-R window is from 112 rows per SM).  The window
+    ``[0, 64]`` is a route on every delivered SM count: its table ends at its last row count, ``64 * SMs``, and the
+    small-R program runs above it in ``bwd_unweighted``.  The bound keeps ``bwd_fine``, which counts its rows in 32
+    bits, far below its ``2**30`` rows."""
+    most = cake_jit.MAX_FINE_ROWS_PER_SM
+    assert most == 64 and 2 * most * max(SM_COUNTS) <= 2**31
+    fine = cake_jit.PROGRAM_OF[stage + FINE]["sm_100a"]
+    small = cake_jit.PROGRAM_OF[stage]["sm_100a"]
     for hi in (most, most + 1):
         record = {**cake_jit.MODULES[fine], "rows_per_sm_windows": {"sm_100a": [[0, hi]]}}
         monkeypatch.setitem(cake_jit.MODULES, fine, record)
-        uncapped = -(-hi * 148 * per_row // per_cta)
-        if hi == most:
-            assert cake_jit.fine("bwd_unweighted", "sm_100a", 148) == (hi * 148, fine)
-            assert cake_jit.grid(fine, hi * 148) == (uncapped, 1, 1) and uncapped <= cake_jit.MAX_GRID
+        for sm_count in SM_COUNTS:
+            host_device.place("sm_100a", sm_count)
+            if hi == most:
+                last = hi * sm_count
+                assert cake_jit.fine(stage, "sm_100a", sm_count) == (last, fine)
+                limit, plans, tail = pkg._route(stage, 0)
+                assert plans[last][0] == fine and {plan[0] for plan in plans[1 : last + 1]} == {fine}
+                if stage == "bwd_unweighted":
+                    assert (limit, len(plans), tail[0]) == (last + 1, last + 1, small)
+                else:
+                    assert plans[last + 1][0] == small
+                continue
+            pattern = f"{fine}: rows_per_sm_windows\\['sm_100a'\\] .* passes {most} rows per SM"
+            with pytest.raises(RuntimeError, match=pattern):
+                cake_jit.fine(stage, "sm_100a", sm_count)
+            with pytest.raises(RuntimeError, match=pattern):
+                pkg._launcher(stage, 0)
+            assert host_device.calls == []
+
+
+def test_the_route_refuses_a_fine_window_whose_grid_passes_the_largest(monkeypatch) -> None:
+    """A fine record's window whose last row count needs more than ``MAX_GRID`` CTAs is a ``RuntimeError`` naming the
+    record, so the grid of a routed launch, ``ceil(9 R / 4)`` CTAs, is never capped.  Within ``MAX_FINE_ROWS_PER_SM``
+    rows per SM only an SM count of about 14.9 M reaches it (``bwd_unweighted`` has no large-R window): the window
+    ``[0, 64]`` is a route on the most SMs whose last row count fits the grid, and refused on one SM more."""
+    fine = cake_jit.PROGRAM_OF["bwd_unweighted_fine"]["sm_100a"]
+    per_cta, per_row = cake_jit.cta_tasks(fine)
+    hi = cake_jit.MAX_FINE_ROWS_PER_SM
+    record = {**cake_jit.MODULES[fine], "rows_per_sm_windows": {"sm_100a": [[0, hi]]}}
+    monkeypatch.setitem(cake_jit.MODULES, fine, record)
+    most = cake_jit.MAX_GRID * per_cta // (per_row * hi)  # the most SMs whose last row count fits the grid
+    for sm_count in (most, most + 1):
+        uncapped = -(-hi * sm_count * per_row // per_cta)
+        if sm_count == most:
+            assert cake_jit.fine("bwd_unweighted", "sm_100a", sm_count) == (hi * sm_count, fine)
+            assert cake_jit.grid(fine, hi * sm_count) == (uncapped, 1, 1) and uncapped <= cake_jit.MAX_GRID
             continue
         assert uncapped > cake_jit.MAX_GRID
         pattern = f"{fine}: rows_per_sm_windows\\['sm_100a'\\] .* more than {cake_jit.MAX_GRID} CTAs"
         with pytest.raises(RuntimeError, match=pattern):
-            cake_jit.fine("bwd_unweighted", "sm_100a", 148)
+            cake_jit.fine("bwd_unweighted", "sm_100a", sm_count)
 
 
 def test_the_route_reads_the_device_once_and_loads_no_library(host_device, monkeypatch) -> None:
