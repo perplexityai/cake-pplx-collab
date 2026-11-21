@@ -625,10 +625,10 @@ def test_the_pin_refuses_a_first_config_that_is_not_its_pin(monkeypatch) -> None
     monkeypatch.setattr(cake_kda_fla, "FLA_PINS", pins)
     with pytest.raises(RuntimeError) as raised:
         cake_kda_fla._pin()
+    # the installed Triton's own Config text (later Triton releases print more fields)
     assert str(raised.value) == (
-        "fla.pin_test_gate_bwd.gate_bwd: the first config is "
-        "'num_warps: 4, num_ctas: 1, num_stages: 2, maxnreg: None', "
-        "the pin 'num_warps: 8, num_ctas: 1, num_stages: 3, maxnreg: None'; "
+        f"fla.pin_test_gate_bwd.gate_bwd: the first config is '{lists['gate_bwd'][0]}', "
+        f"the pin '{lists['gate_bwd'][1]}'; "
         "fla.pin_test_cumsum._kernel_absent is not an autotuned Triton kernel"
     )
     # no autotuner is changed when a pin fails
