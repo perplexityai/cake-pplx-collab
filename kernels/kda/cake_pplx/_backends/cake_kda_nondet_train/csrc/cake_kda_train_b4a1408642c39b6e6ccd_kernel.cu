@@ -339,7 +339,7 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
             int m64_row_base = warp_in_wg * 32 << 16;
             float init_row[16];
             if (use_dht == 1) {
-                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long dht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 #pragma unroll
                 for (int q_0 = 0; q_0 < 4; q_0++) {
                     {
@@ -458,9 +458,9 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
             float gk_pre = 0.0f;
             float decay = 1.0f;
             if (nc > 0) {
-                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                long long gn_next = ((long long)(row0 + nc * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                 gk_pre = gk[gn_next];
-                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long dh_base = ((long long)(c0 + nc - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float _tmem_load_0[16];
                 tmem_ld_x16(&_tmem_load_0[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");
@@ -660,7 +660,7 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
                 _phase_dv_ready_0 ^= 1;
                 asm volatile("tcgen05.fence::after_thread_sync;");
                 int trow = row0 + c * 64 + t_row;
-                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128;
+                long long t_base = ((long long)trow * (long long)num_heads + (long long)head) * 128ll;
                 float tmem_load[16];
                 asm volatile(
                     "tcgen05.ld.sync.aligned.16x32bx2.x16.b32"
@@ -738,7 +738,7 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
                 mbarrier_arrive(bdv_ready_addr);
                 if (nc > rc + 1) {
-                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128 + (long long)k_row;
+                    long long gn_next_1 = ((long long)(row0 + c * 64 - 1) * (long long)num_heads + (long long)head) * 128ll + (long long)k_row;
                     gk_pre = gk[gn_next_1];
                 }
                 if (write_tapes == 1) {
@@ -751,7 +751,7 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
                 if (nc > rc + 1) {
                     float _exp2_9 = approx_exp2(gk_pre);
                     decay = _exp2_9;
-                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                    long long dh_base_1 = ((long long)(c0 + c - 1) * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                     float tmem_load_9[16];
                     tmem_ld_x16(&tmem_load_9[0], taddr + (unsigned int)m128_row_base);
                     float tmem_load_1_1[16];
@@ -1089,7 +1089,7 @@ kernel_cake_kda_train_b4a1408642c39b6e6ccd(const __grid_constant__ CUtensorMap k
                 }
             }
             if (write_ht == 1) {
-                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384 + (long long)(k_row * 128);
+                long long ht_base = ((long long)seq * (long long)num_heads + (long long)head) * 16384ll + (long long)(k_row * 128);
                 float _tmem_load_60[16];
                 tmem_ld_x16(&_tmem_load_60[0], taddr + (unsigned int)m128_row_base);
                 asm volatile("tcgen05.wait::ld.sync.aligned;");

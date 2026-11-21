@@ -3642,11 +3642,16 @@ def _qk_l2norm_readers(mode: str, picked: dict[tuple[str, str], str]) -> str | N
 def qk_l2norm_twin(record: str) -> bool:
     """Whether the existing backend's record ``record`` is the ``_l2n`` twin of its stage, the program that normalizes
     the raw q / k rows itself: the registry's ``l2n`` key of the record lists the fused mode only (absent:
-    ``["off"]``).  The key decides, not the name: a twin may carry a version suffix (``fwd_intra_l2n_v37``)."""
+    ``["off"]``) and the record reads the raw rows (its ``logical`` names hold ``q_raw`` and ``k_raw``).  A fused-mode
+    record that reads the rows another program normalized is no twin: ``bwd_prep_g8_replay_kbonce_raw_l2n``, the
+    replay prep of the raw gate's segmented route up to 256 documents, reads the rows ``fwd_intra_v14_raw_l2n``
+    normalized before it.  The keys decide, not the name: a twin may carry a version suffix (``fwd_intra_l2n_v37``)."""
     from . import _single_rank
 
     cake_jit = _single_rank.module("cake_jit")
-    return list(cake_jit.MODULES[record].get("l2n", ("off",))) == ["fused"]
+    entry = cake_jit.MODULES[record]
+    reads = set(entry.get("logical", {}).values())
+    return list(entry.get("l2n", ("off",))) == ["fused"] and {"q_raw", "k_raw"} <= reads
 
 
 # The saved-rstd twins of the existing backend's records: a launch that reads the saved rstd (``read_rstd = 1``, the

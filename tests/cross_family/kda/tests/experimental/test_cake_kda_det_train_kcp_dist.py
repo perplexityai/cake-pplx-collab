@@ -11,10 +11,14 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 Multi-GPU rows of the context-parallel (KCP) KDA training route (``cake_kda_det_train_kcp.cake_kcp``): ``W`` ranks over
-NCCL, each holding the fragments of one partition of a packed batch, compared with the exact FP64 per-document
-recurrence of the same operands (``tests/experimental/test_helpers/cake_kda_det_train_reference``) and with one another (saved ==
-replay, repeat, autograd == explicit, checkpoint == direct, document-alone == slice, graph replay == eager with
-every rank capturing the same calls).
+NCCL, each holding the fragments of one partition of a packed batch.  Accuracy: over the judge's 32 draws (all in one
+process group) rank 0 gathers the saved-mode step's ``out`` and gradients of the whole pack and judges them against the
+FP64 reference of the unsplit batch beside the naive BF16 tier (``tests/cake_naive.py``,
+``tests/experimental/test_helpers/cake_kda_naive.py``), with no tolerance; the test records the verdicts and settles
+them against the owner-accepted gaps.  The package's bitwise contracts between its forms, on the first draw: saved ==
+replay, repeat, autograd == explicit, checkpoint == direct, ``save_transfer``, the forward-only layouts,
+``workspace=None``, ring == a2a, graph replay == eager with every rank capturing the same calls.  The upload and
+checkpoint rows keep their exact checks.
 
 Two launch forms: ``torch.multiprocessing.spawn`` (``pytest``: skipped when fewer than ``W`` CUDA devices are
 visible or the KCP programs are not exported yet) and one process per Slurm task (``SLURM_PROCID`` /
@@ -43,7 +47,7 @@ from tests.experimental.test_helpers.cake_kda_train_kcp_saved import (
 )
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     GRAD_NAMES,
-    kda_exact_with_grads,
+    LOWER_BOUND,
     make_inputs,
 )
 from tests.cake.test_helpers.cake_package import cake_package
@@ -63,8 +67,10 @@ GRAPH_EVENTS = [
     ["replay", "capture"],
     ["replay", "replay"],
 ]
-ATOL = RTOL = 1e-2
 SCALE = cake_kcp.SCALE
+JUDGE_SEED = (
+    8936  # the base seed of the judged rows (each draw's own seed follows from it)
+)
 
 # (lengths, H, W, layout): small packings with boundaries inside chunks, a document crossing >= 3 ranks (zigzag
 # and per-document zigzag), empty / one-token fragments and an explicit ragged table with a zero-token rank.
@@ -164,7 +170,19 @@ def _to_global(
 
 
 def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) -> dict:
-    """The body of one rank: the KCP forward / backward in every mode, gathered to rank 0 and compared there."""
+    """The body of one rank over the judge's draws (all in one process group): on the first draw the KCP forward /
+    backward in every form, with the package's bitwise contracts between them (each rank's flags, combined on every
+    rank); on every draw the saved-mode step, whose ``out`` and gradients rank 0 gathers in the global token order
+    and judges against the FP64 reference of the unsplit batch beside the naive BF16 tier and FLA (its report carries
+    the verdicts and the failures)."""
+    from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
+    from tests.experimental.test_helpers.cake_kda_naive import (
+        draw_case,
+        fla_of,
+        naive_of,
+        oracle_with_grads,
+    )
+
     lengths, H, _w, layout = row
     device = torch.device("cuda", rank % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
@@ -174,218 +192,257 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
     part, cu = _partition(lengths, W, layout)
     ctx = cake_kcp_plan.cake_kda_det_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    glob = make_inputs(
-        lengths, H, device
-    )  # the same seeded operands on every rank; each takes its slices
-    ops = _local_slices(part, rank, cu, glob)
-    q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
     ws = cake_kcp.CakeKDADetKcpWorkspace()
 
-    def saved_pass(**opts):
-        out, saved = cake_kcp.cake_kda_det_train_kcp_forward(
-            q, k, v, g, beta, ctx, workspace=ws, **opts
-        )
-        # ``boundary_mode`` is a forward keyword: the backward replays the forward whenever ``saved`` is None
-        bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
-        dq, dk, dv, dbeta, dg = cake_kcp.cake_kda_det_train_kcp_backward(
-            q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws, **bwd_opts
-        )
-        return {"out": out, "dq": dq, "dk": dk, "dv": dv, "dg": dg, "dbeta": dbeta}
+    def one_draw(ops: dict, full: bool):
+        """This rank's saved-mode step of the draw's operands ``ops`` (its slices) and, with ``full``, every other
+        form and the flags of its bitwise contracts."""
+        q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
 
-    def autograd_pass(ckpt: bool):
-        leaves = [x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)]
-
-        def fn(*a):
-            return cake_kcp.cake_kda_det_kcp(*a, ctx, None, "light", "saved", ws)
-
-        if ckpt:
-            from torch.utils.checkpoint import checkpoint
-
-            out = checkpoint(fn, *leaves, use_reentrant=False)
-        else:
-            out = fn(*leaves)
-        out.backward(dout)
-        return {
-            "out": out.detach(),
-            **{
-                f"d{n}": lf.grad
-                for n, lf in zip(("q", "k", "v", "g", "beta"), leaves, strict=True)
-            },
-        }
-
-    # the probe runs once per backend, on request (spec3_probe="record"; "off" is the default): a row after an
-    # earlier probing backward in this process (the Slurm per-task form runs every row in one process) finds it
-    # spent; the later passes run the default and must match this one bitwise
-    pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
-    res = saved_pass(spec3_probe="record")
-    spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get(
-        "spec3"
-    )  # SPEC-3 debug assertion of the first saved-mode backward
-    backend = cake_kcp.get_backend()
-    res_replay = saved_pass(boundary_mode="replay")
-    res_repeat = saved_pass()
-    res_auto = autograd_pass(False)
-    res_ckpt = autograd_pass(True)
-    # the shipped default keeps the owner's c1 receive tensor for the backward (save_transfer=True); the recompute
-    # form (save_transfer=False) re-sends it and must be bitwise the same
-    res_recompute = saved_pass(save_transfer=False)
-    # the forward-only workspace (the KCP forward layout, the lazy pools) against this backward workspace: a saving
-    # forward on an empty workspace holds the predicted bytes and none of the lazy pools, a forward without a saved
-    # set adds their predicted bytes, both give this workspace's out (and the written bytes of its saved set)
-    # bitwise, and the backward that upgrades the forward-only workspace gives the same gradients; workspace=None (a
-    # forward-only arena per call) through autograd too
-    out_b, saved_b = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws
-    )
-    ws_f, ws_n = cake_kcp.CakeKDADetKcpWorkspace(), cake_kcp.CakeKDADetKcpWorkspace()
-    out_f, saved_f = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_f
-    )
-    out_n, _ = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_n, save_for_backward=False
-    )
-    pred_f = cake_kcp_plan.cake_kda_det_train_kcp_workspace_bytes(
-        ctx, H=H, backward=False
-    )
-    lazy_f = cake_kcp_plan.kcp_arena_layout(ctx, H=H, backward=False)["lazy"]
-    fwd_only_bytes = (
-        ws_f.bytes == pred_f
-        and not any(ws_f.has(n) for n in cake_kcp_plan.FWD_LAZY_POOLS)
-        and ws_n.bytes == pred_f + lazy_f
-        and (ws_f.local is None or ws_f.local.fwd_layout == "fwd_kcp")
-    )
-    # without save_transfer a forward with a saved set reads the c1 receive and transfer staging pools (that option's
-    # first state) and a forward without a saved set then adds the carry plane; the ring exchange (checked below)
-    # never allocates the c1 receive pool
-    ws_t = cake_kcp.CakeKDADetKcpWorkspace()
-    out_t, _ = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_t, save_transfer=False
-    )
-    pred_t = cake_kcp_plan.cake_kda_det_train_kcp_workspace_bytes(
-        ctx, H=H, backward=False, save_transfer=False
-    )
-    lay_t = cake_kcp_plan.kcp_arena_layout(
-        ctx, H=H, backward=False, save_transfer=False
-    )
-    fwd_only_bytes = fwd_only_bytes and ws_t.bytes == pred_t and not ws_t.has("carry")
-    cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws_t, save_for_backward=False
-    )
-    fwd_only_bytes = (
-        fwd_only_bytes and ws_t.bytes == pred_t + lay_t["lazy"] == pred_f + lazy_f
-    )
-    # the carry plane slots the forward never writes (the extra slots beyond n_in when n_out > n_in, the slots of a
-    # zero-length fragment) hold allocator bytes: the saved sets compare on the written bytes, and NaN in the others
-    # must not reach a gradient.  Each rank's NaN bytes go to the report (0 where the plan leaves no slot unwritten).
-    # The slot invariants differ per rank: a rank that breaks one fails this flag with the reason, instead of raising
-    # before the backward's collectives and leaving its peers waiting
-    try:
-        carry_slots(saved_b)
-        carry_poisoned = poison_unwritten_carry(saved_f)
-    except AssertionError as exc:
-        carry_poisoned = f"carry_slots: {exc!r}"
-    dq, dk, dv, dbeta, dg = cake_kcp.cake_kda_det_train_kcp_backward(
-        q, k, v, g, beta, ctx, dout, saved=saved_f, workspace=ws_f
-    )
-    res_fwd_only = {
-        "out": out_f,
-        "dq": dq,
-        "dk": dk,
-        "dv": dv,
-        "dg": dg,
-        "dbeta": dbeta,
-    }
-    fwd_only_eq = (
-        isinstance(carry_poisoned, int)
-        and torch.equal(out_b, res["out"])
-        and torch.equal(out_n, res["out"])
-        and torch.equal(out_t, res["out"])
-        and saved_f.flags() == saved_b.flags()
-        and all(
-            torch.equal(a, b)
-            for a, b in zip(
-                written_tensors(saved_f), written_tensors(saved_b), strict=True
+        def saved_pass(**opts):
+            out, saved = cake_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws, **opts
             )
+            # ``boundary_mode`` is a forward keyword: the backward replays the forward whenever ``saved`` is None
+            bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
+            dq, dk, dv, dbeta, dg = cake_kcp.cake_kda_det_train_kcp_backward(
+                q, k, v, g, beta, ctx, dout, saved=saved, workspace=ws, **bwd_opts
+            )
+            return {"out": out, "dq": dq, "dk": dk, "dv": dv, "dg": dg, "dbeta": dbeta}
+
+        def autograd_pass(ckpt: bool):
+            leaves = [
+                x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)
+            ]
+
+            def fn(*a):
+                return cake_kcp.cake_kda_det_kcp(*a, ctx, None, "light", "saved", ws)
+
+            if ckpt:
+                from torch.utils.checkpoint import checkpoint
+
+                out = checkpoint(fn, *leaves, use_reentrant=False)
+            else:
+                out = fn(*leaves)
+            out.backward(dout)
+            return {
+                "out": out.detach(),
+                **{
+                    f"d{n}": lf.grad
+                    for n, lf in zip(("q", "k", "v", "g", "beta"), leaves, strict=True)
+                },
+            }
+
+        if not full:
+            return saved_pass(), None
+        # the probe runs once per backend, on request (spec3_probe="record"; "off" is the default): a row after an
+        # earlier probing backward in this process (the Slurm per-task form runs every row in one process) finds it
+        # spent; the later passes run the default and must match this one bitwise
+        pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
+        res = saved_pass(spec3_probe="record")
+        spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get(
+            "spec3"
+        )  # SPEC-3 debug assertion of the first saved-mode backward
+        backend = cake_kcp.get_backend()
+        res_replay = saved_pass(boundary_mode="replay")
+        res_repeat = saved_pass()
+        res_auto = autograd_pass(False)
+        res_ckpt = autograd_pass(True)
+        # the shipped default keeps the owner's c1 receive tensor for the backward (save_transfer=True); the recompute
+        # form (save_transfer=False) re-sends it and must be bitwise the same
+        res_recompute = saved_pass(save_transfer=False)
+        # the forward-only workspace (the KCP forward layout, the lazy pools) against this backward workspace: a saving
+        # forward on an empty workspace holds the predicted bytes and none of the lazy pools, a forward without a saved
+        # set adds their predicted bytes, both give this workspace's out (and the written bytes of its saved set)
+        # bitwise, and the backward that upgrades the forward-only workspace gives the same gradients; workspace=None (a
+        # forward-only arena per call) through autograd too
+        out_b, saved_b = cake_kcp.cake_kda_det_train_kcp_forward(
+            q, k, v, g, beta, ctx, workspace=ws
         )
-        and all(torch.equal(res[n], res_fwd_only[n]) for n in TENSORS)
-    )
-    del ws_f, ws_n, ws_t, out_b, saved_b, out_f, saved_f, out_n, out_t, res_fwd_only
-    leaves = [x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)]
-    out_0 = cake_kcp.cake_kda_det_kcp(*leaves, ctx)
-    out_0.backward(dout)
-    ws_none_eq = torch.equal(out_0.detach(), res["out"]) and all(
-        torch.equal(lf.grad, res[f"d{n}"])
-        for n, lf in zip(("q", "k", "v", "g", "beta"), leaves, strict=True)
-    )
-    del leaves, out_0
-    ring_ok = True
-    if (
-        W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
-    ):  # gate 5: the ring path is bitwise the a2a path; the ring receives no c1 tensor, so recompute form only
-        res_ring = saved_pass(exchange="ring", save_transfer=False)
-        ring_ok = all(torch.equal(res_recompute[n], res_ring[n]) for n in TENSORS)
-        # a forward-only ring workspace: no c1 receive pool, the hop pools on first use
-        ws_r = cake_kcp.CakeKDADetKcpWorkspace()
-        out_r, _ = cake_kcp.cake_kda_det_train_kcp_forward(
-            q, k, v, g, beta, ctx, workspace=ws_r, exchange="ring"
+        ws_f, ws_n = (
+            cake_kcp.CakeKDADetKcpWorkspace(),
+            cake_kcp.CakeKDADetKcpWorkspace(),
         )
-        ring_ok = ring_ok and torch.equal(out_r, res["out"])
+        out_f, saved_f = cake_kcp.cake_kda_det_train_kcp_forward(
+            q, k, v, g, beta, ctx, workspace=ws_f
+        )
+        out_n, _ = cake_kcp.cake_kda_det_train_kcp_forward(
+            q, k, v, g, beta, ctx, workspace=ws_n, save_for_backward=False
+        )
+        pred_f = cake_kcp_plan.cake_kda_det_train_kcp_workspace_bytes(
+            ctx, H=H, backward=False
+        )
+        lazy_f = cake_kcp_plan.kcp_arena_layout(ctx, H=H, backward=False)["lazy"]
         fwd_only_bytes = (
-            fwd_only_bytes
-            and not ws_r.has("c1_recv")
-            and ws_r.bytes == pred_t - lay_t["pool.c1_recv"] + lay_t["ring"]
+            ws_f.bytes == pred_f
+            and not any(ws_f.has(n) for n in cake_kcp_plan.FWD_LAZY_POOLS)
+            and ws_n.bytes == pred_f + lazy_f
+            and (ws_f.local is None or ws_f.local.fwd_layout == "fwd_kcp")
         )
-        del ws_r, out_r
-    # every rank (a rank without tokens included) captures and replays the same calls: a rank that stayed eager
-    # while the others captured would run its collectives outside the graphs of its peers
-    cake_kcp.graph_cache_clear()
-    events = []
-    try:
-        for _ in range(len(GRAPH_EVENTS)):
-            res_graph = {n: t.clone() for n, t in saved_pass(graph="replay").items()}
-            events.append(
-                [
-                    str(cake_kcp.LAST_CALL["fwd"].get("graph_event")),
-                    str(cake_kcp.LAST_CALL["bwd"].get("graph_event")),
-                ]
+        # without save_transfer a forward with a saved set reads the c1 receive and transfer staging pools (that option's
+        # first state) and a forward without a saved set then adds the carry plane; the ring exchange (checked below)
+        # never allocates the c1 receive pool
+        ws_t = cake_kcp.CakeKDADetKcpWorkspace()
+        out_t, _ = cake_kcp.cake_kda_det_train_kcp_forward(
+            q, k, v, g, beta, ctx, workspace=ws_t, save_transfer=False
+        )
+        pred_t = cake_kcp_plan.cake_kda_det_train_kcp_workspace_bytes(
+            ctx, H=H, backward=False, save_transfer=False
+        )
+        lay_t = cake_kcp_plan.kcp_arena_layout(
+            ctx, H=H, backward=False, save_transfer=False
+        )
+        fwd_only_bytes = (
+            fwd_only_bytes and ws_t.bytes == pred_t and not ws_t.has("carry")
+        )
+        cake_kcp.cake_kda_det_train_kcp_forward(
+            q, k, v, g, beta, ctx, workspace=ws_t, save_for_backward=False
+        )
+        fwd_only_bytes = (
+            fwd_only_bytes and ws_t.bytes == pred_t + lay_t["lazy"] == pred_f + lazy_f
+        )
+        # the carry plane slots the forward never writes (the extra slots beyond n_in when n_out > n_in, the slots of a
+        # zero-length fragment) hold allocator bytes: the saved sets compare on the written bytes, and NaN in the others
+        # must not reach a gradient.  Each rank's NaN bytes go to the report (0 where the plan leaves no slot unwritten).
+        # The slot invariants differ per rank: a rank that breaks one fails this flag with the reason, instead of raising
+        # before the backward's collectives and leaving its peers waiting
+        try:
+            carry_slots(saved_b)
+            carry_poisoned = poison_unwritten_carry(saved_f)
+        except AssertionError as exc:
+            carry_poisoned = f"carry_slots: {exc!r}"
+        dq, dk, dv, dbeta, dg = cake_kcp.cake_kda_det_train_kcp_backward(
+            q, k, v, g, beta, ctx, dout, saved=saved_f, workspace=ws_f
+        )
+        res_fwd_only = {
+            "out": out_f,
+            "dq": dq,
+            "dk": dk,
+            "dv": dv,
+            "dg": dg,
+            "dbeta": dbeta,
+        }
+        fwd_only_eq = (
+            isinstance(carry_poisoned, int)
+            and torch.equal(out_b, res["out"])
+            and torch.equal(out_n, res["out"])
+            and torch.equal(out_t, res["out"])
+            and saved_f.flags() == saved_b.flags()
+            and all(
+                torch.equal(a, b)
+                for a, b in zip(
+                    written_tensors(saved_f), written_tensors(saved_b), strict=True
+                )
             )
-        torch.cuda.synchronize(device)
-    except BaseException as exc:
-        # the failed call's frames still reference its cache entry and graph: release them before the cleanup
-        traceback.clear_frames(exc.__traceback__)
-        raise
-    finally:
-        # a cached graph holding a NCCL collective blocks the process group's destruction
+            and all(torch.equal(res[n], res_fwd_only[n]) for n in TENSORS)
+        )
+        del ws_f, ws_n, ws_t, out_b, saved_b, out_f, saved_f, out_n, out_t, res_fwd_only
+        leaves = [x.detach().clone().requires_grad_(True) for x in (q, k, v, g, beta)]
+        out_0 = cake_kcp.cake_kda_det_kcp(*leaves, ctx)
+        out_0.backward(dout)
+        ws_none_eq = torch.equal(out_0.detach(), res["out"]) and all(
+            torch.equal(lf.grad, res[f"d{n}"])
+            for n, lf in zip(("q", "k", "v", "g", "beta"), leaves, strict=True)
+        )
+        del leaves, out_0
+        ring_ok = True
+        if (
+            W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS
+        ):  # gate 5: the ring path is bitwise the a2a path; the ring receives no c1 tensor, so recompute form only
+            res_ring = saved_pass(exchange="ring", save_transfer=False)
+            ring_ok = all(torch.equal(res_recompute[n], res_ring[n]) for n in TENSORS)
+            # a forward-only ring workspace: no c1 receive pool, the hop pools on first use
+            ws_r = cake_kcp.CakeKDADetKcpWorkspace()
+            out_r, _ = cake_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws_r, exchange="ring"
+            )
+            ring_ok = ring_ok and torch.equal(out_r, res["out"])
+            fwd_only_bytes = (
+                fwd_only_bytes
+                and not ws_r.has("c1_recv")
+                and ws_r.bytes == pred_t - lay_t["pool.c1_recv"] + lay_t["ring"]
+            )
+            del ws_r, out_r
+        # every rank (a rank without tokens included) captures and replays the same calls: a rank that stayed eager
+        # while the others captured would run its collectives outside the graphs of its peers
         cake_kcp.graph_cache_clear()
-    flags = {
-        "saved_eq_replay": all(torch.equal(res[n], res_replay[n]) for n in TENSORS),
-        "repeat": all(torch.equal(res[n], res_repeat[n]) for n in TENSORS),
-        "autograd_eq_saved": all(torch.equal(res[n], res_auto[n]) for n in TENSORS),
-        "ckpt_eq_direct": all(torch.equal(res_auto[n], res_ckpt[n]) for n in TENSORS),
-        "save_transfer_eq": all(torch.equal(res[n], res_recompute[n]) for n in TENSORS),
-        "fwd_only_eq": fwd_only_eq,
-        "fwd_only_bytes": fwd_only_bytes,
-        "ws_none_eq": ws_none_eq,
-        "ring_eq_a2a": ring_ok,
-        "graph_replay": events == GRAPH_EVENTS
-        and all(torch.equal(res[n], res_graph[n]) for n in TENSORS),
-        # a backend with local stages whose probe was pending must have run it (spec3_probe="record" on the
-        # first pass); a rank without tokens launches no local stage, so it has nothing to probe.  The probe's row
-        # comparison (the forward's intra prep against the backward's prep program) is reported in spec3_by_rank,
-        # not gated: the requirement of record is saved_eq_replay (both backward modes run the same local programs)
-        "spec3": (not backend.local_stages)
-        or not pending
-        or (spec3 is None and q.shape[0] == 0)
-        or bool(spec3 and spec3.get("checked")),
-    }
-    gathered = {}
-    for n in TENSORS:
-        if W > 1:
-            objs = [None] * W
-            dist.all_gather_object(objs, res[n].cpu())
-        else:
-            objs = [res[n].cpu()]
-        gathered[n] = objs
+        events = []
+        try:
+            for _ in range(len(GRAPH_EVENTS)):
+                res_graph = {
+                    n: t.clone() for n, t in saved_pass(graph="replay").items()
+                }
+                events.append(
+                    [
+                        str(cake_kcp.LAST_CALL["fwd"].get("graph_event")),
+                        str(cake_kcp.LAST_CALL["bwd"].get("graph_event")),
+                    ]
+                )
+            torch.cuda.synchronize(device)
+        except BaseException as exc:
+            # the failed call's frames still reference its cache entry and graph: release them before the cleanup
+            traceback.clear_frames(exc.__traceback__)
+            raise
+        finally:
+            # a cached graph holding a NCCL collective blocks the process group's destruction
+            cake_kcp.graph_cache_clear()
+        flags = {
+            "saved_eq_replay": all(torch.equal(res[n], res_replay[n]) for n in TENSORS),
+            "repeat": all(torch.equal(res[n], res_repeat[n]) for n in TENSORS),
+            "autograd_eq_saved": all(torch.equal(res[n], res_auto[n]) for n in TENSORS),
+            "ckpt_eq_direct": all(
+                torch.equal(res_auto[n], res_ckpt[n]) for n in TENSORS
+            ),
+            "save_transfer_eq": all(
+                torch.equal(res[n], res_recompute[n]) for n in TENSORS
+            ),
+            "fwd_only_eq": fwd_only_eq,
+            "fwd_only_bytes": fwd_only_bytes,
+            "ws_none_eq": ws_none_eq,
+            "ring_eq_a2a": ring_ok,
+            "graph_replay": events == GRAPH_EVENTS
+            and all(torch.equal(res[n], res_graph[n]) for n in TENSORS),
+            # a backend with local stages whose probe was pending must have run it (spec3_probe="record" on the
+            # first pass); a rank without tokens launches no local stage, so it has nothing to probe.  The probe's row
+            # comparison (the forward's intra prep against the backward's prep program) is reported in spec3_by_rank,
+            # not gated: the requirement of record is saved_eq_replay (both backward modes run the same local programs)
+            "spec3": (not backend.local_stages)
+            or not pending
+            or (spec3 is None and q.shape[0] == 0)
+            or bool(spec3 and spec3.get("checked")),
+        }
+        return res, (flags, spec3, events, carry_poisoned, backend)
+
+    judge, failures = TierJudge(DRAWS), []
+    first = None
+    for j in range(DRAWS):
+        # the same seeded operands on every rank; each takes its slices
+        glob = draw_case(lengths, H, "g", False, draw_seed(JUDGE_SEED, j), device)
+        res, found = one_draw(_local_slices(part, rank, cu, glob), j == 0)
+        if j == 0:
+            first = found
+        gathered = {}
+        for n in TENSORS:
+            if W > 1:
+                objs = [None] * W
+                dist.all_gather_object(objs, res[n].cpu())
+            else:
+                objs = [res[n].cpu()]
+            gathered[n] = objs
+        del res
+        if rank == 0:
+            ref = oracle_with_grads(glob, SCALE, LOWER_BOUND, False)
+            tier = naive_of(glob, SCALE, LOWER_BOUND, False)
+            fla = fla_of(glob, SCALE, LOWER_BOUND, False)  # FLA on one GPU over the whole batch
+            for n in TENSORS:
+                actual = _to_global(part, gathered[n], cu, total).to(device)
+                if message := contract(n, actual, ref[n]):
+                    failures.append(f"draw {j}: {message}")
+                    if actual.shape != ref[n].shape:
+                        continue
+                judge.add(n, j, actual, ref[n], {"bf16": tier[n]}, fla=fla.value(n, actual))
+            del ref, tier, fla
+    flags, spec3, events, carry_poisoned, backend = first
     flag_list = [None] * W
     spec3_list = [None] * W
     events_list = [None] * W
@@ -405,7 +462,6 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         "world": W,
         "pass": True,
         "flags": {},
-        "metrics": {},
         "backend": backend.name,
         "backend_path": getattr(backend, "path", None),
         "spec3_by_rank": spec3_list,
@@ -416,33 +472,8 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         report["flags"][key] = all(f[key] for f in flag_list)
         report["pass"] &= report["flags"][key]
     if rank == 0:
-        cu_t = torch.tensor(cu, dtype=torch.int32)
-        ref_out, ref_grads = kda_exact_with_grads(
-            glob["q"].cpu(),
-            glob["k"].cpu(),
-            glob["v"].cpu(),
-            glob["g"].cpu(),
-            glob["beta"].cpu(),
-            glob["dout"].cpu(),
-            cu_t,
-            SCALE,
-        )
-        refs = {"out": ref_out, **ref_grads}
-        for n in TENSORS:
-            cand = _to_global(part, gathered[n], cu, total).to(torch.float64)
-            ref = refs[n]
-            excess = (cand - ref).abs() - (ATOL + RTOL * ref.abs())
-            mism = int((excess > 0).sum())
-            err = cand - ref
-            rel = float(
-                err.pow(2).mean().sqrt() / ref.pow(2).mean().sqrt().clamp_min(1e-300)
-            )
-            report["metrics"][n] = {
-                "mismatch": mism,
-                "rel_rms": rel,
-                "max_abs": float(err.abs().max()),
-            }
-            report["pass"] &= mism == 0 and bool(torch.isfinite(cand).all())
+        report["verdicts"] = judge.verdicts()
+        report["failures"] = failures + judge.failures()
     if W > 1:
         verdict = [None] * W
         dist.all_gather_object(verdict, report["pass"])
@@ -502,8 +533,24 @@ def _skip_unless_runnable(W: int) -> None:
         pytest.skip("the current device's architecture is not covered by the package")
 
 
+def _settle(record_property, report: dict, lengths) -> None:
+    """Record rank 0's verdicts (``naive_tier``) and settle them against the owner-accepted gaps
+    (``cake_kda_known_gaps.settle``; the scope is the row's document lengths).  A run that judged nothing fails."""
+    from tests.experimental.test_helpers.cake_kda_known_gaps import settle
+
+    verdicts = report.get("verdicts") or {}
+    for verdict in verdicts.values():
+        record_property("naive_tier", verdict)
+    assert verdicts, report.get("failures")
+    settle(verdicts, report.get("failures") or [], lengths=lengths)
+
+
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
-def test_multi_gpu_rows_match_the_exact_reference(row) -> None:
+def test_multi_gpu_rows_match_the_exact_reference(record_property, row) -> None:
+    """One row on ``W`` ranks (:func:`_run_rank`): every rank's bitwise contracts between the forms on the first
+    draw, and rank 0's verdicts of ``out`` and every gradient of the whole pack against the FP64 reference beside the
+    naive BF16 tier over 32 draws, recorded and settled here (in the one-process-per-Slurm-task form by the process
+    of rank 0)."""
     lengths, H, W, layout = row
     if (
         os.environ.get("SLURM_PROCID") is not None
@@ -514,14 +561,11 @@ def test_multi_gpu_rows_match_the_exact_reference(row) -> None:
             pytest.skip(
                 "the KCP programs are not exported in the package's build.json yet"
             )
-        report = _run_rank(
-            int(os.environ["SLURM_PROCID"]),
-            W,
-            row,
-            None,
-            os.environ.get("KCP_TEST_RESULT_DIR"),
-        )
+        rank = int(os.environ["SLURM_PROCID"])
+        report = _run_rank(rank, W, row, None, os.environ.get("KCP_TEST_RESULT_DIR"))
         assert report["pass"], report
+        if rank == 0:
+            _settle(record_property, report, lengths)
         return
     _skip_unless_runnable(W)
     with tempfile.TemporaryDirectory(prefix="cake_kcp_dist_") as tmp:
@@ -536,6 +580,7 @@ def test_multi_gpu_rows_match_the_exact_reference(row) -> None:
         with open(os.path.join(result_dir, _row_id(row) + ".json")) as fh:
             report = json.load(fh)
     assert report["pass"], report
+    _settle(record_property, report, lengths)
 
 
 # (lengths, H, W, layout) of the host-synchronization rows: CP2 / CP4 / CP8, every layout, H 4 / 64, one-token
