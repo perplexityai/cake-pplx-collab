@@ -153,7 +153,7 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
-        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
@@ -173,9 +173,11 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
-        ("fwd", 720, 760): (1, 8192),
+        ("fwd", 720, 768): (1, 8192),
+        ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
+        ("fwd_bias", 712, 712): (1, 12800),
         ("fwd_bias", 720, 728): (13824, 16383),
         ("fwd_bias", 736, 736): (14336, 16383),
         ("fwd_bias", 744, 760): (13824, 16383),
@@ -251,7 +253,7 @@ DIRECT_ROWS_OF_RECORD = {
             24576,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 632): (
+        ("fwd_bias", 584, 640): (
             4097,
             20480,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
@@ -318,14 +320,24 @@ DIRECT_ROWS_OF_RECORD = {
             20479,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
-        ("fwd", 720, 760): (
+        ("fwd", 720, 768): (
             8193,
             19456,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
+        ("fwd_bias", 576, 576): (
+            2049,
+            16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 584, 640): (
             4105,
             16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 712, 712): (
+            12801,
+            14592,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
         ("fwd_dt", 576, 640): (

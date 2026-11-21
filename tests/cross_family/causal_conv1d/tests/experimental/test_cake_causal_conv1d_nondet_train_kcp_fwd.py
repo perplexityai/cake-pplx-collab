@@ -96,8 +96,7 @@ FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
 # (the static program), at 12003 tokens inside its direct range (the direct program); from 40003 tokens, above every
 # key and every architecture's floor of the whole 40-vector tiles of the narrow forward plan, the dynamic program, so
 # the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens lies
-# above the ``fwd`` route's floor of the narrow plan on sm_103a (12288: 32-vector tiles of the dynamic program there)
-# and inside the direct ranges of sm_100a and sm_107a.
+# inside the direct range of every architecture's ``fwd`` key covering C 768 (the direct program).
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),

@@ -72,14 +72,16 @@ at C = 576 to 768, inside the token range of a row of the backend's
 route), the static program (a fixed token range per CTA) or the direct
 program (the next token blocks per CTA, no shared memory) runs, neither with
 ``work`` counters: a passed forward ``workspace`` is checked and not passed
-to the program, and such a call zeroes no package buffer.  Each row gives
-its own token range.  For most ``C`` the first range starts at S = 1.  The
-sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736:
-14336) and have only a static range.  Every other call (outside a row's
-range, or where an architecture, route and ``C`` have no row) runs the
-dynamic program, as in 0.2.4, which takes its token chunks from zeroed int32
-counters.
-The forward workspace size is the same in every case.
+to the program, and such a call zeroes no package buffer.  Each row gives its
+own token range.  From release 0.2.6, every architecture and route has a row
+at each ``C`` = 576 to 768 (0.2.5 had none for sm_100a ``fwd_bias`` at
+C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a ``fwd`` at
+C = 768).  For most ``C`` the first range starts at S = 1.  The sm_103a
+``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and
+have only a static range.  Every other call (outside a row's range, or where an
+architecture, route and ``C`` have no row) runs the dynamic program, as in
+0.2.4, which takes its token chunks from zeroed int32 counters.  The forward
+workspace size is the same in every case.
 
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
