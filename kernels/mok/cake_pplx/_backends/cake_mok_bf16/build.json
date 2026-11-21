@@ -55,9 +55,9 @@
     }
   },
   "generator": {
-    "cake_revision": "f3f5c8d69b32932900051fc11ee4773ea5a6c2da",
+    "cake_revision": "16b957c32c9b29a678ffdbaf61e18c05df09c78c",
     "cuda": "13.4.92",
-    "rendered_at": "2026-11-19T19:44:04Z"
+    "rendered_at": "2026-11-21T12:10:51Z"
   },
   "libraries": [
     {
@@ -2899,7 +2899,7 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "15898b0c7ffccbbdf11331d0646343b8494987171d0887355d0902d17fe07b1e",
+      "closure_sha256": "c71d552ba61ee23ac8e7104806b5db9bf9855b3b5d8631d8e498b5f56c262994",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
@@ -2911,7 +2911,7 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_mok_recompute_clamped_wbd_sm_100a.so",
       "sha256": {
-        "csrc/sm_100a/cake_mok_recompute_clamped_wbd.cu": "45439bf06abcb259b3763165217e4bcb53ed81a49069964ef681b707032d5b75",
+        "csrc/sm_100a/cake_mok_recompute_clamped_wbd.cu": "0c83425a321df72860149cbc9c9372a3301399f9cfa03998d53d96877bdf03fa",
         "csrc/sm_100a/cake_mok_recompute_wbd_binding.cu": "66e1fcb68364eefae98543cfb8ade28162436358448da51e72ca17be50a237cb"
       },
       "sources": [
@@ -2921,7 +2921,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "92891d7b0ce07e2e5e341d1c7d916e963bec1811e4cec8e1f03a9e2c942e8641",
+      "closure_sha256": "92e5fd9e676318aae8f07f7f023b5f9ea09dd40f2636455848ffb54f8f0f5897",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -2933,7 +2933,7 @@
       "nvcc_flags_if": [],
       "path": "aot/cake_mok_recompute_clamped_wbd_sm_103a.so",
       "sha256": {
-        "csrc/sm_100a/cake_mok_recompute_clamped_wbd.cu": "45439bf06abcb259b3763165217e4bcb53ed81a49069964ef681b707032d5b75",
+        "csrc/sm_100a/cake_mok_recompute_clamped_wbd.cu": "0c83425a321df72860149cbc9c9372a3301399f9cfa03998d53d96877bdf03fa",
         "csrc/sm_100a/cake_mok_recompute_wbd_binding.cu": "66e1fcb68364eefae98543cfb8ade28162436358448da51e72ca17be50a237cb"
       },
       "sources": [

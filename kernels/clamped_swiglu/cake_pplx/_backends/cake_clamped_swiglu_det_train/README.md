@@ -90,24 +90,34 @@ required keyword everywhere.
 ## Programs
 
 The forward runs stage `fwd`, a weighted backward stage `bwd` and an unweighted backward stage `bwd_unweighted`
-(`cake_jit.MODULES`, keyed by program name).  `fwd` and `bwd` each have two programs: a small-R program (role `fwd` or
-`bwd`) and a large-R program (role `fwd_large` or `bwd_large`).  `bwd_unweighted` has one program (role
-`bwd_unweighted`) on all three architectures, which runs at every `R`.  `cake_jit.PROGRAM_OF` maps a role and an
-architecture to its program.  A program is compiled with the exact `-gencode` flag of each architecture it is delivered
-for (`build.json`).  A call runs the large-R program when `R` lies in one of the record's windows of rows per SM on the
-device's architecture (`rows_per_sm_windows`): `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (both bounds
-included), where `hi` None has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The
-package reads the architecture once per device and the SM count once per stage and device.  An architecture without a
-large-R program of a stage runs the small-R one at every `R`.
+(`cake_jit.MODULES`, keyed by program name).  Each stage has a small-R program (role `fwd`, `bwd` or `bwd_unweighted`)
+and, from 0.1.9, a fine program for the fewest rows (role `fwd_fine`, `bwd_fine` or `bwd_unweighted_fine`), on all
+three architectures.  `fwd` and `bwd` also have a large-R program (role `fwd_large` or `bwd_large`).
+`cake_jit.PROGRAM_OF` maps a role and an architecture to its program.  A program is compiled with the exact
+`-gencode` flag of each architecture it is delivered for (`build.json`).  A call runs the fine program when
+`R <= hi * SMs` for the fine record's one window `[0, hi]` of rows per SM on the device's architecture
+(`rows_per_sm_windows`, `cake_jit.fine`).  At more rows it runs the large-R program when `R` lies in one of the
+large-R record's windows: `lo * SMs <= R <= hi * SMs` for a window `[lo, hi]` (both bounds included), where `hi` None
+has no upper bound.  It runs the small-R program at every other `R` (`cake_jit.route`).  The package reads the
+architecture once per device and the SM count once per stage and device.  Per stage and device it makes one table
+with an entry per row count up to the fine window's last row count or the last large-R edge, whichever is larger.  A
+call compares `R` with that table's length and reads one entry.  A call of more rows runs the large-R program when
+the stage's last large-R window has no upper bound (`fwd` and `bwd`), and the small-R program otherwise
+(`bwd_unweighted`, which has no large-R program).  An architecture without a fine or a large-R program of a stage runs
+the small-R one in its place.  A fine window may reach at most 64 rows per SM (`cake_jit.MAX_FINE_ROWS_PER_SM`), so
+the fine window adds at most `64 * SMs` entries to the table.
 
 | stage | `sm_100a` | `sm_103a` | `sm_107a` |
 |---|---|---|---|
+| `fwd` fine | up to 8 rows per SM | up to 4 | up to 4 |
 | `fwd` large-R | from 112 rows per SM | from 208 | from 384 |
+| `bwd` fine | up to 2 rows per SM | up to 2 | up to 2 |
 | `bwd` large-R | [12, 21], [32, 41], from 48 rows per SM | [12, 21], [32, 41], from 48 | [12, 21], [35, 41], from 48 |
+| `bwd_unweighted` fine | up to 4 rows per SM | up to 4 | up to 2 |
 
 From 0.1.5 the `bwd` windows route weighted backward calls only: an unweighted backward runs the `bwd_unweighted`
-program at every `R`.  The unweighted backward measurements below are 0.1.2's, when an unweighted backward ran the `bwd`
-programs.
+programs at every `R`.  The unweighted backward measurements below are 0.1.2's, when an unweighted backward ran the
+`bwd` programs.
 
 A window changes 0.1.1's route only where forced small/large sweeps showed the other program not slower by more than
 0.5 % on that architecture, with both weighted and unweighted inputs.  In these sweeps the route was forced to each
@@ -155,11 +165,34 @@ programs are within about 0.5 % of each other (small/large 0.995-1.005; the smal
 a merged input and cold L2).  With the deep-gate input the small-R forward is 5.6-6.2 % faster at 384.  Below 384 the
 small-R forward runs, as in 0.1.1.
 
+At a few rows per SM, a small-R program runs each row (in `bwd_unweighted`, each run of 768 columns) on one warp, alone
+on its SM sub-partition.  Its time is that warp's serial chain of loads.  A fine program splits a row over 9 tasks, one
+load of each input a task, so a row's chain is 9 times shorter and takes one memory trip.  At more rows its extra
+per-task instructions (`fwd`, `bwd_unweighted`) or its per-row barriers and shared-memory hand-off (`bwd`) cost more
+than they save.  Each fine window ends at the largest swept multiple `j * SMs` (j in 1, 2, 4, 8, 12 and 16) at and
+below which no swept row measured the fine program slower than the small-R one beyond the run's noise band.  These
+sweeps forced each program and timed R = 1, 2, 3, 4, 8, 16, 32, 64, 128 and `j * SMs - 1`, `j * SMs` and
+`j * SMs + 1` on B200, GB300 and VR200.  They used warm L2 (CUDA graph) and cold L2 (CUPTI), weighted and unweighted,
+merged and split, and ordinary and deep-gate inputs.  Below, fine/small is the fine program's time over the small-R
+one's, at the first slower swept row; each was rechecked on a second GPU of the same kind:
+
+- `fwd`: `12 * SMs - 1` rows on `sm_100a` (1.056, warm L2); `8 * SMs - 1` on `sm_103a` (1.031) and `sm_107a`
+  (1.098-1.103).  At 8 rows per SM `sm_100a` reads 0.998, so its crossover lies near the bound.
+- `bwd`: `4 * SMs - 1` rows on every architecture (1.029, 1.091 and 1.122-1.165).
+- `bwd_unweighted`: `8 * SMs - 1` rows on `sm_100a` (1.047) and `sm_103a` (1.075); `4 * SMs - 1` and `4 * SMs` on
+  `sm_107a` (1.024-1.025, cold L2).
+
+The sweeps have no point between two swept multiples, so a window may end below its crossover.  Each fine window ends
+below its stage's first large-R window.  At 1 row the fine programs measured, as a share of the small-R program's
+time, 0.64-0.69 (`fwd` on B200 and GB300), 0.69-0.80 (`fwd` on VR200), 0.70-0.79 (`bwd`) and 0.77-0.94
+(`bwd_unweighted`).
+
 Every program is one kernel.  In `fwd` and `bwd`, 32 lanes own a row and a thread owns one row.  Each lane makes 9
 loads of 8 BF16 values of the gate and as many of the up (and of `dh` in the backward), at columns
 `(p * 32 + lane) * 8`, so every load of a warp is contiguous.  In `bwd_unweighted`, a warp owns one (row, run) task: a
 run is a third of the row (768 columns), and each lane makes that run's 3 loads of the gate, the up and `dh`, at the
-same columns.  The programs differ in their schedule:
+same columns.  In a fine program a task is one load `p` of a row (256 columns), and each lane makes that load of the
+gate, the up (and `dh`), at the same columns.  The programs differ in their schedule:
 
 | stage | program | architectures | CTA | a lane's 9 loads |
 |---|---|---|---|---|
@@ -168,20 +201,32 @@ same columns.  The programs differ in their schedule:
 | `fwd` | large-R | `sm_107a` | 128 threads, 4 rows | one run; the values of each load are stored as soon as they are computed |
 | `bwd` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3; a run's loads are issued while the run before it computes |
 | `bwd` | large-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 rows | 3 runs of 3, one run at a time |
-| `bwd_unweighted` | every R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, run) tasks | the 3 loads of the task's run |
+| `fwd` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, load) tasks | the task's load |
+| `bwd` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 288 threads (9 warps), 1 row | warp `p`: load `p`; warp 0 then sums `d_weight` |
+| `bwd_unweighted` | small-R | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, run) tasks | the 3 loads of the task's run |
+| `bwd_unweighted` | fine | `sm_100a`, `sm_103a`, `sm_107a` | 128 threads, 4 (row, load) tasks | the task's load |
 
-More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs, and
-`ceil(3 R / 4)` CTAs in `bwd_unweighted` (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`; the
-`bwd_unweighted` kernel counts its `3 R` tasks in 64 bits).  A row or a task past `R` loads the last row and stores
-nothing.  The programs of a stage compute each element with the same FP32 operations (the deep-gate sigmoid gives the
-fast one's bits wherever the fast one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight`
-sums take a lane's columns in load order with the same lanes.  So both programs store the same bits for every input: the
-route changes no output bit.  `bwd_unweighted` votes once per (row, run), the run of 768 columns that the `bwd` programs
-vote over, and computes each element with their operations, taking `dh` where they take `dh w` with `w = 1` (the same
-value).  So it stores the `d_gate` and `d_up` bits of the `bwd` programs with the weight flag 0, for every input.  No
-program uses shared memory, a workspace, a cooperative launch or programmatic dependent launch.  The row count, the
-limit, the weight flag (`fwd`, `bwd`), the strides and the column offsets below are launch arguments, so one library
-per program and architecture serves every call.
+More runs hold fewer registers, so more warps fit on an SM.  The grid is `ceil(R / rows a CTA)` CTAs, `ceil(3 R / 4)`
+CTAs in the small-R `bwd_unweighted` program, `ceil(9 R / 4)` CTAs in `fwd_fine` and `bwd_unweighted_fine`, and `R` CTAs
+in `bwd_fine` (`cake_jit.grid`, from the launch block and `cake_jit.BUILD_OF`; the `bwd_unweighted`, `fwd_fine` and
+`bwd_unweighted_fine` kernels count their tasks in 64 bits and stride over the blocks).  No routed launch has more than
+`2**31 - 1` CTAs (`cake_jit.MAX_GRID`): `cake_jit.fine` refuses a fine window whose last row count needs more, and
+`cake_jit.grid` caps only a fine program launched at more rows than its window holds.  `bwd_fine` counts its rows in
+32 bits, so it takes at most `2**30` rows.  The route sends it at most its window's `hi * SMs` rows: at most
+`64 * SMs`, and `2 * SMs` as shipped.  A row or a task past `R` loads the
+last row and stores nothing.  The programs of a stage
+compute each element with the same FP32 operations (the deep-gate sigmoid gives the fast one's bits wherever the fast
+one may be taken, so the loads a warp's vote covers change no bit), and the `d_weight` sums take a lane's columns in
+load order with the same lanes.  In `bwd_fine`, warps 1 to 8 hand their `dh` words and activations to warp 0 in shared
+memory, and warp 0 runs each lane's `d_weight` chain over the row's loads in load order with the same instructions.  So
+the programs of a stage store the same bits for every input: the route changes no output bit.  `bwd_unweighted` votes
+once per (row, run), the run of 768 columns that the `bwd` programs vote over, and computes each element with their
+operations, taking `dh` where they take `dh w` with `w = 1` (the same value).  So it stores the `d_gate` and `d_up` bits
+of the `bwd` programs with the weight flag 0, for every input; so does `bwd_unweighted_fine`, which votes once per (row,
+load).  No program but `bwd_fine` uses shared memory (its 16 KB pool is static), and none uses a workspace, a
+cooperative launch or programmatic dependent launch.  The row count, the limit, the weight flag (`fwd`, `bwd`), the
+strides and the column offsets below are launch arguments, so one library per program and architecture serves every
+call.
 
 Each program's binding also takes the column offset of `up` (in `bwd` and `bwd_unweighted`, of `d_up` too), in BF16
 elements, last before the grid, and adds it to that pointer.  A merged call passes its `[R, 4608]` tensor as both the
@@ -259,6 +304,6 @@ the fills of those outputs.  The kernels write every element of every output, so
   under `torch.compile` or `torch.jit.trace`: a call that Dynamo or the tracer records launches its forward inside the
   autograd function's `forward`; a checkpoint's recomputation runs with Dynamo disabled.  No MXFP8 or FP4 output.
 - A program's library builds at its first launch, and the row count picks the program (see Programs); in the backward so
-  does the weight, as an unweighted backward runs its own program.  Before capturing a CUDA graph, run an eager call of
+  does the weight, as an unweighted backward runs its own programs.  Before capturing a CUDA graph, run an eager call of
   each kind the graph captures (weighted and unweighted) at each row count it captures, or build every library of the
   architecture with `specs_for_arch` (which leaves out a library whose `min_cuda` the local toolkit is below).

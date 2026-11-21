@@ -25,10 +25,11 @@ and workspaces:
   ``bwd_token__<form>_ho`` twin (the base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
   record, before ``T``; its launch, dynamic shared memory included, is the base record's: ``dpre_in`` is one FP32
   word per stream, reduced in the kernel's own order);
-* ``collapse_forward`` / ``collapse_backward`` are one record each on sm_100a / sm_103a (``collapse_fwd`` /
-  ``collapse_bwd``) with their own library stems and no workspace (on sm_107a ``collapse_forward`` is a token-count band
-  of three records and ``collapse_backward`` one of four, below); the forward takes the per-call PDL attribute on its
-  own edge ``K4->C`` (no band: on), the VJP none; the VJP is the coalesced form: its dynamic shared memory stages each
+* ``collapse_forward`` / ``collapse_backward`` run the records ``collapse_fwd`` / ``collapse_bwd`` on sm_100a /
+  sm_103a, with their own library stems and no workspace (on sm_100a / sm_103a ``collapse_backward`` is a token-count
+  band of three records on sm_100a and of five on sm_103a, ``collapse_bwd`` from 1024 tokens; on sm_107a
+  ``collapse_forward`` is a token-count band of three records and ``collapse_backward`` one of four, below); the forward takes the per-call PDL attribute on its own
+  edge ``K4->C`` (no band: on), the VJP none; the VJP is the coalesced form: its dynamic shared memory stages each
   warp's slab of the ``dU`` row and of the four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial
   sums.
 
@@ -56,12 +57,23 @@ by the token count alone (``rows_between``, :data:`COLLAPSE_BWD_BAND`, edges :da
 prefetch) with every other fact the same; ``collapse_bwd__vjpwa_sp4_mb4`` and ``collapse_bwd__vjpwa_sp2_mb4`` are the
 ``collapse_bwd__vjpwa`` record under their own names split over four / two CTAs a token (:data:`COLLAPSE_BWD_SPLIT`: a
 grid of 4 T / 2 T CTAs, each on a quarter / half of the streams, with :func:`vjp_smem` bytes of dynamic shared memory;
-the same outputs bit for bit), every other fact the same.
+the same outputs bit for bit), every other fact but the architectures the same.  On sm_100a ``collapse_backward``
+holds three records chosen by the token count alone (``rows_between``, :data:`COLLAPSE_BWD_BAND`, edges
+:data:`BWD_EDGES`): ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens, the ``collapse_bwd__vjpwa_sp2_mb4`` library from
+216 to 1023 tokens under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (:data:`COLLAPSE_BWD_ALIAS`:
+the same library and kernel, every fact but the architectures and the select rule the same) and ``collapse_bwd`` from
+1024 tokens.  On sm_103a it holds five: ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens, the
+``collapse_bwd__vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023 tokens under the record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` / ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, and the
+``collapse_bwd`` library from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319`` and from 1024
+tokens as ``collapse_bwd`` itself.  The split records are the ``collapse_bwd`` record split the same way (the same
+outputs bit for bit).
 """
 
 from __future__ import annotations
 
 import copy
+import itertools
 import math
 
 import pytest
@@ -100,7 +112,7 @@ COLLAPSE_RECORD_ARCHES = {
     "collapse_fwd__m2_xhnone": ["sm_107a"],
     "collapse_bwd__vjpwa_pfq2": ["sm_107a"],
     "collapse_bwd__vjpwa": ["sm_107a"],
-    "collapse_bwd__vjpwa_sp4_mb4": ["sm_107a"],
+    "collapse_bwd__vjpwa_sp4_mb4": ["sm_100a", "sm_103a", "sm_107a"],
     "collapse_bwd__vjpwa_sp2_mb4": ["sm_107a"],
     "collapse_fwd__m2_xhnone_rv": ["sm_107a"],
 }
@@ -119,9 +131,21 @@ BAND_T = 6656
 # The first and the last token count of sm_107a's ``collapse_fwd__m2_xhnone_rv``.
 RV_BAND = (2048, 6655)
 # The token-count band of the standalone collapse VJP per architecture, in route order: (record without the prefix,
-# with the hidden suffix; above, at_most) of its ``rows_between`` select rule.  An architecture without an entry runs
-# its one record of COLLAPSE_RECORDS at every token count.
+# with the hidden suffix, which an alias's tag follows; above, at_most) of its ``rows_between`` select rule.  Every
+# handoff architecture has one; its last record is the architecture's VJP of COLLAPSE_RECORDS.
 COLLAPSE_BWD_BAND = {
+    "sm_100a": (
+        ("collapse_bwd__vjpwa_sp4_mb4__h5120", 0, 215),
+        ("collapse_bwd__vjpwa_sp2_mb4__h5120__le1023", 215, 1023),
+        ("collapse_bwd__h5120", 1023, None),
+    ),
+    "sm_103a": (
+        ("collapse_bwd__vjpwa_sp4_mb4__h5120", 0, 215),
+        ("collapse_bwd__vjpwa_sp2_mb4__h5120__le247", 215, 247),
+        ("collapse_bwd__h5120__le319", 247, 319),
+        ("collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023", 319, 1023),
+        ("collapse_bwd__h5120", 1023, None),
+    ),
     "sm_107a": (
         ("collapse_bwd__vjpwa_sp4_mb4__h5120", 0, 215),
         ("collapse_bwd__vjpwa_sp2_mb4__h5120", 215, 383),
@@ -129,12 +153,50 @@ COLLAPSE_BWD_BAND = {
         ("collapse_bwd__vjpwa_pfq2__h5120", 640, None),
     ),
 }
-# The last token count of each record of sm_107a's ``collapse_backward`` but the last.
-BWD_EDGES = (215, 383, 640)
-# The split VJP records of the band: record -> k, the CTAs a token (grid k T, each CTA on 4 / k streams).
+# The last token count of each record of ``collapse_backward`` but the last, per architecture.
+BWD_EDGES = {
+    "sm_100a": (215, 1023),
+    "sm_103a": (215, 247, 319, 1023),
+    "sm_107a": (215, 383, 640),
+}
+# The CTAs a token of each record of each architecture's band, in route order: 4 / 2 for the split records (grid
+# k T), 1 for the one-CTA-a-token records.
+BWD_SPLITS = {
+    "sm_100a": (4, 2, 1),
+    "sm_103a": (4, 2, 1, 2, 1),
+    "sm_107a": (4, 2, 1, 1),
+}
+# The one-CTA-a-token record of each architecture's band that its split records split over k CTAs a token with the
+# same outputs bit for bit: the third record of the band (on sm_103a the ``collapse_bwd`` alias of 248 to 319 tokens).
+BWD_ONE_CTA = {
+    "sm_100a": "collapse_bwd__h5120",
+    "sm_103a": "collapse_bwd__h5120__le319",
+    "sm_107a": "collapse_bwd__vjpwa__h5120",
+}
+# The aliases of the VJP's bands: record -> the record whose library, kernel and every other fact but the
+# architectures and the select rule it carries (sm_100a runs the ``_vjpwa_sp2_mb4`` library from 216 to 1023 tokens
+# under one alias, sm_103a from 216 to 247 and from 320 to 1023 tokens under two, and ``collapse_bwd`` from 248 to 319
+# tokens under a third; the ``_vjpwa_sp2_mb4`` record keeps sm_107a's band from 216 to 383 tokens).
+COLLAPSE_BWD_ALIAS = {
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le1023": "collapse_bwd__vjpwa_sp2_mb4__h5120",
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le247": "collapse_bwd__vjpwa_sp2_mb4__h5120",
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023": "collapse_bwd__vjpwa_sp2_mb4__h5120",
+    "collapse_bwd__h5120__le319": "collapse_bwd__h5120",
+}
+# The architectures of each alias record.
+COLLAPSE_BWD_ALIAS_ARCHES = {
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le1023": ["sm_100a"],
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le247": ["sm_103a"],
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023": ["sm_103a"],
+    "collapse_bwd__h5120__le319": ["sm_103a"],
+}
+# The split VJP records of the bands: record -> k, the CTAs a token (grid k T, each CTA on 4 / k streams).
 COLLAPSE_BWD_SPLIT = {
     "collapse_bwd__vjpwa_sp4_mb4__h5120": 4,
     "collapse_bwd__vjpwa_sp2_mb4__h5120": 2,
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le1023": 2,
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__le247": 2,
+    "collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023": 2,
 }
 # Sub-tokens (token column parts) per CTA of the two collapse forwards' grids: ceil(5 T / rows_per_cta) CTAs.
 COLLAPSE_ROWS_PER_CTA = {"sm_100a": 2, "sm_103a": 2, "sm_107a": 4}
@@ -171,8 +233,12 @@ ROWS = (
     65,
     215,
     216,
+    247,
+    248,
     255,
     256,
+    319,
+    320,
     383,
     384,
     460,
@@ -181,8 +247,11 @@ ROWS = (
     641,
     656,
     657,
+    768,
     1000,
+    1023,
     1024,
+    1025,
     2047,
     2048,
     2049,
@@ -415,51 +484,93 @@ def test_collapse_records(mode: str, arch: str) -> None:
         "kind": "rows_per_cta",
         "rows_per_cta": 1,
     }
-    # the VJP: one record at every token count, or on sm_107a a token-count band of four records (rows_between,
-    # T <= 215 / 216 <= T <= 383 / 384 <= T <= 640 / T >= 641), each under its own name and library: the third is the
-    # record of the token counts from 641 under its own name, with every other fact the same (the same VJP without the
-    # L2 prefetch); the first two are the third split over k CTAs a token (k 4 / 2: grid k T, col_split k) with
-    # vjp_smem(k) bytes of dynamic shared memory, every other fact the same
-    if arch in COLLAPSE_BWD_BAND:
-        band = COLLAPSE_BWD_BAND[arch]
-        assert band[-1][0] == f"{COLLAPSE_RECORDS[arch][2]}__h{HIDDEN}"
-        assert band[2][0] == f"collapse_bwd__vjpwa__h{HIDDEN}"
-        lowers, uppers = (0, *BWD_EDGES), (*BWD_EDGES, None)
-        pairs = [(above, at_most) for _, above, at_most in band]
-        assert pairs == list(zip(lowers, uppers))
-        for suffix, above, at_most in band:
-            rec = _rec(mode, suffix)
-            assert rec["select_rule"] == {
-                "above": above,
-                "at_most": at_most,
-                "kind": "rows_between",
-            }, suffix
-            name = f"{PREFIX[mode]}{suffix}"
-            assert (rec["kernel"], rec["library"], rec["kernel_symbol"]) == (
-                name,
-                name,
-                f"kernel_{name}",
-            ), suffix
+    # the VJP: on every architecture a token-count band of records (rows_between, tiling every token count at the
+    # edges BWD_EDGES), each under its own record name, the last the architecture's VJP of COLLAPSE_RECORDS.  On
+    # sm_107a (T <= 215 / 216 <= T <= 383 / 384 <= T <= 640 / T >= 641) the third is the record of the token counts
+    # from 641 under its own name and library, with every other fact the same (the same VJP without the L2
+    # prefetch); on sm_100a (T <= 215 / 216 <= T <= 1023 / T >= 1024) the third is collapse_bwd itself and the second
+    # the sm_107a band's second library under an alias record (COLLAPSE_BWD_ALIAS); on sm_103a (T <= 215 /
+    # 216 <= T <= 247 / 248 <= T <= 319 / 320 <= T <= 1023 / T >= 1024) the second and the fourth are that library
+    # under two alias records and the third collapse_bwd under an alias record.  The split records (BWD_SPLITS) are the
+    # third split over k CTAs a token (k 4 / 2: grid k T, col_split k) with vjp_smem(k) bytes of dynamic shared memory,
+    # every other fact but the architectures the same
+    assert (
+        set(COLLAPSE_BWD_BAND) == set(BWD_EDGES) == set(BWD_ONE_CTA) == set(BWD_SPLITS)
+    )
+    assert set(COLLAPSE_BWD_BAND) == set(HANDOFF_ARCHES)
+    band, edges = COLLAPSE_BWD_BAND[arch], BWD_EDGES[arch]
+    assert band[-1][0] == f"{COLLAPSE_RECORDS[arch][2]}__h{HIDDEN}"
+    assert band[2][0] == BWD_ONE_CTA[arch]
+    lowers, uppers = (0, *edges), (*edges, None)
+    pairs = [(above, at_most) for _, above, at_most in band]
+    assert pairs == list(zip(lowers, uppers))
+    for suffix, above, at_most in band:
+        rec = _rec(mode, suffix)
+        assert rec["select_rule"] == {
+            "above": above,
+            "at_most": at_most,
+            "kind": "rows_between",
+        }, suffix
+        name = f"{PREFIX[mode]}{COLLAPSE_BWD_ALIAS.get(suffix, suffix)}"
+        assert (rec["kernel"], rec["library"], rec["kernel_symbol"]) == (
+            name,
+            name,
+            f"kernel_{name}",
+        ), suffix
+        if suffix in COLLAPSE_BWD_ALIAS:
+            arches = COLLAPSE_BWD_ALIAS_ARCHES[suffix]
+        else:
             arches = COLLAPSE_RECORD_ARCHES[suffix.removesuffix(f"__h{HIDDEN}")]
-            assert rec["arches"] == arches == [arch], suffix
-            assert REGISTRIES[mode].pdl_edge(rec["library"]) is None, suffix
-        assert len({_rec(mode, s)["library"] for s, _, _ in band}) == len(band)
-        vjpwa = _rec(mode, band[2][0])
-        assert _strip(vjpwa, "select_rule") == _strip(bwd, "select_rule")
-        assert vjp_smem(1) == VJP_SMEM
-        assert [COLLAPSE_BWD_SPLIT[s] for s, _, _ in band[:2]] == [4, 2]
-        assert set(COLLAPSE_BWD_SPLIT) == {s for s, _, _ in band[:2]}
-        for suffix, k in COLLAPSE_BWD_SPLIT.items():
-            rec = _rec(mode, suffix)
-            assert rec["grid_rule"] == {**one_token_per_cta, "col_split": k}, suffix
-            assert rec["launch"] == {
-                **vjpwa["launch"],
-                "dynamic_smem_bytes": vjp_smem(k),
-            }, suffix
-            keys = ("select_rule", "grid_rule", "launch")
-            assert _strip(rec, *keys) == _strip(vjpwa, *keys), suffix
-    else:
-        assert bwd["select_rule"] is None
+        assert arch in arches and rec["arches"] == arches, suffix
+        assert REGISTRIES[mode].pdl_edge(rec["library"]) is None, suffix
+    # every record of the band runs its own library but an alias, which runs its record's; neighbours differ
+    libs = [_rec(mode, s)["library"] for s, _, _ in band]
+    assert len(set(libs)) == len({COLLAPSE_BWD_ALIAS.get(s, s) for s, _, _ in band})
+    assert all(a != b for a, b in itertools.pairwise(libs))
+    # an alias is its record under its own name, architectures and select rule: every other fact the same; an alias of
+    # a split record runs on architectures its record does not list, the alias of collapse_bwd on an architecture of
+    # collapse_bwd at token counts below collapse_bwd's
+    assert set(COLLAPSE_BWD_ALIAS) == set(COLLAPSE_BWD_ALIAS_ARCHES)
+    for alias, own in COLLAPSE_BWD_ALIAS.items():
+        a, o = _rec(mode, alias), _rec(mode, own)
+        assert {k: a[k] for k in NAME_KEYS} == {k: o[k] for k in NAME_KEYS}, alias
+        keys = ("arches", "select_rule")
+        assert _strip(a, *keys) == _strip(o, *keys), alias
+        assert a["arches"] == COLLAPSE_BWD_ALIAS_ARCHES[alias], alias
+        if own in COLLAPSE_BWD_SPLIT:
+            assert not set(a["arches"]) & set(o["arches"]), alias
+        else:
+            assert set(a["arches"]) <= set(o["arches"]), alias
+            assert a["select_rule"]["at_most"] <= o["select_rule"]["above"], alias
+    one_cta = _rec(mode, band[2][0])
+    assert one_cta["grid_rule"] == one_token_per_cta
+    # the one-CTA record is the architecture's VJP (on sm_103a under an alias: its architectures checked above)
+    own_keys = ("arches",) if band[2][0] in COLLAPSE_BWD_ALIAS else ()
+    assert _strip(one_cta, "select_rule", *own_keys) == _strip(
+        bwd, "select_rule", *own_keys
+    )
+    assert vjp_smem(1) == VJP_SMEM
+    splits = BWD_SPLITS[arch]
+    assert len(splits) == len(band) and splits[:3] == (4, 2, 1)
+    assert [COLLAPSE_BWD_SPLIT.get(s, 1) for s, _, _ in band] == list(splits)
+    assert set(COLLAPSE_BWD_SPLIT) == {
+        s
+        for a, b in COLLAPSE_BWD_BAND.items()
+        for (s, _, _), k in zip(b, BWD_SPLITS[a])
+        if k > 1
+    }
+    for (suffix, _, _), k in zip(band, splits):
+        if k == 1:
+            continue
+        assert COLLAPSE_BWD_SPLIT[suffix] == k
+        rec = _rec(mode, suffix)
+        assert rec["grid_rule"] == {**one_token_per_cta, "col_split": k}, suffix
+        assert rec["launch"] == {
+            **one_cta["launch"],
+            "dynamic_smem_bytes": vjp_smem(k),
+        }, suffix
+        keys = ("arches", "select_rule", "grid_rule", "launch")
+        assert _strip(rec, *keys) == _strip(one_cta, *keys), suffix
     # the forward: one record at every token count, or on sm_107a a token-count band of three records (rows_between,
     # T <= 2047 / 2048 <= T <= 6655 / T >= 6656); the record from 6656 is the first under its own name (the same form
     # without the L2 evict-first policy on X) and the record from 2048 to 6655 the one from 6656 under its own name (its
@@ -631,12 +742,13 @@ def test_the_sm107a_collapse_backward_band_reads_the_token_count_only(
     ``collapse_bwd__vjpwa_pfq2`` from 641 tokens (:data:`BWD_EDGES`), on every sm_107a board and Sinkhorn count (and,
     in the deterministic registry, along every call path)."""
     route = _collapse_backward_route(mode, "sm_107a")
-    assert len(route) == len(BWD_EDGES) + 1
+    assert BWD_EDGES["sm_107a"] == (215, 383, 640)
+    assert len(route) == len(BWD_EDGES["sm_107a"]) + 1
     reg = REGISTRIES[mode]
     paths = [{}]
     if mode == "det":
         paths += [{"path": path} for path in reg.PDL_PATHS]
-    edges = tuple(e + d for e in BWD_EDGES for d in (-1, 0, 1, 2))
+    edges = tuple(e + d for e in BWD_EDGES["sm_107a"] for d in (-1, 0, 1, 2))
     for rows in (
         1,
         2,
@@ -654,11 +766,86 @@ def test_the_sm107a_collapse_backward_band_reads_the_token_count_only(
         65536,
         131072,
     ):
-        want = (route[sum(rows > e for e in BWD_EDGES)],)
+        want = (route[sum(rows > e for e in BWD_EDGES["sm_107a"])],)
         for path in paths:
             for iters in (20, 7):
                 got = reg.selected_modules(
                     "sm_107a",
+                    HIDDEN,
+                    "collapse_backward",
+                    rows=rows,
+                    sm_count=sm,
+                    sinkhorn_iters=iters,
+                    **path,
+                )
+                assert got == want, (rows, path, iters)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("mode", tuple(REGISTRIES))
+@pytest.mark.parametrize("arch", ("sm_100a", "sm_103a"))
+@pytest.mark.parametrize("sm", (132, 148, 152))
+def test_the_sm100a_sm103a_collapse_backward_band_reads_the_token_count_only(
+    mode: str, arch: str, sm: int
+) -> None:
+    """sm_100a's and sm_103a's ``collapse_backward`` takes ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens and
+    ``collapse_bwd`` from 1024 tokens; between them sm_100a takes ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (the
+    ``collapse_bwd__vjpwa_sp2_mb4`` library) from 216 to 1023 tokens, sm_103a that library from 216 to 247 tokens
+    (``__le247``) and from 320 to 1023 tokens (``__gt319_le1023``) and ``collapse_bwd__h5120__le319`` (the
+    ``collapse_bwd`` library) from 248 to 319 tokens (:data:`BWD_EDGES`), on every board and Sinkhorn count (and, in
+    the deterministic registry, along every call path)."""
+    p = PREFIX[mode]
+    route = _collapse_backward_route(mode, arch)
+    sp4, sp2, one = (
+        f"{p}collapse_bwd__vjpwa_sp4_mb4__h{HIDDEN}",
+        f"{p}collapse_bwd__vjpwa_sp2_mb4__h{HIDDEN}",
+        f"{p}collapse_bwd__h{HIDDEN}",
+    )
+    if arch == "sm_100a":
+        assert BWD_EDGES[arch] == (215, 1023)
+        assert route == [sp4, f"{sp2}__le1023", one]
+        libraries = [sp4, sp2, one]
+    else:
+        assert BWD_EDGES[arch] == (215, 247, 319, 1023)
+        assert route == [
+            sp4,
+            f"{sp2}__le247",
+            f"{one}__le319",
+            f"{sp2}__gt319_le1023",
+            one,
+        ]
+        libraries = [sp4, sp2, one, sp2, one]
+    reg = REGISTRIES[mode]
+    assert [reg.MODULES[n]["library"] for n in route] == libraries
+    paths = [{}]
+    if mode == "det":
+        paths += [{"path": path} for path in reg.PDL_PATHS]
+    edges = tuple(e + d for e in BWD_EDGES[arch] for d in (-1, 0, 1, 2))
+    for rows in (
+        1,
+        2,
+        128,
+        *edges,
+        247,
+        248,
+        319,
+        320,
+        383,
+        384,
+        512,
+        640,
+        641,
+        768,
+        2049,
+        8192,
+        65536,
+        131072,
+    ):
+        want = (route[sum(rows > e for e in BWD_EDGES[arch])],)
+        for path in paths:
+            for iters in (20, 7):
+                got = reg.selected_modules(
+                    arch,
                     HIDDEN,
                     "collapse_backward",
                     rows=rows,
@@ -752,8 +939,10 @@ def test_the_nondet_handoff_records_are_the_det_records_renamed() -> None:
         )
     }
     # the fused collapse, the standalone collapse pair (each in its sm_100a / sm_103a and its sm_107a form, the
-    # forward's sm_107a form in its three token-count records, the VJP's in its four) and one twin per token-owner form
+    # forward's sm_107a form in its three token-count records, the VJP's in its four, the sm_100a / sm_103a VJP band's
+    # alias) and one twin per token-owner form
     want = {f"{PREFIX['det']}{s}__h{HIDDEN}" for s in COLLAPSE_RECORD_ARCHES}
+    want |= {f"{PREFIX['det']}{s}" for s in COLLAPSE_BWD_ALIAS}
     want |= {f"{PREFIX['det']}bwd_token__{f}_ho__h{HIDDEN}" for f in TOKEN_FORMS}
     assert new == want, sorted(new)
     for name in new:
