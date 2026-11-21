@@ -1905,7 +1905,7 @@ out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))
 - `router_weight_position="before_down"` applies each route's FP32 router weight `w` to the SwiGLU activation `a` before the down projection, `h = BF16(w * a)`, and sums the routed outputs unweighted; the router-weight gradient is `dot(dh, a)` (`dh` the gradient of `h`), defined at a zero weight. It runs top-k 6 over 384 routed experts (and top-k 2 on the diagnostic layouts) with clamped SwiGLU, FP32 weight gradients and BF16 routed weights. The default `"after_down"` weights each routed output in the combine.
 - Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, router-weight position, EP group, build and GPU model).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`; `router_weight_position="before_down"`: `sm_100a` and `sm_103a`. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`, both router-weight positions. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
 
 **Distributed requirements.** The caller passes an initialized `torch.distributed` process group with its CUDA device current. All ranks share one peer-accessible NVLink domain with multicast (PyTorch symmetric memory). EP sizes: 1, 4, 8, 16, 32 and 64. EP1 uses plain tensors.
 
@@ -1952,7 +1952,7 @@ grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *w
 - The MXFP8 forward always saves its context and rejects `save_context=False`.
 - Schedule capacity must hold every padded route; an overflow traps.
 - A context serves one `backward`: when the routed rows exceed one macrobatch, `backward` replays the later macrobatches into the context's routed ring tensors, in either router-weight position. Do not read a context after its `backward`; call `recompute_forward_context` again before another `backward`.
-- `router_weight_position="before_down"` has no `sm_107a` build, no plain SwiGLU, no MXFP8 routed weights and no BF16 weight-gradient accumulation; the package ships no autograd wrapper (a checkpointing caller wraps forward, recompute and backward in its own `torch.autograd.Function`).
+- `router_weight_position="before_down"` has no plain SwiGLU, no MXFP8 routed weights and no BF16 weight-gradient accumulation; the package ships no autograd wrapper (a checkpointing caller wraps forward, recompute and backward in its own `torch.autograd.Function`).
 
 ---
 

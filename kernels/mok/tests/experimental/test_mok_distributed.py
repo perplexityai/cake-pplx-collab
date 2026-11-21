@@ -21,10 +21,10 @@ this process sees fewer GPUs than its group has ranks (the ``ep8`` items on a no
 The workers live in :mod:`tests.experimental._mok_dist`: the complete training step eager and under CUDA Graph
 replay, unequal source counts per rank (empty ranks included), the training features (clamped SwiGLU, recompute and
 the context-free forward, FP32 weight-gradient accumulation, native MXFP8), the adapter's source-length guards and
-scratch lifetime, and the router weight before the down projection through the adapter on SM100a / SM103a: at EP1
-and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and (8, 48) with
-top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow multiplier, the trap
-of a schedule past its capacity and the bytes of separate group launches.
+scratch lifetime, and the router weight before the down projection through the adapter on SM100a, SM103a and
+SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and
+(8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
+multiplier, the trap of a schedule past its capacity and the bytes of separate group launches.
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
@@ -142,10 +142,11 @@ OVERFLOW_TIMEOUT = 600
 
 
 def _require_before_down(world):
-    """Skip on SM107a before any process starts: the router weight before the down projection has no build there."""
+    """Skip before any process starts unless every rank's device has the router-weight-before-down builds (SM100a,
+    SM103a and SM107a)."""
     if torch.cuda.is_available() and torch.cuda.device_count() >= world:
-        if any(torch.cuda.get_device_capability(index) == (10, 7) for index in range(world)):
-            pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+        if any(torch.cuda.get_device_capability(index) not in ((10, 0), (10, 3), (10, 7)) for index in range(world)):
+            pytest.skip("The router weight before the down projection has SM100a, SM103a and SM107a builds only")
 
 
 @pytest.mark.parametrize(

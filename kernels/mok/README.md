@@ -18,8 +18,8 @@ Plain and clamped SwiGLU, BF16 or FP32 weight-gradient accumulation, and unequal
 counts per rank are supported. `prepare_mok_bf16(router_weight_position="before_down")` applies each route's
 FP32 router weight to the SwiGLU activation before the down projection (`h = BF16(w * a)`, an unweighted
 combine, router-weight gradient `dot(dh, a)`): top-k 6 over 384 routed experts at EP 4/8/16/32/64 (and top-k
-2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a` and
-`sm_103a`; `recompute_forward_context` then takes the router weights. The backend README
+2 on the diagnostic layouts), clamped SwiGLU, FP32 weight gradients, BF16 routed weights, on `sm_100a`, `sm_103a`
+and `sm_107a`; `recompute_forward_context` then takes the router weights. The backend README
 ([`cake_pplx/_backends/cake_mok_bf16/README.md`](cake_pplx/_backends/cake_mok_bf16/README.md)) has the
 full API, contract, memory rules and measured communication-SM tables.
 
@@ -37,7 +37,7 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 | Item | Requirement |
 |---|---|
-| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7); `router_weight_position="before_down"`: `sm_100a` or `sm_103a` |
+| GPU | `sm_100a`, `sm_103a` or `sm_107a` (compute capability 10.0, 10.3 or 10.7), both router-weight positions |
 | CUDA toolkit (`nvcc`, JIT) | 12.8 for `sm_100a`, 12.9 for `sm_103a`, 13.5 for `sm_107a` |
 | `torch` | with `torch.distributed` and symmetric memory (multicast) |
 | Process group | Initialized, its CUDA device current; all ranks in one peer-accessible NVLink domain with multicast |
@@ -47,14 +47,13 @@ resident on other streams. Every reduction runs in a fixed order; atomics act on
 
 ## Builds
 
-`build.json` lists 182 builds of 67 kernels: 50 kernels for each of `sm_100a`, `sm_103a` and `sm_107a`, 15 more for
-`sm_100a` and `sm_103a` only (the router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler
-kernels of the 384-expert layouts) and two more for `sm_107a` only. Every build is generated from one kernel source
-revision.
+`build.json` lists 197 builds of 67 kernels: 65 kernels for each of `sm_100a`, `sm_103a` and `sm_107a` (the
+router-weight-before-down fused kernels, the top-k 6 epilogue and the scheduler kernels of the 384-expert layouts
+included) and two more for `sm_107a` only. Every build is generated from one kernel source revision.
 
 | Group | Kernels |
 |---|---|
-| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection (`sm_100a`, `sm_103a`): clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
+| BF16 fused | forward (plain, clamped; with or without the saved context), context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); router weight before the down projection: clamped forward (with or without the saved context), clamped recompute, clamped backward with FP32 weight gradients |
 | MXFP8 fused | forward, context recompute (plain, clamped), backward (plain, clamped; BF16 or FP32 weight gradients); `sm_107a` only: the multi-macrobatch forward (plain, clamped) |
 | Scheduler | count and rows per scheduler layout, pad per EP size |
 | Layout | the expert layout, zero |

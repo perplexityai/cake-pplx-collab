@@ -237,10 +237,10 @@ class MoKFunctional:
         ``y = S(x) + sum_k h_k Wd_k^T``, with ``d_w = dot(dh, a)`` (``dh`` the
         gradient of ``h``; a zero weight is allowed and has its gradient); it
         needs the layouts of ``BEFORE_DOWN_LAYOUTS``, ``clamped_swiglu=True``,
-        ``fp32_wgrad=True``, BF16 routed weights and an sm_100a or sm_103a
-        device. Every unsupported combination raises here, before any kernel
-        is loaded or launched: ``TypeError`` for a position that is not a
-        ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
+        ``fp32_wgrad=True``, BF16 routed weights and an sm_100a, sm_103a or
+        sm_107a device. Every unsupported combination raises here, before any
+        kernel is loaded or launched: ``TypeError`` for a position that is not
+        a ``str``, an ``ep``, ``local_experts`` or ``topk`` that is not an
         ``int`` and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
         ``bool`` (in both positions), ``ValueError`` for every other value.
         """

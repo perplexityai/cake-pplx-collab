@@ -20,12 +20,12 @@ Shared-expert weight gradients remain source-rank local.
   every weight-gradient contribution into caller-owned FP32 accumulators.
 - **Unequal per-rank source counts**, including zero, as runtime inputs.
 - **Router weight before the down projection**
-  (`router_weight_position="before_down"`, SM100a and SM103a): each route's
-  FP32 router weight `w` scales the SwiGLU activation `a` before the down
-  projection, `h = BF16(w * a)`, and the routed outputs are summed unweighted;
-  top-k 6 over 384 routed experts (`(4, 96)`, `(8, 48)`, `(16, 24)`,
-  `(32, 12)`, `(64, 6)`) and top-k 2 on the diagnostic layouts, with clamped
-  SwiGLU and FP32 weight-gradient accumulation (see Contract).
+  (`router_weight_position="before_down"`, SM100a, SM103a and SM107a): each
+  route's FP32 router weight `w` scales the SwiGLU activation `a` before the
+  down projection, `h = BF16(w * a)`, and the routed outputs are summed
+  unweighted; top-k 6 over 384 routed experts (`(4, 96)`, `(8, 48)`,
+  `(16, 24)`, `(32, 12)`, `(64, 6)`) and top-k 2 on the diagnostic layouts,
+  with clamped SwiGLU and FP32 weight-gradient accumulation (see Contract).
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -147,10 +147,10 @@ to backward; retain both while any captured graph uses them.
 With `router_weight_position="before_down"` the workspace is unchanged and
 `scores` are the router weights `w` (FP32 `[tokens, topk]`, each `>= 0`; a zero
 weight is allowed). `prepare_mok_bf16` refuses, before it loads a kernel, a
-layout or top-k the mode does not run, `clamped_swiglu=False`,
-`fp32_wgrad=False` and an SM107a device; `forward`, `recompute_forward_context`,
-`backward`, `prepare` and `prepare_recompute` refuse `swiglu_limit=None` and
-MXFP8 routed weights; `recompute_forward_context` requires `router_weights`
+layout or top-k the mode does not run, `clamped_swiglu=False` and
+`fp32_wgrad=False`; `forward`, `recompute_forward_context`, `backward`,
+`prepare` and `prepare_recompute` refuse `swiglu_limit=None` and MXFP8 routed
+weights; `recompute_forward_context` requires `router_weights`
 (the forward's). A checkpointing caller wraps forward, recompute and backward
 in its own `torch.autograd.Function`; the package ships no autograd wrapper.
 
@@ -251,13 +251,11 @@ The router-weight-before-down kernels (`forward_clamped_wbd`,
 `forward_clamped_noctx_wbd`, `recompute_clamped_wbd`,
 `backward_clamped_fp32_wbd`), the top-k 6 unweighted epilogue
 (`epilogue_backward_6`; top-k 6 has no weighted forward epilogue) and the
-count / rows kernels of the 384-expert layouts are generated for SM100a and
-SM103a only. The forward and recompute take two arguments more than their
+count / rows kernels of the 384-expert layouts are generated for SM100a,
+SM103a and SM107a. The forward and recompute take two arguments more than their
 clamped roles (`weight_peers`, the uint64 table of the ranks' router-weight
 buffers, and `row_weights`, the per-call FP32 `[macro_size]` ring); the
-backward takes the clamped FP32 backward's arguments. `prepare_mok_bf16` with
-`router_weight_position="before_down"` refuses an SM107a device before it loads
-a kernel.
+backward takes the clamped FP32 backward's arguments.
 
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
@@ -364,8 +362,8 @@ across communication-SM splits and under CUDA Graph replay.
   | Position | Layouts (EP, local experts) | Top-k | SwiGLU | Weight gradients | Routed weights | Targets |
   | --- | --- | --- | --- | --- | --- | --- |
   | `"after_down"` (default) | the layouts above | 2 or 8 | plain or clamped | BF16 or FP32 | BF16 or MXFP8 | SM100a, SM103a, SM107a |
-  | `"before_down"` | `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` | 6 | clamped | FP32 | BF16 | SM100a, SM103a |
-  | `"before_down"` | `(1, 4)`, `(4, 4)` (diagnostic) | 2 | clamped | FP32 | BF16 | SM100a, SM103a |
+  | `"before_down"` | `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` | 6 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
+  | `"before_down"` | `(1, 4)`, `(4, 4)` (diagnostic) | 2 | clamped | FP32 | BF16 | SM100a, SM103a, SM107a |
 
 - BF16 inputs, shared weights and outputs; FP32 router scores (positive with
   `"after_down"`, nonnegative with `"before_down"`); contiguous int64 expert
@@ -530,9 +528,9 @@ SM103a or SM107a device):
   `cake_pplx.cake_mok_det_train` facade (signatures, the package names it
   serves, argument forwarding and the refused router-weight combinations).
 - `router_weight_position="before_down"`: in `test_mok_bf16.py` the launchers'
-  arguments against `sources.json` and the refusals before device work (no
-  GPU), the refusal on an SM107a device, and on SM100a / SM103a the fused
-  training at top-2 and top-6 (6 to 96 local experts; another
+  arguments against `sources.json`, the refusals before device work and the
+  targets (no GPU), and on SM100a, SM103a and SM107a the fused training at
+  top-2 and top-6 (6 to 96 local experts; another
   communication-SM split gives the same bytes), zero weights, recompute and
   the context-free forward, the exact limit, the 384-expert scheduler layouts,
   the scheduler and the adapter at the worst-case schedule capacity, and the
