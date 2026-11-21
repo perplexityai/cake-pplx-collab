@@ -204,7 +204,7 @@ context-parallel programs carried no `_kcp`).
   device-resident on `ctx`; the launch grids follow from `(T_r, H_qk, HV, SM
   count, architecture)` alone.  Tables are int32 except the affine merge's
   element offsets, which are int64.  Steady state is CUDA-graph capturable.
-* Several caller streams on one context (since 0.2.5): the context's device
+* Several caller streams on one context (since 0.2.6): the context's device
   tables are written when it is built and at first use (the first call, the
   first call at a head pair, a launch table not cached yet) by asynchronous
   copies on the stream of that call.  Earlier versions did not order these
