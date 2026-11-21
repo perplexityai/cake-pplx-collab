@@ -36,7 +36,17 @@ block below ``persistent_from_rows_per_sm`` rows per SM, whole waves from
 there) and of the backward's grid on the device, on every layout (on an
 architecture that routes a forward of packed rows, on both forward routes), on
 two streams at once, in CUDA Graph replays and under
-``torch.use_deterministic_algorithms``.  A backward of packed rows runs its
+``torch.use_deterministic_algorithms``.  Packed rows and a single token run
+the tiny forward up to ``FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
+rows of ``FWD_TINY_GAP_ROWS`` (``forward_module``), and its ``y`` is the bits
+of the forwards it replaces
+(the routes without it, and ``fwd``) on every data kind, rows of zero ``x``
+with a zero and a subnormal epsilon, partial last blocks, one token of 1 to
+128 heads, the rows around its cut on this device and on other SM counts,
+every layout of ``make``, a side stream, CUDA Graph replays, an ``out`` of
+either layout, autograd and checkpointed steps and
+``torch.use_deterministic_algorithms``; other layouts, a broadcast and rows
+past the cut never run it.  A backward of packed rows runs its
 role's long module from the long module's ``min_rows_per_sm`` rows per SM, and
 strided rows, a single token and fewer rows run the role's module; the two
 give the same ``dx``, ``dz`` and weight-gradient bits on the same inputs and
@@ -655,19 +665,85 @@ def _packed_route():
     return arch, name
 
 
+def _tiny_rows(arch, sm_count):
+    """The most rows the tiny forward runs on ``arch`` with ``sm_count`` SMs
+    (this test's own reading of the routes and the cut table):
+    ``FWD_TINY_ROWS_PER_SM[arch] * sm_count`` where ``arch`` routes
+    ``fwd_tiny``, else 0."""
+    if "fwd_tiny" not in loader.ROUTES[arch]:
+        return 0
+    return loader.FWD_TINY_ROWS_PER_SM[arch] * sm_count
+
+
+def _in_tiny_band(arch, rows, sm_count):
+    """Whether the tiny forward runs ``rows`` packed rows (or one token) on
+    ``arch`` with ``sm_count`` SMs (this test's own reading of the tables):
+    from 1 to ``_tiny_rows`` rows, outside the rows ``(lo, hi]`` of
+    ``FWD_TINY_GAP_ROWS[arch]``."""
+    lo, hi = loader.FWD_TINY_GAP_ROWS[arch]
+    return 1 <= rows <= _tiny_rows(arch, sm_count) and not lo < rows <= hi
+
+
+def _tiny_route():
+    """``(arch, SMs, the tiny forward)`` of this device; skips without one."""
+    arch, sms = _device()
+    if _tiny_rows(arch, sms) < 1:
+        pytest.skip(f"{arch} runs no tiny forward")
+    return arch, sms, loader.ROUTES[arch]["fwd_tiny"]
+
+
+def _plans_without_tiny():
+    """``_FWD_PLANS`` with no tiny forward on any architecture (each plan's
+    packed and ``fwd`` modules kept, no gap): the routes without the tiny
+    forward."""
+    return {
+        arch: (None, 0, *plan[2:4], 0, 0) for arch, plan in loader._FWD_PLANS.items()
+    }
+
+
+def _forward_launch(arch, rows, sm_count, layout, tiny=True):
+    """The forward module a call of ``rows`` rows launches on ``arch`` with
+    ``sm_count`` SMs (this test's own reading of the routes), ``layout`` the
+    strides the kernel reads ``x`` and ``z`` with: ``"packed"`` (head strides
+    128, token strides ``H * 128``), ``"one_token"`` (head stride 128, token
+    stride 0) or ``"other"``.  The tiny forward within ``_in_tiny_band`` for
+    packed rows and one token (where ``tiny``: with ``False``, the routes
+    without it), else ``fwd_packed`` for packed rows below ``PACKED_ROWS``
+    where routed, else ``fwd``."""
+    routes = loader.ROUTES[arch]
+    if tiny and layout != "other" and _in_tiny_band(arch, rows, sm_count):
+        return routes["fwd_tiny"]
+    if layout == "packed" and rows < loader.PACKED_ROWS:
+        return routes.get("fwd_packed", routes["fwd"])
+    return routes["fwd"]
+
+
+def _tiny_edge_rows(edge):
+    """Rows around the tiny forward's cut on this device (``cut-1``, ``cut``
+    and ``cut+1``: ``_tiny_rows`` less one, it and one more)."""
+    arch, sms = _device()
+    last = _tiny_rows(arch, sms)
+    return {"cut-1": last - 1, "cut": last, "cut+1": last + 1}[edge]
+
+
 # Contiguous shapes of both forward routes: the issue's, small and odd ones.
 ROUTE_SHAPES = ((30193, 48), (32737, 48), (2, 64), (3, 48), (17, 7), (255, 2))
-ROUTE_SHAPES += ((33, 1), (1031, 48), (4097, 16))
+ROUTE_SHAPES += ((33, 1), (1031, 48), (4097, 16), (17, 1), (2, 16))
+ROUTE_SHAPES += ((1, 17), (1, 32))
 ROUTE_DATA = ("normal", "near_zero", "saturated", "gate_edges", "non_finite")
 
 
 def _route_inputs(shape, data):
     """``(x, z, w, tokens)`` of one ``ROUTE_SHAPES`` shape (``TxH``, contiguous)
-    or one ``GRID_EDGES`` row count (``edge:<name>``, flat ``[rows, 128]``)
-    with ``data``: ``make``'s, gate edge values, or infinite and NaN gates and
-    infinite ``x`` in every fifth row."""
+    or one ``GRID_EDGES`` row count (``edge:<name>``) or row count around the
+    tiny forward's cut (``tiny:<edge>``, ``_tiny_edge_rows``), both flat
+    ``[rows, 128]``, with ``data``: ``make``'s, gate edge values, infinite and
+    NaN gates and infinite ``x`` in every fifth row, or ``x`` zero in every
+    third row (``zero_rows``)."""
     if shape.startswith("edge:"):
         T, H, layout = _edge_rows(shape[len("edge:") :]), 1, "flat"
+    elif shape.startswith("tiny:"):
+        T, H, layout = _tiny_edge_rows(shape[len("tiny:") :]), 1, "flat"
     else:
         T, H = (int(v) for v in shape.split("x"))
         layout = "contiguous"
@@ -681,6 +757,8 @@ def _route_inputs(shape, data):
         zr[1::5, 9] = float("-inf")
         zr[2::5, 11] = float("nan")
         xr[3::5, 13] = float("inf")
+    elif data == "zero_rows":
+        x.view(-1, D)[::3] = 0
     return x, z, w, T
 
 
@@ -691,15 +769,26 @@ def _route_inputs(shape, data):
 )
 def test_forward_routes_give_the_same_bits(shape, data, launches, monkeypatch):
     """On an architecture that routes a forward of packed rows: ``REPEATS``
-    forwards of contiguous inputs run it (a single token runs ``fwd``) and give
-    the bits of the ``fwd`` program on the same inputs (``forward_module``
-    patched to ``fwd``), finite or not."""
+    forwards of contiguous inputs run the module ``_forward_launch`` names
+    (the tiny forward up to its rows where routed, past them the forward of
+    packed rows, a single token ``fwd``); with the tiny forward taken away
+    (``_FWD_PLANS`` patched without it) a forward runs the forward of packed
+    rows (a single token ``fwd``); all give the bits of the ``fwd`` program on
+    the same inputs (``forward_module`` patched to ``fwd``), finite or not."""
     arch, packed = _packed_route()
+    _, sms = _device()
     x, z, w, tokens = _route_inputs(shape, data)
+    rows = x.numel() // D
+    layout = "packed" if tokens > 1 else "one_token"
     strided = loader.ROUTES[arch]["fwd"]
     launches.clear()
     got = [forward(x, z, w, EPS) for _ in range(REPEATS)]
-    assert launches == [packed if tokens > 1 else strided] * REPEATS, launches
+    name = _forward_launch(arch, rows, sms, layout)
+    assert launches == [name] * REPEATS, launches
+    monkeypatch.setattr(loader, "_FWD_PLANS", _plans_without_tiny())
+    launches.clear()
+    got.append(forward(x, z, w, EPS))
+    assert launches == [packed if tokens > 1 else strided], launches
     monkeypatch.setattr(
         loader,
         "forward_module",
@@ -714,6 +803,12 @@ def test_forward_routes_give_the_same_bits(shape, data, launches, monkeypatch):
         assert_same_bits(y, want, f"{shape} {data} call {i}")
 
 
+# The layouts of ``make`` whose rows the kernel reads as packed rows at any
+# token count (misaligned ones once copied); at one token every layout of
+# ``make`` has head stride 128, so its rows are packed too.
+PACKED_LAYOUTS = ("contiguous", "flat", "misaligned")
+
+
 @pytest.mark.parametrize(
     "layout,T,route",
     [
@@ -724,16 +819,204 @@ def test_forward_routes_give_the_same_bits(shape, data, launches, monkeypatch):
         ("projection", 65, "fwd"),
         ("head_major", 65, "fwd"),
         ("broadcast", 65, "fwd"),
+        ("contiguous", "past", "fwd_packed"),
+        ("flat", "past", "fwd_packed"),
+        ("projection", "past", "fwd"),
+        ("broadcast", "past", "fwd"),
     ],
 )
 def test_forward_route_follows_the_layout(layout, T, route, launches):
     """On an architecture that routes a forward of packed rows, inputs the
     kernel reads as packed rows (contiguous, flat, and misaligned ones once
-    copied) run it; a single token (token stride 0), a gate sliced from a
-    projection, head-major rows and a token-stride-0 broadcast run ``fwd``.
-    Each gives the bits of its rows as contiguous tensors."""
+    copied) run it, and a single token (token stride 0), a gate sliced from a
+    projection, head-major rows and a token-stride-0 broadcast run ``fwd``;
+    but packed rows and a single token run the tiny forward up to its rows
+    (``_tiny_rows``; ``T`` "past": the fewest tokens, at least 2, past
+    them).  Each gives the bits of its rows as contiguous tensors."""
     arch, _ = _packed_route()
+    _, sms = _device()
     H = 48
+    if T == "past":
+        T = max(2, _tiny_rows(arch, sms) // H + 1)
+    if layout == "broadcast":
+        x, z, w, _ = make(1, H, seed=43)
+        x, z = x.expand(T, H, D), z.expand(T, H, D)
+    else:
+        x, z, w, _ = make(T, H, layout=layout, seed=43)
+    if (layout in PACKED_LAYOUTS or T == 1) and _in_tiny_band(arch, T * H, sms):
+        route = "fwd_tiny"
+    launches.clear()
+    y = forward(x, z, w, EPS)
+    assert launches == [loader.ROUTES[arch][route]], (layout, T, launches)
+    xc, zc = (t.reshape(T, H, D).contiguous() for t in (x, z))
+    assert_same_bits(y.reshape(T, H, D), forward(xc, zc, w, EPS), layout)
+
+
+def test_forward_module_runs_packed_rows_only():
+    """``forward_module`` (host only), on 148 SMs past the tiny forward's
+    rows (``_tiny_rows``): an architecture's ``fwd_packed`` program for head
+    strides of 128 and token strides of ``H * 128`` on both ``x`` and ``z``
+    and fewer than ``PACKED_ROWS`` rows; ``fwd`` for any other strides, a
+    single token (token stride 0), a token-stride-0 broadcast and from
+    ``PACKED_ROWS`` rows, and always on an architecture without one.  Up to
+    the tiny forward's rows, where routed, packed rows and a single token run
+    it, and a broadcast and other strides ``fwd``; in its gap
+    (``FWD_TINY_GAP_ROWS``) packed rows and a single token run as past it."""
+    assert loader.PACKED_ROLES == ("fwd_packed",)
+    assert loader.PACKED_ROWS == 2**31 // D
+    H, last, sms = 48, loader.PACKED_ROWS - 1, 148
+    row = H * D
+    for arch in loader.ARCHES:
+        fwd = loader.ROUTES[arch]["fwd"]
+        packed = loader.ROUTES[arch].get("fwd_packed", fwd)
+        tiny_rows = _tiny_rows(arch, sms)
+        # the fewest tokens of H heads, and of one head, past the tiny rows
+        T, n = max(65, tiny_rows // H + 1), max(65, tiny_rows + 1)
+        cases = [
+            (T * H, H, (row, D, row, D), packed),
+            (n, 1, (D, D, D, D), packed),
+            (last, 1, (D, D, D, D), packed),
+            (loader.PACKED_ROWS, 1, (D, D, D, D), fwd),
+            (2**31 - 1, 1, (D, D, D, D), fwd),
+            (n, n, (0, D, 0, D), fwd),
+            (T * H, H, (0, D, 0, D), fwd),
+            (T * H, H, (row, D, 2 * row + 16, D), fwd),
+            (T * H, H, (2 * row + 16, D, row, D), fwd),
+            (T * H, H, (D, T * D, D, T * D), fwd),
+            (T * H, H, (row, D, D, T * D), fwd),
+        ]
+        if tiny_rows:
+            tiny = loader.ROUTES[arch]["fwd_tiny"]
+            cases += [
+                (H, H, (0, D, 0, D), tiny),
+                (tiny_rows, 1, (D, D, D, D), tiny),
+                (tiny_rows, tiny_rows, (0, D, 0, D), tiny),
+                (2 * H, H, (row, D, row, D), tiny),
+                (2 * H, H, (0, D, 0, D), fwd),
+                (2 * H, H, (row, D, 2 * row + 16, D), fwd),
+                (2 * H, H, (D, 2 * D, D, 2 * D), fwd),
+            ]
+            # the gap's rows (lo, hi] run the routes without the tiny forward
+            # (packed rows the forward of packed rows, one token fwd), and
+            # its edges lo and hi + 1 the tiny forward
+            lo, hi = loader.FWD_TINY_GAP_ROWS[arch]
+            if hi > lo:
+                for n in (lo + 1, hi):
+                    cases += [(n, 1, (D, D, D, D), packed), (n, n, (0, D, 0, D), fwd)]
+                for n in (lo, hi + 1):
+                    if 1 <= n <= tiny_rows:
+                        cases += [
+                            (n, 1, (D, D, D, D), tiny),
+                            (n, n, (0, D, 0, D), tiny),
+                        ]
+        for rows, heads, strides, want in cases:
+            got = loader.forward_module(arch, rows, heads, sms, *strides)
+            assert got == want, (arch, rows, heads, strides)
+
+
+# Shapes of the tiny forward's bit tests, as ``TxH`` (contiguous) or rows
+# around its cut on this device (``tiny:<edge>``, flat): one token of 1, 16,
+# 48 and 128 heads, packed rows of a few tokens with partial last blocks of
+# 2, 4, 8 and 16 rows (all of them within the tiny forward's rows on every
+# product at any cut), and the cut's edges.
+TINY_SHAPES = (
+    "1x1",
+    "1x16",
+    "1x48",
+    "1x128",
+    "3x5",
+    "17x7",
+    "2x64",
+    "3x48",
+    "33x1",
+    "tiny:cut-1",
+    "tiny:cut",
+    "tiny:cut+1",
+)
+# The data kinds and epsilons of the tiny forward's bit tests: every
+# ``ROUTE_DATA`` kind at ``EPS``; rows of zero ``x`` with an epsilon of 0
+# and a subnormal one; near-zero rows with the subnormal one; and 1e-3.
+TINY_DATA = (
+    *((data, EPS) for data in ROUTE_DATA),
+    ("zero_rows", 0.0),
+    ("zero_rows", 2.0**-140),
+    ("near_zero", 2.0**-140),
+    ("normal", 1e-3),
+)
+
+
+def _fwd_only(arch, rows, heads, sm_count, *strides):
+    """``forward_module`` patched to ``fwd`` (``module_for_rows``)."""
+    return loader.module_for_rows(arch, "fwd", rows, sm_count)
+
+
+@pytest.mark.parametrize(
+    "data,eps", TINY_DATA, ids=[f"{data}-{eps:g}" for data, eps in TINY_DATA]
+)
+@pytest.mark.parametrize("shape", TINY_SHAPES)
+def test_tiny_forward_gives_the_bits_of_the_forwards_it_replaces(
+    shape, data, eps, launches, monkeypatch
+):
+    """On an architecture that routes the tiny forward: ``REPEATS`` forwards
+    of ``TINY_SHAPES`` with ``TINY_DATA`` run the module ``_forward_launch``
+    names (the tiny forward up to its rows, a single token too; past them the
+    forward of packed rows where routed, else ``fwd``) and give the bits of
+    the forward of the routes without the tiny forward (``_FWD_PLANS``
+    patched without it: ``fwd_packed`` where routed, a single token
+    ``fwd``) and of the ``fwd`` program (``forward_module`` patched to
+    ``fwd``) on the same inputs, finite or not."""
+    arch, sms, _ = _tiny_route()
+    x, z, w, tokens = _route_inputs(shape, data)
+    rows = x.numel() // D
+    layout = "packed" if tokens > 1 else "one_token"
+    launches.clear()
+    got = [forward(x, z, w, eps) for _ in range(REPEATS)]
+    assert launches == [_forward_launch(arch, rows, sms, layout)] * REPEATS, launches
+    monkeypatch.setattr(loader, "_FWD_PLANS", _plans_without_tiny())
+    launches.clear()
+    got.append(forward(x, z, w, eps))
+    name = _forward_launch(arch, rows, sms, layout, tiny=False)
+    assert launches == [name], launches
+    monkeypatch.setattr(loader, "forward_module", _fwd_only)
+    launches.clear()
+    want = forward(x, z, w, eps)
+    assert launches == [loader.ROUTES[arch]["fwd"]], launches
+    for i, y in enumerate(got):
+        assert_same_bits(y, want, f"{shape} {data} eps={eps:g} call {i}")
+
+
+# Layouts of 3 tokens and of one token of 48 heads beside the tiny forward:
+# ``(layout, T, runs the tiny forward)``.  Contiguous, flat and misaligned
+# rows (copied once) are packed; a gate sliced from a projection, head-major
+# rows and a token-stride-0 broadcast are not, but for one token, whose head
+# stride is 128 in every one of them.
+TINY_LAYOUTS = (
+    ("contiguous", 3, True),
+    ("flat", 3, True),
+    ("misaligned", 3, True),
+    ("projection", 3, False),
+    ("head_major", 3, False),
+    ("broadcast", 3, False),
+    ("contiguous", 1, True),
+    ("projection", 1, True),
+    ("head_major", 1, True),
+    ("broadcast", 1, True),
+)
+
+
+@pytest.mark.parametrize(
+    "layout,T,tiny",
+    TINY_LAYOUTS,
+    ids=[f"{layout}-{T}" for layout, T, _ in TINY_LAYOUTS],
+)
+def test_tiny_forward_follows_the_layout(layout, T, tiny, launches, monkeypatch):
+    """``TINY_LAYOUTS`` within the tiny forward's rows: the packed ones run it,
+    the others ``fwd``, and each gives the bits of the ``fwd`` program on its
+    rows as contiguous tensors (``forward_module`` patched to ``fwd``)."""
+    arch, sms, name = _tiny_route()
+    H = 48
+    if not _in_tiny_band(arch, T * H, sms):
+        pytest.skip(f"{T}x{H} is outside the tiny forward's rows on {sms} SMs")
     if layout == "broadcast":
         x, z, w, _ = make(1, H, seed=43)
         x, z = x.expand(T, H, D), z.expand(T, H, D)
@@ -741,39 +1024,158 @@ def test_forward_route_follows_the_layout(layout, T, route, launches):
         x, z, w, _ = make(T, H, layout=layout, seed=43)
     launches.clear()
     y = forward(x, z, w, EPS)
-    assert launches == [loader.ROUTES[arch][route]], (layout, launches)
+    want_name = name if tiny else loader.ROUTES[arch]["fwd"]
+    assert launches == [want_name], (layout, T, launches)
     xc, zc = (t.reshape(T, H, D).contiguous() for t in (x, z))
+    monkeypatch.setattr(loader, "forward_module", _fwd_only)
     assert_same_bits(y.reshape(T, H, D), forward(xc, zc, w, EPS), layout)
 
 
-def test_forward_module_runs_packed_rows_only():
-    """``forward_module`` (host only): an architecture's ``fwd_packed`` program
-    for head strides of 128 and token strides of ``H * 128`` on both ``x`` and
-    ``z`` and fewer than ``PACKED_ROWS`` rows; ``fwd`` for any other strides, a
-    single token (token stride 0), a token-stride-0 broadcast and from
-    ``PACKED_ROWS`` rows, and always on an architecture without one."""
-    assert loader.PACKED_ROLES == ("fwd_packed",)
-    assert loader.PACKED_ROWS == 2**31 // D
-    H, last = 48, loader.PACKED_ROWS - 1
-    row = H * D
-    for arch in loader.ARCHES:
-        fwd = loader.ROUTES[arch]["fwd"]
-        packed = loader.ROUTES[arch].get("fwd_packed", fwd)
-        for rows, heads, strides, want in (
-            (65 * H, H, (row, D, row, D), packed),
-            (65, 1, (D, D, D, D), packed),
-            (last, 1, (D, D, D, D), packed),
-            (loader.PACKED_ROWS, 1, (D, D, D, D), fwd),
-            (2**31 - 1, 1, (D, D, D, D), fwd),
-            (H, H, (0, D, 0, D), fwd),
-            (65 * H, H, (0, D, 0, D), fwd),
-            (65 * H, H, (row, D, 2 * row + 16, D), fwd),
-            (65 * H, H, (2 * row + 16, D, row, D), fwd),
-            (65 * H, H, (D, 65 * D, D, 65 * D), fwd),
-            (65 * H, H, (row, D, D, 65 * D), fwd),
-        ):
-            got = loader.forward_module(arch, rows, heads, 148, *strides)
-            assert got == want, (arch, rows, heads, strides)
+def _tiny_shapes(arch, sms, shapes):
+    """The ``(T, H)`` of ``shapes`` within the tiny forward's rows
+    (``_in_tiny_band``); skips where none is."""
+    inside = [(T, H) for T, H in shapes if _in_tiny_band(arch, T * H, sms)]
+    if not inside:
+        pytest.skip(f"no shape within the tiny forward's rows on {sms} SMs")
+    return inside
+
+
+def test_tiny_forward_on_a_side_stream_into_outputs_of_any_layout(launches):
+    """At 3 x 48 rows and one token of 48 heads, on a side stream with
+    ``torch.cuda.set_sync_debug_mode("error")``: the tiny forward into a new
+    tensor, into a contiguous ``out`` (written in place) and into a
+    head-major ``out`` of rows padded to ``2 * D`` (not contiguous at one
+    token either, so a copy after the launch) runs without a host sync and
+    gives the bits of the same call on the current stream."""
+    arch, sms, name = _tiny_route()
+    for T, H in _tiny_shapes(arch, sms, ((3, 48), (1, 48))):
+        x, z, w, _ = make(T, H, seed=45)
+        want = forward(x, z, w, EPS)
+        out = torch.empty_like(x)
+        head_major = torch.empty(H, T, 2 * D, dtype=x.dtype, device=x.device)
+        head_major = head_major[..., :D].permute(1, 0, 2)
+        assert not head_major.is_contiguous(), (T, H)
+        stream = torch.cuda.Stream()
+        stream.wait_stream(torch.cuda.current_stream())
+        launches.clear()
+        torch.cuda.set_sync_debug_mode("error")
+        try:
+            with torch.cuda.stream(stream):
+                y = forward(x, z, w, EPS)
+                a = forward(x, z, w, EPS, out=out)
+                b = forward(x, z, w, EPS, out=head_major)
+        finally:
+            torch.cuda.set_sync_debug_mode("default")
+        torch.cuda.current_stream().wait_stream(stream)
+        assert launches == [name] * 3, launches
+        assert a is out and b is head_major
+        for got, what in ((y, "y"), (out, "out"), (head_major, "head-major out")):
+            assert_same_bits(got.contiguous(), want, f"{T}x{H} {what}")
+
+
+def test_tiny_forward_cuda_graph_capture(launches):
+    """The tiny forward of 3 x 48 rows into a contiguous and into a
+    head-major ``out``, captured once and replayed three times on new inputs
+    copied into the captured tensors: each replay gives the bits of eager
+    calls on those inputs."""
+    arch, sms, name = _tiny_route()
+    ((T, H),) = _tiny_shapes(arch, sms, ((3, 48),))
+    x, z, w, _ = make(T, H, seed=46)
+    xs, zs = x.clone(), z.clone()
+    y = torch.empty_like(x)
+    head_major = torch.empty(H, T, D, dtype=x.dtype, device=x.device)
+    head_major = head_major.permute(1, 0, 2)
+
+    def step():
+        forward(xs, zs, w, EPS, out=y)
+        forward(xs, zs, w, EPS, out=head_major)
+
+    side = torch.cuda.Stream()
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        step()  # loads the module before the capture
+    torch.cuda.current_stream().wait_stream(side)
+    torch.cuda.synchronize()
+    graph = torch.cuda.CUDAGraph()
+    launches.clear()
+    with torch.cuda.graph(graph):
+        step()
+    assert launches == [name, name], launches
+    for k in range(3):
+        xn, zn, _, _ = make(T, H, seed=47 + k)
+        xs.copy_(xn)
+        zs.copy_(zn)
+        y.zero_()
+        head_major.zero_()
+        graph.replay()
+        torch.cuda.synchronize()
+        want = forward(xn, zn, w, EPS)
+        assert_same_bits(y, want, f"replay {k} y")
+        assert_same_bits(head_major.contiguous(), want, f"replay {k} head-major y")
+
+
+@pytest.mark.parametrize("T,H", [(1, 48), (3, 48)])
+def test_tiny_forward_under_autograd_and_checkpoint(T, H, launches):
+    """Within the tiny forward's rows, an autograd step gives the bits of the
+    functional calls' ``y``, ``dx``, ``dz`` and ``dw``, and so does a
+    non-reentrant checkpointed step; the autograd step launches the tiny
+    forward and the functional backward's module, the checkpointed one the
+    tiny forward twice (the forward and its recomputation) and that module."""
+    arch, sms, name = _tiny_route()
+    _tiny_shapes(arch, sms, ((T, H),))
+    x, z, w, dy = make(T, H, seed=48)
+    launches.clear()
+    y = forward(x, z, w, EPS)
+    dx, dz, dw = backward(dy, x, z, w, EPS)
+    assert launches[0] == name and len(launches) == 2, launches
+    bwd = launches[1]
+    for checkpoint in (False, True):
+        launches.clear()
+        got = _step(x, z, w, dy, checkpoint=checkpoint)
+        want = [name] * (2 if checkpoint else 1) + [bwd]
+        assert launches == want, (checkpoint, launches)
+        names = ("y", "dx", "dz", "dw")
+        for a, b, what in zip(got, (y, dx, dz, dw), names, strict=True):
+            assert_same_bits(a, b, f"checkpoint={checkpoint} {what}")
+
+
+@pytest.mark.parametrize("warn_only", [False, True], ids=["strict", "warn_only"])
+def test_tiny_forward_neither_raises_nor_warns_under_deterministic_algorithms(
+    warn_only, launches
+):
+    """Under ``torch.use_deterministic_algorithms(True)`` (strict and
+    ``warn_only``) with warnings as errors, within the tiny forward's rows
+    (3 x 48 and one token of 48 heads): the forward, an autograd step and a
+    non-reentrant checkpointed step raise nothing, warn nothing and give the
+    bits of the same calls with the setting off; every forward launches the
+    tiny forward."""
+    arch, sms, name = _tiny_route()
+    shapes = _tiny_shapes(arch, sms, ((3, 48), (1, 48)))
+    cases = [make(T, H, seed=49) for T, H in shapes]
+
+    def run():
+        got = []
+        for x, z, w, dy in cases:
+            got.append(forward(x, z, w, EPS))
+            got += _step(x, z, w, dy)
+            got += _step(x, z, w, dy, checkpoint=True)
+        return got
+
+    want = run()
+    enabled = torch.are_deterministic_algorithms_enabled()
+    was_warn_only = torch.is_deterministic_algorithms_warn_only_enabled()
+    launches.clear()
+    try:
+        torch.use_deterministic_algorithms(True, warn_only=warn_only)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            got = run()
+    finally:
+        torch.use_deterministic_algorithms(enabled, warn_only=was_warn_only)
+    forwards = [n for n in launches if loader.MODULES[n]["role"].startswith("fwd")]
+    assert forwards == [name] * (4 * len(cases)), launches
+    for i, (a, b) in enumerate(zip(got, want, strict=True)):
+        assert_same_bits(a, b, f"warn_only={warn_only} output {i}")
 
 
 # The rows per SM from which each architecture's backward runs the long module
@@ -1047,6 +1449,38 @@ def test_grids_of_other_sm_counts(sm_count, record_property):
             )
 
 
+@pytest.mark.parametrize("sm_count", OTHER_SM_COUNTS)
+def test_tiny_forward_on_other_sm_counts(sm_count, launches):
+    """With the SM count patched to ``sm_count`` (``device_sm_count`` in the
+    package and the registry: the host's routing and grids), forwards of flat
+    rows a row short of the tiny forward's rows for ``sm_count``
+    (``FWD_TINY_ROWS_PER_SM * sm_count``), at them and a row past them, and
+    of 3 x 48 rows and one token of 48 heads, run the module
+    ``_forward_launch`` names for ``sm_count`` and give the bits of the
+    ``fwd`` program on this device (``forward_module`` patched to ``fwd``,
+    the device's SM count)."""
+    arch, _, _ = _tiny_route()
+    last = _tiny_rows(arch, sm_count)
+    cases = [(rows, 1, "flat") for rows in (last - 1, last, last + 1) if rows >= 1]
+    cases += [(3, 48, "contiguous"), (1, 48, "contiguous")]
+    for T, H, layout in cases:
+        x, z, w, _ = make(T, H, layout=layout, seed=44)
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(loader, "forward_module", _fwd_only)
+            launches.clear()
+            want = forward(x, z, w, EPS)
+            assert launches == [loader.ROUTES[arch]["fwd"]], launches
+        with pytest.MonkeyPatch.context() as patch:
+            for module in (pkg, loader):
+                patch.setattr(module, "device_sm_count", lambda index: sm_count)
+            launches.clear()
+            got = forward(x, z, w, EPS)
+        kind = "packed" if T > 1 else "one_token"
+        want_name = _forward_launch(arch, T * H, sm_count, kind)
+        assert launches == [want_name], (T, H, sm_count, launches)
+        assert_same_bits(got, want, f"{T}x{H} on {sm_count} SMs")
+
+
 def test_weight_gradient_accumulation(record_property):
     """Two backwards of two microbatches accumulated into one FP32 weight
     gradient that starts at 0.25 (and into one BF16 weight gradient that
@@ -1197,8 +1631,10 @@ def test_steps_neither_raise_nor_warn_under_deterministic_algorithms(warn_only):
 @pytest.mark.parametrize("T,H", [(1, 1), (17, 7), (1031, 48), (32737, 48)])
 def test_each_call_launches_one_module_of_its_role(T, H, launches):
     """One module a call: the forward of contiguous inputs runs
-    ``forward_module`` of their strides (``ROUTES[arch]["fwd_packed"]`` where
-    routed, except for a single token; else ``ROUTES[arch]["fwd"]``); a
+    ``forward_module`` of their strides (``_forward_launch``: the tiny forward
+    up to its rows where routed, a single token too; else
+    ``ROUTES[arch]["fwd_packed"]`` where routed, except for a single token;
+    else ``ROUTES[arch]["fwd"]``); a
     backward runs one kernel, ``backward_module`` of its role and strides:
     ``bwd_bf16`` for a BF16 weight gradient, ``bwd_f32`` for an FP32 one,
     accumulating or not, each its long module (``LONG_ROLES``) where these
@@ -1215,8 +1651,8 @@ def test_each_call_launches_one_module_of_its_role(T, H, launches):
         assert loader.module_for_rows(arch, role, T * H, sms) == routes[role]
     tok = H * D if T > 1 else 0
     forward_name = loader.forward_module(arch, T * H, H, sms, tok, D, tok, D)
-    packed = routes.get("fwd_packed", routes["fwd"])
-    assert forward_name == (packed if T > 1 else routes["fwd"])
+    layout = "packed" if T > 1 else "one_token"
+    assert forward_name == _forward_launch(arch, T * H, sms, layout)
     long = T > 1 and LONG_MIN_ROWS_PER_SM[arch] * sms <= T * H
     clusters = _clusters()
     names = {"fwd": forward_name}
@@ -1404,11 +1840,13 @@ def _routes_without(arch, *roles):
 
 def _patch_routes(patch, arch, table):
     """``ROUTES[arch]`` set to ``table`` for the ``patch`` context, with the
-    plans :func:`nodw_module` reads for ``arch`` (``_NODW_PLANS``, read once
-    at import) read again from it."""
+    plans :func:`nodw_module` and :func:`forward_module` read for ``arch``
+    (``_NODW_PLANS`` and ``_FWD_PLANS``, read once at import) read again
+    from it."""
     patch.setitem(loader.ROUTES, arch, table)
     plans = {name: loader._nodw_plan(arch, name) for name in loader.MODULES}
     patch.setitem(loader._NODW_PLANS, arch, plans)
+    patch.setitem(loader._FWD_PLANS, arch, loader._fwd_plan(arch))
 
 
 def _strided_tokens(arch, sms, role, H=48, T=257):
@@ -3160,7 +3598,11 @@ def test_registry_records_reference_the_build_manifest():
     (``LONG_ROLES``) and the programs of one CTA and of one cluster of each
     backward role (``CLUSTER_ROLES``), an architecture may also route a
     forward of packed rows
-    (``PACKED_ROLES``) and programs of a backward without the weight gradient
+    (``PACKED_ROLES``), the tiny forward (``TINY_ROLES``; exactly where
+    ``FWD_TINY_ROWS_PER_SM``, one int of rows per SM for each architecture,
+    has a cut above 0; ``FWD_TINY_GAP_ROWS``, rows ``(lo, hi]`` for each
+    architecture, ``(0, 0)`` without the tiny forward) and programs of a
+    backward without the weight gradient
     (``NODW_ROLES``; ``NODW_STRIDED_ROWS_PER_SM`` cuts the rows between the
     strided and the claimed one exactly where both are routed; the strided
     program's 128-thread builds only where the strided one is, the build of
@@ -3196,7 +3638,23 @@ def test_registry_records_reference_the_build_manifest():
         "claimed_row_blocks",
         "strided_row_blocks",
         "cluster",
+        "row_blocks",
     )
+    assert loader.TINY_ROLES == ("fwd_tiny",)
+    assert set(loader.FWD_TINY_ROWS_PER_SM) == set(loader.ARCHES)
+    for arch, per_sm in loader.FWD_TINY_ROWS_PER_SM.items():
+        assert isinstance(per_sm, int) and per_sm >= 0, arch
+        assert ("fwd_tiny" in loader.ROUTES[arch]) == (per_sm > 0), arch
+    # the gap of each architecture: ``(lo, hi]`` rows, two ints with
+    # ``0 <= lo <= hi``, ``(0, 0)`` where it keeps none or routes no tiny
+    # forward
+    assert set(loader.FWD_TINY_GAP_ROWS) == set(loader.ARCHES)
+    for arch, gap in loader.FWD_TINY_GAP_ROWS.items():
+        assert isinstance(gap, tuple) and len(gap) == 2, arch
+        lo, hi = gap
+        assert isinstance(lo, int) and isinstance(hi, int) and 0 <= lo <= hi, arch
+        if loader.FWD_TINY_ROWS_PER_SM[arch] == 0:
+            assert gap == (0, 0), arch
     assert set(loader.NODW_STRIDED_ROWS_PER_SM) == set(loader.ARCHES)
     for arch, cuts in loader.NODW_STRIDED_ROWS_PER_SM.items():
         both = {NODW_STRIDED, NODW_CLAIMED} <= set(loader.ROUTES[arch])
@@ -3234,6 +3692,7 @@ def test_registry_records_reference_the_build_manifest():
             *loader.ROLES,
             *loader.LONG_ROLES,
             *loader.PACKED_ROLES,
+            *loader.TINY_ROLES,
             *loader.NODW_ROLES,
             *loader.CLUSTER_ROLES,
         }
@@ -3272,6 +3731,8 @@ FORWARD_ARGUMENTS = {
     "z_head",
     "eps",
 }
+# The tiny forward reads packed rows only: no head count and no strides.
+TINY_ARGUMENTS = {"x", "z", "w", "y", "rows", "eps"}
 BACKWARD_ARGUMENTS = {
     "dy",
     "x",
@@ -3306,7 +3767,12 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
     ``persistent_row_blocks`` rule of positive ``ctas_per_sm``,
     ``max_blocks_per_cta``, ``persistent_from_rows_per_sm`` and
     ``rows_per_block``; an architecture's two forwards launch alike and take
-    the same arguments.
+    the same arguments.  The tiny forward (``TINY_ROLES``): no dynamic shared
+    memory, no workspace, a ``row_blocks`` rule of a positive
+    ``rows_per_cta`` that splits its CTA's threads into rows of 8, 16, 32 or
+    64 lanes, the arguments ``TINY_ARGUMENTS``, and the entry, cluster and
+    launch flags of its architecture's ``fwd`` module, on some or all of
+    that module's architectures.
     Each backward: 256 threads and the ``claimed_row_blocks`` rule of 4 CTAs
     per SM over 16-row blocks, and a workspace of 2 slots of 9 limbs, the same
     for both weight-gradient dtypes; a long module's rule adds its
@@ -3353,6 +3819,18 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             assert launch["dynamic_smem_bytes"] == 0, name
             assert "workspace" not in record, name
             assert set(logical.values()) == FORWARD_ARGUMENTS, name
+        elif record["role"] in loader.TINY_ROLES:
+            assert set(rule) == {"kind", "rows_per_cta"}, name
+            assert rule["kind"] == "row_blocks", name
+            per_cta = rule["rows_per_cta"]
+            assert isinstance(per_cta, int) and per_cta >= 1, name
+            threads = launch["block"][0]
+            assert tuple(launch["block"]) == (threads, 1, 1), name
+            assert threads % per_cta == 0, name
+            assert threads // per_cta in (8, 16, 32, 64), name
+            assert launch["dynamic_smem_bytes"] == 0, name
+            assert "workspace" not in record, name
+            assert set(logical.values()) == TINY_ARGUMENTS, name
         elif record["role"] in NODW_STRIDED_GRID_RULES:
             assert rule == NODW_STRIDED_GRID_RULES[record["role"]], name
             threads = NODW_STRIDED_THREADS[record["role"]]
@@ -3402,6 +3880,15 @@ def test_records_launch_alone_and_take_the_hosts_arguments():
             )
             for key in ("grid_rule", "launch", "logical", "arg_plan", "ffi_entry"):
                 assert fwd[key] == packed[key], (arch, key)
+        if "fwd_tiny" in loader.ROUTES[arch]:
+            fwd, tiny = (
+                loader.MODULES[loader.route_module(arch, role)]
+                for role in ("fwd", "fwd_tiny")
+            )
+            assert tiny["ffi_entry"] == fwd["ffi_entry"], arch
+            assert set(tiny["arches"]) <= set(fwd["arches"]), arch
+            for key in ("cluster", "cooperative", "use_pdl"):
+                assert tiny["launch"][key] == fwd["launch"][key], (arch, key)
         routes = loader.ROUTES[arch]
         for role, twin_role in (
             (NODW_CLAIMED, "bwd_bf16"),
@@ -3482,8 +3969,8 @@ def test_launch_grid_takes_rows_and_the_sm_count_only():
         "rows",
         "sm_count",
     ]
-    rule = {"ctas_per_sm": 1, "kind": "row_blocks", "rows_per_block": 16}
-    with pytest.raises(ValueError, match="row_blocks"):
+    rule = {"ctas_per_sm": 1, "kind": "row_claims", "rows_per_block": 16}
+    with pytest.raises(ValueError, match="row_claims"):
         loader.launch_grid({"grid_rule": rule}, rows=1, sm_count=1)
 
 
@@ -3534,6 +4021,107 @@ def test_forward_grid_is_one_cta_a_block_then_whole_waves(sm_count):
             if rows >= 1:
                 got = loader.launch_grid(record, rows=rows, sm_count=sm_count)
                 assert got == (ctas, 1, 1), (arch, rows, got)
+
+
+# Row counts of the tiny forward's host tests below its cut: a row, a few
+# rows about a block of 8 and 16 rows, and the edges of sm_107a's gap
+# (``FWD_TINY_GAP_ROWS``).
+TINY_HOST_ROWS = (1, 7, 8, 9, 15, 16, 17, 32, 33)
+
+
+@pytest.mark.parametrize("sm_count", GRID_SM_COUNTS)
+def test_forward_module_runs_the_tiny_forward_up_to_its_cut(sm_count):
+    """``forward_module`` (host only), on every architecture that routes the
+    tiny forward, at ``TINY_HOST_ROWS``, a row short of its rows
+    (``FWD_TINY_ROWS_PER_SM * SMs``) and at them: within ``_in_tiny_band``
+    the tiny forward for packed rows (one head of token stride 128, and 48
+    heads of token stride 48 * 128) and for one token of head stride 128
+    (token stride 0, or one of the two inputs at ``H * 128``); in the gap
+    (``FWD_TINY_GAP_ROWS``) and a row past them the module of the routes
+    without it (``_forward_launch`` with ``tiny=False``).  At every row count
+    ``fwd`` for 2 tokens or more of a gate or an ``x`` sliced from a
+    projection, head-major rows, a token-stride-0 broadcast of both inputs or
+    of one, heads of stride 256 and mixed strides, and for one token of head
+    stride 256.  Its record names the role on the architecture, takes the
+    arguments ``TINY_ARGUMENTS`` and launches ``ceil(rows / rows_per_cta)``
+    CTAs at every row count."""
+    H = 48
+    row = H * D
+    for arch in loader.ARCHES:
+        last = _tiny_rows(arch, sm_count)
+        if last == 0:
+            assert "fwd_tiny" not in loader.ROUTES[arch], arch
+            continue
+        routes = loader.ROUTES[arch]
+        tiny = routes["fwd_tiny"]
+        record = loader.MODULES[tiny]
+        assert record["role"] == "fwd_tiny" and arch in record["arches"], arch
+        assert set(record["logical"].values()) == TINY_ARGUMENTS, arch
+        per_cta = record["grid_rule"]["rows_per_cta"]
+        rows_list = sorted({r for r in (*TINY_HOST_ROWS, last - 1, last) if r >= 1})
+        for rows in (*rows_list, last + 1):
+            inside = _in_tiny_band(arch, rows, sm_count)
+            packed = tiny
+            if not inside:
+                packed = _forward_launch(arch, rows, sm_count, "packed", False)
+            one = tiny if inside else routes["fwd"]
+            for heads, strides, want in (
+                (1, (D, D, D, D), packed),
+                (rows, (0, D, 0, D), one),
+                (rows, (0, D, rows * D, D), one),
+                (rows, (rows * D, D, 0, D), one),
+                (rows, (0, 2 * D, 0, 2 * D), routes["fwd"]),
+                (rows, (0, D, 0, 2 * D), routes["fwd"]),
+            ):
+                got = loader.forward_module(arch, rows, heads, sm_count, *strides)
+                assert got == want, (arch, sm_count, rows, heads, strides)
+            if rows % H == 0:
+                got = loader.forward_module(arch, rows, H, sm_count, row, D, row, D)
+                assert got == packed, (arch, sm_count, rows, H)
+            grid = loader.launch_grid(record, rows=rows, sm_count=sm_count)
+            assert grid == (-(-rows // per_cta), 1, 1), (arch, rows, grid)
+        for T in sorted({2, 3, max(2, last // H), max(2, last // H + 1)}):
+            rows = T * H
+            want = (
+                tiny
+                if _in_tiny_band(arch, rows, sm_count)
+                else _forward_launch(arch, rows, sm_count, "packed", False)
+            )
+            got = loader.forward_module(arch, rows, H, sm_count, row, D, row, D)
+            assert got == want, (arch, sm_count, T, "packed")
+            for name, strides in (
+                ("projection", (row, D, 2 * row + 16, D)),
+                ("x_projection", (2 * row + 16, D, row, D)),
+                ("head_major", (D, T * D, D, T * D)),
+                ("broadcast", (0, D, 0, D)),
+                ("x_broadcast", (0, D, row, D)),
+                ("z_broadcast", (row, D, 0, D)),
+                ("wide_heads", (2 * row, 2 * D, 2 * row, 2 * D)),
+                ("mixed", (row, D, D, T * D)),
+            ):
+                got = loader.forward_module(arch, rows, H, sm_count, *strides)
+                assert got == routes["fwd"], (arch, sm_count, T, name, got)
+
+
+def test_the_tiny_plans_are_those_of_the_routes():
+    # forward_module reads the plans built once at import (_FWD_PLANS): of
+    # every architecture, the tiny forward and its cut where it routes one
+    # with a cut above 0 (else None and 0), the forward of packed rows where
+    # routed (else None), the fwd module where no long fwd module is routed
+    # (else None) and the gap's rows (lo, hi] where it routes the tiny
+    # forward (else 0, 0), so a patch of the cut or gap table alone routes
+    # nothing
+    want = {}
+    for arch, routes in loader.ROUTES.items():
+        cut = loader.FWD_TINY_ROWS_PER_SM.get(arch, 0)
+        base = None if "fwd" + loader.LONG in routes else routes.get("fwd")
+        if "fwd_tiny" in routes and cut > 0:
+            lo, hi = loader.FWD_TINY_GAP_ROWS[arch]
+            tiny, packed = routes["fwd_tiny"], routes.get("fwd_packed")
+            want[arch] = (tiny, cut, packed, base, lo, hi)
+        else:
+            want[arch] = (None, 0, routes.get("fwd_packed"), base, 0, 0)
+    assert loader._FWD_PLANS == want
 
 
 @pytest.mark.parametrize("sm_count", GRID_SM_COUNTS)

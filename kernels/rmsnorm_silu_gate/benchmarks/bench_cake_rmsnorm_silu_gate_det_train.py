@@ -43,8 +43,11 @@ against the Cake outputs (largest absolute difference of ``y``, ``dx``, ``dz``,
 ``dw``).
 
 The Cake rows name the forward module the call runs (``module``: its role and
-program, chosen from the architecture and the layout whatever the row count:
-contiguous inputs run the packed-rows forward where one is routed).
+program, chosen from the architecture, the layout and the rows: contiguous
+inputs, and one token, run the tiny forward up to its cut of rows per SM
+where one is routed (on SM107 not from 17 to 32 rows), and elsewhere
+contiguous inputs of two tokens or more run the packed-rows forward where one
+is routed).
 
 ``--side-stream`` adds, for the Cake kernels, the event-timed median of seven
 forward and seven backward calls beside a one-thread kernel resident on

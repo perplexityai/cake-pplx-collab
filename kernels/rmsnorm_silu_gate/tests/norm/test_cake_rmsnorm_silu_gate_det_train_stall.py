@@ -16,9 +16,10 @@ limitations under the License.
 Stall regression of the Cake SiLU-gated RMSNorm training forward and backward
 beside a kernel resident on another stream (the concurrent-launch contract).
 
-Every forward module (one per architecture, and one for packed rows where
-routed) has the same grid rule.  Below ``persistent_from_rows_per_sm`` rows
-per SM it launches one CTA per row block; from there the fewest whole waves of
+Every forward module but the tiny one (one per architecture, and one for
+packed rows where routed) has the same grid rule.  Below
+``persistent_from_rows_per_sm`` rows per SM it launches one CTA per row
+block; from there the fewest whole waves of
 ``ctas_per_sm`` CTAs per SM whose CTAs each walk at most
 ``max_blocks_per_cta`` row blocks (its record's grid rule).  The backward is
 one kernel of ``min(row blocks, ctas_per_sm * SMs)`` CTAs; past one block per
@@ -67,8 +68,17 @@ block, "below"), the fewest whole waves of ``max_blocks_per_cta`` row blocks
 at or above it ("first") and four times that ("last").  In these tests every
 side CTA records its SM and its start time, a run counts only when the side
 kernel held the intended SMs before the call started, and every output is
-bitwise that of the first call alone.  The thresholds are the
-non-deterministic suite's.
+bitwise that of the first call alone.  The tiny forward of packed rows
+(``fwd_tiny``, where routed: one CTA a block of its rule's ``rows_per_cta``
+rows, no loop) at one row per SM, half its cut and its cut
+(``FWD_TINY_ROWS_PER_SM``) keeps its speed beside the one-thread kernel,
+starts beside the all-SM kernel with the max-shared carveout, and beside a
+side kernel that holds ``k`` SMs (the item 1 side kernels and 16 CTAs of
+1024 threads with the max-shared carveout) takes at most ``N / (N - k)``
+times its time alone, plus the share of one CTA's blocks (one block over the
+blocks a CTA slot runs, the slots counted at the most CTAs of its threads an
+SM holds, and at most 1, since a call is never shorter than one block), plus
+``PROPORTIONAL_SLACK``.  The thresholds are the non-deterministic suite's.
 """
 
 from __future__ import annotations
@@ -642,4 +652,185 @@ def test_forward_slows_in_proportion_to_the_sms_held(
         f"on {ctas} SMs {busy_ms:.4f} ms: ratio {ratio:.3f} > {bound:.3f} "
         f"(proportional {ideal:.3f} + one CTA's blocks {cta_share:.4f} + "
         f"{PROPORTIONAL_SLACK})"
+    )
+
+
+# The tiny forward of packed rows: its probes, as rows per SM of this
+# device's cut (``FWD_TINY_ROWS_PER_SM``): one row per SM, half the cut and
+# the cut (the most rows it runs); and the side kernels beside it, the
+# item 1 side kernels and 16 CTAs of 1024 threads with the max-shared
+# carveout.
+TINY_EDGES = ("one", "half", "cut")
+TINY_SIDES = tuple((ctas, threads, None) for ctas, threads in PROPORTIONAL_SIDES) + (
+    (16, 1024, CARVEOUT_MAX_SHARED),
+)
+
+
+@functools.cache
+def _sm_limits(device_index: int) -> tuple[int, int]:
+    """``(CTAs, threads)``: the most of each one SM of device
+    ``device_index`` holds (its attributes, read once)."""
+    from cuda.bindings import driver
+
+    torch.empty(1, device=torch.device("cuda", device_index))  # primary context
+    attribute = driver.CUdevice_attribute
+    return (
+        int(
+            _checked(
+                driver.cuDeviceGetAttribute(
+                    attribute.CU_DEVICE_ATTRIBUTE_MAX_BLOCKS_PER_MULTIPROCESSOR,
+                    device_index,
+                )
+            )
+        ),
+        int(
+            _checked(
+                driver.cuDeviceGetAttribute(
+                    attribute.CU_DEVICE_ATTRIBUTE_MAX_THREADS_PER_MULTIPROCESSOR,
+                    device_index,
+                )
+            )
+        ),
+    )
+
+
+def _tiny_forward(edge: str) -> tuple[int, str, float]:
+    """``(T, module, cta_share)``: the most tokens ``T`` of ``H`` heads (at
+    least one) within the rows per SM of ``edge`` on this device, the tiny
+    forward that runs them (``forward_module`` of contiguous inputs), and the
+    share of one CTA's blocks in the call alone: one block a CTA over the
+    blocks a CTA slot runs, the call's CTAs over the slots, of which an SM
+    has at most as many as it holds CTAs of the module's threads (its
+    attributes; the share is then at its largest), and at most 1: a call of
+    less than one wave still takes one block's time.  Skips where the device
+    runs no tiny forward."""
+    device_index = torch.cuda.current_device()
+    arch = loader.device_arch(device_index)
+    name = loader.ROUTES[arch].get("fwd_tiny")
+    cut = loader.FWD_TINY_ROWS_PER_SM[arch] if name is not None else 0
+    if cut < 1:
+        pytest.skip(f"{arch} runs no tiny forward")
+    rows_per_sm = {"one": 1, "half": max(1, cut // 2), "cut": cut}[edge]
+    sms = torch.cuda.get_device_properties(device_index).multi_processor_count
+    tokens = max(1, rows_per_sm * sms // H)
+    rows = tokens * H
+    tok = H * D if tokens > 1 else 0
+    assert loader.forward_module(arch, rows, H, sms, tok, D, tok, D) == name, rows
+    record = loader.MODULES[name]
+    threads = int(record["launch"]["block"][0])
+    (ctas, _, _) = loader.launch_grid(record, rows=rows, sm_count=sms)
+    most_ctas, most_threads = _sm_limits(device_index)
+    slots = min(most_ctas, most_threads // threads) * sms
+    return tokens, name, min(1.0, slots / ctas)
+
+
+def _launched(call) -> list[str]:
+    """The modules ``call`` launches, in order."""
+    launched = []
+    run_module = loader.run_module
+
+    def spy(module, values, *, rows, device_index):
+        launched.append(module)
+        return run_module(module, values, rows=rows, device_index=device_index)
+
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(loader, "run_module", spy)
+        call()
+    return launched
+
+
+@pytest.mark.parametrize("edge", TINY_EDGES)
+def test_tiny_forward_keeps_its_speed_beside_a_resident_kernel(edge: str) -> None:
+    tokens, name, _ = _tiny_forward(edge)
+    x, z, w, _dy = _inputs(tokens)
+    y = torch.empty_like(x)
+
+    def call():
+        return (forward(x, z, w, EPS, out=y),)
+
+    assert _launched(call) == [name], (edge, tokens)
+    side = torch.cuda.Stream()
+    for _ in range(WARMUP):
+        _timed(call, side=None)
+    alone, busy = [], []
+    for _ in range(RUNS):
+        alone.append(_timed(call, side=None))
+        busy.append(_timed(call, side=side))
+    alone_ms = statistics.median(t for t, _ in alone)
+    busy_ms = statistics.median(t for t, _ in busy)
+    print(
+        f"STALL stage=forward_tiny edge={edge} tokens={tokens} heads={H} "
+        f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
+        f"ratio={busy_ms / alone_ms:.3f} extra_ms={busy_ms - alone_ms:.4f}"
+    )
+    _check_outputs("forward", tokens, alone, busy)
+    assert _keeps_its_speed(alone_ms, busy_ms), (
+        f"tiny forward tokens={tokens}: {busy_ms:.4f} ms beside a resident "
+        f"kernel vs {alone_ms:.4f} ms alone"
+    )
+
+
+@pytest.mark.parametrize("edge", TINY_EDGES)
+def test_tiny_forward_starts_beside_an_all_sm_kernel_with_the_max_shared_carveout(
+    edge: str,
+) -> None:
+    tokens, name, _ = _tiny_forward(edge)
+    x, z, w, _dy = _inputs(tokens)
+    y = torch.empty_like(x)
+
+    def call():
+        return (forward(x, z, w, EPS, out=y),)
+
+    assert _launched(call) == [name], (edge, tokens)
+    alone_ms, busy_ms, alone, busy = _paired_medians(
+        call, _spin(CARVEOUT_MAX_SHARED), ALL_SM_RUNS
+    )
+    print(
+        f"ALL_SM stage=forward_tiny edge={edge} tokens={tokens} heads={H} "
+        f"carveout=max_shared alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
+        f"extra_ms={busy_ms - alone_ms:.4f}"
+    )
+    _check_outputs("forward", tokens, alone, busy)
+    assert busy_ms - alone_ms <= MAX_ALL_SM_EXTRA_MS, (
+        f"tokens={tokens}: tiny forward alone {alone_ms:.4f} ms, beside an "
+        f"all-SM kernel with the max-shared carveout {busy_ms:.4f} ms (at most "
+        f"{MAX_ALL_SM_EXTRA_MS} ms more)"
+    )
+
+
+@pytest.mark.parametrize(
+    "ctas,threads,carveout",
+    TINY_SIDES,
+    ids=["1x128", "16x640", "32x640", "16x1024-max_shared"],
+)
+@pytest.mark.parametrize("edge", TINY_EDGES)
+def test_tiny_forward_slows_in_proportion_to_the_sms_held(
+    edge: str, ctas: int, threads: int, carveout: int | None
+) -> None:
+    tokens, name, cta_share = _tiny_forward(edge)
+    x, z, w, _dy = _inputs(tokens)
+    y = torch.empty_like(x)
+
+    def call():
+        return (forward(x, z, w, EPS, out=y),)
+
+    assert _launched(call) == [name], (edge, tokens)
+    spin = _spin(carveout, ctas=ctas, threads=threads)
+    alone_ms, busy_ms, alone, busy = _paired_medians(call, spin, PROPORTIONAL_RUNS)
+    ideal = spin.sms / (spin.sms - ctas)
+    bound = ideal + cta_share + PROPORTIONAL_SLACK
+    ratio = busy_ms / alone_ms
+    side = f"{ctas}x{threads}" + ("s" if carveout is not None else "")
+    print(
+        f"HELD stage=forward_tiny edge={edge} tokens={tokens} heads={H} "
+        f"side={side} alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} "
+        f"ratio={ratio:.3f} ideal={ideal:.3f} cta_share={cta_share:.4f} "
+        f"excess={ratio - ideal - cta_share:.4f}"
+    )
+    _check_outputs("forward", tokens, alone, busy)
+    assert ratio <= bound, (
+        f"tokens={tokens} ({edge}): tiny forward alone {alone_ms:.4f} ms, beside "
+        f"{ctas} x {threads} side CTAs ({side}) on {ctas} SMs {busy_ms:.4f} ms: "
+        f"ratio {ratio:.3f} > {bound:.3f} (proportional {ideal:.3f} + one CTA's "
+        f"blocks {cta_share:.4f} + {PROPORTIONAL_SLACK})"
     )
