@@ -1640,8 +1640,10 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
             if (tail_splits > 1) {
                 reg_end_e = tail_base_e;
             }
+#if __CUDA_ARCH__ == 1030
             int m_begin_r_2 = m_begin[0];
             int m_begin_e = m_begin_r_2;
+#endif
             if (warp == 2) {
                 if (num_groups <= 128) {
                     int og_n = num_groups;
@@ -1654,7 +1656,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                         int ok_e = lane + 32 * ok;
                         if (ok_e < og_n) {
                             og_g[ok] = ok_e;
+#if __CUDA_ARCH__ == 1030
                             int ok_lo = m_begin_e;
+#else
+                            int m_begin_r_2 = m_begin[0];
+                            int ok_lo = m_begin_r_2;
+#endif
                             if (ok_e > 0) {
                                 ok_lo = offs[ok_e - 1];
                             }
@@ -7660,7 +7667,12 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     }
                     int start_te = offs[prev_te];
                     if (e_kb_te == 0) {
+#if __CUDA_ARCH__ == 1030
                         start_te = m_begin_e;
+#else
+                        int m_begin_r_3 = m_begin[0];
+                        start_te = m_begin_r_3;
+#endif
                     }
                     int kb_te = (end_te - start_te + (BLOCK_K - 1)) / BLOCK_K;
                     if (kb_te == 0) {
