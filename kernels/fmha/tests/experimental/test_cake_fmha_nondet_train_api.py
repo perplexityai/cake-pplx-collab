@@ -39,8 +39,8 @@ main kernel, each with the one-launch route turned off (``fused_record`` patched
 one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region).  The entry's
 results for every variant, operands off a 256-byte boundary, a given ``softmax_scale``, the alert and ``warn_only`` are
 checked on the three-kernel routes with the one-launch route turned off, and again on a small call without the mask
-unpatched, which the shipped regions place on the one-launch route (the entry and the offsets at head dimension 64
-and 128).
+unpatched, which the shipped regions place on the one-launch route (the entry, the offsets and a given
+``softmax_scale`` at head dimension 64 and 128).
 The package promises no bits: no test here compares two runs bit for bit. """
 
 from __future__ import annotations
@@ -187,9 +187,10 @@ def _route(label: str, case: Case, device: torch.device, monkeypatch, D: int = 1
     """``(record, launches)`` of a head-dimension ``D`` call (128 unless given; ``one_cta`` and ``pair`` take 128)
     without the mask on ``case`` and ``device``, the route checked against ``label`` under the regions the test runs
     with: ``one_cta`` (the 1-CTA route) and ``pair`` (the pair route) with the one-launch route turned off first
-    (``fused_record`` patched to give None); ``fused`` unpatched.  ``record`` is the one-launch record
-    ``fused_record`` gives the call (None on the three-kernel routes); every ``launch_bwd_fused`` call from then on
-    appends its record name to ``launches``."""
+    (``fused_record`` patched to give None); ``fused`` unpatched, the call checked to be inside the one-launch
+    region.  ``record`` is the one-launch record ``fused_record`` gives the call (None on the three-kernel routes,
+    ``FUSED_OF[(D, False)]`` on ``fused``); every ``launch_bwd_fused`` call from then on appends its record name to
+    ``launches``."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     backend = _backend()
@@ -200,6 +201,8 @@ def _route(label: str, case: Case, device: torch.device, monkeypatch, D: int = 1
     if label != "fused":
         assert record is None, (label, record)
         _assert_route(device, case, label == "pair")
+    else:
+        assert record == cake_jit.FUSED_OF[(D, False)], (case, D, record)
     launches = []
     launch = backend.launch_bwd_fused
 
@@ -214,13 +217,9 @@ def _route(label: str, case: Case, device: torch.device, monkeypatch, D: int = 1
 def _one_launch(case: Case, device: torch.device, monkeypatch, D: int = 128) -> tuple:
     """``(record, launches)`` of a head-dimension ``D`` call (128 unless given) without the mask on ``case`` and
     ``device``, unpatched, which the shipped regions place on the one-launch route: ``record`` is
-    ``FUSED_OF[(D, False)]``, and every ``launch_bwd_fused`` call from then on appends its record name to
-    ``launches``."""
-    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
-
-    record, launches = _route("fused", case, device, monkeypatch, D)
-    assert record == cake_jit.FUSED_OF[(D, False)], (case, D, record)
-    return record, launches
+    ``FUSED_OF[(D, False)]`` (``_route`` checks it), and every ``launch_bwd_fused`` call from then on appends its
+    record name to ``launches``."""
+    return _route("fused", case, device, monkeypatch, D)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -354,15 +353,17 @@ def test_a_given_softmax_scale_matches_the_reference(causal, pair, monkeypatch, 
     judge_draws(record_property, draw)
 
 
-def test_a_given_softmax_scale_matches_the_reference_on_the_one_launch_route(monkeypatch, record_property) -> None:
-    """The same ``softmax_scale`` on the same call without the mask, unpatched, which the shipped regions place on the
-    one-launch route: each call launches the one-launch kernel once, and the gradients meet the tier of that scale."""
+@pytest.mark.parametrize("D", (128, 64), ids=("d128", "d64"))
+def test_a_given_softmax_scale_matches_the_reference_on_the_one_launch_route(D, monkeypatch, record_property) -> None:
+    """The same ``softmax_scale`` on the same call without the mask at head dimension ``D``, unpatched, which the
+    shipped regions place on the one-launch route on every architecture: each call launches the one-launch kernel
+    once, and the gradients meet the tier of that scale."""
     device = _device_or_skip()
-    record, launches = _one_launch(Case(1, 4, 256), device, monkeypatch)
+    record, launches = _one_launch(Case(1, 4, 256), device, monkeypatch, D)
     scale = 0.0625
 
     def draw(seed: int):
-        x = make_inputs(Case(1, 4, 256), 128, causal=False, seed=seed, device=device, softmax_scale=scale)
+        x = make_inputs(Case(1, 4, 256), D, causal=False, seed=seed, device=device, softmax_scale=scale)
         launches.clear()
         got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=scale)
         assert launches == [record], launches
