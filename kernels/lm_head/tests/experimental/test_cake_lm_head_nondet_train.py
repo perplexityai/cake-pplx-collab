@@ -60,6 +60,7 @@ import sys
 import threading
 import time
 import warnings
+import weakref
 from collections import OrderedDict
 from pathlib import Path
 from types import SimpleNamespace
@@ -3070,6 +3071,25 @@ def _require_program(*, entry: str = "loss"):
         pytest.skip(
             f"generated chunked LM-head program ({entry} entry) not registered for this device"
         )
+
+
+def _require_holding_gate():
+    """The holding-stream tests run with the allocator gate open (``_rlab_holding_ok``): torch's native caching
+    allocator with fixed segments.  Otherwise the package takes an ordinary allocation by design and these tests cannot
+    see a holding stream: they fail here, naming the allocator state of this process and the settings they need."""
+    if cake_backend._rlab_holding_ok():
+        return
+    query = getattr(torch._C, "_cuda_getAllocatorBackend", None)
+    backend = "unknown" if query is None else query()
+    query = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+    settings = "unknown" if query is None else query()
+    raise AssertionError(
+        "the holding-stream tests need torch's native caching allocator with fixed segments (the allocator gate "
+        f"_rlab_holding_ok); this process has allocator backend {backend!r}, settings {settings!r}, "
+        f"PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF')!r}, "
+        f"PYTORCH_ALLOC_CONF={os.environ.get('PYTORCH_ALLOC_CONF')!r}: run them without expandable_segments:True and "
+        "without backend:cudaMallocAsync"
+    )
 
 
 @pytest.fixture(scope="module")
@@ -18128,6 +18148,7 @@ def test_device_graph_rlab_holding_streams(monkeypatch):
     stream pools holds were taken from every pool, the two differ from each other and from every pooled stream."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
     index = torch.cuda.current_device()
     device = torch.device("cuda", index)
     pooled = _pooled_streams(device)
@@ -18212,6 +18233,7 @@ def test_device_graph_rlab_holding_block_kept(monkeypatch):
     holding streams made afresh after every pooled stream was taken)."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
     index = torch.cuda.current_device()
     device = torch.device("cuda", index)
     pooled = _pooled_streams(device)
@@ -18544,6 +18566,7 @@ def test_device_graph_rlab_stream_error_cleared(monkeypatch):
     and the launches after it run without raising that error."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
     index = torch.cuda.current_device()
     device = torch.device("cuda", index)
     real = torch.cuda.cudart()
@@ -18649,6 +18672,7 @@ def test_device_graph_rlab_holding_placement(glm_weight, tmp_path):
     graph's label residuals lie in the same caching-allocator segment at the same offset in both (a device address
     itself differs between processes), the residuals in a segment of the holding stream."""
     _require_program(entry="logprob")
+    _require_holding_gate()
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env = dict(
         os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
@@ -19076,6 +19100,7 @@ print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, held_rows=held_rows, 
 def _check_graph_rlab_pool_placement(package, entry):
     """Shared body of the det / nondet pool placement tests (see ``test_device_graph_rlab_pool_placement``)."""
     _require_program(entry="logprob")
+    _require_holding_gate()
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
     env = dict(
         os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
@@ -19692,56 +19717,116 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch):
         assert torch.equal(_bits(folded[key]), _bits(plain[key])), key
 
 
-@pytest.mark.parametrize("write", ["labels", "head"])
-def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, write):
-    """An uncompacted loss call (every row valid) folds its label residuals in its forward's slab sums, also on
-    one-slice dX chunks: an uncompacted loss plan has no cast-fold range, the flat dX cast's fold program never runs,
-    and the backward reads neither the caller's labels nor the head.  Writing either in place between the forward and
-    the backward (a labels buffer refilled with the next micro-batch, a head updated in place) leaves ``dX`` and ``dW``
-    bitwise those of the same call without the write."""
-    _require_program(entry="loss")
-    # H 8192 at 4096 rows in one chunk: a one-slice dX chunk under the B200 slice rule
-    inp = make_inputs(4096, seed=SEED + 97, device=CUDA, H=8192, ignore_frac=0.0)
-    assert bool(inp.valid.all())
-    bound = []
+def _one_slice_shape():
+    """``(rows, H)`` of :func:`_cast_fold_shape` on the running device: one chunk of ``rows`` loop rows is a one-slice
+    dX chunk there.  An AssertionError naming every candidate's dX slice count when no candidate is one (no skip)."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    shape, tried = _cast_fold_shape(
+        *cake_backend.record_for(device),
+        torch.cuda.get_device_properties(device).multi_processor_count,
+    )
+    assert shape is not None, (
+        f"no candidate shape is a one-slice dX chunk on this device; (rows, H, dX slices): {tried}"
+    )
+    return shape
+
+
+def _fold_route_spies(monkeypatch):
+    """Spies of the launches a loss step binds and runs, with both modules' binding caches disabled (every call binds
+    every launch): ``names`` -- the stage of every key ``_bind_all`` binds and of every eager launch (the dX finalize's
+    casts); ``fold_alone`` -- the slab sums of ``n_slabs`` 0 that fold the label residuals (``lr`` 1: the fold-alone
+    launch behind a one-slice dX chunk); ``ranges`` -- the cast-fold range of every plan that forms one (a plan with
+    ``cast_fold``).  ``clear()`` empties the three lists."""
+    spy = SimpleNamespace(names=[], fold_alone=[], ranges=[])
+
+    def clear():
+        del spy.names[:], spy.fold_alone[:], spy.ranges[:]
+
+    spy.clear = clear
     for mod in (cake_backend, opt_in):
-        real = mod._bind_all
+        real_bind = mod._bind_all
 
-        def spy(record, module_name, keys, *args, _real=real, **kwargs):
-            bound.extend(key[0] for key in keys)
-            return _real(record, module_name, keys, *args, **kwargs)
+        def bind(record, module_name, keys, values, *args, _real=real_bind, **kwargs):
+            for key in keys:
+                spy.names.append(key[0])
+                v = values.get(key) if isinstance(values, dict) else None
+                if (
+                    key[0] in set(cake_backend.DX_SLAB_SUM_STAGES)
+                    and isinstance(v, dict)
+                    and int(v.get("n_slabs", -1)) == 0
+                    and int(v.get("lr", 0)) == 1
+                ):
+                    spy.fold_alone.append(key)
+            return _real(record, module_name, keys, values, *args, **kwargs)
 
-        monkeypatch.setattr(mod, "_bind_all", spy)
+        monkeypatch.setattr(mod, "_bind_all", bind)
+        if hasattr(mod, "_eager_launch"):
+            real_eager = mod._eager_launch
+
+            def eager(record, module_name, stage, *args, _real=real_eager, **kwargs):
+                spy.names.append(stage)
+                return _real(record, module_name, stage, *args, **kwargs)
+
+            monkeypatch.setattr(mod, "_eager_launch", eager)
         off = type(mod.BINDING_CACHE)()
         off.configure(enabled=False)
         monkeypatch.setattr(mod, "BINDING_CACHE", off)
-    ranges = []
     real_range = cake_backend._cast_fold_range
 
     def range_spy(plan):
         out = real_range(plan)
-        if not plan.compact:
-            ranges.append(out)
+        spy.ranges.append(out)
         return out
 
     monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
+    return spy
+
+
+def _route_loss(inp, rows, X, W, labels=None):
+    """``loss`` of one call of the default training route -- the loss entry of ``cake_backend``, where the public
+    facade sends a default call -- over ``inp`` with ``X`` / ``W`` (and ``labels``, default the inputs'), in one chunk
+    of ``rows`` loop rows."""
+    loss, _ = cake_backend.cake_lm_head_nondet_train_loss(
+        X,
+        W,
+        inp.labels if labels is None else labels,
+        objective=inp.objective,
+        loss_div=inp.loss_div if inp.objective == "ce" else None,
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=rows,
+        return_logp=True,
+        backend="cake",
+    )
+    return loss
+
+
+_FOLD_STAGES = frozenset(
+    {cake_backend.DX_CAST_FOLD_STAGE, cake_backend.DX_FINALIZE_FOLD_STAGE}
+)
+
+
+@pytest.mark.parametrize("write", ["labels", "head"])
+def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, write):
+    """An uncompacted loss call (every row valid) of the default training route (:func:`_route_loss`, with ``W`` a leaf
+    that requires a gradient) folds its label residuals in its forward's slab sums, also on its one-slice dX chunk: the
+    call binds the fold-alone slab sum there (``n_slabs`` 0 with the fold), runs no cast fold program and forms no
+    cast-fold range, and the backward reads neither the caller's labels nor the head.  Writing either in place between
+    the forward and the backward (a labels buffer refilled with the next micro-batch, a head updated in place) leaves
+    ``dX`` and ``dW`` bitwise those of the same call without the write.  The shape is the first candidate whose one
+    chunk is a one-slice dX chunk on the running device (:func:`_one_slice_shape`)."""
+    _require_program(entry="loss")
+    rows, hidden = _one_slice_shape()
+    inp = make_inputs(rows, seed=SEED + 97, device=CUDA, H=hidden, ignore_frac=0.0)
+    assert bool(inp.valid.all())
+    spy = _fold_route_spies(monkeypatch)
 
     def step(written: bool):
         X = inp.X.detach().clone().requires_grad_(True)
         W = inp.W.detach().clone().requires_grad_(True)
         labels = inp.labels.clone()
-        loss, _ = cake_backend.cake_lm_head_nondet_train_loss(
-            X,
-            W,
-            labels,
-            objective=inp.objective,
-            loss_div=inp.loss_div if inp.objective == "ce" else None,
-            infer_logp=inp.infer_logp,
-            loss_weights=inp.loss_weights,
-            chunk_size=4096,
-            return_logp=True,
-            backend="cake",
-        )
+        spy.clear()
+        loss = _route_loss(inp, rows, X, W, labels)
         if written:
             with torch.no_grad():
                 if write == "labels":
@@ -19753,9 +19838,182 @@ def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, w
         return X.grad, W.grad
 
     dX, dW = step(False)
-    assert cake_backend.DX_CAST_FOLD_STAGE not in bound
-    assert any(s in cake_backend.DX_SLAB_SUM_STAGES for s in bound)
-    assert all(hi <= lo for lo, hi in ranges)
+    # the one-slice chunk exists and its fold stays in the forward: a fold-alone slab sum, no fold program, no range
+    assert spy.fold_alone, ((rows, hidden), spy.names)
+    assert not _FOLD_STAGES & set(spy.names), spy.names
+    assert all(hi <= lo for lo, hi in spy.ranges), spy.ranges
     dX_w, dW_w = step(True)
     assert torch.equal(_bits(dX_w), _bits(dX))
     assert torch.equal(_bits(dW_w), _bits(dW))
+
+
+def _compacted_fold_inputs():
+    """``(inputs, rows)``: a compacted loss call's inputs -- 64 ignored rows on top of ``rows`` valid rows, the shape of
+    :func:`_one_slice_shape` -- whose valid rows form one one-slice dX chunk on the running device (``chunk_size`` =
+    ``rows``)."""
+    rows, hidden = _one_slice_shape()
+    T = rows + 64
+    inp = make_inputs(T, seed=SEED + 131, device=CUDA, H=hidden, ignore_frac=64 / T)
+    assert int(inp.valid.sum()) == rows
+    return inp, rows
+
+
+def _compacted_step(inp, rows, spy, leaf: bool, write: bool = False):
+    """One step of :func:`_route_loss` over the compacted inputs: ``W`` the leaf ``base`` (``leaf``) or a non-leaf copy
+    of it (``base.clone()``, the same bits); ``write``: ``W.neg_()`` between the forward and the backward.  Returns
+    ``dX``, ``dW`` (``base``'s gradient) and the spies' lists of the step."""
+    X = inp.X.detach().clone().requires_grad_(True)
+    base = inp.W.detach().clone().requires_grad_(True)
+    W = base if leaf else base.clone()
+    spy.clear()
+    loss = _route_loss(inp, rows, X, W)
+    if write:
+        with torch.no_grad():
+            W.neg_()
+    loss.backward()
+    torch.cuda.synchronize()
+    return X.grad, base.grad, list(spy.names), list(spy.fold_alone), list(spy.ranges)
+
+
+def test_device_compacted_loss_fold_saves_the_head(monkeypatch):
+    """A compacted loss call (some labels ignored) of the default training route (:func:`_route_loss`) whose valid rows
+    form a one-slice dX chunk, with ``W`` a leaf that requires a gradient: the forward leaves that chunk's label
+    residual fold to the backward's scatter cast (a cast-fold range, the fold program
+    ``scale_cast_scatter_fold_bf16``) and saves ``W`` through the autograd context, so an in-place write to ``W``
+    between the forward and the backward raises PyTorch's saved-tensor version error instead of changing ``dX``."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    _, _, names, _, ranges = _compacted_step(inp, rows, spy, leaf=True)
+    assert any(hi > lo for lo, hi in ranges), ranges
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        _compacted_step(inp, rows, spy, leaf=True, write=True)
+
+
+def test_device_compacted_loss_nonleaf_head_folds_in_the_forward(monkeypatch):
+    """The compacted call of ``test_device_compacted_loss_fold_saves_the_head`` with a non-leaf ``W`` (a copy of the
+    same head, as a head cast or dequantized for the step) folds every label residual in its forward's slab sums: the
+    fold-alone slab sum on the one-slice chunk, no cast-fold range, no fold program -- so its backward reads no ``W``
+    -- and its ``dX`` / ``dW`` are bitwise those of the leaf call, whose backward cast folds that chunk."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, names, fold_alone, ranges = _compacted_step(inp, rows, spy, leaf=True)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    dX_n, dW_n, names_n, fold_alone_n, ranges_n = _compacted_step(
+        inp, rows, spy, leaf=False
+    )
+    assert not _FOLD_STAGES & set(names_n), names_n
+    assert not any(hi > lo for lo, hi in ranges_n), ranges_n
+    assert len(fold_alone_n) > len(fold_alone), (fold_alone, fold_alone_n)
+    assert torch.equal(_bits(dX_n), _bits(dX))
+    assert torch.equal(_bits(dW_n), _bits(dW))
+
+
+def test_device_compacted_loss_keeps_no_temporary_head(monkeypatch):
+    """The compacted call of ``test_device_compacted_loss_fold_saves_the_head`` with a non-leaf ``W`` keeps no reference
+    to ``W`` past its forward: with the loss graph alive, ``W`` is freed once the caller drops it (a weak reference to
+    it is dead), and the backward still gives the leaf call's ``dX`` / ``dW`` bit for bit."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, _, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    X = inp.X.detach().clone().requires_grad_(True)
+    base = inp.W.detach().clone().requires_grad_(True)
+    W = base.clone()
+    ref = weakref.ref(W)
+    loss = _route_loss(inp, rows, X, W)
+    del W
+    gc.collect()
+    assert ref() is None, "the loss graph keeps the non-leaf head alive"
+    loss.backward()
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(X.grad), _bits(dX))
+    assert torch.equal(_bits(base.grad), _bits(dW))
+
+
+def test_device_logprob_graph_rlab_freed_by_its_backward(glm_weight, monkeypatch):
+    """A log-probability graph kept alive past a backward that frees it (its output held, as a training loop that keeps
+    its losses) holds no label residual buffer: that backward drops the graph's holder (``rlab`` of the node: None), so
+    every buffer the graph took is on the free list of the stream once the backward returns -- after a first backward
+    that frees the graph, and after the last backward of a retained graph -- while a retained graph keeps its holder
+    and its buffer (off the list) through its retained backwards.  Forms: the default form, a scalar temperature and
+    the kept logits; the default form, whose remembered binding binds the holder, takes a buffer in every case.
+    Every backward's ``dX`` / ``dW`` are the first one's bits."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    inp = make_inputs(16, seed=SEED + 151, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    entries = (
+        ("default", be.cake_lm_head_nondet_train_logprob, {}),
+        (
+            "temperature",
+            be.cake_lm_head_nondet_train_logprob_temperature,
+            dict(temperature=0.75),
+        ),
+        ("keep", be.cake_lm_head_nondet_train_logprob_keep, {}),
+    )
+    takes = []
+    real_take = be._graph_rlab
+
+    def take(rows, zero, device):
+        got = real_take(rows, zero, device)
+        if got is not None:
+            takes.append(got[1][3].data_ptr())
+        return got
+
+    monkeypatch.setattr(be, "_graph_rlab", take)
+
+    def call(entry, kw):
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        return X, W, entry(X, W, inp.labels, chunk_size=4096, **kw)
+
+    def backward(X, W, lp, retain):
+        X.grad = W.grad = None
+        lp.backward(inp.dlogp, retain_graph=retain)
+        torch.cuda.synchronize()
+        return _bits(X.grad).clone(), _bits(W.grad).clone()
+
+    def free_buffers():
+        return [entry[3].data_ptr() for entry in _pool_free(be)]
+
+    for name, entry, kw in entries:
+        # one step first: a binding-cache miss may run the runner's own path (no holder bound); later calls bind it
+        X, W, lp = call(entry, kw)
+        backward(X, W, lp, False)
+        del X, W, lp
+        gc.collect()
+        be._RLAB_POOL.clear()
+        gc.collect()
+        first = None
+        for retain in (False, True):
+            case = (name, retain)
+            X, W, lp = call(entry, kw)
+            node = _graph_rlab_node(lp)
+            assert isinstance(node.rlab, be._GraphRlab), case
+            del takes[:]
+            grads = []
+            if retain:
+                for _ in range(2):
+                    grads.append(backward(X, W, lp, True))
+                    assert node.rlab is not None, case
+                    own = node.rlab.own
+                    assert own is not None or name != "default", case
+                    if own is not None:
+                        assert own[1][3].data_ptr() not in free_buffers(), case
+                    del own
+            grads.append(backward(X, W, lp, False))
+            # the graph (lp) is alive and its backward freed it: no holder, every buffer it took back on the free list
+            assert node.rlab is None, case
+            free = free_buffers()
+            assert all(ptr in free for ptr in takes), (case, takes, free)
+            assert takes or name != "default", case
+            for got in grads:
+                first = got if first is None else first
+                same = torch.equal(got[0], first[0]) and torch.equal(got[1], first[1])
+                assert same, case
+            del X, W, lp, node
+            gc.collect()
+    be._RLAB_POOL.clear()
+    gc.collect()
