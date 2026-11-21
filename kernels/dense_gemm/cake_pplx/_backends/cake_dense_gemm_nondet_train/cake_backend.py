@@ -1762,7 +1762,13 @@ def k1_program_knobs(program: str) -> tuple:
 #: and the indexer_k ``6144 -> 128`` at 16172 and 16384 tokens, and ``4096 -> 48``, ``5120 -> 128`` and
 #: ``8192 -> 128`` at 16172.  Since version 0.3.18 these keys run the deterministic plan, which was faster there in a
 #: counted comparison on two GB200 nodes (:data:`_NVJET_DGRAD_DET_PLAN_ROWS`; at the 13 keys the lowest and highest
-#: medians of the entry's time over the plan's were 1.019 and 1.086).
+#: medians of the entry's time over the plan's were 1.019 and 1.086).  Up to version 0.3.19 it also held the GB200
+#: entry ``kn_n256_tma1_w8r`` of ``5120 -> 128`` at 16384 tokens.  Since version 0.3.20 that key runs the deterministic
+#: plan, which since the deterministic package's version 0.3.20 runs ``kn_n256_tma1_w8relf`` there (a range of that
+#: one token count): on two GB200 nodes, 21 paired rounds per node in eager launches and in CUDA graph replays, the
+#: plan was faster than the entry's program in all 21 rounds of each of the four node and mode pairs, medians of the
+#: entry's time over the plan's 1.039 to 1.041, and the plan met the naive BF16 tier on five seeds.  The entry of this
+#: row at 16231 tokens stays (under the entry of :data:`K1_DGRAD_NVJET_RULES_BY_SM`, which comes first).
 # fmt: off
 K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
@@ -1817,7 +1823,7 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
-        (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8rs",
@@ -2202,6 +2208,21 @@ _NVJET_DGRAD_DET_PLAN_ROWS: dict[tuple[str, int], frozenset[tuple[int, int, int]
 #: 0.3.17 VR200 10; since version 0.3.18 GB200 10) out of both programs: the deterministic plan of the row was faster
 #: there.  Since version 0.3.18 GB200 leaves 23 keys to the deterministic plan in all, those 10 and 13 that only
 #: :data:`K1_DGRAD_RULES_BY_SM` held: the deterministic plan was faster there in a counted comparison on two nodes.
+#: Since its version 0.3.20 the deterministic plan of six VR200 rows here (``4096 -> 48``, ``4096 -> 128``,
+#: ``5120 -> 48``, ``5120 -> 128``, ``8192 -> 128`` and the indexer_k ``6144 -> 128``) runs start-path programs at 16172
+#: to 16384 tokens.  The VR200 part keeps its 18 keys of these rows: the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`
+#: names another form than those ranges, so it is unchanged.  The round of that version timed this package's launch at
+#: the 18 keys beside one copy of the new plan on two VR200 nodes, 21 paired rounds per node in eager launches and in
+#: CUDA graph replays: the ratio of its median time to the plan's was 0.987 to 1.020.  Only at ``4096 -> 128`` at 16231
+#: tokens was the plan faster in at least 17 of the 21 rounds with a median of this package's time over the plan's of at
+#: least 1.0 in every node and mode pair; the lowest of those medians, 1.005, is below the 1.015 above, so the key
+#: stays.  The token counts between the keys, which no table of
+#: this package holds, run the new deterministic plan.  Since its version 0.3.20 the deterministic plan of the GB200 row
+#: ``4096 -> 48`` runs ``kn_n256_tma1_w8relf`` at 16232 to 32767 tokens too (one range at 16172 to 32768 tokens), where
+#: it ran the half-tail program of the row's rule and, at 16384 tokens, ``kn_n256_tma1_w8r``, with the same bits,
+#: measured 1.027 to 1.061 times faster at 16300, 16384 and 24576 tokens.  The GB200 part keeps its key of this row at
+#: 16231 tokens (this package's program on the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`, unchanged); no table of this
+#: package holds the row at 16232 to 32767 tokens, so the call there runs the new deterministic plan.
 # fmt: off
 K1_DGRAD_NVJET_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {

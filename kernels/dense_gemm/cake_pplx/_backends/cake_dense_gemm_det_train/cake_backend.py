@@ -2478,13 +2478,15 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # measured T to another and holds no measured T that missed the bar; its plans were 1.021 to 1.091 times faster than
 # the plan before on B200, 1.020 to 1.095 on GB200, 1.017 to 1.094 on B300 and 1.015 to 1.077 on GB300 (the lowest and
 # highest node and mode medians).  On sm_100a a range replaces the GB T-exact rule of 4096 -> 48 (``_tma1_w8r``) at
-# T 16231 on both parts and at T 16384 on 148 SMs.  A range's rule holds for its form: a caller that forces another
-# form (the ten-warp program included) plans with the row's rule without the part tables, as in version 0.3.11.
-# Neither form met the bar at these, which keep their plan:
+# T 16231 on both parts and at T 16384 on 148 SMs (since version 0.3.20 on 152 SMs too: below).  A range's rule holds
+# for its form: a caller that forces another form (the ten-warp program included) plans with the row's rule without
+# the part tables, as in version 0.3.11.  Neither form met the bar at these, which keep their plan:
 #   * B200: 4096 -> 64 at T 16172 and 16231 (medians 1.048 to 1.077, but a paired win in one or two of the four node
 #     and mode pairs; version 0.3.14 runs T 16172 and version 0.3.15 T 16231 in the 128-column program: below), and
 #     5120 -> 128, 8192 -> 128 and indexer_k at T 32768 (0.999 to 1.018);
-#   * GB200: 4096 -> 48 and 5120 -> 128 at T 16384 (1.019 to 1.061, a paired win in three of the four pairs);
+#   * GB200: 4096 -> 48 and 5120 -> 128 at T 16384 (1.019 to 1.061, a paired win in three of the four pairs; version
+#     0.3.20 runs 4096 -> 48 at T 16232 - 32767, T 16384 among them, and 5120 -> 128 at T 16384 in
+#     ``kn_n256_tma1_w8relf``);
 #   * B300: 4096 -> 48, 8192 -> 128 and indexer_k at T 32768 (1.000 to 1.013);
 #   * GB300: 5120 -> 64 and 8192 -> 128 at every measured T (0.995 to 1.026), and 4096 -> 32 and indexer_k at T 32768
 #     (1.001 to 1.017); 5120 -> 64 at T 16172 and 4096 -> 32 at T 32768 kept their plan up to version 0.3.12 (version
@@ -2612,6 +2614,81 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # to 23.47 us (the faster library takes 1.016 to 1.019 times the time of the new plan, 0.980 to 0.989 times that of
 # the plan before).  T 16172 and T 16384 ran this rule already (versions 0.3.14 and 0.3.15); the unmeasured
 # T 16173 - 16230 and 16232 - 16383 run it with T 16231.
+# Version 0.3.20 runs the start-path programs on the other six BF16 input gradients of the 212-SM sm_107a part (VR200),
+# which planned the ten-warp programs of their ``ROW_RULES`` rules up to version 0.3.19 (``kn_n256_ht_tma2_lw_pro15`` on
+# 4096 -> 48, ``kn_n256_tma2_pd2_lw_pro15`` on 5120 -> 48, ``kn_n256_tma2_pd2_pro15`` on 4096 -> 128, 5120 -> 128,
+# 8192 -> 128 and the indexer_k input gradient 6144 -> 128), each row in one range at T 16172 - 16384 in raster groups
+# of 16: ``kn_n256_tma1_w8relf`` on 4096 -> 48, 4096 -> 128, 5120 -> 48, 8192 -> 128 and indexer_k, and the 128-column
+# program in 64-element K steps (``kn_n128_tma1_w8relf``) on 5120 -> 128.
+# Measured at T 16172, 16231 and 16384 with cold L2 in eager launches and CUDA graph replays, 21 paired rounds per node
+# and mode against the plan of version 0.3.19 and a second prepared copy of it in the same rounds, on two VR200 nodes
+# (drivers 620.43 and 620.70.06, CUDA 13.5): ``kn_n256_tma1_w8relf`` in groups of 16 on every row, the 128-column
+# program in 64-element K steps in groups of 16 and 32 on the -> 128 rows and in 32-element K steps in groups of 16 on
+# the -> 48 rows.  A candidate met the bar at a token count with at least 17 of the 21 paired wins against each copy and
+# both medians at least 1.0 in every node and mode pair (the two copies within 0.01 of each other), its outputs within
+# the naive BF16 tier on five seeds and of one bit pattern on every run; a row takes, over its three measured token
+# counts, the candidate that met the bar at all three with the higher lowest node and mode median (each the lower of
+# the two against the plan before and its copy), within 0.005 ``kn_n256_tma1_w8relf`` and then the smaller group.  The
+# outputs are not held to the bits of the plan before; at the measured token counts they were equal to its bits on
+# both nodes.  The ranges, with the lowest and highest node and mode medians against the plan before (each new plan
+# faster in all 21 rounds of every node and mode pair against both copies):
+#   * ``kn_n256_tma1_w8relf`` in groups of 16: 4096 -> 48 (1.091 to 1.119), 4096 -> 128 (1.072 to 1.082), 5120 -> 48
+#     (1.063 to 1.085), 8192 -> 128 (1.030 to 1.053) and indexer_k (1.047 to 1.059);
+#   * the 128-column program in groups of 16: 5120 -> 128 (1.053 to 1.077; the group of 32 had the higher lowest
+#     median, 1.055 against 1.051, within 0.005: the smaller group).
+# Median times at T 16231 in us (the plan before, the new plan, cuBLASLt and the cuDNN frontend, the lowest and highest
+# node and mode medians), and the fastest library's time over the new plan's:
+#   * 4096 -> 48: 18.14 to 18.27, 16.21 to 16.48, 16.21 to 16.64 and 16.24 to 16.75 (1.000 to 1.010);
+#   * 4096 -> 128: 18.02 to 21.73, 16.70 to 20.24, 16.90 to 20.69 and 16.85 to 20.69 (1.009 to 1.022);
+#   * 5120 -> 48: 20.37 to 20.59, 18.81 to 19.25, 18.88 to 19.46 and 18.91 to 19.42 (1.003 to 1.009);
+#   * 5120 -> 128: 21.38 to 22.98, 20.30 to 21.66, 20.10 to 21.95 and 20.18 to 22.02 (0.990 to 1.013);
+#   * indexer_k: 26.54 to 26.69, 25.17 to 25.40, 25.95 to 26.21 and 25.52 to 26.12 (1.014 to 1.028);
+#   * 8192 -> 128: 29.86 to 34.00, 28.72 to 32.88, 29.97 to 34.74 and 29.63 to 34.75 (1.032 to 1.056).
+# Over the three measured token counts the fastest library took 0.957 to 1.010 times the time of the new plan on
+# 4096 -> 48, 0.995 to 1.027 on 4096 -> 128, 0.991 to 1.009 on 5120 -> 48 and 0.990 to 1.025 on 5120 -> 128 (on these
+# four rows faster than the new plan at some token count and node and mode pair), 1.014 to 1.042 on indexer_k and 1.019
+# to 1.059 on 8192 -> 128.  The unmeasured token counts inside a range run its program; the other token counts of these
+# rows keep their plan of version 0.3.19.  The non-deterministic package keeps its entries of these rows at T 16172,
+# 16231 and 16384 (its program on the plan of ``kn_n256_tma1_w8r``, a form these ranges do not name; the round timed it
+# beside the new plan, its median time 0.987 to 1.020 times the new plan's); at the token counts between them it runs
+# this plan.
+# Version 0.3.20 also runs ``kn_n256_tma1_w8relf`` in the default raster group of 16 (the rule of version 0.3.12) on the
+# GB200 (152-SM sm_100a) BF16 input gradient 4096 -> 48 at T 16232 - 32767, where version 0.3.19 ran the row's
+# ``ROW_RULES`` rule, the half-tail program ``kn_n256_ht_tma2_lw_pro15``, and at T 16384 its GB T-exact rule, the
+# eight-warp program ``kn_n256_tma1_w8r`` (a kept cell of version 0.3.12): the row's two ranges become one,
+# T 16172 - 32768.  Measured at T 16300, 16384 and 24576 with cold L2 (CUPTI) in eager launches and CUDA graph replays,
+# 21 paired rounds per node and mode against the plan of version 0.3.19 on two GB200 nodes (driver 580.126.20): medians
+# 1.053 to 1.061 at T 16300, 1.027 to 1.038 at T 16384 (faster in all 21 rounds of each of the four node and mode pairs)
+# and 1.035 to 1.038 at T 24576, and the outputs equal to that plan's bit for bit at the three token counts on both
+# nodes.  Median times (the plan before, the new plan, the cuDNN frontend and cuBLASLt): 24.18 to 24.59, 22.78 to 23.34,
+# 23.44 to 23.84 and 23.50 to 24.00 us at T 16300; 23.42 to 23.98, 22.78 to 23.20, 23.47 to 23.84 and 23.50 to 23.97 us
+# at T 16384; 34.13 to 34.86, 32.99 to 33.73, 35.18 to 35.71 and 34.11 to 34.59 us at T 24576.  The fastest library (the
+# cuDNN frontend at T 16300 and 16384, cuBLASLt at T 24576) takes 1.021 to 1.029, 1.021 to 1.033 and 1.026 to 1.034
+# times the time of the new plan at the three token counts, against 0.966 to 0.970, 0.993 to 1.002 and 0.992 to 1.000
+# times that of the plan before.  The unmeasured token counts of T 16232 - 32767 run the range's program.  The
+# ``ROW_RULES`` key at T 16384 stays: sm_100a parts without a range of this row (SM counts other than 148 and 152) plan
+# it, and so does a caller that forces the ``w8r`` form.  The non-deterministic package holds no entry of this row at
+# T 16232 - 32767, so its call there runs this plan.  A second pair of GB200 nodes repeated this measurement: medians
+# 1.054 to 1.059 at T 16300, 1.024 to 1.028 at T 16384 and 1.032 to 1.044 at T 24576, faster in all 21 rounds of every
+# node and mode pair, with the bits of the plan before.
+# Version 0.3.20 also runs ``kn_n256_tma1_w8relf`` in the default raster group of 16 on the GB200 BF16 input gradient
+# 5120 -> 128 at T 16384 alone, a range of one token count between the row's ranges of version 0.3.12 (T 16172 - 16231
+# and 32768), where version 0.3.19 ran the row's ``ROW_RULES`` rule, the ten-warp program
+# ``kn_n256_tma2_pd2_lw_pro15`` (a kept cell of version 0.3.12).  Measured at T 16384 with cold L2 (CUPTI) in eager
+# launches and CUDA graph replays, 21 paired rounds per node and mode against the plan of version 0.3.19 and a second
+# prepared copy of it in the same rounds, with the bar fixed before timing (at least 17 of the 21 paired wins against
+# each copy, both medians at least 1.0 and the two copies within 0.01 of each other in every node and mode pair): on
+# two GB200 nodes (driver 580.126.20) the new plan was faster in all 21 rounds of each of the four node and mode pairs
+# against each copy, medians 1.050 to 1.056 against the plan and 1.043 to 1.049 against its copy, and its outputs met
+# the naive BF16 tier on five seeds and were equal to that plan's bit for bit on both nodes.  An earlier pair of GB200
+# nodes measured 1.053 to 1.067 against the plan and 1.048 to 1.055 against its copy, but on one of them the two copies
+# of the plan were more than 0.01 apart, which the bar does not accept; the second pair decided.  Median times (the plan
+# before, the new plan, the cuDNN frontend and cuBLASLt): 30.83 to 31.18, 29.42 to 29.58, 31.41 to 31.55 and 31.36 to
+# 31.46 us; the fastest library takes 1.063 to 1.067 times the time of the new plan, against 1.007 to 1.019 times that
+# of the plan before.  The other token counts of the row keep their plan of version 0.3.19.  The non-deterministic
+# package drops its entry at this key (this package's program ``kn_n256_tma1_w8r``, 30.59 to 30.78 us, 1.039 to 1.041
+# times the time of the new plan and slower in all 21 rounds of every node and mode pair), so its call there runs this
+# plan.
 # The BF16 entries (version 0.3.7) are K-major forward and input-gradient rows with K > 8192 at small token counts,
 # judged on VR200 on five seeds of 32 draws against the naive BF16 tier and timed against the plan the row had without
 # them (geometric mean of eager launches and CUDA graph replays, cold L2).  That plan sums 136 to 256 K blocks of a tile
@@ -2668,6 +2745,12 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             (16172, 16231, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),
             (16384, 16384, {**_W8RELF_N128_DGRAD_BF16, "group_m": 32}),
         ),
+        ('sm_107a', False, True, False, False, False, 4096, 48, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 4096, 128, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 5120, 48, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 5120, 128, None): ((16172, 16384, {**_W8RELF_N128_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 6144, 128, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
+        ('sm_107a', False, True, False, False, False, 8192, 128, None): ((16172, 16384, {**_W8RELF_DGRAD_BF16, "group_m": 16}),),
     },
     ("sm_103a", 148): {
         **{
@@ -2798,16 +2881,14 @@ ROW_RULE_RANGES_BY_SM: dict[tuple[str, int], dict[tuple, tuple[tuple[int, int, d
             (16385, 32768, dict(_W8RELF_DGRAD_BF16)),
         ),
         ('sm_100a', False, True, False, False, False, 6144, 32, None): ((16172, 32768, {**_W8RELF_N128_K32_DGRAD_BF16, "group_m": 16}),),
-        ('sm_100a', False, True, False, False, False, 4096, 48, None): (
-            (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
-            (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
-        ),
+        ('sm_100a', False, True, False, False, False, 4096, 48, None): ((16172, 32768, dict(_W8RELF_DGRAD_BF16)),),
         ('sm_100a', False, True, False, False, False, 5120, 48, None): (
             (16172, 16384, dict(_W8RELF_DGRAD_BF16)),
             (32768, 32768, dict(_W8REL_DGRAD_BF16)),
         ),
         ('sm_100a', False, True, False, False, False, 5120, 128, None): (
             (16172, 16231, dict(_W8RELF_DGRAD_BF16)),
+            (16384, 16384, dict(_W8RELF_DGRAD_BF16)),
             (32768, 32768, dict(_W8RELF_DGRAD_BF16)),
         ),
     },
@@ -3984,7 +4065,16 @@ def cake_dense_gemm_det_train_projection_plan(
     4096 -> 32 at T 16172 - 32768 in groups of 2 and 4096 -> 64 at T 16384 - 32768 in groups of 16, and on 148-SM
     sm_100a parts 4096 -> 64 at T 16172 - 16231 in groups of 2.  Since version 0.3.19 the 152-SM sm_100a range of
     4096 -> 64 runs the 128-column program in groups of 16 at T 16173 - 16383 too, one range at T 16172 - 32768 (the
-    same bits, measured faster than the plan of version 0.3.18 at T 16231 on four GB200 nodes)."""
+    same bits, measured faster than the plan of version 0.3.18 at T 16231 on four GB200 nodes).  Since version 0.3.20
+    the 212-SM sm_107a ranges also plan the BF16 input gradients 4096 -> 48, 4096 -> 128, 5120 -> 48, 5120 -> 128,
+    8192 -> 128 and 6144 -> 128 at T 16172 - 16384 with a start-path program in groups of 16, ``kn_n256_tma1_w8relf``
+    (on 5120 -> 128 ``kn_n128_tma1_w8relf``), where the rows' rules plan ten-warp programs (measured faster than the
+    plan of version 0.3.19 on two VR200 nodes, within the naive BF16 tier, the same bits
+    on every run), and the 152-SM sm_100a range of 4096 -> 48 runs ``kn_n256_tma1_w8relf`` at T 16232 - 32767 too,
+    one range at T 16172 - 32768 (the same bits, measured faster than the plan of version 0.3.19 at T 16300, 16384 and
+    24576 on two GB200 nodes), and the 152-SM sm_100a ranges of 5120 -> 128 run ``kn_n256_tma1_w8relf`` at T 16384 too,
+    a range of one token count (the same bits, measured faster than the plan of version 0.3.19 there on two GB200
+    nodes)."""
     _caller_knobs: dict[str, Any] = dict(
         transposed_out=transposed_out,
         sk=sk,
