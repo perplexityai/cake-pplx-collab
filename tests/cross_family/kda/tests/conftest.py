@@ -21,7 +21,8 @@ of its FLA reference steps (``experimental/test_helpers/cake_kda_fla.py``).  Eac
 ``cake_kda_fla.steps_of_test``, so a test that calls FLA without recording its steps, in its own process or in the
 ranks it spawns, gets the steps of those processes.  A test that passed with owner-accepted gaps within their caps is
 reported as xfailed, its reason naming each gap; a test that passed without judging an output listed as a gap for it
-fails (``experimental/test_helpers/cake_kda_known_gaps.py``).
+fails (``experimental/test_helpers/cake_kda_known_gaps.py``).  An output that misses the naive tier and FLA within
+the caps the owner accepted for it (``cake_naive_accepted.json``) passes, and its ``TIER`` line reads ``accepted``.
 """
 
 import pytest

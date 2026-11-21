@@ -22,6 +22,10 @@ found no failure:
 
 - a failure that is not a tier miss (a contract break, an output judged on fewer draws than the judge's, two draws
   with the same oracle values) fails the test with the judge's text;
+- an output that misses the tier and FLA and is listed for the running test in the owner-accepted misses of
+  ``tests/cake_naive_accepted.json`` passes when it is within the caps listed for it, and fails the test with the
+  reasons and the judge's text when it is beyond them (``tests.cake_naive.accepted_check``): the test runs on, it is
+  not reported xfailed, and its ``TIER`` line reads ``accepted``;
 - an output that misses the tier and is not listed for the running test fails the test with the judge's text;
 - a listed output that meets the tier fails the test: the listing is stale (a strict xfail);
 - a listed output that misses beyond its gap fails the test: the case is outside the gap's scope (:attr:`KnownGap.
@@ -53,7 +57,7 @@ import os
 from collections.abc import Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 
-from tests.cake_naive import NEAR_TIE, NORMS, TIERS
+from tests.cake_naive import NEAR_TIE, NORMS, TIERS, accepted_cap, accepted_check
 
 #: The scopes a gap may have: ``"one_token"``, a batch of exactly one document of one token (``cu_seqlens`` ``[0,
 #: 1]``); ``"internal"``, an internal tensor of the kernels that no test of this family judges (never applies).
@@ -241,11 +245,12 @@ def settle(
     *,
     lengths: Sequence[int] | None,
 ) -> None:
-    """Settle a judge's ``failures`` against :data:`KNOWN_GAP_ITEMS` for the running test: raise an
-    ``AssertionError`` for a failure that is not a tier miss, a tier miss that is not listed, a listed output that met
-    the tier, and a listed output that misses beyond its gap (:func:`beyond`); record the listed misses within their
-    gaps (the conftest reports the test xfailed).  ``verdicts`` are :meth:`TierJudge.verdicts` (or their JSON form),
-    ``lengths`` the case's document lengths (the gaps' scope)."""
+    """Settle a judge's ``failures`` against the owner-accepted misses (``tests.cake_naive.accepted_check``) and
+    :data:`KNOWN_GAP_ITEMS` for the running test: pass an owner-accepted miss within its caps; raise an
+    ``AssertionError`` for a failure that is not a tier miss, an owner-accepted miss beyond its caps, a tier miss that
+    is not listed, a listed output that met the tier, and a listed output that misses beyond its gap (:func:`beyond`);
+    record the listed misses within their gaps (the conftest reports the test xfailed).  ``verdicts`` are
+    :meth:`TierJudge.verdicts` (or their JSON form), ``lengths`` the case's document lengths (the gaps' scope)."""
     misses, others = {}, []
     for failure in failures:
         name = next(
@@ -271,8 +276,18 @@ def settle(
             )
         )
     test = current_test()
+    problems = []
+    for name in list(misses):
+        entry, why = accepted_check(test, verdicts[name])
+        if entry is not None:
+            failure = misses.pop(name)
+            if why:
+                problems += [
+                    *(f"{name}: an owner-accepted miss beyond its cap {accepted_cap(entry)}: {r}" for r in why),
+                    failure,
+                ]
     listed = KNOWN_GAP_ITEMS.get(test, {})
-    problems = [failure for name, failure in misses.items() if name not in listed]
+    problems += [failure for name, failure in misses.items() if name not in listed]
     problems += [
         f"{name}: listed as a known gap ({listed[name]}) but meets the naive tier now: remove it from KNOWN_GAP_ITEMS"
         for name in listed

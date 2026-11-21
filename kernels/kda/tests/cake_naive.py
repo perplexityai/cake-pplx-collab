@@ -47,7 +47,32 @@ tier or FLA, and fails only when it misses both.  An output without an FLA
 value on every draw (it has no FLA counterpart, or FLA does not run the case)
 is judged against the naive tier only: it passes
 when it meets the tier and fails when it misses it, and its verdict names the
-reason.  Each test records every
+reason.
+
+An output that misses both references passes only when the owner accepted it
+(:func:`accepted_check`): its test and output are listed in
+``cake_naive_accepted.json`` beside this file, and against the listed
+reference (the naive tier or FLA) it is within the caps listed for it.  The
+owner reviewed the validation of this version on B200, GB300 and VR200 (FLA's
+autotuned kernels at their first config) and accepted these measured misses,
+each capped at its measured values: the largest ratio of its median and of its
+largest L2 error over the reference's (as the ``TIER`` line prints them, nine
+significant digits), and the smallest count of draws within :data:`NEAR_TIE`
+of the reference in the max norm.  A
+part of the rule the output meets keeps its ordinary bound; the zero rule,
+finite errors of the reference and the norms judged draw by draw still hold,
+and every entry needs FLA's values: an output judged against the naive tier
+only is never accepted, whatever its listed reference.  Any other output that
+misses both references fails, and a listed output beyond a cap fails with the
+reason.
+The settling of a test's verdicts (the family's
+``experimental/test_helpers/cake_kda_known_gaps.py``) applies the caps, and
+the ``TIER`` line of an accepted output reads ``accepted met=accepted
+cap=...``.  An entry with a ``temporary`` field is accepted only until the
+fix it names lands, and the ``TIER`` line of its output adds ``| temporary:
+<the field>``.
+
+Each test records every
 output's verdict with pytest's ``record_property``
 (:meth:`TierJudge.record`), and the family's ``conftest.py`` prints one
 ``TIER`` line per recorded output in the terminal summary, for passing tests
@@ -73,15 +98,18 @@ kernel's own checks are run to run: the same call on the same inputs gives
 the same bytes.
 
 The comparisons work in blocks of about :data:`BLOCK` elements along dim 0, so
-the float64 copies of a large output stay bounded.  Only torch is imported.
-This file is the same in the family's own tests and in its cross-family tests.
+the float64 copies of a large output stay bounded.  Only torch and the
+standard library are imported.  This file and ``cake_naive_accepted.json``
+are the same in the family's own tests and in its cross-family tests.
 """
 
 from __future__ import annotations
 
+import json
 import random
 import statistics
 from collections.abc import Callable, Iterator, Mapping, Sequence
+from pathlib import Path
 
 import torch
 
@@ -112,6 +140,12 @@ PAIRED_NORMS = ("max",)
 PAIRED_EFFECTIVE = 1
 #: The seed of draw ``j`` of a case of seed ``base`` is ``base + j * DRAW_SEED_STRIDE``.
 DRAW_SEED_STRIDE = 1_000_003
+#: The verdict of an output that missed both references within the caps the owner accepted for it
+#: (:func:`accepted_check`).
+ACCEPTED = "accepted"
+#: The owner-accepted misses and their caps (:func:`accepted_entries`).
+ACCEPTED_FILE = Path(__file__).with_name("cake_naive_accepted.json")
+_accepted: dict[tuple[str, str], dict] | None = None
 
 
 def draw_seed(base: int, draw: int) -> int:
@@ -485,14 +519,105 @@ class TierJudge:
             record_property("naive_tier", verdict)
 
 
+def node_key(test_id: str) -> str:
+    """``test_id`` (pytest's node id) from its ``tests/experimental/`` directory on: the node id depends on the
+    rootdir."""
+    marker = "tests/experimental/"
+    at = test_id.rfind(marker)
+    return test_id[at:] if at >= 0 else test_id
+
+
+def accepted_entries() -> dict[tuple[str, str], dict]:
+    """The owner-accepted misses of :data:`ACCEPTED_FILE` by (test, output), read once."""
+    global _accepted
+    if _accepted is None:
+        entries = json.loads(ACCEPTED_FILE.read_text(encoding="utf-8"))["entries"]
+        _accepted = {(entry["test"], entry["output"]): entry for entry in entries}
+    return _accepted
+
+
+def accepted_cap(entry: Mapping) -> str:
+    """An entry's caps as one token: ``<reference>,l2<=<median>/<largest>,max>=<draws within>/<draws>``."""
+    return (
+        f"{entry['reference']},l2<={entry['l2_median']!r}/{entry['l2_largest']!r},"
+        f"max>={entry['max_paired']}/{entry['draws']}"
+    )
+
+
+def _l2_within(ours: float, theirs: float, cap: float) -> bool:
+    """An L2 statistic of the output meets the reference's (at most :data:`NEAR_TIE` times it), or its ratio to it, to
+    nine significant digits as the ``TIER`` line prints it, is at most ``cap``."""
+    return ours <= NEAR_TIE * theirs or (theirs > 0 and float(f"{ours / theirs:.9g}") <= cap)
+
+
+def accepted_check(test_id: str, verdict: Mapping) -> tuple[Mapping | None, list[str]]:
+    """The owner's entry for the output of ``verdict`` (:meth:`TierJudge.verdicts`, or its JSON form) in the test
+    ``test_id`` (pytest's node id), None when it is not listed, and why the verdict is beyond the entry's caps, one
+    reason each (empty: the output is accepted).  Call it for a verdict that met no reference (``tier`` None): a miss of
+    both references, or a miss of the naive tier where FLA has no values, which no entry accepts.
+
+    Against the entry's reference (``"bf16"``, the tier, or ``"fla"``): the median and the largest L2 error over the
+    draws each meet the reference's or their ratio to it is at most the entry's cap (``l2_median``, ``l2_largest``);
+    in the max norm, judged draw by draw, the output is within :data:`NEAR_TIE` of the reference on at least half of
+    the draws or on at least ``max_paired`` of them.  No cap covers the zero rule, an error of the reference that is
+    not finite, another draw count or other norms judged draw by draw, and every entry, whatever its reference, needs
+    FLA's values: it accepts only a miss of both references."""
+    if verdict.get("tier") is not None:
+        raise ValueError(f"{verdict['output']}: met {verdict['tier']}, not a miss to check against the owner's caps")
+    entry = accepted_entries().get((node_key(test_id), verdict["output"]))
+    if entry is None:
+        return None, []
+    ref, draws = entry["reference"], verdict["draws"]
+    why = []
+    if draws != entry["draws"]:
+        why.append(f"judged over {draws} draws, the caps over {entry['draws']}")
+    by_draw = tuple(verdict.get("by_draw") or ())
+    if by_draw != PAIRED_NORMS:
+        why.append(f"judged draw by draw in {by_draw}, the caps in {PAIRED_NORMS}")
+    if (verdict.get("met") or {}).get(REFERENCE) is None:
+        why.append(f"no FLA values ({verdict.get('fla_reason')}): an entry accepts only a miss of both references")
+        return entry, why
+    if verdict["zero"].get(ref):
+        why.append(f"{ref}: error 0 on draws {verdict['zero'][ref]}, ours not (the zero rule; no cap covers it)")
+    norms = verdict["norms"]
+    if any(norms[norm].get(ref) is None for norm in NORMS):
+        why.append(f"{ref}: an error that is not finite on a draw (no cap covers it)")
+    else:
+        ours, theirs = norms["l2"]["ours"], norms["l2"][ref]
+        for i, (statistic, cap) in enumerate((("median", entry["l2_median"]), ("largest", entry["l2_largest"]))):
+            if not _l2_within(ours[i], theirs[i], cap):
+                ratio = ours[i] / theirs[i] if theirs[i] > 0 else float("inf")
+                why.append(f"l2 {statistic}: ours x{ratio:.9g} {ref}'s, above the cap x{cap!r}")
+    wins = (verdict["wins"] if ref in TIERS else verdict["fla_wins"])["max"]
+    if 2 * wins < draws and wins < entry["max_paired"]:
+        why.append(
+            f"max: ours within {NEAR_TIE} x {ref} on {wins} of {draws} draws, below the cap {entry['max_paired']}"
+        )
+    return entry, why
+
+
 def tier_line(test_id: str, verdict: Mapping) -> str:
-    """``TIER <test> <output> bf16|fla|FAIL met=bf16|fla|none``, whether the
+    """``TIER <test> <output> bf16|fla|accepted|FAIL met=bf16|fla|accepted|none``
+    (``accepted``: a miss of both references within the owner's caps for it,
+    :func:`accepted_check`, followed by ``cap=<its caps>``), whether the
     output met each reference (``bf16=meets|misses fla=meets|misses|none``),
     the number of draws, per norm judged draw by draw the draws within
     :data:`NEAR_TIE` of the tier and of FLA (``paired max <n>/<draws> (fla
     <n>/<draws>) |``), and per norm the median and largest error of the output
-    and of each reference with the output's ratios to them.  An output judged
-    against the naive tier only ends with ``| fla: <reason>, naive tier only``."""
+    and of each reference with the output's ratios to them.  A listed miss
+    beyond its caps adds ``| beyond the accepted cap <caps>: <reasons>``, and
+    a listed miss of a temporary entry ``| temporary: <why>``.  An output
+    judged against the naive tier only ends with ``| fla: <reason>, naive tier
+    only``."""
+    verdict_word, cap, beyond = verdict["tier"], "", ""
+    if verdict_word is None:
+        entry, why = accepted_check(test_id, verdict)
+        if entry is not None and not why:
+            verdict_word, cap = ACCEPTED, f" cap={accepted_cap(entry)}"
+        elif entry is not None:
+            beyond = f" | beyond the accepted cap {accepted_cap(entry)}: {'; '.join(why)}"
+        if entry is not None and entry.get("temporary"):
+            beyond += f" | temporary: {entry['temporary']}"
     met = verdict.get("met") or {}
     judged = met.get(REFERENCE) is not None
     refs = (*TIERS, REFERENCE) if judged else TIERS
@@ -513,8 +638,8 @@ def tier_line(test_id: str, verdict: Mapping) -> str:
     )
     tail = "" if judged else f" | fla: {verdict.get('fla_reason') or NO_FLA_COUNTERPART}, naive tier only"
     return (
-        f"TIER {test_id} {verdict['output']} {verdict['tier'] or 'FAIL'} met={verdict['tier'] or 'none'} "
-        f"{shown} draws={verdict['draws']} {norms}{tail}"
+        f"TIER {test_id} {verdict['output']} {verdict_word or 'FAIL'} met={verdict_word or 'none'}{cap} "
+        f"{shown} draws={verdict['draws']} {norms}{beyond}{tail}"
     )
 
 

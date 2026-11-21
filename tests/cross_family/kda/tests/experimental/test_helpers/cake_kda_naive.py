@@ -46,9 +46,10 @@ under the same rule (the same norms, :data:`tests.cake_naive.NEAR_TIE`, the max 
 fails only when it misses both.  When FLA does not run a draw (the operands are not on a GPU, or FLA does not support
 the case) the output is judged against the naive tier only, and its verdict says why; when FLA runs it and the pinned
 FLA reference cannot (``cake_kda_fla.FlaReferenceError``), the test fails.  There is no tolerance: an output that
-misses fails, unless it is listed in the gaps within its gap's scope and caps.  :func:`assert_bitwise` is the
-deterministic package's run-to-run contract; the non-deterministic package has no bit contract, and no output of one
-package is compared with the other's.
+misses fails, unless it misses both references and is listed in the owner-accepted misses within its caps
+(``tests/cake_naive_accepted.json``), or it is listed in the gaps within its gap's scope and caps.
+:func:`assert_bitwise` is the deterministic package's run-to-run contract; the non-deterministic package has no bit
+contract, and no output of one package is compared with the other's.
 """
 
 from __future__ import annotations

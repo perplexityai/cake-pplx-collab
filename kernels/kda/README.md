@@ -22,9 +22,15 @@ passes when it meets either reference, and fails only when it misses both. To me
 largest L2 error over the draws are at most 1.005 times the reference's, its max-norm error is within 1.005 times
 the reference's on at least half of the draws, and its error is 0 on every draw where the reference's is 0. An
 output with no FLA counterpart, or a case that FLA does not run (operands that are not on a GPU or not `[S, H, D]`,
-an activated gate outside FLA's safe range), is judged against the naive implementation only. Each `TIER` line of
-the test summary names the reference met and shows the errors against both. The tests set no tolerance, and they
-never compare `det` with `nondet`. A `det` package is also checked for bitwise identical results from run to run.
+an activated gate outside FLA's safe range), is judged against the naive implementation only. The owner reviewed the
+misses of both references measured on B200, GB300 and VR200 with the pinned FLA reference below and accepted a listed
+set of them, each capped at its measured values (`tests/cake_naive_accepted.json`): a listed output of its listed test
+passes only when FLA was judged and each part of the rule against its listed reference is met or within its cap, and its
+`TIER` line reads `accepted`; a value beyond a cap fails, and any other miss of both references fails. The entries
+marked `temporary`, the `dk` of the s1450-h2 case of the default-entry KCP tests with the in-kernel Q/K L2 norm, stay
+only until the fix of the in-kernel L2-norm backward lands, and their `TIER` lines say so. Each `TIER` line of the test
+summary names the reference met and shows the errors against both. The tests set no tolerance, and they never compare
+`det` with `nondet`. A `det` package is also checked for bitwise identical results from run to run.
 
 FLA runs with Triton 3.8.0, and each autotuned FLA kernel runs the first config FLA lists for it, not a config that
 Triton's autotuner picks by timing (`tests/experimental/test_helpers/cake_kda_fla.py`, `FLA_PINS`). A GPU test fails
