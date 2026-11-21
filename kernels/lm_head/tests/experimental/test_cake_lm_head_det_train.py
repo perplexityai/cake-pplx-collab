@@ -18893,6 +18893,8 @@ def test_device_compacted_loss_fold_under_saved_tensor_hooks(monkeypatch, hooks)
     assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
     X = inp.X.detach().clone().requires_grad_(True)
     W = inp.W.detach().clone().requires_grad_(True)
+    # the head's storage address as an int (a failing assert then renders no storage)
+    head_storage = W.untyped_storage().data_ptr()
     packed = []
     spy.clear()
     if hooks == "offload":
@@ -18914,9 +18916,7 @@ def test_device_compacted_loss_fold_under_saved_tensor_hooks(monkeypatch, hooks)
         assert any(hi > lo for lo, hi in spy.ranges), spy.ranges
     else:
         assert packed, "the offload hooks packed no tensor"
-        assert W.untyped_storage().data_ptr() not in packed, (
-            "the offload hooks packed the head"
-        )
+        assert head_storage not in packed, "the offload hooks packed the head"
         assert spy.fold_alone, spy.names
         assert not _FOLD_STAGES & set(spy.names), spy.names
         assert not any(hi > lo for lo, hi in spy.ranges), spy.ranges
