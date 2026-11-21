@@ -35,6 +35,15 @@ operands' device, in this order:
    the dQ tiles added into the FP32 accumulator by bulk reductions.
 3. ``bwd_post``: ``dq = bf16(acc * softmax_scale)`` in the layout of ``q``.
 
+A head-dimension 128 call whose key length is a multiple of 256, with at least
+as many queries as keys, takes the pair route where a region of
+``cake_jit.PAIR_REGIONS`` for its architecture and mask holds its ``B * H`` and
+key length (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
+variant): its main stage is the 2-CTA kernel, one CTA pair per 256 keys, which
+adds the dQ tiles in the pair-row order, and its postprocess is the build that
+reads that order.  The kernel parameters, grids and workspace are the same on
+both routes.
+
 The backward runs the three launches in one host call: the library of the
 variant's host sequence compiles the three kernel units beside a host unit
 that launches them in order, with the arguments and grids of the stage
@@ -45,9 +54,10 @@ in.  The stage launchers ``launch_bwd_pre``, ``launch_bwd_main`` and
 ``launch_bwd_post`` launch one stage each.
 
 Every launch is a plain stream-ordered launch: nothing cooperative, no PDL, no
-co-residency requirement.  Nothing here reads an environment variable, reads
-device memory or synchronizes; grids and buffer sizes come from tensor
-shapes.
+co-residency requirement beyond the clusters of two CTAs of the pair route's
+main kernel, which the launch itself schedules together.  Nothing here
+reads an environment variable, reads device memory or synchronizes; grids and
+buffer sizes come from tensor shapes.
 
 This is the non-deterministic package of its family, and the family has no
 deterministic package: the dQ tiles of the key blocks of one head reach the
@@ -202,10 +212,10 @@ def _entry(name: str, arch: str) -> Any:
 
 
 @functools.cache
-def _sequence(D: int, causal: bool, arch: str) -> Optional[tuple[Any, Any, Any]]:
-    """``(library, run, run_with_workspace)`` of the host sequence of variant ``(D, causal)`` built for ``arch``
-    (looked up once per process), or ``None`` when ``SEQUENCES`` has none for the variant on ``arch``; the backward
-    then launches through the stage launchers.
+def _sequence(variant: tuple[int, bool, bool], arch: str) -> Optional[tuple[Any, Any, Any]]:
+    """``(library, run, run_with_workspace)`` of the host sequence of ``variant`` (a ``RECORD_OF`` key ``(D, causal,
+    pair)``, :func:`.cake_jit.variant`) built for ``arch`` (looked up once per process), or ``None`` when
+    ``SEQUENCES`` has none for the variant on ``arch``; the backward then launches through the stage launchers.
 
     The library compiles the variant's three kernel units beside one host unit.  ``run(q, k, v, out, lse, dout, dq,
     dk, dv, softmax_scale, softmax_scale_log2)`` launches the records ``RECORD_OF`` names for the variant, in order,
@@ -215,13 +225,13 @@ def _sequence(D: int, causal: bool, arch: str) -> Optional[tuple[Any, Any, Any]]
     before any launch when an allocation fails.  ``run_with_workspace(q, k, v, out, lse, dout,
     dq, dk, dv, lse_log2, dpsum, dq_accum, softmax_scale, softmax_scale_log2)`` takes the three buffers from the
     caller."""
-    found = cake_jit.SEQUENCES.get((D, causal))
+    found = cake_jit.SEQUENCES.get(variant)
     if found is None or arch not in found["arches"]:
         return None
-    if tuple(found["records"]) != tuple(cake_jit.RECORD_OF[(D, causal)]):
+    if tuple(found["records"]) != tuple(cake_jit.RECORD_OF[variant]):
         raise RuntimeError(
-            f"the host sequence of variant {(D, causal)} runs {found['records']}, not the records "
-            f"{cake_jit.RECORD_OF[(D, causal)]} of RECORD_OF"
+            f"the host sequence of variant {variant} runs {found['records']}, not the records "
+            f"{cake_jit.RECORD_OF[variant]} of RECORD_OF"
         )
     library = cake_build.load_library(f"{found['library']}_{arch}")
     return library, library.run, library.run_with_workspace
@@ -667,9 +677,10 @@ def cake_fmha_nondet_train_backward(
         dk = torch.empty(0, Skv, H, D, dtype=torch.bfloat16, device=device)
         return dq, dk, torch.empty_like(dk)
     arch = device_arch(device.index)  # RuntimeError on a device outside ARCHES, before the alert
-    pre, main, post = cake_jit.RECORD_OF[(D, bool(causal))]
+    variant = cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+    pre, main, post = cake_jit.RECORD_OF[variant]
     _alert_nondeterministic(_ENTRY)
-    sequence = _sequence(D, causal, arch)
+    sequence = _sequence(variant, arch)
     if sequence is not None:
         # One host call runs the three records: the kernels, arguments and grids of the stage launchers below.
         _, run, run_with_workspace = sequence

@@ -38,14 +38,17 @@ SINK_SCALE = nope_ref.SINK_SCALE
 # sink, a row with one valid slot is a row of kv exactly).  dq and the accumulator's increment: rel-L2 at most
 # SINK_REL_L2_FACTOR x the same call's without a sink.  Every finite lse within SINK_LSE_FACTOR x the largest lse error
 # without a sink plus SINK_LSE_REL x |lse_ref|; dsink within SINK_DSINK_REL_L2 rel-L2 and every head within
-# SINK_DSINK_HEAD x max |dsink_ref|.  Each call also reports the raw out ratio (rel-L2 with the sink over rel-L2
-# without it) and the same ratio over the rows with more than SINK_MANY_KEYS valid slots.
+# SINK_DSINK_HEAD x max |dsink_ref| (SINK_DSINK_HEAD_NO_OLO x under with_o_lo=False: that mode derives delta from the
+# BF16 out, so its per-head dsink bound is 1.5 x the default; every other bound and the naive tier are the same in
+# both modes).  Each call also reports the raw out ratio (rel-L2 with the sink over rel-L2 without it) and the same
+# ratio over the rows with more than SINK_MANY_KEYS valid slots.
 SINK_REL_L2_FACTOR = 1.1
 SINK_MANY_KEYS = 16
 SINK_LSE_FACTOR = 4.0
 SINK_LSE_REL = 1e-6
 SINK_DSINK_REL_L2 = 5e-3
 SINK_DSINK_HEAD = 5e-3
+SINK_DSINK_HEAD_NO_OLO = 7.5e-3
 
 # name -> (T, index row width, make_sink_inputs keywords, key_passes): the widths 640 and 128 of the model's layers
 # at T 1,024 and 4,096, and at T 1,024 width 640 the variants of the acceptance: q x 5, a head-major dout, the
@@ -136,15 +139,23 @@ def sink_out_ratios(found, oracle, form: str, many_keys: torch.Tensor) -> dict:
     return dict(raw=raw, floor=floor, e=raw / floor, many_keys=many_s / many_n)
 
 
-def assert_sink_bounds(found, oracle, out_ratios: dict) -> None:
+def sink_dsink_head_bound(with_o_lo: bool) -> float:
+    """The per-head ``dsink`` bound of a call's mode, as a multiple of ``max |dsink_ref|``: :data:`SINK_DSINK_HEAD`
+    as shipped, :data:`SINK_DSINK_HEAD_NO_OLO` under ``with_o_lo=False`` (``delta`` from the BF16 ``out``)."""
+    return SINK_DSINK_HEAD if with_o_lo else SINK_DSINK_HEAD_NO_OLO
+
+
+def assert_sink_bounds(
+    found, oracle, out_ratios: dict, *, with_o_lo: bool = True
+) -> None:
     """The acceptance bounds of one draw beside the judge, for each form of ``out_ratios`` (form ->
     :func:`sink_out_ratios`; outputs named ``"sink <form> <name>"`` with the sink and ``"no sink <form> <name>"`` for
     the same call without it): the ``e`` ratio of ``out`` at most :data:`SINK_REL_L2_FACTOR`; the rel-L2 of ``dq``
     and the accumulator's increment at most :data:`SINK_REL_L2_FACTOR` x the call's without a sink; every finite
     ``lse`` within :data:`SINK_LSE_FACTOR` x the largest ``lse`` error without a sink plus :data:`SINK_LSE_REL` x
     ``|lse_ref|``, and ``-inf`` exactly where the reference is; ``dsink`` within :data:`SINK_DSINK_REL_L2` rel-L2 and
-    every head within :data:`SINK_DSINK_HEAD` x ``max |dsink_ref|``; on the dominant head (about 100 above the
-    scores) ``lse`` is the sink to FP32 rounding on every row."""
+    every head within :func:`sink_dsink_head_bound` of ``with_o_lo`` (the mode the calls ran) x ``max |dsink_ref|``;
+    on the dominant head (about 100 above the scores) ``lse`` is the sink to FP32 rounding on every row."""
     dominant = max(nope_ref.SINK_SPECIAL_HEADS, key=nope_ref.SINK_SPECIAL_HEADS.get)
     top = nope_ref.SINK_SPECIAL_HEADS[dominant]
     half_ulp = 0.5 * torch.finfo(torch.float32).eps * 2.0 ** math.floor(math.log2(top))
@@ -191,7 +202,7 @@ def assert_sink_bounds(found, oracle, out_ratios: dict) -> None:
         )
         assert rel <= SINK_DSINK_REL_L2, f"{form} dsink: rel-L2 {rel:.3e}"
         head = float((dsink - want).abs().max())
-        limit = SINK_DSINK_HEAD * float(want.abs().max())
+        limit = sink_dsink_head_bound(with_o_lo) * float(want.abs().max())
         assert head <= limit, f"{form} dsink: a head's error {head:.3e} > {limit:.3e}"
 
 

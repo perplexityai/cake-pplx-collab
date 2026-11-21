@@ -17,7 +17,7 @@ Public-API suite of ``cake_pplx.cake_engram_gate_nondet_train``, the non-determi
 
 Without a device: the entries are stable APIs, importing the module imports no backend, the module reads no
 environment variable, every keyword of an entry is the backend's keyword of the same name, the autograd entries and
-the explicit forward take the keyword-only ``dot_sum="compensated"`` (the explicit backward and the workspace query do
+the explicit forward take the keyword-only ``dot_sum="fp32"`` (the explicit backward and the workspace query do
 not) and refuse another choice before they look at the operands, the entries document their behaviour under
 ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a device of capability (10, 7)
 maps to ``sm_107a``.
@@ -83,14 +83,13 @@ ENTRIES = (
 GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
 # The ``dot_sum`` choices (the default first) and the forward record suffix each launches; every backward launches
 # ``bwd_dot2``.
-DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 # The entries that take ``dot_sum``: the forward's sum (the backward is the same for both).
 SUM_ENTRIES = ("cake_engram_gate_nondet", "cake_engram_gate_nondet_kv", "cake_engram_gate_nondet_train_forward")
-# The gradients with one fixed order (the weight gradients are summed with atomics).
+# The gradients with one fixed order (the weight gradients promise no bits).
 EXACT_GRADS = ("dx", "dkey", "dvalue")
 # Cycles of the sleep kernel queued before a call on a side stream (about 0.1 s): the call returns long before it ends.
 SLEEP_CYCLES = 200_000_000
-ALERT = "adds the weight gradients with float atomics"
 
 
 def _backend():
@@ -221,7 +220,7 @@ def test_keywords_match_the_backend() -> None:
     assert gate["token_mask"].default is None
     for name in SUM_ENTRIES:
         param = inspect.signature(inspect.unwrap(getattr(api, name))).parameters["dot_sum"]
-        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "compensated", name
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "fp32", name
     for name in sorted(set(ENTRIES) - set(SUM_ENTRIES)):
         assert "dot_sum" not in inspect.signature(inspect.unwrap(getattr(api, name))).parameters, name
     for cls in ("CakeEngramGateNondetFunction", "CakeEngramGateNondetKvFunction"):
@@ -253,11 +252,11 @@ def test_another_dot_sum_is_refused_before_the_operands() -> None:
     assert set(SUM_ENTRIES) <= set(calls)
     for label, call in calls.items():
         for bad in ("dot2", "f32", "FP32", ""):
-            with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+            with pytest.raises(ValueError, match=r"dot_sum must be one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
         for bad in (None, 1):
-            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
     # Both choices pass the check; the CPU operands are refused next.
@@ -338,10 +337,10 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
     api.cake_engram_gate_nondet_train_forward(*args, dot_sum=dot_sum)
     api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
     assert launched == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
-    if dot_sum == "compensated":
+    if dot_sum == "fp32":
         launched.clear()
         _autograd(ns, packed=packed)
-        assert launched == ["fwd_dot2", "bwd_dot2", "dw_reduce"], "the default is the compensated sum"
+        assert launched == ["fwd_f32", "bwd_dot2", "dw_reduce"], "the default is the one-word FP32 sum"
 
 
 def _gpu_activities(call) -> Optional[list[str]]:
@@ -358,9 +357,9 @@ def _gpu_activities(call) -> Optional[list[str]]:
     return names or None
 
 
-# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward runs the
-# accumulator's clear, ``bwd_dot2`` and ``dw_reduce``.
-LAUNCHES = {"forward": 1, "backward": 3}
+# The GPU activities of one call, for every pair of weight dtypes: the forward launches ``fwd``; the backward launches
+# ``bwd_dot2`` and ``dw_reduce``.
+LAUNCHES = {"forward": 1, "backward": 2}
 
 
 @pytest.mark.parametrize("weights", ("fp32", "bf16", "mixed"))
@@ -368,7 +367,7 @@ LAUNCHES = {"forward": 1, "backward": 3}
 def test_launches_per_call(packed, weights) -> None:
     """CUPTI's count of the GPU activities of one forward and one backward call (autograd and explicit), for every
     pair of weight dtypes, with no cast, product or copy of a weight and no cast of a weight gradient: the forward runs
-    ``fwd`` alone and the backward 3."""
+    ``fwd`` alone and the backward 2."""
     device = _device_or_skip()
     layout = "kv" if packed else "contiguous"
     ns = make_inputs(129, seed=61, device=device, weights=weights, mask="some", layout=layout)
@@ -716,34 +715,41 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 # On SM100 / SM103 / SM107: determinism, streams, graphs, checkpoint, memory
 
 
-def test_deterministic_mode_raises_the_alert_in_the_backward_only() -> None:
-    """Under ``torch.use_deterministic_algorithms(True)``: the forward runs; the backward of every entry raises
-    PyTorch's ``RuntimeError`` naming the deterministic package's entry, before it launches."""
+@pytest.mark.parametrize("dot_sum", tuple(DOT_SUMS))
+def test_deterministic_mode_changes_nothing(dot_sum) -> None:
+    """Under ``torch.use_deterministic_algorithms(True)``, strict or ``warn_only``: nothing alerts or warns, and the
+    output and the gradients with one fixed order are the bits of a call outside the mode (autograd, packed and
+    explicit entries)."""
     device = _device_or_skip()
-    ns = make_inputs(16, seed=23, device=device, weights="bf16", mask="some", layout="kv")
-    x, key, value, kv, qw, kw = _leaves(ns)
-    with _torch_deterministic(warn_only=False):
-        out = api.cake_engram_gate_nondet(x, key, value, qw, kw, ns.token_mask)
-        packed = api.cake_engram_gate_nondet_kv(x, kv, qw, kw, ns.token_mask)
-        api.cake_engram_gate_nondet_train_forward(ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train\.cake_engram_gate_det\b"):
-            out.backward(ns.dout)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train\.cake_engram_gate_det_kv\b"):
-            packed.backward(ns.dout)
-        with pytest.raises(RuntimeError, match=rf"{ALERT}.*cake_engram_gate_det_train_backward\b"):
-            api.cake_engram_gate_nondet_train_backward(ns.dout, ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
+    ns = make_inputs(1031, seed=19, device=device, weights="bf16", mask="some", layout="kv")
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight, ns.token_mask)
+    first = _autograd(ns, dot_sum=dot_sum)
+    explicit = api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        with _torch_deterministic(warn_only=False):
+            second = _autograd(ns, dot_sum=dot_sum)
+            strict = api.cake_engram_gate_nondet_train_backward(ns.dout, *args)
+        with _torch_deterministic(warn_only=True):
+            third = _autograd(ns, packed=True, dot_sum=dot_sum)
+    for name in ("out", *EXACT_GRADS):
+        assert _same_bits(first[name], second[name]), name
+        assert _same_bits(first[name], third[name]), name
+    for k in range(3):
+        assert _same_bits(explicit[k], strict[k]), k
 
 
-def test_warn_only_warns_once_and_runs(record_property) -> None:
-    """With ``warn_only=True`` the backward warns once per call and runs; the results meet the tier."""
+def test_warn_only_runs_without_an_alert_and_meets_the_tier(record_property) -> None:
+    """With ``warn_only=True`` the backward runs without a deterministic-algorithms warning; the results meet the
+    tier."""
     device = _device_or_skip()
 
     def run(ns):
         with _torch_deterministic(warn_only=True), warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             got = _autograd(ns)
-        alerts = [w for w in caught if ALERT in str(w.message)]
-        assert len(alerts) == 1, [str(w.message) for w in caught]
+        alerts = [w for w in caught if "deterministic" in str(w.message)]
+        assert not alerts, [str(w.message) for w in alerts]
         return got
 
     def make(seed):

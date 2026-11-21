@@ -1746,11 +1746,23 @@ def k1_program_knobs(program: str) -> tuple:
 #: prefix), planned with the knobs that name it (:func:`k1_program_knobs`); every other part, row, token count, layout
 #: and output dtype runs the deterministic plan.  The table's programs (``kn_n128_f32_tma2_s4_c1``,
 #: ``kn_n256_tma1_w8`` / ``_w8r`` / ``_w8rs``, ``kn_n256_f32_v8_ef_pro7``; on 212-SM ``sm_107a`` parts
-#: ``kn_n128_f32_tma1_pd2_c1`` and ``kn_n256_tma2_pd2_lw_pro15``) were measured at exactly these rows and token counts on
-#: one part of each SM count, against the deterministic plan of the row in the same process: faster in eager launches
-#: and in CUDA graph replays in at least 4 of 5 paired groups of a screen (``sm_107a``: 5 of 5), the output equal to
-#: the deterministic plan's bit for bit, and the same bits on 20 repeats; the rows and token counts of that screen that
-#: missed keep the deterministic plan.
+#: ``kn_n128_f32_tma1_pd2_c1`` and, up to version 0.3.16, ``kn_n256_tma2_pd2_lw_pro15``) were measured at exactly these
+#: rows and token counts on one part of each SM count, against the deterministic plan of the row in the same process:
+#: faster in eager launches and in CUDA graph replays in at least 4 of 5 paired groups of a screen (``sm_107a``: 5 of
+#: 5), the output equal to the deterministic plan's bit for bit, and the same bits on 20 repeats; the rows and token
+#: counts of that screen that missed keep the deterministic plan.  Up to version 0.3.15 the table also held BF16
+#: entries at 16 keys of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (11 on 152-SM ``sm_103a`` parts, 5 on 148-SM ``sm_100a``
+#: parts) and up to version 0.3.16 at 3 more (``kn_n256_tma2_pd2_lw_pro15`` on the indexer_hw ``6144 -> 32`` at 16172,
+#: 16231 and 16384 tokens on 212-SM ``sm_107a`` parts), each under an entry of :data:`K1_DGRAD_NVJET_RULES_BY_SM`,
+#: which comes first; since version 0.3.16 (on ``sm_107a`` since version 0.3.17) these keys run the deterministic plan.
+#: Up to version 0.3.17 it also held 20 BF16 entries on 152-SM ``sm_100a`` parts (GB200), ``kn_n256_tma1_w8`` /
+#: ``_w8r`` / ``_w8rs``: 7 under keys of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (``4096 -> 32`` at 16172, 16231 and 16384
+#: tokens, ``4096 -> 64`` at 16384, and ``4096 -> 128``, ``5120 -> 32`` and the indexer_hw ``6144 -> 32`` at 16231),
+#: and 13 of keys no other table held: ``4096 -> 128``, ``5120 -> 32``, ``5120 -> 48``, the indexer_hw ``6144 -> 32``
+#: and the indexer_k ``6144 -> 128`` at 16172 and 16384 tokens, and ``4096 -> 48``, ``5120 -> 128`` and
+#: ``8192 -> 128`` at 16172.  Since version 0.3.18 these keys run the deterministic plan, which was faster there in a
+#: counted comparison on two GB200 nodes (:data:`_NVJET_DGRAD_DET_PLAN_ROWS`; at the 13 keys the lowest and highest
+#: medians of the entry's time over the plan's were 1.019 and 1.086).
 # fmt: off
 K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
@@ -1760,15 +1772,14 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8r",
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
         (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7",
         (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1778,7 +1789,7 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
         (5120, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
         (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8r",
         (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1793,54 +1804,43 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
     },
     ("sm_100a", 152): {
-        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8rs", (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs", (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (5120, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
         (5120, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs",
-        (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8rs",
         (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16172, "bf16"): "kn_n256_tma1_w8r",
         (6144, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16231, "bf16"): "kn_n256_tma1_w8r",
         (6144, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16231, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16384, "bf16"): "kn_n256_tma1_w8r",
-        (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
+        (6144, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (6144, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (8192, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (8192, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (8192, 128, 16384, "bf16"): "kn_n256_tma1_w8r", (8192, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
     },
     ("sm_103a", 152): {
-        (4096, 32, 16172, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 32, 16384, "bf16"): "kn_n256_tma1_w8r", (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
-        (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16172, "bf16"): "kn_n256_tma1_w8rs",
-        (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16231, "bf16"): "kn_n256_tma1_w8rs",
-        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16384, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 64, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
+        (4096, 64, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16231, "bf16"): "kn_n256_tma1_w8rs",
         (4096, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (4096, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (4096, 1024, 16172, "f32"): "kn_n256_f32_v8_ef_pro7", (4096, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 32, 16172, "bf16"): "kn_n256_tma1_w8r",
-        (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16231, "bf16"): "kn_n256_tma1_w8r",
+        (4096, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (5120, 32, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 32, 16231, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 32, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 48, 16231, "bf16"): "kn_n256_tma1_w8r", (5120, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1849,8 +1849,7 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (5120, 64, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16172, "bf16"): "kn_n256_tma1_w8rs",
         (5120, 128, 16172, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 128, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (5120, 128, 16384, "f32"): "kn_n128_f32_tma2_s4_c1", (5120, 1024, 16231, "f32"): "kn_n256_f32_v8_ef_pro7",
-        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7", (6144, 32, 16172, "bf16"): "kn_n256_tma1_w8rs",
-        (6144, 32, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 32, 16384, "bf16"): "kn_n256_tma1_w8rs",
+        (5120, 1024, 16384, "f32"): "kn_n256_f32_v8_ef_pro7",
         (6144, 48, 16172, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16172, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16231, "bf16"): "kn_n256_tma1_w8rs", (6144, 48, 16231, "f32"): "kn_n128_f32_tma2_s4_c1",
         (6144, 48, 16384, "bf16"): "kn_n256_tma1_w8r", (6144, 48, 16384, "f32"): "kn_n128_f32_tma2_s4_c1",
@@ -1867,8 +1866,6 @@ K1_DGRAD_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]
         (4096, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1", (4096, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1",
         (4096, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16172, "f32"): "kn_n128_f32_tma1_pd2_c1",
         (5120, 128, 16231, "f32"): "kn_n128_f32_tma1_pd2_c1", (5120, 128, 16384, "f32"): "kn_n128_f32_tma1_pd2_c1",
-        (6144, 32, 16172, "bf16"): "kn_n256_tma2_pd2_lw_pro15", (6144, 32, 16231, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
-        (6144, 32, 16384, "bf16"): "kn_n256_tma2_pd2_lw_pro15",
     },
 }
 # fmt: on
@@ -2123,6 +2120,55 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
         for t in _GLM3
     ),
 }
+#: The ``(K, N, T)`` rows (BF16 out) per part that :data:`K1_DGRAD_NVJET_RULES_BY_SM` leaves out of both its programs
+#: since version 0.3.16 (on 212-SM ``sm_107a`` parts since version 0.3.17, on 152-SM ``sm_100a`` parts since version
+#: 0.3.18), as :data:`K1_DGRAD_RULES_BY_SM` leaves out the entries it held under 26 of them: there the call runs the
+#: deterministic plan of the row, its program and bits (before, the nvjet program on the plan of
+#: :data:`K1_DGRAD_NVJET_DET_PROGRAM`).  A round on two nodes of each part timed, at the keys a part holds among 11 rows
+#: at 16172, 16231 and 16384 tokens (on 212-SM ``sm_107a`` parts among 5 rows), the deterministic plan as two prepared
+#: copies against this package's launch of the key in the same 21 paired rounds, in eager launches and in CUDA graph
+#: replays.  A key leaves where, in every node and mode pair, each copy was faster in at least 17 of the 21 rounds and
+#: both medians of this package's time over the copy's were at least 1.015, the plan met the naive BF16 tier against
+#: FP64 on five seeds, and its outputs had one bit pattern on every run and GPU.  At every GB300 and B200 key here both
+#: copies were faster in all 21 rounds of every pair, and at every GB200 key but ``4096 -> 64`` at 16231 tokens (there
+#: in 19 to 21); the lowest and highest medians over the nodes, modes and copies:
+#:   * 152-SM ``sm_103a`` (GB300), at 16172, 16231 and 16384 tokens: ``4096 -> 32`` (1.050 to 1.075), ``4096 -> 64``
+#:     (1.015 to 1.068), ``5120 -> 32`` (1.026 to 1.052), ``5120 -> 64`` (1.028 to 1.053) and the indexer_hw input
+#:     gradient ``6144 -> 32`` (1.023 to 1.042);
+#:   * 148-SM ``sm_100a`` (B200): ``5120 -> 32`` at 16172, 16231 and 16384 tokens (1.018 to 1.026), and ``4096 -> 64``
+#:     (1.035 to 1.052), ``5120 -> 64`` (1.023 to 1.038) and the indexer_hw ``6144 -> 32`` (1.019 to 1.024) at 16384;
+#:   * 212-SM ``sm_107a`` (VR200), since version 0.3.17: ``4096 -> 32`` (1.027 to 1.080), ``5120 -> 32`` (1.024 to
+#:     1.082) and the indexer_hw ``6144 -> 32`` (1.017 to 1.058) at 16172, 16231 and 16384 tokens, and ``5120 -> 64``
+#:     (1.022 to 1.033) at 16384; there the plan runs the 128-column start-path programs of the deterministic
+#:     package's version 0.3.17;
+#:   * 152-SM ``sm_100a`` (GB200), since version 0.3.18: ``4096 -> 32`` (1.049 to 1.077) and ``4096 -> 64`` (1.021 to
+#:     1.065) at 16172, 16231 and 16384 tokens, and ``4096 -> 128`` (1.022 to 1.028), ``5120 -> 32`` (1.051 to 1.064),
+#:     ``5120 -> 64`` (1.045 to 1.059) and the indexer_hw ``6144 -> 32`` (1.048 to 1.053) at 16231; with them 13 keys
+#:     that only :data:`K1_DGRAD_RULES_BY_SM` held run the deterministic plan (that table's notes), 23 in all.  The
+#:     medians are against the deterministic package's plan of version 0.3.18; since its version 0.3.19 that plan runs
+#:     ``4096 -> 64`` at 16231 tokens (and 16173 to 16383) on its 128-column start-path program
+#:     ``kn_n128_tma1_w8relf`` in raster groups of 16 instead of ``kn_n256_tma1_w8relf``, with the same bits, measured
+#:     1.011 to 1.039 times faster than its plan of version 0.3.18 there (1.029 to 1.039 in a confirmation round), and
+#:     the call runs that program.
+#: The other measured keys of these parts (18 on GB300, 27 on B200, 5 on VR200, 7 on GB200) missed the bar and keep
+#: their programs.  A key names one token count: the token counts next to it keep their routes.  Up to version 0.3.17
+#: 152-SM ``sm_100a`` parts kept every entry (an empty set); a part's set holds the rows it leaves, with their entries
+#: of :data:`K1_DGRAD_RULES_BY_SM` taken out.
+_NVJET_DGRAD_DET_PLAN_ROWS: dict[tuple[str, int], frozenset[tuple[int, int, int]]] = {
+    ("sm_100a", 148): frozenset(
+        {*((5120, 32, t) for t in _GLM3), (4096, 64, 16384), (5120, 64, 16384), (6144, 32, 16384)}
+    ),
+    ("sm_100a", 152): frozenset(
+        {
+            *((k, n, t) for k, n in ((4096, 32), (4096, 64)) for t in _GLM3),
+            *((k, n, 16231) for k, n in ((4096, 128), (5120, 32), (5120, 64), (6144, 32))),
+        }
+    ),
+    ("sm_103a", 152): frozenset(
+        (k, n, t) for k, n in ((4096, 32), (4096, 64), (5120, 32), (5120, 64), (6144, 32)) for t in _GLM3
+    ),
+    ("sm_107a", 212): frozenset({*((k, 32, t) for k in (4096, 5120, 6144) for t in _GLM3), (5120, 64, 16384)}),
+}
 # fmt: on
 #: The K1 input-gradient rows that run this package's nvjet program on the deterministic package's plan of
 #: :data:`K1_DGRAD_NVJET_DET_PROGRAM`, ``(arch, sm_count) -> {(K, N, T, out_dtype): template}``: on a part of exactly
@@ -2151,20 +2197,33 @@ _NVJET_FREE_ROWS: dict[tuple[str, int], tuple[tuple[int, int, int], ...]] = {
 #: graph replays, faster in 17 of 17 groups in both: on a B200 part that route took 1.006 to 1.043 times its time, on a
 #: GB300 part 1.005 to 1.053 times, on an R200 part 1.036 to 1.108 times (and 1.07 to 1.11 times on two more cards for
 #: 8 rows).  The other rows of those screens (within 0.998 to 1.014 times) keep their routes.
+#:
+#: Since version 0.3.16 a part leaves its rows of :data:`_NVJET_DGRAD_DET_PLAN_ROWS` (GB300 15, B200 6; since version
+#: 0.3.17 VR200 10; since version 0.3.18 GB200 10) out of both programs: the deterministic plan of the row was faster
+#: there.  Since version 0.3.18 GB200 leaves 23 keys to the deterministic plan in all, those 10 and 13 that only
+#: :data:`K1_DGRAD_RULES_BY_SM` held: the deterministic plan was faster there in a counted comparison on two nodes.
 # fmt: off
 K1_DGRAD_NVJET_RULES_BY_SM: dict[tuple[str, int], dict[tuple[int, int, int, str], str]] = {
     ("sm_100a", 148): {
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM100_KEPT},
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_100a", 148)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+           if row not in _NVJET_DGRAD_SM100_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 148)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_100a", 148)]
+           if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 148)]},
     },
     ("sm_100a", 152): {
-        (*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM100_KEPT
+        (*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+        if row not in _NVJET_DGRAD_SM100_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_100a", 152)]
     },
     ("sm_103a", 152): {
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS if row not in _NVJET_DGRAD_SM103_KEPT},
-        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_103a", 152)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN for row in _NVJET_DGRAD_ROWS
+           if row not in _NVJET_DGRAD_SM103_KEPT | _NVJET_DGRAD_DET_PLAN_ROWS[("sm_103a", 152)]},
+        **{(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_103a", 152)]
+           if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_103a", 152)]},
     },
-    ("sm_107a", 212): {(*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_107a", 212)]},
+    ("sm_107a", 212): {
+        (*row, "bf16"): _NVJET_EARLY_LEAN_FREE for row in _NVJET_FREE_ROWS[("sm_107a", 212)]
+        if row not in _NVJET_DGRAD_DET_PLAN_ROWS[("sm_107a", 212)]
+    },
 }
 # fmt: on
 

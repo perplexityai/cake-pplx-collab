@@ -82,7 +82,13 @@ STREAMS, MAPPING_ROWS = 4, 24
 SEED = 8900
 # A1 / A9: T = 1, small, irregular and the issue's benchmark points.
 T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
-T_COLLAPSE = (1, 7, 257, 2049, 16384, 65536)
+# The standalone collapse; 383 / 384 and 640 / 641 pin both edges of sm_107a's token-count band of
+# ``collapse_backward``, 6655 / 6656 both sides of its band of ``collapse_forward``.
+T_COLLAPSE = (1, 7, 257, 383, 384, 640, 641, 2049, 6655, 6656, 8191, 8192, 16384, 65536)
+# Every record of a token-count band of ``collapse_forward``, launched on its own.
+T_COLLAPSE_BAND = (1, 129, 2049, 6655, 6656, 8191, 8192, 16384)
+# Every record of a token-count band of ``collapse_backward``, launched on its own.
+T_COLLAPSE_BWD_BAND = (1, 129, 383, 384, 512, 640, 641, 2049)
 _PARAMETER = ("dfn", "dscale", "dbase")
 
 
@@ -118,6 +124,47 @@ def _arch() -> str:
 
 def _sm_count() -> int:
     return loader.sm_count(_device().index)
+
+
+def _collapse_forward_records(T: int) -> tuple[dict, dict[str, torch.Tensor]]:
+    """The inputs (seed of ``T``) and ``U`` of every record of the device's ``collapse_forward`` route launched on
+    its own on them, each into a NaN-filled ``U`` that must hold no NaN after the launch (no unwritten word)."""
+    i = make_inputs(T, device=_device(), seed=SEED + 1700 + T)
+    out = {}
+    for name in loader.route_modules(_arch(), HIDDEN, "collapse_forward"):
+        U = torch.full((T, HIDDEN), float("nan"), dtype=BF16, device=_device())
+        values = {"x": i["X"], "pre_in": i["pre_in"], "u": U, "rows": T}
+        loader.run_module(name, values, rows=T, device_index=_device().index)
+        torch.cuda.synchronize()
+        assert not bool(U.isnan().any()), f"{name}: unwritten U words at T={T}"
+        out[name] = U
+    return i, out
+
+
+def _collapse_backward_records(T: int) -> tuple[dict, dict[str, dict]]:
+    """The inputs (seed of ``T``) and ``dX`` / ``dpre_in`` of every record of the device's ``collapse_backward`` route
+    launched on its own on them, each into a NaN-filled ``dX`` and ``dpre_in`` that must hold no NaN after the launch
+    (no unwritten word)."""
+    dev = _device()
+    i = make_inputs(T, device=dev, seed=SEED + 1800 + T)
+    out = {}
+    for name in loader.route_modules(_arch(), HIDDEN, "collapse_backward"):
+        dX = torch.full((T, STREAMS, HIDDEN), float("nan"), dtype=BF16, device=dev)
+        dpre_in = torch.full((T, STREAMS), float("nan"), dtype=F32, device=dev)
+        values = {
+            "x": i["X"],
+            "pre_in": i["pre_in"],
+            "du": i["dU"],
+            "dx": dX,
+            "dpre_in": dpre_in,
+            "rows": T,
+        }
+        loader.run_module(name, values, rows=T, device_index=dev.index)
+        torch.cuda.synchronize()
+        for k, v in (("dX", dX), ("dpre_in", dpre_in)):
+            assert not bool(v.isnan().any()), f"{name}: unwritten {k} at T={T}"
+        out[name] = {"dX": dX, "dpre_in": dpre_in}
+    return i, out
 
 
 def _poison(fwd_ws: torch.Tensor, bwd_ws: torch.Tensor, T: int) -> None:
@@ -956,6 +1003,43 @@ def test_handoff_outputs_are_deterministic(T: int) -> None:
         assert_equal(auto[n], auto[0], tuple(auto[0]), f"autograd run {n}")
     shared = ("U", "Y", "pre_next", "dX", "dpre_in", "dfn", "dscale", "dbase")
     assert_equal(auto[0], direct[0], shared, "autograd vs direct")
+
+
+@pytest.mark.parametrize("T", T_COLLAPSE_BAND)
+def test_every_collapse_forward_record_gives_the_same_bits(T: int) -> None:
+    """Where ``collapse_forward`` is a token-count band of records (sm_107a: ``collapse_fwd__m2`` below 6656 tokens,
+    ``collapse_fwd__m2_xhnone`` from 6656), every record of the route, launched on its own on the same inputs into a
+    NaN-filled ``U``, writes every word, and every record and the public entry point give the same bits."""
+    route = loader.route_modules(_arch(), HIDDEN, "collapse_forward")
+    if len(route) < 2:
+        pytest.skip(f"collapse_forward is one record on {_arch()}")
+    i, records = _collapse_forward_records(T)
+    public = {"U": pkg.cake_mhc_det_train_collapse_forward(i["X"], i["pre_in"])}
+    for name, U in records.items():
+        assert_equal({"U": U}, public, ("U",), f"{name} at T={T}")
+
+
+@pytest.mark.parametrize("T", T_COLLAPSE_BWD_BAND)
+def test_every_collapse_backward_record_gives_the_same_bits(T: int) -> None:
+    """Where ``collapse_backward`` is a token-count band of records (sm_107a: ``collapse_bwd__vjpwa`` from 384 to 640
+    tokens, ``collapse_bwd__vjpwa_pfq2`` at every other token count, up to 383 tokens under the record name
+    ``collapse_bwd__vjpwa_pfq2__h5120__le383``), every record of the route, launched on its own on the same inputs into
+    a NaN-filled ``dX`` and ``dpre_in``, writes every word, and every record, the public entry point and the autograd
+    ``collapse``'s gradients give the same bits."""
+    route = loader.route_modules(_arch(), HIDDEN, "collapse_backward")
+    if len(route) < 2:
+        pytest.skip(f"collapse_backward is one record on {_arch()}")
+    i, records = _collapse_backward_records(T)
+    assert tuple(records) == tuple(route)
+    dX, dpre_in = pkg.cake_mhc_det_train_collapse_backward(i["X"], i["pre_in"], i["dU"])
+    public = {"dX": dX, "dpre_in": dpre_in}
+    X = i["X"].clone().requires_grad_(True)
+    pre_in = i["pre_in"].clone().requires_grad_(True)
+    pkg.cake_mhc_det_train_collapse(X, pre_in).backward(i["dU"])
+    auto = {"dX": X.grad, "dpre_in": pre_in.grad}
+    assert_equal(auto, public, ("dX", "dpre_in"), f"autograd collapse at T={T}")
+    for name, out in records.items():
+        assert_equal(out, public, ("dX", "dpre_in"), f"{name} at T={T}")
 
 
 def test_captured_handoff_replays_the_eager_bits() -> None:

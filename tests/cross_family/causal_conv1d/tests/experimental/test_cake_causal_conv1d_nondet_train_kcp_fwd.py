@@ -49,8 +49,12 @@ deterministic package.  Per row of the single-GPU suites:
 - a steady round of every two-launch form (single and multi entry) issues no host-to-device copy, no synchronizing
   operation and no device allocation;
 - the single-rank main program is the record ``cake_jit.selected_modules`` picks for the call, on both host paths:
-  rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are the three programs of the
-  route, and a row of ``C`` = 640 above every architecture's token floor of the narrow forward's whole tiles.
+  rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are the dynamic programs of the
+  route, rows of ``C`` = 640 at local token counts inside every architecture's static range and direct range of its
+  forward key (the static and the direct program, which take no counters), and a row of ``C`` = 640 above every
+  architecture's token floor of the narrow forward's whole tiles and above the key;
+- the multi entry with tensors of a static row and of dynamic rows in one call (one counter buffer, sized for the
+  dynamic ones).
 
 Skipped until the exporter renders the non-deterministic package.
 """
@@ -86,19 +90,26 @@ REPEATS = 3
 # (fwd_main, fwd_overlap): the one-launch forward, the single-rank main program waiting, the kcp_fwd program
 # overlapped, the single-rank main program overlapped
 FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
-# The rows of the zero-history fwd route's programs on sm_107a: C = 2048 (the c_band program), C = 256 from 65536
-# tokens (the two-stage program) and below (the route's fallback); on sm_100a and sm_103a the fallback serves all three.
-# C = 640 from 40003 tokens is above every architecture's floor of the whole 40-vector tiles of the narrow forward
-# plan, so the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens
-# lies between the ``fwd`` route's floor of the narrow plan on sm_103a (12288: 32-vector tiles there) and the floors of
-# sm_100a and sm_107a (20480, 16384: one tile there).
+# The rows of the zero-history fwd route's programs: on sm_107a C = 2048 (the c_band program), C = 256 from 65536
+# tokens (the two-stage program) and below (the one-stage program); on sm_100a and sm_103a the one-stage program serves
+# all three.  C = 640 at 3003 tokens lies inside the static range of every architecture's ``fwd`` key covering C 640
+# (the static program), at 12003 tokens inside its direct range (the direct program); from 40003 tokens, above every
+# key and every architecture's floor of the whole 40-vector tiles of the narrow forward plan, the dynamic program, so
+# the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens lies
+# above the ``fwd`` route's floor of the narrow plan on sm_103a (12288: 32-vector tiles of the dynamic program there)
+# and inside the direct ranges of sm_100a and sm_107a.
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),
     ("c256-s6003", (5000, 1003), (1, 2, 4997, 1003), 256),
+    ("c640-s3003", (2000, 1003), (1, 2, 1997, 1003), 640),
+    ("c640-s12003", (8000, 4003), (1, 2, 7997, 4003), 640),
     ("c640-s40003", (30000, 10003), (1, 2, 29997, 10003), 640),
     ("c768-s14003", (10000, 4003), (1, 2, 9997, 4003), 768),
 ]
+# A multi-entry row whose first tensor's local token count lies inside every architecture's static range at C = 640
+# (no counters) and whose other tensors run dynamic programs (C = 512, 1024): one counter buffer per call.
+MROWS_KEYS = [("c7-static-mixed", (2000, 1003), (1, 2, 1997, 1003), (640, 512, 1024))]
 
 pytestmark = pytest.mark.skipif(
     not torch.cuda.is_available()
@@ -243,7 +254,9 @@ def test_main_program_alone_is_the_fragments_zero_history_forward(
 
 @pytest.mark.parametrize("main_in", [False, True], ids=["f", "sr"])
 @pytest.mark.parametrize("overlap_in", [False, True], ids=["wait", "pair"])
-@pytest.mark.parametrize("name,lens,cuts,Cs", MROWS, ids=[r[0] for r in MROWS])
+@pytest.mark.parametrize(
+    "name,lens,cuts,Cs", MROWS + MROWS_KEYS, ids=[r[0] for r in MROWS + MROWS_KEYS]
+)
 def test_multi_forward_forms_order_and_outputs(
     monkeypatch, name, lens, cuts, Cs, main_in, overlap_in
 ) -> None:
@@ -617,16 +630,33 @@ def test_two_launch_forward_steady_round_does_not_block_or_allocate(
         )
 
 
-def test_route_rows_select_every_sm107a_program() -> None:
-    """The rows of ``ROUTE_ROWS`` select the three programs of sm_107a's zero-history ``fwd`` route (a route with
-    another program set needs rows of its own here)."""
-    chosen = {
-        cake_jit.selected_modules("sm_107a", conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens))[
-            0
-        ]
-        for _name, lens, _cuts, C in ROUTE_ROWS
+@pytest.mark.parametrize("arch", cake_jit.ARCHES)
+def test_route_rows_select_every_program(arch) -> None:
+    """The rows of ``ROUTE_ROWS`` select every program of the architecture's zero-history ``fwd`` route (a route with
+    another program set needs rows of its own here): the static and the direct program at the C = 640 rows inside
+    the key's ranges, which take no counters, and the dynamic programs at the others; the C = 640 row of the
+    multi-entry row of ``MROWS_KEYS`` selects the static program."""
+    picked = {
+        name: cake_jit.selected_modules(
+            arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens)
+        )[0]
+        for name, lens, _cuts, C in ROUTE_ROWS
     }
-    assert chosen == set(cake_jit.route_modules("sm_107a", conv_kcp.FWD_MAIN_ROUTE))
+    assert set(picked.values()) == set(
+        cake_jit.route_modules(arch, conv_kcp.FWD_MAIN_ROUTE)
+    ), (arch, picked)
+    for name, kind in (("c640-s3003", None), ("c640-s12003", cake_jit.ROWS_KIND)):
+        record = cake_jit.MODULES[picked[name]]
+        assert (cake_jit.select_rule(record) or {"kind": None})["kind"] == kind, (
+            arch,
+            name,
+        )
+        assert record["workspace_rule"] is None, (arch, name)
+    for _name, lens, _cuts, Cs in MROWS_KEYS:
+        (name,) = cake_jit.selected_modules(
+            arch, conv_kcp.FWD_MAIN_ROUTE, C=Cs[0], S=sum(lens)
+        )
+        assert cake_jit.select_rule(cake_jit.MODULES[name]) is None, (arch, name)
 
 
 @pytest.mark.parametrize("name,lens,cuts,C", ROUTE_ROWS, ids=[r[0] for r in ROUTE_ROWS])

@@ -14,7 +14,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The accuracy acceptance of issue #82 for both modules (``det`` and ``nondet``), through the autograd entry with each
-forward sum of the dot product (``dot_sum="compensated"``, the default, and the opt-in ``"fp32"``; the backward is the
+forward sum of the dot product (``dot_sum="fp32"``, the default, and the opt-in ``"compensated"``; the backward is the
 same for both), on operands as the issue's script draws them (``T = 16``, BF16 operands, FP32 weights rounded from
 BF16).
 
@@ -51,7 +51,7 @@ from tests.cake.test_helpers.cake_engram_gate_naive import (
 
 MODES = ("det", "nondet")
 # The ``dot_sum`` choices, the default first.
-DOT_SUMS = ("compensated", "fp32")
+DOT_SUMS = ("fp32", "compensated")
 #: Draws of each kind (the issue asks for 25 or more).
 DRAWS = 32
 T = 16

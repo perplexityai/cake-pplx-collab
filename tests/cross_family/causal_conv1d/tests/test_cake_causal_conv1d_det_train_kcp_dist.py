@@ -48,8 +48,11 @@ fragment that reads its history from three predecessor ranks).  Per row and rank
 ``ROWS`` are W = 2 / 4 / 8; ``F_ROWS`` are W = 2 / 4 at C = 528 and 568 around the forward's token floor of the
 channel count on the running architecture (``cake_jit.NARROW_ROW_FLOORS["fwd"]``): its ``floor:`` rows take the ranks'
 token counts from that table at run time (a rank at the floor and one a token below it), its other rows fixed counts
-(the comment above ``F_ROWS``); ``ROWS_SCALE`` are per-document zigzag at W = 16 / 32 / 64 (at W = 64 a document of 128
-fragments, and documents of one- and two-token fragments whose history comes from up to three predecessor ranks).
+(the comment above ``F_ROWS``); ``S_ROWS`` are W = 2 / 4 at C = 576 with the ranks' token counts on both sides of the
+ends of the ``fwd`` route's static and direct ranges (the forward's small-S rows, read from ``cake_jit``), so the ranks'
+single-rank main programs are the static, the direct and the dynamic program; ``ROWS_SCALE`` are per-document zigzag at
+W = 16 / 32 / 64 (at W = 64 a document of 128 fragments, and documents of one- and two-token fragments whose history
+comes from up to three predecessor ranks).
 Two launch forms (as ``tests/experimental/test_cake_kda_det_train_kcp_dist.py``):
 ``torch.multiprocessing`` (``pytest``: skipped when fewer than ``W`` CUDA devices are visible) and one process per Slurm
 task (``SLURM_NTASKS == W``; the rendezvous from ``MASTER_ADDR`` / ``MASTER_PORT``; rows of another ``W`` are skipped
@@ -102,6 +105,35 @@ F_ROWS = [
     ((20000, 10003, "rest"), 2, "floor:f,f-1", 528),
     ((30000, 19000, "rest"), 4, "floor:f,f-1,1,3", 528),
 ]
+
+
+def _small_s_rows() -> list:
+    """Rows of C = 576 per architecture whose ``fwd`` route has a static and a direct range there
+    (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``): at W = 2 the ranks hold the static range's last token count
+    ``S_x`` and one more (the static and the direct program), at W = 4 ``S_x``, ``S_x + 1``, the direct range's last
+    count ``S_hi`` and one more (static, direct, direct, dynamic); a first document of three quarters of the tokens
+    spans every rank."""
+
+    from cake_pplx._backends.cake_causal_conv1d_det_train import cake_jit
+
+    rows = []
+    for arch in cake_jit.ARCHES:
+        static = cake_jit.fallback_row_range(arch, "fwd", 576)
+        direct = cake_jit.direct_row_range(arch, "fwd", 576)
+        if static is None or direct is None:
+            continue
+        s_x, s_hi = static[1], direct[1]
+        for counts in ((s_x, s_x + 1), (s_x, s_x + 1, s_hi, s_hi + 1)):
+            total = sum(counts)
+            lengths = (total - total // 4, total // 4)
+            row = (lengths, len(counts), "ragged:" + ",".join(map(str, counts)), 576)
+            if row not in rows:
+                rows.append(row)
+    return rows
+
+
+# Kept out of ``ROWS`` (other suites import it).
+S_ROWS = _small_s_rows()
 # Per-document zigzag at W = 16 / 32 / 64: every document is cut into 2 W fragments, so the longest is a chain over
 # every rank (128 fragments at W = 64); the short documents give one- and two-token fragments and empty ones.  Kept
 # out of ``ROWS`` (other suites import it).
@@ -694,7 +726,7 @@ def _skip_without_allocator_counts(report: dict) -> None:
         )
 
 
-@pytest.mark.parametrize("row", ROWS + F_ROWS + ROWS_SCALE, ids=_row_id)
+@pytest.mark.parametrize("row", ROWS + F_ROWS + S_ROWS + ROWS_SCALE, ids=_row_id)
 def test_recompute_handle_rows(row) -> None:
     """Bitwise and per-phase collective counts of the checkpoint with / without a recompute handle, repeats per launch
     form, the direct pass judged against the naive tier and the steady-state census (module docstring)."""
