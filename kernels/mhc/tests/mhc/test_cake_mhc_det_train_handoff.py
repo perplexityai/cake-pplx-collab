@@ -82,8 +82,8 @@ STREAMS, MAPPING_ROWS = 4, 24
 SEED = 8900
 # A1 / A9: T = 1, small, irregular and the issue's benchmark points.
 T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
-# The standalone collapse; 215 / 216, 383 / 384 and 656 / 657 pin both sides of each edge of sm_107a's token-count
-# band of ``collapse_backward`` (460 / 461 and 640 / 641 two points inside its ``collapse_bwd__vjpwa`` band),
+# The standalone collapse; 215 / 216, 383 / 384 and 640 / 641 pin both sides of each edge of sm_107a's token-count
+# band of ``collapse_backward`` (460 / 461 inside its ``collapse_bwd__vjpwa`` band, 656 / 657 inside the last),
 # 2047 / 2048 and 6655 / 6656 both sides of each edge of its band of ``collapse_forward``.
 T_COLLAPSE = (
     1,
@@ -1076,8 +1076,8 @@ def test_every_collapse_forward_record_gives_the_same_bits(T: int) -> None:
 @pytest.mark.parametrize("T", T_COLLAPSE_BWD_BAND)
 def test_every_collapse_backward_record_gives_the_same_bits(T: int) -> None:
     """Where ``collapse_backward`` is a token-count band of records (sm_107a: ``collapse_bwd__vjpwa_sp4_mb4`` up to
-    215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383, ``collapse_bwd__vjpwa`` from 384 to 656,
-    ``collapse_bwd__vjpwa_pfq2`` from 657), every record of the route, launched on its own (the split records on their
+    215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383, ``collapse_bwd__vjpwa`` from 384 to 640,
+    ``collapse_bwd__vjpwa_pfq2`` from 641), every record of the route, launched on its own (the split records on their
     grid of 4 T / 2 T CTAs) on the same inputs into a NaN-filled ``dX`` and ``dpre_in``, writes every word, and every
     record, the public entry point and the autograd ``collapse``'s gradients give the same bits."""
     route = loader.route_modules(_arch(), HIDDEN, "collapse_backward")

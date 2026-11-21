@@ -51,7 +51,7 @@ same form reading ``X`` without the L2 evict-first policy) and ``collapse_fwd__m
 outputs bit for bit), each with every other fact the same.  On sm_107a ``collapse_backward`` holds four records chosen
 by the token count alone (``rows_between``, :data:`COLLAPSE_BWD_BAND`, edges :data:`BWD_EDGES`):
 ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383 tokens,
-``collapse_bwd__vjpwa`` from 384 to 656 tokens and ``collapse_bwd__vjpwa_pfq2`` from 657 tokens.
+``collapse_bwd__vjpwa`` from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641 tokens.
 ``collapse_bwd__vjpwa`` is the ``collapse_bwd__vjpwa_pfq2`` record under its own name (the same VJP without the L2
 prefetch) with every other fact the same; ``collapse_bwd__vjpwa_sp4_mb4`` and ``collapse_bwd__vjpwa_sp2_mb4`` are the
 ``collapse_bwd__vjpwa`` record under their own names split over four / two CTAs a token (:data:`COLLAPSE_BWD_SPLIT`: a
@@ -125,12 +125,12 @@ COLLAPSE_BWD_BAND = {
     "sm_107a": (
         ("collapse_bwd__vjpwa_sp4_mb4__h5120", 0, 215),
         ("collapse_bwd__vjpwa_sp2_mb4__h5120", 215, 383),
-        ("collapse_bwd__vjpwa__h5120", 383, 656),
-        ("collapse_bwd__vjpwa_pfq2__h5120", 656, None),
+        ("collapse_bwd__vjpwa__h5120", 383, 640),
+        ("collapse_bwd__vjpwa_pfq2__h5120", 640, None),
     ),
 }
 # The last token count of each record of sm_107a's ``collapse_backward`` but the last.
-BWD_EDGES = (215, 383, 656)
+BWD_EDGES = (215, 383, 640)
 # The split VJP records of the band: record -> k, the CTAs a token (grid k T, each CTA on 4 / k streams).
 COLLAPSE_BWD_SPLIT = {
     "collapse_bwd__vjpwa_sp4_mb4__h5120": 4,
@@ -416,8 +416,8 @@ def test_collapse_records(mode: str, arch: str) -> None:
         "rows_per_cta": 1,
     }
     # the VJP: one record at every token count, or on sm_107a a token-count band of four records (rows_between,
-    # T <= 215 / 216 <= T <= 383 / 384 <= T <= 656 / T >= 657), each under its own name and library: the third is the
-    # record of the token counts from 657 under its own name, with every other fact the same (the same VJP without the
+    # T <= 215 / 216 <= T <= 383 / 384 <= T <= 640 / T >= 641), each under its own name and library: the third is the
+    # record of the token counts from 641 under its own name, with every other fact the same (the same VJP without the
     # L2 prefetch); the first two are the third split over k CTAs a token (k 4 / 2: grid k T, col_split k) with
     # vjp_smem(k) bytes of dynamic shared memory, every other fact the same
     if arch in COLLAPSE_BWD_BAND:
@@ -627,8 +627,8 @@ def test_the_sm107a_collapse_backward_band_reads_the_token_count_only(
     mode: str, sm: int
 ) -> None:
     """sm_107a's ``collapse_backward`` takes ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens,
-    ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383 tokens, ``collapse_bwd__vjpwa`` from 384 to 656 tokens and
-    ``collapse_bwd__vjpwa_pfq2`` from 657 tokens (:data:`BWD_EDGES`), on every sm_107a board and Sinkhorn count (and,
+    ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383 tokens, ``collapse_bwd__vjpwa`` from 384 to 640 tokens and
+    ``collapse_bwd__vjpwa_pfq2`` from 641 tokens (:data:`BWD_EDGES`), on every sm_107a board and Sinkhorn count (and,
     in the deterministic registry, along every call path)."""
     route = _collapse_backward_route(mode, "sm_107a")
     assert len(route) == len(BWD_EDGES) + 1

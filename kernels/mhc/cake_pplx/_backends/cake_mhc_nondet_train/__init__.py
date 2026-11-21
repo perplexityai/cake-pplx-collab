@@ -75,7 +75,7 @@ form with its trips in reverse launch order, from 2048 to 6655 tokens and
 ``collapse_bwd__vjpwa_sp4_mb4`` / ``collapse_bwd__vjpwa_sp2_mb4``, the
 ``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, up to 215 /
 from 216 to 383 tokens, ``collapse_bwd__vjpwa``, the same VJP without the L2
-prefetch, from 384 to 656 tokens and ``collapse_bwd__vjpwa_pfq2`` from 657
+prefetch, from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641
 tokens).
 ``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
 are made contiguous, of their dtype and 32-byte aligned before the launch.  No
