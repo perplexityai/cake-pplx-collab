@@ -2503,7 +2503,7 @@ def test_round24_rules_plan_like_the_cake_launcher(T, monkeypatch):
     # column-grouped raster (cgrp, group_m 8) to its cta_rows 256 / htail rule; no sm_100a rule changes
     # the table size is asserted by the newest round's test (round 26: 103 = 49 + 54); round 25 shipped 100 = 49 + 51; round 24 shipped 100 = 49 + 51
     # the part ranges of version 0.3.11 (the start-path ranges of version 0.3.12: test_start_0312_ranges_plan_their_form;
-    # the 212-SM sm_107a ranges of version 0.3.17: test_tile_0317_tables)
+    # the 212-SM sm_107a ranges of versions 0.3.17 and 0.3.20: test_tile_0317_tables, test_tile_0320_tables)
     _tables_0316(monkeypatch)
     _tables_0311(monkeypatch)
     kw = dict(sm_count=148, l2_bytes=L2_BYTES, arch="sm_100a", _fallback=False)
@@ -14051,8 +14051,9 @@ def test_sm107a_212_f32_range_table():
     with more ranges on the 152-SM sm_100a part, ``RASTER_0311_RANGES``, test_raster_0311_tables), and since
     version 0.3.10 the 148-SM sm_100a part (``RASTER_0310_RANGES``, test_raster_0310_tables).  The 212-SM
     part's FP32 ranges are ``SM107A_212_F32_RANGES``, its BF16 ranges the K-major rows of version 0.3.7
-    (``K_MAJOR_RANGES_212``, test_k_major_tier_and_range_tables) and, since version 0.3.17, the BF16 input-gradient
-    ranges of ``TILE_0317_RANGES`` (test_tile_0317_tables).  The FP32 ranges: ragged keys in the orientation the
+    (``K_MAJOR_RANGES_212``, test_k_major_tier_and_range_tables) and, since versions 0.3.17 and 0.3.20, the BF16
+    input-gradient ranges of ``TILE_0317_RANGES`` and ``TILE_0320_RANGES`` (test_tile_0317_tables,
+    test_tile_0320_tables).  The FP32 ranges: ragged keys in the orientation the
     rows plan (the weight gradients direct: no ``ROW_RULES`` key swaps them), sorted disjoint inclusive ranges, rules
     whose program the sm_107a registry ships, no token tiers on the keys and no exact ``ROW_RULES`` key of a row inside
     its ranges (such a key would lose to the range); each range of versions 0.3.5 - 0.3.7 lies inside a range (whose rule
@@ -14073,7 +14074,9 @@ def test_sm107a_212_f32_range_table():
         for key, value in SM107A_212_F32_RANGES.items()
     }
     assert {
-        key: ranges for key, ranges in table[("sm_107a", 212)].items() if not key[3] and key not in _tile_0317_keys()
+        key: ranges
+        for key, ranges in table[("sm_107a", 212)].items()
+        if not key[3] and key not in _tile_0317_keys() | _tile_0320_keys()
     } == K_MAJOR_RANGES_212
     assert set(SM107A_212_F32_BOUNDS_037) == set(SM107A_212_F32_RANGES)
     assert set(SM107A_212_F32_MEASURED_038) <= set(SM107A_212_F32_RANGES)
@@ -15158,18 +15161,20 @@ def _pre_037_tables(m):
 def test_k_major_tier_and_range_tables():
     """The K-major entries of version 0.3.7: ``ROW_RULE_MIN_T`` holds ``K_MAJOR_TIERS`` and the 212-SM sm_107a part of
     ``ROW_RULE_RANGES_BY_SM`` the BF16 ranges ``K_MAJOR_RANGES_212``; every key is a ragged BF16 key of a forward (both
-    operands K-major) or input gradient with K > 8192, unbatched (beside the BF16 input-gradient ranges of version
-    0.3.17, ``TILE_0317_RANGES``), with the row's ``ROW_RULES`` entry (the tiers apply
-    only under one; the 17408 -> 5120 forward and 5120 -> 17408 input gradient of sm_107a have none), tiers sorted by
-    bound, ranges sorted, disjoint and inclusive; no exact ``ROW_RULES`` key of a row at a token count of its bands
-    (such a key would win); the measured bands of ``K_MAJOR_BAND_PLANS`` are the bands of the tables, each program
+    operands K-major) or input gradient with K > 8192, unbatched (beside the BF16 input-gradient ranges of versions
+    0.3.17 and 0.3.20, ``TILE_0317_RANGES`` and ``TILE_0320_RANGES``), with the row's ``ROW_RULES`` entry (the tiers
+    apply only under one; the 17408 -> 5120 forward and 5120 -> 17408 input gradient of sm_107a have none), tiers
+    sorted by bound, ranges sorted, disjoint and inclusive; no exact ``ROW_RULES`` key of a row at a token count of its
+    bands (such a key would win); the measured bands of ``K_MAJOR_BAND_PLANS`` are the bands of the tables, each program
     registered on the architecture (and on sm_103a for an sm_100a key it reads).  sm_103a reads the sm_100a tiers of
     the o_proj and dense_down forwards and of the q_b and dense_gate_up input gradients.  ``_measured_row_rule`` reads
     a band's rule at its ends; a range with the 212-SM count alone."""
     tiers = {key: v for key, v in cake_backend.ROW_RULE_MIN_T.items() if key in K_MAJOR_TIERS}
     assert tiers == K_MAJOR_TIERS
     part = cake_backend.ROW_RULE_RANGES_BY_SM[("sm_107a", 212)]
-    assert {key: v for key, v in part.items() if not key[3] and key not in _tile_0317_keys()} == K_MAJOR_RANGES_212
+    assert {
+        key: v for key, v in part.items() if not key[3] and key not in _tile_0317_keys() | _tile_0320_keys()
+    } == K_MAJOR_RANGES_212
     assert set(K_MAJOR_BAND_PLANS) == set(K_MAJOR_TIERS) | set(K_MAJOR_RANGES_212)
     assert len(K_MAJOR_ROWS) == 8
     read = {
@@ -17041,6 +17046,7 @@ def test_start_0312_tables(monkeypatch):
     of the row lies inside one (a part rule would shadow the range).  The exact ``ROW_RULES`` keys of the rows inside a
     range are the two sm_100a 4096 -> 48 keys at T 16231 and 16384 (the GB T-exact rules): the range wins on the 148-
     and 152-SM parts, every other sm_100a part keeps them."""
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     ranges_now = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
     rules_now = {p: dict(t) for p, t in cake_backend.ROW_RULES_BY_SM.items()}
@@ -17094,6 +17100,7 @@ def test_start_0312_ranges_plan_their_form(monkeypatch, part, row):
     than the range's (the ten-warp ``""``, ``w8r`` or the other start-path form) plans as with the tables of version
     0.3.11 with that form, or is refused as there: the range's rule yields to the row's rule without the part
     tables."""
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     arch, sm = part
     d_in, d_out = row
@@ -17151,6 +17158,7 @@ def test_start_0312_ranges_plan_their_form(monkeypatch, part, row):
 def test_start_0312_kept_cells_plan_as_in_0_3_11(monkeypatch):
     """The measured rows of version 0.3.12 at their measured token counts outside every range of that version plan as in
     version 0.3.11 on their part (``START_0312_KEPT``), not the program of a start-path form."""
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     kept = []
     for arch, sm in START_0312_RANGES:
@@ -17178,6 +17186,7 @@ def test_routing_0312_changes_exactly_the_start_plans(monkeypatch):
     ``START_0312_RANGES`` at ``_START_0312_SWEEP_TOKENS`` on every class of ``ROUTING_038_CLASSES``: a plan changes
     exactly at the BF16 input gradients of ``START_0312_RANGES`` inside their ranges on their part, to the range form's
     program.  Every other plan is the plan of version 0.3.11."""
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     rows = {(d_in, d_out) for table in START_0312_RANGES.values() for d_in, d_out in table}
     sweep = _merged_sweep(
@@ -17240,6 +17249,7 @@ def test_start_0312_rows_keep_their_bits_and_repeat_bitwise(case, monkeypatch, r
     BF16 tier over the draws, it returns the same bits on three more launches into NaN, its plan differs from the plan of
     version 0.3.11 (``_tables_0311``) on the device, and its output equals that plan's bit for bit.  Another device
     skips."""
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     _tables_0312(monkeypatch)  # the part ranges of version 0.3.12: version 0.3.13 is checked below
     _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0311, "version 0.3.12", plan_changes=True)
 
@@ -17971,7 +17981,7 @@ def test_tile_0314_tables(monkeypatch):
     (``TILE_0314_MEASURED``) that is not a cell of its row.  Every token count outside them keeps the rule it had in
     version 0.3.13, so there the checks that put ``TILE_0314_BANDS_0313`` back first read the ranges the tables
     hold."""
-    _tables_0316(monkeypatch)  # without the 212-SM sm_107a keys of version 0.3.17 (test_tile_0317_tables)
+    _tables_0316(monkeypatch)  # without the 212-SM sm_107a keys of versions 0.3.17 and 0.3.20 (test_tile_0317_tables)
     _tables_0314(monkeypatch)  # the part ranges of version 0.3.14: version 0.3.15 is checked below
     live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
     with monkeypatch.context() as m:
@@ -19043,8 +19053,10 @@ def _tile_0317_keys():
 def _tables_0316(m):
     """Put the part ranges of version 0.3.16 back (``m``: a monkeypatch context; applying it again in a nested context
     is a no-op): the 212-SM sm_107a part without the keys of ``TILE_0317_RANGES`` (after the part ranges of version
-    0.3.18, ``_tables_0318``)."""
+    0.3.18, ``_tables_0318``, and of version 0.3.19, ``_tables_0319``, which puts back the ranges version 0.3.20
+    changed)."""
     _tables_0318(m)
+    _tables_0319(m)
     table = cake_backend.ROW_RULE_RANGES_BY_SM.get(TILE_0317_PART)
     if table is None:
         return
@@ -19059,6 +19071,7 @@ def test_tile_0317_tables(monkeypatch):
     in one, each the 128-column start-path rule of the row's K step (``_tile_0314_rule``) in a raster group of
     ``TILE_0314_GROUPS``.  ``_tables_0316`` applied again in a nested context changes nothing."""
     _tables_0318(monkeypatch)  # the part ranges of version 0.3.18: version 0.3.19 is checked below
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
     with monkeypatch.context() as m:
         _tables_0316(m)
@@ -19199,6 +19212,7 @@ def test_routing_0317_changes_exactly_the_ranges(monkeypatch):
     to the 128-column program of the range's K step in its raster group.  Every other plan is the plan of version
     0.3.16."""
     _tables_0318(monkeypatch)  # the part ranges of version 0.3.18: version 0.3.19 is checked below
+    _tables_0319(monkeypatch)  # the part ranges of version 0.3.19: version 0.3.20 is checked below
     assert TILE_0317_PART in ROUTING_038_CLASSES
     rows = {row for table in TILE_0314_ROWS.values() for row in table}
     assert set(TILE_0317_RANGES) <= rows
@@ -19596,6 +19610,866 @@ def test_gpu_tile_0319_cells_keep_their_bits_and_repeat_bitwise(case, monkeypatc
     program) on the device, and its output equals that plan's bit for bit.  Another device skips; a GB200 device whose
     registry lacks the program fails."""
     _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0318, "version 0.3.19", plan_changes=True)
+
+
+# ---------------------------------------------------------------------------
+# The start-path programs on six more VR200 input gradients (version 0.3.20): the 212-SM sm_107a BF16 input gradients
+# 4096 -> 48, 4096 -> 128, 5120 -> 48, 5120 -> 128, 8192 -> 128 and the indexer_k 6144 -> 128, which versions up to
+# 0.3.19 planned with the ten-warp programs of their ``ROW_RULES`` rules, run a start-path program in the ranges of
+# ``TILE_0320_RANGES``, keys version 0.3.19 did not have
+# ---------------------------------------------------------------------------
+
+#: The part of version 0.3.20.
+TILE_0320_PART = ("sm_107a", 212)
+#: The token counts the start-path programs were measured at on its rows.
+TILE_0320_MEASURED = (16172, 16231, 16384)
+#: The rows the round of version 0.3.20 measured and the program each planned at the measured token counts in version
+#: 0.3.19 (the row's ``ROW_RULES`` rule, a ten-warp program).
+TILE_0320_BEFORE = {
+    (4096, 48): "dense_proj_det_gemm_kn_n256_ht_tma2_lw_pro15",
+    (4096, 128): "dense_proj_det_gemm_kn_n256_tma2_pd2_pro15",
+    (5120, 48): "dense_proj_det_gemm_kn_n256_tma2_pd2_lw_pro15",
+    (5120, 128): "dense_proj_det_gemm_kn_n256_tma2_pd2_pro15",
+    (6144, 128): "dense_proj_det_gemm_kn_n256_tma2_pd2_pro15",
+    (8192, 128): "dense_proj_det_gemm_kn_n256_tma2_pd2_pro15",
+}
+#: The ranges of version 0.3.20, ``(d_in, d_out) -> ((lo, hi, block_n, block_k, group_m), ...)``: the start-path rule
+#: of version 0.3.12 (``w8relf``) on the tile of ``block_n`` columns in K steps of ``block_k`` elements
+#: (``TILE_0320_PROGRAMS``) in raster groups of ``group_m`` (``_tile_0320_rule``).  At each measured token count a
+#: range holds, its rule met the bar of the round against the plan of version 0.3.19 and a second prepared copy of it
+#: on each VR200 node; a row whose rule met it at all three measured token counts runs it at T 16172 - 16384.
+TILE_0320_RANGES = {
+    (4096, 48): ((16172, 16384, 256, 64, 16),),
+    (4096, 128): ((16172, 16384, 256, 64, 16),),
+    (5120, 48): ((16172, 16384, 256, 64, 16),),
+    (5120, 128): ((16172, 16384, 128, 64, 16),),
+    (6144, 128): ((16172, 16384, 256, 64, 16),),
+    (8192, 128): ((16172, 16384, 256, 64, 16),),
+}
+#: The start-path program of each tile and K step of ``TILE_0320_RANGES``, ``(block_n, block_k) -> template``.
+TILE_0320_PROGRAMS = {
+    (256, 64): START_0312_PROGRAMS["w8relf"],
+    (128, 64): TILE_0314_PROGRAMS[64],
+    (128, 32): TILE_0314_PROGRAMS[32],
+}
+#: Unmeasured token counts around and between the measured ones, the lowest and the highest unmeasured one inside
+#: T 16172 - 16384 included: inside a range they run its rule, elsewhere the plan of version 0.3.19.
+TILE_0320_PROBES = (16173, 16200, 16230, 16232, 16300, 16383)
+#: The token count of ``TILE_0320_PROBES`` the GPU check runs on each row, where a range of the row holds it.
+TILE_0320_GPU_PROBE = {
+    (4096, 48): 16173,
+    (4096, 128): 16200,
+    (5120, 48): 16230,
+    (5120, 128): 16232,
+    (6144, 128): 16300,
+    (8192, 128): 16383,
+}
+
+
+def _tile_0320_rule(block_n, block_k, group):
+    """The rule of a range of ``TILE_0320_RANGES``: the start-path rule of version 0.3.12 (``w8relf``) on the tile of
+    ``block_n`` columns in K steps of ``block_k`` elements (on the 128-column tile ``_tile_0314_rule``, on the
+    256-column tile ``_tile_0314_wide_rule``), in raster groups of ``group``."""
+    if block_n == 128:
+        return _tile_0314_rule(block_k, group)
+    assert (block_n, block_k) == (256, BLOCK_K), (block_n, block_k)
+    return _tile_0314_wide_rule(group)
+
+
+def _tile_0320_bands(row):
+    """The ranges of ``row`` in ``TILE_0320_RANGES`` as ``(lo, hi, rule)`` (none for a row without a range)."""
+    return tuple((lo, hi, _tile_0320_rule(bn, bk, group)) for lo, hi, bn, bk, group in TILE_0320_RANGES.get(row, ()))
+
+
+def _tile_0320_band_at(row, T):
+    """The range ``(lo, hi, block_n, block_k, group_m)`` of ``TILE_0320_RANGES`` that holds ``row`` at ``T`` tokens,
+    else ``None``."""
+    return next((band for band in TILE_0320_RANGES.get(row, ()) if band[0] <= T <= band[1]), None)
+
+
+def _tile_0320_keys():
+    """The BF16 input-gradient keys of ``TILE_0320_RANGES`` on the 212-SM sm_107a part."""
+    return {_bf16_dgrad_key(TILE_0320_PART[0], d_in, d_out) for d_in, d_out in TILE_0320_RANGES}
+
+
+#: The part of the GB200 range of version 0.3.20 (``START_0320_RANGES``).
+START_0320_PART = ("sm_100a", 152)
+#: The ranges of version 0.3.19 of the BF16 input-gradient key version 0.3.20 joins on ``START_0320_PART``,
+#: ``(d_in, d_out) -> ((lo, hi, form), ...)`` in the form of ``START_0312_RANGES``: 4096 -> 48 in the start-path
+#: program ``w8relf`` in the default raster group at T 16172 - 16231 and at T 32768 (its ranges of version 0.3.12).
+START_0320_BANDS_0319 = {
+    (4096, 48): ((16172, 16231, "w8relf"), (32768, 32768, "w8relf")),
+}
+
+
+def _start_0320_rules(bands):
+    """The ``(lo, hi, rule)`` ranges of ``bands`` (``(lo, hi, form)``, the form of ``START_0320_BANDS_0319`` and
+    ``START_0320_RANGES``): the start-path rule of version 0.3.12 of each form (``_start_0312_rule``)."""
+    return tuple((lo, hi, _start_0312_rule(form)) for lo, hi, form in bands)
+
+
+def _start_0320_keys():
+    """The BF16 input-gradient keys of ``START_0320_BANDS_0319`` on ``START_0320_PART``."""
+    return {_bf16_dgrad_key(START_0320_PART[0], d_in, d_out) for d_in, d_out in START_0320_BANDS_0319}
+
+
+#: The single-token ranges of version 0.3.20 on ``START_0320_PART``, ``(d_in, d_out, T)``: the BF16 input gradient
+#: 5120 -> 128 runs the start-path rule of version 0.3.12 (``w8relf``) in the default raster group at T 16384, a range
+#: of that one token count between the row's ranges of version 0.3.19 (``START_0320_SINGLE_BANDS_0319``), where
+#: version 0.3.19 planned the row's ``ROW_RULES`` rule (``START_0320_SINGLE_BEFORE``; a kept cell of version 0.3.12,
+#: ``START_0312_KEPT``).  The round of version 0.3.20 measured each such cell against the plan of version 0.3.19 and a
+#: second prepared copy of it on two GB200 nodes in 21 paired rounds per node and mode, with the bits of that plan.
+START_0320_SINGLE_CELLS = ((5120, 128, 16384),)
+#: The ranges of version 0.3.19 of the row of each cell of ``START_0320_SINGLE_CELLS``, in the form of
+#: ``START_0312_RANGES``: 5120 -> 128 in the start-path program ``w8relf`` in the default raster group at
+#: T 16172 - 16231 and at T 32768 (its ranges of version 0.3.12).
+START_0320_SINGLE_BANDS_0319 = {
+    (5120, 128): ((16172, 16231, "w8relf"), (32768, 32768, "w8relf")),
+}
+#: The program the row of each cell of ``START_0320_SINGLE_CELLS`` planned at the cell in version 0.3.19: the ten-warp
+#: program of its ``ROW_RULES`` rule.
+START_0320_SINGLE_BEFORE = {(5120, 128): "dense_proj_det_gemm_kn_n256_tma2_pd2_lw_pro15"}
+
+
+def _start_0320_single_keys():
+    """The BF16 input-gradient keys of ``START_0320_SINGLE_BANDS_0319`` on ``START_0320_PART``."""
+    return {_bf16_dgrad_key(START_0320_PART[0], d_in, d_out) for d_in, d_out in START_0320_SINGLE_BANDS_0319}
+
+
+def _start_0320_single_ranges(row):
+    """The ``(lo, hi, rule)`` ranges of version 0.3.20 of the row ``row`` of ``START_0320_SINGLE_BANDS_0319``, sorted:
+    its ranges of version 0.3.19 and a range of one token count at each cell of ``START_0320_SINGLE_CELLS`` on the row,
+    each the start-path rule of version 0.3.12 of its form (``w8relf`` at the cells)."""
+    cells = tuple((T, T, "w8relf") for d_in, d_out, T in START_0320_SINGLE_CELLS if (d_in, d_out) == row)
+    return _start_0320_rules(sorted((*START_0320_SINGLE_BANDS_0319[row], *cells)))
+
+
+def _tables_0319(m):
+    """Put the part ranges of version 0.3.19 back (``m``: a monkeypatch context; applying it again in a nested context
+    is a no-op): the 212-SM sm_107a part without the keys of ``TILE_0320_RANGES``, and on the 152-SM sm_100a part the
+    BF16 input-gradient keys of ``START_0320_BANDS_0319`` and ``START_0320_SINGLE_BANDS_0319`` with their ranges of
+    that version.  Outside the token counts version 0.3.20 moved to the start-path program there (``START_0320_NEW``
+    and ``START_0320_SINGLE_CELLS``) these are the ranges the tables hold (``test_start_0320_tables`` and
+    ``test_start_0320_single_tables``)."""
+    table = cake_backend.ROW_RULE_RANGES_BY_SM.get(TILE_0320_PART)
+    if table is not None:
+        for key in _tile_0320_keys():
+            m.delitem(table, key, raising=False)
+    table = cake_backend.ROW_RULE_RANGES_BY_SM.get(START_0320_PART)
+    if table is not None:
+        for (d_in, d_out), bands in (*START_0320_BANDS_0319.items(), *START_0320_SINGLE_BANDS_0319.items()):
+            m.setitem(table, _bf16_dgrad_key(START_0320_PART[0], d_in, d_out), _start_0320_rules(bands))
+
+
+def test_tile_0320_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.19 (``_tables_0319``) in the BF16 input-gradient keys of
+    ``TILE_0320_RANGES`` on the 212-SM sm_107a part (beside the GB200 keys of ``START_0320_RANGES`` and
+    ``START_0320_SINGLE_CELLS``, ``test_start_0320_tables`` and ``test_start_0320_single_tables``), keys that version
+    did not have, each holding the ranges listed there: sorted, disjoint, from one measured token count to another, each
+    the start-path rule ``w8relf`` on the listed tile and K step in a raster group of ``TILE_0314_GROUPS``, the
+    package's rule of that tile (``_W8RELF_DGRAD_BF16``, ``_W8RELF_N128_DGRAD_BF16`` or ``_W8RELF_N128_K32_DGRAD_BF16``)
+    with ``group_m``.  The rows are rows the round measured (``TILE_0320_BEFORE``).  No token tier, exact
+    ``ROW_RULES`` key or part rule of a row lies inside its ranges (a part rule would shadow a range, a range an exact
+    key).  ``_tables_0319`` applied again in a nested context changes nothing."""
+    live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_0319(m)
+        was = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+        with monkeypatch.context() as again:
+            _tables_0319(again)
+            assert {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()} == was
+    assert {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()} == live
+    assert set(live) == set(was)
+    keys = _tile_0320_keys()
+    assert keys and set(TILE_0320_RANGES) <= set(TILE_0320_BEFORE) and len(TILE_0320_BEFORE) == 6
+    expected = {TILE_0320_PART: keys, START_0320_PART: _start_0320_keys() | _start_0320_single_keys()}
+    for p in live:
+        changed = {key for key in set(live[p]) | set(was[p]) if live[p].get(key) != was[p].get(key)}
+        assert changed == expected.get(p, set()), (p, sorted(changed))
+    plain = {
+        (256, 64): cake_backend._W8RELF_DGRAD_BF16,
+        (128, 64): cake_backend._W8RELF_N128_DGRAD_BF16,
+        (128, 32): cake_backend._W8RELF_N128_K32_DGRAD_BF16,
+    }
+    assert set(plain) == set(TILE_0320_PROGRAMS)
+    part_rules = cake_backend.ROW_RULES_BY_SM.get(TILE_0320_PART, {})
+    for row, bands in TILE_0320_RANGES.items():
+        key = _bf16_dgrad_key(TILE_0320_PART[0], *row)
+        assert key not in was[TILE_0320_PART], row
+        held = live[TILE_0320_PART][key]
+        assert held == _tile_0320_bands(row), (row, held)
+        assert all(lo <= hi for lo, hi, _ in held) and all(a[1] < b[0] for a, b in zip(held, held[1:])), row
+        for (lo, hi, rule), (_, _, block_n, block_k, group) in zip(held, bands):
+            assert lo in TILE_0320_MEASURED and hi in TILE_0320_MEASURED, (row, lo, hi)
+            assert group in TILE_0314_GROUPS and (block_n, block_k) in TILE_0320_PROGRAMS, (row, block_n, block_k)
+            assert rule == {**plain[(block_n, block_k)], "group_m": group}, (row, rule)
+            assert rule["form"] == "w8relf", (row, rule)
+        assert key not in cake_backend.ROW_RULE_MIN_T, row
+        inside = [
+            exact
+            for exact in (*ROW_RULES, *part_rules)
+            if exact[:8] == key[:8] and exact[8] is not None and any(lo <= exact[8] <= hi for lo, hi, _ in held)
+        ]
+        assert not inside, (row, inside)
+
+
+def _tile_0320_cells():
+    """The measured cells of version 0.3.20, ``(d_in, d_out, T)``: each measured token count a range of its row
+    holds."""
+    return tuple(
+        (d_in, d_out, T)
+        for d_in, d_out in sorted(TILE_0320_RANGES)
+        for T in TILE_0320_MEASURED
+        if _tile_0320_band_at((d_in, d_out), T) is not None
+    )
+
+
+_TILE_0320_CELL_CASES = _tile_0320_cells()
+
+
+def _tile_0320_plan_exact(monkeypatch, d_in, d_out, T, rule):
+    """The plan of ``rule`` as an exact ``ROW_RULES`` key of the BF16 input gradient ``d_in -> d_out`` at ``T`` on the
+    212-SM sm_107a part, without the part ranges of version 0.3.20 (``_tables_0319``) and without
+    ``ROW_RULES_BY_SM``."""
+    arch, sm = TILE_0320_PART
+    with monkeypatch.context() as m:
+        _tables_0319(m)
+        m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+        m.setitem(ROW_RULES, _bf16_dgrad_key(arch, d_in, d_out)[:8] + (T,), rule)
+        return _rows_plan("dgrad", arch, sm, d_in, d_out, T)
+
+
+@pytest.mark.parametrize("cell", _TILE_0320_CELL_CASES, ids=[f"{d}x{o}-T{t}" for d, o, t in _TILE_0320_CELL_CASES])
+def test_tile_0320_cells_plan_their_program(monkeypatch, cell):
+    """At each measured token count a range of version 0.3.20 holds, the 212-SM sm_107a plan is the plan of the range's
+    rule as an exact ``ROW_RULES`` key at that token count without the part tables: the start-path program of the
+    range's tile and K step (``TILE_0320_PROGRAMS``) in the range's raster group, the form's six stages,
+    ``ceil(d_out / block_k)`` K steps per item, ``ceil(d_in / block_n)`` column tiles, whole tiles (no stream-K unit,
+    no promoted chunk) through the one-slot TMA store and no fallback flag.  With the tables of version 0.3.19
+    (``_tables_0319``) the part plans the row's ten-warp program (``TILE_0320_BEFORE``).  A caller that forces another
+    form than ``w8relf`` (the ten-warp ``""``, ``w8r`` or ``w8rel``) plans as with the tables of version 0.3.19 with
+    that form, or is refused as there: the range's rule yields to the row's rule without the part tables."""
+    d_in, d_out, T = cell
+    arch, sm = TILE_0320_PART
+    _lo, _hi, block_n, block_k, group = _tile_0320_band_at((d_in, d_out), T)
+    rule = _tile_0320_rule(block_n, block_k, group)
+
+    def plan_at(**knobs):
+        return _rows_plan("dgrad", arch, sm, d_in, d_out, T, **knobs)
+
+    def plan_0319(**knobs):
+        with monkeypatch.context() as m:
+            _tables_0319(m)
+            return plan_at(**knobs)
+
+    def outcome(plan, **knobs):
+        try:
+            return plan(**knobs)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    plan, before = plan_at(), plan_0319()
+    where = (cell, plan.template, before.template)
+    assert plan == _tile_0320_plan_exact(monkeypatch, d_in, d_out, T, rule), where
+    assert plan.template == TILE_0320_PROGRAMS[(block_n, block_k)] and plan.form == "w8relf", where
+    assert (plan.block_n, plan.block_k, plan.group_m, plan.stages) == (block_n, block_k, group, 6), where
+    assert plan.k_blocks == plan.iters_per_unit == -(-d_out // block_k), (where, plan.k_blocks)
+    assert plan.n_tiles == -(-d_in // block_n), where
+    assert plan.sk_units == 0 and plan.tail_tiles == 0 and plan.num_full == plan.pair_tiles, where
+    assert plan.promote_blocks == 0 and plan.tma_out and plan.epi == "tma" and plan.slots == 1, where
+    assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+    assert before.template == TILE_0320_BEFORE[(d_in, d_out)] != plan.template, where
+    assert not (before.rule_fallback or before.knob_fallback), where
+    for forced in ("", "w8r", "w8rel"):
+        assert outcome(plan_at, form=forced) == outcome(plan_0319, form=forced), (where, forced)
+
+
+_TILE_0320_ROW_CASES = tuple(sorted(TILE_0320_BEFORE))
+
+
+@pytest.mark.parametrize("row", _TILE_0320_ROW_CASES, ids=[f"{d}x{o}" for d, o in _TILE_0320_ROW_CASES])
+def test_tile_0320_unmeasured_token_counts_plan_their_range(monkeypatch, row):
+    """Each token count of ``TILE_0320_PROBES`` a range of the row holds (unmeasured, the lowest and the highest
+    unmeasured one inside the ranges included) plans the program of that range of ``TILE_0320_RANGES``: the plan of its
+    rule as an exact ``ROW_RULES`` key at that token count without the part tables, the start-path program of its tile
+    and K step in its raster group with whole tiles and no fallback flag, another program than with the tables of
+    version 0.3.19 (``_tables_0319``), the row's ten-warp program.  At the other token counts of ``TILE_0320_PROBES``,
+    at the measured token counts no range holds and one token count outside the lowest and the highest range end
+    (T 16171 and 16385 on a row without a range) the plan is the plan of version 0.3.19, field for field."""
+    d_in, d_out = row
+    arch, sm = TILE_0320_PART
+    bands = _tile_0320_bands(row)
+    inside = [T for T in TILE_0320_PROBES if _rule_at(bands, T) is not None]
+    span = [T for lo, hi, _ in bands for T in range(lo, hi + 1) if T not in TILE_0320_MEASURED]
+    if span:
+        assert (min(inside), max(inside)) == (min(span), max(span)), (row, inside[:1], inside[-1:])
+    gpu = TILE_0320_GPU_PROBE[row]
+    assert gpu in TILE_0320_PROBES, row
+
+    def plan_at(T):
+        return _rows_plan("dgrad", arch, sm, d_in, d_out, T)
+
+    def plan_0319(T):
+        with monkeypatch.context() as m:
+            _tables_0319(m)
+            return plan_at(T)
+
+    for T in inside:
+        _lo, _hi, block_n, block_k, group = _tile_0320_band_at(row, T)
+        rule = _rule_at(bands, T)
+        plan, before = plan_at(T), plan_0319(T)
+        where = (row, T, plan.template, before.template)
+        assert plan == _tile_0320_plan_exact(monkeypatch, d_in, d_out, T, rule), where
+        assert (plan.template, plan.form, plan.block_n, plan.block_k, plan.group_m) == (
+            TILE_0320_PROGRAMS[(block_n, block_k)],
+            "w8relf",
+            block_n,
+            block_k,
+            group,
+        ), where
+        assert plan.sk_units == 0 and plan.tail_tiles == 0 and plan.num_full == plan.pair_tiles, where
+        assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+        assert before.template == TILE_0320_BEFORE[row] != plan.template, where
+    ends = {T for lo, hi, _ in bands for T in (lo - 1, hi + 1)} if bands else {16171, 16385}
+    outside = sorted({T for T in (*TILE_0320_PROBES, *TILE_0320_MEASURED, *ends) if _rule_at(bands, T) is None})
+    assert set(ends) <= set(outside), (row, sorted(ends))
+    for T in outside:
+        assert plan_at(T) == plan_0319(T), (row, T)
+    if not bands:
+        for T in TILE_0320_MEASURED:
+            assert plan_at(T).template == TILE_0320_BEFORE[row], (row, T)
+
+
+def test_routing_0320_changes_exactly_the_ranges(monkeypatch):
+    """Byte for byte against the tables of version 0.3.19 (``_tables_0319``), over ``ROUTING_038_SWEEP`` and the rows
+    of ``TILE_0314_ROWS``, ``TILE_0320_BEFORE`` and ``START_0320_NEW`` at ``_START_0312_SWEEP_TOKENS`` on every class of
+    ``ROUTING_038_CLASSES``: a plan changes exactly at the 212-SM sm_107a BF16 input gradients of ``TILE_0320_RANGES``
+    at a token count of one of their ranges, from the row's ten-warp program to the start-path program of the range's
+    tile and K step in its raster group, and at the 152-SM sm_100a BF16 input gradient of ``START_0320_NEW`` at its new
+    token counts, from the row's plan of version 0.3.19 (``_start_0320_before``), and at the cells of
+    ``START_0320_SINGLE_CELLS``, from the row's ``ROW_RULES`` rule (``START_0320_SINGLE_BEFORE``), to
+    ``kn_n256_tma1_w8relf`` in the default raster group of 16.  Every other plan (the other parts, among them the 208-,
+    216- and 224-SM sm_107a parts and the 148-SM sm_100a part, the FP32 forms, the other rows and token counts) is the
+    plan of version 0.3.19."""
+    assert TILE_0320_PART in ROUTING_038_CLASSES and START_0320_PART in ROUTING_038_CLASSES
+    rows = {row for table in TILE_0314_ROWS.values() for row in table} | set(TILE_0320_BEFORE) | set(START_0320_NEW)
+    rows |= {(d_in, d_out) for d_in, d_out, _T in START_0320_SINGLE_CELLS}
+    assert {T for _, _, T in START_0320_SINGLE_CELLS} <= set(_START_0312_SWEEP_TOKENS)
+    sweep = _merged_sweep(
+        ROUTING_038_SWEEP, tuple(("dgrad", d_in, d_out, "bf16", _START_0312_SWEEP_TOKENS) for d_in, d_out in sorted(rows))
+    )
+    changed, expected = set(), set()
+    for op, d_in, d_out, out_dtype, token_counts in sweep:
+        for T in token_counts:
+            for arch, sm_count in ROUTING_038_CLASSES:
+                where = (op, d_in, d_out, out_dtype, T, arch, sm_count)
+                plan = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                with monkeypatch.context() as m:
+                    _tables_0319(m)
+                    before = _rows_plan(op, arch, sm_count, d_in, d_out, T, out_dtype)
+                band = new = cell = None
+                if (op, out_dtype, arch, sm_count) == ("dgrad", "bf16", *TILE_0320_PART):
+                    band = _tile_0320_band_at((d_in, d_out), T)
+                if (op, out_dtype, arch, sm_count) == ("dgrad", "bf16", *START_0320_PART):
+                    new = START_0320_NEW.get((d_in, d_out))
+                    new = new if new is not None and new[0] <= T <= new[1] else None
+                    cell = (d_in, d_out, T) if (d_in, d_out, T) in START_0320_SINGLE_CELLS else None
+                if band is None and new is None and cell is None:
+                    assert _plan_signature(plan) == _plan_signature(before), (where, plan.template, before.template)
+                    continue
+                expected.add((arch, sm_count, d_in, d_out, T))
+                if band is not None:
+                    _lo, _hi, block_n, block_k, group = band
+                    assert (plan.template, plan.block_n, plan.block_k, plan.group_m) == (
+                        TILE_0320_PROGRAMS[(block_n, block_k)],
+                        block_n,
+                        block_k,
+                        group,
+                    ), (where, plan.template)
+                    assert before.template == TILE_0320_BEFORE[(d_in, d_out)] != plan.template, where
+                else:
+                    assert (plan.template, plan.block_n, plan.block_k, plan.group_m) == (
+                        START_0312_PROGRAMS["w8relf"],
+                        256,
+                        BLOCK_K,
+                        cake_backend.GROUP_M,
+                    ), (where, plan.template)
+                    want = START_0320_SINGLE_BEFORE[(d_in, d_out)] if cell else _start_0320_before((d_in, d_out), T)
+                    assert before.template == want != plan.template, where
+                changed.add((arch, sm_count, d_in, d_out, T))
+    assert changed == expected
+    assert {(*TILE_0320_PART, *cell) for cell in _TILE_0320_CELL_CASES} <= changed
+    assert {(*START_0320_PART, *cell) for cell in START_0320_SINGLE_CELLS} <= changed
+    # the sweep's token counts inside the ranges: on the six VR200 rows 16172, 16173, 16230, 16231, 16232, 16278, 16383
+    # and 16384 each (6 x 8 = 48); on GB200 4096 -> 48 16232, 16278, 16383, 16384, 16385, 24576 and 32767 (7) and the
+    # cell of 5120 -> 128 at 16384 (1): 48 + 7 + 1 = 56 (55 before the cell)
+    counts = {part: sum(1 for cell in changed if cell[:2] == part) for part in (TILE_0320_PART, START_0320_PART)}
+    assert counts == {TILE_0320_PART: 48, START_0320_PART: 8} and len(changed) == 56, (counts, len(changed))
+
+
+def _tile_0320_gpu_cases():
+    """The GPU cases of version 0.3.20, each on the 212-SM sm_107a part alone: the measured cells and the token count of
+    ``TILE_0320_GPU_PROBE`` of each row where a range holds it.  The bits are not compared with the plan of version
+    0.3.19 (the bits of the deterministic package may change from one version to the next)."""
+    probes = {(*row, T) for row, T in TILE_0320_GPU_PROBE.items() if _tile_0320_band_at(row, T) is not None}
+    cases = {*_TILE_0320_CELL_CASES, *probes}
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "bf16",
+            {TILE_0320_PART: TILE_0320_PROGRAMS[_tile_0320_band_at((d_in, d_out), T)[2:4]]},
+            scoped=True,
+        )
+        for d_in, d_out, T in sorted(cases)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _tile_0320_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-bf16",
+)
+def test_gpu_tile_0320_cells_meet_the_naive_tier_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each measured cell of version 0.3.20 and each token count of ``TILE_0320_GPU_PROBE`` a range holds runs its
+    default plan on the 212-SM sm_107a part, the start-path program of the range's tile and K step in its raster group:
+    its output is judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on
+    three more launches into NaN, and its plan differs from the plan of version 0.3.19 (``_tables_0319``) on the device
+    (another program).  Its bits are not compared with that plan's.  Another device skips; a VR200 device whose
+    registry lacks the program fails."""
+    _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0319, "version 0.3.20", plan_changes=True)
+
+
+# ---------------------------------------------------------------------------
+# The start-path program over the whole GB200 4096 -> 48 range (version 0.3.20): the 152-SM sm_100a BF16 input
+# gradient 4096 -> 48 runs ``w8relf`` in the default raster group at T 16172 - 32768 in one range
+# (``START_0320_RANGES``), where version 0.3.19 planned the row's ``ROW_RULES`` rule at T 16232 - 32767 and its GB
+# T-exact rule at T 16384 (``START_0320_BANDS_0319``)
+# ---------------------------------------------------------------------------
+
+#: The range of version 0.3.20 of the key of ``START_0320_BANDS_0319``, in its form: the start-path rule of version
+#: 0.3.12 (``w8relf``) in the default raster group over the row's two ranges of version 0.3.19 and the token counts
+#: between them.
+START_0320_RANGES = {
+    (4096, 48): ((16172, 32768, "w8relf"),),
+}
+#: The token counts at which the row newly plans the start-path program, ``(d_in, d_out) -> (lo, hi)`` (inclusive).
+START_0320_NEW = {(4096, 48): (16232, 32767)}
+#: The token counts the round of version 0.3.20 measured on the row, against the plan of version 0.3.19 on two GB200
+#: nodes in 21 paired rounds per node and mode, with the bits of that plan at each.
+START_0320_MEASURED = (16300, 16384, 24576)
+#: The program the row planned at the token counts of ``START_0320_NEW`` in version 0.3.19: the half-tail program of
+#: its ``ROW_RULES`` rule, but at a token count of ``START_0320_BEFORE_AT`` the program of its GB T-exact rule there.
+START_0320_BEFORE = {(4096, 48): "dense_proj_det_gemm_kn_n256_ht_tma2_lw_pro15"}
+START_0320_BEFORE_AT = {(4096, 48, 16384): "dense_proj_det_gemm_kn_n256_tma1_w8r"}
+#: The token counts of the exact ``ROW_RULES`` keys of the row inside its range of version 0.3.20 (the GB T-exact rules,
+#: ``w8r``): T 16231 (inside a range since version 0.3.12) and T 16384 (since version 0.3.20).  The keys stay: sm_100a
+#: parts without a range of this row (SM counts other than 148 and 152) plan them, and so does a caller that forces
+#: their form.
+START_0320_EXACT_T = {(4096, 48): (16231, 16384)}
+#: Unmeasured token counts among those of ``START_0320_NEW``, the lowest and the highest included and those next to
+#: the measured T 16384.
+START_0320_UNMEASURED = {(4096, 48): (16232, 16383, 16385, 20000, 32767)}
+#: The unmeasured token counts of ``START_0320_UNMEASURED`` the GPU check runs.
+START_0320_GPU_UNMEASURED = {(4096, 48): (16232, 32767)}
+
+
+def _start_0320_before(row, T):
+    """The program the row ``row`` of ``START_0320_NEW`` planned at ``T`` tokens (one of its new token counts) on the
+    152-SM sm_100a part in version 0.3.19."""
+    return START_0320_BEFORE_AT.get((*row, T), START_0320_BEFORE[row])
+
+
+def test_start_0320_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.19 (``_tables_0319``) on the 152-SM sm_100a part in the BF16
+    input-gradient key of ``START_0320_RANGES`` alone (beside the key of the cells of ``START_0320_SINGLE_CELLS``,
+    test_start_0320_single_tables, and the 212-SM sm_107a keys of ``TILE_0320_RANGES``, test_tile_0320_tables), holding
+    the range listed there: the start-path rule of version 0.3.12 (``w8relf``, the package's ``_W8RELF_DGRAD_BF16``) in
+    the default raster group at T 16172 - 32768.  With ``_tables_0319`` the key holds its ranges of version 0.3.12
+    (``START_0312_RANGES``); applied again in a nested context it changes nothing.
+    The rule differs from that of version 0.3.19 exactly at the token counts of ``START_0320_NEW``, each the start-path
+    rule where version 0.3.19 had no range, and every measured token count of versions 0.3.12 and 0.3.20 on the row
+    lies in the range.  No token tier or part rule of the row lies inside it; the exact ``ROW_RULES`` keys inside it are
+    the row's GB T-exact rules at ``START_0320_EXACT_T``, which stay with their ``w8r`` form, and which the
+    architecture's rule lookup without a part (``_measured_row_rule``) reads at their token counts."""
+    live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_0319(m)
+        was = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+        with monkeypatch.context() as again:
+            _tables_0319(again)
+            assert {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()} == was
+    assert {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()} == live
+    assert set(live) == set(was)
+    keys = _start_0320_keys()
+    assert len(keys) == 1 and set(START_0320_RANGES) == set(START_0320_BANDS_0319) == set(START_0320_NEW)
+    expected = {START_0320_PART: keys | _start_0320_single_keys(), TILE_0320_PART: _tile_0320_keys()}
+    for p in live:
+        changed = {key for key in set(live[p]) | set(was[p]) if live[p].get(key) != was[p].get(key)}
+        assert changed == expected.get(p, set()), (p, sorted(changed))
+    plain = _start_0312_rule("w8relf")
+    assert plain == cake_backend._W8RELF_DGRAD_BF16
+    part_rules = cake_backend.ROW_RULES_BY_SM.get(START_0320_PART, {})
+    for row, bands in START_0320_RANGES.items():
+        key = _bf16_dgrad_key(START_0320_PART[0], *row)
+        held, before = live[START_0320_PART][key], was[START_0320_PART][key]
+        assert held == _start_0320_rules(bands) == ((16172, 32768, plain),), (row, held)
+        assert START_0320_BANDS_0319[row] == START_0312_RANGES[START_0320_PART][row], row
+        assert before == _start_0320_rules(START_0320_BANDS_0319[row]), (row, before)
+        assert all(lo <= hi for lo, hi, _ in held) and all(a[1] < b[0] for a, b in zip(held, held[1:])), row
+        for T in (*START_0312_MEASURED, *START_0320_MEASURED):
+            assert _rule_at(held, T) == plain, (row, T)
+        # every token count from one below the lowest range end to one above the highest
+        ends = [T for lo, hi, _ in (*held, *before) for T in (lo, hi)]
+        new = [T for T in range(min(ends) - 1, max(ends) + 2) if _rule_at(held, T) != _rule_at(before, T)]
+        lo, hi = START_0320_NEW[row]
+        assert new == list(range(lo, hi + 1)), (row, new[:1], new[-1:])
+        assert all(_rule_at(before, T) is None and _rule_at(held, T) == plain for T in new), row
+        assert set(START_0320_MEASURED) <= set(new), row
+        assert key not in cake_backend.ROW_RULE_MIN_T, row
+        assert not [
+            exact for exact in part_rules if exact[:8] == key[:8] and any(lo <= exact[8] <= hi for lo, hi, _ in held)
+        ], row
+        inside = sorted(
+            exact[8]
+            for exact in ROW_RULES
+            if exact[:8] == key[:8] and exact[8] is not None and any(a <= exact[8] <= b for a, b, _ in held)
+        )
+        assert inside == list(START_0320_EXACT_T[row]), (row, inside)
+        for T in inside:
+            exact = ROW_RULES[key[:8] + (T,)]
+            assert exact["form"] == "w8r", (row, T, exact)
+            assert cake_backend._measured_row_rule(*key[:8], T) == exact, (row, T)
+
+
+_START_0320_CELL_CASES = tuple((*row, T) for row in sorted(START_0320_RANGES) for T in START_0320_MEASURED)
+
+
+@pytest.mark.parametrize(
+    "cell", _START_0320_CELL_CASES, ids=[f"sm_100a-152-{d}x{o}-T{t}" for d, o, t in _START_0320_CELL_CASES]
+)
+def test_start_0320_cells_plan_their_program(monkeypatch, cell):
+    """At each token count the round of version 0.3.20 measured, the 152-SM sm_100a plan is the plan of the range's
+    rule as an exact ``ROW_RULES`` key at that token count without the part tables: ``kn_n256_tma1_w8relf``
+    (``START_0312_PROGRAMS``) in the default raster group of 16, the form's six stages, ``ceil(d_out / 64)`` K steps
+    per item, whole tiles (no stream-K unit, no promoted chunk) through the one-slot TMA store and no fallback flag.
+    With the tables of version 0.3.19 (``_tables_0319``) the part plans the row's program of that version
+    (``_start_0320_before``: the half-tail program of its ``ROW_RULES`` rule, at T 16384 the eight-warp ``w8r`` program
+    of its GB T-exact rule), another program.  A caller that forces another form than ``w8relf`` (the ten-warp ``""``,
+    ``w8r`` or ``w8rel``) plans as with the tables of version 0.3.19 with that form, or is refused as there: the range's
+    rule yields to the row's rule without the part tables, at T 16384 the GB T-exact rule, whose ``w8r`` program a
+    caller that forces ``w8r`` plans there."""
+    d_in, d_out, T = cell
+    arch, sm = START_0320_PART
+    key = _bf16_dgrad_key(arch, d_in, d_out)
+    rule = _rule_at(_start_0320_rules(START_0320_RANGES[(d_in, d_out)]), T)
+
+    def plan_at(**knobs):
+        return _rows_plan("dgrad", arch, sm, d_in, d_out, T, **knobs)
+
+    def plan_0319(**knobs):
+        with monkeypatch.context() as m:
+            _tables_0319(m)
+            return plan_at(**knobs)
+
+    def plan_exact():
+        # the range's rule as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), rule)
+            return plan_at()
+
+    def outcome(plan, **knobs):
+        try:
+            return plan(**knobs)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    plan, before = plan_at(), plan_0319()
+    where = (cell, plan.template, before.template)
+    assert rule == _start_0312_rule("w8relf"), where
+    assert plan == plan_exact(), where
+    assert plan.template == START_0312_PROGRAMS["w8relf"] and plan.form == "w8relf", where
+    assert (plan.block_n, plan.block_k, plan.group_m, plan.stages) == (256, BLOCK_K, cake_backend.GROUP_M, 6), where
+    assert plan.k_blocks == plan.iters_per_unit == -(-d_out // BLOCK_K), (where, plan.k_blocks)
+    assert plan.n_tiles == -(-d_in // 256), where
+    assert plan.sk_units == 0 and plan.tail_tiles == 0 and plan.num_full == plan.pair_tiles, where
+    assert plan.promote_blocks == 0 and plan.tma_out and plan.epi == "tma" and plan.slots == 1, where
+    assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+    assert before.template == _start_0320_before((d_in, d_out), T) != plan.template, where
+    assert not (before.rule_fallback or before.knob_fallback), where
+    for forced in ("", "w8r", "w8rel"):
+        assert outcome(plan_at, form=forced) == outcome(plan_0319, form=forced), (where, forced)
+    if T in START_0320_EXACT_T[(d_in, d_out)]:
+        # the GB T-exact key at T: a caller that forces its form plans its program
+        assert plan_at(form="w8r").template == START_0320_BEFORE_AT[cell] == before.template, where
+
+
+_START_0320_ROW_CASES = tuple(sorted(START_0320_NEW))
+
+
+@pytest.mark.parametrize(
+    "row", _START_0320_ROW_CASES, ids=[f"sm_100a-152-{d}x{o}" for d, o in _START_0320_ROW_CASES]
+)
+def test_start_0320_unmeasured_token_counts_plan_the_range(monkeypatch, row):
+    """Each token count of ``START_0320_UNMEASURED`` on the row (unmeasured, among those the row newly plans the
+    start-path program at, ``START_0320_NEW``, the lowest and the highest included) plans the program of the range of
+    ``START_0320_RANGES`` on the 152-SM sm_100a part: the plan of its rule as an exact ``ROW_RULES`` key at that token
+    count without the part tables, ``kn_n256_tma1_w8relf`` in the default raster group of 16 with whole tiles and no
+    fallback flag, another program than with the tables of version 0.3.19 (``_tables_0319``), the half-tail program of
+    the row's ``ROW_RULES`` rule.  One token count outside each end of the range (T 16171 and 32769) and of the new
+    token counts (T 16231 and 32768, in the ranges of version 0.3.19) the plan is the plan of version 0.3.19, field for
+    field."""
+    arch, sm = START_0320_PART
+    d_in, d_out = row
+    lo, hi = START_0320_NEW[row]
+    key = _bf16_dgrad_key(arch, d_in, d_out)
+    unmeasured = START_0320_UNMEASURED[row]
+    assert all(lo <= T <= hi and T not in START_0320_MEASURED for T in unmeasured), (row, unmeasured)
+    assert (min(unmeasured), max(unmeasured)) == (lo, hi), row
+    assert set(START_0320_GPU_UNMEASURED[row]) <= set(unmeasured), row
+    bands = _start_0320_rules(START_0320_RANGES[row])
+    (joined,) = [band for band in bands if band[0] <= lo and hi <= band[1]]
+    rule = joined[2]
+    assert rule == _start_0312_rule("w8relf"), (row, rule)
+
+    def plan_at(T):
+        return _rows_plan("dgrad", arch, sm, d_in, d_out, T)
+
+    def plan_0319(T):
+        with monkeypatch.context() as m:
+            _tables_0319(m)
+            return plan_at(T)
+
+    def plan_exact(T):
+        # the range's rule as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), rule)
+            return plan_at(T)
+
+    for T in unmeasured:
+        plan, before = plan_at(T), plan_0319(T)
+        where = (row, T, plan.template, before.template)
+        assert plan == plan_exact(T), where
+        assert (plan.template, plan.form, plan.block_n, plan.block_k, plan.group_m) == (
+            START_0312_PROGRAMS["w8relf"],
+            "w8relf",
+            256,
+            BLOCK_K,
+            cake_backend.GROUP_M,
+        ), where
+        assert plan.sk_units == 0 and plan.tail_tiles == 0 and plan.num_full == plan.pair_tiles, where
+        assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+        assert before.template == _start_0320_before(row, T) != plan.template, where
+    for T in sorted({joined[0] - 1, joined[1] + 1, lo - 1, hi + 1}):
+        assert plan_at(T) == plan_0319(T), (row, T)
+
+
+def _start_0320_gpu_cases():
+    """The GPU cases of the GB200 range of version 0.3.20, each on the 152-SM sm_100a part alone: the measured token
+    counts of ``START_0320_MEASURED`` and those of ``START_0320_GPU_UNMEASURED``; the output keeps the bits of the plan
+    of version 0.3.19 (the half-tail program of the row's ``ROW_RULES`` rule, at T 16384 the eight-warp ``w8r``
+    program)."""
+    cases = {
+        *((*row, T) for row in START_0320_RANGES for T in START_0320_MEASURED),
+        *((*row, T) for row, tokens in START_0320_GPU_UNMEASURED.items() for T in tokens),
+    }
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "bf16",
+            {START_0320_PART: START_0312_PROGRAMS["w8relf"]},
+            scoped=True,
+            same_bits=True,
+        )
+        for d_in, d_out, T in sorted(cases)
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _start_0320_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-bf16",
+)
+def test_gpu_start_0320_cells_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each measured token count of ``START_0320_MEASURED`` and each token count of ``START_0320_GPU_UNMEASURED`` runs
+    its default plan on the 152-SM sm_100a part, ``kn_n256_tma1_w8relf`` in the default raster group of 16: the output
+    is judged against the FP64 oracle beside the naive BF16 tier over the draws, it returns the same bits on three more
+    launches into NaN, its plan differs from the plan of version 0.3.19 (``_tables_0319``, the half-tail program, at
+    T 16384 the eight-warp ``w8r`` program) on the device, and its output equals that plan's bit for bit.  Another
+    device skips; a GB200 device whose registry lacks the program fails."""
+    _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0319, "version 0.3.20", plan_changes=True)
+
+
+# ---------------------------------------------------------------------------
+# The start-path program at one more GB200 token count (version 0.3.20): the 152-SM sm_100a BF16 input gradient
+# 5120 -> 128 runs ``w8relf`` in the default raster group at T 16384 (``START_0320_SINGLE_CELLS``), a range of that one
+# token count between its ranges of version 0.3.12, where version 0.3.19 planned the row's ``ROW_RULES`` rule
+# ---------------------------------------------------------------------------
+
+
+def test_start_0320_single_tables(monkeypatch):
+    """``ROW_RULE_RANGES_BY_SM`` differs from version 0.3.19 (``_tables_0319``) on the 152-SM sm_100a part in the BF16
+    input-gradient key of the row of each cell of ``START_0320_SINGLE_CELLS`` beside the key of ``START_0320_RANGES``
+    (test_start_0320_tables), and on the 212-SM sm_107a part in the keys of ``TILE_0320_RANGES``
+    (test_tile_0320_tables).  The key holds its ranges of version 0.3.19 (``START_0320_SINGLE_BANDS_0319``, which are
+    its ranges of version 0.3.12, ``START_0312_RANGES``) and a range of one token count at each cell, every range the
+    start-path rule of version 0.3.12 (``w8relf``, the package's ``_W8RELF_DGRAD_BF16``) in the default raster group:
+    sorted and disjoint.  The rule differs from that of version 0.3.19 exactly at the cells, where version 0.3.19 had
+    no range; each cell is a kept cell of version 0.3.12 (``START_0312_KEPT``).  No token tier, part rule or exact
+    ``ROW_RULES`` key of the row lies inside its ranges."""
+    live = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    with monkeypatch.context() as m:
+        _tables_0319(m)
+        was = {p: dict(t) for p, t in cake_backend.ROW_RULE_RANGES_BY_SM.items()}
+    assert set(live) == set(was)
+    keys = _start_0320_single_keys()
+    assert len(keys) == 1 and not keys & _start_0320_keys(), sorted(keys)
+    rows = {(d_in, d_out) for d_in, d_out, _T in START_0320_SINGLE_CELLS}
+    assert rows == set(START_0320_SINGLE_BANDS_0319) == set(START_0320_SINGLE_BEFORE), sorted(rows)
+    expected = {START_0320_PART: keys | _start_0320_keys(), TILE_0320_PART: _tile_0320_keys()}
+    for p in live:
+        changed = {key for key in set(live[p]) | set(was[p]) if live[p].get(key) != was[p].get(key)}
+        assert changed == expected.get(p, set()), (p, sorted(changed))
+    plain = _start_0312_rule("w8relf")
+    assert plain == cake_backend._W8RELF_DGRAD_BF16
+    part_rules = cake_backend.ROW_RULES_BY_SM.get(START_0320_PART, {})
+    for row, bands_0319 in START_0320_SINGLE_BANDS_0319.items():
+        key = _bf16_dgrad_key(START_0320_PART[0], *row)
+        held, before = live[START_0320_PART][key], was[START_0320_PART][key]
+        cells = sorted(T for d_in, d_out, T in START_0320_SINGLE_CELLS if (d_in, d_out) == row)
+        assert held == _start_0320_single_ranges(row), (row, held)
+        assert all(rule == plain for _, _, rule in held), (row, held)
+        assert all(lo <= hi for lo, hi, _ in held) and all(a[1] < b[0] for a, b in zip(held, held[1:])), row
+        assert bands_0319 == START_0312_RANGES[START_0320_PART][row], row
+        assert before == _start_0320_rules(bands_0319), (row, before)
+        assert [band for band in held if band not in before] == [(T, T, plain) for T in cells], (row, held)
+        # every token count from one below the lowest range end to one above the highest
+        ends = [T for lo, hi, _ in (*held, *before) for T in (lo, hi)]
+        new = [T for T in range(min(ends) - 1, max(ends) + 2) if _rule_at(held, T) != _rule_at(before, T)]
+        assert new == cells, (row, new)
+        assert all(_rule_at(before, T) is None for T in cells), row
+        assert {(*START_0320_PART, *row, T) for T in cells} <= set(START_0312_KEPT), row
+        assert key not in cake_backend.ROW_RULE_MIN_T, row
+        assert not [exact for exact in part_rules if exact[:8] == key[:8]], row
+        assert not [
+            exact
+            for exact in ROW_RULES
+            if exact[:8] == key[:8] and exact[8] is not None and any(lo <= exact[8] <= hi for lo, hi, _ in held)
+        ], row
+
+
+@pytest.mark.parametrize(
+    "cell", START_0320_SINGLE_CELLS, ids=[f"sm_100a-152-{d}x{o}-T{t}" for d, o, t in START_0320_SINGLE_CELLS]
+)
+def test_start_0320_single_cells_plan_their_program(monkeypatch, cell):
+    """At each cell of ``START_0320_SINGLE_CELLS`` the 152-SM sm_100a plan is the plan of the cell's rule as an exact
+    ``ROW_RULES`` key at that token count without the part tables: ``kn_n256_tma1_w8relf`` (``START_0312_PROGRAMS``) in
+    the default raster group of 16, the form's six stages, ``ceil(d_out / 64)`` K steps per item, whole tiles (no
+    stream-K unit, no promoted chunk) through the one-slot TMA store and no fallback flag.  With the tables of version
+    0.3.19 (``_tables_0319``) the part plans the row's ``ROW_RULES`` rule there (``START_0320_SINGLE_BEFORE``), another
+    program.  One token count below and above the cell (T 16383 and 16385 at T 16384), and at the ends of the row's
+    ranges of version 0.3.19 and one token count outside each (T 16231 and 32768 among them), the plan is the plan of
+    version 0.3.19, field for field; at the cell every other class of ``_DGRAD_PART_CLASSES`` plans the row as in
+    version 0.3.19, but the 212-SM sm_107a part where a range of ``TILE_0320_RANGES`` holds the row there
+    (test_tile_0320_tables).  A caller that forces another form than ``w8relf`` (the ten-warp ``""``, ``w8r`` or
+    ``w8rel``) at the cell plans as with the tables of version 0.3.19 with that form, or is refused as there: the
+    cell's rule yields to the row's rule without the part tables."""
+    d_in, d_out, T = cell
+    arch, sm = START_0320_PART
+    key = _bf16_dgrad_key(arch, d_in, d_out)
+    rule = _rule_at(_start_0320_single_ranges((d_in, d_out)), T)
+
+    def plan_at(t, a=arch, s=sm, **knobs):
+        return _rows_plan("dgrad", a, s, d_in, d_out, t, **knobs)
+
+    def plan_0319(t, a=arch, s=sm, **knobs):
+        with monkeypatch.context() as m:
+            _tables_0319(m)
+            return plan_at(t, a, s, **knobs)
+
+    def plan_exact():
+        # the cell's rule as an exact key of the row at T, without the part tables
+        with monkeypatch.context() as m:
+            m.setattr(cake_backend, "ROW_RULES_BY_SM", {})
+            _without_dgrad_parts(m)
+            m.setitem(ROW_RULES, key[:8] + (T,), rule)
+            return plan_at(T)
+
+    def outcome(plan, *args, **knobs):
+        try:
+            return plan(*args, **knobs)
+        except ValueError as error:
+            return ("ValueError", str(error))
+
+    plan, before = plan_at(T), plan_0319(T)
+    where = (cell, plan.template, before.template)
+    assert rule == _start_0312_rule("w8relf"), where
+    assert plan == plan_exact(), where
+    assert plan.template == START_0312_PROGRAMS["w8relf"] and plan.form == "w8relf", where
+    assert (plan.block_n, plan.block_k, plan.group_m, plan.stages) == (256, BLOCK_K, cake_backend.GROUP_M, 6), where
+    assert plan.k_blocks == plan.iters_per_unit == -(-d_out // BLOCK_K), (where, plan.k_blocks)
+    assert plan.n_tiles == -(-d_in // 256), where
+    assert plan.sk_units == 0 and plan.tail_tiles == 0 and plan.num_full == plan.pair_tiles, where
+    assert plan.promote_blocks == 0 and plan.tma_out and plan.epi == "tma" and plan.slots == 1, where
+    assert not (plan.rule_fallback or plan.knob_fallback or plan.swap_fallback or plan.wave_fallback), where
+    assert before.template == START_0320_SINGLE_BEFORE[(d_in, d_out)] != plan.template, where
+    assert not (before.rule_fallback or before.knob_fallback), where
+    for forced in ("", "w8r", "w8rel"):
+        assert outcome(plan_at, T, form=forced) == outcome(plan_0319, T, form=forced), (where, forced)
+    bands = START_0320_SINGLE_BANDS_0319[(d_in, d_out)]
+    around = {T - 1, T + 1} | {t for lo, hi, _ in bands for t in (lo - 1, lo, hi, hi + 1)}
+    assert T not in around and {16231, 32768} <= around, sorted(around)
+    for t in sorted(around):
+        assert plan_at(t) == plan_0319(t), (cell, t)
+    compared = 0
+    for a, s in _DGRAD_PART_CLASSES:
+        if (a, s) == START_0320_PART or ((a, s) == TILE_0320_PART and _tile_0320_band_at((d_in, d_out), T)):
+            continue  # the cell's part, and a 212-SM range of version 0.3.20 of the same row (test_tile_0320_tables)
+        assert plan_at(T, a, s) == plan_0319(T, a, s), (cell, a, s)
+        compared += 1
+    assert compared >= len(_DGRAD_PART_CLASSES) - 2, compared
+
+
+def _start_0320_single_gpu_cases():
+    """The GPU cases of the cells of ``START_0320_SINGLE_CELLS``, each on the 152-SM sm_100a part alone; the output
+    keeps the bits of the plan of version 0.3.19 (the row's ``ROW_RULES`` rule, ``START_0320_SINGLE_BEFORE``)."""
+    return tuple(
+        _Routing034Case(
+            "dgrad",
+            d_in,
+            d_out,
+            T,
+            "bf16",
+            {START_0320_PART: START_0312_PROGRAMS["w8relf"]},
+            scoped=True,
+            same_bits=True,
+        )
+        for d_in, d_out, T in START_0320_SINGLE_CELLS
+    )
+
+
+@pytest.mark.parametrize(
+    "case",
+    _start_0320_single_gpu_cases(),
+    ids=lambda c: "+".join(f"{a}-{s}" for a, s in sorted(c.programs)) + f"-dgrad-{c.d_in}x{c.d_out}-T{c.T}-bf16",
+)
+def test_gpu_start_0320_single_cells_keep_their_bits_and_repeat_bitwise(case, monkeypatch, record_property):
+    """Each cell of ``START_0320_SINGLE_CELLS`` runs its default plan on the 152-SM sm_100a part,
+    ``kn_n256_tma1_w8relf`` in the default raster group of 16: the output is judged against the FP64 oracle beside the
+    naive BF16 tier over the draws, it returns the same bits on three more launches into NaN, its plan differs from the
+    plan of version 0.3.19 (``_tables_0319``, the row's ``ROW_RULES`` rule, ``START_0320_SINGLE_BEFORE``) on the
+    device, and its output equals that plan's bit for bit.  Another device skips; a GB200 device whose registry lacks
+    the program fails."""
+    _run_routing_gpu_case(case, monkeypatch, record_property, _tables_0319, "version 0.3.20", plan_changes=True)
 
 
 # The determinism contract of the package: a prepared launch rerun over the same operands gives the same bits.
