@@ -2644,13 +2644,13 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 #   * 5120 -> 128: 21.38 to 22.98, 20.30 to 21.66, 20.10 to 21.95 and 20.18 to 22.02 (0.990 to 1.013);
 #   * indexer_k: 26.54 to 26.69, 25.17 to 25.40, 25.95 to 26.21 and 25.52 to 26.12 (1.014 to 1.028);
 #   * 8192 -> 128: 29.86 to 34.00, 28.72 to 32.88, 29.97 to 34.74 and 29.63 to 34.75 (1.032 to 1.056).
-# Over the three measured token counts the fastest library took 0.958 to 1.010 times the time of the new plan on
+# Over the three measured token counts the fastest library took 0.957 to 1.010 times the time of the new plan on
 # 4096 -> 48, 0.995 to 1.027 on 4096 -> 128, 0.991 to 1.009 on 5120 -> 48 and 0.990 to 1.025 on 5120 -> 128 (on these
 # four rows faster than the new plan at some token count and node and mode pair), 1.014 to 1.042 on indexer_k and 1.019
 # to 1.059 on 8192 -> 128.  The unmeasured token counts inside a range run its program; the other token counts of these
 # rows keep their plan of version 0.3.19.  The non-deterministic package keeps its entries of these rows at T 16172,
 # 16231 and 16384 (its program on the plan of ``kn_n256_tma1_w8r``, a form these ranges do not name; the round timed it
-# beside the new plan, its median time 0.987 to 1.021 times the new plan's); at the token counts between them it runs
+# beside the new plan, its median time 0.987 to 1.020 times the new plan's); at the token counts between them it runs
 # this plan.
 # Version 0.3.20 also runs ``kn_n256_tma1_w8relf`` in the default raster group of 16 (the rule of version 0.3.12) on the
 # GB200 (152-SM sm_100a) BF16 input gradient 4096 -> 48 at T 16232 - 32767, where version 0.3.19 ran the row's
@@ -2679,7 +2679,7 @@ ROW_RULES_BY_SM: dict[tuple[str, int], dict[tuple, dict]] = {
 # prepared copy of it in the same rounds, with the bar fixed before timing (at least 17 of the 21 paired wins against
 # each copy, both medians at least 1.0 and the two copies within 0.01 of each other in every node and mode pair): on
 # two GB200 nodes (driver 580.126.20) the new plan was faster in all 21 rounds of each of the four node and mode pairs
-# against each copy, medians 1.050 to 1.056 against the plan and 1.044 to 1.049 against its copy, and its outputs met
+# against each copy, medians 1.050 to 1.056 against the plan and 1.043 to 1.049 against its copy, and its outputs met
 # the naive BF16 tier on five seeds and were equal to that plan's bit for bit on both nodes.  An earlier pair of GB200
 # nodes measured 1.053 to 1.067 against the plan and 1.048 to 1.055 against its copy, but on one of them the two copies
 # of the plan were more than 0.01 apart, which the bar does not accept; the second pair decided.  Median times (the plan

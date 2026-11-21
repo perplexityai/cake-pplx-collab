@@ -2213,7 +2213,7 @@ _NVJET_DGRAD_DET_PLAN_ROWS: dict[tuple[str, int], frozenset[tuple[int, int, int]
 #: to 16384 tokens.  The VR200 part keeps its 18 keys of these rows: the plan of :data:`K1_DGRAD_NVJET_DET_PROGRAM`
 #: names another form than those ranges, so it is unchanged.  The round of that version timed this package's launch at
 #: the 18 keys beside one copy of the new plan on two VR200 nodes, 21 paired rounds per node in eager launches and in
-#: CUDA graph replays: the ratio of its median time to the plan's was 0.987 to 1.021.  Only at ``4096 -> 128`` at 16231
+#: CUDA graph replays: the ratio of its median time to the plan's was 0.987 to 1.020.  Only at ``4096 -> 128`` at 16231
 #: tokens was the plan faster in at least 17 of the 21 rounds with a median of this package's time over the plan's of at
 #: least 1.0 in every node and mode pair; the lowest of those medians, 1.005, is below the 1.015 above, so the key
 #: stays.  The token counts between the keys, which no table of
