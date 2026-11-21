@@ -351,7 +351,7 @@ def test_captured_standalone_collapse(record_property) -> None:
     )
 
 
-@pytest.mark.parametrize("T", (129, 384, 16384))
+@pytest.mark.parametrize("T", (129, 383, 384, 16384))
 def test_handoff_steady_state_has_no_host_sync(T: int) -> None:
     """After a warm-up, eager iterations of the direct handoff entry points, the autograd chain and the standalone
     collapse run under ``torch.cuda.set_sync_debug_mode("error")`` (any synchronizing CUDA call raises)."""

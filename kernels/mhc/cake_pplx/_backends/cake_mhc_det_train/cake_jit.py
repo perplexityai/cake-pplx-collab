@@ -148,8 +148,8 @@ launch order (all three: the same outputs bit for bit, grid and launch facts;
 the same PDL edge ``K4->C``).  On sm_107a ``collapse_backward_h5120`` holds
 four records selected by the token count (``rows_between``):
 ``collapse_bwd__vjpwa_sp4_mb4__h5120`` up to 215 tokens,
-``collapse_bwd__vjpwa_sp2_mb4__h5120`` from 216 to 460 tokens,
-``collapse_bwd__vjpwa__h5120`` from 461 to 656 tokens and
+``collapse_bwd__vjpwa_sp2_mb4__h5120`` from 216 to 383 tokens,
+``collapse_bwd__vjpwa__h5120`` from 384 to 656 tokens and
 ``collapse_bwd__vjpwa_pfq2__h5120`` from 657 tokens.  ``_vjpwa`` is the same
 VJP without the L2 prefetch (the same grid, dynamic shared memory and launch
 facts), and ``_vjpwa_sp4_mb4`` / ``_vjpwa_sp2_mb4`` the ``_vjpwa`` VJP split
@@ -10998,7 +10998,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "collapse_bwd",
         "select_rule": {
             "above": 215,
-            "at_most": 460,
+            "at_most": 383,
             "kind": "rows_between",
         },
         "workspace_rule": None,
@@ -11048,7 +11048,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "role": "collapse_bwd",
         "select_rule": {
-            "above": 460,
+            "above": 383,
             "at_most": 656,
             "kind": "rows_between",
         },

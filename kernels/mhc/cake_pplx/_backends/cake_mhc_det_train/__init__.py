@@ -37,8 +37,8 @@ trips in reverse launch order, the same bits) from 2048 to 6655 tokens and
 ``X``, the same bits) from 6656 tokens; ``collapse_backward`` runs
 ``collapse_bwd__vjpwa_sp4_mb4`` / ``collapse_bwd__vjpwa_sp2_mb4`` (the
 ``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, the same bits)
-up to 215 / from 216 to 460 tokens, ``collapse_bwd__vjpwa`` (the same VJP
-without the L2 prefetch, the same bits) from 461 to 656 tokens and
+up to 215 / from 216 to 383 tokens, ``collapse_bwd__vjpwa`` (the same VJP
+without the L2 prefetch, the same bits) from 384 to 656 tokens and
 ``collapse_bwd__vjpwa_pfq2`` from 657 tokens.
 """
 
