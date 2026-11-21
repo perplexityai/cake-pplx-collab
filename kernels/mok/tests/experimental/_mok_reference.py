@@ -30,14 +30,14 @@ threads launched: one call of more elements than that has other values on a GPU
 with another SM count (148 against 152, for example), and the generator's
 offset, so every later draw of it, moves by another step.  The helpers fill a
 CUDA tensor in consecutive torch calls of :data:`DRAW_CHUNK` elements each.  A
-call of at most 2^18 elements runs one thread per element on every GPU with
-2^18 threads or more (128 SMs of 2048 threads; the supported GPUs have 148 to
-216 SMs), so its values and the offset step it takes (4) do not depend on the
-SM count.  Each call is torch's own: the generator (``generator``, or the
-default one that ``torch.manual_seed`` seeds), the dtype (a BF16 tensor holds
-float normals rounded to BF16) and the order of the draws are unchanged, and a
-draw of at most :data:`DRAW_CHUNK` elements is a single torch call.  A CPU
-tensor is drawn in one torch call.
+call of at most 2^17 elements runs one thread per element on every GPU with
+2^17 threads or more (64 SMs of 2048 threads or 128 SMs of 1024; the supported
+GPUs have 148 to 216 SMs of 1024 or 2048 threads), so its values and the offset
+step it takes (4) do not depend on the SM count.  Each call is torch's own: the
+generator (``generator``, or the default one that ``torch.manual_seed`` seeds),
+the dtype (a BF16 tensor holds float normals rounded to BF16) and the order of
+the draws are unchanged, and a draw of at most :data:`DRAW_CHUNK` elements is a
+single torch call.  A CPU tensor is drawn in one torch call.
 """
 
 import pytest
@@ -55,7 +55,7 @@ def require_gpu():
 
 
 #: Elements of one torch random call of the draw helpers on a CUDA device.
-DRAW_CHUNK = 1 << 18
+DRAW_CHUNK = 1 << 17
 #: Threads per block of torch's CUDA random kernels.
 _RANDOM_BLOCK = 256
 

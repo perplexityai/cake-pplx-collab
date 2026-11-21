@@ -14,13 +14,13 @@ See the License for the specific language governing permissions and
 limitations under the License.
 
 The random inputs of the MoK tests (:mod:`tests.experimental._mok_reference`, :func:`randn` and the other draw
-helpers) fill a CUDA tensor in consecutive torch calls of ``DRAW_CHUNK`` = 2^18 elements, so they do not depend on the
-GPU's SM count.  On the CPU: the chunks of ``n`` elements are ``ceil(n / 2^18)`` consecutive parts of ``2^18`` elements
+helpers) fill a CUDA tensor in consecutive torch calls of ``DRAW_CHUNK`` = 2^17 elements, so they do not depend on the
+GPU's SM count.  On the CPU: the chunks of ``n`` elements are ``ceil(n / 2^17)`` consecutive parts of ``2^17`` elements
 (the last one the rest), filled in order, and filling them from one generator gives torch's draws of each part in turn;
 a CPU tensor is one torch call with torch's values; and no module of ``tests/experimental`` calls torch's random
 functions itself.  On a GPU: each helper gives the concatenation of torch's draws of each chunk from the same generator
 state (the default generator and an explicit one), each chunk moves the generator's offset by 4, and a draw of at most
-2^18 elements is torch's own single call.
+2^17 elements is torch's own single call.
 """
 
 from __future__ import annotations
@@ -123,7 +123,7 @@ def _per_chunk(torch_draw, shape, g):
     ids=str,
 )
 def test_chunks_cover_the_tensor_in_order(shape):
-    """A tensor of ``n`` elements is filled in ``ceil(n / 2^18)`` calls, on consecutive parts of ``2^18`` elements in
+    """A tensor of ``n`` elements is filled in ``ceil(n / 2^17)`` calls, on consecutive parts of ``2^17`` elements in
     order (the last part the rest), each a view of the tensor's storage."""
     out = torch.empty(shape, dtype=torch.int64)
     base = out.untyped_storage().data_ptr()
