@@ -1534,11 +1534,11 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
     device's architecture: ``fwd`` on sm_100a / sm_103a, ``fwd_sm_107a`` on sm_107a), which builds the pair table
     itself; the forward of more documents (257, 300, 512, 513, 8193) launches a pair table then ``fwd_unfused``
     (``fwd_unfused`` on sm_100a / sm_103a, ``fwd_unfused_sm_107a`` on sm_107a); the backward of those packs a pair
-    table then the record of their backward role (``bwd`` / ``bwd_sm_107a``, and on sm_107a ``bwd_warp_sm_107a`` for
-    257 to 513 documents, at most 1024), and of a pack of at most ``bwd_small_docs`` documents a pair table then
+    table then the record of their backward role (``bwd`` / ``bwd_sm_107a``), and of a pack of at most
+    ``bwd_small_docs`` documents a pair table then
     ``bwd_small`` (``bwd_small`` on sm_100a / sm_103a, ``bwd_small_sm_107a`` on sm_107a), or the backward alone with
     ``pair_offsets``; the backward of 16384 tokens in 27 documents a pair table then ``bwd`` on sm_100a (more than 26
-    documents), ``bwd_warp_sm_103a`` on sm_103a (15 to 32) and ``bwd_small_sm_107a`` on sm_107a (at most 40); the
+    documents), ``bwd_warp_sm_103a`` on sm_103a (15 to 32) and ``bwd_small_sm_107a`` on sm_107a (at most 125); the
     backward of 16385 documents (more than ``bwd_warp_docs``) a pair table then ``bwd_warp`` (``bwd_warp``,
     ``bwd_warp_sm_103a``, ``bwd_warp_sm_107a``); a call of the ``bwd_warp`` role looks up no other backward bound; the
     autograd entries launch no pair table in the backward and the same backward role.  The pair table of at most
@@ -1627,7 +1627,7 @@ def test_the_calls_launch_their_records_in_order(device, monkeypatch) -> None:
         lookups.clear()
         pkg.cake_gated_kv_compression_det_train_backward(many.dout, many.c, many.z, many.cu)
         many_role = _bwd_role(arch, many.S)
-        assert many_role == ("bwd_warp" if arch == "sm_107a" and many.S <= 1024 else "bwd"), many.S
+        assert many_role == "bwd", many.S
         assert launched == [table, many_role], many.S
         assert entries == [(table, arch), (BACKWARD_RECORDS[arch][many_role], arch)], many.S
         assert lookups == [*lookups_of(many_role), "small_docs"], many.S
