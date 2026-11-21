@@ -35,7 +35,7 @@ span of their kernels' GPU time.
 
 The route of a run is chosen on the command line and applied to every
 comparator: ``--weight-dtype bfloat16`` (BF16 taps and a BF16 ``dweight``: the
-``fwd_dt`` / ``bwd_dt_bf16_taps`` programs, ``fwd_bias`` / ``bwd_bias`` with a
+``fwd_dt`` / ``bwd_dt`` programs, ``fwd_bias`` / ``bwd_bias`` with a
 bias; FLA and eager take the BF16 taps as given),
 ``--bias float32|bfloat16`` (the ``*_bias`` programs; FLA's conv takes the bias,
 eager adds it after the taps) and ``--silu-grad-preactivation fp32`` (the

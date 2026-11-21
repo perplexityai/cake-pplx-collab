@@ -28,12 +28,11 @@ S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
 the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
 busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
 rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
-1016; from release 0.2.7 also the ``bwd_bias`` and ``bwd_dt_bf16_taps`` routes
-at C = 520 to 1016 and small S, ``bwd_dt_bf16_taps`` not at C = 768 on
-sm_103a; each row up to its own token bound), that launch runs the route's
-fallback program, the one the route runs at its smallest channel counts, in
-place of the program its channel thresholds pick.  This module never runs the
-deterministic package.
+1016; from release 0.2.7 also the ``bwd_bias`` and ``bwd_dt`` routes at C = 520
+to 1016 and small S, ``bwd_dt`` not at C = 768 on sm_103a; each row up to its
+own token bound), that launch runs the route's fallback program, the one the
+route runs at its smallest channel counts, in place of the program its channel
+thresholds pick.  This module never runs the deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
@@ -433,8 +432,9 @@ def cake_causal_conv1d_nondet_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
         ``"bf16"``: SiLU' at the unrounded FP32 preactivation with a ``bias``
-        (FP32 or BF16 ``weight``) or with a BF16 ``weight``, at the BF16-rounded
-        recomputed preactivation with an FP32 ``weight`` and no ``bias``.
+        (FP32 or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight``
+        out, at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and ``dweight`` and no ``bias``.
         ``"fp32"``: at the unrounded FP32 preactivation.  Both accumulate in
         plain FP32 words by default (see ``dweight_sum``).
     workspace : torch.Tensor, optional

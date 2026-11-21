@@ -29,8 +29,9 @@ Host design (the knobs are keywords; no environment variable):
   (FLA's order).  ``dweight`` / ``dbias`` default to the parameter's dtype and
   may be preallocated as FP32 or BF16.
 - ``silu_grad_preactivation``: ``"bf16"`` (default, the shipped policy: SiLU'
-  at the unrounded FP32 preactivation with a bias (FP32 or BF16 taps) or
-  with BF16 taps, and at the BF16-rounded preactivation with FP32 taps and
+  at the unrounded FP32 preactivation with a bias (FP32 or BF16 taps),
+  with BF16 taps or with a BF16 ``dweight``, and at the BF16-rounded
+  preactivation with FP32 taps and ``dweight`` and
   no bias, the boundary FLA's backward uses) or ``"fp32"`` (SiLU' at the
   unrounded FP32 preactivation; a slower program).
   Every ``dweight`` / ``dbias`` sum is one plain FP32 word under both by
@@ -869,8 +870,9 @@ def cake_causal_conv1d_det_train_backward(
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
         ``"bf16"`` at the unrounded FP32 preactivation with a ``bias`` (FP32
-        or BF16 ``weight``) or with a BF16 ``weight``, and at the BF16-rounded
-        recomputed preactivation with an FP32 ``weight`` and no ``bias`` (the
+        or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight`` out, and
+        at the BF16-rounded recomputed preactivation with an FP32 ``weight``
+        and ``dweight`` and no ``bias`` (the
         shipped policy and FLA's boundary; ``dweight`` within ~3e-5 rel-L2 of
         exact),
         ``"fp32"`` at the unrounded FP32 preactivation (a slower program);

@@ -1775,8 +1775,9 @@ def cake_causal_conv1d_nondet_train_backward(
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
         ``"bf16"`` at the unrounded FP32 preactivation with a ``bias`` (FP32
-        or BF16 ``weight``) or with a BF16 ``weight``, and at the BF16-rounded
-        recomputed preactivation with an FP32 ``weight`` and no ``bias``,
+        or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight`` out, and
+        at the BF16-rounded recomputed preactivation with an FP32 ``weight``
+        and ``dweight`` and no ``bias``,
         ``"fp32"`` at
         the unrounded FP32 preactivation; both accumulate in plain FP32 words.
         ``dx`` is within one BF16 ulp of exact either way, and bitwise the det

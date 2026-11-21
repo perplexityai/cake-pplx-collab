@@ -38,9 +38,10 @@ FP32,
     dbias[c]      = sum_t dpre[t, c]                            # with a bias
 
 at ``p`` chosen by ``silu_grad_preactivation``: ``"bf16"`` (default), ``p =
-pre`` unrounded with a bias (an FP32 or BF16 ``weight``) or with a BF16
+pre`` unrounded with a bias (an FP32 or BF16 ``weight``), with a BF16
 ``weight`` (there the rounding can move ``dx`` across a BF16 rounding
-midpoint), and ``p = bf16(pre)`` with an FP32 ``weight`` and no bias, the
+midpoint) or with a BF16 ``dweight``, and ``p = bf16(pre)`` with an FP32
+``weight`` and ``dweight`` and no bias, the
 rounded value the forward stores and the boundary flash-linear-attention's
 backward uses (``dweight`` lands within about 3e-5 rel-L2 of the exact FP64
 gradient); ``"fp32"``, ``p = pre`` unrounded with either ``weight`` (a slower
@@ -312,8 +313,8 @@ def cake_causal_conv1d_det_train_backward(
     r"""Packed width-4 depthwise causal convolution + SiLU, training backward.
 
     Recomputes the FP32 preactivation from ``x``, evaluates the SiLU derivative
-    at it -- rounded to BF16 with an FP32 ``weight`` and no bias under
-    ``silu_grad_preactivation="bf16"`` (the default), else unrounded (see
+    at it -- rounded to BF16 with an FP32 ``weight`` and ``dweight`` and no bias
+    under ``silu_grad_preactivation="bf16"`` (the default), else unrounded (see
     ``silu_grad_preactivation``) -- and produces ``dx``, the weight gradient and,
     with a bias, the bias gradient in two ordinary launches on the current
     stream: the main program writes ``dx`` and per-CTA partial rows of the
@@ -341,8 +342,9 @@ def cake_causal_conv1d_det_train_backward(
         BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
         ``"bf16"``: SiLU' at the unrounded FP32 preactivation with a ``bias``
-        (FP32 or BF16 ``weight``) or with a BF16 ``weight``, at the BF16-rounded
-        recomputed preactivation with an FP32 ``weight`` and no ``bias`` (the
+        (FP32 or BF16 ``weight``), a BF16 ``weight`` or a BF16 ``dweight``
+        out, at the BF16-rounded recomputed preactivation with an FP32
+        ``weight`` and ``dweight`` and no ``bias`` (the
         boundary flash-linear-attention's backward uses; ``dweight`` within
         about 3e-5 rel-L2 of the exact FP64 gradient).  ``"fp32"``: SiLU' at
         the unrounded FP32 preactivation (a slower program).  Both sum
