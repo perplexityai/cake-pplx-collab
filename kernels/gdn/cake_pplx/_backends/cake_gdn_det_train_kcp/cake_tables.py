@@ -54,6 +54,7 @@ import dataclasses
 import torch
 
 from .cake_kcp_plan import (
+    _note_table_write,
     upload_tables,
     CHUNK,
     TILE,
@@ -501,19 +502,23 @@ def walk_tables(
         name: hp.device_tables[name] for name in WALK_TABLES if name in hp.device_tables
     }
     # the fused-walk index tables are CPU tuples on the head plan: uploaded once here, in one asynchronous copy
-    device.update(
-        upload_tables(
-            {
-                name: (getattr(hp, name), torch.int32, None)
-                for name in WALK_TABLES
-                if name not in hp.device_tables
-            },
-            ctx.device,
-        )
+    fused = upload_tables(
+        {
+            name: (getattr(hp, name), torch.int32, None)
+            for name in WALK_TABLES
+            if name not in hp.device_tables
+        },
+        ctx.device,
     )
+    device.update(fused)
+    written = list(
+        fused.values()
+    )  # the context's tables this call writes (_note_table_write)
     for family, tables in chains.items():
         for name, t in tables.device_tables(ctx.device).items():
             device[f"{family}.{name}"] = t
+            written.append(t)
+    _note_table_write(ctx, written)
     cached = WalkTables(
         HV=HV,
         Hg=hp.Hg,

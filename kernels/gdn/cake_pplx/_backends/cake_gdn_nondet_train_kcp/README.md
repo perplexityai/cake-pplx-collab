@@ -204,6 +204,21 @@ context-parallel programs carried no `_kcp`).
   device-resident on `ctx`; the launch grids follow from `(T_r, H_qk, HV, SM
   count, architecture)` alone.  Tables are int32 except the affine merge's
   element offsets, which are int64.  Steady state is CUDA-graph capturable.
+* Several caller streams on one context (since 0.2.6): the context's device
+  tables are written when it is built and at first use (the first call, the
+  first call at a head pair, a launch table not cached yet) by asynchronous
+  copies on the stream of that call.  Earlier versions did not order these
+  writes with a call on another stream: such a call issued before the copies
+  ran could read stale memory and give a wrong output and gradients on that
+  stream, or an illegal memory access, and a context dropped while another
+  stream's reads were queued gave its tables back to the allocator at once.
+  Only a caller that uses one context from two or more streams could hit it;
+  calls on one stream (the package's own side-stream walk included), one
+  context per stream and a context synchronized before its multi-stream use
+  were not exposed.  A call now waits for the table writes of other streams
+  that it has not seen and records its use of those tables on its stream
+  (nothing under a CUDA stream capture).  The launches, their arguments and
+  every output are unchanged.
 * Repeated calls on the same inputs, the backward from the saved set, the
   checkpoint replay and the `torch.utils.checkpoint` direct and indirect
   backward agree (bitwise today, every path being fixed-order; not
