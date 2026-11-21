@@ -43,7 +43,7 @@ entry falls back to another package.
 | `cake_dsa_sparse_attention_det_nope` | `CakeDSASparseAttentionDetNopeFunction` |
 | `cake_dsa_sparse_attention_det_nope_varlen` | `CakeDSASparseAttentionDetNopeVarlenFunction` |
 
-The entries take the arguments of the non-deterministic entries.
+The entries take the arguments of the non-deterministic entries, except `with_o_lo` (the det entries always write `o_lo`).
 `key_passes` and `num_segments` select the key-range passes of the backward
 (see below): the varlen entries pass `len(cu_seqlens_k) - 1`, and the flat
 entries and the step backwards of both forms take the count as the keyword

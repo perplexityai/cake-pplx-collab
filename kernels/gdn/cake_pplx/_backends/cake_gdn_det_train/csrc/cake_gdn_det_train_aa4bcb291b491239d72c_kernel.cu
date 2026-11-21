@@ -1820,6 +1820,8 @@ kernel_cake_gdn_det_train_aa4bcb291b491239d72c(const __grid_constant__ CUtensorM
             int seq_2 = seg_seq[seg_2];
             int ptid = tid - 256;
             int row_off_2 = warp % 4 * 32 << 16;
+            int pofs = ptid / 8 * 128 + ptid % 8 * 16;
+            unsigned int bk0 = s_bk_addr + (unsigned int)pofs;
             int tok_begin_2 = 0;
             int n_last_2 = 0;
             if (nc_2 > 0) {
@@ -1838,38 +1840,109 @@ kernel_cake_gdn_det_train_aa4bcb291b491239d72c(const __grid_constant__ CUtensorM
                 int n_2 = ((c_2 + 1 == nc_2) ? n_last_2 : 64);
                 mbarrier_wait(gates_ready_addr + (gp_c) * 8, _phase_gates_ready_2);
                 int g_off_2 = c_2 % 4 * 384;
+                float btv[4];
+                float bgv[4];
+                btv[0] = s_gt[g_off_2 + 192 + ptid / 8];
+                bgv[0] = s_gt[g_off_2 + 256 + ptid / 8];
+                btv[1] = s_gt[g_off_2 + 192 + ptid / 8 + 16];
+                bgv[1] = s_gt[g_off_2 + 256 + ptid / 8 + 16];
+                btv[2] = s_gt[g_off_2 + 192 + ptid / 8 + 32];
+                bgv[2] = s_gt[g_off_2 + 256 + ptid / 8 + 32];
+                btv[3] = s_gt[g_off_2 + 192 + ptid / 8 + 48];
+                bgv[3] = s_gt[g_off_2 + 256 + ptid / 8 + 48];
                 mbarrier_wait(va_full_addr + (va_c) * 8, _phase_va_full);
-                unsigned int zero = 0;
-                #pragma unroll 4
-                for (int it = 0; it < 8; it++) {
-                    int tr = ptid / 8 + 16 * (it % 4);
-                    unsigned int v_at = s_vT_addr + (unsigned int)(c_2 % 2 * 24576 + 8192 * (it / 4) + tr * 128 + ptid % 8 * 16);
-                    if (tr < n_2) {
-                        float bt = s_gt[g_off_2 + 192 + tr];
-                        unsigned int raw[4];
-                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                            : "=r"(*reinterpret_cast<uint32_t*>(&raw[0])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 3]))
-                            : "r"(v_at));
-                        float xs[8];
-                        #pragma unroll
-                        for (int _pair = 0; _pair < 4; _pair++) {
-                            (&xs[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw[_pair]) << 16);
-                            (&xs[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw[_pair]) & 0xffff0000u);
-                        }
-                        const float2 _scale2_0 = {bt, bt};
-                        #pragma unroll
-                        for (int _ls = 0; _ls < 4; _ls++)
-                            mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs)[_ls], _scale2_0);
-                        unsigned int xp[4];
-                        #pragma unroll
-                        for (int _lp = 0; _lp < 4; _lp++) {
-                            __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs[_lp*2 + 0], xs[_lp*2+1 + 0]));
-                            xp[_lp] = *(uint32_t*)&_bf2;
-                        }
-                        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v_at), "r"(xp[0]), "r"(xp[1]), "r"(xp[2]), "r"(xp[3]));
+                unsigned int v0 = s_vT_addr + (unsigned int)(c_2 % 2 * 24576 + pofs);
+                #pragma unroll 1
+                for (int atom = 0; atom < 2; atom++) {
+                    unsigned int raw[16];
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw[0])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(0) + 3]))
+                        : "r"(v0 + (unsigned int)(8192 * atom)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw[4])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(4) + 3]))
+                        : "r"(v0 + (unsigned int)(8192 * atom + 2048)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw[8])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(8) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(8) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(8) + 3]))
+                        : "r"(v0 + (unsigned int)(8192 * atom + 4096)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw[12])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(12) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(12) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw[(12) + 3]))
+                        : "r"(v0 + (unsigned int)(8192 * atom + 6144)));
+                    float xs_0[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_0[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw[_pair]) << 16);
+                        (&xs_0[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw[_pair]) & 0xffff0000u);
                     }
-                    if (tr >= n_2) {
-                        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v_at), "r"(zero), "r"(zero), "r"(zero), "r"(zero) : "memory");
+                    const float2 _scale2_0 = {btv[0], btv[0]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_0)[_ls], _scale2_0);
+                    unsigned int xp_0[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_0[_lp*2 + 0], xs_0[_lp*2+1 + 0]));
+                        xp_0[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v0 + (unsigned int)(8192 * atom)), "r"(xp_0[0]), "r"(xp_0[1]), "r"(xp_0[2]), "r"(xp_0[3]));
+                    float xs_1[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_1[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw[4 + _pair]) << 16);
+                        (&xs_1[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw[4 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_1 = {btv[1], btv[1]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_1)[_ls], _scale2_1);
+                    unsigned int xp_1[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_1[_lp*2 + 0], xs_1[_lp*2+1 + 0]));
+                        xp_1[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v0 + (unsigned int)(8192 * atom + 2048)), "r"(xp_1[0]), "r"(xp_1[1]), "r"(xp_1[2]), "r"(xp_1[3]));
+                    float xs_2[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_2[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw[8 + _pair]) << 16);
+                        (&xs_2[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw[8 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_2 = {btv[2], btv[2]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_2)[_ls], _scale2_2);
+                    unsigned int xp_2[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_2[_lp*2 + 0], xs_2[_lp*2+1 + 0]));
+                        xp_2[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v0 + (unsigned int)(8192 * atom + 4096)), "r"(xp_2[0]), "r"(xp_2[1]), "r"(xp_2[2]), "r"(xp_2[3]));
+                    float xs_3[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_3[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw[12 + _pair]) << 16);
+                        (&xs_3[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw[12 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_3 = {btv[3], btv[3]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_3)[_ls], _scale2_3);
+                    unsigned int xp_3[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_3[_lp*2 + 0], xs_3[_lp*2+1 + 0]));
+                        xp_3[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v0 + (unsigned int)(8192 * atom + 6144)), "r"(xp_3[0]), "r"(xp_3[1]), "r"(xp_3[2]), "r"(xp_3[3]));
+                }
+                if (n_2 < 64) {
+                    unsigned int zero = 0;
+                    #pragma unroll 1
+                    for (int it = 0; it < 8; it++) {
+                        if (ptid / 8 + 16 * (it % 4) >= n_2) {
+                            asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(v0 + (unsigned int)(8192 * (it / 4) + 2048 * (it % 4))), "r"(zero), "r"(zero), "r"(zero), "r"(zero) : "memory");
+                        }
                     }
                 }
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");
@@ -1879,39 +1952,99 @@ kernel_cake_gdn_det_train_aa4bcb291b491239d72c(const __grid_constant__ CUtensorM
                 mbarrier_wait(kq_full_addr + (kq_c) * 8, _phase_kq_full);
                 mbarrier_wait(bk_free_addr, _phase_bk_free_0);
                 _phase_bk_free_0 ^= 1;
-                unsigned int zero_0 = 0;
-                #pragma unroll 4
-                for (int it_1 = 0; it_1 < 8; it_1++) {
-                    int tr_1 = ptid / 8 + 16 * (it_1 % 4);
-                    unsigned int k_at = s_kq_addr + (unsigned int)(c_2 % 3 * 32768 + 16384 * (it_1 / 4) + tr_1 * 128 + ptid % 8 * 16);
-                    unsigned int bk_at = s_bk_addr + (unsigned int)(8192 * (it_1 / 4) + tr_1 * 128 + ptid % 8 * 16);
-                    if (tr_1 < n_2) {
-                        float bg = s_gt[g_off_2 + 256 + tr_1];
-                        unsigned int raw_1[4];
-                        asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
-                            : "=r"(*reinterpret_cast<uint32_t*>(&raw_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 3]))
-                            : "r"(k_at));
-                        float xs_1[8];
-                        #pragma unroll
-                        for (int _pair = 0; _pair < 4; _pair++) {
-                            (&xs_1[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw_1[_pair]) << 16);
-                            (&xs_1[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw_1[_pair]) & 0xffff0000u);
-                        }
-                        const float2 _scale2_1 = {bg, bg};
-                        #pragma unroll
-                        for (int _ls = 0; _ls < 4; _ls++)
-                            mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_1)[_ls], _scale2_1);
-                        unsigned int bp[4];
-                        #pragma unroll
-                        for (int _lp = 0; _lp < 4; _lp++) {
-                            __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_1[_lp*2 + 0], xs_1[_lp*2+1 + 0]));
-                            bp[_lp] = *(uint32_t*)&_bf2;
-                        }
-                        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk_at), "r"(bp[0]), "r"(bp[1]), "r"(bp[2]), "r"(bp[3]));
+                unsigned int k0 = s_kq_addr + (unsigned int)(c_2 % 3 * 32768 + pofs);
+                #pragma unroll 1
+                for (int atom_1 = 0; atom_1 < 2; atom_1++) {
+                    unsigned int raw_1[16];
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw_1[0])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(0) + 3]))
+                        : "r"(k0 + (unsigned int)(16384 * atom_1)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw_1[4])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(4) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(4) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(4) + 3]))
+                        : "r"(k0 + (unsigned int)(16384 * atom_1 + 2048)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw_1[8])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(8) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(8) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(8) + 3]))
+                        : "r"(k0 + (unsigned int)(16384 * atom_1 + 4096)));
+                    asm volatile("ld.shared.v4.b32 {%0,%1,%2,%3}, [%4];"
+                        : "=r"(*reinterpret_cast<uint32_t*>(&raw_1[12])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(12) + 1])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(12) + 2])), "=r"(*reinterpret_cast<uint32_t*>(&raw_1[(12) + 3]))
+                        : "r"(k0 + (unsigned int)(16384 * atom_1 + 6144)));
+                    float xs_4[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_4[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw_1[_pair]) << 16);
+                        (&xs_4[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw_1[_pair]) & 0xffff0000u);
                     }
-                    if (tr_1 >= n_2) {
-                        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(k_at), "r"(zero_0), "r"(zero_0), "r"(zero_0), "r"(zero_0) : "memory");
-                        asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk_at), "r"(zero_0), "r"(zero_0), "r"(zero_0), "r"(zero_0) : "memory");
+                    const float2 _scale2_4 = {bgv[0], bgv[0]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_4)[_ls], _scale2_4);
+                    unsigned int xp_4[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_4[_lp*2 + 0], xs_4[_lp*2+1 + 0]));
+                        xp_4[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk0 + (unsigned int)(8192 * atom_1)), "r"(xp_4[0]), "r"(xp_4[1]), "r"(xp_4[2]), "r"(xp_4[3]));
+                    float xs_5[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_5[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw_1[4 + _pair]) << 16);
+                        (&xs_5[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw_1[4 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_5 = {bgv[1], bgv[1]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_5)[_ls], _scale2_5);
+                    unsigned int xp_5[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_5[_lp*2 + 0], xs_5[_lp*2+1 + 0]));
+                        xp_5[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk0 + (unsigned int)(8192 * atom_1 + 2048)), "r"(xp_5[0]), "r"(xp_5[1]), "r"(xp_5[2]), "r"(xp_5[3]));
+                    float xs_6[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_6[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw_1[8 + _pair]) << 16);
+                        (&xs_6[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw_1[8 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_6 = {bgv[2], bgv[2]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_6)[_ls], _scale2_6);
+                    unsigned int xp_6[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_6[_lp*2 + 0], xs_6[_lp*2+1 + 0]));
+                        xp_6[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk0 + (unsigned int)(8192 * atom_1 + 4096)), "r"(xp_6[0]), "r"(xp_6[1]), "r"(xp_6[2]), "r"(xp_6[3]));
+                    float xs_7[8];
+                    #pragma unroll
+                    for (int _pair = 0; _pair < 4; _pair++) {
+                        (&xs_7[_pair * 2])[0] = __uint_as_float(static_cast<uint32_t>(raw_1[12 + _pair]) << 16);
+                        (&xs_7[_pair * 2])[1] = __uint_as_float(static_cast<uint32_t>(raw_1[12 + _pair]) & 0xffff0000u);
+                    }
+                    const float2 _scale2_7 = {bgv[3], bgv[3]};
+                    #pragma unroll
+                    for (int _ls = 0; _ls < 4; _ls++)
+                        mul_f32x2_noftz_inplace(&reinterpret_cast<float2*>(xs_7)[_ls], _scale2_7);
+                    unsigned int xp_7[4];
+                    #pragma unroll
+                    for (int _lp = 0; _lp < 4; _lp++) {
+                        __nv_bfloat162 _bf2 = __float22bfloat162_rn(make_float2(xs_7[_lp*2 + 0], xs_7[_lp*2+1 + 0]));
+                        xp_7[_lp] = *(uint32_t*)&_bf2;
+                    }
+                    asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk0 + (unsigned int)(8192 * atom_1 + 6144)), "r"(xp_7[0]), "r"(xp_7[1]), "r"(xp_7[2]), "r"(xp_7[3]));
+                }
+                if (n_2 < 64) {
+                    unsigned int zero_1 = 0;
+                    #pragma unroll 1
+                    for (int it_1 = 0; it_1 < 8; it_1++) {
+                        if (ptid / 8 + 16 * (it_1 % 4) >= n_2) {
+                            asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(k0 + (unsigned int)(16384 * (it_1 / 4) + 2048 * (it_1 % 4))), "r"(zero_1), "r"(zero_1), "r"(zero_1), "r"(zero_1) : "memory");
+                            asm volatile("st.shared.v4.b32 [%0], {%1,%2,%3,%4};" :: "r"(bk0 + (unsigned int)(8192 * (it_1 / 4) + 2048 * (it_1 % 4))), "r"(zero_1), "r"(zero_1), "r"(zero_1), "r"(zero_1) : "memory");
+                        }
                     }
                 }
                 asm volatile("fence.proxy.async.shared::cta;" ::: "memory");

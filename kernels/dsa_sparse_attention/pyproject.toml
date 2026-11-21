@@ -32,4 +32,5 @@ pythonpath = ["."]
 testpaths = ["tests"]
 markers = [
     "cpu_only: identifies tests that do not use any GPU; does not change test behavior",
+    "no_olo: the with_o_lo=False cases of the accuracy tests; does not change test behavior",
 ]

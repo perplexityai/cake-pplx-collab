@@ -67,9 +67,26 @@ forms ``bwd_token__<form>_ho``: ``dpre_next`` into the coefficient VJP,
 ``dpre_in`` out), and the standalone collapse routes ``collapse_forward`` /
 ``collapse_backward`` (no workspace; on SM107 the three collapse records are
 that architecture's own forms: ``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``,
-``collapse_bwd__vjpwa_pfq2``).  ``handoff_prepare`` is the autograd
-node; ``dU`` / ``dpre_next`` from autograd are made contiguous, of their
-dtype and 32-byte aligned before the launch.  No run-to-run bit promise.
+``collapse_bwd__vjpwa_pfq2``; ``collapse_forward`` runs ``collapse_fwd__m2``
+up to 2047 tokens, ``collapse_fwd__m2_xhnone_rv``, the ``collapse_fwd__m2_xhnone``
+form with its trips in reverse launch order, from 2048 to 6655 tokens and
+``collapse_fwd__m2_xhnone``, the same form without the L2 evict-first policy on
+``X``, from 6656 tokens; ``collapse_backward`` runs
+``collapse_bwd__vjpwa_sp4_mb4`` / ``collapse_bwd__vjpwa_sp2_mb4``, the
+``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, up to 215 /
+from 216 to 383 tokens, ``collapse_bwd__vjpwa``, the same VJP without the L2
+prefetch, from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641
+tokens; on SM100 / SM103 ``collapse_backward`` runs
+``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens and ``collapse_bwd`` from 1024
+tokens, and between them ``collapse_bwd__vjpwa_sp2_mb4``: on SM100 from 216 to
+1023 tokens under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``,
+on SM103 from 216 to 247 and from 320 to 1023 tokens under the record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, with ``collapse_bwd``
+from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319``).
+``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
+are made contiguous, of their dtype and 32-byte aligned before the launch.  No
+run-to-run bit promise.
 """
 
 from __future__ import annotations

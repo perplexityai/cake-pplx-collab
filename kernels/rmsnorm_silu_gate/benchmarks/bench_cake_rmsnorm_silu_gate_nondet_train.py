@@ -41,10 +41,12 @@ Every row times, for both modes, on identical generated inputs:
   then the backward (which replays the forward): ``2 * fwd + bwd`` measured.
 
 Each package picks its kernels from the rows and the SM count.  The
-non-deterministic forward of packed rows (the benchmark's inputs) runs its tiny
-forward up to 36 rows per SM on SM100 and SM103 and 65 on SM107 and past
-that its mid, long, extra-long or pipelined forward (its copy of the
-deterministic forward) by bands of rows per SM (``cake_jit.FORWARD_BANDS``).
+non-deterministic forward of packed rows (the benchmark's inputs) runs its
+32-lane tiny forward up to 4 rows per SM on SM100 and 12 on SM103, its tiny
+forward from there up to 36 rows per SM on SM100 and SM103 and up to 65 on
+SM107, and past that its mid, long, extra-long or pipelined forward (its copy
+of the deterministic forward) by bands of rows per SM
+(``cake_jit.FORWARD_BANDS``).
 Its backward runs one cluster of 16 CTAs for few rows, else one kernel by bands
 of rows per SM (``cake_jit.BACKWARD_BANDS``).  A BF16 weight gradient (the one
 timed here) runs the short backward (one cluster, a fixed-order FP32 sum) up

@@ -116,6 +116,10 @@ split forward on `fwd_ho_a` where its pieces are 63 to 95 chunks long, which
 the build measured here ran on `wy_tc2` (see Chain), with other bits in the
 cases that cut such pieces.  The largest-ratio columns and the ratio figures
 below were measured on the earlier routes; the pack columns keep their routes.
+Every figure of this section was measured with a `fwd_ho_a` that rounded `u`
+to BF16; since 0.2.4 it keeps `u` in FP32 (see Chain), so every case that
+runs the serial A form or the split forward on `A` has other bits in this
+version.
 
 On B200 every ratio is at most 1.069.  On GB300, GB200 and R200 every ratio is
 at most 1.1 but one: the ratio of the worst `dg` element on the small `(1, 3)`
@@ -144,9 +148,9 @@ reference at most 1.005 times those of PyTorch on the same BF16 inputs with
 the same operations in BF16, and its max-norm error at most 1.005 times
 PyTorch's on at least half of the draws).  It misses by the median: on the 32
 draws from seed 23031 the median of its L2 errors is 1.0175 times the tier's
-on GB300 and on GB200, which give the same bits there.  GB200 runs this route
-in 0.2.2 too, so 0.2.2 has the same miss on GB200 (earlier versions were not
-measured).  Over 160 draws (five seeds), the split forward on `fwd_ho_a` and
+in 0.2.3 on GB300 and on GB200, which give the same bits there.  GB200 runs
+this route in 0.2.2 too, so 0.2.2 has the same miss on GB200 (earlier
+versions were not measured).  Over 160 draws (five seeds), the split forward on `fwd_ho_a` and
 the `wy_tc2` form (0.2.2's route on GB300) show no systematic difference in
 the `dg` error per draw (geometric mean of the per-draw ratio 1.0007, 95 %
 interval 0.9966-1.0047), and each misses the tier on about
@@ -154,6 +158,7 @@ half of the sets of 32 draws (48.9 % and 47.9 % of 20,000 random sets of the
 160 draws; at the five seeds `fwd_ho_a` misses on one, the `wy_tc2` form on
 two).  Its largest L2 error and its max-norm error meet the tier at each of
 the five seeds, and so does every other output.  B200 was not measured.
+These figures are 0.2.3's, whose `fwd_ho_a` rounded `u` to BF16.
 
 ## Mode rules
 
@@ -290,7 +295,8 @@ call that neither of the two takes runs the third, the prep forward (below).
   gives every piece its start state, and wave 2 runs every other piece.  On
   `sm_100a`, and on `sm_103a` for pieces of at least 63 chunks
   (`FWD_SPLIT_A_MIN_PIECE`), the waves run `fwd_ho_a` and the maps
-  `fwd_summary_a`, which form `u` and `w` in the CTA; on shorter `sm_103a`
+  `fwd_summary_a`, which form `u` and `w` in the CTA (`fwd_ho_a` keeps `u`
+  in FP32, `fwd_summary_a` rounds it to BF16); on shorter `sm_103a`
   pieces (48 to 62 chunks, not measured) `wy_tc2` forms `w` and `u` from `A`,
   and the waves run `fwd_fused` and the maps `fwd_summary`.  Where the
   backward splits its adjoint walk on the same pieces and the device has a
@@ -302,13 +308,21 @@ call that neither of the two takes runs the third, the prep forward (below).
 * The serial A form (`FWD_A_ARCHS`: `sm_100a`, `sm_103a`, `sm_107a`), where
   the forward table splits no sequence: `fwd_ho_a` runs the scan and the
   output on `A`, `qn` and `kn` with one CTA per (segment, value head), forming
-  `u = bf16(A bf16(beta v))` and `w = bf16(A bf16(beta 2^g kn))` in the CTA
-  at the deterministic forward's rounding points: two launches where the prep
-  forward runs three.  On `sm_107a` (`FWD_A_SERIAL_KEEP`) a host table without
-  plan pins keeps the planner's cheapest serial forward table where the
-  planner takes a split one, if that serial table prices at most 1.10 x the
-  split one and its sequences x `HV` CTAs fill at least 0.65 of the SMs; this
-  route then runs it.
+  `u = A bf16(beta v)` in FP32 (since 0.2.4; earlier versions rounded it to
+  BF16 before the state term joined it) and `w = bf16(A bf16(beta 2^g kn))`
+  in the CTA: two launches where the prep forward runs three.  With
+  `save_state=False` the backward rebuilds `w`, `h` and `v_new` with the WY
+  stage, which rounds `u` to BF16, so `o` and the final state come from the
+  FP32 `u` and the gradients from the BF16 one; the recomputed forward of a
+  non-reentrant checkpoint keeps the tape.  On `sm_107a` (`FWD_A_SERIAL_KEEP`)
+  a host table without plan pins keeps the planner's cheapest serial forward
+  table where the planner takes a split one, if that serial table prices at
+  most 1.10 x the split one and its sequences x `HV` CTAs fill at least 0.65
+  of the SMs; this route then runs it.
+
+In 0.2.5 `wy_a` is built from newer kernel source under the same program
+name: each compute warp owns the ring slots of its parity.  Routes, launch
+records and output bits are those of 0.2.4.
 
 On the shapes of the speed table below, `sm_100a` (B200, GB200) and `sm_103a`
 (GB300) run the split forward on `fwd_ho_a` on the three `(2, 6)` packs and
@@ -619,7 +633,8 @@ forward of the `(8, 24)` pair on GB300, which this version runs on `fwd_ho_a`
 instead of the `wy_tc2` form (see Chain), with other bits; R200 ran an
 earlier build whose
 routes and plans on these rows, and bits under two of the three gate regimes,
-are this version's.  The deterministic
+are this version's.  Every build of the table ran a `fwd_ho_a` that rounded
+`u` to BF16, which this version keeps in FP32 (see Chain).  The deterministic
 package is that of revision `18c327b4` (on R200 `c8a4d8a2`, with the
 same deterministic package).  It is not the accuracy baseline of Outputs: it
 carries that package's later kernel and table changes, and the deterministic
