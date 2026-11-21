@@ -472,7 +472,8 @@ the adjoint tape walk, whose `dh` shares bytes with `u` in both backward
 layouts.  In between, the b1 / b2 exchange and the merges read no tape and
 write only the call's pools, so the replay runs beside them.  The first
 replay of a table set, a backward that launches `kcp_dav` (it reads
-`v_new`), the ring exchange and the `overlap` schedule keep the call's
+`v_new`) or `kcp_dav_l2n` (it reads `h`: every backward with the in-kernel
+Q/K L2 norm), the ring exchange and the `overlap` schedule keep the call's
 stream.  Placement changes no bit.  The private test knob
 `bwd_tape_stream` keeps the one-stream form (`"one"`) and the other fork,
 issue and priority forms selectable for the A/B record;
@@ -488,7 +489,11 @@ The files of this package:
   context-parallel route, `kcp_fwd_o` (the output from the K1 tapes) and
   `kcp_dav` (`dA_qk`, launched only where the single-rank plan dispatches
   its `dav` stage; the K2 adjoint walks form `dv1 = Aqk^T dO` themselves from
-  the internal `Aqk` rows), and the fused forward walk
+  the internal `Aqk` rows), the output backward of the in-kernel Q/K L2 norm
+  modes `kcp_dav_l2n` (launched on every backward of those modes, after the
+  K1 tape replay: `dA_qk` from an FP32 `v_new` it recomputes from `akk_int`,
+  `beta`, `v`, `w` and the `h` tape, one CTA per (chunk, head) tile; no
+  `dv1`), and the fused forward walk
   `kcp_fwdh_o` (the forward state walk with the chunk output inside it: the
   same bits as the tape walk followed by `kcp_fwd_o`, no tape written; in its
   full-width and two-CTA records), which the forward that keeps no tape

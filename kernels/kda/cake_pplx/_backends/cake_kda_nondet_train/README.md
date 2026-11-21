@@ -141,8 +141,10 @@ its modes (`glm_intra_l2n`, `glm_intra_raw_l2n` and the fallback route's
 `glm_intra_l2n_capture` / `glm_intra_raw_l2n_capture`) adds the `q * dq` term.
 Its backward runs the deterministic fused gradient on every row: in g mode the
 `_l2n` records of the `dqkg` stage (`dqkg_l2n`, `dqkg_int_l2n`,
-`dqkg_davq_l2n`, `dqkg_int_davq_l2n`, `dqkg_davq_nohint_l2n`,
-`dqkg_int_davq_nohint_l2n`), in raw mode the raw records above.  Its raw
+`dqkg_nohint_l2n`, `dqkg_int_nohint_l2n`: `dqkg_v18` built with `davq` 0,
+which stores no `dAqk`), in raw mode their `_raw_l2n` twins (the same
+programs), and forms `dAqk` in the `dav` stage on every row (the
+deterministic package's `dav_l2n*` records).  Its raw
 backward finishes the parameter gradients with `param_finalize_l2n`, the
 deterministic `param_finalize`.
 
@@ -320,20 +322,23 @@ changes:
 | `fwd_intra_raw`, `fwd_intra_v14_raw`, `bwd_prep_g8_raw`, `bwd_prep_g8_replay_raw`, `bwd_prep_g8_noqg_raw`, `bwd_prep_g8_noqg_nokb_raw`, `glm_intra_raw`, `param_finalize` | the raw gate mode's records, unchanged (all three architectures) |
 | `dqkg_raw`, `dqkg_int_raw`, `dqkg_davq_raw`, `dqkg_int_davq_raw`, `dqkg_davq_nohint_raw`, `dqkg_int_davq_nohint_raw` | new: the raw gate mode's `dqkg` class (`gate: "raw"`), the deterministic package's `dqkg` records of the same names without the suffix and their rules, so the raw mode selects the deterministic fused gradient on every row (on the deterministic records' architectures: the `_nohint` forms on `sm_107a`, the others on all three) |
 | `fwd_intra_l2n`, `fwd_intra_v14_l2n`, `fwd_intra_v37_l2n`, `bwd_prep_g8_l2n`, `bwd_prep_g8_replay_l2n`, `bwd_prep_g8_replay_saved_l2n`, `bwd_prep_g8_noqg_l2n`, `bwd_prep_g8_noqg_nokb_l2n`, `glm_intra_l2n`, `glm_intra_v30_l2n`, `glm_intra_l2n_capture`, `qk_l2norm`, `qk_l2norm_apply`, `qk_pullback`, `fwd_intra_raw_l2n`, `fwd_intra_v14_raw_l2n`, `bwd_prep_g8_raw_l2n`, `bwd_prep_g8_replay_raw_l2n`, `bwd_prep_g8_noqg_raw_l2n`, `bwd_prep_g8_noqg_nokb_raw_l2n`, `glm_intra_raw_l2n`, `glm_intra_raw_l2n_capture` | the in-kernel Q/K L2 norm's records, unchanged (`fwd_intra_v37_l2n` and `glm_intra_v30_l2n` on `sm_103a`, the saved-rstd twin `bwd_prep_g8_replay_saved_l2n` on `sm_100a` / `sm_103a`, the others on all three architectures; no path selects the twin) |
-| `dqkg_l2n`, `dqkg_int_l2n`, `dqkg_davq_l2n`, `dqkg_int_davq_l2n`, `dqkg_davq_nohint_l2n`, `dqkg_int_davq_nohint_l2n` | new: the in-kernel Q/K L2 norm's `dqkg` records of the g class (`l2n: ["fused", "fallback"]`), the deterministic package's `dqkg` records of the same names without the suffix and their rules, so an l2n mode selects the deterministic pair on every row; each shares its program with the raw class record of the same build |
+| `dqkg_l2n`, `dqkg_int_l2n`, `dqkg_nohint_l2n`, `dqkg_int_nohint_l2n` | the in-kernel Q/K L2 norm's `dqkg` records of the g class (`l2n: ["fused", "fallback"]`), the deterministic package's records of the same names and their rules (`dqkg_v18` built with `davq` 0: no `dAqk`; the `_nohint` ones on `sm_107a` from 16 heads), so an l2n mode selects the deterministic fused gradient on every row |
+| `dqkg_raw_l2n`, `dqkg_int_raw_l2n`, `dqkg_nohint_raw_l2n`, `dqkg_int_nohint_raw_l2n` | new: their raw class twins (`gate: "raw"`), the same programs and rules |
+| `dav_l2n`, `dav_l2n_wt`, `dav_l2n_wtk`, `dav_l2n_replay`, `dav_l2n_replay_wt` | new: the in-kernel Q/K L2 norm's `dav` records (`l2n: ["fused", "fallback"]`), the deterministic package's (all three architectures): `dAqk` on every backward path and row of an l2n mode |
 | `param_finalize_l2n` | new: the in-kernel Q/K L2 norm's `param_finalize` record of the raw class (`l2n: ["fused", "fallback"]`), the deterministic package's `param_finalize` record and its rule on all three architectures, so the raw gate mode's l2n backward finishes the deterministic GLM intra programs' partials as the deterministic package does; it shares its program with `param_finalize` |
 | `fwd_intra_v19`, `fwd_intra_v20` | new: the checkpoint hand-off's intra twins of `fwd_intra_v14` and `fwd_intra` (all three architectures); no path selects them |
 | `wy_bwd_v9` | new: the tape WY twin of `wy_bwd`, writing `w` alone (all three architectures); no path selects it |
 
 The stages of `cake_jit.GATE_STAGES` select among the records of the call's
 gate mode (a record's `gate`, `"g"` when absent), and the stages of
-`cake_jit.L2N_STAGES` (the deterministic package's, `dqkg` and
-`param_finalize`) among the records of the call's in-kernel Q/K L2 norm
+`cake_jit.L2N_STAGES` (the deterministic package's, `dav` and `dqkg` among
+them, and `param_finalize`) among the records of the call's in-kernel Q/K L2 norm
 mode (a record's `l2n`, `["off"]` when absent).  The copies of the plain
 records keep the deterministic records' `l2n` modes; the `S1` records and
 the hand-off twins serve `"off"` alone; the raw class's
-`dqkg` records serve every mode, as does the tape WY twin (its stage `wy` is
-no l2n stage).
+`dqkg` records without the `_l2n` suffix serve `"off"` alone and their
+`_raw_l2n` twins the l2n modes; the tape WY twin serves every mode (its
+stage `wy` is no l2n stage).
 
 `build.json` has 288 entries: 95 on `sm_100a`, 96 on `sm_103a` and 97 on
 `sm_107a`.
