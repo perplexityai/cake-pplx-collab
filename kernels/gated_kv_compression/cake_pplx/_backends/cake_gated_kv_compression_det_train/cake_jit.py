@@ -74,13 +74,14 @@ The roles, in launch order:
   128-bit lanes (4 FP32 channels, 128 lanes a row); ``fwd_sm_107a`` and
   ``fwd_unfused_sm_107a`` on ``sm_107a`` read them in 256-bit lanes (8
   channels, 64 lanes a row), with the same FP32 operations per element.
-* ``bwd`` and ``bwd_small``: the backward.  Virtual rows ``v < G + S``.  Row
-  ``v < G`` is pair ``v``: it writes the ``dC`` and ``dZ`` rows of ``t0`` and
-  ``t1`` (nothing for a pair ``v >= cu_pairs[S]``), its document ``s`` by a
-  binary search of ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``:
-  when its length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its
-  last token.  Every token row below ``cu_seqlens[S]`` is written exactly
-  once.  One kernel with two searches:
+* ``bwd``, ``bwd_small`` and ``bwd_warp``: the backward.
+  Virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes the
+  ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
+  ``v >= cu_pairs[S]``), its document ``s`` by a binary search of
+  ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``: when its length
+  is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last token.
+  Every token row below ``cu_seqlens[S]`` is written exactly once.  One
+  kernel with three searches:
   ``bwd`` (``bwd`` on ``sm_100a`` and ``sm_103a``, ``bwd_sm_107a`` on
   ``sm_107a``, one program) searches a launch of ``S <= 16384`` documents in
   two levels (each CTA with pair rows copies every 16th entry of
@@ -88,14 +89,22 @@ The roles, in launch order:
   there and searches only that window of ``cu_pairs``), and a launch of more
   documents in one level; ``bwd_small`` (``bwd_small`` on ``sm_100a`` and
   ``sm_103a``, ``bwd_small_sm_107a`` on ``sm_107a``, one program) searches
-  all of ``cu_pairs`` in one level; both read ``C`` and ``Z`` in 256-bit
-  lanes.  A backward launch of ``S`` documents runs ``bwd`` for
+  all of ``cu_pairs`` in one level; ``bwd_warp`` (``bwd_warp`` on
+  ``sm_100a``, ``bwd_warp_sm_103a`` on ``sm_103a``, ``bwd_warp_sm_107a`` on
+  ``sm_107a``, one program) searches with the 32 lanes of a warp, as
+  ``fwd_unfused`` does (one probe of ``cu_pairs`` a lane in each of
+  ``ceil(log2(S) / 5)`` rounds, no shared memory); the three read ``C`` and
+  ``Z`` in 256-bit lanes.  A backward launch of ``S`` documents runs
+  ``bwd_warp`` for ``S > above`` or ``lo <= S <= hi``
+  (:func:`bwd_warp_region`: ``(lo, hi, above)``, ``above`` 16384 on the three
+  architectures, ``lo`` to ``hi`` 15 to 32 on ``sm_103a`` and 41 to 1024 on
+  ``sm_107a``, none on ``sm_100a``), else ``bwd`` for
   ``bwd_small_docs < S <= bwd_max_docs`` and ``bwd_small`` otherwise
   (:func:`bwd_small_docs`: 26 on ``sm_100a`` and ``sm_103a``, 125 on
   ``sm_107a``; :func:`bwd_max_docs`: 16384 on ``sm_107a``, no bound on
   ``sm_100a`` and ``sm_103a``; the leaves of the records serving the roles
-  on the architecture).  Both searches find the same document for every
-  row, so both backwards write the same bytes.
+  on the architecture).  Every search finds the same document for every
+  row, so every backward writes the same bytes.
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
@@ -121,10 +130,12 @@ MANIFEST = "build.json"
 
 # The roles of the package's programs, in launch order (a pair table first, ``pair_table_small`` for at most
 # ``small_docs`` documents and ``pair_table`` for more, then the forward, ``fwd`` for at most ``fuse_docs`` documents
-# and ``fwd_unfused`` for more, or the backward, ``bwd`` for more than ``bwd_small_docs`` and at most
-# ``bwd_max_docs`` documents and ``bwd_small`` for the others).  Every role is served on every architecture of
-# ROLE_ARCHES (of ARCHES for a role it does not name) by exactly one record of MODULES (``role_record``).
-ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small")
+# and ``fwd_unfused`` for more, or the backward, ``bwd_warp`` for more than ``bwd_warp_docs`` documents and for the
+# ``bwd_warp_min_docs`` to ``bwd_warp_max_docs`` documents of its record where it has them, else ``bwd`` for more
+# than ``bwd_small_docs`` and at most ``bwd_max_docs`` documents and ``bwd_small`` for the others).  Every role is
+# served on every architecture of ROLE_ARCHES (of ARCHES for a role it does not name) by exactly one record of
+# MODULES (``role_record``).
+ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp")
 # Role -> the architectures it is served on, for a role not served on every architecture: none, every role is served
 # on the three.
 ROLE_ARCHES: dict[str, tuple[str, ...]] = {}
@@ -164,9 +175,12 @@ MAX_TOKENS = INT32_MAX
 # ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``), the ``fuse_docs`` of
 # the ``fwd`` records (the most documents a forward launch builds the pair table for), the ``small_docs`` of
 # ``pair_table_small`` (the most documents a pair-table launch runs it for), the ``bwd_small_docs`` of the
-# ``bwd_small`` records (the most documents a backward launch runs it for below ``bwd``) and the ``bwd_max_docs`` of
-# the ``bwd_sm_107a`` record (the most documents a backward launch runs ``bwd`` for there) are rewritten by the
-# generator; every other field is host plan.
+# ``bwd_small`` records (the most documents a backward launch runs it for below ``bwd``), the ``bwd_max_docs`` of
+# the ``bwd_sm_107a`` record (the most documents a backward launch runs ``bwd`` for there), the ``bwd_warp_docs`` of
+# the ``bwd_warp`` records (the most documents a backward launch runs ``bwd`` or ``bwd_small`` for) and the
+# ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` of the ``bwd_warp_sm_103a`` and ``bwd_warp_sm_107a`` records (the
+# documents below that a backward launch also runs ``bwd_warp`` for) are rewritten by the generator; every other
+# field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -478,6 +492,115 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
         "role": "bwd_small",
     },
+    "bwd_warp": {
+        "arches": ["sm_100a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "bwd_warp_docs": 16384,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "role": "bwd_warp",
+    },
+    "bwd_warp_sm_103a": {
+        "arches": ["sm_103a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "bwd_warp_docs": 16384,
+        "bwd_warp_max_docs": 32,
+        "bwd_warp_min_docs": 15,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "role": "bwd_warp",
+    },
+    "bwd_warp_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "bwd_warp_docs": 16384,
+        "bwd_warp_max_docs": 1024,
+        "bwd_warp_min_docs": 41,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_aa24263114554decff8e",
+        "role": "bwd_warp",
+    },
 }
 
 
@@ -533,11 +656,25 @@ def bwd_small_docs(arch: str) -> int:
 @functools.cache
 def bwd_max_docs(arch: str) -> int | None:
     """The most documents a backward launch on ``arch`` runs ``bwd`` for (the ``bwd_max_docs`` leaf of the record
-    serving that role on ``arch``): a launch of more documents runs ``bwd_small``.  ``None`` when the record has no
-    such leaf: no bound, ``bwd`` serves every launch of more than :func:`bwd_small_docs` documents.  Cached per
-    architecture."""
+    serving that role on ``arch``): a launch of more documents runs ``bwd_small``, up to the bound of
+    :func:`bwd_warp_region`.  ``None`` when the record has no such leaf: no bound, ``bwd`` serves every launch of more
+    than :func:`bwd_small_docs` documents that :func:`bwd_warp_region` leaves to it.  Cached per architecture."""
     found = record(role_record("bwd", arch)).get("bwd_max_docs")
     return None if found is None else int(found)
+
+
+@functools.cache
+def bwd_warp_region(arch: str) -> tuple[int | None, int | None, int] | None:
+    """The documents a backward launch on ``arch`` runs ``bwd_warp`` for, from the leaves of the record serving that
+    role on ``arch``: ``(lo, hi, above)``, a launch of ``lo <= S <= hi`` or of ``S > above`` documents.  ``lo`` and
+    ``hi`` are its ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` leaves (``None`` where the record has none, as on
+    ``sm_100a``), ``above`` its ``bwd_warp_docs`` leaf; every other launch runs the rule of ``bwd`` and ``bwd_small``.
+    ``None`` when no record serves ``bwd_warp`` on ``arch``.  Cached per architecture."""
+    if arch not in ROLE_ARCHES.get("bwd_warp", ARCHES):
+        return None
+    found = record(role_record("bwd_warp", arch))
+    lo, hi = found.get("bwd_warp_min_docs"), found.get("bwd_warp_max_docs")
+    return (None if lo is None else int(lo), None if hi is None else int(hi), int(found["bwd_warp_docs"]))
 
 
 @functools.cache
@@ -699,8 +836,8 @@ def _launch_plan(name: str) -> tuple[int, tuple[tuple[int, Any, str], ...]]:
 def _libraries(arch: str) -> None:
     """Load the library of every role of :data:`ROLES` served on ``arch`` (:data:`ROLE_ARCHES`), once per process.
     The pair table, the forward and the backward of a launch depend on its document count, so loading only the records
-    a first call launched would leave ``pair_table``, ``fwd_unfused``, ``bwd`` or ``bwd_small`` to load (or build) at
-    the first pack of another document count, possibly inside a CUDA graph capture."""
+    a first call launched would leave ``pair_table``, ``fwd_unfused``, ``bwd``, ``bwd_small`` or ``bwd_warp`` to load
+    (or build) at the first pack of another document count, possibly inside a CUDA graph capture."""
     for role in ROLES:
         if arch in ROLE_ARCHES.get(role, ARCHES):
             load(role_record(role, arch), arch)
@@ -765,6 +902,7 @@ __all__ = [
     "arch_for_capability",
     "bwd_max_docs",
     "bwd_small_docs",
+    "bwd_warp_region",
     "device_arch",
     "fuse_docs",
     "launch_grid",
