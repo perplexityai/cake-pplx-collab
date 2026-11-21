@@ -2178,6 +2178,9 @@ MODULES: dict[str, dict[str, Any]] = {
     # (uint32 ``[n_ch_tiles]``), and the tile's last CTA stores ``dw`` (and ``db``) in the dtypes ``flags``
     # names once (one rounding from FP32) and zeroes its accumulators and counter, so ``acc`` / ``work`` are
     # zero before and after every launch.  No reduce program, no host synchronization, no cooperative launch.
+    # On sm_100a / sm_103a it also runs at the rows of ``FALLBACK_ROWS`` (C = 520 to 1016 up to a per-C token
+    # bound), in place of the program the ``bwd_bias`` thresholds pick there; at C 768 it runs
+    # :func:`channel_split`'s one tile there (no ``NARROW_TILES`` key).
     "cake_causal_conv1d_train_befc06774f6fee7c36ce": {
         "arches": [
             "sm_100a",
@@ -4513,8 +4516,11 @@ MODULES: dict[str, dict[str, Any]] = {
     },
     # Route ``bwd_dt_bf16_taps``: the ``bwd_dt`` record ``cake_causal_conv1d_train_32c5625f33586925f154`` with
     # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
-    # ``cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94``; the same body, plan, grid, workspace and selection
-    # rule.
+    # ``cake_causal_conv1d_det_train_af4c42c4bc5c9f00be94``; the same body, plan, grid and workspace, and no
+    # ``select_rule`` either.  On sm_100a / sm_103a it also runs at the rows of ``FALLBACK_ROWS`` (C = 520 to 1016
+    # up to a per-C token bound; on sm_103a not at C 768), in place of the program the route's thresholds pick
+    # there; at C 768 on sm_100a it runs :func:`channel_split`'s one tile there (no ``NARROW_TILES`` key).  The
+    # ``bwd_dt`` route has no key, so at those rows it runs the program its thresholds pick.
     "cake_causal_conv1d_train_7035e23df8c9bf3c11e8": {
         "arches": [
             "sm_100a",
@@ -4779,7 +4785,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # Route ``bwd_bias_bf16_taps``: the ``bwd_bias`` record ``cake_causal_conv1d_train_befc06774f6fee7c36ce`` with
     # ``exact_pre=True`` (SiLU' at the unrounded FP32 preactivation), the single-launch build of the det program
     # ``cake_causal_conv1d_det_train_d8ce3d764c386135943a``; the same body, plan, grid, workspace and selection
-    # rule.
+    # rule.  The route has the ``FALLBACK_ROWS`` keys of ``bwd_bias``, so at every row both routes run these twin
+    # programs (at C 768 :func:`channel_split`'s one tile).
     "cake_causal_conv1d_train_93f7280de3dcb9ad7f49": {
         "arches": [
             "sm_100a",

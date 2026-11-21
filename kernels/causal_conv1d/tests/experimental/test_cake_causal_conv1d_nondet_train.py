@@ -64,8 +64,9 @@ architecture, the row's route and the taps' dtype,
 ``forward_narrow_min_s`` and ``FORWARD_WIDTH_FLOORS``, and one token below a floor or inside a single-tile range of
 ``FORWARD_SINGLE_TILE_ROWS``) launch their 32-vector, width or single tiles on a caller-owned forward workspace of the
 public size and on the package's, with ``y`` judged against the naive tier and the workspace zero after the call.  The
-backward rows of ``FALLBACK_ROWS`` (each key's channel ends and C 640 / 896 at the key's last token count and the next)
-launch the route's fallback program inside the key's token range and the rules' program above it.  The rows of
+backward rows of ``FALLBACK_ROWS`` (each key's channel ends, C 640 / 896 and its one-tile channel counts at the key's
+last token count and the next, the inner ones also at S 1000) launch the route's fallback program inside the key's
+token range and the rules' program above it.  The rows of
 ``SM_WIDE_ROWS`` (route ``bwd``: each key's lowest, an inner and its highest channel count on both sides of every
 segment's first token count) launch the segment's SM-wide program (one CTA per SM), judged against the naive tier, on a
 caller-owned workspace and the package's (sm_107a's program from 131072 tokens keeps two accumulator copies in the
@@ -155,12 +156,16 @@ CASES = (
     (4097, 1344, (1000, 0, 3, 3094)),
     (1000, 1600, "perf"),
 )
+# The rows of every backward route (the first three also under CUDA Graph replay); C 768 at S 4097 lies inside the
+# ``FALLBACK_ROWS`` keys of the bias routes (and of ``bwd_dt_bf16_taps`` on sm_100a), whose fallback runs
+# ``channel_split``'s one tile there.
 ROUTE_CASES = (
     (1000, 512, "perf"),
     (4097, 1280, (1000, 0, 3, 3094)),
     (5, 1536, (2, 0, 3)),
     (65, 256, (64, 1)),
     (4097, 1344, (1000, 0, 3, 3094)),
+    (4097, 768, (1000, 0, 3, 3094)),
 )
 # A large row per architecture class for the repeated launches (many CTAs per channel tile race on the accumulators).
 REPEAT_CASES = (
@@ -468,14 +473,33 @@ def _token_floors(arch: str, kind: str) -> dict[str, tuple[int, int]]:
 FALLBACK_INNER_CHANNELS = (640, 896)
 
 
+def _one_tile_channels(arch: str, kind: str) -> tuple[int, ...]:
+    """The channel counts inside backward route ``kind``'s ``FALLBACK_ROWS`` keys on ``arch`` that no
+    ``NARROW_TILES`` key of the route covers: there the route's fallback runs :func:`channel_split`'s plan, one tile
+    (C 768 of the bias routes, and of ``bwd_dt_bf16_taps`` on sm_100a), where every other channel count of the key
+    runs the 32-vector tiles."""
+
+    found = set()
+    for route, c_lo, c_hi in loader.FALLBACK_ROWS.get(arch, {}):
+        if route == kind:
+            found.update(
+                C
+                for C in range(int(c_lo), int(c_hi) + 1, loader.CHANNEL_MULTIPLE)
+                if loader.narrow_tile_range(arch, kind, C) is None
+            )
+    return tuple(sorted(found))
+
+
 def _fallback_rows(arch: str, kind: str) -> list[tuple[int, int]]:
     """``(C, S_max)`` of the ``FALLBACK_ROWS`` keys of route ``kind`` on ``arch``: each key's channel ends and the
-    channel counts of :data:`FALLBACK_INNER_CHANNELS` the key covers, with the key's last token count."""
+    channel counts of :data:`FALLBACK_INNER_CHANNELS` and :func:`_one_tile_channels` the key covers, with the key's
+    last token count."""
 
+    inner = (*FALLBACK_INNER_CHANNELS, *_one_tile_channels(arch, kind))
     rows = set()
     for (route, c_lo, c_hi), (_s_min, s_max) in loader.FALLBACK_ROWS.get(arch, {}).items():
         if route == kind:
-            for C in (int(c_lo), int(c_hi), *(c for c in FALLBACK_INNER_CHANNELS if c_lo <= c <= c_hi)):
+            for C in (int(c_lo), int(c_hi), *(c for c in inner if c_lo <= c <= c_hi)):
                 rows.add((C, int(s_max)))
     return sorted(rows)
 
@@ -492,7 +516,8 @@ def _fallback_program(arch: str, kind: str) -> str | None:
 
 # The default backward route's channel counts at its ``FALLBACK_ROWS`` keys that the graph, PDL, grid-multiple,
 # repeated-launch and two-stream tests add (C 768: the 768 key; C 1016: the top of the 776-1016 key), with the
-# document layout of their S 4097 rows.  Every other backward route with a key adds its keys' channel ends.
+# document layout of their S 4097 rows.  Every other backward route with a key adds its keys' channel ends and
+# one-tile channel counts (:func:`_one_tile_channels`).
 FALLBACK_ROW_CHANNELS = (768, 1016)
 FALLBACK_ROW_DOCS = (1000, 0, 3, 3094)
 # The token count of those rows inside a key (the key's last token count where it ends below it).
@@ -527,13 +552,14 @@ def _fallback_key_arch(kind: str) -> str:
 
 def _fallback_row_channels(kind: str = "bwd") -> tuple[int, ...]:
     """The channel counts of the fallback-row tests on route ``kind``: :data:`FALLBACK_ROW_CHANNELS` on the default
-    route, the channel ends of the route's keys (:func:`_fallback_key_arch`) on every other."""
+    route, the channel ends and one-tile channel counts (:func:`_one_tile_channels`) of the route's keys
+    (:func:`_fallback_key_arch`) on every other."""
 
     if kind == "bwd":
         return FALLBACK_ROW_CHANNELS
-    rows = loader.FALLBACK_ROWS[_fallback_key_arch(kind)]
-    ends = {int(C) for route, lo, hi in rows if route == kind for C in (lo, hi)}
-    return tuple(sorted(ends))
+    arch = _fallback_key_arch(kind)
+    ends = {int(C) for route, lo, hi in loader.FALLBACK_ROWS[arch] if route == kind for C in (lo, hi)}
+    return tuple(sorted(ends | set(_one_tile_channels(arch, kind))))
 
 
 def _fallback_row_bounds(C: int, kind: str = "bwd") -> tuple[int, int]:
@@ -1083,11 +1109,13 @@ def test_backward_programs_switch_on_channel_count(kind, monkeypatch) -> None:
     # A token-floored program runs from its floor only: both sides of the floor at its channel threshold.
     for T, floor in _token_floors(arch, kind).values():
         rows += [(S, "perf", C) for S in (floor - 8, floor) for C in (T - 8, T, T + 8)]
-    # The rows of ``FALLBACK_ROWS``: each key's channel ends (and C 640 / 896 inside a key) at the key's last token
-    # count (the route's fallback program) and the next (the rules' program); C 640 / 896 also at S 1000.
+    # The rows of ``FALLBACK_ROWS``: each key's channel ends (and C 640 / 896 and the one-tile channel counts inside
+    # a key) at the key's last token count (the route's fallback program) and the next (the rules' program); the inner
+    # ones also at S 1000.
     fallback = _fallback_rows(arch, kind)
+    inner = (*FALLBACK_INNER_CHANNELS, *_one_tile_channels(arch, kind))
     rows += [(S, "perf", C) for C, S_max in fallback for S in (S_max, S_max + 1)]
-    rows += [(1000, "perf", C) for C, _ in fallback if C in FALLBACK_INNER_CHANNELS]
+    rows += [(1000, "perf", C) for C, _ in fallback if C in inner]
     # The rows of ``SM_WIDE_ROWS``: each segment's first token count (and one token below the first segment) at the
     # key's channel ends.
     for (route, c_lo, c_hi), segments in loader.SM_WIDE_ROWS.get(arch, {}).items():
@@ -1167,9 +1195,10 @@ def test_repeated_launches_worst_case(case, kind, record_property) -> None:
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
 def test_fallback_row_repeated_launches(kind, monkeypatch, record_property) -> None:
     """The repeated-launch rows at each backward route's ``FALLBACK_ROWS`` channel counts (the default route's C 768
-    and C 1016, every other route's keys' channel ends; many CTAs per channel tile, inside the keys' token ranges):
-    each row launches the expected program (the route's fallback program on sm_100a / sm_103a, the architecture's own
-    plan elsewhere), every launch judged against the naive tier and the workspace zero after each."""
+    and C 1016, every other route's keys' channel ends and one-tile channel counts; many CTAs per channel tile, inside
+    the keys' token ranges): each row launches the expected program (the route's fallback program on sm_100a /
+    sm_103a, the architecture's own plan elsewhere), every launch judged against the naive tier and the workspace zero
+    after each."""
 
     _require_route(kind)
     seen = _record_programs(monkeypatch)
@@ -2225,8 +2254,9 @@ def test_two_streams_with_two_workspaces() -> None:
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
 def test_fallback_row_two_streams(kind, monkeypatch) -> None:
     """The two-stream test at each backward route's ``FALLBACK_ROWS`` channel counts (the default route's C 768 and
-    C 1016, every other route's keys' channel ends; inside the keys' token ranges): the expected program on both
-    streams, both calls judged against the naive tier on every draw, every workspace zero afterwards."""
+    C 1016, every other route's keys' channel ends and one-tile channel counts; inside the keys' token ranges): the
+    expected program on both streams, both calls judged against the naive tier on every draw, every workspace zero
+    afterwards."""
 
     _require_route(kind)
     seen = _record_programs(monkeypatch)
@@ -4049,28 +4079,38 @@ def _pdl_chain(kind: str, mode: str, case, monkeypatch) -> None:
     _pdl_run(mode, [body], load, outputs, check, case, kind, key=181, seen=seen, label=f"pdl chain {kind} {mode}")
 
 
+def _fallback_row_pdl_cases(kind: str) -> tuple:
+    """The rows of the fallback-row PDL tests on route ``kind``: the first row of :func:`_fallback_row_cases` (inside
+    the key: the default route's C 768 at S 4097), then its rows at the one-tile channel counts of the route's keys
+    (:func:`_one_tile_channels` on :func:`_fallback_key_arch`; C 768 at S 4097)."""
+
+    cases = _fallback_row_cases(kind)
+    one_tile = _one_tile_channels(_fallback_key_arch(kind), kind)
+    return (cases[0], *(case for case in cases[1:-1] if case[1] in one_tile))
+
+
 @pytest.mark.parametrize("kind", FALLBACK_ROW_KINDS)
 @pytest.mark.parametrize("mode", PDL_MODES)
 @pytest.mark.parametrize("check", ("producer", "reader", "chain"))
 def test_fallback_row_pdl(check, mode, kind, monkeypatch, record_property) -> None:
     """The three PDL tests above (``producer``: a launch reads what the kernel before it wrote; ``reader``: it does
     not overwrite what that kernel reads; ``chain``: back-to-back launches share the package's workspaces) on each
-    backward route with a ``FALLBACK_ROWS`` key, at the first row of :func:`_fallback_row_cases` (inside the key: the
-    default route's C 768 at S 4097): the backward launches the expected program (the route's fallback program on
-    sm_100a / sm_103a), eagerly and inside captures with the policy forced on and with the shipped graph policy,
-    every output judged against the naive tier."""
+    backward route with a ``FALLBACK_ROWS`` key, at each row of :func:`_fallback_row_pdl_cases`: the backward
+    launches the expected program (the route's fallback program on sm_100a / sm_103a), eagerly and inside captures
+    with the policy forced on and with the shipped graph policy, every output judged against the naive tier."""
 
-    case = _fallback_row_cases(kind)[0]
-    S, C, _ = case
     seen = _record_programs(monkeypatch)
-    if check == "producer":
-        _pdl_producer(kind, mode, case, monkeypatch, record_property)
-    elif check == "reader":
-        _pdl_reader(kind, mode, case, monkeypatch, record_property)
-    else:
-        _pdl_chain(kind, mode, case, monkeypatch)
-    expected = _expected_backward_program(S, C, kind)
-    assert _backward_programs(seen, kind) == {expected}, (kind, set(seen))
+    for case in _fallback_row_pdl_cases(kind):
+        S, C, _ = case
+        seen.clear()
+        if check == "producer":
+            _pdl_producer(kind, mode, case, monkeypatch, record_property)
+        elif check == "reader":
+            _pdl_reader(kind, mode, case, monkeypatch, record_property)
+        else:
+            _pdl_chain(kind, mode, case, monkeypatch)
+        expected = _expected_backward_program(S, C, kind)
+        assert _backward_programs(seen, kind) == {expected}, (kind, case, set(seen))
 
 
 # ----------------------------------------------------------------------------------------------------------------
