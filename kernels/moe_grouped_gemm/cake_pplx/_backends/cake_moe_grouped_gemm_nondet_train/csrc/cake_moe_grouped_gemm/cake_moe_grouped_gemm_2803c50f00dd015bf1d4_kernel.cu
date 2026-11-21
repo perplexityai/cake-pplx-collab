@@ -384,13 +384,23 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                     unsigned int ts = w * num_clusters_u + p;
                     mbarrier_wait(work_full_addr + (work_stage) * 8, _phase_work_full);
                     unsigned int q_tk = work_ring[work_stage * 4];
-                    asm volatile(
-                        "{\n\t"
-                        ".reg .b32 remAddr32;\n\t"
-                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                        "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
-                        "}"
-                        :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    if (cta_rank != 0) {
+                        asm volatile(
+                            "{\n\t"
+                            ".reg .b32 remAddr32;\n\t"
+                            "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                            "mbarrier.arrive.release.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+                            "}"
+                            :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    } else {
+                        asm volatile(
+                            "{\n\t"
+                            ".reg .b32 remAddr32;\n\t"
+                            "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                            "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                            "}"
+                            :: "r"(work_empty_addr + (work_stage) * 8), "r"(0) : "memory");
+                    }
                     work_stage += 1;
                     if (work_stage == 4) { work_stage = 0; _phase_work_empty ^= 1; _phase_work_full ^= 1; }
                     if (cta_rank == 0) {
@@ -3974,13 +3984,24 @@ CAKE_PROGRAM_KERNEL(const __grid_constant__ CUtensorMap A, const __grid_constant
                 mbarrier_wait(work_full_addr + (work_stage_e) * 8, _phase_work_full_2);
                 unsigned int q_tke = work_ring[work_stage_e * 4];
                 asm volatile("tcgen05.fence::before_thread_sync;");
-                asm volatile(
-                    "{\n\t"
-                    ".reg .b32 remAddr32;\n\t"
-                    "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
-                    "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
-                    "}"
-                    :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                if (cta_rank != 0) {
+                    asm volatile("fence.release.sync_restrict::shared::cta.cluster;" ::: "memory");
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .b32 remAddr32;\n\t"
+                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                        "mbarrier.arrive.relaxed.cluster.shared::cluster.b64 _, [remAddr32];\n\t"
+                        "}"
+                        :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                } else {
+                    asm volatile(
+                        "{\n\t"
+                        ".reg .b32 remAddr32;\n\t"
+                        "mapa.shared::cluster.u32 remAddr32, %0, %1;\n\t"
+                        "mbarrier.arrive.release.cta.shared::cluster.b64 _, [remAddr32];\n\t"
+                        "}"
+                        :: "r"(work_empty_addr + (work_stage_e) * 8), "r"(0) : "memory");
+                }
                 work_stage_e += 1;
                 if (work_stage_e == 4) { work_stage_e = 0; _phase_work_full_2 ^= 1; }
                 if (q_tke >= reg_end_e) {
