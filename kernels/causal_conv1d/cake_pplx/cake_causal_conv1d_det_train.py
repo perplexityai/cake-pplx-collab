@@ -74,9 +74,10 @@ architecture and route), the forward runs a static program on the route's tile
 plan or a direct program on channel tiles of its own with at most one CTA per
 token block; neither takes counters, so such a call zeroes and uses no buffer,
 eager or captured, and a passed ``workspace`` is checked and not read.  Each
-row gives its own token range.  For most ``C`` the first range starts at S = 1.
-The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736:
-14336) and have only a static range.  Outside a row's range, and where an
+row gives its own token range.  Every architecture and route has a row at each
+``C`` = 576 to 768.  For most ``C`` the first range starts at S = 1.  The
+sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336)
+and have only a static range.  Outside a row's range, and where an
 architecture, route and ``C`` have no row, the forward takes its counters from
 the workspace, as in 0.2.4.  Every forward program writes the same ``y`` bits.
 

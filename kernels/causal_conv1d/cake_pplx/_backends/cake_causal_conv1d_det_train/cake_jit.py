@@ -72,21 +72,21 @@ without a ``select_rule``) at the rows of :data:`FALLBACK_ROWS`, and the
 direct program (no shared memory, barrier or atomic; the CTAs of a channel
 tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
 plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
-CTA per token block.  Each row gives its own token range.  For most C the
-first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
-768 start at S = 13824 (C = 736: 14336) and have only a static range.
-Outside a row's range, and where an architecture, route and C have no row,
-a call runs the dynamic program its rules select, as in 0.2.4.  Every
-forward program computes each ``y`` element in the same fixed order, so ``y``
-is bitwise the same whichever program and plan a call runs.  The counters
-of the dynamic programs are the forward workspace ``work``
-(``workspace_rule`` ``tile_counters``: :func:`counter_words`, two int32 words
-per channel tile), zero before the first launch; the last CTA of each tile
-resets them, so the buffer is zero after every launch and every CUDA Graph
-replay and serves every later launch of one stream.  Two launches that may run
-at once (two streams, two graphs replayed concurrently) need two buffers.  The
-static and direct programs take no ``work``; a passed buffer is checked and
-not read.
+CTA per token block.  Each row gives its own token range.  Every architecture
+and route has a row at each C = 576 to 768.  For most C the first range starts
+at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824
+(C = 736: 14336) and have only a static range.  Outside a row's range, and
+where an architecture, route and C have no row, a call runs the dynamic program
+its rules select, as in 0.2.4.  Every forward program computes each ``y``
+element in the same fixed order, so ``y`` is bitwise the same whichever program
+and plan a call runs.  The counters of the dynamic programs are the forward
+workspace ``work`` (``workspace_rule`` ``tile_counters``:
+:func:`counter_words`, two int32 words per channel tile), zero before the first
+launch; the last CTA of each tile resets them, so the buffer is zero after
+every launch and every CUDA Graph replay and serves every later launch of one
+stream.  Two launches that may run at once (two streams, two graphs replayed
+concurrently) need two buffers.  The static and direct programs take no
+``work``; a passed buffer is checked and not read.
 
 A backward call is two ordinary launches on one stream.  The selected program
 (persistent, ``grid_mult x ctas_per_sm x SM count`` CTAs) writes ``dx`` and
@@ -5254,7 +5254,7 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
         ("fwd_bias", 576, 576): (1, 4096),
-        ("fwd_bias", 584, 632): (1, 4096),
+        ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
@@ -5265,14 +5265,16 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
-        ("fwd", 720, 760): (1, 8192),
+        ("fwd", 720, 768): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
+        ("fwd_bias", 712, 712): (1, 12800),
         ("fwd_bias", 720, 728): (13824, 16383),
         ("fwd_bias", 736, 736): (14336, 16383),
         ("fwd_bias", 744, 760): (13824, 16383),
@@ -5379,7 +5381,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             24576,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 632): (
+        ("fwd_bias", 584, 640): (
             4097,
             20480,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
@@ -5421,7 +5423,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20479,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
         ),
-        ("fwd", 720, 760): (
+        ("fwd", 720, 768): (
             8193,
             19456,
             "cake_causal_conv1d_det_train_a81632301ba92a887c46",
@@ -5451,9 +5453,19 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             20480,
             "cake_causal_conv1d_det_train_21b9be3d1093abe38406",
         ),
+        ("fwd_bias", 576, 576): (
+            2049,
+            16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 584, 640): (
             4105,
             16384,
+            "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 712, 712): (
+            12801,
+            14592,
             "cake_causal_conv1d_det_train_8ed855b04178bc5d90f9",
         ),
     },

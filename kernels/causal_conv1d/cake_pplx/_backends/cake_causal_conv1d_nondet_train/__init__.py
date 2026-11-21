@@ -167,12 +167,13 @@ Host design (the knobs are keywords; no environment variable):
   its channel tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at
   most one CTA per token block).  Neither takes counters: a passed
   ``workspace`` is checked and not passed to the program, and the workspace
-  size is unchanged.  Each row gives its own token range.  For most C the
-  first range starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to
-  768 start at S = 13824 (C = 736: 14336) and have only a static range.
-  Outside a row's range, and where an architecture, route and C have no
-  row, the forward runs the dynamic program, which takes counters, as in
-  0.2.4.  ``y`` is the same bits on every forward program and plan.
+  size is unchanged.  Each row gives its own token range.  Every architecture
+  and route has a row at each C = 576 to 768.  For most C the first range
+  starts at S = 1.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at
+  S = 13824 (C = 736: 14336) and have only a static range.  Outside a row's
+  range, and where an architecture, route and C have no row, the forward runs
+  the dynamic program, which takes counters, as in 0.2.4.  ``y`` is the same
+  bits on every forward program and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
