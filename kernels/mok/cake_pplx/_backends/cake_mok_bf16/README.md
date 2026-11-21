@@ -395,9 +395,10 @@ across communication-SM splits and under CUDA Graph replay.
   `IMBALANCE_DEVICE_THRESHOLDS`, else the precision's value in
   `IMBALANCE_THRESHOLDS`, BF16 4, MXFP8 2.7), the later launches use the
   (forward, backward) imbalance split; balanced steps are unchanged. Measured
-  rows (`IMBALANCE_COMM_SMS`, keyed by compute capability and SM count, so B200
-  at 148 SMs only - GB200 is also (10, 0) at 152 SMs and keeps the fixed split,
-  where the B200 BF16 row measured slower under skew at EP16-64), from EP8
+  rows (`IMBALANCE_COMM_SMS`, keyed by compute capability, SM count and the
+  workspace's `precision`, so B200 at 148 SMs - GB200 is also (10, 0) at 152 SMs
+  and keeps the fixed split, where the B200 BF16 row measured slower under skew
+  at EP16-64), from EP8
   complete training steps, two rounds on one node, step time against the fixed
   split of this package's programs. B200 BF16 24 / 28 against 20 / 24: hottest
   rank at 5.6x / 7.4x the mean routed load -1.0 / -1.7 % and -1.2 / -1.3 %;
@@ -420,7 +421,10 @@ across communication-SM splits and under CUDA Graph replay.
   hottest rank at 1.51x the mean routed load forward -6.9 % / update -3.8 %,
   2.05x -5.7 / -2.8 %, 3.05x -10.1 / -5.1 %, 4.66x -11.1 / -5.5 %, 6.47x
   -10.6 / -5.5 %; balanced steps do not switch, where an unconditional 72 / 60
-  forward is 4.1 % slower. No row elsewhere.
+  forward is 4.1 % slower. B300 (148 SMs) BF16 and MXFP8 40 / 40 from a device
+  threshold of 1.8 end its forward row 16 / 40 (BF16 EP8) where it stops gaining
+  (see "Fixed split per device and group size"); 40 / 40 is B300's fixed MXFP8
+  split, so its MXFP8 launches do not change. No row elsewhere.
   `MoKConfig.comm_split_log=True` (default `False`; `dataclasses.replace(config,
   comm_split_log=True)` on the returned config) prints each split change per
   rank to stderr; the `CAKE_MOK_COMM_SPLIT_LOG` environment variable that used
@@ -480,9 +484,10 @@ across communication-SM splits and under CUDA Graph replay.
   32768 tokens per rank: -7.4 / -4.6, -13.3 / -8.7, -18.1 / -2.4 % (round
   spread at most 1.2 %); Rubin BF16 had no consistent gain at EP8.
 
-  B200 (148 SMs) BF16 EP8, GB200 (152 SMs) BF16 EP4 and B300 (148 SMs) BF16 EP8:
-  16 / 40, the forward count only (the backward keeps 40), chosen from forward
-  counts 8-16 (B200), 12-20 (GB200) and 8-16 (B300) against 40 / 40. One node,
+  B300 (148 SMs) BF16 EP8: 16 / 40, the forward count only (the backward keeps
+  40), chosen from forward counts 8-16 against 40 / 40; from 1.8x skew the
+  imbalance split 40 / 40 replaces it, as 16 / 40 measured slower from 2.0x.
+  B200 (148 SMs) BF16 EP8 and GB200 (152 SMs) BF16 EP4 keep 40 / 40. One node,
   BF16 routed experts, FP32 accumulators, the counts interleaved in one process
   over three rounds, eager, slowest-rank median of timed repetitions 41-60 of 60
   (repetitions 1-20 show no row slower beyond the identical-arm noise band
@@ -495,26 +500,6 @@ across communication-SM splits and under CUDA Graph replay.
 
   | device | EP | configuration | routing | tokens per rank | forward 40 / 40 (ms) | forward row (ms) | change | checkpointed step 40 / 40 (ms) | row (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-  | B200 | 8 | before down, 384 experts, top 6 | uniform | 4,096 | 2.61 | 2.37 | -10.1 % | 10.06 | 9.87 | -2.0 % |
-  | B200 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 3.22 | 2.99 | -7.2 % | 12.26 | 11.85 | -3.4 % |
-  | B200 | 8 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.24 | 2.18 | -2.8 % | 9.40 | 9.38 | -0.5 % |
-  | B200 | 8 | before down, 384 experts, top 6 | uniform | 16,384 | 8.57 | 8.15 | -6.2 % | 30.17 | 29.54 | -1.7 % |
-  | B200 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 11.41 | 10.76 | -5.7 % | 39.69 | 39.43 | -0.6 % |
-  | B200 | 8 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 7.26 | 6.80 | -7.2 % | 26.56 | 26.08 | -1.8 % |
-  | B200 | 8 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 11.22 | 10.36 | -7.5 % | 39.00 | 37.77 | -3.2 % |
-  | B200 | 8 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.81 | 3.53 | -7.7 % | 14.22 | 14.00 | -2.4 % |
-  | B200 | 8 | H 4096 / 288 experts, top 8 | uniform | 16,384 | 7.77 | 6.90 | -11.1 % | 26.73 | 25.82 | -3.4 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 4,096 | 2.81 | 2.69 | -4.1 % | 11.99 | 11.78 | -1.2 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 3.23 | 3.20 | -1.5 % | 13.60 | 13.48 | -0.9 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.35 | 2.34 | -0.4 % | 10.83 | 10.81 | -0.1 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 16,384 | 7.89 | 7.65 | -3.0 % | 30.23 | 29.80 | -1.5 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 11.01 | 10.35 | -6.4 % | 38.34 | 37.59 | -2.0 % |
-  | GB200 | 4 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 7.23 | 7.05 | -2.8 % | 27.29 | 26.82 | -1.5 % |
-  | GB200 | 4 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 11.00 | 10.27 | -6.1 % | 38.10 | 37.48 | -1.8 % |
-  | GB200 | 4 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.85 | 3.70 | -3.4 % | 14.64 | 14.44 | -1.8 % |
-  | GB200 | 4 | 16 experts, top 2 | uniform | 16,384 | 3.29 | 3.28 | -0.9 % | 11.57 | 11.41 | -1.4 % |
-  | GB200 | 4 | 16 experts, before down, top 2 | uniform | 16,384 | 3.30 | 3.26 | -0.6 % | 11.44 | 11.59 | +0.3 % |
-  | GB200 | 4 | 16 experts, top 8 | uniform | 16,384 | 9.74 | 9.69 | -0.5 % | 34.47 | 34.37 | -0.8 % |
   | B300 | 8 | before down, 384 experts, top 6 | uniform | 4,096 | 2.33 | 2.18 | -6.6 % | 9.17 | 9.06 | -1.2 % |
   | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 2.95 | 2.80 | -5.2 % | 11.53 | 11.40 | -1.6 % |
   | B300 | 8 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.09 | 2.01 | -3.1 % | 8.50 | 8.69 | +2.6 % |

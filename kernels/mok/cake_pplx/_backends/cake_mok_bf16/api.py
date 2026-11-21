@@ -13,7 +13,7 @@ MOK_PRECISIONS = ("bf16", "mxfp8")
 ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
 
 # Imbalance-aware communication split, keyed by device compute capability, SM
-# count and routed precision. Only devices with a measured gain have a row;
+# count and the workspace's precision. Only devices with a measured gain have a row;
 # "auto" resolves to None (the fixed split) elsewhere. The SM count separates
 # B200 (148 SMs) from GB200 (152 SMs, also compute capability (10, 0)), where
 # the B200 BF16 row measured slower than the fixed split at 8x skew and above on
@@ -27,6 +27,14 @@ ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
 # identical arms, so the fixed split is kept. The BF16 threshold sits between
 # the measured 3.0x and 5.6x; the crossover in between is not measured, and
 # with 4 ranks the ratio reaches 4 only when one rank carries every routed row.
+# B300 (compute capability (10, 3), 148 SMs) BF16 and MXFP8 rows 40 / 40 from
+# 1.8x (IMBALANCE_DEVICE_THRESHOLDS): its fixed BF16 EP8 row 16 / 40 (COMM_SMS)
+# measured faster than 40 / 40 up to 1.8x and slower from 2.0x (hottest rank
+# over the mean routed load), so skewed steps return to the factory split.
+# 40 / 40 is also its fixed MXFP8 split, so MXFP8 launches do not change, and
+# the MXFP8 row gives BF16 launches on a workspace created with precision
+# "mxfp8" the same switch. Protocol and times: backend README, "Fixed split per
+# device and group size".
 # B200 MXFP8 row 44 / 36 against the fixed 40 / 32 (same protocol, EP8, two
 # rounds on one node): hottest rank at 3.0x -1.0 % (full) / -1.0 % (checkpoint),
 # at 5.6x -2.7 %; balanced steps +0.5 / +0.8 % (so they must not switch); with
@@ -47,13 +55,17 @@ ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
 # 4.1 % slower at 27116 tokens.
 IMBALANCE_COMM_SMS = {
     (10, 0): {148: {"bf16": (24, 28), "mxfp8": (44, 36)}},
+    (10, 3): {148: {"bf16": (40, 40), "mxfp8": (40, 40)}},
     (10, 7): {212: {"mxfp8": (72, 60)}},
 }
 IMBALANCE_THRESHOLDS = {"bf16": 4.0, "mxfp8": 2.7}
 # Measured device thresholds that replace IMBALANCE_THRESHOLDS for a device
 # (compute capability, SM count) and precision. Rubin MXFP8 1.5: its split gains
-# from the measured 1.51x up; balanced steps (1.0x) measured no gain.
+# from the measured 1.51x up; balanced steps (1.0x) measured no gain. B300 1.8:
+# its 16 / 40 BF16 row measured faster up to 1.8x and slower from 2.0x (see
+# above).
 IMBALANCE_DEVICE_THRESHOLDS = {
+    (10, 3): {148: {"bf16": 1.8, "mxfp8": 1.8}},
     (10, 7): {212: {"mxfp8": 1.5}},
 }
 # The BF16 threshold under the single-precision name of the first imbalance
@@ -93,20 +105,21 @@ IMBALANCE_THRESHOLD = IMBALANCE_THRESHOLDS["bf16"]
 # -18.1 / -2.4 %; round spread at most 1.2 %. Rubin BF16 measured no consistent
 # gain at EP8 (36 / 36 and 28 / 32 within the +-3 % round spread or slower).
 #
-# B200 (compute capability (10, 0), 148 SMs) BF16 EP8, GB200 ((10, 0), 152 SMs)
-# BF16 EP4 and B300 ((10, 3), 148 SMs) BF16 EP8 rows 16 / 40 against the
-# factory 40 / 40: the forward count only (the backward keeps 40). Like every
-# row they apply to launches with routed weights of their precision (BF16):
-# MXFP8 launches on the same workspace take the MXFP8 key, which has no row on
-# these devices (40 / 40). Protocol, absolute times and the configurations not
-# measured: backend README, "Fixed split per device and group size".
+# B300 ((10, 3), 148 SMs) BF16 EP8 row 16 / 40 against the factory 40 / 40:
+# the forward count only (the backward keeps 40). Like every row it applies to
+# launches with routed weights of its precision (BF16): MXFP8 launches on the
+# same workspace take the MXFP8 key, which has no row on B300 (40 / 40). From
+# 1.8x skew the imbalance split (40 / 40) replaces it (IMBALANCE_COMM_SMS).
+# B200 ((10, 0), 148 SMs) BF16 EP8 and GB200 ((10, 0), 152 SMs) BF16 EP4 keep
+# 40 / 40: on B200 16 / 40 measured slower from 2.0x skew, and its imbalance
+# split (24 / 28 from 4.0x) follows the workspace's precision, so it cannot
+# replace the row for every workspace; on GB200 16 / 40 measured slower on its
+# 16-expert top-8 configuration and 20 / 40 is not measured beyond the gating
+# cells. Protocol, absolute times and the configurations not measured: backend
+# README, "Fixed split per device and group size".
 #
 # GB300 BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain).
 COMM_SMS = {
-    (10, 0): {
-        148: {"bf16": {8: (16, 40)}},
-        152: {"bf16": {4: (16, 40)}},
-    },
     (10, 3): {
         148: {"bf16": {8: (16, 40)}},
         152: {
@@ -303,9 +316,9 @@ def create_mok_bf16_workspace(
     communication-SM counts of every launch. ``"auto"`` (default, for both)
     gives each launch the measured row of the device, the launch's routed
     precision (BF16 or MXFP8 routed weights) and the EP group size
-    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B200 BF16 at EP8, GB200 BF16
-    at EP4 and B300 BF16 at EP8: 16 / 40, GB300 BF16 at EP4-64: 20 / 24, GB300
-    MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
+    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B300 BF16 at EP8: 16 / 40,
+    GB300 BF16 at EP4-64: 20 / 24, GB300 MXFP8 at EP8/32/64: 44 / 36,
+    Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
     factory split 40 / 40 where there is no row, whatever ``precision`` the
     workspace was created with (``MoKConfig.bf16_comm_sms`` /
     ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
@@ -319,17 +332,19 @@ def create_mok_bf16_workspace(
     are identical on every rank, each rank applies its own latest completed
     observation). ``"auto"`` (default) takes the measured row of the device
     for ``precision`` (:func:`resolve_imbalance_comm_sms`, keyed by compute
-    capability and SM count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, Rubin
-    (212 SMs) MXFP8: 72 / 60, no row elsewhere - GB200 and GB300 included - so
-    the fixed split stays in force there), ``None`` keeps the fixed split and a
-    pair sets it. ``precision`` selects that row and the threshold.
+    capability and SM count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, B300
+    BF16 and MXFP8: 40 / 40, Rubin (212 SMs) MXFP8: 72 / 60, no row elsewhere -
+    GB200 and GB300 included - so the fixed split stays in force there),
+    ``None`` keeps the fixed split and a pair sets it. ``precision`` selects
+    that row and the threshold.
     ``imbalance_threshold`` ``"auto"`` (default) takes the measured ratio of
     the device and ``precision`` (:func:`resolve_imbalance_threshold`;
     :data:`IMBALANCE_DEVICE_THRESHOLDS`, else :data:`IMBALANCE_THRESHOLDS`):
     BF16 4, between the 3x load ratio, where its split shows no gain, and 5.6x,
     where it gains 1-2 %; MXFP8 2.7, between 2.4x (no gain) and 3x (gains 1 %);
-    Rubin MXFP8 1.5, its split gaining from the measured 1.51x up. A number
-    sets the ratio. Balanced steps never switch.
+    Rubin MXFP8 1.5, its split gaining from the measured 1.51x up; B300 1.8,
+    where its 16 / 40 BF16 row stops gaining (faster up to the measured 1.8x,
+    slower from 2.0x). A number sets the ratio. Balanced steps never switch.
     ``MoKConfig.comm_split_log`` (default ``False``; ``dataclasses.replace(config,
     comm_split_log=True)`` on the returned config) prints each split change per
     rank to stderr.
