@@ -18845,7 +18845,9 @@ def test_device_compacted_loss_keeps_no_temporary_head(monkeypatch):
     _require_program(entry="loss")
     inp, rows = _compacted_fold_inputs()
     spy = _fold_route_spies(monkeypatch)
-    dX, dW, _, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    dX, dW, names, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    # the shape's one-slice chunk: the leaf call folds it in the backward (the non-leaf call below must not keep W)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
     X = inp.X.detach().clone().requires_grad_(True)
     base = inp.W.detach().clone().requires_grad_(True)
     W = base.clone()
@@ -18858,6 +18860,68 @@ def test_device_compacted_loss_keeps_no_temporary_head(monkeypatch):
     torch.cuda.synchronize()
     assert torch.equal(_bits(X.grad), _bits(dX))
     assert torch.equal(_bits(base.grad), _bits(dW))
+
+
+def _offload_hooks(packed):
+    """Saved-tensor hooks of the ``save_on_cpu`` kind -- each saved tensor copied to the host, copied back when
+    unpacked -- that record the storage of every tensor they pack in ``packed``."""
+
+    def pack(t):
+        packed.append(t.untyped_storage().data_ptr())
+        return t.device, t.to("cpu")
+
+    def unpack(saved):
+        device, t = saved
+        return t.to(device)
+
+    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
+
+
+@pytest.mark.parametrize("hooks", ["offload", "offload_in_checkpoint", "checkpoint"])
+def test_device_compacted_loss_fold_under_saved_tensor_hooks(monkeypatch, hooks):
+    """The compacted leaf-``W`` call of ``test_device_compacted_loss_fold_saves_the_head`` under saved-tensor hooks.
+    With CPU offload hooks on top (:func:`_offload_hooks`; ``offload_in_checkpoint``: inside the function of a
+    non-reentrant ``torch.utils.checkpoint``) the call folds every label residual in its forward's slab sums, as a
+    non-leaf head does -- the fold-alone slab sum, no cast-fold range, no fold program -- and the hooks never pack
+    ``W``: no copy of the head to the host and back each step.  Under a non-reentrant ``torch.utils.checkpoint`` (its
+    hooks on top, ``W`` a checkpoint argument) the recomputation keeps the backward's fold.  ``dX`` and ``dW`` are
+    bitwise those of the plain call."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, names, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    X = inp.X.detach().clone().requires_grad_(True)
+    W = inp.W.detach().clone().requires_grad_(True)
+    packed = []
+    spy.clear()
+    if hooks == "offload":
+        with _offload_hooks(packed):
+            loss = _route_loss(inp, rows, X, W)
+    else:
+
+        def head(a, b):
+            if hooks == "checkpoint":
+                return _route_loss(inp, rows, a, b)
+            with _offload_hooks(packed):
+                return _route_loss(inp, rows, a, b)
+
+        loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
+    loss.backward()
+    torch.cuda.synchronize()
+    if hooks == "checkpoint":
+        assert cake_backend.DX_FINALIZE_FOLD_STAGE in spy.names, spy.names
+        assert any(hi > lo for lo, hi in spy.ranges), spy.ranges
+    else:
+        assert packed, "the offload hooks packed no tensor"
+        assert W.untyped_storage().data_ptr() not in packed, (
+            "the offload hooks packed the head"
+        )
+        assert spy.fold_alone, spy.names
+        assert not _FOLD_STAGES & set(spy.names), spy.names
+        assert not any(hi > lo for lo, hi in spy.ranges), spy.ranges
+    assert torch.equal(_bits(X.grad), _bits(dX))
+    assert torch.equal(_bits(W.grad), _bits(dW))
 
 
 def test_device_logprob_graph_rlab_freed_by_its_backward(glm_weight, monkeypatch):
