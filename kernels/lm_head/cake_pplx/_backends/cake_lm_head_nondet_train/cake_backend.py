@@ -260,6 +260,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import ctypes
 import functools
 import inspect
 import math
@@ -12346,9 +12347,12 @@ def _logprob_vm_eligible(
 
 
 # the streams the graphs' label residuals are allocated on (:func:`_graph_rlab_tensor`), one pair per device: the holding
-# stream of the calls on the device's default stream, and the side holding stream of the calls on any other stream
-_RLAB_STREAMS: dict[int, torch.cuda.Stream] = {}
-_RLAB_SIDE_STREAMS: dict[int, torch.cuda.Stream] = {}
+# stream of the calls on the device's default stream, and the side holding stream of the calls on any other stream;
+# ``None`` for a device where the stream could not be made (:func:`_rlab_new_stream`)
+_RLAB_STREAMS: dict[int, Optional[torch.cuda.Stream]] = {}
+_RLAB_SIDE_STREAMS: dict[int, Optional[torch.cuda.Stream]] = {}
+# one thread makes a holding stream, the others wait for it (:func:`_rlab_stream`)
+_RLAB_STREAMS_LOCK = threading.Lock()
 # per device, the default stream's ``(stream_id, device_index, device_type)``
 _RLAB_DEFAULT: dict[int, tuple] = {}
 _SMALL_BLOCK_BYTES = 1 << 20  # the caching allocator's small-pool request limit
@@ -12367,15 +12371,37 @@ def _rlab_default(index: int) -> tuple:
     return default
 
 
+def _rlab_new_stream(index: int) -> Optional[torch.cuda.Stream]:
+    """A new CUDA stream of device ``index`` that no other code can get: made by the CUDA runtime's
+    ``cudaStreamCreate`` (torch's binding, :func:`torch.cuda.cudart`) with the device current, and wrapped as a
+    :class:`torch.cuda.ExternalStream`; it is never destroyed.  A ``torch.cuda.Stream`` would be one of torch's pooled
+    streams (a fixed number per device and priority, handed out round-robin), which the other holding stream or a
+    caller's own stream can also be.  ``None`` when the stream cannot be made (no binding, or the call fails): no
+    pooled stream takes its place."""
+    try:
+        cudart = torch.cuda.cudart()
+        slot = ctypes.c_void_p()
+        with torch.cuda.device(index):
+            err = cudart.cudaStreamCreate(ctypes.addressof(slot))
+        if int(err) != 0 or not slot.value:
+            return None
+        return torch.cuda.ExternalStream(slot.value, device=torch.device("cuda", index))
+    except (AttributeError, RuntimeError, TypeError):
+        return None
+
+
 def _rlab_stream(
-    streams: dict[int, torch.cuda.Stream], index: int
-) -> torch.cuda.Stream:
-    """The holding stream of ``streams`` on device ``index``, created on first use."""
+    streams: dict[int, Optional[torch.cuda.Stream]], index: int
+) -> Optional[torch.cuda.Stream]:
+    """The holding stream of ``streams`` on device ``index``, made on first use (:func:`_rlab_new_stream`, once per
+    device and holding stream: under :data:`_RLAB_STREAMS_LOCK`, so two threads never make two); ``None`` when it
+    could not be made."""
     stream = streams.get(index)
-    if stream is None:
-        stream = streams.setdefault(
-            index, torch.cuda.Stream(device=torch.device("cuda", index))
-        )
+    if stream is None and index not in streams:
+        with _RLAB_STREAMS_LOCK:
+            if index not in streams:
+                streams[index] = _rlab_new_stream(index)
+            stream = streams[index]
     return stream
 
 
@@ -12396,8 +12422,10 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
     default stream's earlier work on it -- the order ``record_stream`` would give, without the allocator's events at
     the free and their queries in the requests after it.  A call on any other stream, or from another current device,
     takes the side holding stream (:data:`_RLAB_SIDE_STREAMS`) and marks the tensor as used on the caller's stream
-    (``record_stream``), so its block is reused only after that stream's work on it.  Under a CUDA graph capture, or
-    above the small-pool limit, it is an ordinary allocation on the caller's stream."""
+    (``record_stream``), so its block is reused only after that stream's work on it.  Each holding stream is a stream of
+    its own (:func:`_rlab_new_stream`): no other request, and no caller, is on it.  Under a CUDA graph capture, above
+    the small-pool limit, or where the holding stream could not be made, it is an ordinary allocation on the caller's
+    stream."""
     if (
         rows * 4 > _SMALL_BLOCK_BYTES
         or device.type != "cuda"
@@ -12416,6 +12444,10 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
         caller = _CUDA_GET_STREAM(index)
         if caller == (_RLAB_DEFAULT.get(index) or _rlab_default(index)):
             stream = _rlab_stream(_RLAB_STREAMS, index)
+            if stream is None:
+                return (torch.zeros if zero else torch.empty)(
+                    (rows,), dtype=torch.float32, device=device
+                )
             _CUDA_SET_STREAM(
                 stream_id=stream.stream_id,
                 device_index=index,
@@ -12430,8 +12462,13 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
             if zero:
                 held.zero_()
             return held
+    stream = _rlab_stream(_RLAB_SIDE_STREAMS, index)
+    if stream is None:
+        return (torch.zeros if zero else torch.empty)(
+            (rows,), dtype=torch.float32, device=device
+        )
     current = torch.cuda.current_stream(index)
-    with torch.cuda.stream(_rlab_stream(_RLAB_SIDE_STREAMS, index)):
+    with torch.cuda.stream(stream):
         held = torch.empty((rows,), dtype=torch.float32, device=device)
     held.record_stream(current)
     if zero:

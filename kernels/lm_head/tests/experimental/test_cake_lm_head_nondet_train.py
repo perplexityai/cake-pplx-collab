@@ -18123,11 +18123,29 @@ def test_device_graph_rlab_holding_streams(monkeypatch):
     call on the device's default stream lies in the default holding stream's segment and marks no stream on the tensor
     (``record_stream``): that segment serves calls on the default stream only.  A call on another stream, and a call
     from another current device, lie in the side holding stream's segment and mark the tensor as used on the caller's
-    stream.  The tensor is zero-filled when asked."""
+    stream.  The tensor is zero-filled when asked.  Each holding stream is a stream of its own, whatever ran before:
+    made here afresh, by eight threads at once (all eight get the same pair), after more streams than one of torch's
+    stream pools holds were taken from every pool, the two differ from each other and from every pooled stream."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     index = torch.cuda.current_device()
     device = torch.device("cuda", index)
+    pooled = _pooled_streams(device)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    kinds = (cake_backend._RLAB_STREAMS, cake_backend._RLAB_SIDE_STREAMS)
+    barrier, made = threading.Barrier(8), []
+
+    def first_use():
+        barrier.wait(timeout=60)
+        made.append(tuple(cake_backend._rlab_stream(s, index) for s in kinds))
+
+    threads = [threading.Thread(target=first_use) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert len(made) == 8 and set(made) == {tuple(s[index] for s in kinds)}, made
 
     def segment_stream(t):
         ptr = t.data_ptr()
@@ -18168,9 +18186,58 @@ def test_device_graph_rlab_holding_streams(monkeypatch):
     holding = cake_backend._RLAB_STREAMS[index]
     side = cake_backend._RLAB_SIDE_STREAMS[index]
     assert holding.cuda_stream != side.cuda_stream
+    others = {s.cuda_stream for s in pooled + [caller, default]}
+    ours = {holding.cuda_stream, side.cuda_stream}
+    assert not ours & others, [hex(s) for s in ours & others]
     for name, t in held.items():
         want = holding if name.startswith("default") else side
         assert segment_stream(t) == want.cuda_stream, name
+
+
+def _pooled_streams(device):
+    """33 ``torch.cuda.Stream`` objects of each priority torch offers on ``device``: every one of its pooled streams
+    (a pool holds 32 per device and priority, handed out round-robin)."""
+    least, greatest = torch.cuda.Stream.priority_range()
+    return [
+        torch.cuda.Stream(device=device, priority=priority)
+        for priority in range(least, greatest - 1, -1)
+        for _ in range(33)
+    ]
+
+
+def test_device_graph_rlab_holding_block_kept(monkeypatch):
+    """A block of the default holding stream's segment is handed to no request on another stream: the label
+    residuals of a call on the device's default stream (``_graph_rlab_tensor``, no ``record_stream``), once freed, are
+    not where a same-size request on any of torch's pooled streams lands, nor in that segment, whatever ran before (the
+    holding streams made afresh after every pooled stream was taken)."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    pooled = _pooled_streams(device)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    with torch.cuda.stream(torch.cuda.default_stream(index)):
+        held = cake_backend._graph_rlab_tensor(300, True, device)
+    torch.cuda.synchronize()
+    holding, ptr = cake_backend._RLAB_STREAMS[index].cuda_stream, held.data_ptr()
+    del held
+    got = []
+    for stream in pooled:
+        with torch.cuda.stream(stream):
+            got.append(torch.empty((300,), dtype=torch.float32, device=device))
+    segments = [
+        (seg["address"], seg["total_size"], seg["stream"])
+        for seg in torch.cuda.memory_snapshot()
+        if seg["device"] == index
+    ]
+
+    def in_holding(t):
+        p = t.data_ptr()
+        return p == ptr or any(s == holding and 0 <= p - a < n for a, n, s in segments)
+
+    shared = [hex(s.cuda_stream) for s, t in zip(pooled, got) if in_holding(t)]
+    assert not shared, (hex(holding), shared)
 
 
 _RLAB_PLACEMENT_SCRIPT = """
