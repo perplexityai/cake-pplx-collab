@@ -7237,6 +7237,95 @@ def test_fwd_split_a_tape_and_the_w_form_naive_tier_verdict(
     _judge(record_property, 437, draw)
 
 
+# the forwards that run fwd_ho_a, which keeps u in FP32: the serial A form and the split forward on wy_a's A
+FWD_HO_A_ROUTES = ("a", "split_a")
+
+
+def _fwd_ho_a_taped_word(device) -> int:
+    """fwd_ho_a's tape word of a taped call on the device: the state of its tape level in FWD_A_TAPE."""
+    arch = cake_backend.device_arch(cake_chain._device_index(device))
+    tape = cake_chain.FWD_A_TAPE
+    return sum(tape[name] for name in cake_plan.tape_state(arch, True) if name in tape)
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_without_a_tape_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # save_state=False on the forwards that run fwd_ho_a: fwd_ho_a stores no tape (word 0) and keeps u in FP32 for o
+    # and the final state, and the backward rebuilds w, h and v_new with the WY stage on the tape's A (which rounds u
+    # to BF16) and the forward scan; o, the final state and every gradient (the initial state's too) are judged
+    (heads, seq_lens), _marker = _route_or_skip(route, device, monkeypatch)
+    arch = cake_backend.device_arch(cake_chain._device_index(device))
+    per_call = 1 if route == "a" else 2
+    launches = _record_launch_values(monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+        h0, dht = _states(seq_lens, heads[1], device, s + 1)
+        launches.clear()
+        got = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, save_state=False)  # fmt: skip
+        stages = [stage for stage, _values in launches]
+        assert stages.count("wy_a") == 1, stages
+        assert stages.count("fwd_ho_a") == per_call, stages
+        assert _tape_words(launches) == [0] * per_call, _tape_words(launches)
+        backward = stages[len(_forward_stages(stages)) :]
+        assert cake_chain.wy_stage(arch) in backward, backward
+        assert any(stage.startswith("fwd_h_") for stage in backward), backward
+        launches.clear()
+        oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
+        return _judged({"": got}, oracle, STATE_OUTPUTS)
+
+    _judge(record_property, 491, draw)
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_checkpointed_step_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # a non-reentrant checkpointed step (torch.utils.checkpoint, use_reentrant=False: the first pass stores no tape,
+    # the recompute writes it) and the plain call on the forwards that run fwd_ho_a, from an initial state with a
+    # final-state gradient: o, the final state and every gradient (the initial state's too) of each are judged
+    (heads, seq_lens), _marker = _route_or_skip(route, device, monkeypatch)
+    per_call = 1 if route == "a" else 2
+    word = _fwd_ho_a_taped_word(device)
+    cu = _cu(seq_lens)
+    cu_seqlens = torch.tensor(cu, dtype=torch.int64, device=device)
+    cu_seqlens_cpu = torch.tensor(cu, dtype=torch.int64)
+
+    def layer(q, k, v, g, beta, h):
+        return cake_gdn_nondet(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM), initial_state=h,
+                               output_final_state=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu,
+                               use_qk_l2norm_in_kernel=True)  # fmt: skip
+
+    launches = _record_launch_values(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        want = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        leaves = {
+            n: inputs[n].detach().clone().requires_grad_(True)
+            for n in ("q", "k", "v", "g", "beta")
+        }
+        leaves["h0"] = h0.detach().clone().requires_grad_(True)
+        launches.clear()
+        o, final = checkpoint(layer, *leaves.values(), use_reentrant=False)
+        torch.autograd.backward((o, final), (inputs["do"], dht))
+        torch.cuda.synchronize()
+        words = _tape_words(launches)
+        launches.clear()
+        assert words == [0] * per_call + [word] * per_call, words
+        got = {
+            "o": o.detach(),
+            "final_state": final.detach(),
+            **{"d" + n: leaves[n].grad for n in ("q", "k", "v", "g", "beta")},
+            "dh0": leaves["h0"].grad,
+        }
+        return {"plain": want, "checkpoint": got}
+
+    _judge_forms(record_property, 493, seq_lens, heads, device, forms, beta_dtype=torch.float32, names=STATE_OUTPUTS,
+                 states=True)  # fmt: skip
+
+
 # --------------------------------------------------------------------------- M-share: the backward on the forward's maps
 # The pricing rule's rows on B200 (sm_100a, 148 SMs): the priced saving (us) of the backward's first wave, M-share where
 # it reaches M_SHARE_MIN_SAVING; a row without a middle piece prices none.

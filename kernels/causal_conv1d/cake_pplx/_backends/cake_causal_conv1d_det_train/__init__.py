@@ -71,6 +71,19 @@ Host design (the knobs are keywords; no environment variable):
   an omitted workspace is a zeroed buffer of the call's own (its zeroing is
   captured with the launch), so a graph never shares counters with eager
   calls or with another graph.
+- Inside the token range of a forward small-S row (``cake_jit.FALLBACK_ROWS``
+  / ``DIRECT_ROWS``: C = 576 to 768, by architecture and route) the forward
+  runs the route's static program on the route's plan, or its direct program
+  on the channel tiles of ``cake_jit.DIRECT_PLANS`` with at most one CTA per
+  token block; neither takes counters, so the call zeroes and uses no buffer
+  there (eager or captured), and a passed ``workspace`` is checked and not
+  read.  Each row gives its own token range.  Every architecture and route has
+  a row at each C = 576 to 768.  For most C the first range starts at S = 1.
+  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736:
+  14336) and have only a static range.  Outside a row's range, and where an
+  architecture, route and C have no row, the forward takes its counters from
+  the workspace, as in 0.2.4.  Every forward program writes the same ``y``
+  bits.
 """
 
 from __future__ import annotations
@@ -430,9 +443,10 @@ def _launch(
     that many times the record's untrimmed grid (``launch_grid`` without the
     row), never trimmed to whole channel-tile ranks.  The plan names the
     device's architecture, so a forward row of ``NARROW_TILE_WIDTHS`` runs its
-    width from the architecture's token floor (``cake_jit.NARROW_WIDTH_FLOORS``)
-    and a forward row of ``cake_jit.NARROW_ROW_FLOORS`` (C = 520 to 568) keeps
-    one tile below its own floor.
+    width from the architecture's token floor (``cake_jit.NARROW_WIDTH_FLOORS``),
+    a forward row of ``cake_jit.NARROW_ROW_FLOORS`` (C = 520 to 568) keeps
+    one tile below its own floor, and a forward row of ``cake_jit.DIRECT_ROWS``
+    runs the direct program's tiles (``cake_jit.direct_split``).
     """
 
     arch = _loader.device_arch(device_index)
@@ -568,7 +582,8 @@ def cake_causal_conv1d_det_train_forward_workspace_bytes(
     ``cake_jit.NARROW_WIDTH_FLOORS`` and ``cake_jit.NARROW_ROW_FLOORS``), so
     one buffer serves every route and token count; the size depends on ``C``
     only (``S`` is checked and otherwise unused, as for the backward helper).
-    From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
+    The static and the direct programs of the small-S rows take no counters,
+    so release 0.2.5 keeps 0.2.4's size.  From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
     before), so a buffer sized by an earlier release raises ``ValueError``
     there from the row's token floor.  The buffer must be zero
     before its first launch; every launch leaves it zero, so one buffer serves
@@ -709,7 +724,10 @@ def cake_causal_conv1d_det_train_forward(
         so one buffer serves every later call of one stream).  Two launches
         that may run at once need two buffers.  When omitted the package
         uses a zeroed buffer it keeps per (device, current stream), or a
-        fresh zeroed one inside a CUDA Graph capture.
+        fresh zeroed one inside a CUDA Graph capture.  Inside the token range
+        of a small-S row (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``) the
+        program takes no counters: a passed buffer is checked, then not read,
+        and none is zeroed.
 
     Returns
     -------

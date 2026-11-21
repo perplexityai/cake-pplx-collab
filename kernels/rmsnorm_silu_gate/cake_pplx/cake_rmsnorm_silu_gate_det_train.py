@@ -49,7 +49,11 @@ in the max norm of the error, the median and the largest error of each output
 are at most 1.005 times the naive implementation's, and 0 on every input
 where the naive implementation's is 0.  No output has an error budget of its
 own.  The forward's CTAs each walk at most two
-blocks of 16 rows, and the backward's CTAs, past one wave, claim chunks of row
+blocks of 16 rows; on short inputs whose rows are packed (``x`` and ``z``
+contiguous ``[T, H, 128]``, or one token of head stride 128), up to a cut of
+rows per SM on each architecture (on SM107 not from 17 to 32 rows), each CTA
+runs one block of a few rows with no loop and the same bits.  The
+backward's CTAs, past one wave, claim chunks of row
 blocks from a counter, so a CTA that becomes resident late takes only the
 blocks left.  A backward that computes the weight gradient on up to 256 rows
 runs, with no workspace, one CTA (up to 16 rows) or one thread-block cluster

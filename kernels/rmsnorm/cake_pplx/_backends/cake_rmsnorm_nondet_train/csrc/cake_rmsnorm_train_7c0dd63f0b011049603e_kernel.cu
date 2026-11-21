@@ -742,11 +742,7 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
     sums[rg * 1536 + 1440 + tir] = sums[rg * 1536 + 1440 + tir] + acc[15];
     acc[15] = 0.0f;
     int _min_29 = (((int)num_bids) < (n_chunks) ? ((int)num_bids) : (n_chunks));
-#if __CUDA_ARCH__ == 1070
     int nrep = ((_min_29) < (21) ? (_min_29) : (21));
-#else
-    int nrep = ((_min_29) < (4) ? (_min_29) : (4));
-#endif
     __syncthreads();
     int at_0 = tid;
     float rv_0[2];
@@ -847,11 +843,7 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
     }
     __syncthreads();
     if (flags[2] != 0) {
-#if __CUDA_ARCH__ == 1070
         float buf[42];
-#else
-        float buf[32];
-#endif
         buf[0] = 0.0f;
         if (0 < nrep) {
             {
@@ -889,480 +881,255 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
             }
         }
         buf[4] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_38;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_38) : "l"((const void*)(partial + (6144 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_38) : "l"((const void*)(partial + (192 + tid))) : "memory");
-#endif
                 buf[4] = __uint_as_float(_scalar_bits_38);
             }
         }
         buf[5] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (5 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_39;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_39) : "l"((const void*)(partial + (7680 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_39) : "l"((const void*)(partial + (1728 + tid))) : "memory");
-#endif
                 buf[5] = __uint_as_float(_scalar_bits_39);
             }
         }
         buf[6] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (6 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_40;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_40) : "l"((const void*)(partial + (9216 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_40) : "l"((const void*)(partial + (3264 + tid))) : "memory");
-#endif
                 buf[6] = __uint_as_float(_scalar_bits_40);
             }
         }
         buf[7] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (7 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_41;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_41) : "l"((const void*)(partial + (10752 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_41) : "l"((const void*)(partial + (4800 + tid))) : "memory");
-#endif
                 buf[7] = __uint_as_float(_scalar_bits_41);
             }
         }
         buf[8] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (8 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_42;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_42) : "l"((const void*)(partial + (12288 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_42) : "l"((const void*)(partial + (384 + tid))) : "memory");
-#endif
                 buf[8] = __uint_as_float(_scalar_bits_42);
             }
         }
         buf[9] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (9 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_43;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_43) : "l"((const void*)(partial + (13824 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_43) : "l"((const void*)(partial + (1920 + tid))) : "memory");
-#endif
                 buf[9] = __uint_as_float(_scalar_bits_43);
             }
         }
         buf[10] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (10 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_44;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_44) : "l"((const void*)(partial + (15360 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_44) : "l"((const void*)(partial + (3456 + tid))) : "memory");
-#endif
                 buf[10] = __uint_as_float(_scalar_bits_44);
             }
         }
         buf[11] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (11 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_45;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_45) : "l"((const void*)(partial + (16896 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_45) : "l"((const void*)(partial + (4992 + tid))) : "memory");
-#endif
                 buf[11] = __uint_as_float(_scalar_bits_45);
             }
         }
         buf[12] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (12 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_46;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_46) : "l"((const void*)(partial + (18432 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_46) : "l"((const void*)(partial + (576 + tid))) : "memory");
-#endif
                 buf[12] = __uint_as_float(_scalar_bits_46);
             }
         }
         buf[13] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (13 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_47;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_47) : "l"((const void*)(partial + (19968 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_47) : "l"((const void*)(partial + (2112 + tid))) : "memory");
-#endif
                 buf[13] = __uint_as_float(_scalar_bits_47);
             }
         }
         buf[14] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (14 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_48;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_48) : "l"((const void*)(partial + (21504 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_48) : "l"((const void*)(partial + (3648 + tid))) : "memory");
-#endif
                 buf[14] = __uint_as_float(_scalar_bits_48);
             }
         }
         buf[15] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (15 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_49;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_49) : "l"((const void*)(partial + (23040 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_49) : "l"((const void*)(partial + (5184 + tid))) : "memory");
-#endif
                 buf[15] = __uint_as_float(_scalar_bits_49);
             }
         }
         buf[16] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (16 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_50;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_50) : "l"((const void*)(partial + (24576 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_50) : "l"((const void*)(partial + (768 + tid))) : "memory");
-#endif
                 buf[16] = __uint_as_float(_scalar_bits_50);
             }
         }
         buf[17] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (17 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_51;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_51) : "l"((const void*)(partial + (26112 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_51) : "l"((const void*)(partial + (2304 + tid))) : "memory");
-#endif
                 buf[17] = __uint_as_float(_scalar_bits_51);
             }
         }
         buf[18] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (18 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_52;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_52) : "l"((const void*)(partial + (27648 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_52) : "l"((const void*)(partial + (3840 + tid))) : "memory");
-#endif
                 buf[18] = __uint_as_float(_scalar_bits_52);
             }
         }
         buf[19] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (19 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_53;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_53) : "l"((const void*)(partial + (29184 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_53) : "l"((const void*)(partial + (5376 + tid))) : "memory");
-#endif
                 buf[19] = __uint_as_float(_scalar_bits_53);
             }
         }
         buf[20] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (20 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_54;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_54) : "l"((const void*)(partial + (30720 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_54) : "l"((const void*)(partial + (960 + tid))) : "memory");
-#endif
                 buf[20] = __uint_as_float(_scalar_bits_54);
             }
         }
         buf[21] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (0 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_55;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_55) : "l"((const void*)(partial + (192 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_55) : "l"((const void*)(partial + (2496 + tid))) : "memory");
-#endif
                 buf[21] = __uint_as_float(_scalar_bits_55);
             }
         }
         buf[22] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (1 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_56;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_56) : "l"((const void*)(partial + (1728 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_56) : "l"((const void*)(partial + (4032 + tid))) : "memory");
-#endif
                 buf[22] = __uint_as_float(_scalar_bits_56);
             }
         }
         buf[23] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (2 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_57;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_57) : "l"((const void*)(partial + (3264 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_57) : "l"((const void*)(partial + (5568 + tid))) : "memory");
-#endif
                 buf[23] = __uint_as_float(_scalar_bits_57);
             }
         }
         buf[24] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (3 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_58;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_58) : "l"((const void*)(partial + (4800 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_58) : "l"((const void*)(partial + (1152 + tid))) : "memory");
-#endif
                 buf[24] = __uint_as_float(_scalar_bits_58);
             }
         }
         buf[25] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_59;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_59) : "l"((const void*)(partial + (6336 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_59) : "l"((const void*)(partial + (2688 + tid))) : "memory");
-#endif
                 buf[25] = __uint_as_float(_scalar_bits_59);
             }
         }
         buf[26] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (5 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_60;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_60) : "l"((const void*)(partial + (7872 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_60) : "l"((const void*)(partial + (4224 + tid))) : "memory");
-#endif
                 buf[26] = __uint_as_float(_scalar_bits_60);
             }
         }
         buf[27] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (6 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_61;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_61) : "l"((const void*)(partial + (9408 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_61) : "l"((const void*)(partial + (5760 + tid))) : "memory");
-#endif
                 buf[27] = __uint_as_float(_scalar_bits_61);
             }
         }
         buf[28] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (7 < nrep) {
-#else
-        if (0 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_62;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_62) : "l"((const void*)(partial + (10944 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_62) : "l"((const void*)(partial + (1344 + tid))) : "memory");
-#endif
                 buf[28] = __uint_as_float(_scalar_bits_62);
             }
         }
         buf[29] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (8 < nrep) {
-#else
-        if (1 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_63;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_63) : "l"((const void*)(partial + (12480 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_63) : "l"((const void*)(partial + (2880 + tid))) : "memory");
-#endif
                 buf[29] = __uint_as_float(_scalar_bits_63);
             }
         }
         buf[30] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (9 < nrep) {
-#else
-        if (2 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_64;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_64) : "l"((const void*)(partial + (14016 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_64) : "l"((const void*)(partial + (4416 + tid))) : "memory");
-#endif
                 buf[30] = __uint_as_float(_scalar_bits_64);
             }
         }
         buf[31] = 0.0f;
-#if __CUDA_ARCH__ == 1070
         if (10 < nrep) {
-#else
-        if (3 < nrep) {
-#endif
             {
                 uint32_t _scalar_bits_65;
                 asm volatile("ld.global.cg.b32 %0, [%1];"
-#if __CUDA_ARCH__ == 1070
                     : "=r"(_scalar_bits_65) : "l"((const void*)(partial + (15552 + tid))) : "memory");
-#else
-                    : "=r"(_scalar_bits_65) : "l"((const void*)(partial + (5952 + tid))) : "memory");
-#endif
                 buf[31] = __uint_as_float(_scalar_bits_65);
-#if __CUDA_ARCH__ == 1070
             }
         }
         buf[32] = 0.0f;
@@ -1453,12 +1220,10 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
                 asm volatile("ld.global.cg.b32 %0, [%1];"
                     : "=r"(_scalar_bits_75) : "l"((const void*)(partial + (30912 + tid))) : "memory");
                 buf[41] = __uint_as_float(_scalar_bits_75);
-#endif
             }
         }
         buf[0] = buf[0] + buf[1];
         buf[2] = buf[2] + buf[3];
-#if __CUDA_ARCH__ == 1070
         buf[4] = buf[4] + buf[5];
         buf[6] = buf[6] + buf[7];
         buf[8] = buf[8] + buf[9];
@@ -1467,9 +1232,7 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[14] = buf[14] + buf[15];
         buf[16] = buf[16] + buf[17];
         buf[18] = buf[18] + buf[19];
-#endif
         buf[0] = buf[0] + buf[2];
-#if __CUDA_ARCH__ == 1070
         buf[4] = buf[4] + buf[6];
         buf[8] = buf[8] + buf[10];
         buf[12] = buf[12] + buf[14];
@@ -1479,7 +1242,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[16] = buf[16] + buf[20];
         buf[0] = buf[0] + buf[8];
         buf[0] = buf[0] + buf[16];
-#endif
         int at_w_0 = tid;
         dwbuf[(at_w_0 / 96 / 8 * 96 + at_w_0 % 96) * 8 + at_w_0 / 96 % 8] = buf[0];
         if (0 < nrep) {
@@ -1494,7 +1256,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_0)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_0)) = 0.0f;
         }
@@ -1755,17 +1516,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[37] = buf[37] + buf[41];
         buf[21] = buf[21] + buf[29];
         buf[21] = buf[21] + buf[37];
-#else
-        buf[4] = buf[4] + buf[5];
-        buf[6] = buf[6] + buf[7];
-        buf[4] = buf[4] + buf[6];
-#endif
         int at_w_1 = 192 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_1 / 96 / 8 * 96 + at_w_1 % 96) * 8 + at_w_1 / 96 % 8] = buf[21];
-#else
-        dwbuf[(at_w_1 / 96 / 8 * 96 + at_w_1 % 96) * 8 + at_w_1 / 96 % 8] = buf[4];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_1)) = 0.0f;
         }
@@ -1778,7 +1530,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_1)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_1)) = 0.0f;
         }
@@ -2023,19 +1774,15 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[2] = buf[2] + buf[3];
         buf[4] = buf[4] + buf[5];
         buf[6] = buf[6] + buf[7];
-#endif
         buf[8] = buf[8] + buf[9];
         buf[10] = buf[10] + buf[11];
-#if __CUDA_ARCH__ == 1070
         buf[12] = buf[12] + buf[13];
         buf[14] = buf[14] + buf[15];
         buf[16] = buf[16] + buf[17];
         buf[18] = buf[18] + buf[19];
         buf[0] = buf[0] + buf[2];
         buf[4] = buf[4] + buf[6];
-#endif
         buf[8] = buf[8] + buf[10];
-#if __CUDA_ARCH__ == 1070
         buf[12] = buf[12] + buf[14];
         buf[16] = buf[16] + buf[18];
         buf[0] = buf[0] + buf[4];
@@ -2043,13 +1790,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[16] = buf[16] + buf[20];
         buf[0] = buf[0] + buf[8];
         buf[0] = buf[0] + buf[16];
-#endif
         int at_w_2 = 384 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_2 / 96 / 8 * 96 + at_w_2 % 96) * 8 + at_w_2 / 96 % 8] = buf[0];
-#else
-        dwbuf[(at_w_2 / 96 / 8 * 96 + at_w_2 % 96) * 8 + at_w_2 / 96 % 8] = buf[8];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_2)) = 0.0f;
         }
@@ -2062,7 +1804,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_2)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_2)) = 0.0f;
         }
@@ -2323,17 +2064,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[37] = buf[37] + buf[41];
         buf[21] = buf[21] + buf[29];
         buf[21] = buf[21] + buf[37];
-#else
-        buf[12] = buf[12] + buf[13];
-        buf[14] = buf[14] + buf[15];
-        buf[12] = buf[12] + buf[14];
-#endif
         int at_w_3 = 576 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_3 / 96 / 8 * 96 + at_w_3 % 96) * 8 + at_w_3 / 96 % 8] = buf[21];
-#else
-        dwbuf[(at_w_3 / 96 / 8 * 96 + at_w_3 % 96) * 8 + at_w_3 / 96 % 8] = buf[12];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_3)) = 0.0f;
         }
@@ -2346,7 +2078,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_3)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_3)) = 0.0f;
         }
@@ -2595,29 +2326,20 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[10] = buf[10] + buf[11];
         buf[12] = buf[12] + buf[13];
         buf[14] = buf[14] + buf[15];
-#endif
         buf[16] = buf[16] + buf[17];
         buf[18] = buf[18] + buf[19];
-#if __CUDA_ARCH__ == 1070
         buf[0] = buf[0] + buf[2];
         buf[4] = buf[4] + buf[6];
         buf[8] = buf[8] + buf[10];
         buf[12] = buf[12] + buf[14];
-#endif
         buf[16] = buf[16] + buf[18];
-#if __CUDA_ARCH__ == 1070
         buf[0] = buf[0] + buf[4];
         buf[8] = buf[8] + buf[12];
         buf[16] = buf[16] + buf[20];
         buf[0] = buf[0] + buf[8];
         buf[0] = buf[0] + buf[16];
-#endif
         int at_w_4 = 768 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_4 / 96 / 8 * 96 + at_w_4 % 96) * 8 + at_w_4 / 96 % 8] = buf[0];
-#else
-        dwbuf[(at_w_4 / 96 / 8 * 96 + at_w_4 % 96) * 8 + at_w_4 / 96 % 8] = buf[16];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_4)) = 0.0f;
         }
@@ -2630,7 +2352,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_4)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_4)) = 0.0f;
         }
@@ -2891,17 +2612,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[37] = buf[37] + buf[41];
         buf[21] = buf[21] + buf[29];
         buf[21] = buf[21] + buf[37];
-#else
-        buf[20] = buf[20] + buf[21];
-        buf[22] = buf[22] + buf[23];
-        buf[20] = buf[20] + buf[22];
-#endif
         int at_w_5 = 960 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_5 / 96 / 8 * 96 + at_w_5 % 96) * 8 + at_w_5 / 96 % 8] = buf[21];
-#else
-        dwbuf[(at_w_5 / 96 / 8 * 96 + at_w_5 % 96) * 8 + at_w_5 / 96 % 8] = buf[20];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_5)) = 0.0f;
         }
@@ -2914,7 +2626,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_5)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_5)) = 0.0f;
         }
@@ -3175,17 +2886,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[16] = buf[16] + buf[20];
         buf[0] = buf[0] + buf[8];
         buf[0] = buf[0] + buf[16];
-#else
-        buf[24] = buf[24] + buf[25];
-        buf[26] = buf[26] + buf[27];
-        buf[24] = buf[24] + buf[26];
-#endif
         int at_w_6 = 1152 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_6 / 96 / 8 * 96 + at_w_6 % 96) * 8 + at_w_6 / 96 % 8] = buf[0];
-#else
-        dwbuf[(at_w_6 / 96 / 8 * 96 + at_w_6 % 96) * 8 + at_w_6 / 96 % 8] = buf[24];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_6)) = 0.0f;
         }
@@ -3198,7 +2900,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_6)) = 0.0f;
         }
-#if __CUDA_ARCH__ == 1070
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_6)) = 0.0f;
         }
@@ -3270,17 +2971,8 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         buf[37] = buf[37] + buf[41];
         buf[21] = buf[21] + buf[29];
         buf[21] = buf[21] + buf[37];
-#else
-        buf[28] = buf[28] + buf[29];
-        buf[30] = buf[30] + buf[31];
-        buf[28] = buf[28] + buf[30];
-#endif
         int at_w_7 = 1344 + tid;
-#if __CUDA_ARCH__ == 1070
         dwbuf[(at_w_7 / 96 / 8 * 96 + at_w_7 % 96) * 8 + at_w_7 / 96 % 8] = buf[21];
-#else
-        dwbuf[(at_w_7 / 96 / 8 * 96 + at_w_7 % 96) * 8 + at_w_7 / 96 % 8] = buf[28];
-#endif
         if (0 < nrep) {
             *(reinterpret_cast<float*>(partial) + (at_w_7)) = 0.0f;
         }
@@ -3292,7 +2984,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         }
         if (3 < nrep) {
             *(reinterpret_cast<float*>(partial) + (4608 + at_w_7)) = 0.0f;
-#if __CUDA_ARCH__ == 1070
         }
         if (4 < nrep) {
             *(reinterpret_cast<float*>(partial) + (6144 + at_w_7)) = 0.0f;
@@ -3344,7 +3035,6 @@ kernel_cake_rmsnorm_train_7c0dd63f0b011049603e(__nv_bfloat16* __restrict__ g, __
         }
         if (20 < nrep) {
             *(reinterpret_cast<float*>(partial) + (30720 + at_w_7)) = 0.0f;
-#endif
         }
         __syncthreads();
         int col_0 = tid * 4;

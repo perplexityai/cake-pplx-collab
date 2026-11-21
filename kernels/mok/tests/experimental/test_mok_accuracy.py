@@ -20,7 +20,14 @@ max-norm wins leave it undecided (:func:`tests.cake_naive.judge_case`).
 The oracle and the naive implementation are defined in :mod:`tests.experimental._mok_naive`.  The cases are the fused
 BF16 training cases (three geometries, ring replay with several macrobatches, empty experts, clamped SwiGLU, FP32
 weight-gradient accumulation onto nonzero starts, 36 and 9 local experts at top-8), the fused MXFP8 training cases
-(plain and clamped, BF16 and FP32 weight gradients, 36 and 9 local experts at top-8) and the forward epilogue.
+(plain and clamped, BF16 and FP32 weight gradients, 36 and 9 local experts at top-8), the forward epilogue, and the
+router weight before the down projection on SM100a / SM103a (clamped SwiGLU, FP32 weight gradients): top-2 over the
+three geometries, top-6 over 6 to 96 local experts, half of the weights exactly zero, the requester's input
+distribution at hidden 5120 / intermediate 2304 over 6 and 48 local experts
+(:func:`tests.experimental._mok_reference.production_inputs`, its gate and up exactly at the limit on one route), and
+the adapter's top-6 step at each 384-expert layout as rank 0 of its EP group emulated on one GPU
+(:mod:`tests.experimental._mok_one_gpu`; ``y``, ``dx`` and the router-weight gradients), and at the EP64 and EP8 layouts
+over changing source counts on one workspace (padded and unpadded staging; also the shared weight gradients).
 
 An FP32 weight-gradient accumulator is judged by its increment, ``accumulator - start`` in float64 (exact for these
 values), against the oracle's weight gradient: the same error as the accumulator's against ``start`` plus the exact
@@ -44,13 +51,23 @@ from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import TierJudge, judge_case
 from tests.experimental import _mok_gaps as gaps
 from tests.experimental import _mok_naive as naive
+from tests.experimental._mok_one_gpu import (
+    CHANGED_COUNTS,
+    OneGpuGroup,
+    bound_multiplier,
+    one_gpu_source_workspace,
+    one_gpu_workspace,
+)
 from tests.experimental._mok_reference import (
     mxfp8_quantize,
+    production_inputs,
     require_gpu,
     single_rank_schedule,
 )
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
+backend = cake_package("cake_mok_bf16", "backend")
+workspace_module = cake_package("cake_mok_bf16", "workspace")
 
 GEOMETRIES = ((256, 256, 768), (512, 512, 768), (512, 256, 1536))
 MXFP8_GEOMETRIES = ((512, 256, 768), (512, 512, 1536), (512, 256, 512))
@@ -486,3 +503,329 @@ def test_epilogue_forward_accuracy(record_property, topk, tokens, hidden):
     judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=6100 + tokens + topk)
     judge.record(record_property)
     assert not failures, "\n".join(failures)
+
+
+def _require_before_down():
+    """Skip on a target without the router-weight-before-down kernels (SM100a and SM103a have them)."""
+    require_gpu()
+    if gaps.TARGETS[torch.cuda.get_device_capability()] not in kernels.BEFORE_DOWN_TARGETS:
+        pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+
+
+def _before_down_weights(tokens, topk, zeros):
+    """FP32 router weights in [0, 1.5): every 5th token's first weight and every weight of token 3 exactly 0; with
+    ``zeros`` also every second slot's."""
+    scores = torch.rand(tokens, topk, device="cuda") * 1.5
+    scores[::5, 0] = 0.0
+    scores[3] = 0.0
+    if zeros:
+        scores[:, 1::2] = 0.0
+    return scores
+
+
+def _before_down_case(
+    *,
+    experts=4,
+    topk=2,
+    tokens=512,
+    geometry=GEOMETRIES[0],
+    empty=False,
+    swiglu_limit=0.125,
+    zeros=False,
+    production=False,
+    mini=256,
+    comm=4,
+    seed=8311,
+):
+    """One router-weight-before-down case: forward + backward (clamped SwiGLU, FP32 accumulators from nonzero
+    starts) per draw, every floating output against the oracle beside the naive implementation.  ``production``
+    draws the requester's inputs (:func:`production_inputs`, its routes and a schedule per draw) and, right after the
+    forward (the backward rewrites the context's ring rows while it replays the later macrobatches), checks that the
+    saved gate and up of the resident macrobatch hold values exactly at the limit and beyond it, and that the pinned
+    route's saved gate and up are exactly the limit in every draw that holds its row in the resident macrobatch;
+    the case fails if no draw holds it."""
+    hidden, intermediate, macro = geometry
+    forward = kernels.MoKForward(True, weight_before_down=True)
+    backward = kernels.MoKBackward(True, True, weight_before_down=True)
+    options = dict(device="cuda", dtype=torch.bfloat16)
+    row = torch.arange(tokens, device="cuda")
+    fixed = torch.stack([(row + slot) % (topk if empty else experts) for slot in range(topk)], -1)
+    naive_values = {}
+    pinned_draws = []
+
+    def run(j, draw):
+        if production:
+            p = production_inputs(tokens, hidden, intermediate, experts, topk, swiglu_limit, seed=draw)
+            x, dy, scores, shared, routed, routes = p["x"], p["dy"], p["weights"], p["shared"], p["routed"], p["ids"]
+        else:
+            x = torch.randn(tokens, hidden, **options) * 0.125
+            dy = torch.randn_like(x) * 0.125
+            shared, routed = _weights(experts, hidden, intermediate, options)
+            scores = _before_down_weights(tokens, topk, zeros)
+            routes = fixed
+        s = single_rank_schedule(routes, experts)
+        schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
+        combine = torch.zeros(tokens * topk, hidden, **options)
+        dx_peer = torch.zeros(tokens * topk, hidden, **options)
+        ds_peer = torch.zeros_like(scores)
+        initial, accumulators = _accumulators(shared, routed)
+        weights = (shared[0], routed[0], shared[1], routed[1], shared[2], routed[2])
+        context = forward(
+            x, [x.data_ptr()], combine, [combine.data_ptr()], *weights,
+            *schedule, topk, swiglu_limit, comm, macro, mini, weight_ptrs=[scores.data_ptr()],
+        )  # fmt: skip
+        if production:
+            # The forward's saved context, before the backward rewrites its ring rows.
+            torch.cuda.synchronize()
+            resident = s["schedule"][: min(s["actual"], macro)]
+            defined = resident >= 0
+            gate, up = context[2][: resident.numel()][defined], context[4][: resident.numel()][defined]
+            assert (gate > swiglu_limit).any().item() and (up.abs() > swiglu_limit).any().item(), j
+            assert ((gate == swiglu_limit).sum() + (up.abs() == swiglu_limit).sum()).item() > 0, j
+            assert p["pinned"] is not None
+            token, expert = p["pinned"]
+            slot = token * topk + int((routes[token] == expert).nonzero()[0, 0])
+            position = (resident[defined] == slot).nonzero()
+            if position.numel():
+                pinned_gate, pinned_up = gate[position[0, 0]], up[position[0, 0]]
+                assert pinned_gate[0].item() == swiglu_limit and pinned_up[0].item() == swiglu_limit, j
+                assert pinned_up[1].item() == -swiglu_limit, j
+                pinned_draws.append(j)
+        result = backward(
+            dy, [dy.data_ptr()], dx_peer, [dx_peer.data_ptr()],
+            scores, [scores.data_ptr()], ds_peer, [ds_peer.data_ptr()],
+            *weights, *context[:7], x, [x.data_ptr()], *schedule,
+            topk, swiglu_limit, comm, macro, mini,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        outputs = dict(
+            y_route=combine,
+            y_shared=context[7],
+            dx_route=dx_peer,
+            d_scores=ds_peer,
+            dx_shared=result[0],
+            d_gate_shared=result[2],
+            d_up_shared=result[4],
+            dh_shared=result[6],
+            **_weight_outputs(result, initial),
+        )
+        x_routes, dy_routes = x.repeat_interleave(topk, 0), dy.repeat_interleave(topk, 0)
+        flat = scores.flatten()
+        segments = _segments(s)
+        values = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.routed(
+                x_routes, dy_routes, flat, segments, routed, swiglu_limit, dtype, weight_before_down=True,
+            )  # fmt: skip
+            sh = naive.shared(x, dy, shared, swiglu_limit, dtype)
+            values[dtype] = _reference_values(r, sh)
+        naive_values[j] = values[naive.NAIVE]
+        return outputs, values[naive.ORACLE]
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + hidden + experts)
+    if production and not pinned_draws:
+        failures = [*failures, "pinned route: no draw held its row in the resident macrobatch"]
+    return judge, TierJudge(), failures
+
+
+def _before_down(record_property, **kwargs):
+    _require_before_down()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(("before_down", *sorted(kwargs.items())), lambda: _before_down_case(**kwargs)),
+    )
+
+
+@pytest.mark.parametrize("empty", [False, True], ids=["routed", "empty-experts"])
+@pytest.mark.parametrize("geometry", GEOMETRIES, ids=lambda g: "h{}-i{}-m{}".format(*g))
+def test_before_down_training_accuracy(record_property, geometry, empty):
+    """Top-2 over 4 local experts (the diagnostic layouts), the three geometries, ring replay and empty experts."""
+    _before_down(record_property, geometry=geometry, empty=empty)
+
+
+@pytest.mark.parametrize("experts", [6, 12, 24, 48, 96], ids=lambda e: f"local{e}")
+def test_before_down_top6_accuracy(record_property, experts):
+    """Top-6 over the local expert counts of the 384-expert layouts (EP 64, 32, 16, 8, 4), several macrobatches."""
+    _before_down(record_property, experts=experts, topk=6, geometry=(512, 256, 1536))
+
+
+def test_before_down_zero_weights_accuracy(record_property):
+    """Half of the router weights exactly zero: their routes' outputs and input gradients are zero, their weight
+    gradients are not."""
+    _before_down(record_property, experts=6, topk=6, geometry=(512, 256, 1536), zeros=True)
+
+
+@pytest.mark.parametrize(
+    "experts,geometry,tokens,mini",
+    [(6, (5120, 2304, 1536), 512, 256), (48, (5120, 2304, 4096), 512, 256), (6, (5120, 2304, 4096), 1024, 4096)],
+    ids=["local6", "local48", "local6-mini4096"],
+)
+def test_before_down_production_shape_accuracy(record_property, experts, geometry, tokens, mini):
+    """The requester's inputs (unit-RMS ``x``, ``sqrtsoftplus`` top-6 weights times 1.5 with exact zeros, gate and up
+    past the limit 10 on a small fraction and exactly at it on one route) at hidden 5120 and intermediate 2304, the
+    production layouts' 6 and 48 local experts, several macrobatches; the requester's minibatch of 4,096 rows on 6
+    local experts."""
+    _before_down(
+        record_property, experts=experts, topk=6, geometry=geometry, swiglu_limit=10.0, production=True,
+        tokens=tokens, mini=mini,
+    )  # fmt: skip
+
+
+def _before_down_adapter_case(
+    *, ep, experts, tokens=512, hidden=512, intermediate=256, macro=1536, mini=256, swiglu_limit=0.125, seed=8417
+):  # fmt: skip
+    """The adapter's top-6 router-weight-before-down step (``build_schedule``, ``forward``, ``backward``; clamped
+    SwiGLU, FP32 accumulators, several macrobatches) at a 384-expert layout, as rank 0 of its EP group emulated on one
+    GPU (:mod:`tests.experimental._mok_one_gpu`): every token routes to this rank's experts and reaches them from every
+    emulated peer, so ``y``, ``dx`` and the router-weight gradients are those of a single-rank layer over this rank's
+    experts.  Those three are judged per draw against the oracle beside the naive implementation of that layer; the
+    routed weight gradients sum EP copies of every route and are checked exactly in ``test_mok_bf16.py``."""
+    topk = 6
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    multiplier = bound_multiplier(tokens, topk, ep, experts)
+    capacity = workspace_module.schedule_capacity_for(tokens, topk, ep, multiplier)
+    workspace = one_gpu_workspace(ep, tokens, hidden, topk, capacity, device)
+    config = workspace_module.MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    options = dict(device=device, dtype=torch.bfloat16)
+    naive_values = {}
+
+    def run(j, _draw):
+        x = torch.randn(tokens, hidden, **options) * 0.125
+        dy = torch.randn_like(x) * 0.125
+        shared, routed = _weights(experts, hidden, intermediate, options)
+        scores = _before_down_weights(tokens, topk, False)
+        ids = torch.rand(tokens, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        weights = (*shared, *routed)
+        accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+        schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+        assert int(schedule.num_tokens.item()) > macro  # several macrobatches: backward replays the later ones
+        y, context = functional.forward(
+            config, workspace, schedule, x, scores, *weights, swiglu_limit=swiglu_limit
+        )  # fmt: skip
+        gradients = functional.backward(
+            config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=swiglu_limit,
+            weight_grad_accumulators=accumulators,
+        )  # fmt: skip
+        torch.cuda.synchronize()
+        outputs = dict(y=y.clone(), dx=gradients[0].clone(), d_scores=gradients[1].clone())
+        segments = _segments(single_rank_schedule(ids, experts))
+        values = {}
+        for dtype in (naive.ORACLE, naive.NAIVE):
+            r = naive.layer(x, dy, scores, shared, routed, segments, swiglu_limit, dtype, weight_before_down=True)
+            values[dtype] = {name: r[name] for name in outputs}
+        naive_values[j] = values[naive.NAIVE]
+        return outputs, values[naive.ORACLE]
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + ep + experts)
+    return judge, TierJudge(), failures
+
+
+@pytest.mark.parametrize(
+    "ep,experts", kernels.SCHEDULER_LAYOUTS_384, ids=[f"ep{e}-local{n}" for e, n in kernels.SCHEDULER_LAYOUTS_384]
+)
+def test_before_down_adapter_top6_accuracy(record_property, ep, experts):
+    """The adapter's top-6 step at the 384-expert layouts (EP 4, 8, 16, 32, 64), emulated on one GPU as rank 0 of the
+    group with every route on this rank: ``y``, ``dx`` and the router-weight gradients."""
+    _require_before_down()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(("before_down_adapter", ep, experts), lambda: _before_down_adapter_case(ep=ep, experts=experts)),
+    )
+
+
+#: The shared weight gradients of :func:`tests.experimental._mok_naive.layer` (``dw`` entries 3-5, stacked over one
+#: source rank) and their indexes in the adapter's ``backward`` result.
+SHARED_DW = (("dw_shared_gate", 3, 5), ("dw_shared_up", 4, 6), ("dw_shared_down", 5, 7))
+
+
+def _before_down_adapter_counts_case(
+    *, ep, experts, hidden=512, intermediate=256, macro=1536, mini=256, swiglu_limit=0.125, seed=8423
+):  # fmt: skip
+    """The adapter's top-6 router-weight-before-down step over the source counts of
+    :data:`tests.experimental._mok_one_gpu.CHANGED_COUNTS` in order, on one source workspace whose capacity covers the
+    largest (padded staging of rows ``[count, shared_rows)`` at 1031, 257 and 513 rows, each smaller count after a
+    larger one; unpadded at 768), as rank 0 of its EP group emulated on one GPU (as :func:`_before_down_adapter_case`).
+    Per draw and count: new inputs, a new schedule, ``forward`` and ``backward`` with zeroed FP32 accumulators;
+    ``y``, ``dx``, the router-weight gradients and the shared weight gradients (this rank's own, over the count's rows
+    and the zero rows of the padding) are judged against the oracle beside the naive implementation of the
+    single-rank layer, as ``rows<count>:<output>``."""
+    topk = 6
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(
+        ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+    )
+    functional.communication = OneGpuGroup()
+    workspace, multiplier = one_gpu_source_workspace(ep, experts, CHANGED_COUNTS, hidden, topk, device)
+    config = workspace_module.MoKConfig(
+        fwd_num_comm_sms=8,
+        bwd_num_comm_sms=8,
+        minibatch_size=mini,
+        macrobatch_size=macro,
+        schedule_capacity_multiplier=multiplier,
+    )
+    options = dict(device=device, dtype=torch.bfloat16)
+    naive_values = {}
+
+    def run(j, _draw):
+        shared, routed = _weights(experts, hidden, intermediate, options)
+        weights = (*shared, *routed)
+        outputs, oracle, naive_values[j] = {}, {}, {}
+        for count in CHANGED_COUNTS:
+            x = torch.randn(count, hidden, **options) * 0.125
+            dy = torch.randn_like(x) * 0.125
+            scores = _before_down_weights(count, topk, False)
+            ids = torch.rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+            accumulators = [torch.zeros(w.shape, device=device) for w in weights]
+            schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+            assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro
+            y, context = functional.forward(
+                config, workspace, schedule, x, scores, *weights, swiglu_limit=swiglu_limit
+            )  # fmt: skip
+            gradients = functional.backward(
+                config, workspace, schedule, context, dy, x, scores, *weights, swiglu_limit=swiglu_limit,
+                weight_grad_accumulators=accumulators,
+            )  # fmt: skip
+            torch.cuda.synchronize()
+            values = dict(y=y, dx=gradients[0], d_scores=gradients[1])
+            values.update((name, gradients[index]) for name, _, index in SHARED_DW)
+            segments = _segments(single_rank_schedule(ids, experts))
+            for dtype, target in ((naive.ORACLE, oracle), (naive.NAIVE, naive_values[j])):
+                r = naive.layer(x, dy, scores, shared, routed, segments, swiglu_limit, dtype, weight_before_down=True)
+                reference = dict(y=r["y"], dx=r["dx"], d_scores=r["d_scores"])
+                reference.update((name, r["dw"][index][0]) for name, index, _ in SHARED_DW)
+                target.update((f"rows{count}:{name}", reference[name]) for name in values)
+            outputs.update((f"rows{count}:{name}", value.clone()) for name, value in values.items())
+        return outputs, oracle
+
+    judge, failures = judge_case(run, lambda j, tier: naive_values.pop(j), seed=seed + ep + experts)
+    return judge, TierJudge(), failures
+
+
+@pytest.mark.parametrize("ep,experts", [(64, 6), (8, 48)], ids=["ep64-local6", "ep8-local48"])
+def test_before_down_adapter_top6_changed_counts_accuracy(record_property, ep, experts):
+    """The adapter's top-6 step over changing source counts on one source workspace (1031, 768, 257 and 513 rows; the
+    padded staging at every count that is not a multiple of 256), at the requester's EP64 and EP8 layouts, emulated on
+    one GPU as rank 0 of the group with every route on this rank: per count ``y``, ``dx``, the router-weight gradients
+    and the shared weight gradients."""
+    _require_before_down()
+    _check(
+        record_property,
+        gaps.OUTPUTS,
+        gaps.judged(
+            ("before_down_adapter_counts", ep, experts),
+            lambda: _before_down_adapter_counts_case(ep=ep, experts=experts),
+        ),
+    )

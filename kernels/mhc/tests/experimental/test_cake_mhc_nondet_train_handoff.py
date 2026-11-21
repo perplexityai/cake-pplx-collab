@@ -29,7 +29,7 @@ package makes no bit promise: two runs are compared by format and finiteness, an
 
 * accuracy of one sublayer (default and poisoned caller workspaces, NaN-filled caller outputs) and of the standalone
   collapse, at T = 1, 7 and irregular counts up to 65536 (and of every record of a token-count band of
-  ``collapse_forward``, each launched on its own, on both sides of the band's edge);
+  ``collapse_forward`` or ``collapse_backward``, each launched on its own, on both sides of each edge of the band);
 * two sublayers from the one-hot start through the final collapse (the issue's chain), per the issue owner's answer on
   #79: each sublayer and the final collapse judged on the inputs it received in the chain (every rule of the tier),
   the chain's own outputs against the FP64 chain in the median, and three wrong forms (a collapse with the sublayer's
@@ -92,10 +92,66 @@ STREAMS, MAPPING_ROWS = 4, 24
 SEED = 7900
 # A1 / A9: T = 1, small, irregular and the issue's benchmark points.
 T_ACCURACY = (1, 7, 65, 257, 1000, 2049, 4096, 16263, 16384, 32768, 65536)
-# The standalone collapse; 6655 / 6656 pin both sides of sm_107a's token-count band of ``collapse_forward``.
-T_COLLAPSE = (1, 7, 257, 2049, 6655, 6656, 8191, 8192, 16384, 65536)
+# The standalone collapse; 215 / 216, 383 / 384 and 640 / 641 pin both sides of each edge of sm_107a's token-count
+# band of ``collapse_backward`` (460 / 461 inside its ``collapse_bwd__vjpwa`` band, 656 / 657 inside the last),
+# 2047 / 2048 and 6655 / 6656 both sides of each edge of its band of ``collapse_forward``.
+T_COLLAPSE = (
+    1,
+    7,
+    215,
+    216,
+    257,
+    383,
+    384,
+    460,
+    461,
+    640,
+    641,
+    656,
+    657,
+    2047,
+    2048,
+    2049,
+    6655,
+    6656,
+    8191,
+    8192,
+    16384,
+    65536,
+)
 # Every record of a token-count band of ``collapse_forward``, launched on its own.
-T_COLLAPSE_BAND = (1, 129, 2049, 6655, 6656, 8191, 8192, 16384)
+T_COLLAPSE_BAND = (
+    1,
+    129,
+    1919,
+    1920,
+    2047,
+    2048,
+    2049,
+    4096,
+    6655,
+    6656,
+    8191,
+    8192,
+    16384,
+)
+# Every record of a token-count band of ``collapse_backward``, launched on its own.
+T_COLLAPSE_BWD_BAND = (
+    1,
+    129,
+    215,
+    216,
+    383,
+    384,
+    460,
+    461,
+    512,
+    640,
+    641,
+    656,
+    657,
+    2049,
+)
 # The backward workspace's zero prefix: the ticket region (256 bytes) and the column slab's arrival counts (512 bytes).
 ZERO_PREFIX_BYTES = 768
 _PARAMETER = ("dfn", "dscale", "dbase")
@@ -293,9 +349,10 @@ def test_collapse_matches_fp64(T: int, record_property) -> None:
 
 @pytest.mark.parametrize("T", T_COLLAPSE_BAND)
 def test_every_collapse_forward_record_matches_fp64(T: int, record_property) -> None:
-    """Where ``collapse_forward`` is a token-count band of records (sm_107a: ``collapse_fwd__m2`` below 6656 tokens,
-    ``collapse_fwd__m2_xhnone`` from 6656), every record of the route, launched on its own into a NaN-filled ``U``,
-    writes every word, and its ``U`` is judged against the naive BF16 tier over 32 inputs."""
+    """Where ``collapse_forward`` is a token-count band of records (sm_107a: ``collapse_fwd__m2`` up to 2047 tokens,
+    ``collapse_fwd__m2_xhnone_rv`` from 2048 to 6655, ``collapse_fwd__m2_xhnone`` from 6656), every record of the
+    route, launched on its own into a NaN-filled ``U``, writes every word, and its ``U`` is judged against the naive
+    BF16 tier over 32 inputs."""
     route = loader.route_modules(_arch(), HIDDEN, "collapse_forward")
     if len(route) < 2:
         pytest.skip(f"collapse_forward is one record on {_arch()}")
@@ -314,6 +371,48 @@ def test_every_collapse_forward_record_matches_fp64(T: int, record_property) -> 
         return launches, expected, naive
 
     judge_draws(case, record_property, seed=SEED + 1700 + T)
+
+
+@pytest.mark.parametrize("T", T_COLLAPSE_BWD_BAND)
+def test_every_collapse_backward_record_matches_fp64(T: int, record_property) -> None:
+    """Where ``collapse_backward`` is a token-count band of records (sm_107a: ``collapse_bwd__vjpwa_sp4_mb4`` up to
+    215 tokens, ``collapse_bwd__vjpwa_sp2_mb4`` from 216 to 383, ``collapse_bwd__vjpwa`` from 384 to 640,
+    ``collapse_bwd__vjpwa_pfq2`` from 641), every record of the route, launched on its own (the split records on their
+    grid of 4 T / 2 T CTAs) into a NaN-filled ``dX`` and ``dpre_in``, writes every word, and its ``dX`` and
+    ``dpre_in`` are judged against the naive BF16 tier over 32 inputs; ``dpre_in`` within 2 x the IEEE-FP32
+    evaluation's error (median at every ``T``, largest at ``T >= 257``)."""
+    route = loader.route_modules(_arch(), HIDDEN, "collapse_backward")
+    if len(route) < 2:
+        pytest.skip(f"collapse_backward is one record on {_arch()}")
+    gate = Fp32Gate()
+    dev = _device()
+
+    def case(j: int, s: int):
+        i = make_inputs(T, device=dev, seed=s)
+        launches = []
+        for name in route:
+            dX = torch.full((T, STREAMS, HIDDEN), float("nan"), dtype=BF16, device=dev)
+            dpre_in = torch.full((T, STREAMS), float("nan"), dtype=F32, device=dev)
+            values = {
+                "x": i["X"],
+                "pre_in": i["pre_in"],
+                "du": i["dU"],
+                "dx": dX,
+                "dpre_in": dpre_in,
+                "rows": T,
+            }
+            loader.run_module(name, values, rows=T, device_index=dev.index)
+            torch.cuda.synchronize()
+            for k, v in (("dX", dX), ("dpre_in", dpre_in)):
+                assert not bool(v.isnan().any()), f"{name}: unwritten {k} at T={T}"
+            launches.append({"dX": dX, "dpre_in": dpre_in})
+        expected, naive = collapse_expected_and_naive(i)
+        for out in launches:
+            gate.add(j, out["dpre_in"], i["X"], i["dU"], expected["dpre_in"])
+        return launches, expected, naive
+
+    judge_draws(case, record_property, seed=SEED + 1800 + T)
+    gate.check(record_property, DRAWS)
 
 
 # ----------------------------------------------------------------------------------------------------------------

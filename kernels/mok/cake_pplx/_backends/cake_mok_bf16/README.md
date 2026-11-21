@@ -19,6 +19,13 @@ Shared-expert weight gradients remain source-rank local.
 - **FP32 weight-gradient accumulation** (`fp32_wgrad=True`): backward adds
   every weight-gradient contribution into caller-owned FP32 accumulators.
 - **Unequal per-rank source counts**, including zero, as runtime inputs.
+- **Router weight before the down projection**
+  (`router_weight_position="before_down"`, SM100a and SM103a): each route's
+  FP32 router weight `w` scales the SwiGLU activation `a` before the down
+  projection, `h = BF16(w * a)`, and the routed outputs are summed unweighted;
+  top-k 6 over 384 routed experts (`(4, 96)`, `(8, 48)`, `(16, 24)`,
+  `(32, 12)`, `(64, 6)`) and top-k 2 on the diagnostic layouts, with clamped
+  SwiGLU and FP32 weight-gradient accumulation (see Contract).
 
 The implementation uses standalone generated CUDA sources, loaded prebuilt
 from `aot/` when the package ships them and otherwise built by the package's
@@ -42,6 +49,10 @@ Distributed ranks must share one peer-accessible NVLink domain (peers may span
 hosts of one NVL72 domain).
 
 ```python
+import math
+
+import torch
+
 from cake_pplx.cake_mok_det_train import (
     create_mok_bf16_workspace,
     prepare_mok_bf16,
@@ -75,6 +86,36 @@ y, _ = backend.forward(config, workspace, schedule, x, scores, *weights,
 context = backend.recompute_forward_context(
     config, workspace, schedule, x, *weights[:2], *weights[3:5])
 grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *weights)
+
+# Router weight before the down projection: 384 experts at EP64 (6 local
+# experts), top-6, on a workspace of its own at the worst-case schedule
+# capacity (see Contract). n: this rank's source rows; ids: int64 [n, 6]
+# expert IDs; router_w: FP32 [n, 6] router weights; weights: BF16, 6 routed
+# experts. Every rank must pass the same configuration, so the multiplier
+# comes from max_rows, a bound on every rank's n that all ranks agree on (for
+# example the training configuration's tokens per rank), reserved as
+# source_capacity.
+ep, local, k = 64, 6, 6
+worst = min(k, local) * max_rows * ep + local * 255  # routed rows, padded
+m = math.ceil(worst / (max_rows * k)) / ep
+config, workspace = create_mok_bf16_workspace(
+    group=group, device=device, num_local_tokens=n, hidden_size=5120, topk=k,
+    source_capacity=max_rows, minibatch_size=4096, macrobatch_size=262144,
+    schedule_capacity_multiplier=m,
+)
+backend = prepare_mok_bf16(ep_size=ep, local_experts=local, topk=k, clamped_swiglu=True,
+                           fp32_wgrad=True, router_weight_position="before_down")
+backend.prepare(10.0, save_context=False)  # compile before CUDA Graph capture
+backend.prepare_recompute(10.0)
+schedule = backend.build_schedule(workspace, config, ids, num_local_experts=local)
+accumulators = [torch.zeros(w.shape, device=device) for w in weights]  # FP32
+y, _ = backend.forward(config, workspace, schedule, x, router_w, *weights,
+                       swiglu_limit=10.0, save_context=False)
+context = backend.recompute_forward_context(
+    config, workspace, schedule, x, *weights[:2], *weights[3:5], swiglu_limit=10.0,
+    router_weights=router_w)
+grads = backend.backward(config, workspace, schedule, context, dy, x, router_w, *weights,
+                         swiglu_limit=10.0, weight_grad_accumulators=accumulators)
 ```
 
 `weights` contains shared gate/up/down followed by routed gate/up/down; gate
@@ -103,6 +144,16 @@ while the adapter or a captured graph can use them. Use a separate workspace
 and adapter for concurrent executions. Pass the matching context and schedule
 to backward; retain both while any captured graph uses them.
 
+With `router_weight_position="before_down"` the workspace is unchanged and
+`scores` are the router weights `w` (FP32 `[tokens, topk]`, each `>= 0`; a zero
+weight is allowed). `prepare_mok_bf16` refuses, before it loads a kernel, a
+layout or top-k the mode does not run, `clamped_swiglu=False`,
+`fp32_wgrad=False` and an SM107a device; `forward`, `recompute_forward_context`,
+`backward`, `prepare` and `prepare_recompute` refuse `swiglu_limit=None` and
+MXFP8 routed weights; `recompute_forward_context` requires `router_weights`
+(the forward's). A checkpointing caller wraps forward, recompute and backward
+in its own `torch.autograd.Function`; the package ships no autograd wrapper.
+
 Calling the API is the opt-in. There is no automatic dispatch or AOT
 registration.
 
@@ -114,8 +165,20 @@ activations of the first macrobatch, which stays resident in the forward ring
 E4M3). Backward replays later macrobatches inside the fused kernel. No routed
 expert output is saved: the router-score gradient is fused into SwiGLU
 backward as `dot(d_hidden, hidden) / score`, as in native MoK. Scores must be
-positive; a zero score yields a zero score gradient. A larger macrobatch ring
-uses more memory and replays less in backward.
+positive; a zero score yields a zero score gradient. With
+`router_weight_position="before_down"` the router-weight gradient is
+`dot(dh, a)` (`dh` the gradient of the down projection's input `h`, `a` the
+SwiGLU activation), with no division: it is defined at a zero weight, whose
+route has zero output and zero input gradient. The weights are gathered at
+dispatch into an FP32 row ring, and `d_a = w * dh` before the SwiGLU backward. A
+larger macrobatch ring uses more memory and replays less in backward.
+
+A context serves one `backward`. When the routed rows exceed one macrobatch,
+`backward` replays the later macrobatches into the context's routed ring
+tensors (gate, up and hidden; with three or more macrobatches also the routed
+x), in either router-weight position. Do not read a context after its
+`backward`; call `recompute_forward_context` again before another `backward`
+of the same step.
 
 `backward` returns `dx`, `dscores` and the six weight gradients. The fused
 kernel's routed and shared scratch is released as soon as the launch is
@@ -125,10 +188,12 @@ both precisions, except when the intermediate size is below a third of the
 hidden size and a rank's source rows exceed twice the macrobatch.
 
 `recompute_forward_context(config, workspace, schedule, x, shared_gate,
-shared_up, routed_gate, routed_up, swiglu_limit=None)` dispatches and
-recomputes the gate/up GEMMs and SwiGLU of exactly that context. Pass the same
-schedule, inputs, weights and limit as the checkpointed forward; the returned
-context is bitwise identical to the forward's and interchangeable with it.
+shared_up, routed_gate, routed_up, swiglu_limit=None, *, router_weights=None)`
+dispatches and recomputes the gate/up GEMMs and SwiGLU of exactly that context.
+Pass the same schedule, inputs, weights and limit as the checkpointed forward
+(with `router_weight_position="before_down"` also its router weights, which
+the routed hidden `BF16(w * a)` of the context reads); the returned context is
+bitwise identical to the forward's and interchangeable with it.
 
 ### Context-free forward
 
@@ -182,6 +247,18 @@ device compute capability (10.0, 10.3 or 10.7) and loads its build for that
 exact target; on the JIT path SM107a requires CUDA 13.5 and every generated
 source is checksum-verified before compilation.
 
+The router-weight-before-down kernels (`forward_clamped_wbd`,
+`forward_clamped_noctx_wbd`, `recompute_clamped_wbd`,
+`backward_clamped_fp32_wbd`), the top-k 6 unweighted epilogue
+(`epilogue_backward_6`; top-k 6 has no weighted forward epilogue) and the
+count / rows kernels of the 384-expert layouts are generated for SM100a and
+SM103a only. The forward and recompute take two arguments more than their
+clamped roles (`weight_peers`, the uint64 table of the ranks' router-weight
+buffers, and `row_weights`, the per-call FP32 `[macro_size]` ring); the
+backward takes the clamped FP32 backward's arguments. `prepare_mok_bf16` with
+`router_weight_position="before_down"` refuses an SM107a device before it loads
+a kernel.
+
 The locality-domain (`_domain`) builds of the MoK kernels, which split work
 over the two dies of an SM107a GPU, are not shipped: this package has no such
 library, and no entry point selects one.
@@ -233,14 +310,15 @@ The context is `x_routed`, `gate_shared`, `gate_routed`, `up_shared`,
 and scales); the recomputed context is bitwise identical to the forward's (see
 Context, memory and recompute). The weight gradients are shared and routed
 gate/up/down, or the six FP32 accumulators with `fp32_wgrad=True`. This holds
-for BF16 and MXFP8 routed experts and for plain and clamped SwiGLU.
+for BF16 and MXFP8 routed experts, for plain and clamped SwiGLU and for both
+router-weight positions.
 
 Scope: repeated calls with the same inputs (source tokens `x`, expert IDs,
 scores, per-rank source counts, `dy`), the same weights (and the same MXFP8
 prequantized weights), the same `MoKConfig` values other than the
 communication-SM split (minibatch and macrobatch sizes, schedule capacity), the
-same precision, `swiglu_limit` and `fp32_wgrad`, the same EP group (size and
-rank order), the same package build and the same GPU model (compute capability
+same precision, `swiglu_limit`, `fp32_wgrad` and `router_weight_position`, the
+same EP group (size and rank order), the same package build and the same GPU model (compute capability
 and SM count). Results may differ bitwise across GPU architectures, EP sizes,
 minibatch or macrobatch sizes, precisions, package versions and CUDA
 toolkits.
@@ -276,9 +354,23 @@ across communication-SM splits and under CUDA Graph replay.
   settings; 256 routed experts at EP 4/8/16/32/64 (`(4, 64)`, `(8, 32)`,
   `(16, 16)`, `(32, 8)`, `(64, 4)`); 288 routed experts at EP8
   and EP32 (`(8, 36)`, `(32, 9)`). Top-k is 2 or 8.
-- BF16 inputs, shared weights and outputs; FP32 positive router scores;
-  contiguous int64 expert IDs. Each token selects distinct, valid expert IDs.
-  Scores are already normalized/scaled by the caller.
+- Router-weight positions (`router_weight_position`): the table below. A
+  combination outside it raises before any kernel is loaded or launched:
+  `TypeError` for a position that is not a `str`, an `ep_size`,
+  `local_experts` or `topk` that is not an `int` (a `bool` included) and a
+  `clamped_swiglu` or `fp32_wgrad` that is not a `bool`, in both positions;
+  `ValueError` for every other value.
+
+  | Position | Layouts (EP, local experts) | Top-k | SwiGLU | Weight gradients | Routed weights | Targets |
+  | --- | --- | --- | --- | --- | --- | --- |
+  | `"after_down"` (default) | the layouts above | 2 or 8 | plain or clamped | BF16 or FP32 | BF16 or MXFP8 | SM100a, SM103a, SM107a |
+  | `"before_down"` | `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` | 6 | clamped | FP32 | BF16 | SM100a, SM103a |
+  | `"before_down"` | `(1, 4)`, `(4, 4)` (diagnostic) | 2 | clamped | FP32 | BF16 | SM100a, SM103a |
+
+- BF16 inputs, shared weights and outputs; FP32 router scores (positive with
+  `"after_down"`, nonnegative with `"before_down"`); contiguous int64 expert
+  IDs. Each token selects distinct, valid expert IDs. Scores are already
+  normalized/scaled by the caller.
 - Logical source token counts may differ across ranks and may be zero. Hidden
   and intermediate widths are positive multiples of 256; MXFP8 also requires a
   hidden width that is a multiple of 512. Below CUDA 13.1 the MXFP8 forward
@@ -386,6 +478,23 @@ across communication-SM splits and under CUDA Graph replay.
   spread at most 1.2 %); Rubin BF16 had no consistent gain at EP8.
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
+  The capacity is `T * topk * max(2, ceil(EP * m))` rows for
+  `schedule_capacity_multiplier` `m` and the workspace's physical source rows
+  `T` (the largest rank's source rows, or `source_capacity`, rounded up to the
+  256-row tile, at least 512); every routing fits when
+  `m >= ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local
+  experts), about `(EP + 1) / EP`. The bound decreases as `T` grows, so a
+  multiplier computed from any `T` up to the physical rows also holds; every
+  rank must pass the same `m` (the ranks' configurations are compared at
+  workspace creation), so compute it from a row bound all ranks agree on, such
+  as `source_capacity`. No upper bound is enforced. The 384-expert layouts at this bound (`(64, 6)` and `(8, 48)` at
+  16,384 rows, macrobatch 262,144, minibatch 4,096, every route on one rank)
+  run on one GPU with emulated peers: finite outputs, the same bytes run to
+  run, routed x ring rows past 2^31 bytes checked exactly, `y`, `dx` and the
+  router-weight gradients equal to a 32,768-row macrobatch run, and the routed
+  weight gradients of a step where only tokens that share no expert keep their
+  router weights equal to that run and exactly EP times one BF16 product per
+  element. Multi-GPU runs at these layouts are a separate test.
 - Routed weight gradients are summed across macrobatches in BF16 (or in the
   FP32 accumulators). MXFP8 adds quantization error to the routed outputs and
   gradients; the shared expert path is unchanged.
@@ -418,8 +527,27 @@ SM103a or SM107a device):
   sees enough GPUs of one NVLink domain; run it with the `SLURM_*` task
   variables unset.
 - `tests/experimental/test_cake_mok_det_train_api.py`: the
-  `cake_pplx.cake_mok_det_train` facade (signatures, re-exports and argument
-  forwarding).
+  `cake_pplx.cake_mok_det_train` facade (signatures, the package names it
+  serves, argument forwarding and the refused router-weight combinations).
+- `router_weight_position="before_down"`: in `test_mok_bf16.py` the launchers'
+  arguments against `sources.json` and the refusals before device work (no
+  GPU), the refusal on an SM107a device, and on SM100a / SM103a the fused
+  training at top-2 and top-6 (6 to 96 local experts; another
+  communication-SM split gives the same bytes), zero weights, recompute and
+  the context-free forward, the exact limit, the 384-expert scheduler layouts,
+  the scheduler and the adapter at the worst-case schedule capacity, and the
+  adapter's top-6 step over changing source counts on one workspace (1031,
+  768, 257 and 513 rows: padded and unpadded staging; the bytes of a fresh
+  workspace whatever the rows past the count hold); in `test_mok_accuracy.py`
+  the same cases, the requester's input distribution at H 5120 / I 2304, the
+  adapter's top-6 step at every 384-expert layout and over those changing
+  counts at EP64 and EP8 (one GPU, emulated peers) judged against the naive
+  tier; in `test_mok_distributed.py` the adapter at EP1 over changing source
+  counts, with another communication-SM split and a test-local autograd
+  function;
+  `tests/test_mok_naive_wbd.py` (CPU) the oracle and naive forms.
+  `tests/experimental/report_mok_wbd.py` (a measurement report, not a test)
+  prints the issue's stage-rounded reference errors on those inputs.
 
 The CUDA schedules derive from Cursor Research's Apache-2.0 Mixture of Kittens
 implementation at revision `caeb2963f855c7ad53bb50c8bbf211086405cb98`. Copyright and modification notices are

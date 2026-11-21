@@ -66,6 +66,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "bwd_main_pass_natural",
             "bwd_cast",
             "fwd_scan",
+            "fwd_no_olo",
+            "bwd_delta_no_olo",
+            "fwd_scan_no_olo",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -216,6 +219,41 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": True,
             },
         },
+        "fwd_no_olo": {
+            "library": "cake_dsa_h64_train_b17222dad27ed54be27a",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [384, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
+        "bwd_delta_no_olo": {
+            "library": "cake_dsa_h64_nope_train_ca5f47db0a3e8065ce81",
+            "ffi_entry": "run",
+            "launch": {
+                "block": [256, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 0,
+                "use_pdl": False,
+            },
+        },
+        "fwd_scan_no_olo": {
+            "library": "cake_dsa_h64_train_7e29ce0f6edc6dae144f",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [416, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 231680,
+                "use_pdl": True,
+            },
+        },
     },
     # The native zero-RoPE (NoPE) training program: shared latent K = V of 512
     # dimensions, no rope operands, one combined FP32 dK + dV gradient of 2048 B
@@ -262,7 +300,8 @@ MODULES: dict[str, dict[str, Any]] = {
     # ``nope_fwd`` there -- and, in its backward, the sink-gradient stage
     # (``nope_bwd_dsink``, 256 threads, every architecture of the record) once
     # right after the delta stage.  Stage order = launch order, the sink
-    # stages last.  ``build.json`` carries every library named here
+    # stages last among the default stages, then the ``with_o_lo=False``
+    # stages (``NO_OLO_STAGES``).  ``build.json`` carries every library named here
     # once the export delivers it; ``scripts/check_cake_build_manifests.py``
     # reports a registry library the manifest lacks.
     "cake_dsa_h64_nope_train": {
@@ -281,6 +320,11 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_fwd_sink",
             "nope_bwd_dsink",
             "nope_fwd_scan_sink",
+            "nope_fwd_no_olo",
+            "nope_bwd_delta_no_olo",
+            "nope_fwd_scan_no_olo",
+            "nope_fwd_sink_no_olo",
+            "nope_fwd_scan_sink_no_olo",
         ],
         "key_pass_policy": {
             "l2_budget_bytes": 104857600,
@@ -448,6 +492,65 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": True,
             },
         },
+        "nope_fwd_no_olo": {
+            "library": "cake_dsa_h64_nope_train_3571d6ea545eb531e395",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [320, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
+        "nope_bwd_delta_no_olo": {
+            "library": "cake_dsa_h64_nope_train_ca5f47db0a3e8065ce81",
+            "ffi_entry": "run",
+            "launch": {
+                "block": [256, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 0,
+                "use_pdl": False,
+            },
+        },
+        "nope_fwd_scan_no_olo": {
+            "library": "cake_dsa_h64_nope_train_0f925280bc0271d524dd",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [352, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
+        "nope_fwd_sink_no_olo": {
+            "library": "cake_dsa_h64_nope_train_4ae850190859722841c2",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [320, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
+        "nope_fwd_scan_sink_no_olo": {
+            "library": "cake_dsa_h64_nope_train_e120e5ca8bd3ae1fa358",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [352, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
     },
 }
 
@@ -471,7 +574,8 @@ STAGE_PREFIX = {PROGRAM: "", NOPE_PROGRAM: "nope_"}
 NOPE_STAGES = tuple(f"{STAGE_PREFIX[NOPE_PROGRAM]}{stage}" for stage in STAGES)
 NOPE_FORWARD_STAGES = NOPE_STAGES[:1]
 # The scanner-warp builds of the two forwards and of the NoPE forward's sink
-# build: on the architectures of their stage entries' ``arches``
+# build, then those of their ``with_o_lo=False`` builds (``NO_OLO_STAGES``):
+# on the architectures of their stage entries' ``arches``
 # (``sm_107a``) the host runs them in place of the forward stage; the
 # device's architecture alone chooses.  Same arguments, grid and outputs as
 # the forward they replace.
@@ -479,6 +583,9 @@ SCAN_STAGES = {
     "fwd": "fwd_scan",
     "nope_fwd": "nope_fwd_scan",
     "nope_fwd_sink": "nope_fwd_scan_sink",
+    "fwd_no_olo": "fwd_scan_no_olo",
+    "nope_fwd_no_olo": "nope_fwd_scan_no_olo",
+    "nope_fwd_sink_no_olo": "nope_fwd_scan_sink_no_olo",
 }
 # The NoPE program's trainable-sink stages: the forward's sink build, which runs in place of ``nope_fwd`` when a call
 # passes a sink (same arguments plus ``sink``, same grid and outputs; its ``lse`` includes the sink; its scanner-warp
@@ -487,12 +594,29 @@ SCAN_STAGES = {
 NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
 NOPE_DSINK_STAGE = "nope_bwd_dsink"
 NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
-STAGES_OF = {
+# The stages a call with ``with_o_lo=False`` runs in place of the default ones: the forward builds that leave the
+# ``o_lo`` operand unwritten and the delta that reads ``out`` alone (same arguments and grid as the default stage).
+# Each record lists them after its default stages, in their order.
+NO_OLO_STAGES = {
+    "fwd": "fwd_no_olo",
+    "bwd_delta": "bwd_delta_no_olo",
+    "fwd_scan": "fwd_scan_no_olo",
+    "nope_fwd": "nope_fwd_no_olo",
+    "nope_bwd_delta": "nope_bwd_delta_no_olo",
+    "nope_fwd_scan": "nope_fwd_scan_no_olo",
+    "nope_fwd_sink": "nope_fwd_sink_no_olo",
+    "nope_fwd_scan_sink": "nope_fwd_scan_sink_no_olo",
+}
+_DEFAULT_STAGES_OF = {
     PROGRAM: STAGES + (SCAN_STAGES["fwd"],),
     NOPE_PROGRAM: NOPE_STAGES
     + (SCAN_STAGES["nope_fwd"],)
     + NOPE_SINK_STAGES
     + (SCAN_STAGES[NOPE_SINK_FORWARD_STAGE],),
+}
+STAGES_OF = {
+    program: order + tuple(NO_OLO_STAGES[s] for s in order if s in NO_OLO_STAGES)
+    for program, order in _DEFAULT_STAGES_OF.items()
 }
 
 

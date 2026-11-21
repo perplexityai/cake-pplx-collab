@@ -6,7 +6,11 @@ The public, experimental-marked entry points are re-exported by
 :mod:`cake_pplx.cake_mok_det_train`; this module imports nothing outside this package.
 """
 
+from . import _kernels
+
 MOK_PRECISIONS = ("bf16", "mxfp8")
+# The router-weight positions of ``prepare_mok_bf16`` (a facade name).
+ROUTER_WEIGHT_POSITIONS = _kernels.ROUTER_WEIGHT_POSITIONS
 
 # Imbalance-aware communication split, keyed by device compute capability, SM
 # count and routed precision. Only devices with a measured gain have a row;
@@ -175,7 +179,13 @@ def resolve_imbalance_threshold(precision, device=None):
 
 
 def prepare_mok_bf16(
-    *, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False
+    *,
+    ep_size=16,
+    local_experts=16,
+    topk=8,
+    clamped_swiglu=False,
+    fp32_wgrad=False,
+    router_weight_position="after_down",
 ):
     """Prepare the explicit Cake MoK training backend.
 
@@ -196,10 +206,31 @@ def prepare_mok_bf16(
     adds every weight gradient into caller-owned FP32 accumulators passed as
     ``weight_grad_accumulators``.
 
+    ``router_weight_position`` (one of :data:`ROUTER_WEIGHT_POSITIONS`)
+    places each route's FP32 router weight ``w``. ``"after_down"`` (default)
+    weights the routed expert's output in the combine,
+    ``y = S(x) + sum_k w_k E_k(x)``. ``"before_down"`` weights the SwiGLU
+    activation ``a`` before the down projection, ``h = BF16(w * a)``, and sums
+    the routed outputs unweighted; its router-weight gradient is
+    ``dot(dh, a)`` (``dh`` the gradient of ``h``), defined at a zero weight.
+    ``"before_down"`` runs clamped SwiGLU only (``clamped_swiglu=True`` and a
+    ``swiglu_limit`` on every call), BF16 routed weights only, FP32
+    weight-gradient accumulation only (``fp32_wgrad=True``), on sm_100a and
+    sm_103a; ``recompute_forward_context`` then takes the forward's
+    ``router_weights``.
+
     Prepare and warm up outside graph capture. Supported scheduler layouts
-    (EP, local experts) are (1, 4) and (4, 4) for diagnostics, 256 routed
-    experts at EP 4/8/16/32/64 and 288 routed experts at EP 8/32, with top-k
-    2 or 8. Tokens, hidden/intermediate widths and per-rank source counts
+    (EP, local experts) are (1, 4) and (4, 4) for diagnostics (top-k 2 in
+    both positions, top-k 8 with ``"after_down"``), 256 routed experts at EP
+    4/8/16/32/64 and 288 routed experts at EP 8/32 with top-k 2 or 8
+    (``"after_down"``), and 384 routed experts at EP 4/8/16/32/64 ((4, 96),
+    (8, 48), (16, 24), (32, 12), (64, 6)) with top-k 6 (``"before_down"``).
+    Any other combination raises before any kernel is loaded or launched:
+    ``TypeError`` for a position that is not a ``str``, an ``ep_size``,
+    ``local_experts`` or ``topk`` that is not an ``int`` (a ``bool``
+    included) and a ``clamped_swiglu`` or ``fp32_wgrad`` that is not a
+    ``bool``, in both positions; ``ValueError`` for every other value.
+    Tokens, hidden/intermediate widths and per-rank source counts
     remain runtime values subject to the documented alignment constraints.
     This is a synthetic training experiment, with no full-model or optimizer
     integration.
@@ -212,6 +243,7 @@ def prepare_mok_bf16(
         topk,
         clamped_swiglu=clamped_swiglu,
         fp32_wgrad=fp32_wgrad,
+        router_weight_position=router_weight_position,
     )
 
 
@@ -242,6 +274,14 @@ def create_mok_bf16_workspace(
     a small toy ring; see the backend README for capacity and reuse rules.
     The same workspace serves BF16 and MXFP8 routed experts.
     Call outside CUDA Graph capture; retain the workspace for every replay.
+    A routed-row overflow traps the kernel: a ``schedule_capacity_multiplier``
+    of at least ``ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP``
+    (``E`` local experts, ``T`` the physical source rows, at least the
+    largest rank's source rows or ``source_capacity``, ``EP`` the group
+    size; about ``(EP + 1) / EP``) holds every routing; any positive
+    multiplier is accepted. Every rank passes the same configuration, so
+    compute the multiplier from a row bound all ranks agree on, such as
+    ``source_capacity`` (the bound decreases as ``T`` grows).
 
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)

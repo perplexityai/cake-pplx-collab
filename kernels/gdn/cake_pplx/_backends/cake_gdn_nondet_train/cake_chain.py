@@ -3375,8 +3375,8 @@ def _launch_fwd_ho(arch, qn, kn, w, u, g_cs, initial_state, meta, num_heads, num
 # ``fwd_ho``: ``wy_a``, the WY A producer (``A = bf16(X)``, ``X = (I + L)^-1`` of every chunk and value head by a
 # tcgen05 product and TF32x3 merges, within half a BF16 ulp of the FP64 ``X``, beside the prep's rstd_q / rstd_k / g_cs
 # / qn / kn bits; one persistent CTA per SM over the (chunk, key head) items), and ``fwd_ho_a``, the fused scan and
-# output on that A, qn and kn (``u = bf16(A bf16(beta v))`` and ``w = bf16(A bf16(beta 2^g kn))`` formed in the CTA at
-# the deterministic forward's rounding points; one CTA per (segment, value head) on ``fwd_ho``'s walk).  ``fwd_ho_a``
+# output on that A, qn and kn (``u = A bf16(beta v)`` in FP32, ``w = bf16(A bf16(beta 2^g kn))`` formed in the CTA, w at
+# the deterministic forward's rounding point; one CTA per (segment, value head) on ``fwd_ho``'s walk).  ``fwd_ho_a``
 # writes the tape's h / v_new / w (:data:`FWD_A_TAPE`) when the call keeps a tape and none when it keeps none
 # (:func:`_forward_tape`); o and the final state are the same bits either way.  The tape is the ``T_full`` level's in
 # the same layouts, so the backward reads it unchanged (u is never formed in memory: its entry is a placeholder, as
@@ -3708,11 +3708,11 @@ FWD_FUSED_TAPE = {"h": 1, "v_new": 2}
 # On an architecture of ``FWD_SPLIT_A_ARCHS`` the split forward runs on wy_a's A alone (no WY stage, u and w never
 # formed in memory): both waves are ``fwd_ho_a`` (the serial route's fused scan and output, with the h / v_new / w
 # tapes of :data:`FWD_A_TAPE`) on the split tables, and the middle pieces' maps are ``fwd_summary_a`` (the same maps
-# and layout as ``fwd_summary``, u and w formed in the CTA).  ``fwd_ho_a`` has no ``split_out``: wave 1 stores the end
-# state of each first piece as its sequence's final state, which is copied into the B half of the segment state, the
-# first pieces' flags zeroed, before the stitch.  B200 (148 SMs, CUPTI, cold L2, the issue row of three sequences of
-# 131071 / 87531 / 43385 tokens at HV 6): 145-193 us less per taped forward and 193-238 us less per forward without a
-# tape than the waves on the WY stage's w / u.
+# and layout as ``fwd_summary``, u and w formed in the CTA, u rounded to BF16 where ``fwd_ho_a`` keeps it in FP32).
+# ``fwd_ho_a`` has no ``split_out``: wave 1 stores the end state of each first piece as its sequence's final state,
+# which is copied into the B half of the segment state, the first pieces' flags zeroed, before the stitch.  B200 (148
+# SMs, CUPTI, cold L2, the issue row of three sequences of 131071 / 87531 / 43385 tokens at HV 6): 145-193 us less per
+# taped forward and 193-238 us less per forward without a tape than the waves on the WY stage's w / u.
 FWD_SPLIT_A_ARCHS = ("sm_100a", "sm_103a")
 # the shortest piece (chunks, the planned piece length) whose split forward runs on wy_a's A, per architecture (none
 # listed: every split forward).  Ratios are A-form / W-form time (below 1 the A form is faster), CUPTI, cold L2.  GB300
@@ -5543,7 +5543,8 @@ def _backward_chain(
     if initial_state is None:
         initial_state = forward.get("initial_state")
     has_initial_state = initial_state is not None
-    # u is read only to rebuild h / v_new (a T_full tape keeps w, h and v_new without u)
+    # u is read only to rebuild h / v_new (a T_full tape keeps w, h and v_new without u); the rebuilt u is the WY
+    # stage's, rounded to BF16, where fwd_ho_a keeps u in FP32
     rebuild_state = forward.get("h") is None or forward.get("v_new") is None
     if rebuild_state or forward.get("w") is None:
         ex.refuse("the tape rebuilds the state")

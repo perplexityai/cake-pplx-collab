@@ -5802,6 +5802,85 @@ def test_fwd_split_matches_the_fp64_recurrence(
     _judge(record_property, draw, OUTPUT_NAMES + ("final_state", "dh0"), seed=421)
 
 
+# the forwards that run fwd_ho_a: the serial A form and the split forward on wy_a's A
+FWD_HO_A_ROUTES = ("a", "split_a")
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_without_a_tape_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # save_state=False on the forwards that run fwd_ho_a: fwd_ho_a stores no tape (word 0), and the backward rebuilds
+    # w, h and v_new with the WY stage on the tape's A (u rounded to BF16, as in fwd_ho_a) and the forward scan; o,
+    # the final state and every gradient (the initial state's too) judged
+    heads, seq_lens = _fwd_route(route, device, monkeypatch)
+    arch = _current_arch()
+    launches = _record_launch_scalars(monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+        h0, dht = _state_pair(seq_lens, heads, device, s + 1)
+        launches.clear()
+        got = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, save_state=False)  # fmt: skip
+        stages = [stage for stage, _values in launches]
+        _assert_fwd_route(stages, route)
+        words = _tape_words(launches, "fwd_ho_a")
+        assert words == [0] * (1 if route == "a" else 2), words
+        backward = stages[len(_forward_stages(stages)) :]
+        assert cake_chain.wy_stage(arch) in backward, backward
+        assert any(stage.startswith("fwd_h_") for stage in backward), backward
+        return {"": got}, inputs, seq_lens, {"initial_state": h0, "dht": dht}
+
+    _judge(record_property, draw, OUTPUT_NAMES + ("final_state", "dh0"), seed=491)
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_checkpointed_step_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # a non-reentrant checkpointed step (torch.utils.checkpoint, use_reentrant=False: the first pass stores no tape,
+    # the recompute writes it) and the plain call on the forwards that run fwd_ho_a, from an initial state with a
+    # final-state gradient: o, the final state and every gradient (the initial state's too) of each judged
+    # ("plain.*", "checkpoint.*")
+    heads, seq_lens = _fwd_route(route, device, monkeypatch)
+    names = OUTPUT_NAMES + ("final_state", "dh0")
+    cu_seqlens, cu_seqlens_cpu = _cu_tensors(seq_lens, device)
+    launches = _record_launch_scalars(monkeypatch)
+    per_call = 1 if route == "a" else 2
+
+    def layer(q, k, v, g, beta, h):
+        return cake_gdn_det(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM), initial_state=h,
+                            output_final_state=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu,
+                            use_qk_l2norm_in_kernel=True)  # fmt: skip
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+        h0, dht = _state_pair(seq_lens, heads, device, s + 1)
+        plain = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        leaves = {
+            n: inputs[n].detach().clone().requires_grad_(True)
+            for n in ("q", "k", "v", "g", "beta")
+        }
+        leaves["h0"] = h0.detach().clone().requires_grad_(True)
+        launches.clear()
+        o, final = checkpoint(layer, *leaves.values(), use_reentrant=False)
+        torch.autograd.backward((o, final), (inputs["do"], dht))
+        torch.cuda.synchronize()
+        _assert_fwd_route([stage for stage, _values in launches], route, calls=2)
+        words = _tape_words(launches, "fwd_ho_a")
+        assert words == [0] * per_call + [_taped_word(route)] * per_call, words
+        ckpt = {
+            "o": o.detach(),
+            "final_state": final.detach(),
+            **{"d" + n: leaves[n].grad for n in ("q", "k", "v", "g", "beta")},
+            "dh0": leaves["h0"].grad,
+        }
+        routes = {"plain": plain, "checkpoint": ckpt}
+        return routes, inputs, seq_lens, {"initial_state": h0, "dht": dht}
+
+    _judge(record_property, draw, names, seed=493)
+
+
 # (route, layout) of the accuracy tests beside the prep forward: every layout of the route's cases
 FWD_ACCURACY_CASES = tuple(("a", case) for case in sorted(FWD_A_CASES)) + tuple(
     (route, case) for route in FWD_SPLIT_ROUTES for case in sorted(FWD_SPLIT_CASES)
