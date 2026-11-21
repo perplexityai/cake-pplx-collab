@@ -286,21 +286,21 @@ its unpaired unit, a key-range split to narrow) with `n_split = 1`, at the
 decided tile unroll where its program is registered, else the smallest
 registered one (`sm_100a` and `sm_103a` register `u1`; `sm_107a` also
 registers the narrow `u2` program); then the finalize orders `indices` as in
-the plain call.  The block entries follow the
-scan's candidate buffers and ticket tail in the workspace: `blk_cap =
-ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
-`ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
-`Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
-segment of the call: a row with more older blocks than `blk_cap` stops the
-kernel with a device-side trap.
+the plain call.  The block entries follow the scan's candidate buffers and
+ticket tail in the workspace: `blk_cap = ceil(W / 8) - 1` entries of 8 bytes
+per query slot of the grid when `ceil(W / 8) > 2048`, else none, `W` being
+`max_seqlen_k` when given, else `Tkv`.  With candidate blocks `max_seqlen_k`
+therefore bounds every key segment of the call: a row with more older blocks
+than `blk_cap` stops the kernel with a device-side trap.
 `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
 bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
 `scan_blocks` programs draw their work units from a 16-byte ticket block
 passed as an argument (registry `ticket_arg_arches`), as the plain call's
-ticket-argument programs there do: a prepared runner whose scan draws owns
-that block, zeroed once at prepare, outside the reported bound; the eager
-entry uses the first 16 bytes of the workspace's ticket tail instead.  An
-architecture without a `scan_blocks` program raises `NotImplementedError`.
+ticket-argument programs there do ("No host synchronization" under "Workspace
+and host behaviour"): a prepared runner whose scan draws owns that block,
+zeroed once at prepare, outside the reported bound; the eager entry uses the
+first 16 bytes of the workspace's ticket tail instead.  An architecture
+without a `scan_blocks` program raises `NotImplementedError`.
 
 ## Candidate-restricted top-k
 
@@ -414,14 +414,22 @@ that writes the registry verifies the record against them before it is frozen.
   count and the strides.  The eager entry point allocates the outputs and the
   workspace (unless supplied) through the caching allocator; the scan binding
   zeroes the ticket tail of a supplied workspace right before every scan
-  launch, in the same host call (none on a static call:
-  where the shape alone bounds the work units by the grid,
-  `cake_policy.ticket_static_path`, the scan never touches the ticket word;
-  none for a program of the `static_scan_kinds` of its form's record, which
-  keeps the static unit enumeration on every call: on `sm_107a` every FP8
-  program);
-  the prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates nothing at launch
-  and is CUDA-graph capturable.
+  launch, in the same host call (none on a static call: where the shape alone
+  bounds the work units by the grid, `cake_policy.ticket_static_path`, the
+  scan never touches the ticket word; none for a program of the
+  `static_scan_kinds` of its form's record, which keeps the static unit
+  enumeration on every call: on `sm_107a` every FP8 program; for a program
+  that reads a ticket argument, only the word of its ticket block, below); the
+  prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates
+  nothing at launch and is CUDA-graph capturable.
+  * On `sm_107a`, a scan program listed in `ticket_arg_arches` draws from a
+    16-byte ticket block passed as an argument instead of the tail.  A
+    prepared runner owns such a block, zeroed once at prepare, outside the
+    reported workspace.  The eager entry passes the first 16 bytes of the
+    workspace's tail instead, and the scan binding zeroes its ticket word
+    right before the launch.  The `:lsf` copies of such programs still keep
+    the segment order in the tail; every launch writes it before it reads it,
+    so it needs no zeroing.
 * **Launch structure**: scan, optional merge, finalize (see above).  No
   `[T, Tkv]` matrix is materialized.
 
@@ -480,33 +488,37 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
 
 The candidate-block call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, plans at the request's shapes on every architecture,
-the registered program of every candidate-block plan on a dense grid of
-shapes and `top_k` up to 2047, argument checks and the refusal of an
-architecture whose registry lacks the programs; on the GPU, the exact sets of
-`indices` and `candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
-packed layouts), sampled rows at the request's shapes, the Gaussian rule with
-the scores judged against the naive tier, containment, bitwise repetition and
-the plain call's bits, the caller-owned workspace and outputs, the argument
+FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, plans at the request's shapes on every architecture (on `sm_107a`
+the expected programs), the registered program of every candidate-block plan
+on a dense grid of shapes and `top_k` up to 2047, argument checks and the
+refusal of an architecture whose registry lacks the programs; on the GPU, the
+exact sets of `indices` and `candidate_blocks` against the oracle on
+MXFP4-grid inputs (six cases, two packed layouts), sampled rows at the
+request's shapes, the Gaussian rule with the scores judged against the naive
+tier, containment, bitwise repetition and the plain call's bits (also at
+`top_k` 2044 and 2047; at 2044 with the persistent rank finalize on
+`sm_107a`), a prepared runner that draws its work units on a poisoned
+caller-owned workspace, the caller-owned workspace and outputs, the argument
 checks and the absence of host synchronization.  The benchmark's
 `--rows candidates` times the call next to the plain call at the request's
 shapes.
 
 The candidate-restricted call has its own suite,
-`tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, the plan and its workspace bound at the request's shapes,
-argument checks and the refusal of an architecture whose registry lacks the
-program; on the GPU, the exact sets against
-the oracle on MXFP4-grid inputs (six cases, six kinds of candidate rows, two
-packed layouts), the unrestricted sets from the source layer's own candidate
-blocks and from every visible block, keys outside the pool that never count,
-sampled rows at the request's shapes, the Gaussian rule with the scores judged
-against the naive tier, bitwise repetition, the caller-owned workspace and
-outputs, the argument checks and the absence of host synchronization.  The
-benchmark's `cake_in` arm on `--rows candidates` times the call next to the
-plain call.
+`tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with
+the FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, the plan and its workspace bound at the request's shapes, argument
+checks and the refusal of an architecture whose registry lacks the program; on
+the GPU, the exact sets against the oracle on MXFP4-grid inputs (six cases,
+six kinds of candidate rows, two packed layouts), the unrestricted sets from
+the source layer's own candidate blocks and from every visible block, keys
+outside the pool that never count, sampled rows at the request's shapes, the
+Gaussian rule with the scores judged against the naive tier, bitwise
+repetition, the caller-owned workspace and outputs, the argument checks and
+the absence of host synchronization.  The benchmark's `cake_in` arm on
+`--rows candidates` times the call next to the plain call.
 
 Tests: `tests/experimental/test_cake_dsa_indexer_det_train.py` (the backend suite, which
 imports the package only through `tests/cake/test_helpers/cake_package.py`),

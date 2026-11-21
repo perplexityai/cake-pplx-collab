@@ -5909,10 +5909,12 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
             if key.startswith("scan_blocks:"):
                 twin = keys["scan:" + key.split(":", 1)[1]]
                 reads = cake_backend.reads_ticket_word(name, arch)
-                assert reads == (
-                    arch in cake_jit.PROGRAMS[name].get("ticket_arg_arches", ())
-                ), (arch, key)
                 assert reads == cake_backend.reads_ticket_word(twin, arch), (arch, key)
+                # a BF16 program, counted with the scan programs below: on an architecture with a reader it reads
+                # its TicketWord unless its kind is static
+                kind = key.split(":")[1]
+                static = set(policy_for(arch, cake_policy.BF16).static_scan_kinds)
+                readers.setdefault(arch, []).append((reads, kind in static))
                 continue
             if not key.startswith("scan:"):
                 continue

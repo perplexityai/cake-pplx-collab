@@ -66,6 +66,8 @@ TOP_K = 512
 CAND_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # the persistent grids (SM counts) of the devices of each architecture
 GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212, 216)}
+# the refusal of a plan on a registry without the ``cand`` program
+CAND_REFUSAL = "no candidate-restricted top-k program"
 # the request's shapes: T = 16,384 queries at the tail of one document of 16,384 / 65,536 / 262,144 keys, and the
 # packed layout of eight segments (T = 16,231, Tkv = 268,757)
 P1_SEG_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
@@ -397,16 +399,22 @@ def test_plan_and_workspace_bound(arch, shape):
 @pytest.mark.parametrize("arch", CAND_ARCHES)
 def test_architecture_without_the_program_is_refused(arch, monkeypatch):
     """An architecture whose registry has no ``cand`` program (here the registry of ``arch`` without its ``cand``
-    key): the plan and the workspace bound raise ``NotImplementedError``."""
+    key): the plan and the workspace bound raise the candidate-restricted plan's ``NotImplementedError``, and the
+    plain call's plan is unaffected."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     keys = cake_backend.PROGRAM_KEYS[arch]
     stripped = {key: name for key, name in keys.items() if key != CAND_KEY}
     assert len(stripped) == len(keys) - 1
     monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, stripped)
+    grid = GRIDS[arch][0]
     for fn in (plan_in_candidates, in_candidates_workspace_size):
-        with pytest.raises(NotImplementedError):
-            fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=GRIDS[arch][0])
+        with pytest.raises(NotImplementedError, match=CAND_REFUSAL):
+            fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid)
+    plain = cake_backend.plan_dsa_indexer_nondet_topk(
+        16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid
+    )
+    assert plain.scan_key in stripped
 
 
 @pytest.mark.cpu_only

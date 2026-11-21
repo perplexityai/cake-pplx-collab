@@ -19,8 +19,9 @@ Backend tests of the candidate-block call of the non-deterministic Cake DSA inde
 host plan at the request's shapes and on a dense grid of call geometries, the call's argument checks and the refusal
 of an architecture whose registry lacks the programs (CPU), then on an SM100 / SM103 / SM107 device the exact sets
 against the FP64 oracle (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs, the Gaussian rule,
-the containment of every id in a returned block, the repetition of the sets and the alert under torch's deterministic algorithms, the caller-owned workspace and outputs, and the absence of
-host synchronization.
+the containment of every id in a returned block, the repetition of the sets and the plain top-k call's sets (also at ``top_k``
+2044 and 2047), a prepared runner that draws its work units on a poisoned caller-owned workspace, the alert under torch's
+deterministic algorithms, the caller-owned workspace and outputs, and the absence of host synchronization.
 """
 
 import contextlib
@@ -85,6 +86,25 @@ SHAPES = {
     "tail256k": ((16384,), (262144,)),
     "packed8": (P1_SEG_Q, P1_SEG_K),
 }
+# the ``scan_blocks`` program of each request shape on sm_107a, on both grids, with and without ``max_seqlen_k``
+CB_KEYS_AT_THE_REQUEST_SHAPES = {
+    "sm_107a": {
+        "tail16k": f"{CB_ROLE}:l6:u1:s0:f1",
+        "tail64k": f"{CB_ROLE}:l6:u1:s0:f0",
+        "tail256k": f"{CB_ROLE}:l6:u1:s0:f0",
+        "packed8": f"{CB_ROLE}:l6:u1:s0:f0",
+    },
+}
+# the refusal of a plan whose unit no registered ``scan_blocks`` program serves
+CB_REFUSAL = "no registered scan_blocks program serves"
+# more work units than any grid of the architectures (8,192 queries: 2,048 narrow or 1,366 l6 units), so the scan
+# draws its units from a ticket word
+DRAWING_SHAPE = ([8192], [32768])
+# the architectures whose ``scan_blocks`` programs draw from their TicketWord argument (registry ``ticket_arg_arches``)
+TICKET_WORD_ARCHES = ("sm_107a",)
+# the largest multiple of 4 below 2047: the deterministic package's rank finalize moves such rows in bulk (on sm_107a
+# with its persistent program); this package's scan writes the rows itself
+PERSIST_TOP_K = 2044
 # the exact layouts: default offsets (rows with fewer than, exactly and more than 2048 visible blocks, n % 8 != 0,
 # unequal query and key lengths, an empty query segment, a segment without keys) and explicit offsets (positive,
 # beyond the keys, negative: rows without visible keys)
@@ -280,16 +300,18 @@ def test_registry_ships_the_candidate_block_programs():
 @pytest.mark.parametrize("shape", sorted(SHAPES))
 @pytest.mark.parametrize("bound", ["max_seqlen_k", "num_keys"])
 def test_plan_at_the_request_shapes(arch, shape, bound):
-    """Per grid of the architecture: the plan runs a registered ``scan_blocks`` program unsplit and unpaired; the
-    block entries are ``ceil(W / 8) - 1`` per query slot when ``ceil(W / 8) > 2048`` (``W``: ``max_seqlen_k`` when
-    given, else ``Tkv``), else none; the call's workspace is the scan's (candidate buffers and ticket tail) plus the
-    block entries; the bound is the larger plan of the two sampling modes."""
+    """Per grid of the architecture: the plan runs a registered ``scan_blocks`` program unsplit and unpaired (on
+    sm_107a the program of ``CB_KEYS_AT_THE_REQUEST_SHAPES``); the block entries are ``ceil(W / 8) - 1`` per query
+    slot when ``ceil(W / 8) > 2048`` (``W``: ``max_seqlen_k`` when given, else ``Tkv``), else none; the call's
+    workspace is the scan's (candidate buffers and ticket tail) plus the block entries; the bound is the larger plan
+    of the two sampling modes."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     seg_q, seg_k = SHAPES[shape]
     T, Tkv, S = sum(seg_q), sum(seg_k), len(seg_q)
     msk = max(seg_k) if bound == "max_seqlen_k" else None
     W = Tkv if msk is None else msk
+    expected = CB_KEYS_AT_THE_REQUEST_SHAPES.get(arch, {}).get(shape)
     for grid in GRIDS[arch]:
         kw = dict(top_k=TOP_K, arch=arch, num_sms=grid, max_seqlen_k=msk)
         plan = plan_with_candidates(T, Tkv, S, **kw)
@@ -301,6 +323,7 @@ def test_plan_at_the_request_shapes(arch, shape, bound):
             grid,
             c.scan_key,
         )
+        assert expected is None or c.scan_key == expected, (grid, c.scan_key)
         assert c.n_split == 1 and not c.split and not c.pair and c.merge_key is None, (
             grid
         )
@@ -323,7 +346,8 @@ def test_plan_at_the_request_shapes(arch, shape, bound):
 def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
     """Every program a candidate-block plan names is registered for the architecture, on a dense grid of call
     geometries: 1 to 2^17 queries in 1, 8 or 64 segments, 0 to 2^13 mean key tiles per segment, ``top_k`` 1, 512,
-    1024, 1025 and 2047, with and without ``max_seqlen_k``, both sampling modes and every grid of the architecture.
+    1024, 1025 and 2047, without ``max_seqlen_k`` and with it at the mean key segment and at ``Tkv`` (one long
+    segment), both sampling modes and every grid of the architecture.
     The host fails closed by name on an unregistered program, so a selectable but unregistered ``scan_blocks`` or
     finalize program would fail in production (the backend suite's dense-grid test does the same for the plain
     call).  Every plan runs one ``scan_blocks`` program unsplit and without a merge."""
@@ -340,7 +364,7 @@ def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
                 for m in tiles:
                     Tkv = max(1, int(round(m * tile * S + T / 2)))
                     for top_k in (1, 512, 1024, 1025, CB_MAX_TOP_K):
-                        for bound in (None, -(-Tkv // S)):
+                        for bound in [None, *sorted({-(-Tkv // S), Tkv})]:
                             for sample_tiles_max in (None, 0):
                                 plan = plan_with_candidates(
                                     T,
@@ -374,8 +398,8 @@ def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
 @pytest.mark.parametrize("arch", CB_ARCHES)
 def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypatch):
     """An architecture whose registry has no ``scan_blocks`` program (here the registry of ``arch`` without its
-    ``scan_blocks:`` keys): the plan and the workspace bound raise ``NotImplementedError``, and the plain call's plan
-    is unaffected."""
+    ``scan_blocks:`` keys): the plan and the workspace bound raise the candidate-block dispatch's
+    ``NotImplementedError``, and the plain call's plan is unaffected."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     keys = cake_backend.PROGRAM_KEYS[arch]
@@ -386,7 +410,7 @@ def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypa
     monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, stripped)
     grid = GRIDS[arch][0]
     for fn in (plan_with_candidates, with_candidates_workspace_size):
-        with pytest.raises(NotImplementedError):
+        with pytest.raises(NotImplementedError, match=CB_REFUSAL):
             fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid)
     plain = cake_backend.plan_dsa_indexer_nondet_topk(
         16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid
@@ -582,6 +606,90 @@ def test_indices_and_scores_are_the_plain_calls():
         )
         assert torch.equal(cb.ascending(first[2]), cb.ascending(second[2]))
     assert bool(cb.contained(first[0], first[2]).all())
+
+
+def _same_result(a, b) -> bool:
+    """Two results of the call on one input: the same bits (det) or the same sets (nondet)."""
+    if ORDERED:
+        return ref.same_bits(a[:2], b[:2]) and torch.equal(a[2], b[2])
+    if not naive.same_ids(a[:2], b[:2]):
+        return False
+    return torch.equal(cb.ascending(a[2]), cb.ascending(b[2]))
+
+
+def _same_as_plain(got, plain) -> bool:
+    """The call's ``indices`` / ``scores`` against the plain call's: the same bits (det) or the same sets (nondet)."""
+    if ORDERED:
+        return ref.same_bits(got[:2], plain)
+    return naive.same_ids(got[:2], plain)
+
+
+def test_prepared_runner_draws_its_tickets_on_a_poisoned_caller_workspace():
+    """A call with more work units than the grid draws them from a ticket word: on the architectures of
+    ``TICKET_WORD_ARCHES`` from a 16-byte block of the prepared runner's own, outside the caller-owned workspace,
+    elsewhere from the workspace's ticket tail, which the scan binding zeroes before every scan launch.  With the
+    whole caller-owned workspace filled with 0xFF before each of three runs, every run of that runner and of a
+    backend-owned one returns the eager call's sets, the word reads 0 after every run, and ``indices`` / ``scores``
+    hold the plain call's sets."""
+    _require_cb_program()
+    inputs = ref.make_random_inputs(
+        *DRAWING_SHAPE, top_k=TOP_K, seed=7801, device="cuda"
+    )
+    device = inputs.device
+    arch = arch_for(device)
+    T, Tkv, S = inputs.num_queries, inputs.num_keys, inputs.num_segments
+    args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+    eager = tuple(t.clone() for t in topk_with_candidates(*args, **inputs.kwargs()))
+    plain = naive.cloned(topk(*args, **inputs.kwargs()))
+    assert not _structure_failures(*eager, ref.visible_rows(inputs).tolist())
+    assert _same_as_plain(eager, plain)
+    nbytes = with_candidates_workspace_size(T, Tkv, S, top_k=TOP_K, device=device)
+    workspace = torch.empty(nbytes, dtype=torch.uint8, device=device)
+    owned = prepare_with_candidates(*args, **inputs.kwargs())
+    shared = prepare_with_candidates(
+        *args, **inputs.kwargs(), workspace_buffer=workspace
+    )
+    assert not cake_policy.ticket_static_path(shared.choice)
+    reads = cake_backend.reads_ticket_word(shared.programs[CB_ROLE], arch)
+    assert reads == (arch in TICKET_WORD_ARCHES), (arch, shared.choice.scan_key)
+    for runner in (owned, shared):
+        if reads:
+            assert runner.ticket_tail is None and runner.ticket_block is not None
+            assert runner.ticket_block.numel() == cake_backend.TICKET_BLOCK_BYTES
+        else:
+            assert runner.ticket_block is None and runner.ticket_tail is not None
+    if reads:
+        at = shared.ticket_block.data_ptr()
+        assert not workspace.data_ptr() <= at < workspace.data_ptr() + nbytes
+    for step in range(3):
+        workspace.fill_(0xFF)
+        for runner in (shared, owned):
+            out = runner()
+            torch.cuda.synchronize()
+            word = runner.ticket_block if reads else runner.ticket_tail
+            assert not word[: cake_backend.TICKET_WORD_ZERO_BYTES].any(), step
+            assert _same_result(out, eager), step
+            assert _same_as_plain(out, plain), step
+
+
+@pytest.mark.parametrize("top_k", [PERSIST_TOP_K, CB_MAX_TOP_K])
+def test_indices_and_scores_are_the_plain_calls_at_the_largest_top_k(top_k):
+    """At ``top_k`` 2047 and 2044, on a call that draws its work units: ``indices`` / ``scores`` hold the plain call's
+    sets, a prepared runner returns the eager call's sets and every id lies in a returned block.  The call launches
+    its ``scan_blocks`` program alone: the scan writes the rows (no finalize program)."""
+    _require_cb_program()
+    inputs = ref.make_random_inputs(
+        *DRAWING_SHAPE, top_k=top_k, seed=7802, device="cuda"
+    )
+    args = (inputs.q, inputs.k, inputs.w, inputs.cu_seqlens_q, inputs.cu_seqlens_k)
+    runner = prepare_with_candidates(*args, **inputs.kwargs())
+    assert runner.stages == (CB_ROLE,), runner.stages
+    eager = tuple(t.clone() for t in topk_with_candidates(*args, **inputs.kwargs()))
+    plain = naive.cloned(topk(*args, **inputs.kwargs()))
+    prepared = runner()
+    assert not _structure_failures(*eager, ref.visible_rows(inputs).tolist())
+    assert _same_as_plain(eager, plain), top_k
+    assert _same_result(prepared, eager), top_k
 
 
 def test_caller_owned_workspace_and_outputs():

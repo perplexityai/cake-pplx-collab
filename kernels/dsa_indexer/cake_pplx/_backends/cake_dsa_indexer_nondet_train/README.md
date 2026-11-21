@@ -315,23 +315,23 @@ The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
 `scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the deterministic package's
 candidate-block scan program under this package's prefix.  Only the unsplit,
 unpaired narrow and l6 units carry it, so the host maps the decided kind to
-one of them (a wide unit or a CTA pair to its unpaired unit, a key-range
-split to narrow) with `n_split = 1`, at the decided tile unroll where its
-program is registered, else the smallest registered one (`sm_100a` and
-`sm_103a` register `u1`; `sm_107a` also registers the narrow `u2`
-program).  The block entries follow the scan's
-candidate buffers and ticket tail in the workspace: `blk_cap = ceil(W / 8) -
-1` entries of 8 bytes per query slot of the grid when `ceil(W / 8) > 2048`,
-else none, `W` being `max_seqlen_k` when given, else `Tkv`.  With candidate
-blocks `max_seqlen_k` therefore bounds every key segment of the call: a row
-with more older blocks than `blk_cap` stops the kernel with a device-side
-trap.  `cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size`
-reports the bound; the `[T, 2048]` output is not part of it.  On `sm_107a`
-the `scan_blocks` programs are listed in `ticket_arg_arches` and draw from a
+one of them (a wide unit or a CTA pair to its unpaired unit, a key-range split
+to narrow) with `n_split = 1`, at the decided tile unroll where its program is
+registered, else the smallest registered one (`sm_100a` and `sm_103a` register
+`u1`; `sm_107a` also registers the narrow `u2` program).  The block entries
+follow the scan's candidate buffers and ticket tail in the workspace:
+`blk_cap = ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
+`ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
+`Tkv`.  With candidate blocks `max_seqlen_k` therefore bounds every key
+segment of the call: a row with more older blocks than `blk_cap` stops the
+kernel with a device-side trap.
+`cake_dsa_indexer_nondet_train_topk_with_candidates_workspace_size` reports
+the bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
+`scan_blocks` programs are listed in `ticket_arg_arches` and draw from a
 16-byte ticket block passed as an argument, as the plain call's programs
-listed there do ("Ticket tail" under "Workspace and host behaviour"): a prepared
-runner whose scan draws owns that block, outside the reported bound.  An
-architecture without a `scan_blocks` program raises `NotImplementedError`.
+listed there do ("Ticket tail" under "Workspace and host behaviour"): a
+prepared runner whose scan draws owns that block, outside the reported bound.
+An architecture without a `scan_blocks` program raises `NotImplementedError`.
 
 ## Candidate-restricted top-k
 
@@ -639,36 +639,38 @@ those of BF16 calls at the device's grid.  It does not compare the outputs of
 the two packages.
 
 The candidate-block call has its own suite,
-`tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`, with the
-FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, plans at the request's shapes on every architecture,
-the registered program of every candidate-block plan on a dense grid of
-shapes and `top_k` up to 2047, argument checks and the refusal of an
-architecture whose registry lacks the programs; on the GPU, the exact sets of
-`indices` and
-`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
-packed layouts), sampled rows at the request's shapes, the Gaussian rule with
-the scores judged against the naive tier, containment, the repetition of the
-sets and the plain call's sets, the caller-owned workspace and outputs, the
+`tests/experimental/test_cake_dsa_indexer_nondet_train_candidates.py`, with
+the FP64 oracle in
+`tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
+registry, plans at the request's shapes on every architecture (on `sm_107a`
+the expected programs), the registered program of every candidate-block plan
+on a dense grid of shapes and `top_k` up to 2047, argument checks and the
+refusal of an architecture whose registry lacks the programs; on the GPU, the
+exact sets of `indices` and `candidate_blocks` against the oracle on
+MXFP4-grid inputs (six cases, two packed layouts), sampled rows at the
+request's shapes, the Gaussian rule with the scores judged against the naive
+tier, containment, the repetition of the sets and the plain call's sets (also
+at `top_k` 2044 and 2047), a prepared runner that draws its work units on a
+poisoned caller-owned workspace, the caller-owned workspace and outputs, the
 argument checks, the absence of host synchronization and the
-deterministic-algorithms guard.  The benchmark's `--rows candidates` times
-the call next to the plain call at the request's shapes.
+deterministic-algorithms guard.  The benchmark's `--rows candidates` times the
+call next to the plain call at the request's shapes.
 
 The candidate-restricted call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_nondet_train_in_candidates.py`, with
 the FP64 oracle in
 `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`: host-only
 registry, the plan and its workspace bound at the request's shapes, argument
-checks and the refusal of an architecture whose registry lacks the program;
-on the GPU, the exact sets against the oracle
-on MXFP4-grid inputs (six cases, six kinds of candidate rows, two packed
-layouts), the unrestricted sets from the source layer's own candidate blocks
-and from every visible block, keys outside the pool that never count, sampled
-rows at the request's shapes, the Gaussian rule with the scores judged against
-the naive tier, the repetition of the sets, the caller-owned workspace and
-outputs, the argument checks, the absence of host synchronization and the
-deterministic-algorithms guard.  The benchmark's `nondet_in` / `det_in` arms
-on `--rows candidates` time the call next to the plain calls.
+checks and the refusal of an architecture whose registry lacks the program; on
+the GPU, the exact sets against the oracle on MXFP4-grid inputs (six cases,
+six kinds of candidate rows, two packed layouts), the unrestricted sets from
+the source layer's own candidate blocks and from every visible block, keys
+outside the pool that never count, sampled rows at the request's shapes, the
+Gaussian rule with the scores judged against the naive tier, the repetition of
+the sets, the caller-owned workspace and outputs, the argument checks, the
+absence of host synchronization and the deterministic-algorithms guard.  The
+benchmark's `nondet_in` / `det_in` arms on `--rows candidates` time the call
+next to the plain calls.
 
 Benchmark: `benchmarks/bench_cake_dsa_indexer_nondet_train.py` times this
 package against the deterministic package on the same rows, in the BF16 form
