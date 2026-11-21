@@ -312,7 +312,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
             int row_base = quad * 32 << 16;
             int kcol = khalf * 64;
             int k0 = kcol + (lane >> 4) * 32;
-            long long k_off = (long long)k0 * 128;
+            long long k_off = (long long)k0 * 128ll;
             float zeros[32];
             zeros[0] = 0.0f;
             zeros[1] = 0.0f;
@@ -351,7 +351,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                 if (reverse == 1) {
                     s = seg0 + nseg - 1;
                 }
-                long long base = ((long long)s * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v;
+                long long base = ((long long)s * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v;
                 long long zero_base = base + k_off;
                 #pragma unroll
                 for (int k = 0; k < 32; k++) {
@@ -489,7 +489,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                             asm volatile("tcgen05.fence::after_thread_sync;");
                         }
                     }
-                    long long base_1 = ((long long)o * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v;
+                    long long base_1 = ((long long)o * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v;
                     long long o_base = base_1 + k_off;
                     #pragma unroll
                     for (int k_1 = 0; k_1 < 32; k_1++) {
@@ -519,7 +519,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
             int row_base_1 = quad_1 * 32 << 16;
             int kcol_1 = khalf_1 * 64;
             int k0_1 = kcol_1 + (lane >> 4) * 32;
-            long long k_off_1 = (long long)k0_1 * 128;
+            long long k_off_1 = (long long)k0_1 * 128ll;
             float zeros_1[32];
             zeros_1[0] = 0.0f;
             zeros_1[1] = 0.0f;
@@ -580,7 +580,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                 if (reverse == 1) {
                     s_8 = seg0 + nseg - 1 - gsize;
                 }
-                long long base_2 = ((long long)s_8 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                long long base_2 = ((long long)s_8 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                 #pragma unroll
                 for (int k_3 = 0; k_3 < 32; k_3++) {
                     {
@@ -654,7 +654,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                         }
                         __syncwarp();
                         asm volatile("tcgen05.fence::after_thread_sync;");
-                        long long base_3 = ((long long)s_9 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                        long long base_3 = ((long long)s_9 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                         #pragma unroll
                         for (int k_4 = 0; k_4 < 32; k_4++) {
                             {
@@ -662,7 +662,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                             }
                         }
                     } else {
-                        long long base_4 = ((long long)s_9 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                        long long base_4 = ((long long)s_9 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                         #pragma unroll
                         for (int k_5 = 0; k_5 < 32; k_5++) {
                             {
@@ -769,7 +769,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                         }
                         __syncwarp();
                         asm volatile("tcgen05.fence::after_thread_sync;");
-                        long long base_5 = ((long long)s_10 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                        long long base_5 = ((long long)s_10 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                         #pragma unroll
                         for (int k_6 = 0; k_6 < 32; k_6++) {
                             {
@@ -777,7 +777,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                             }
                         }
                     } else {
-                        long long base_6 = ((long long)s_10 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                        long long base_6 = ((long long)s_10 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                         #pragma unroll
                         for (int k_7 = 0; k_7 < 32; k_7++) {
                             {
@@ -912,7 +912,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                             }
                             __syncwarp();
                             asm volatile("tcgen05.fence::after_thread_sync;");
-                            long long base_7 = ((long long)s_11 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                            long long base_7 = ((long long)s_11 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                             #pragma unroll
                             for (int k_8 = 0; k_8 < 32; k_8++) {
                                 {
@@ -920,7 +920,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                                 }
                             }
                         } else {
-                            long long base_8 = ((long long)s_11 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                            long long base_8 = ((long long)s_11 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                             #pragma unroll
                             for (int k_9 = 0; k_9 < 32; k_9++) {
                                 {
@@ -993,7 +993,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                 if (reverse == 1) {
                     s_12 = seg0 + nseg - 1 - grp * gsize;
                 }
-                long long base_9 = ((long long)s_12 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                long long base_9 = ((long long)s_12 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                 #pragma unroll
                 for (int k_10 = 0; k_10 < 32; k_10++) {
                     {
@@ -1068,7 +1068,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                             }
                             __syncwarp();
                             asm volatile("tcgen05.fence::after_thread_sync;");
-                            long long base_0 = ((long long)s_7_1 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                            long long base_0 = ((long long)s_7_1 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                             #pragma unroll
                             for (int k_11 = 0; k_11 < 32; k_11++) {
                                 {
@@ -1076,7 +1076,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                                 }
                             }
                         } else {
-                            long long base_1_1 = ((long long)s_7_1 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                            long long base_1_1 = ((long long)s_7_1 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                             #pragma unroll
                             for (int k_12 = 0; k_12 < 32; k_12++) {
                                 {
@@ -1201,7 +1201,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                                 }
                                 __syncwarp();
                                 asm volatile("tcgen05.fence::after_thread_sync;");
-                                long long base_2_1 = ((long long)s_10_1 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                                long long base_2_1 = ((long long)s_10_1 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                                 #pragma unroll
                                 for (int k_13 = 0; k_13 < 32; k_13++) {
                                     {
@@ -1209,7 +1209,7 @@ kernel_cake_kda_train_e244f5d7d0e0569a62c1(const __grid_constant__ CUtensorMap m
                                     }
                                 }
                             } else {
-                                long long base_3_1 = ((long long)s_10_1 * (long long)num_heads + (long long)head) * 16384 + (long long)lane_v_1;
+                                long long base_3_1 = ((long long)s_10_1 * (long long)num_heads + (long long)head) * 16384ll + (long long)lane_v_1;
                                 #pragma unroll
                                 for (int k_14 = 0; k_14 < 32; k_14++) {
                                     {

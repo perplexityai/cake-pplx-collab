@@ -59,6 +59,8 @@ void Run(TensorView a_seq_chunk_start, TensorView a_seq_order, int64_t a_num_seq
   check_same_device(a_seq_order, a_seq_chunk_start, "seq_order", "seq_chunk_start");
   check_contiguous(a_seg_table, "seg_table");
   check_same_device(a_seg_table, a_seq_chunk_start, "seg_table", "seq_chunk_start");
+  TVM_FFI_CHECK((a_num_seqs >= 1LL), ValueError)
+      << KERNEL_NAME << ": requires (num_seqs >= 1)";
   TVM_FFI_CHECK(grid_x > 0 && grid_y > 0 && grid_z > 0, ValueError)
       << KERNEL_NAME << ": the grid (" << grid_x << ", " << grid_y << ", " << grid_z << ") must be positive";
   TVM_FFI_CHECK(grid_x <= 2147483647 && grid_y <= 65535 && grid_z <= 65535, ValueError)
