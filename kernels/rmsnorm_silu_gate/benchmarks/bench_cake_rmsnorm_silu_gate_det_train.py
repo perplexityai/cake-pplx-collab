@@ -44,8 +44,8 @@ against the Cake outputs (largest absolute difference of ``y``, ``dx``, ``dz``,
 
 The Cake rows name the forward module the call runs (``module``: its role and
 program, chosen from the architecture, the layout and the rows: contiguous
-inputs, and one token, run the tiny forward up to its cut of rows per SM
-where one is routed (on SM107 not from 17 to 32 rows), and elsewhere
+inputs, and one token of head stride 128, run the tiny forward up to its cut
+of rows per SM where one is routed (on SM107 not from 17 to 32 rows), and elsewhere
 contiguous inputs of two tokens or more run the packed-rows forward where one
 is routed).
 

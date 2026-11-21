@@ -86,9 +86,9 @@ CTAs, neither of which uses a workspace, with the same ``dx``, ``dz`` and
 ``dw`` bits on a device of at least 4 SMs.
 Version 0.2.11 changes nothing in this package and no bits: the
 deterministic package's forward runs, on short inputs whose rows are
-packed (contiguous ``x`` and ``z``, or one token) up to a cut of rows per SM
-(on SM107 not from 17 to 32 rows), a program of one row block per CTA with
-no loop, with the same ``y`` bits.
+packed (contiguous ``x`` and ``z``, or one token of head stride 128) up to a
+cut of rows per SM (on SM107 not from 17 to 32 rows), a program of one row
+block per CTA with no loop, with the same ``y`` bits.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
