@@ -97,8 +97,8 @@ The roles, in launch order:
   ``Z`` in 256-bit lanes.  A backward launch of ``S`` documents runs
   ``bwd_warp`` for ``S > above`` or ``lo <= S <= hi``
   (:func:`bwd_warp_region`: ``(lo, hi, above)``, ``above`` 16384 on the three
-  architectures, ``lo`` to ``hi`` 15 to 32 on ``sm_103a`` and 41 to 1024 on
-  ``sm_107a``, none on ``sm_100a``), else ``bwd`` for
+  architectures, ``lo`` to ``hi`` 15 to 32 on ``sm_103a``, none on ``sm_100a``
+  and ``sm_107a``), else ``bwd`` for
   ``bwd_small_docs < S <= bwd_max_docs`` and ``bwd_small`` otherwise
   (:func:`bwd_small_docs`: 26 on ``sm_100a`` and ``sm_103a``, 125 on
   ``sm_107a``; :func:`bwd_max_docs`: 16384 on ``sm_107a``, no bound on
@@ -178,9 +178,8 @@ MAX_TOKENS = INT32_MAX
 # ``bwd_small`` records (the most documents a backward launch runs it for below ``bwd``), the ``bwd_max_docs`` of
 # the ``bwd_sm_107a`` record (the most documents a backward launch runs ``bwd`` for there), the ``bwd_warp_docs`` of
 # the ``bwd_warp`` records (the most documents a backward launch runs ``bwd`` or ``bwd_small`` for) and the
-# ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` of the ``bwd_warp_sm_103a`` and ``bwd_warp_sm_107a`` records (the
-# documents below that a backward launch also runs ``bwd_warp`` for) are rewritten by the generator; every other
-# field is host plan.
+# ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` of the ``bwd_warp_sm_103a`` record (the documents below that a
+# backward launch also runs ``bwd_warp`` for) are rewritten by the generator; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -586,8 +585,6 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "bwd_warp_docs": 16384,
-        "bwd_warp_max_docs": 1024,
-        "bwd_warp_min_docs": 41,
         "ffi_entry": "run",
         "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
         "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_aa24263114554decff8e",
@@ -668,7 +665,8 @@ def bwd_warp_region(arch: str) -> tuple[int | None, int | None, int] | None:
     """The documents a backward launch on ``arch`` runs ``bwd_warp`` for, from the leaves of the record serving that
     role on ``arch``: ``(lo, hi, above)``, a launch of ``lo <= S <= hi`` or of ``S > above`` documents.  ``lo`` and
     ``hi`` are its ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` leaves (``None`` where the record has none, as on
-    ``sm_100a``), ``above`` its ``bwd_warp_docs`` leaf; every other launch runs the rule of ``bwd`` and ``bwd_small``.
+    ``sm_100a`` and ``sm_107a``), ``above`` its ``bwd_warp_docs`` leaf; every other launch runs the rule of ``bwd``
+    and ``bwd_small``.
     ``None`` when no record serves ``bwd_warp`` on ``arch``.  Cached per architecture."""
     if arch not in ROLE_ARCHES.get("bwd_warp", ARCHES):
         return None

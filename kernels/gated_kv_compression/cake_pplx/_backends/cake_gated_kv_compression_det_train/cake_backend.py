@@ -39,7 +39,7 @@ pair table (unless the caller passes the table as ``pair_offsets``) and the
 backward (the ``dC`` / ``dZ`` rows of every pair's two tokens and the zero
 rows of the odd-length documents' tail tokens): ``bwd_warp`` for the
 documents of :func:`.cake_jit.bwd_warp_region` (more than 16384, and 15 to 32
-on SM103, 41 to 1024 on SM107), else ``bwd`` for more than
+on SM103), else ``bwd`` for more than
 :func:`.cake_jit.bwd_small_docs` and at most :func:`.cake_jit.bwd_max_docs`
 documents (no upper bound on SM100 / SM103) and ``bwd_small`` for the
 others (:func:`launch_bwd`); all write the same bytes.  The pair table is
@@ -533,7 +533,7 @@ def launch_bwd(
     """Launch the backward: every ``dc`` and ``dz`` row (FP32, row strides ``dc_ld`` and ``dz_ld``) of a token below
     ``cu_seqlens[S]`` from ``dout [G, 512]`` (BF16), ``c``, ``z``, ``cu_seqlens`` and ``cu_pairs`` (``S >= 1``,
     ``G >= 1``), on ``G + S`` virtual rows.  For the ``S`` of ``cake_jit.bwd_warp_region(arch)`` (more than 16384;
-    15 to 32 on SM103, 41 to 1024 on SM107) the ``bwd_warp`` role (record ``bwd_warp`` on SM100, ``bwd_warp_sm_103a``
+    15 to 32 on SM103) the ``bwd_warp`` role (record ``bwd_warp`` on SM100, ``bwd_warp_sm_103a``
     on SM103, ``bwd_warp_sm_107a`` on SM107); else for ``cake_jit.bwd_small_docs(arch) < S <=
     cake_jit.bwd_max_docs(arch)`` (no upper bound when that is ``None``, as on SM100 / SM103) the ``bwd`` role
     (record ``bwd`` on SM100 / SM103, ``bwd_sm_107a`` on SM107), for the other ``S`` the ``bwd_small`` role (record

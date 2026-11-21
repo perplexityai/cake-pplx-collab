@@ -31,7 +31,7 @@ empty problems launch nothing and return empty or zero-filled outputs; the launc
 synchronizing; a captured CUDA graph replays to the bits of the eager call; ``torch.use_deterministic_algorithms(True)``
 changes nothing; a forward launches the pair table only past 256 documents (its kernel builds the table of fewer);
 every backward path launches ``bwd_warp`` for more than ``bwd_warp_docs`` documents (16384) and for
-``bwd_warp_min_docs`` to ``bwd_warp_max_docs`` documents (15 to 32 on SM103, 41 to 1024 on SM107), else ``bwd`` for
+``bwd_warp_min_docs`` to ``bwd_warp_max_docs`` documents (15 to 32 on SM103), else ``bwd`` for
 more than ``bwd_small_docs`` documents (26 on SM100 / SM103, 125 on SM107) and at most ``bwd_max_docs`` (no bound on
 SM100 / SM103, 16384 on SM107), else ``bwd_small``, and every backward role gives the same bits;
 the autograd nodes save their inputs and the pair table only, compute only the requested gradients, read an incoming
@@ -658,7 +658,7 @@ def test_the_forward_launches_the_pair_table_only_past_256_documents(pack, launc
 BWD_SMALL_DOCS = {"sm_100a": 26, "sm_103a": 26, "sm_107a": 125}
 BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
 BWD_WARP_DOCS = {"sm_100a": 16384, "sm_103a": 16384, "sm_107a": 16384}
-BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": (41, 1024)}
+BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 # Packs on either side of the documents bounds (14, 26, 32, 40, 125, 1024 and 16384) and of the forward's fused bound
 # (256 documents): one document, 14, 15, 16, 26, 27, 32, 33, 40, 41, 124, 125, 126, 256, 257, 1024, 1025, 16384, 16385
 # and 32769 documents of 0 to 6 tokens; and log-normal packs of 16383 to 65536 tokens on either side of the documents
@@ -689,7 +689,7 @@ BWD_BOUND_PACKS = (
 @pytest.mark.parametrize("pack", BWD_BOUND_PACKS, ids=[p.id for p in BWD_BOUND_PACKS])
 def test_every_backward_runs_the_role_of_its_documents(pack, launches) -> None:
     """A backward of ``S`` documents launches ``bwd_warp`` for ``S > bwd_warp_docs`` (16384) and for
-    ``bwd_warp_min_docs <= S <= bwd_warp_max_docs`` (15 to 32 on sm_103a, 41 to 1024 on sm_107a), else ``bwd`` for
+    ``bwd_warp_min_docs <= S <= bwd_warp_max_docs`` (15 to 32 on sm_103a), else ``bwd`` for
     ``bwd_small_docs < S <= bwd_max_docs`` (26 on sm_100a / sm_103a and 125 on sm_107a; no bound on sm_100a / sm_103a
     and 16384 on sm_107a), else ``bwd_small``.  The rule holds on the three backward paths: the explicit backward
     without ``pair_offsets`` (after a pair table), with them (alone), and the autograd backward (alone, on its forward's
@@ -840,9 +840,8 @@ def test_a_device_outside_the_architectures_is_refused(monkeypatch) -> None:
 def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     """A device of capability (10, 7) is the delivered ``sm_107a`` target: ``build.json`` holds an ``sm_107a``
     library for every record that serves it, one per role served there, the forwards' being ``fwd_sm_107a`` and
-    ``fwd_unfused_sm_107a`` and the backwards' ``bwd_sm_107a`` (for 1025 to 16384 documents), ``bwd_warp_sm_107a``
-    (for 41 to 1024 and for more than 16384) and ``bwd_small_sm_107a`` (for the others; nothing is built or launched
-    here)."""
+    ``fwd_unfused_sm_107a`` and the backwards' ``bwd_sm_107a`` (for 126 to 16384 documents), ``bwd_warp_sm_107a``
+    (for more than 16384 only) and ``bwd_small_sm_107a`` (for the others; nothing is built or launched here)."""
     jit = _jit()
     path = Path(jit.__file__).parent / "build.json"
     if not path.is_file():
@@ -867,7 +866,7 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
     assert jit.bwd_small_docs("sm_107a") == 125
     assert jit.bwd_max_docs("sm_107a") == 16384
     assert jit.role_record("bwd_warp", "sm_107a") == "bwd_warp_sm_107a"
-    assert jit.bwd_warp_region("sm_107a") == (41, 1024, 16384)
+    assert jit.bwd_warp_region("sm_107a") == (None, None, 16384)
     assert all(entry["gencode"] == "-gencode=arch=compute_107a,code=sm_107a" for entry in entries)
 
 

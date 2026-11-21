@@ -134,7 +134,7 @@ BWD_MAX_DOCS = {"sm_100a": None, "sm_103a": None, "sm_107a": 16384}
 BWD_WARP_DOCS = dict.fromkeys(ARCHES, 16384)
 # The documents below that a backward launch also runs ``bwd_warp`` for (the rendered ``bwd_warp_min_docs`` and
 # ``bwd_warp_max_docs`` of the record serving ``bwd_warp``; ``None``: the record has no such leaves).
-BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": (41, 1024)}
+BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 # What :func:`cake_jit.bwd_warp_region` reads on each architecture: ``(lo, hi, above)``.
 BWD_WARP_REGIONS = {arch: (*(BWD_WARP_RANGES[arch] or (None, None)), BWD_WARP_DOCS[arch]) for arch in ARCHES}
 # Backward packs on either side of the documents bounds and of the forward's fused bound (``FUSE_DOCS``, 256).
@@ -147,7 +147,7 @@ ROUTING_DOCS = (14, 15, 26, 27, 32, 33, 40, 41, 124, 125, 126, 1024, 1025, 16383
 ROUTING = {
     "sm_100a": "sssbbbbbbbbbbbbww",
     "sm_103a": "swwwwbbbbbbbbbbww",
-    "sm_107a": "ssssssswwwwwbbbww",
+    "sm_107a": "ssssssssssbbbbbww",
 }
 ROUTING_ROLES = {"s": "bwd_small", "b": "bwd", "w": "bwd_warp"}
 # The record serving each backward role on each architecture.
@@ -342,8 +342,8 @@ def test_the_backward_records_carry_their_bounds() -> None:
     sm_107a), and :func:`cake_jit.bwd_small_docs` reads the one of the record serving each architecture; the
     ``bwd_sm_107a`` record carries ``bwd_max_docs`` (16384), and :func:`cake_jit.bwd_max_docs` reads it, ``None`` (no
     bound) on sm_100a / sm_103a, whose ``bwd`` record has no such leaf; the ``bwd_warp`` records carry
-    ``bwd_warp_docs`` (16384), ``bwd_warp_sm_103a`` and ``bwd_warp_sm_107a`` also ``bwd_warp_min_docs`` and
-    ``bwd_warp_max_docs`` (15 and 32, 41 and 1024), and :func:`cake_jit.bwd_warp_region` reads them on the three
+    ``bwd_warp_docs`` (16384), ``bwd_warp_sm_103a`` also ``bwd_warp_min_docs`` and
+    ``bwd_warp_max_docs`` (15 and 32), and :func:`cake_jit.bwd_warp_region` reads them on the three
     architectures.  No other record carries these leaves.  The records of each backward program have its library,
     kernel symbol and launch, and every backward record has the arguments of ``bwd`` and rows of 64 lanes."""
     for name, rec in cake_jit.MODULES.items():
@@ -529,7 +529,7 @@ def test_launchers_pass_every_kernel_argument(monkeypatch) -> None:
     documents is the ``fwd`` role, of more (257, 512, 513, 8193 and 2^20) the ``fwd_unfused`` role; the backward of 23
     tokens and at most ``bwd_small_docs`` documents (26 on sm_100a / sm_103a, 125 on sm_107a) is the ``bwd_small``
     role, of more the ``bwd`` role, of more than ``bwd_warp_docs`` (16384) and of ``bwd_warp_min_docs`` to
-    ``bwd_warp_max_docs`` (15 to 32 on sm_103a, 41 to 1024 on sm_107a) the ``bwd_warp`` role, and of the documents of
+    ``bwd_warp_max_docs`` (15 to 32 on sm_103a) the ``bwd_warp`` role, and of the documents of
     ``ROUTING``, at each token count of ``ROUTING_TOKENS``, its role there; every launcher passes the architecture it
     looked up to ``run_module``, and a device index, an architecture (and a forward or backward role) a caller gives as
     given, with no lookup (no device: the architecture is given and the launch is a recorder)."""
