@@ -476,6 +476,41 @@ def _check_placement(
         raise ValueError(f"{name} must be contiguous")
 
 
+# The byte alignment of each operand's address.  The programs load and store these operands as vectors of that
+# many bytes, and a misaligned vector access is a "misaligned address" CUDA error.  A fresh tensor, or a
+# ``.clone()``, is always aligned; a view that starts at a whole row (``x[1:]``, ``weight[1:]``) keeps it.
+# The token rows (x, dy, y or out, dx): eight BF16 channels of a row per 16-byte vector.
+TOKEN_ALIGN = 16
+# The taps: one channel's four taps per vector.
+TAPS_ALIGN = {torch.float32: 16, torch.bfloat16: 8}
+# The bias: the forward loads eight channels per vector (32 bytes in FP32, 16 in BF16); the backward loads them as
+# 16-byte vectors (two in FP32, one in BF16).
+BIAS_ALIGN = {torch.float32: 32, torch.bfloat16: 16}
+BACKWARD_BIAS_ALIGN = {torch.float32: 16, torch.bfloat16: 16}
+
+
+def _aligned(tensor: torch.Tensor, name: str, need: int) -> torch.Tensor:
+    """``tensor`` when its address is ``need``-byte aligned (``ValueError`` otherwise; an empty tensor is never
+    read or written)."""
+
+    misaligned = tensor.data_ptr() % need
+    if misaligned and tensor.numel():
+        raise ValueError(
+            f"{name} must be {need}-byte aligned (the kernels access it as {need}-byte vectors), got "
+            f"data_ptr() % {need} == {misaligned}; pass a fresh tensor or .clone()"
+        )
+    return tensor
+
+
+def _grad_tokens(grad: torch.Tensor) -> torch.Tensor:
+    """The incoming gradient of an autograd backward as a contiguous BF16 tensor at a :data:`TOKEN_ALIGN`-byte
+    address.  Autograd can hand over a view at any offset (the backward of ``torch.cat`` narrows its gradient), and
+    the caller cannot replace that tensor, so a misaligned one is copied."""
+
+    g = grad.to(torch.bfloat16).contiguous()
+    return g.clone() if g.data_ptr() % TOKEN_ALIGN else g
+
+
 # The largest token count ``S`` a call takes.  The kernels split a channel
 # tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
 # streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
@@ -496,7 +531,8 @@ def _tokens(
 
     ``shape`` pins the exact shape another token tensor of the call has (``dy``
     against ``x``).  Both kernels read the packed rows as 16-byte vectors of eight
-    channels, so ``C`` is a multiple of eight; ``S`` and ``C`` are 32-bit kernel
+    channels, so ``C`` is a multiple of eight and the address is
+    :data:`TOKEN_ALIGN`-byte aligned; ``S`` and ``C`` are 32-bit kernel
     scalars (``S x C`` itself may exceed 2^31: the kernels address with 64-bit
     offsets), and ``S`` is at most :data:`MAX_TOKENS`.
     """
@@ -524,6 +560,7 @@ def _tokens(
             "32-bit kernel scalar (the kernels split S over at most "
             f"{MAX_TOKEN_STREAMS} token streams with the 32-bit S + streams - 1)"
         )
+    _aligned(t, name, TOKEN_ALIGN)
     return S, C, t.view(S, C)
 
 
@@ -536,7 +573,7 @@ def _weight(
     dtypes: tuple[torch.dtype, ...] = (torch.float32,),
 ) -> torch.Tensor:
     """Validate the ``[C, 4]`` taps of one of ``dtypes`` (the training API passes FP32 and BF16; the KCP path
-    keeps the default, FP32 only)."""
+    keeps the default, FP32 only), at a :data:`TAPS_ALIGN`-byte aligned address."""
 
     w = _require_tensor(weight, name)
     if w.ndim != 2 or int(w.shape[1]) != WIDTH:
@@ -549,11 +586,14 @@ def _weight(
             f"{name} must have one row per channel ([{C}, {WIDTH}]), got shape {tuple(w.shape)}"
         )
     _check_placement(w, name, device=device, dtype=dtypes)
-    return w
+    return _aligned(w, name, TAPS_ALIGN[w.dtype])
 
 
-def _bias(bias: object, C: int, *, device: torch.device) -> torch.Tensor:
-    """Validate the per-channel ``[C]`` bias (FP32 or BF16, independently of the taps)."""
+def _bias(
+    bias: object, C: int, *, device: torch.device, backward: bool = False
+) -> torch.Tensor:
+    """Validate the per-channel ``[C]`` bias (FP32 or BF16, independently of the taps), at a :data:`BIAS_ALIGN`-byte
+    aligned address (:data:`BACKWARD_BIAS_ALIGN` for the standalone ``backward`` call)."""
 
     b = _require_tensor(bias, "bias")
     if b.ndim != 1 or int(b.shape[0]) != C:
@@ -561,7 +601,8 @@ def _bias(bias: object, C: int, *, device: torch.device) -> torch.Tensor:
             f"bias must be a [C] tensor with one value per channel ([{C}]), got shape {tuple(b.shape)}"
         )
     _check_placement(b, "bias", device=device, dtype=PARAMETER_DTYPES)
-    return b
+    need = (BACKWARD_BIAS_ALIGN if backward else BIAS_ALIGN)[b.dtype]
+    return _aligned(b, "bias", need)
 
 
 def _cu_seqlens(
@@ -596,9 +637,10 @@ def _output(
     dtype: torch.dtype,
     device: torch.device,
     dtypes: Optional[tuple[torch.dtype, ...]] = None,
+    align: int = 1,
 ) -> torch.Tensor:
-    """A caller-provided output (exact shape, contiguous, of ``dtype`` or of one of ``dtypes`` when given) or a
-    fresh ``dtype`` one."""
+    """A caller-provided output (exact shape, contiguous, of ``dtype`` or of one of ``dtypes`` when given, at an
+    ``align``-byte aligned address) or a fresh ``dtype`` one."""
 
     if tensor is None:
         return torch.empty(shape, dtype=dtype, device=device)
@@ -608,7 +650,7 @@ def _output(
             f"{name} must have shape {tuple(shape)}, got {tuple(out.shape)}"
         )
     _check_placement(out, name, device=device, dtype=dtypes or dtype)
-    return out
+    return _aligned(out, name, align)
 
 
 # The backward programs store one channel's four FP32 ``dweight`` taps with one 16-byte store.
@@ -1598,23 +1640,31 @@ def cake_causal_conv1d_nondet_train_forward(
     ``cake_causal_conv1d_det_train_forward``'s (the forward does not alert
     under torch's deterministic mode).
 
+    The kernels access ``x``, ``weight``, ``bias`` and ``out`` as vectors, so
+    each address (``data_ptr()``) must be aligned as stated below; a misaligned
+    one raises ``ValueError`` before anything launches.  A fresh tensor or a
+    ``.clone()`` is aligned, and so is a view that starts at a whole row
+    (``x[1:]``, ``weight[1:]``).
+
     Parameters
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations of every
-        document; ``C`` is a multiple of 8.
+        document; ``C`` is a multiple of 8.  16-byte aligned.
     weight : torch.Tensor
         FP32 or BF16 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the
-        current token, ``weight[c, 0]`` the token three positions back.
+        current token, ``weight[c, 0]`` the token three positions back.  FP32
+        taps are 16-byte aligned, BF16 taps 8-byte aligned.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` contiguous device prefix sums of the document
         lengths (``cu_seqlens[0] == 0``, ``cu_seqlens[-1] == S``; a repeated
         value is an empty document).  The host reads its metadata only.
     bias : torch.Tensor, optional
         FP32 or BF16 ``[C]`` contiguous per-channel bias (its dtype is
-        independent of ``weight``'s), added after the four taps.
+        independent of ``weight``'s), added after the four taps.  An FP32 bias
+        is 32-byte aligned, a BF16 bias 16-byte aligned.
     out : torch.Tensor, optional
-        Preallocated BF16 output of ``x``'s shape, contiguous.
+        Preallocated BF16 output of ``x``'s shape, contiguous, 16-byte aligned.
     workspace : torch.Tensor, optional
         Caller-owned int32 buffer from
         :func:`cake_causal_conv1d_nondet_train_forward_workspace` (the
@@ -1642,7 +1692,14 @@ def cake_causal_conv1d_nondet_train_forward(
     w = _weight(weight, C, device=device, dtypes=PARAMETER_DTYPES)
     b = None if bias is None else _bias(bias, C, device=device)
     cu, num_docs = _cu_seqlens(cu_seqlens, device=device)
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     if S == 0:
         return y
     bf16_taps = w.dtype == torch.bfloat16
@@ -1711,9 +1768,10 @@ def cake_causal_conv1d_nondet_train_backward(
     ----------
     x, weight, cu_seqlens, bias
         The forward's inputs (same contracts as
-        :func:`cake_causal_conv1d_nondet_train_forward`); nothing else is saved.
+        :func:`cake_causal_conv1d_nondet_train_forward`, except that an FP32
+        ``bias`` needs only 16-byte alignment here); nothing else is saved.
     dy : torch.Tensor
-        BF16 gradient of ``y``, ``x``'s shape, contiguous.
+        BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
         Where the SiLU derivative of the weight gradient is evaluated:
         ``"bf16"`` at the BF16-rounded recomputed preactivation with an FP32
@@ -1741,9 +1799,9 @@ def cake_causal_conv1d_nondet_train_backward(
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
         (FP32 or BF16 each; the parameter's dtype when omitted), contiguous.
-        An FP32 ``dweight`` must be 16-byte aligned (each channel's four taps
-        are stored with one 16-byte store; ``ValueError`` otherwise).
-        ``dbias`` needs ``bias``.  Every element is overwritten.
+        ``dx`` must be 16-byte aligned, and so must an FP32 ``dweight`` (each
+        channel's four taps are stored with one 16-byte store); ``ValueError``
+        otherwise.  ``dbias`` needs ``bias``.  Every element is overwritten.
     bwd_grid_mult : {1, 2, 3, 4}
         Opt-in finer static partition of the token axis (default 1, the
         default grid): the program launches ``bwd_grid_mult`` times its
@@ -1781,11 +1839,16 @@ def cake_causal_conv1d_nondet_train_backward(
     arch = _device_arch(device)
     S, C, x_flat = _tokens(x, "x", device=device)
     w = _weight(weight, C, device=device, dtypes=PARAMETER_DTYPES)
-    b = None if bias is None else _bias(bias, C, device=device)
+    b = None if bias is None else _bias(bias, C, device=device, backward=True)
     cu, num_docs = _cu_seqlens(cu_seqlens, device=device)
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _dweight_aligned(
         _output(
@@ -1883,7 +1946,8 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
     the backward runs the one-launch ``dx`` + unordered ``dweight`` (+ ``dbias``) program of
     :func:`cake_causal_conv1d_nondet_train_backward` (with ``bwd_grid_mult``; it alerts under torch's deterministic
     mode) on the incoming gradient (materialized as a contiguous BF16 tensor when autograd hands over another layout
-    or dtype) and returns the gradients of ``weight`` and ``bias`` in the parameters' dtypes.
+    or dtype, and copied when its address is not 16-byte aligned) and returns the gradients of ``weight`` and
+    ``bias`` in the parameters' dtypes.
     """
 
     @staticmethod
@@ -1912,7 +1976,7 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
         x, weight, cu_seqlens, bias = ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         grads = cake_causal_conv1d_nondet_train_backward(
             x,
             weight,
@@ -1943,13 +2007,16 @@ def cake_causal_conv1d_nondet(
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations on a
-        supported CUDA device.
+        supported CUDA device, 16-byte aligned.
     weight : torch.Tensor
-        FP32 or BF16 ``[C, 4]`` contiguous taps.
+        FP32 (16-byte aligned) or BF16 (8-byte aligned) ``[C, 4]`` contiguous
+        taps.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` device prefix sums of the document lengths.
     bias : torch.Tensor, optional
-        FP32 or BF16 ``[C]`` contiguous per-channel bias.
+        FP32 (32-byte aligned) or BF16 (16-byte aligned) ``[C]`` contiguous
+        per-channel bias.  A misaligned tensor raises ``ValueError`` (see
+        :func:`cake_causal_conv1d_nondet_train_forward`).
     silu_grad_preactivation : {"bf16", "fp32"}
         The weight gradient's SiLU' policy (see
         :func:`cake_causal_conv1d_nondet_train_backward`).

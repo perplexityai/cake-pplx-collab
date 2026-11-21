@@ -361,21 +361,26 @@ def cake_causal_conv1d_nondet_train_forward(
     The package's copy of the deterministic forward programs; the forward runs (without an alert) under torch's
     deterministic mode.
 
+    The kernels access ``x``, ``weight``, ``bias`` and ``out`` as vectors, so each address (``data_ptr()``) must be
+    aligned as stated below; a misaligned one raises ``ValueError`` before anything launches.  A fresh tensor or a
+    ``.clone()`` is aligned, and so is a view that starts at a whole row (``x[1:]``, ``weight[1:]``).
+
     Parameters
     ----------
     x : torch.Tensor
         BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations of every
-        document; ``C`` is a multiple of 8.
+        document; ``C`` is a multiple of 8.  16-byte aligned.
     weight : torch.Tensor
         FP32 or BF16 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the
-        current token.
+        current token.  FP32 taps are 16-byte aligned, BF16 taps 8-byte aligned.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` contiguous device prefix sums of the document
         lengths; the host reads its metadata only.
     bias : torch.Tensor, optional
         FP32 or BF16 ``[C]`` contiguous per-channel bias, added after the taps.
+        An FP32 bias is 32-byte aligned, a BF16 bias 16-byte aligned.
     out : torch.Tensor, optional
-        Preallocated BF16 output of ``x``'s shape, contiguous.
+        Preallocated BF16 output of ``x``'s shape, contiguous, 16-byte aligned.
     workspace : torch.Tensor, optional
         Caller-owned zeroed int32 buffer from
         :func:`cake_causal_conv1d_nondet_train_forward_workspace`.
@@ -422,9 +427,10 @@ def cake_causal_conv1d_nondet_train_backward(
     Parameters
     ----------
     x, weight, cu_seqlens, bias
-        The forward's inputs; nothing else is saved.
+        The forward's inputs (an FP32 ``bias`` needs only 16-byte alignment
+        here); nothing else is saved.
     dy : torch.Tensor
-        BF16 gradient of ``y``, ``x``'s shape, contiguous.
+        BF16 gradient of ``y``, ``x``'s shape, contiguous, 16-byte aligned.
     silu_grad_preactivation : {"bf16", "fp32"}
         ``"bf16"``: SiLU' at the BF16-rounded recomputed preactivation with an
         FP32 ``weight``, at the unrounded FP32 preactivation with a BF16
@@ -435,9 +441,9 @@ def cake_causal_conv1d_nondet_train_backward(
         Caller-owned buffer from :func:`cake_causal_conv1d_nondet_train_backward_workspace`.
     dx, dweight, dbias : torch.Tensor, optional
         Preallocated outputs: BF16 of ``x``'s shape, ``[C, 4]`` and ``[C]``
-        (FP32 or BF16 each; the parameter's dtype when omitted).  An FP32
-        ``dweight`` must be 16-byte aligned (one 16-byte store per channel;
-        ``ValueError`` otherwise).
+        (FP32 or BF16 each; the parameter's dtype when omitted).  ``dx`` must
+        be 16-byte aligned, and so must an FP32 ``dweight`` (one 16-byte store
+        per channel); ``ValueError`` otherwise.
     bwd_grid_mult : {1, 2, 3, 4}
         Opt-in finer static partition of the token axis (default 1, the
         default grid): the backward launches ``bwd_grid_mult`` times its
@@ -500,13 +506,16 @@ def cake_causal_conv1d_nondet(
     Parameters
     ----------
     x : torch.Tensor
-        BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations.
+        BF16 ``[S, C]`` or ``[1, S, C]`` contiguous packed activations, 16-byte
+        aligned.
     weight : torch.Tensor
-        FP32 or BF16 ``[C, 4]`` contiguous taps.
+        FP32 (16-byte aligned) or BF16 (8-byte aligned) ``[C, 4]`` contiguous
+        taps.
     cu_seqlens : torch.Tensor
         ``int32 [num_docs + 1]`` device prefix sums of the document lengths.
     bias : torch.Tensor, optional
-        FP32 or BF16 ``[C]`` contiguous per-channel bias.
+        FP32 (32-byte aligned) or BF16 (16-byte aligned) ``[C]`` contiguous
+        per-channel bias.  A misaligned tensor raises ``ValueError``.
     silu_grad_preactivation : {"bf16", "fp32"}
         The weight gradient's SiLU' policy.
     bwd_grid_mult : {1, 2, 3, 4}

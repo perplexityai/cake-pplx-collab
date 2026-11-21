@@ -4040,6 +4040,158 @@ def test_argument_validation() -> None:
         cake_causal_conv1d_det_train_forward(x, w, [0, S])
 
 
+def _view_at(base: torch.Tensor, offset: int, shape: tuple[int, ...]) -> torch.Tensor:
+    """A ``shape`` view of fresh zeroed storage of ``base``'s dtype that starts ``offset`` elements past a 32-byte
+    aligned address, holding ``base``'s values."""
+
+    n = base.numel()
+    buf = torch.zeros(n + offset, dtype=base.dtype, device=base.device)
+    assert buf.data_ptr() % 32 == 0
+    view = buf[offset : offset + n].view(shape)
+    view.copy_(base.reshape(shape))
+    return view
+
+
+def _same_bits(a, b) -> bool:
+    """Two outputs (tensors, or tuples of tensors and ``None``) bit for bit."""
+
+    if isinstance(a, tuple):
+        pairs = zip(a, b, strict=True)
+        return len(a) == len(b) and all(_same_bits(p, q) for p, q in pairs)
+    if a is None or b is None:
+        return a is None and b is None
+    return torch.equal(_bits(a), _bits(b))
+
+
+def test_bias_must_be_aligned() -> None:
+    """The forward programs load eight bias channels per vector (32 bytes in FP32, 16 in BF16), the backward
+    programs as 16-byte vectors.  A bias off that grid (FP32 or BF16, 1 to 7 elements past a 32-byte boundary) is
+    refused (``ValueError``) by the forward and the autograd entry, and off the 16-byte grid by the standalone
+    backward, before anything launches: ``out``, the gradient outs and both workspaces stay zero.  A bias view on the
+    grid inside a larger buffer gives ``y``, ``dx``, ``dweight`` and ``dbias`` bitwise equal to a fresh bias (an FP32
+    bias 16 bytes past a 32-byte boundary runs the standalone backward too)."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=9)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    dw = torch.zeros(C, WIDTH, dtype=F32, device=device)
+    fws = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
+    bws = cake_causal_conv1d_det_train_backward_workspace(S, C, device).zero_()
+    for dtype, need in ((F32, 32), (BF16, 16)):
+        b = _bias_input(C, dtype, key=9)
+        big = torch.zeros(C + 8, dtype=dtype, device=device)
+        assert big.data_ptr() % 32 == 0
+        db = torch.zeros(C, dtype=dtype, device=device)
+        for k in range(1, 8):
+            bias = big[k : k + C]
+            assert bias.data_ptr() % need != 0
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                cake_causal_conv1d_det_train_forward(
+                    x, w, cu, bias=bias, out=out, workspace=fws
+                )
+            with pytest.raises(ValueError, match=f"bias must be {need}-byte aligned"):
+                cake_causal_conv1d_det(x, w, cu, bias)
+            if bias.data_ptr() % 16 == 0:
+                continue  # FP32, k = 4: the standalone backward takes it (below)
+            outs = dict(dx=dx, dweight=dw, dbias=db, workspace=bws)
+            with pytest.raises(ValueError, match="bias must be 16-byte aligned"):
+                _backward(x, w, cu, dy, bias, "bf16", **outs)
+        torch.cuda.synchronize(device)
+        for t in (big, db, out, dx, dw, fws, bws):
+            assert int(torch.count_nonzero(t)) == 0
+        # 8 elements: 32 bytes (FP32) / 16 bytes (BF16) past a 32-byte boundary;
+        # 4 FP32 elements: 16 bytes past one
+        y = cake_causal_conv1d_det_train_forward(x, w, cu, bias=_view_at(b, 8, (C,)))
+        assert _same_bits(y, cake_causal_conv1d_det_train_forward(x, w, cu, bias=b))
+        ref = _backward(x, w, cu, dy, b, "bf16")
+        for offset in (8, 4) if dtype == F32 else (8,):
+            grads = _backward(x, w, cu, dy, _view_at(b, offset, (C,)), "bf16")
+            assert _same_bits(grads, ref), (dtype, offset)
+
+
+def test_tokens_and_taps_must_be_aligned() -> None:
+    """The programs move the token rows (``x``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one channel's taps as
+    one vector (16 bytes FP32, 8 bytes BF16).  A token tensor 1 to 7 elements past a 32-byte boundary and taps 1 to 3
+    elements past one are refused (``ValueError``) by the forward, the backward and the autograd entry before
+    anything launches: the outputs and both workspaces stay zero.  Views that start at a whole row of a larger buffer
+    (``x``, ``dy``, ``out``, ``dx`` and the taps one row in) are read and written in place, with ``y``, ``dx`` and
+    ``dweight`` bitwise equal to fresh tensors, with FP32 and BF16 taps."""
+
+    S, C, docs = 1000, 512, "perf"
+    device = _device()
+    x, w, cu, dy = _inputs(S, C, docs, key=10)
+    out, dx = torch.zeros_like(x), torch.zeros_like(x)
+    fws = cake_causal_conv1d_det_train_forward_workspace(S, C, device)
+    bws = cake_causal_conv1d_det_train_backward_workspace(S, C, device).zero_()
+
+    def refused(name: str, need: int, fn, *args, **kwargs) -> None:
+        with pytest.raises(ValueError, match=f"{name} must be {need}-byte aligned"):
+            fn(*args, **kwargs)
+
+    forward, backward = cake_causal_conv1d_det_train_forward, _backward
+    flat = torch.zeros(S * C + 8, dtype=BF16, device=device)
+    assert flat.data_ptr() % 32 == 0
+    for k in range(1, 8):
+        v = flat[k : k + S * C].view(S, C)
+        assert v.data_ptr() % 16 != 0
+        refused("x", 16, forward, v, w, cu, out=out, workspace=fws)
+        refused("x", 16, backward, v, w, cu, dy, None, "bf16", dx=dx, workspace=bws)
+        refused("x", 16, cake_causal_conv1d_det, v, w, cu)
+        refused("dy", 16, backward, x, w, cu, v, None, "bf16", dx=dx, workspace=bws)
+        refused("out", 16, forward, x, w, cu, out=v, workspace=fws)
+        refused("dx", 16, backward, x, w, cu, dy, None, "bf16", dx=v, workspace=bws)
+    for dtype, need in ((F32, 16), (BF16, 8)):
+        for k in range(1, 4):
+            taps = torch.zeros(C * WIDTH + k, dtype=dtype, device=device)
+            taps = taps[k:].view(C, WIDTH)
+            assert taps.data_ptr() % need != 0
+            refused("weight", need, forward, x, taps, cu, out=out, workspace=fws)
+            outs = dict(dx=dx, workspace=bws)
+            refused("weight", need, backward, x, taps, cu, dy, None, "bf16", **outs)
+            refused("weight", need, cake_causal_conv1d_det, x, taps, cu)
+    torch.cuda.synchronize(device)
+    for t in (flat, out, dx, fws, bws):
+        assert int(torch.count_nonzero(t)) == 0
+
+    for weight_dtype in (F32, BF16):
+        wt = w.to(weight_dtype)
+        xv, dyv = _view_at(x, C, (S, C)), _view_at(dy, C, (S, C))
+        wv = _view_at(wt, WIDTH, (C, WIDTH))
+        outv = _view_at(torch.zeros_like(x), C, (S, C))
+        dxv = _view_at(torch.zeros_like(x), C, (S, C))
+        y = forward(xv, wv, cu, out=outv)
+        grads = backward(xv, wv, cu, dyv, None, "bf16", dx=dxv)
+        assert y is outv and grads[0] is dxv
+        assert _same_bits(y, forward(x, wt, cu)), weight_dtype
+        assert _same_bits(grads, backward(x, wt, cu, dy, None, "bf16")), weight_dtype
+
+
+def test_autograd_copies_a_misaligned_incoming_gradient() -> None:
+    """Autograd can hand the backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entry copies it, so the backward runs (no ``ValueError``) and ``dx``, ``dweight`` and ``dbias`` are
+    bitwise equal to the direct backward of the same gradient, without a bias and with FP32 and BF16 biases."""
+
+    S, C, docs = 1000, 512, "perf"
+    x0, w0, cu, dy = _inputs(S, C, docs, key=11)
+    for bias_dtype in (None, F32, BF16):
+        b0 = None if bias_dtype is None else _bias_input(C, bias_dtype, key=11)
+        x = x0.detach().clone().requires_grad_(True)
+        w = w0.detach().clone().requires_grad_(True)
+        b = None if b0 is None else b0.detach().clone().requires_grad_(True)
+        y = cake_causal_conv1d_det(x, w, cu, b)
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        torch.cat([pad, y.reshape(-1)]).backward(torch.cat([pad, dy.reshape(-1)]))
+        assert seen == [2], (bias_dtype, seen)
+        dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, "bf16")
+        assert _same_bits(x.grad, dx_ref) and _same_bits(w.grad, dw_ref), bias_dtype
+        if b0 is not None:
+            assert _same_bits(b.grad, db_ref), bias_dtype
+
+
 def test_every_route_ships_on_every_architecture() -> None:
     """The delivered package has no trap: every route of ``KINDS`` is exported on every architecture, with every
     library in ``build.json``.  Fails until the exporter has rendered every route's programs."""
