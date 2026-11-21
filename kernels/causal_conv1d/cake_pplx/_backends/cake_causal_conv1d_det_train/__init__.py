@@ -81,13 +81,13 @@ Host design (the knobs are keywords; no environment variable):
   there (eager or captured), and a passed ``workspace`` is checked and not
   read.  Each row gives its own token range.  Every architecture and route has
   a row at each C = 512 to 1024.  For most C the first range starts at S = 1.
-  A row in ``FALLBACK_ROWS`` only runs the static program over its whole
-  range: the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632 run it
-  from S = 1 to 24576.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start
-  at S = 13824 (C = 736: 14336) and have only a static range.  Outside a row's
-  range, and where an architecture, route and C have no row, the forward takes
-  its counters from the workspace, as in 0.2.4.  Every forward program writes
-  the same ``y`` bits.
+  Where a key has no ``DIRECT_ROWS`` range (for example the sm_107a
+  ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576), the
+  static program runs over the key's whole range.  The sm_103a ``fwd_bias``
+  rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
+  static range.  Outside a row's range, and where an architecture, route and C
+  have no row, the forward takes its counters from the workspace, as in 0.2.4.
+  Every forward program writes the same ``y`` bits.
 """
 
 from __future__ import annotations
@@ -632,12 +632,15 @@ def cake_causal_conv1d_det_train_forward_workspace_bytes(
     ``cake_jit.NARROW_WIDTH_FLOORS`` and ``cake_jit.NARROW_ROW_FLOORS``), so
     one buffer serves every route and token count; the size depends on ``C``
     only (``S`` is checked and otherwise unused, as for the backward helper).
-    The static and the direct programs of the small-S rows take no counters,
-    so release 0.2.5 keeps 0.2.4's size.  From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
+    The static and the direct programs of the small-S rows take no counters, so
+    the releases that add such rows (0.2.5, 0.2.6 and 0.2.10) keep 0.2.4's
+    size.  From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
     before), so a buffer sized by an earlier release raises ``ValueError``
-    there from the row's token floor.  The buffer must be zero
-    before its first launch; every launch leaves it zero, so one buffer serves
-    every later forward call of one stream, CUDA Graph replays included,
+    there at each token count from the row's token floor up that no small-S
+    range holds: from the floor where no range holds it, and above the ranges
+    where they hold it (release 0.2.10: most of these floors).  The buffer must
+    be zero before its first launch; every launch leaves it zero, so one buffer
+    serves every later forward call of one stream, CUDA Graph replays included,
     without zeroing.  Two launches that may run at once (on two streams, or
     two graphs replayed concurrently) need two buffers.
     """

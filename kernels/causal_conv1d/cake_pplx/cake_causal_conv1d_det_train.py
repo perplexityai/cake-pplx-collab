@@ -81,13 +81,13 @@ range.  From release 0.2.10, every architecture and route has a row at each
 ``C`` = 512 to 1024 (0.2.6 to 0.2.9: at each ``C`` = 576 to 768; 0.2.5 had
 none for sm_100a ``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at C = 576 and
 712, and sm_103a ``fwd`` at C = 768).  For most ``C`` the first range starts
-at S = 1.  A row in ``FALLBACK_ROWS`` only runs the static program over its
-whole range: the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632 run it
-from S = 1 to 24576.  The sm_103a ``fwd_bias`` rows at C = 720 to 768 start at
-S = 13824 (C = 736: 14336) and have only a static range.  Outside a row's
-range, and where an architecture, route and ``C`` have no row, the forward
-takes its counters from the workspace, as in 0.2.4.  Every forward program
-writes the same ``y`` bits.
+at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example the sm_107a
+``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576), the
+static program runs over the key's whole range.  The sm_103a ``fwd_bias`` rows
+at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a static
+range.  Outside a row's range, and where an architecture, route and ``C`` have
+no row, the forward takes its counters from the workspace, as in 0.2.4.  Every
+forward program writes the same ``y`` bits.
 
 Inputs and outputs are contiguous (``C`` a multiple of 8, ``S`` at most
 ``2**31 - 2**16``, ``ValueError`` beyond); ``dweight`` and

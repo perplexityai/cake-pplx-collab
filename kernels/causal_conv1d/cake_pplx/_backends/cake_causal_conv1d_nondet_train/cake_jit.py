@@ -45,30 +45,30 @@ program (each CTA the next token blocks of its channel tile, on the route's
 tiles of ``DIRECT_PLANS``); neither takes ``work``, and ``y`` is the same bits
 on every forward program and plan.  Each row gives its own token range.  Every
 architecture and route has a row at each C = 512 to 1024.  For most C the first
-range starts at S = 1.  A row in ``FALLBACK_ROWS`` only runs the static program
-over its whole range: the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
-632 run it from S = 1 to 24576.  The sm_103a ``fwd_bias`` rows at C = 720 to
-768 start at S = 13824 (C = 736: 14336) and have only a static range.  Outside
-a row's range, and where an architecture, route and C have no row, a forward
-call runs the dynamic program, which takes ``work``, as in 0.2.4.  A backward
-call is ONE ordinary launch: every per-thread and per-CTA FP32 step and ``dx``
-are those of the det program it is built from, and only the cross-CTA
-reduction of ``dweight`` / ``dbias`` differs.  Instead of storing one partial
-row per CTA for a reduce program to sum in a fixed order, each CTA adds its CTA
-row into the accumulators (logical tensor ``acc``, kernel parameter ``dw_acc``) with
-unordered global reductions -- FP32 ``red.add`` (``v4``), one plain FP32
-word per sum, as the det reduce sums in FP32 on every route; the ``_fp32g``
-routes spread a tile's CTAs over ``slots`` copies of the accumulators so
-that fewer adds queue on a word -- then takes a ticket on its channel tile's
-``work`` counter; the tile's last CTA reads the tile's accumulators (with
-several copies every copy's, added in copy order in FP32), stores ``dw`` (and
-``db``) in the dtypes ``flags`` names, and stores zeros back.  So ``acc`` and
-``work`` are zero before and after every launch (CUDA Graph replays
-included), the host never zeroes them again, and nothing synchronizes with
-the host.  The summation order of the cross-CTA sum depends
-on the CTAs' timing: ``dweight`` / ``dbias`` are not bitwise reproducible run
-to run (the only relaxed property); they accumulate in plain FP32 words,
-as the det reduction does.
+range starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example
+the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to
+24576), the static program runs over the key's whole range.  The sm_103a
+``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and
+have only a static range.  Outside a row's range, and where an architecture,
+route and C have no row, a forward call runs the dynamic program, which takes
+``work``, as in 0.2.4.  A backward call is ONE ordinary launch: every
+per-thread and per-CTA FP32 step and ``dx`` are those of the det program it is
+built from, and only the cross-CTA reduction of ``dweight`` / ``dbias``
+differs.  Instead of storing one partial row per CTA for a reduce program to
+sum in a fixed order, each CTA adds its CTA row into the accumulators (logical
+tensor ``acc``, kernel parameter ``dw_acc``) with unordered global reductions
+-- FP32 ``red.add`` (``v4``), one plain FP32 word per sum, as the det reduce
+sums in FP32 on every route; the ``_fp32g`` routes spread a tile's CTAs over
+``slots`` copies of the accumulators so that fewer adds queue on a word -- then
+takes a ticket on its channel tile's ``work`` counter; the tile's last CTA
+reads the tile's accumulators (with several copies every copy's, added in copy
+order in FP32), stores ``dw`` (and ``db``) in the dtypes ``flags`` names, and
+stores zeros back.  So ``acc`` and ``work`` are zero before and after every
+launch (CUDA Graph replays included), the host never zeroes them again, and
+nothing synchronizes with the host.  The summation order of the cross-CTA sum
+depends on the CTAs' timing: ``dweight`` / ``dbias`` are not bitwise
+reproducible run to run (the only relaxed property); they accumulate in plain
+FP32 words, as the det reduction does.
 
 The opt-in pair routes ``bwd_fp32g_pair`` / ``bwd_bias_fp32g_pair``
 (:data:`PAIR_ROUTES`, selected only by ``dweight_sum="fp32_pair"``) are the

@@ -74,15 +74,15 @@ tile take its token blocks in turn) at the rows of :data:`DIRECT_ROWS`, which
 plans its own channel tiles (:data:`DIRECT_PLANS`) and launches at most one
 CTA per token block.  Each row gives its own token range.  Every architecture
 and route has a row at each C = 512 to 1024.  For most C the first range
-starts at S = 1.  A row in :data:`FALLBACK_ROWS` only runs the static program
-over its whole range: the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
-632 run it from S = 1 to 24576.  The sm_103a ``fwd_bias`` rows at C = 720 to
-768 start at S = 13824 (C = 736: 14336) and have only a static range.  Outside
-a row's range, and where an architecture, route and C have no row, a call runs
-the dynamic program its rules select, as in 0.2.4.  Every forward program
-computes each ``y`` element in the same fixed order, so ``y`` is bitwise the
-same whichever program and plan a call runs.  The counters of the dynamic
-programs are the forward workspace ``work`` (``workspace_rule``
+starts at S = 1.  Where a key has no :data:`DIRECT_ROWS` range (for example the
+sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576),
+the static program runs over the key's whole range.  The sm_103a ``fwd_bias``
+rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
+static range.  Outside a row's range, and where an architecture, route and C
+have no row, a call runs the dynamic program its rules select, as in 0.2.4.
+Every forward program computes each ``y`` element in the same fixed order, so
+``y`` is bitwise the same whichever program and plan a call runs.  The counters
+of the dynamic programs are the forward workspace ``work`` (``workspace_rule``
 ``tile_counters``: :func:`counter_words`, two int32 words per channel tile),
 zero before the first launch; the last CTA of each tile resets them, so the
 buffer is zero after every launch and every CUDA Graph replay and serves every
