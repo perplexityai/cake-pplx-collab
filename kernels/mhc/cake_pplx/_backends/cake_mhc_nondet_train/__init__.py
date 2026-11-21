@@ -77,9 +77,13 @@ form with its trips in reverse launch order, from 2048 to 6655 tokens and
 from 216 to 383 tokens, ``collapse_bwd__vjpwa``, the same VJP without the L2
 prefetch, from 384 to 640 tokens and ``collapse_bwd__vjpwa_pfq2`` from 641
 tokens; on SM100 / SM103 ``collapse_backward`` runs
-``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens, ``collapse_bwd__vjpwa_sp2_mb4``
-under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` from 216
-to 1023 tokens and ``collapse_bwd`` from 1024 tokens).
+``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens and ``collapse_bwd`` from 1024
+tokens, and between them ``collapse_bwd__vjpwa_sp2_mb4``: on SM100 from 216 to
+1023 tokens under the record name ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``,
+on SM103 from 216 to 247 and from 320 to 1023 tokens under the record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, with ``collapse_bwd``
+from 248 to 319 tokens under the record name ``collapse_bwd__h5120__le319``).
 ``handoff_prepare`` is the autograd node; ``dU`` / ``dpre_next`` from autograd
 are made contiguous, of their dtype and 32-byte aligned before the launch.  No
 run-to-run bit promise.
