@@ -138,8 +138,7 @@ TOKENS = (
 # C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at which no
 # backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520 to 608
 # up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).  The
-# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` routes run their fallback at small token counts by
-# the same rule (a ``bwd_bias`` key inside the ``bwd_bias_bf16_taps`` keys, whose programs plan by its tables).  The
+# ``bwd_bias`` and ``bwd_dt_bf16_taps`` routes run their fallback at small token counts by the same rule.  The
 # forward routes' keys (C 576 to 768) run the route's static program, the deterministic package's at the same rows,
 # over the measured token counts where it was not slower than the dynamic program; a direct range of
 # :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends.
@@ -155,9 +154,6 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_dt_bf16_taps", 520, 568): (1, 16384),
         ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
         ("bwd_dt_bf16_taps", 648, 1016): (1, 16384),
-        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
@@ -186,9 +182,6 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
         ("bwd_dt_bf16_taps", 648, 760): (1, 16384),
         ("bwd_dt_bf16_taps", 776, 1016): (1, 16384),
-        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
         ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
@@ -227,12 +220,11 @@ FALLBACK_ROWS_OF_RECORD = {
 }
 # The programs whose rows the fallback takes inside :data:`FALLBACK_ROWS_OF_RECORD` (named by program, not by
 # route position): the ``bwd`` program the channel thresholds pick at C 520 to 1016 on each architecture, and the
-# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` programs the thresholds pick from C 512.
+# ``bwd_bias`` and ``bwd_dt_bf16_taps`` programs the thresholds pick from C 512.
 FALLBACK_REPLACES_OF_RECORD = {
     "sm_100a": frozenset(
         {
             "cake_causal_conv1d_train_461d358d7090642c65de",
-            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
             "cake_causal_conv1d_train_92aeee41bc2e2d394937",
             "cake_causal_conv1d_train_092af77575f0fdbf3615",
         }
@@ -241,7 +233,6 @@ FALLBACK_REPLACES_OF_RECORD = {
         {
             "cake_causal_conv1d_train_461d358d7090642c65de",
             "cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab",
-            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
             "cake_causal_conv1d_train_92aeee41bc2e2d394937",
             "cake_causal_conv1d_train_092af77575f0fdbf3615",
         }
@@ -595,9 +586,9 @@ DET_ONLY = frozenset(
 OWN_COPIES = {
     "cake_causal_conv1d_det_train_0d99ef0e0ed10b11dfd5": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
 }
-# The route whose ``TILE_OVERRIDES`` / ``NARROW_TILES`` rows each ``_bf16_taps`` route plans by: its base route, whose
+# The route whose ``TILE_OVERRIDES`` / ``NARROW_TILES`` rows the ``bwd_dt_bf16_taps`` route plans by: ``bwd_dt``, whose
 # body it runs with SiLU' at the unrounded FP32 preactivation; every other route plans by its own rows.
-TILE_ROUTE = {"bwd_dt_bf16_taps": "bwd_dt", "bwd_bias_bf16_taps": "bwd_bias"}
+TILE_ROUTE = {"bwd_dt_bf16_taps": "bwd_dt"}
 
 
 @contextmanager
@@ -620,8 +611,8 @@ def _args(record: dict) -> set[str]:
 PDL_FIELDS = ("launch", "arg_plan", "logical")
 PDL_ARG = ["launch", "enable_pdl"]
 # The single-rank programs that take the scalar: every record but the opt-in pair routes' (15 forward: the static and
-# direct program of each forward route among them; 36 backward).
-RUNTIME_PDL_PROGRAMS = 51
+# direct program of each forward route among them; 32 backward).
+RUNTIME_PDL_PROGRAMS = 47
 
 
 def _pdl_program_of(det: dict) -> dict:
@@ -954,7 +945,6 @@ def test_channel_band_programs_take_their_twins_lowest_channels() -> None:
         ("sm_107a", "bwd"),
         ("sm_107a", "bwd_bias"),
         ("sm_107a", "bwd_fp32g"),
-        ("sm_107a", "bwd_bias_bf16_taps"),
     }
     for arch, kind, band, twin, det_twin in bands:
         record, twin_record = cake_jit.MODULES[band], cake_jit.MODULES[twin]
@@ -1439,7 +1429,6 @@ ACC_SLOTS = {
     "bwd_fp32g": 16,
     "bwd_bias_fp32g": 16,
     "bwd_dt_bf16_taps": 1,
-    "bwd_bias_bf16_taps": 1,
     "bwd_fp32g_pair": 8,
     "bwd_bias_fp32g_pair": 8,
 }
@@ -1609,10 +1598,10 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
 
 @pytest.mark.cpu_only
 def test_bf16_taps_routes_run_their_base_routes_records() -> None:
-    """``TILE_ROUTE`` names each ``_bf16_taps`` route's base route.  On every architecture a ``_bf16_taps`` route
+    """``TILE_ROUTE`` names the ``bwd_dt_bf16_taps`` route's base route, ``bwd_dt``.  On every architecture the route
     lists, position for position, its base route's records under their own names (the same selection rule, plan,
-    grid, launch, arguments and workspace rule; another program), and the tile tables name base routes only (a
-    ``_bf16_taps`` route plans by its base route's rows)."""
+    grid, launch, arguments and workspace rule; another program), and the tile tables name base routes only (the
+    route plans by its base route's rows)."""
 
     assert cake_jit.TILE_ROUTE == TILE_ROUTE
     for arch in ARCHES:
@@ -2284,7 +2273,7 @@ def narrow_table(request, monkeypatch):
 
 def _covering(table: dict, arch: str, route: str, C: int):
     """The ``(S_min, S_max)`` of the first key of ``table[arch]`` on ``route`` covering ``C`` (``None``: none, or
-    a ``TILE_OVERRIDES`` row of ``(route, C)``; a ``_bf16_taps`` route reads its base route's keys)."""
+    a ``TILE_OVERRIDES`` row of ``(route, C)``; ``bwd_dt_bf16_taps`` reads its base route's keys)."""
 
     route = TILE_ROUTE.get(route, route)
     if C % 8 or (route, C) in cake_jit.TILE_OVERRIDES.get(arch, {}):
