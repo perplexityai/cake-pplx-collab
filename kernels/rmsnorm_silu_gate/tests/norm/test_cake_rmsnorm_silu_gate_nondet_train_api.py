@@ -83,7 +83,9 @@ checks:
   accumulated ``dw`` from the same starting value too) but a BF16 ``dw`` in
   the fused and the row-claims bands, and every output is judged; so are
   the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows)
-  and ``STRIDED_FORWARD_BANDS`` bands (other layouts) and the backward at
+  and ``STRIDED_FORWARD_BANDS`` bands (other layouts), the forward of ``x``
+  and ``z`` broadcast over more than one token (token stride 0: not packed
+  rows, so the forward of other layouts) and the backward at
   the first and the last rows of each ``BACKWARD_BANDS`` band of this device
   (the small-row backwards, one cluster each, the static backward of an
   FP32 weight gradient on sm_100a and sm_103a, the fused backward and the
@@ -1731,6 +1733,137 @@ def test_forward_keeps_the_gate_tail_in_every_band(
         return silu_draw(x, z, w, None, EPS, [{"y": y}], {"y": "y"})
 
     judge(record_property, run, seed=23)
+
+
+# Forward inputs whose ``x`` and ``z`` (``both``), or one of them, are one
+# token of its own storage broadcast over more tokens (``expand``: token
+# stride 0), at row counts at which packed rows run a program that reads
+# packed rows at their linear offsets: a tiny forward (no stride; on 148 SMs
+# or more) or, on sm_107a past 280 rows per SM, the pipelined forward of
+# packed rows (passed the token stride ``H * 128``).  Such a program cannot
+# read them (the tiny forward takes contiguous ``x`` and ``z`` only, and the
+# pipelined forward of packed rows would read rows past the broadcast token),
+# so they run the forward of other layouts (``STRIDED_FORWARD_BANDS``), which
+# reads the token stride.
+BROADCAST_CASES = [
+    pytest.param(2, 1, "both", id="2x1"),
+    pytest.param(3, 48, "both", id="3x48"),
+    pytest.param(37, 48, "both", id="37x48"),
+    pytest.param(100, 48, "both", id="100x48"),
+    pytest.param(1300, 48, "both", id="1300x48"),
+    pytest.param(3, 48, "x", id="3x48-x"),
+    pytest.param(3, 48, "z", id="3x48-z"),
+]
+
+
+@requires_device
+@pytest.mark.parametrize("tokens,heads,broadcast", BROADCAST_CASES)
+def test_forward_of_inputs_broadcast_over_tokens_runs_the_forward_of_other_layouts(
+    tokens,
+    heads,
+    broadcast,
+    determinism_setting,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
+) -> None:
+    """``BROADCAST_CASES``: the forward passes a broadcast input's token
+    stride 0 and launches ``module_for_rows``' module of other layouts
+    (``packed=False``), no program of packed rows at their linear offsets,
+    where packed rows of the same count run one (skipped elsewhere:
+    ``BROADCAST_STRIDED_CASES``); ``y`` repeats bit for bit and, on the
+    inputs of every draw of ``judge``, is judged against the naive
+    implementation."""
+    sms = _sm_count()
+    arch = loader.device_arch(torch.cuda.current_device())
+    rows = tokens * heads
+    linear = _linear_forwards(arch)
+    if loader.module_for_rows(arch, "fwd", rows, sms) not in linear:
+        pytest.skip(f"{rows} rows on {sms} SMs: packed rows run no such program")
+    name = loader.module_for_rows(arch, "fwd", rows, sms, packed=False)
+    assert name not in linear, (arch, rows, name)
+    _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, 27)
+
+
+def _linear_forwards(arch):
+    """The forward modules of ``arch`` that read packed rows at their linear
+    offsets: the tiny forwards and the pipelined forward of packed rows."""
+    return {
+        name
+        for role, name in loader.ROUTES[arch].items()
+        if role.startswith("fwd") and role.endswith(("_tiny", "_packed"))
+    }
+
+
+def _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, seed):
+    """Two forwards of ``tokens`` x ``heads`` rows with ``x``, ``z`` or both
+    (``broadcast``) one token broadcast over the others: each launches
+    ``name`` with the inputs' token strides (0 for a broadcast input), ``y``
+    repeats bit for bit and, on the inputs of every draw of ``judge``, is
+    judged against the naive implementation."""
+    arch = loader.device_arch(torch.cuda.current_device())
+    rows = tokens * heads
+    launched = _spy_strides(monkeypatch)
+
+    def run(j, s):
+        x, z, w, _ = suite.make(tokens, heads, seed=s)
+        if broadcast in ("both", "x"):
+            x = x[:1].clone().expand(tokens, heads, D)
+        if broadcast in ("both", "z"):
+            z = z[:1].clone().expand(tokens, heads, D)
+        launched.clear()
+        y = nd_forward(x, z, w, EPS)
+        assert_same_bits("y", nd_forward(x, z, w, EPS), y)
+        assert [n for n, _ in launched] == [name] * 2, (arch, rows, launched)
+        for _, strides in launched:
+            for which, t in (("x", x), ("z", z)):
+                want = 0 if t.stride(0) == 0 else heads * D
+                assert strides[f"{which}_tok"] == want, (which, strides)
+        return silu_draw(x, z, w, None, EPS, [{"y": y}], {"y": "y"})
+
+    judge(record_property, run, seed=seed)
+
+
+# Broadcast inputs as in ``BROADCAST_CASES`` at row counts at which packed
+# rows run a program that reads the token stride (on 148 SMs or more: the
+# mid forward at 441 x 48 rows on every architecture, the pipelined forward
+# of sm_100a at 185 x 48, the long forward of sm_100a and the extra-long
+# forward of sm_103a and sm_107a at 883 x 48, the extra-long forward of
+# sm_100a and sm_103a at 1300 x 48): such a call runs the program of packed
+# rows of the same count, as 0.2.11 did, with the token stride 0.
+BROADCAST_STRIDED_CASES = [
+    pytest.param(185, 48, "both", id="185x48"),
+    pytest.param(441, 48, "both", id="441x48"),
+    pytest.param(883, 48, "both", id="883x48"),
+    pytest.param(1300, 48, "both", id="1300x48"),
+    pytest.param(883, 48, "x", id="883x48-x"),
+    pytest.param(883, 48, "z", id="883x48-z"),
+]
+
+
+@requires_device
+@pytest.mark.parametrize("tokens,heads,broadcast", BROADCAST_STRIDED_CASES)
+def test_forward_of_inputs_broadcast_over_tokens_elsewhere_runs_the_program_of_packed_rows(
+    tokens,
+    heads,
+    broadcast,
+    determinism_setting,
+    monkeypatch: pytest.MonkeyPatch,
+    record_property,
+) -> None:
+    """``BROADCAST_STRIDED_CASES``: where packed rows of the same count run
+    a program that reads the token stride, the forward of a broadcast input
+    launches that program (``module_for_rows``' module of packed rows) with
+    the token stride 0 (skipped where packed rows run a program that reads
+    them at their linear offsets: ``BROADCAST_CASES``); ``y`` repeats bit for
+    bit and, on the inputs of every draw of ``judge``, is judged against the
+    naive implementation."""
+    sms = _sm_count()
+    arch = loader.device_arch(torch.cuda.current_device())
+    rows = tokens * heads
+    name = loader.module_for_rows(arch, "fwd", rows, sms)
+    if name in _linear_forwards(arch):
+        pytest.skip(f"{rows} rows on {sms} SMs: packed rows run {name} (BROADCAST_CASES)")
+    _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, 29)
 
 
 # Gate inputs at and past the edges of the packed gate's range: below -41,

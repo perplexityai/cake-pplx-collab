@@ -776,12 +776,27 @@ def _forward(
     }
     index = _device_index(device)
     # packed rows: row n of x and z at element 128 n (the tiny forward reads
-    # no other layout)
+    # no other layout): head stride 128 and token stride H * 128, or token
+    # stride 0 (one token, whose token stride is never read, or x or z
+    # broadcast over tokens)
     packed = all(
         head == HEAD_DIM and tok in (0, heads * HEAD_DIM)
         for tok, head in ((x_tok, x_head), (z_tok, z_head))
     )
-    name = module_for_rows(arch, "fwd", rows, device_sm_count(index), packed=packed)
+    sms = device_sm_count(index)
+    name = module_for_rows(arch, "fwd", rows, sms, packed=packed)
+    if (
+        packed
+        and rows != heads
+        and 0 in (x_tok, z_tok)
+        and name in _linear_forwards(arch)
+    ):
+        # x or z broadcast over more than one token: a program that reads
+        # packed rows at their linear offsets (the tiny forward takes
+        # contiguous x and z only; the pipelined forward of packed rows is
+        # passed the token stride H * 128) cannot read it, so the band of
+        # other layouts runs, which reads the token stride
+        name = module_for_rows(arch, "fwd", rows, sms, packed=False)
     if name == ROUTES[arch].get("fwd_pipe_packed"):
         # this program requires the token stride H * 128 of packed rows; a
         # single token's stride (passed as 0) is never read
@@ -829,6 +844,19 @@ def _workspace_bytes(arch: str) -> int:
         workspace_bytes(name)
         for role, name in ROUTES[arch].items()
         if role.startswith("bwd")
+    )
+
+
+@functools.cache
+def _linear_forwards(arch: str) -> frozenset[str]:
+    """The forward modules of ``arch`` that read packed rows at their linear
+    offsets (the tiny forward and the pipelined forward of packed rows): a
+    broadcast ``x`` or ``z`` runs the band of other layouts instead."""
+
+    return frozenset(
+        name
+        for role, name in ROUTES[arch].items()
+        if role.startswith("fwd") and role.endswith(("_tiny", "_packed"))
     )
 
 
