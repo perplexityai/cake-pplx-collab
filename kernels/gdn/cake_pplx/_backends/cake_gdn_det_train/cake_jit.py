@@ -1724,15 +1724,15 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_gdn_det_train_8e4cbeb215641bdc650f",
+        "kernel_symbol": "kernel_cake_gdn_det_train_37dbc82792ae71cc2119",
         "launch": {
             "block": (320, 1, 1),
             "cluster": (1, 1, 1),
             "cooperative": False,
-            "dynamic_smem_bytes": 223104,
+            "dynamic_smem_bytes": 222976,
             "use_pdl": False,
         },
-        "library": "cake_gdn_det_train_8e4cbeb215641bdc650f",
+        "library": "cake_gdn_det_train_37dbc82792ae71cc2119",
         "stage": "dhu_tc2_dvl32_gm2",
     },
     "dqkwg": {
