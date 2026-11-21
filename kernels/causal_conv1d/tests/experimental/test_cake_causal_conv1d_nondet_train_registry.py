@@ -101,9 +101,9 @@ CHANNELS = (
     4096,
     8192,
 )
-# 262143 / 262144: both sides of the sm_107a token-floored backward program's floor; S_max and S_max + 1 of every
-# ``FALLBACK_ROWS`` key (:data:`FALLBACK_ROWS_OF_RECORD`); both sides of every bound of the ``SM_WIDE_ROWS``
-# segments (:data:`SM_WIDE_ROWS_OF_RECORD`).
+# 262143 / 262144: both sides of the sm_107a token-floored backward program's floor; S_max and S_max + 1 of the
+# default backward route's ``FALLBACK_ROWS`` keys (:data:`FALLBACK_ROWS_OF_RECORD`; :func:`_backward_edges` adds those of
+# every backward key); both sides of every bound of the ``SM_WIDE_ROWS`` segments (:data:`SM_WIDE_ROWS_OF_RECORD`).
 TOKENS = (
     1,
     1000,
@@ -138,6 +138,8 @@ TOKENS = (
 # C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at which no
 # backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520 to 608
 # up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).  The
+# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` routes run their fallback at small token counts by
+# the same rule (a ``bwd_bias`` key inside the ``bwd_bias_bf16_taps`` keys, whose programs plan by its tables).  The
 # forward routes' keys (C 576 to 768) run the route's static program, the deterministic package's at the same rows,
 # over the measured token counts where it was not slower than the dynamic program; a direct range of
 # :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends.
@@ -147,6 +149,15 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd", 616, 760): (1, 131072),
         ("bwd", 768, 768): (1, 262144),
         ("bwd", 776, 1016): (1, 62585),
+        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 576, 640): (1, 24576),
+        ("bwd_bias", 648, 1016): (1, 16384),
+        ("bwd_dt_bf16_taps", 520, 568): (1, 16384),
+        ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
+        ("bwd_dt_bf16_taps", 648, 1016): (1, 16384),
+        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
+        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
+        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
@@ -168,6 +179,16 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd", 616, 760): (1, 31292),
         ("bwd", 768, 768): (1, 250340),
         ("bwd", 776, 1016): (1, 125170),
+        ("bwd_bias", 520, 568): (1, 16384),
+        ("bwd_bias", 576, 640): (1, 24576),
+        ("bwd_bias", 648, 1016): (1, 16384),
+        ("bwd_dt_bf16_taps", 520, 568): (1, 16384),
+        ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
+        ("bwd_dt_bf16_taps", 648, 760): (1, 16384),
+        ("bwd_dt_bf16_taps", 776, 1016): (1, 16384),
+        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
+        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
+        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
         ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
@@ -205,13 +226,24 @@ FALLBACK_ROWS_OF_RECORD = {
     },
 }
 # The programs whose rows the fallback takes inside :data:`FALLBACK_ROWS_OF_RECORD` (named by program, not by
-# route position): the ``bwd`` program the channel thresholds pick at C 520 to 1016 on each architecture.
+# route position): the ``bwd`` program the channel thresholds pick at C 520 to 1016 on each architecture, and the
+# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` programs the thresholds pick from C 512.
 FALLBACK_REPLACES_OF_RECORD = {
-    "sm_100a": frozenset({"cake_causal_conv1d_train_461d358d7090642c65de"}),
+    "sm_100a": frozenset(
+        {
+            "cake_causal_conv1d_train_461d358d7090642c65de",
+            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
+            "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+            "cake_causal_conv1d_train_092af77575f0fdbf3615",
+        }
+    ),
     "sm_103a": frozenset(
         {
             "cake_causal_conv1d_train_461d358d7090642c65de",
             "cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab",
+            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
+            "cake_causal_conv1d_train_92aeee41bc2e2d394937",
+            "cake_causal_conv1d_train_092af77575f0fdbf3615",
         }
     ),
 }
@@ -1278,6 +1310,20 @@ def _forward_edges(arch: str) -> tuple[set[int], set[int]]:
     return {C for C in channels if C > 0}, {S for S in tokens if S > 0}
 
 
+def _backward_edges(arch: str) -> tuple[set[int], set[int]]:
+    """The channel counts (both sides of every channel bound) and token counts (both sides of every token bound) of
+    the backward keys of ``arch`` in :data:`FALLBACK_ROWS_OF_RECORD`."""
+
+    channels, tokens = set(), set()
+    for (route, c_lo, c_hi), (s_lo, s_hi) in FALLBACK_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        if route not in FORWARD_ROUTES:
+            channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
+            tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    return {C for C in channels if C > 0}, {S for S in tokens if S > 0}
+
+
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("arch", ARCHES)
 def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
@@ -1303,15 +1349,16 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     sm_wide_replaced = set()
     forward_hits = set()
     edge_channels, edge_tokens = _forward_edges(arch)
+    backward_channels, backward_tokens = _backward_edges(arch)
     for kind in cake_jit.KINDS:
         new, det = cake_jit.ROUTES[arch][kind], _det_route(arch, kind)
         forward = cake_jit.route_role(kind) == "fwd"
         channels = (
             sorted(set(CHANNELS) | {C for C in edge_channels if C % 8 == 0})
             if forward
-            else CHANNELS
+            else sorted(set(CHANNELS) | backward_channels)
         )
-        tokens = sorted(set(TOKENS) | edge_tokens) if forward else TOKENS
+        tokens = sorted(set(TOKENS) | (edge_tokens if forward else backward_tokens))
         for C in channels:
             for S in tokens:
                 (name,) = cake_jit.selected_modules(arch, kind, C=C, S=S)

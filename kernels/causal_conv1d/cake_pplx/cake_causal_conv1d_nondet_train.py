@@ -26,8 +26,14 @@ fixed-order reduce launch).  At the rows of the backend's
 S = 24576 on sm_100a and from S = 20480 on sm_103a, at C = 520 to 680 from
 S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
 the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
-busy on another stream can delay it.  This module never runs the
-deterministic package.
+busy on another stream can delay it.  On sm_100a and sm_103a, at the backward
+rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
+1016; from release 0.2.7 also the ``bwd_bias``, ``bwd_bias_bf16_taps`` and
+``bwd_dt_bf16_taps`` routes at C = 520 to 1016 and small S,
+``bwd_dt_bf16_taps`` not at C = 768 on sm_103a; each row up to its own token
+bound), that launch runs the route's fallback program, the one the route runs
+at its smallest channel counts, in place of the program its channel thresholds
+pick.  This module never runs the deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
