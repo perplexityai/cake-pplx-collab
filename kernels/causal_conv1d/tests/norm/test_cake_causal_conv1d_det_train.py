@@ -4167,6 +4167,31 @@ def test_tokens_and_taps_must_be_aligned() -> None:
         assert _same_bits(grads, backward(x, wt, cu, dy, None, "bf16")), weight_dtype
 
 
+def test_autograd_copies_a_misaligned_incoming_gradient() -> None:
+    """Autograd can hand the backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entry copies it, so the backward runs (no ``ValueError``) and ``dx``, ``dweight`` and ``dbias`` are
+    bitwise equal to the direct backward of the same gradient, without a bias and with FP32 and BF16 biases."""
+
+    S, C, docs = 1000, 512, "perf"
+    x0, w0, cu, dy = _inputs(S, C, docs, key=11)
+    for bias_dtype in (None, F32, BF16):
+        b0 = None if bias_dtype is None else _bias_input(C, bias_dtype, key=11)
+        x = x0.detach().clone().requires_grad_(True)
+        w = w0.detach().clone().requires_grad_(True)
+        b = None if b0 is None else b0.detach().clone().requires_grad_(True)
+        y = cake_causal_conv1d_det(x, w, cu, b)
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        torch.cat([pad, y.reshape(-1)]).backward(torch.cat([pad, dy.reshape(-1)]))
+        assert seen == [2], (bias_dtype, seen)
+        dx_ref, dw_ref, db_ref = _backward(x0, w0, cu, dy, b0, "bf16")
+        assert _same_bits(x.grad, dx_ref) and _same_bits(w.grad, dw_ref), bias_dtype
+        if b0 is not None:
+            assert _same_bits(b.grad, db_ref), bias_dtype
+
+
 def test_every_route_ships_on_every_architecture() -> None:
     """The delivered package has no trap: every route of ``KINDS`` is exported on every architecture, with every
     library in ``build.json``.  Fails until the exporter has rendered every route's programs."""

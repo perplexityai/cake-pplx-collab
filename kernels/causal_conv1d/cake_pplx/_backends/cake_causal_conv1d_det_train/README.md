@@ -106,6 +106,7 @@ q, k, v = cake_causal_conv1d_det_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 |---|---|---|---|
 | `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous, 16-byte aligned; the rank's fragments back to back in the order of `ctx.cu_seqlens_local`; `C` a multiple of 8; `T_r` may be 0 |
 | `weight`, `dweight` | `[C, 4]` | FP32 | 16-byte aligned; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `hist` | `[n_hist_rows, C]` | BF16 | the forward's history pool, passed back to the backward unchanged; contiguous, 16-byte aligned |
 | `ctx` | | | the rank's KCP context, built by the calling family's context builder (for example `cake_kda_det_train_kcp_build_context(..., conv_kernel_size=4)`): fragment table, halo plan, device tables, process group |
 
 A misaligned operand raises `ValueError` before anything launches; a fresh

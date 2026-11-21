@@ -224,8 +224,9 @@ TAPS_ALIGN = {torch.float32: 16, torch.bfloat16: 8}
 # 16-byte vectors (two in FP32, one in BF16).
 BIAS_ALIGN = {torch.float32: 32, torch.bfloat16: 16}
 BACKWARD_BIAS_ALIGN = {torch.float32: 16, torch.bfloat16: 16}
-# The KCP backward programs store one channel's four FP32 ``dweight`` taps with one 16-byte store (the single-rank
-# reduce program stores ``dweight`` per element).
+# The KCP backward's FP32 ``dweight``: the cooperative form (``cooperative=True``) stores one channel's four taps with
+# one 16-byte store; the default form's reduce program, like the single-rank one, stores them one at a time.  The
+# KCP backward asks 16 bytes of every form, so a buffer that one form takes the other takes too.
 DWEIGHT_FP32_ALIGN = 16
 
 
@@ -240,6 +241,15 @@ def _aligned(tensor: torch.Tensor, name: str, need: int) -> torch.Tensor:
             f"data_ptr() % {need} == {misaligned}; pass a fresh tensor or .clone()"
         )
     return tensor
+
+
+def _grad_tokens(grad: torch.Tensor) -> torch.Tensor:
+    """The incoming gradient of an autograd backward as a contiguous BF16 tensor at a :data:`TOKEN_ALIGN`-byte
+    address.  Autograd can hand over a view at any offset (the backward of ``torch.cat`` narrows its gradient), and
+    the caller cannot replace that tensor, so a misaligned one is copied."""
+
+    g = grad.to(torch.bfloat16).contiguous()
+    return g.clone() if g.data_ptr() % TOKEN_ALIGN else g
 
 
 # The largest token count ``S`` a call takes.  The kernels split a channel
@@ -1054,7 +1064,8 @@ class CakeCausalConv1dDetFunction(torch.autograd.Function):
     bwd_grid_mult=1, dweight_sum="fp32")`` returns ``y``; the backward runs the fused ``dx`` + deterministic
     ``dweight`` (+ ``dbias``) pair of launches of :func:`cake_causal_conv1d_det_train_backward`
     on the incoming gradient (materialized as a contiguous BF16 tensor when
-    autograd hands over another layout or dtype) and returns the gradients of
+    autograd hands over another layout or dtype, and copied when its address is
+    not 16-byte aligned) and returns the gradients of
     ``weight`` and ``bias`` in the parameters' dtypes.
     """
 
@@ -1084,7 +1095,7 @@ class CakeCausalConv1dDetFunction(torch.autograd.Function):
         x, weight, cu_seqlens, bias = ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         grads = cake_causal_conv1d_det_train_backward(
             x,
             weight,

@@ -218,12 +218,14 @@ from . import (
     TOKEN_ALIGN,
     _accumulator_layout,
     _alert_nondeterministic,
+    _aligned,
     _backward_accumulators,
     _cu_seqlens,
     _device_arch,
     _device_index,
     _dweight_aligned,
     _forward_work,
+    _grad_tokens,
     _output,
     _require_tensor,
     _scalars,
@@ -309,6 +311,27 @@ def _pool(
     entry names it)."""
 
     return torch.empty((max(rows, 1), C), dtype=dtype, device=device)
+
+
+def _hist_pool(hist: Any, C: int, *, device: torch.device) -> torch.Tensor:
+    """The backward's ``hist``: the forward's contiguous BF16 ``[n_hist_rows, C]`` pool at a 16-byte aligned address
+    (the backward programs read its rows as 16-byte vectors; ``ValueError`` otherwise), or a fresh one-row pool for
+    an empty one (a valid pointer for the kernels; no table entry names a row of it)."""
+
+    hist_t = _require_tensor(hist, "hist")
+    if (
+        hist_t.ndim != 2
+        or int(hist_t.shape[1]) != C
+        or hist_t.dtype != torch.bfloat16
+        or not hist_t.is_contiguous()
+    ):
+        raise ValueError(
+            f"hist must be the forward's contiguous BF16 [n_hist_rows, {C}] pool, got {hist_t.dtype} {tuple(hist_t.shape)}"
+        )
+    _aligned(hist_t, "hist", TOKEN_ALIGN)
+    if hist_t.shape[0] == 0:
+        hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
+    return hist_t
 
 
 def _exchange(
@@ -1429,7 +1452,8 @@ def cake_causal_conv1d_nondet_train_kcp_forward(
     ``y`` and ``hist`` are the det KCP forward's bits (no alert under torch's deterministic mode).
 
     ``x_local`` BF16 ``[T_r, C]`` (or ``[1, T_r, C]``) contiguous, the rank's fragments back to back in the order of
-    ``ctx.cu_seqlens_local``; ``weight`` FP32 ``[C, 4]``; ``ctx`` a ``CakeKDADetKcpContext`` (its halo plan ``ctx.halo``, the
+    ``ctx.cu_seqlens_local``; ``weight`` FP32 ``[C, 4]``; ``x_local``, ``weight`` and a preallocated ``out`` 16-byte
+    aligned (``ValueError`` otherwise); ``ctx`` a ``CakeKDADetKcpContext`` (its halo plan ``ctx.halo``, the
     device tables ``ctx.halo_tables`` and the process group ``ctx.group``).  Every rank of the group calls this
     function once per layer, in the same order: the forward halo exchange is a collective (a rank without tokens
     joins it with empty splits and returns empty outputs).  ``hist`` is a fresh ``[n_hist_rows, C]`` BF16 tensor
@@ -1956,7 +1980,8 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     before the one BF16 rounding; the det KCP backward's bits) and the rank's FP32 ``dweight`` partial (summed across
     CTAs in an unordered order: not bitwise reproducible run to run; its sum over the ranks is the framework's).
 
-    ``hist`` is the forward's pool.  The head program writes the derivative rows of every continuing fragment's first
+    ``hist`` is the forward's pool (16-byte aligned: the programs read its rows as 16-byte vectors; ``ValueError``
+    otherwise).  The head program writes the derivative rows of every continuing fragment's first
     tokens into the backward exchange's send layout, the exchange delivers them to the predecessors as ``dpre_tail``,
     and the main program folds them in one ordinary launch.  Every rank calls this function once per layer, in the
     same order.  ``graph`` as in the forward (the backward's key holds the forward's ``hist`` pointer, so its capture
@@ -2088,19 +2113,7 @@ def _kcp_backward(
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
     cu, n_frag = _context(ctx, device=device, T_r=S)
     halo = ctx.halo
-    hist_t = _require_tensor(hist, "hist")
-    if (
-        hist_t.ndim != 2
-        or int(hist_t.shape[1]) != C
-        or hist_t.dtype != torch.bfloat16
-        or not hist_t.is_contiguous()
-    ):
-        raise ValueError(
-            f"hist must be the forward's contiguous BF16 [n_hist_rows, {C}] pool, got {hist_t.dtype} {tuple(hist_t.shape)}"
-        )
-    if hist_t.shape[0] == 0:
-        # A valid pointer for the kernels; no table entry names a row of it.
-        hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
+    hist_t = _hist_pool(hist, C, device=device)
     dx_out = _output(
         dx,
         "dx",
@@ -2276,18 +2289,7 @@ def _bwd_host(
     _pair_fits(pair, C, S, reserve, "cake_causal_conv1d_nondet_train_kcp_backward")
     w = _weight(weight, C, device=device)
     _, _, dy_flat = _tokens(dy, "dy", device=device, shape=tuple(x.shape))
-    hist_t = _require_tensor(hist, "hist")
-    if (
-        hist_t.ndim != 2
-        or int(hist_t.shape[1]) != C
-        or hist_t.dtype != torch.bfloat16
-        or not hist_t.is_contiguous()
-    ):
-        raise ValueError(
-            f"hist must be the forward's contiguous BF16 [n_hist_rows, {C}] pool, got {hist_t.dtype} {tuple(hist_t.shape)}"
-        )
-    if hist_t.shape[0] == 0:
-        hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
+    hist_t = _hist_pool(hist, C, device=device)
     dx_out = _output(
         dx,
         "dx",
@@ -2712,7 +2714,7 @@ class CakeCausalConv1dNondetKcpFunction(torch.autograd.Function):
         x_local, weight, hist = fn_ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x_local)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         dx, dweight = cake_causal_conv1d_nondet_train_kcp_backward(
             x_local,
             weight,
@@ -2742,7 +2744,7 @@ class _CakeCausalConv1dReserveFunctionKcp(CakeCausalConv1dNondetKcpFunction):
         x_local, weight, hist = fn_ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x_local)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         dx, dweight = cake_causal_conv1d_nondet_train_kcp_backward(
             x_local,
             weight,
@@ -2776,9 +2778,10 @@ def cake_causal_conv1d_nondet_kcp(
     ----------
     x_local : torch.Tensor
         BF16 ``[T_r, C]`` (or ``[1, T_r, C]``) contiguous activations of the rank's fragments, back to back in the
-        order of ``ctx.cu_seqlens_local``.
+        order of ``ctx.cu_seqlens_local``; 16-byte aligned (``ValueError`` otherwise).
     weight : torch.Tensor
-        FP32 ``[C, 4]`` contiguous taps; ``weight[c, 3]`` multiplies the current token.
+        FP32 ``[C, 4]`` contiguous taps, 16-byte aligned (``ValueError`` otherwise); ``weight[c, 3]`` multiplies the
+        current token.
     ctx : CakeKDADetKcpContext
         The rank's context (``cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context``): fragment table, halo
         plan, process group.  Every rank of the group calls this function once per layer, in the same order.
@@ -2989,10 +2992,11 @@ def cake_causal_conv1d_nondet_train_kcp_multi_forward(
     ``cake_causal_conv1d_nondet_train_kcp_forward(xs[i], weights[i], ctx)`` per tensor.
 
     ``xs`` BF16 ``[T_r, C_i]`` (or ``[1, T_r, C_i]``) contiguous tensors of the rank's fragments (the channel counts
-    may differ); ``weights`` FP32 ``[C_i, 4]``; ``outs`` optional preallocated outputs.  Every rank of ``ctx.group``
-    calls this function once per layer, in the same order, with the same number of tensors and the same channel
-    counts: the one forward exchange is a collective.  ``hists[i]`` is a fresh contiguous ``[n_hist_rows, C_i]``
-    BF16 pool (the saved tensor of tensor ``i``).  ``graph`` as in
+    may differ); ``weights`` FP32 ``[C_i, 4]``; ``outs`` optional preallocated outputs.  Each ``xs[i]``, ``weights[i]``
+    and ``outs[i]`` follows the single forward's rules (16-byte aligned; ``ValueError`` otherwise).  Every rank of
+    ``ctx.group`` calls this function once per layer, in the same order, with the same number of tensors and the same
+    channel counts: the one forward exchange is a collective.  ``hists[i]`` is a fresh contiguous
+    ``[n_hist_rows, C_i]`` BF16 pool (the saved tensor of tensor ``i``).  ``graph`` as in
     :func:`cake_causal_conv1d_nondet_train_kcp_forward` (the validity key holds every operand).
     """
 
@@ -3134,9 +3138,9 @@ def cake_causal_conv1d_nondet_train_kcp_multi_backward(
     launch per tensor on the stream's accumulator workspace).  ``hists`` are the forward's pools.  Every rank calls
     this function once per layer, in the same order.  ``graph`` as in
     :func:`cake_causal_conv1d_nondet_train_kcp_backward`.  Under torch's deterministic mode the call alerts like the
-    single backward.  ``dxs`` / ``dweights`` entries follow the single backward's output rules (``dweight`` 16-byte
-    aligned).  ``bwd_reserve_sms`` and ``dweight_sum`` as in :func:`cake_causal_conv1d_nondet_train_kcp_backward`, for
-    every tensor's main backward.
+    single backward.  ``dxs`` / ``dweights`` entries follow the single backward's output rules (``dx`` and
+    ``dweight`` 16-byte aligned), and each ``hists[i]`` its ``hist`` rule.  ``bwd_reserve_sms`` and ``dweight_sum``
+    as in :func:`cake_causal_conv1d_nondet_train_kcp_backward`, for every tensor's main backward.
     """
 
     if bwd_reserve_sms is not None or dweight_sum is not None:
@@ -3496,7 +3500,7 @@ class CakeCausalConv1dNondetKcpMultiFunction(torch.autograd.Function):
         saved = fn_ctx.saved_tensors
         xs, weights, hists = saved[:n], saved[n : 2 * n], saved[2 * n :]
         dys = [
-            (torch.zeros_like(x) if g is None else g).to(torch.bfloat16).contiguous()
+            _grad_tokens(torch.zeros_like(x) if g is None else g)
             for g, x in zip(grad_ys, xs, strict=True)
         ]
         dxs, dweights = cake_causal_conv1d_nondet_train_kcp_multi_backward(
@@ -3524,7 +3528,7 @@ class _CakeCausalConv1dReserveMultiFunctionKcp(CakeCausalConv1dNondetKcpMultiFun
         saved = fn_ctx.saved_tensors
         xs, weights, hists = saved[:n], saved[n : 2 * n], saved[2 * n :]
         dys = [
-            (torch.zeros_like(x) if g is None else g).to(torch.bfloat16).contiguous()
+            _grad_tokens(torch.zeros_like(x) if g is None else g)
             for g, x in zip(grad_ys, xs, strict=True)
         ]
         dxs, dweights = cake_causal_conv1d_nondet_train_kcp_multi_backward(
@@ -3563,9 +3567,9 @@ def cake_causal_conv1d_nondet_kcp_multi(
     ----------
     xs : sequence of torch.Tensor
         ``n >= 1`` BF16 ``[T_r, C_i]`` (or ``[1, T_r, C_i]``) contiguous activations of the rank's fragments, in the
-        order of ``ctx.cu_seqlens_local``; the channel counts may differ.
+        order of ``ctx.cu_seqlens_local``; the channel counts may differ.  Each 16-byte aligned.
     weights : sequence of torch.Tensor
-        FP32 ``[C_i, 4]`` contiguous taps, one per tensor.
+        FP32 ``[C_i, 4]`` contiguous taps, one per tensor, each 16-byte aligned.
     ctx : CakeKDADetKcpContext
         The rank's context, as in :func:`cake_causal_conv1d_nondet_kcp`.  Every rank of the group calls this function
         once per layer, in the same order, with the same tensor count and channel counts.  The ranks are not compared

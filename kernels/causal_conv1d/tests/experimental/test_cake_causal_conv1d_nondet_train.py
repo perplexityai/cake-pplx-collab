@@ -5310,6 +5310,47 @@ def test_tokens_and_taps_must_be_aligned() -> None:
         )
 
 
+def test_autograd_copies_a_misaligned_incoming_gradient() -> None:
+    """Autograd can hand the backward a contiguous BF16 gradient off the 16-byte grid: the backward of
+    ``torch.cat([pad, y.reshape(-1)])`` narrows its gradient one element in, 2 bytes past an aligned address.  The
+    autograd entry copies it, so the backward runs (no ``ValueError``): ``dx`` bitwise equal to the direct backward
+    of the same gradient, and ``dweight`` / ``dbias`` judged against the naive tier, without a bias and with an FP32
+    bias."""
+
+    S, C, docs = 1000, 512, "perf"
+
+    def through_cat(x, w, cu, dy, b, policy):
+        xg = x.detach().clone().requires_grad_(True)
+        wg = w.detach().clone().requires_grad_(True)
+        bg = None if b is None else b.detach().clone().requires_grad_(True)
+        y = pkg.cake_causal_conv1d_nondet(
+            xg, wg, cu, bg, silu_grad_preactivation=policy
+        )
+        seen = []
+        y.register_hook(lambda g: seen.append(g.data_ptr() % 16))
+        pad = y.new_zeros(1)
+        torch.cat([pad, y.reshape(-1)]).backward(torch.cat([pad, dy.reshape(-1)]))
+        assert seen == [2], seen
+        dx_ref = _backward(x, w, cu, dy, b, policy)[0]
+        assert torch.equal(_bits(xg.grad), _bits(dx_ref))
+        return {
+            "y": y.detach(),
+            **_grads(xg.grad, wg.grad, None if bg is None else bg.grad),
+        }
+
+    for bias_dtype in (None, F32):
+        bias = "none" if bias_dtype is None else _dtype_id(bias_dtype)
+        _judge(
+            S,
+            C,
+            docs,
+            through_cat,
+            bias_dtype=bias_dtype,
+            key=11,
+            label=f"incoming gradient off the grid, bias {bias}",
+        )
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # The registry against the rendered manifest.
 

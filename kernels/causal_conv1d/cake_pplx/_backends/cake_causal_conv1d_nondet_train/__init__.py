@@ -502,6 +502,15 @@ def _aligned(tensor: torch.Tensor, name: str, need: int) -> torch.Tensor:
     return tensor
 
 
+def _grad_tokens(grad: torch.Tensor) -> torch.Tensor:
+    """The incoming gradient of an autograd backward as a contiguous BF16 tensor at a :data:`TOKEN_ALIGN`-byte
+    address.  Autograd can hand over a view at any offset (the backward of ``torch.cat`` narrows its gradient), and
+    the caller cannot replace that tensor, so a misaligned one is copied."""
+
+    g = grad.to(torch.bfloat16).contiguous()
+    return g.clone() if g.data_ptr() % TOKEN_ALIGN else g
+
+
 # The largest token count ``S`` a call takes.  The kernels split a channel
 # tile's tokens over its token streams with the 32-bit ``(S + streams - 1) /
 # streams``.  A tile has at most ``grid_mult x ctas_per_sm`` streams per SM, a
@@ -1937,7 +1946,8 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
     the backward runs the one-launch ``dx`` + unordered ``dweight`` (+ ``dbias``) program of
     :func:`cake_causal_conv1d_nondet_train_backward` (with ``bwd_grid_mult``; it alerts under torch's deterministic
     mode) on the incoming gradient (materialized as a contiguous BF16 tensor when autograd hands over another layout
-    or dtype) and returns the gradients of ``weight`` and ``bias`` in the parameters' dtypes.
+    or dtype, and copied when its address is not 16-byte aligned) and returns the gradients of ``weight`` and
+    ``bias`` in the parameters' dtypes.
     """
 
     @staticmethod
@@ -1966,7 +1976,7 @@ class CakeCausalConv1dNondetFunction(torch.autograd.Function):
         x, weight, cu_seqlens, bias = ctx.saved_tensors
         if grad_y is None:
             grad_y = torch.zeros_like(x)
-        dy = grad_y.to(torch.bfloat16).contiguous()
+        dy = _grad_tokens(grad_y)
         grads = cake_causal_conv1d_nondet_train_backward(
             x,
             weight,

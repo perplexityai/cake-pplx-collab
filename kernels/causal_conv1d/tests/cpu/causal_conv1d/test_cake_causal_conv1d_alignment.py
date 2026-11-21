@@ -16,10 +16,12 @@ limitations under the License.
 CPU tests of the address-alignment checks of both causal convolution training packages.  The programs load and
 store their operands as vectors, so each operand's address must be a multiple of the vector size: the token rows
 (``x``, ``dy``, ``out``, ``dx``) 16 bytes, one channel's taps 16 bytes (FP32) or 8 (BF16), and the bias 32 bytes
-(FP32) or 16 (BF16) where a forward runs, 16 bytes in the standalone backward.  A misaligned operand raises a
-``ValueError`` that names it, the alignment and the address residue; an aligned view and an empty tensor pass.  The
-checks read host metadata only: the tensors live on the CPU, the architecture lookup returns a fixed answer, and each
-refusal comes before any device query, so no GPU is needed and no kernel runs.
+(FP32) or 16 (BF16) where a forward runs, 16 bytes in the standalone backward, and the KCP backward's ``hist``
+pool 16 bytes.  A misaligned operand raises a ``ValueError`` that names it, the alignment and the address residue;
+an aligned view and an empty tensor pass.  The autograd entries copy a misaligned incoming gradient instead (autograd
+hands it over, so the caller cannot replace it).  The checks read host metadata only: the tensors live on the CPU,
+the architecture lookup returns a fixed answer, and each refusal comes before any device query, so no GPU is needed
+and no kernel runs.
 """
 
 from __future__ import annotations
@@ -77,8 +79,8 @@ def test_alignment_rules(package: str) -> None:
     assert backend.BIAS_ALIGN == {F32: 32, BF16: 16}
     assert backend.BACKWARD_BIAS_ALIGN == {F32: 16, BF16: 16}
     assert backend.DWEIGHT_FP32_ALIGN == 16
-    # the KCP entries run the package's checks
-    for name in ("_tokens", "_weight", "_output"):
+    # the KCP entries run the package's checks and its gradient copy
+    for name in ("_aligned", "_tokens", "_weight", "_output", "_grad_tokens"):
         assert getattr(kcp, name) is getattr(backend, name), name
     assert kcp.TOKEN_ALIGN == backend.TOKEN_ALIGN
 
@@ -152,6 +154,57 @@ def test_outputs_take_the_alignment_they_are_given(package: str) -> None:
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("package", sorted(PACKAGES))
+def test_kcp_hist_pool_needs_16_bytes(package: str) -> None:
+    _, kcp = PACKAGES[package]
+    for offset in range(0, 64, 2):
+        hist = _at(offset, BF16, (2, C))
+        if offset % 16:
+            with pytest.raises(ValueError, match=_refusal("hist", 16, offset % 16)):
+                kcp._hist_pool(hist, C, device=CPU)
+        else:
+            assert kcp._hist_pool(hist, C, device=CPU) is hist
+    # an empty pool is never read: any address passes, and the programs get a fresh
+    # one-row pool
+    empty = _at(2, BF16, (0, C))
+    pool = kcp._hist_pool(empty, C, device=CPU)
+    assert pool is not empty and tuple(pool.shape) == (1, C) and pool.dtype == BF16
+    # the shape, dtype and layout rules come before the address rule
+    msg = "hist must be the forward's contiguous BF16"
+    bad = (
+        _at(2, BF16, (2, C + 8)),
+        _at(0, F32, (2, C)),
+        _at(0, BF16, (4, C))[::2],
+        _at(0, BF16, (2 * C,)),
+    )
+    for hist in bad:
+        with pytest.raises(ValueError, match=msg):
+            kcp._hist_pool(hist, C, device=CPU)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("package", sorted(PACKAGES))
+def test_autograd_gradient_is_copied_to_an_aligned_address(package: str) -> None:
+    backend, _ = PACKAGES[package]
+    gen = torch.Generator().manual_seed(11)
+    for offset in range(0, 32, 2):
+        grad = _at(offset, BF16, (S, C))
+        grad.copy_(torch.randn(S, C, generator=gen))
+        g = backend._grad_tokens(grad)
+        assert g.data_ptr() % 16 == 0 and g.is_contiguous() and g.dtype == BF16
+        assert torch.equal(g, grad)
+        # an aligned gradient is used in place; a misaligned one is copied
+        assert (g is grad) == (offset % 16 == 0)
+    # an FP32 or strided gradient becomes a contiguous BF16 tensor
+    f32 = torch.randn(S, C, generator=gen)
+    assert torch.equal(backend._grad_tokens(f32), f32.to(BF16))
+    strided = _at(0, BF16, (C, S)).t()
+    strided.copy_(torch.randn(S, C, generator=gen))
+    g = backend._grad_tokens(strided)
+    assert g.is_contiguous() and g.data_ptr() % 16 == 0 and torch.equal(g, strided)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("package", sorted(PACKAGES))
 def test_single_rank_entries_refuse_misaligned_operands(
     monkeypatch, package: str
 ) -> None:
@@ -209,8 +262,10 @@ def test_kcp_entries_refuse_misaligned_operands(
         ("dy", 2, lambda: backward(x, w, ctx, tokens, hist)),
     ]
     if host_trim:
-        # the trimmed forward checks its output before it reads the context
+        # the trimmed forward checks its output, and the trimmed backward its hist pool,
+        # before they read the context
         cases.append(("out", 2, lambda: forward(x, w, ctx, out=tokens)))
+        cases.append(("hist", 2, lambda: backward(x, w, ctx, dy, _at(2, BF16, (1, C)))))
     try:
         kcp._set_test_knobs({"host_trim": host_trim})
         for name, residue, call in cases:
