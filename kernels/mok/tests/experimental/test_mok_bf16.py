@@ -47,7 +47,17 @@ from tests.experimental._mok_one_gpu import (
     one_gpu_source_workspace,
     one_gpu_workspace,
 )
-from tests.experimental._mok_reference import production_inputs, require_gpu, single_rank_schedule
+from tests.experimental._mok_reference import (
+    normal_,
+    production_inputs,
+    rand,
+    randint,
+    randn,
+    randn_like,
+    require_gpu,
+    single_rank_schedule,
+    uniform_,
+)
 from tests.cake.test_helpers.cake_package import cake_package
 
 kernels = cake_package("cake_mok_bf16", "_kernels")
@@ -115,20 +125,19 @@ def _check_fused_training(
         for hidden, intermediate, macro in geometries:
             torch.manual_seed(9173 + hidden)
             options = dict(device="cuda", dtype=torch.bfloat16)
-            x = torch.randn(tokens, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
+            x = randn(tokens, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
             shared = [
-                torch.randn(intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+                randn(intermediate, hidden, **options) / hidden**0.5,
+                randn(intermediate, hidden, **options) / hidden**0.5,
+                randn(hidden, intermediate, **options) / intermediate**0.5,
             ]
             routed = [
-                torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-                torch.randn(experts, hidden, intermediate, **options)
-                / intermediate**0.5,
+                randn(experts, intermediate, hidden, **options) / hidden**0.5,
+                randn(experts, intermediate, hidden, **options) / hidden**0.5,
+                randn(experts, hidden, intermediate, **options) / intermediate**0.5,
             ]
-            scores = torch.rand(tokens, topk, device="cuda") + 0.1
+            scores = rand(tokens, topk, device="cuda") + 0.1
             scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
             row = torch.arange(tokens, device="cuda")
             routes = torch.stack(
@@ -143,8 +152,7 @@ def _check_fused_training(
             accumulators = initial = None
             if fp32_wgrad:
                 initial = [
-                    torch.randn(w.shape, device="cuda") * 0.01
-                    for w in (*shared, *routed)
+                    randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)
                 ]
                 accumulators = [value.clone() for value in initial]
 
@@ -200,9 +208,9 @@ def _check_fused_training(
             replay()
             assert torch.count_nonzero(ds_peer).item() == 0
             for _ in range(2):
-                x.normal_(std=0.125)
-                dy.normal_(std=0.125)
-                scores.uniform_(0.1, 1.0)
+                normal_(x, std=0.125)
+                normal_(dy, std=0.125)
+                uniform_(scores, 0.1, 1.0)
                 scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
                 assert _same(replay(), outputs(sequence()))
             records.append(dict(empty=empty, hidden=hidden, macro=macro, routed=actual))
@@ -267,19 +275,19 @@ def test_recompute_context(swiglu_limit, macro):
     )
     torch.manual_seed(4111)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -337,19 +345,19 @@ def test_context_free_forward(swiglu_limit, macro):
     )
     torch.manual_seed(4127)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -447,7 +455,7 @@ def test_scheduler(ep, experts):
     tokens = 512
     generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -499,7 +507,7 @@ def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, expe
     topk = 2 if ep * experts <= 16 else 8
     limit = ep * experts
     generator = torch.Generator(device="cuda").manual_seed(2203)
-    ids = torch.randint(
+    ids = randint(
         -1, limit + 8, (ep, 256, topk), device="cuda", dtype=torch.int32,
         generator=generator,
     )  # fmt: skip
@@ -534,7 +542,7 @@ def test_scheduler_at_training_geometries(ep, experts, tokens, rank, real):
     topk = 8
     generator = torch.Generator(device="cuda").manual_seed(5309 + ep)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -582,11 +590,9 @@ def test_epilogues(topk, tokens, hidden):
     require_gpu()
     _require_role(f"epilogue_backward_{topk}")
     epilogues = MoKEpilogues(topk)
-    shared = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-    routed = (
-        torch.randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-    )
-    scores = torch.rand(tokens, topk, device="cuda")
+    shared = randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+    routed = randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+    scores = rand(tokens, topk, device="cuda")
     # Native order: FP32 accumulation from the shared row, then ascending slots.
     expected_dx = shared.float()
     for k in range(topk):
@@ -634,7 +640,7 @@ def test_count_routed_load_matches_a_reference_count():
     assert count_routed_load(edges, ep_size, local_experts).tolist() == [1, 0, 0, 0]
     generator = torch.Generator().manual_seed(0)
     ep_size, local_experts = 64, 4
-    random_routes = torch.randint(
+    random_routes = randint(
         -1, ep_size * local_experts + 8, (ep_size, 2048, 8), generator=generator
     ).to(torch.int32)
     reference = torch.zeros(ep_size, dtype=torch.int64)
@@ -787,7 +793,7 @@ def test_expert_layout_matches_torch_reference(ep, experts):
     tokens = 512
     generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
-        torch.rand(ep * tokens, ep * experts, device="cuda", generator=generator)
+        rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -819,19 +825,19 @@ def test_launchers_accept_a_precomputed_layout(monkeypatch):
     )  # fmt: skip
     torch.manual_seed(4111)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
     s = single_rank_schedule(routes, experts)
@@ -1059,7 +1065,7 @@ def test_launch_counters_are_one_slab_per_launch():
     recorder = _LaunchRecorder()
     scheduler.count = scheduler.pad = scheduler.rows = recorder
     generator = torch.Generator(device="cuda").manual_seed(77)
-    ids = torch.randint(
+    ids = randint(
         0, ep * experts, (ep, tokens, topk), device="cuda", dtype=torch.int32,
         generator=generator,
     )  # fmt: skip
@@ -1084,12 +1090,12 @@ def test_launch_counters_are_one_slab_per_launch():
 
     hidden, intermediate, macro, mini, comm = 256, 256, 768, 256, 4
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options)
-    dy = torch.randn_like(x)
-    shared = [torch.randn(intermediate, hidden, **options) for _ in range(2)] + [
-        torch.randn(hidden, intermediate, **options)
+    x = randn(tokens, hidden, **options)
+    dy = randn_like(x)
+    shared = [randn(intermediate, hidden, **options) for _ in range(2)] + [
+        randn(hidden, intermediate, **options)
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     routes = torch.stack(
         [
             (torch.arange(tokens, device="cuda") + slot) % experts
@@ -1105,9 +1111,9 @@ def test_launch_counters_are_one_slab_per_launch():
     backward.zero_module = backward.module
     for count in (experts, 2 * experts):
         routed = [
-            torch.randn(count, intermediate, hidden, **options),
-            torch.randn(count, intermediate, hidden, **options),
-            torch.randn(count, hidden, intermediate, **options),
+            randn(count, intermediate, hidden, **options),
+            randn(count, intermediate, hidden, **options),
+            randn(count, hidden, intermediate, **options),
         ]
         s = single_rank_schedule(routes % count, count)
         schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
@@ -1332,9 +1338,9 @@ def test_ffi_stream_context_follows_torch_current_stream():
             assert tvm_ffi.get_raw_stream(device) == reference == side.cuda_stream
         assert tvm_ffi.get_raw_stream(device) == before
     epilogues = MoKEpilogues(2)
-    shared = torch.randn(64, 256, device="cuda", dtype=torch.bfloat16)
-    routed = torch.randn(128, 256, device="cuda", dtype=torch.bfloat16)
-    scores = torch.rand(64, 2, device="cuda")
+    shared = randn(64, 256, device="cuda", dtype=torch.bfloat16)
+    routed = randn(128, 256, device="cuda", dtype=torch.bfloat16)
+    scores = rand(64, 2, device="cuda")
     expected = epilogues.forward(shared, routed, scores)
     graph = torch.cuda.CUDAGraph()
     with torch.cuda.graph(graph):
@@ -2006,19 +2012,19 @@ def _before_down_problem(tokens, hidden, intermediate, experts, topk, seed):
     token's first weight and every weight of token 3 exactly 0."""
     torch.manual_seed(seed)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options) * 0.125
-    dy = torch.randn_like(x) * 0.125
+    x = randn(tokens, hidden, **options) * 0.125
+    dy = randn_like(x) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") * 1.5
+    scores = rand(tokens, topk, device="cuda") * 1.5
     scores[::5, 0] = 0.0
     scores[3] = 0.0
     return x, dy, shared, routed, scores
@@ -2060,9 +2066,7 @@ def _check_before_down_training(
             combine = torch.empty(tokens * topk, hidden, **options)
             dx_peer = torch.empty(tokens * topk, hidden, **options)
             ds_peer = torch.empty_like(scores)
-            initial = [
-                torch.randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)
-            ]
+            initial = [randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
             accumulators = [value.clone() for value in initial]
 
             def sequence(split=comm):
@@ -2132,9 +2136,9 @@ def _check_before_down_training(
             for index in (0, 1, 2, 3, 4, 6, 8, 12):  # the shared expert's outputs
                 assert torch.equal(unweighted[index], weighted[index]), index
             for _ in range(2):
-                x.normal_(std=0.125)
-                dy.normal_(std=0.125)
-                scores.uniform_(0.0, 1.5)
+                normal_(x, std=0.125)
+                normal_(dy, std=0.125)
+                uniform_(scores, 0.0, 1.5)
                 assert _same(replay(), outputs(sequence()))
             records.append(dict(empty=empty, hidden=hidden, macro=macro, routed=s["actual"]))
     return records
@@ -2299,7 +2303,7 @@ def test_scheduler_at_the_capacity_bound(ep, experts):
     )
     generator = torch.Generator(device="cuda").manual_seed(4409 + ep)
     ids = (
-        torch.rand(ep * tokens, experts, device="cuda", generator=generator)
+        rand(ep * tokens, experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
         .int()
         .reshape(ep, tokens, topk)
@@ -2419,20 +2423,20 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
     )
     generator = torch.Generator(device=device).manual_seed(7211 + ep)
     options = dict(device=device, dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, device=device, generator=generator)
+    x = randn(tokens, hidden, device=device, generator=generator)
     x = (x / x.square().mean(-1, keepdim=True).sqrt()).bfloat16()
-    dy = torch.randn(tokens, hidden, device=device, generator=generator).bfloat16()
-    ids = torch.rand(tokens, experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
-    scores = torch.rand(tokens, topk, device=device, generator=generator)
+    dy = randn(tokens, hidden, device=device, generator=generator).bfloat16()
+    ids = rand(tokens, experts, device=device, generator=generator).argsort(-1)[:, :topk].contiguous()
+    scores = rand(tokens, topk, device=device, generator=generator)
     scores = (scores / scores.sum(-1, keepdim=True) * 1.5).contiguous()
     scale = 4.0 / hidden**0.5
     weights = (
-        (torch.randn(intermediate, hidden, **options) * scale),
-        (torch.randn(intermediate, hidden, **options) * scale),
-        (torch.randn(hidden, intermediate, **options) / intermediate**0.5),
-        (torch.randn(experts, intermediate, hidden, **options) * scale),
-        (torch.randn(experts, intermediate, hidden, **options) * scale),
-        (torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5),
+        (randn(intermediate, hidden, **options) * scale),
+        (randn(intermediate, hidden, **options) * scale),
+        (randn(hidden, intermediate, **options) / intermediate**0.5),
+        (randn(experts, intermediate, hidden, **options) * scale),
+        (randn(experts, intermediate, hidden, **options) * scale),
+        (randn(experts, hidden, intermediate, **options) / intermediate**0.5),
     )
     accumulators = [torch.zeros(w.shape, device=device) for w in weights]
     schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
@@ -2540,7 +2544,7 @@ def test_before_down_adapter_top6_changed_counts(ep, experts):
     loads = None
     for index, count in enumerate(CHANGED_COUNTS):
         x, dy, shared, routed, scores = _before_down_problem(count, hidden, intermediate, experts, topk, 6151 + index)
-        ids = torch.rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
         weights = (*shared, *routed)
 
         def step(ws, checkpointed):

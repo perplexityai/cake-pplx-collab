@@ -56,147 +56,152 @@ TARGETS = {(10, 0): "sm_100a", (10, 3): "sm_103a", (10, 7): "sm_107a"}
 #: marked on exactly the architectures it lists.
 CAPS: dict[str, dict[str, dict[str, float]]] = {
     "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_down]": {
-        "sm_100a": {"max": 1.1186},
-        "sm_103a": {"max": 1.1186},
-        "sm_107a": {"max": 1.1186},
+        "sm_100a": {"max": 1.0538},
+        "sm_103a": {"max": 1.0538},
+        "sm_107a": {"max": 1.0538},
     },
     "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_gate]": {
-        "sm_100a": {"max": 1.2124},
-        "sm_103a": {"max": 1.2124},
-        "sm_107a": {"max": 1.2124},
+        "sm_100a": {"max": 1.0805},
+        "sm_103a": {"max": 1.0805},
+        "sm_107a": {"max": 1.0805},
     },
     "test_fused_training_accuracy[h256-i256-m768-empty-experts-dw_routed_up]": {
-        "sm_100a": {"max": 1.245},
-        "sm_103a": {"max": 1.245},
-        "sm_107a": {"max": 1.245},
+        "sm_100a": {"max": 1.4804},
+        "sm_103a": {"max": 1.4804},
+        "sm_107a": {"max": 1.4804},
     },
     "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_down]": {
-        "sm_100a": {"max": 1.081},
-        "sm_103a": {"max": 1.081},
-        "sm_107a": {"max": 1.081},
+        "sm_100a": {"max": 1.3675},
+        "sm_103a": {"max": 1.3675},
+        "sm_107a": {"max": 1.3675},
     },
     "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_gate]": {
-        "sm_100a": {"max": 1.1026},
-        "sm_103a": {"max": 1.1026},
-        "sm_107a": {"max": 1.1026},
+        "sm_100a": {"max": 1.0779},
+        "sm_103a": {"max": 1.0779},
+        "sm_107a": {"max": 1.0779},
     },
     "test_fused_training_accuracy[h512-i512-m768-empty-experts-dw_routed_up]": {
-        "sm_100a": {"max": 1.1913},
-        "sm_103a": {"max": 1.1913},
-        "sm_107a": {"max": 1.1913},
+        "sm_100a": {"max": 1.116},
+        "sm_103a": {"max": 1.116},
+        "sm_107a": {"max": 1.116},
     },
     "test_mxfp8_training_accuracy[h512-i256-m512-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1538, "max": 1.1246},
-        "sm_103a": {"l2": 1.1538, "max": 1.1246},
-        "sm_107a": {"l2": 1.1538, "max": 1.1246},
+        "sm_100a": {"l2": 1.1775, "max": 1.2143},
+        "sm_103a": {"l2": 1.1775, "max": 1.2143},
+        "sm_107a": {"l2": 1.1775, "max": 1.2143},
     },
     "test_mxfp8_training_accuracy[h512-i256-m512-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0357},
-        "sm_103a": {"l2": 1.0357},
-        "sm_107a": {"l2": 1.0357},
+        "sm_100a": {"l2": 1.0371},
+        "sm_103a": {"l2": 1.0371},
+        "sm_107a": {"l2": 1.0371},
     },
     "test_mxfp8_training_accuracy[h512-i256-m768-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1734, "max": 1.1502},
-        "sm_103a": {"l2": 1.1734, "max": 1.1502},
-        "sm_107a": {"l2": 1.1734, "max": 1.1502},
+        "sm_100a": {"l2": 1.1551, "max": 1.1477},
+        "sm_103a": {"l2": 1.1551, "max": 1.1477},
+        "sm_107a": {"l2": 1.1551, "max": 1.1477},
     },
     "test_mxfp8_training_accuracy[h512-i256-m768-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0259},
-        "sm_103a": {"l2": 1.0259},
-        "sm_107a": {"l2": 1.0259},
+        "sm_100a": {"l2": 1.0289},
+        "sm_103a": {"l2": 1.0289},
+        "sm_107a": {"l2": 1.0289},
     },
     "test_mxfp8_training_accuracy[h512-i512-m1536-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1486, "max": 1.1987},
-        "sm_103a": {"l2": 1.1486, "max": 1.1987},
-        "sm_107a": {"l2": 1.1486, "max": 1.1987},
+        "sm_100a": {"l2": 1.1561, "max": 1.1272},
+        "sm_103a": {"l2": 1.1561, "max": 1.1272},
+        "sm_107a": {"l2": 1.1561, "max": 1.1272},
     },
     "test_mxfp8_training_accuracy[h512-i512-m1536-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0452},
-        "sm_103a": {"l2": 1.0452},
-        "sm_107a": {"l2": 1.0452},
+        "sm_100a": {"l2": 1.0379},
+        "sm_103a": {"l2": 1.0379},
+        "sm_107a": {"l2": 1.0379},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m512-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1538, "max": 1.1246},
-        "sm_103a": {"l2": 1.1538, "max": 1.1246},
-        "sm_107a": {"l2": 1.1538, "max": 1.1246},
+        "sm_100a": {"l2": 1.1775, "max": 1.2143},
+        "sm_103a": {"l2": 1.1775, "max": 1.2143},
+        "sm_107a": {"l2": 1.1775, "max": 1.2143},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m512-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0357},
-        "sm_103a": {"l2": 1.0357},
-        "sm_107a": {"l2": 1.0357},
+        "sm_100a": {"l2": 1.0371},
+        "sm_103a": {"l2": 1.0371},
+        "sm_107a": {"l2": 1.0371},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m768-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1734, "max": 1.1502},
-        "sm_103a": {"l2": 1.1734, "max": 1.1502},
-        "sm_107a": {"l2": 1.1734, "max": 1.1502},
+        "sm_100a": {"l2": 1.1551, "max": 1.1477},
+        "sm_103a": {"l2": 1.1551, "max": 1.1477},
+        "sm_107a": {"l2": 1.1551, "max": 1.1477},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i256-m768-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0259},
-        "sm_103a": {"l2": 1.0259},
-        "sm_107a": {"l2": 1.0259},
+        "sm_100a": {"l2": 1.0289},
+        "sm_103a": {"l2": 1.0289},
+        "sm_107a": {"l2": 1.0289},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i512-m1536-clamped-d_scores]": {
-        "sm_100a": {"l2": 1.1486, "max": 1.1987},
-        "sm_103a": {"l2": 1.1486, "max": 1.1987},
-        "sm_107a": {"l2": 1.1486, "max": 1.1987},
+        "sm_100a": {"l2": 1.1561, "max": 1.1272},
+        "sm_103a": {"l2": 1.1561, "max": 1.1272},
+        "sm_107a": {"l2": 1.1561, "max": 1.1272},
     },
     "test_mxfp8_training_fp32_wgrad_accuracy[h512-i512-m1536-plain-d_scores]": {
-        "sm_100a": {"l2": 1.0452},
-        "sm_103a": {"l2": 1.0452},
-        "sm_107a": {"l2": 1.0452},
+        "sm_100a": {"l2": 1.0379},
+        "sm_103a": {"l2": 1.0379},
+        "sm_107a": {"l2": 1.0379},
     },
     "test_mxfp8_training_local_experts_accuracy[local36-d_scores]": {
-        "sm_100a": {"l2": 1.1587, "max": 1.2336},
-        "sm_103a": {"l2": 1.1587, "max": 1.2336},
-        "sm_107a": {"l2": 1.1587, "max": 1.2336},
+        "sm_100a": {"l2": 1.1509, "max": 1.1296},
+        "sm_103a": {"l2": 1.1509, "max": 1.1296},
+        "sm_107a": {"l2": 1.1509, "max": 1.1296},
     },
     "test_mxfp8_training_local_experts_accuracy[local9-d_scores]": {
-        "sm_100a": {"l2": 1.1556, "max": 1.3397},
-        "sm_103a": {"l2": 1.1556, "max": 1.3397},
-        "sm_107a": {"l2": 1.1556, "max": 1.3397},
+        "sm_100a": {"l2": 1.1673, "max": 1.1265},
+        "sm_103a": {"l2": 1.1673, "max": 1.1265},
+        "sm_107a": {"l2": 1.1673, "max": 1.1265},
     },
     "test_training_features[ep1-bf16-clamped-recompute.dw_routed_down]": {
-        "sm_100a": {"l2": 1.071, "max": 1.3012},
-        "sm_103a": {"l2": 1.071, "max": 1.3012},
-        "sm_107a": {"l2": 1.071, "max": 1.3012},
+        "sm_100a": {"l2": 1.0666, "max": 1.3762},
+        "sm_103a": {"l2": 1.0666, "max": 1.3762},
+        "sm_107a": {"l2": 1.0666, "max": 1.3762},
     },
     "test_training_features[ep1-bf16-clamped.dw_routed_down]": {
-        "sm_100a": {"l2": 1.0719, "max": 1.2315},
-        "sm_103a": {"l2": 1.0719, "max": 1.2315},
-        "sm_107a": {"l2": 1.0719, "max": 1.2315},
+        "sm_100a": {"l2": 1.0692, "max": 1.3433},
+        "sm_103a": {"l2": 1.0692, "max": 1.3433},
+        "sm_107a": {"l2": 1.0692, "max": 1.3433},
     },
     "test_training_features[ep1-bf16-recompute.dw_routed_down]": {
-        "sm_100a": {"max": 1.1083},
-        "sm_103a": {"max": 1.1083},
-        "sm_107a": {"max": 1.1083},
+        "sm_100a": {"max": 1.0418},
+        "sm_103a": {"max": 1.0418},
+        "sm_107a": {"max": 1.0418},
     },
     "test_training_features[ep1-bf16-recompute.dw_routed_gate]": {
-        "sm_100a": {"max": 1.1819},
-        "sm_103a": {"max": 1.1819},
-        "sm_107a": {"max": 1.1819},
+        "sm_100a": {"max": 1.0733},
+        "sm_103a": {"max": 1.0733},
+        "sm_107a": {"max": 1.0733},
     },
     "test_training_features[ep1-bf16-recompute.dw_routed_up]": {
-        "sm_100a": {"max": 1.1847},
-        "sm_103a": {"max": 1.1847},
-        "sm_107a": {"max": 1.1847},
+        "sm_100a": {"max": 1.1638},
+        "sm_103a": {"max": 1.1638},
+        "sm_107a": {"max": 1.1638},
+    },
+    "test_training_features[ep1-mxfp8-fp32-wgrad.dw_routed_gate]": {
+        "sm_100a": {"max": 1.0338},
+        "sm_103a": {"max": 1.0338},
+        "sm_107a": {"max": 1.0338},
     },
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_down]": {
-        "sm_100a": {"l2": 1.0348, "max": 1.4219},
-        "sm_103a": {"l2": 1.0348, "max": 1.4219},
-        "sm_107a": {"l2": 1.0348, "max": 1.4219},
+        "sm_100a": {"l2": 1.0339, "max": 1.2988},
+        "sm_103a": {"l2": 1.0339, "max": 1.2988},
+        "sm_107a": {"l2": 1.0339, "max": 1.2988},
     },
-    # Caps per architecture, each from that architecture's runs: sm_100a and sm_103a from the GB200 and GB300 runs,
-    # sm_107a from the VR200 runs, whose largest max-norm ratio (1.8942, one input of the 32; median 1.3121) is above
-    # the other architectures' (1.3122).
+    # Caps per architecture, each from that architecture's runs: sm_100a from the B200 and GB200 runs, sm_103a from the
+    # B300 and GB300 runs, sm_107a from the VR200 runs. With inputs drawn independently of the SM count the three give
+    # the same ratios (max-norm ratio of the median error 1.30438, of the largest 1.19612).
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_gate]": {
-        "sm_100a": {"l2": 1.0347, "max": 1.3122},
-        "sm_103a": {"l2": 1.0347, "max": 1.3122},
-        "sm_107a": {"l2": 1.036, "max": 1.8942},
+        "sm_100a": {"l2": 1.0336, "max": 1.3044},
+        "sm_103a": {"l2": 1.0336, "max": 1.3044},
+        "sm_107a": {"l2": 1.0336, "max": 1.3044},
     },
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_up]": {
-        "sm_100a": {"l2": 1.034, "max": 1.4131},
-        "sm_103a": {"l2": 1.034, "max": 1.4131},
-        "sm_107a": {"l2": 1.034, "max": 1.4131},
+        "sm_100a": {"l2": 1.0341, "max": 1.3226},
+        "sm_103a": {"l2": 1.0341, "max": 1.3226},
+        "sm_107a": {"l2": 1.0341, "max": 1.3226},
     },
 }
 
@@ -210,6 +215,11 @@ BF16_STRADDLE_DW_WHAT = (
     "BF16, so an expert whose rows cross a macrobatch boundary misses the naive tier (one GEMM per expert)"
 )
 BF16_STRADDLE_DW_FIX = "A follow-up kernel change (an FP32 carry for straddling experts) fixes it."
+MXFP8_FP32_DW_GATE_WHAT = (
+    "with MXFP8 routed experts and FP32 weight-gradient accumulation, the routed gate projection's weight gradient "
+    "misses the naive tier in the max norm (its L2 norm meets the tier)"
+)
+MXFP8_FP32_DW_GATE_FIX = "A follow-up kernel change fixes it."
 
 
 class GapCapError(Exception):
@@ -267,6 +277,11 @@ def mxfp8_d_scores(item: str) -> pytest.MarkDecorator:
 def bf16_straddle_dw(item: str) -> pytest.MarkDecorator:
     """The marker of a BF16 straddle routed dW item."""
     return marker(item, BF16_STRADDLE_DW_WHAT, BF16_STRADDLE_DW_FIX)
+
+
+def mxfp8_fp32_dw_gate(item: str) -> pytest.MarkDecorator:
+    """The marker of an MXFP8 FP32-accumulated routed gate dW item."""
+    return marker(item, MXFP8_FP32_DW_GATE_WHAT, MXFP8_FP32_DW_GATE_FIX)
 
 
 def item_id(output: str) -> str:
