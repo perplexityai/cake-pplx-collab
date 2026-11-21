@@ -143,7 +143,9 @@ keyword.
   there, before the weight gradient's buffers exist.  A loss call whose `W`
   is not a leaf or requires no gradient, and every call of
   `cake_backend.py`'s own loss entry, fold every row in the forward's slab
-  sums: the backward reads no `W`, and the call keeps no reference to it.
+  sums: the dX finalize reads no `W`, and the fast form keeps no reference
+  to it (a recompute form or a checkpointed call saves `W` for its
+  recomputation, as in 0.3.2).
   An uncompacted log-probability backward of
   `cake_backend.py` (not a kept-logits or temperature plan) folds the same
   run in its in-loop flat cast, the fold program `scale_cast_fold_bf16`,
@@ -1140,8 +1142,9 @@ log-probability forward and `logprob_dz` to its backward), `None` selecting the 
 (`cake_backend.compact_rows_default()` and friends return the constants); the
 autograd entries resolve every switch once in the forward.  **No switch reads
 an environment variable** (the build loader `_cake_pplx_jit.py` reads only its
-build variables: `CUDA_HOME` / `CUDA_PATH`, `CAKE_PPLX_CACHE_DIR`,
-`CAKE_PPLX_NVCC`, `CXX`, `CAKE_PPLX_DISABLE_JIT`, `CAKE_PPLX_JIT_WORKERS`).
+build variables: `CUDA_HOME` / `CUDA_PATH` (else the `nvcc` on `PATH`),
+`CAKE_PPLX_CACHE_DIR`, `CAKE_PPLX_NVCC`, `CXX`, `CAKE_PPLX_DISABLE_JIT`,
+`CAKE_PPLX_JIT_WORKERS`).
 The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are the facades' own A/B knobs, read
 only by the LM-head facades (through `cake_pplx/_cake_lm_head_train_knobs.py`): a
 switch keyword left at `None` there falls back to its variable and the resolved

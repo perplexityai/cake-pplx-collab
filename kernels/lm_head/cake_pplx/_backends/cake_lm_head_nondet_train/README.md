@@ -744,7 +744,8 @@ scan).  The one stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   saved-tensor version error); a backward that frees the graph drops the
   labels and `rlab` there, before the weight gradient's buffers exist.  A
   loss call whose `W` is not a leaf or requires no gradient folds every row
-  in the forward's slab sums and keeps no reference to `W`.  A
+  in the forward's slab sums and keeps no reference to `W` (a checkpointed
+  call saves `W` for its recomputation, as in 0.3.2).  A
   log-probability autograd graph holds the `rlab` its backwards bind as in
   the deterministic package (its README, "FP32 label residual"): the first
   backward that binds it takes the buffer from the free list of the caller's

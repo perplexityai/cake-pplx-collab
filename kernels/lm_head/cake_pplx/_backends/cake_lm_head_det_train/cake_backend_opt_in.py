@@ -8321,8 +8321,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
     (the fast form; the recompute forms and a checkpointed call save it already), the fold operands kept on ``ctx``
     carry no ``W``, and the backward hands the unpacked saved ``W`` to the fold: an in-place write to ``W`` between the
     forward and the backward raises PyTorch's saved-tensor version error.  Any other call (a non-leaf ``W``, or one
-    that requires no gradient) folds every residual in its forward's slab sums, and its backward reads no ``W``: the
-    call keeps no reference to ``W`` past its forward.  The same kernels and operands either way: the same bits."""
+    that requires no gradient) folds every residual in its forward's slab sums, and its dX finalize reads no ``W``:
+    the fast form keeps no reference to ``W`` past its forward (a recompute form and a checkpointed call save ``W``
+    for their recomputation, as in 0.3.2).  The same kernels and operands either way: the same bits."""
 
     @staticmethod
     def forward(
