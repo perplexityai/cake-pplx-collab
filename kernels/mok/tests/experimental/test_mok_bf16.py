@@ -1520,6 +1520,17 @@ def test_imbalance_comm_sms_defaults_keep_the_fixed_split():
         ((10, 3), 160, "mxfp8", 8, None),  # other GB300 SM count: factory split
         ((10, 0), 148, "mxfp8", 8, None),  # B200: the imbalance switch instead
         ((10, 0), 152, "mxfp8", 8, None),  # GB200
+        ((10, 0), 148, "bf16", 8, (16, 40)),  # B200 EP8
+        ((10, 0), 148, "bf16", 4, None),
+        ((10, 0), 148, "bf16", 16, None),
+        ((10, 0), 152, "bf16", 4, (16, 40)),  # GB200 EP4
+        ((10, 0), 152, "bf16", 8, None),
+        ((10, 0), 152, "bf16", 16, None),
+        ((10, 0), 152, "mxfp8", 4, None),  # the MXFP8 key: factory split
+        ((10, 3), 148, "bf16", 8, (16, 40)),  # B300 EP8
+        ((10, 3), 148, "bf16", 4, None),
+        ((10, 3), 148, "bf16", 16, None),
+        ((10, 3), 148, "mxfp8", 8, None),  # the MXFP8 key: factory split
         ((10, 7), 160, "mxfp8", 8, None),
         ((10, 7), 212, "mxfp8", 8, (60, 60)),  # Rubin, EP8 across two nodes
         ((10, 7), 212, "mxfp8", 16, None),
@@ -1559,7 +1570,12 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
     assert facade["bwd_num_comm_sms"].default == "auto"
     assert api._FACTORY_COMM_SMS == (40, 40)
     assert api.COMM_SMS == {
+        (10, 0): {
+            148: {"bf16": {8: (16, 40)}},
+            152: {"bf16": {4: (16, 40)}},
+        },
         (10, 3): {
+            148: {"bf16": {8: (16, 40)}},
             152: {
                 "bf16": {
                     4: (20, 24),
@@ -1569,7 +1585,7 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
                     64: (20, 24),
                 },
                 "mxfp8": {8: (44, 36), 32: (44, 36), 64: (44, 36)},
-            }
+            },
         },
         (10, 7): {212: {"mxfp8": {8: (60, 60)}}},
     }

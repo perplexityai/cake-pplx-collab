@@ -91,8 +91,58 @@ IMBALANCE_THRESHOLD = IMBALANCE_THRESHOLDS["bf16"]
 # backward: 8192 tokens per rank -7.4 / -4.6 %, 27116 -13.3 / -8.7 %, 32768
 # -18.1 / -2.4 %; round spread at most 1.2 %. Rubin BF16 measured no consistent
 # gain at EP8 (36 / 36 and 28 / 32 within the +-3 % round spread or slower).
+#
+# B200 (compute capability (10, 0), 148 SMs) BF16 EP8, GB200 (compute capability
+# (10, 0), 152 SMs) BF16 EP4 and B300 (compute capability (10, 3), 148 SMs) BF16
+# EP8 rows 16 / 40 against the factory 40 / 40: the forward count only (the
+# backward keeps 40), chosen from forward counts 8-16 (B200), 12-20 (GB200) and
+# 8-16 (B300). One node per device, BF16 routed experts, FP32 weight-gradient
+# accumulators, the counts and 40 / 40 interleaved in one process over three
+# rounds, slowest-rank median of timed repetitions 41-60 of 60, eager.
+# Forward / checkpointed step (schedule, forward, context recompute, backward).
+# Router weight before the down projection (H 5120 / I 2304 / 384
+# experts / top 6, clamped SwiGLU, schedule and forward without context):
+#
+# B200 4,096 tokens per rank uniform -10.1 / -2.0 %, 1.5x hot rank
+# -7.2 / -3.4 %, ragged -2.8 / -0.5 %; 16,384 tokens per rank uniform
+# -6.2 / -1.7 %, 1.5x hot rank -5.7 / -0.6 %, ragged -7.2 / -1.8 %.
+#
+# GB200 4,096 tokens per rank uniform -4.1 / -1.2 %, 1.5x hot rank
+# -1.5 / -0.9 %, ragged -0.4 / -0.1 %; 16,384 tokens per rank uniform
+# -3.0 / -1.5 %, 1.5x hot rank -6.4 / -2.0 %, ragged -2.8 / -1.5 %.
+#
+# B300 4,096 tokens per rank uniform -6.6 / -1.2 %, 1.5x hot rank -5.2 / -1.6 %,
+# ragged -3.1 / +2.6 %; 16,384 tokens per rank uniform -5.0 / -1.6 %, 1.5x
+# hot rank -4.5 / -0.4 %, ragged -8.4 / -1.6 %.
+#
+# Router weight after the down projection, 16,384 tokens per rank, uniform:
+#
+# B200 H 6144 / 256 experts top 8 -7.5 / -3.2 %, top 2 -7.7 / -2.4 %,
+# H 4096 / 288 experts top 8 (clamped) -11.1 / -3.4 %.
+#
+# GB200 H 6144 / 256 experts top 8 -6.1 / -1.8 %, top 2 -3.4 / -1.8 %, 16
+# experts (EP4 diagnostic layout) top 2 -0.9 / -1.4 %, router weight before the
+# down projection top 2 -0.6 / +0.3 %, top 8 -0.5 / -0.8 %.
+#
+# B300 H 6144 / 256 experts top 8 -6.6 / -3.4 %, top 2 -4.1 / -1.7 %,
+# H 4096 / 288 experts top 8 (clamped) -7.5 / -2.8 %.
+#
+# Every output bit is the same at every measured split. MXFP8 routed experts on
+# a workspace created with precision "bf16" resolve these rows and measured
+# slower (H 6144 / 256 experts / top 8, forward / checkpointed step: B200
+# +29.8 / +21.6 %, GB200 +38.9 / +18.1 %, B300 +29.2 / +18.9 %); with MXFP8 pass
+# precision="mxfp8" (no MXFP8 fixed row on these devices: 40 / 40). On B200 a
+# step whose hottest rank is at least the BF16 imbalance threshold still
+# switches to the imbalance split above.
+#
+# GB300 BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain).
 COMM_SMS = {
+    (10, 0): {
+        148: {"bf16": {8: (16, 40)}},
+        152: {"bf16": {4: (16, 40)}},
+    },
     (10, 3): {
+        148: {"bf16": {8: (16, 40)}},
         152: {
             "bf16": {
                 4: (20, 24),
@@ -102,7 +152,7 @@ COMM_SMS = {
                 64: (20, 24),
             },
             "mxfp8": {8: (44, 36), 32: (44, 36), 64: (44, 36)},
-        }
+        },
     },
     (10, 7): {212: {"mxfp8": {8: (60, 60)}}},
 }
@@ -286,10 +336,13 @@ def create_mok_bf16_workspace(
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)
     takes the measured row of the device, ``precision`` and EP group size
-    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; GB300 BF16 at EP4-64: 20 / 24,
-    GB300 MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60)
-    and the factory split 40 / 40 where there is no row; a pair of integers
-    fixes the split. The split changes time only, never an output bit.
+    (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B200 BF16 at EP8, GB200 BF16
+    at EP4 and B300 BF16 at EP8: 16 / 40, GB300 BF16 at EP4-64: 20 / 24, GB300
+    MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
+    factory split 40 / 40 where there is no row; a pair of integers fixes the
+    split. The split changes time only, never an output bit. With MXFP8 routed
+    experts pass ``precision="mxfp8"``: the BF16 rows with fewer forward
+    communication SMs make MXFP8 forwards slower (backend README).
     ``imbalance_comm_sms`` is the (forward, backward) communication-SM split the
     launches switch to while the hottest rank's routed-row load is at least
     ``imbalance_threshold`` times the mean per-rank load (observed on the

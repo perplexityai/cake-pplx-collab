@@ -476,6 +476,54 @@ across communication-SM splits and under CUDA Graph replay.
   hottest-rank medians of four rounds, forward / backward at 8192 / 27116 /
   32768 tokens per rank: -7.4 / -4.6, -13.3 / -8.7, -18.1 / -2.4 % (round
   spread at most 1.2 %); Rubin BF16 had no consistent gain at EP8.
+
+  B200 (148 SMs) BF16 EP8, GB200 (152 SMs) BF16 EP4 and B300 (148 SMs) BF16 EP8:
+  16 / 40, the forward count only (the backward keeps 40), chosen from forward
+  counts 8-16 (B200), 12-20 (GB200) and 8-16 (B300) against 40 / 40. One node,
+  BF16 routed experts, FP32 accumulators, the counts interleaved in one process
+  over three rounds, eager, slowest-rank median of timed repetitions 41-60 of 60
+  (repetitions 1-20 show no row slower beyond the identical-arm noise band
+  either); forward = schedule and forward without context for the router weight
+  before the down projection (H 5120 / I 2304 / 384 experts, clamped SwiGLU), the
+  forward otherwise (H 6144 / I 2048 plain, H 4096 / I 2048 clamped, 16 experts
+  H 5120 / I 2304 clamped). Every output bit is the same at every split. GB300
+  BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain). MXFP8 routed
+  experts on a workspace created with the default `precision="bf16"` resolve the
+  BF16 row and measured slower (H 6144 / 256 experts, forward / checkpointed step:
+  B200 +29.8 / +21.6 %, GB200 +38.9 / +18.1 %, B300 +29.2 / +18.9 %); pass
+  `precision="mxfp8"`, whose key has no fixed row on these devices (40 / 40):
+
+  | device | EP | configuration | routing | tokens per rank | forward 40 / 40 (ms) | forward row (ms) | change | checkpointed step 40 / 40 (ms) | row (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | B200 | 8 | before down, 384 experts, top 6 | uniform | 4,096 | 2.61 | 2.37 | -10.1 % | 10.06 | 9.87 | -2.0 % |
+  | B200 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 3.22 | 2.99 | -7.2 % | 12.26 | 11.85 | -3.4 % |
+  | B200 | 8 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.24 | 2.18 | -2.8 % | 9.40 | 9.38 | -0.5 % |
+  | B200 | 8 | before down, 384 experts, top 6 | uniform | 16,384 | 8.57 | 8.15 | -6.2 % | 30.17 | 29.54 | -1.7 % |
+  | B200 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 11.41 | 10.76 | -5.7 % | 39.69 | 39.43 | -0.6 % |
+  | B200 | 8 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 7.26 | 6.80 | -7.2 % | 26.56 | 26.08 | -1.8 % |
+  | B200 | 8 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 11.22 | 10.36 | -7.5 % | 39.00 | 37.77 | -3.2 % |
+  | B200 | 8 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.81 | 3.53 | -7.7 % | 14.22 | 14.00 | -2.4 % |
+  | B200 | 8 | H 4096 / 288 experts, top 8 | uniform | 16,384 | 7.77 | 6.90 | -11.1 % | 26.73 | 25.82 | -3.4 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 4,096 | 2.81 | 2.69 | -4.1 % | 11.99 | 11.78 | -1.2 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 3.23 | 3.20 | -1.5 % | 13.60 | 13.48 | -0.9 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.35 | 2.34 | -0.4 % | 10.83 | 10.81 | -0.1 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | uniform | 16,384 | 7.89 | 7.65 | -3.0 % | 30.23 | 29.80 | -1.5 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 11.01 | 10.35 | -6.4 % | 38.34 | 37.59 | -2.0 % |
+  | GB200 | 4 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 7.23 | 7.05 | -2.8 % | 27.29 | 26.82 | -1.5 % |
+  | GB200 | 4 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 11.00 | 10.27 | -6.1 % | 38.10 | 37.48 | -1.8 % |
+  | GB200 | 4 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.85 | 3.70 | -3.4 % | 14.64 | 14.44 | -1.8 % |
+  | GB200 | 4 | 16 experts, top 2 | uniform | 16,384 | 3.29 | 3.28 | -0.9 % | 11.57 | 11.41 | -1.4 % |
+  | GB200 | 4 | 16 experts, before down, top 2 | uniform | 16,384 | 3.30 | 3.26 | -0.6 % | 11.44 | 11.59 | +0.3 % |
+  | GB200 | 4 | 16 experts, top 8 | uniform | 16,384 | 9.74 | 9.69 | -0.5 % | 34.47 | 34.37 | -0.8 % |
+  | B300 | 8 | before down, 384 experts, top 6 | uniform | 4,096 | 2.33 | 2.18 | -6.6 % | 9.17 | 9.06 | -1.2 % |
+  | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 2.95 | 2.80 | -5.2 % | 11.53 | 11.40 | -1.6 % |
+  | B300 | 8 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.09 | 2.01 | -3.1 % | 8.50 | 8.69 | +2.6 % |
+  | B300 | 8 | before down, 384 experts, top 6 | uniform | 16,384 | 8.03 | 7.73 | -5.0 % | 28.56 | 28.12 | -1.6 % |
+  | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 10.84 | 10.41 | -4.5 % | 38.43 | 38.32 | -0.4 % |
+  | B300 | 8 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 7.25 | 6.75 | -8.4 % | 25.81 | 25.40 | -1.6 % |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 10.63 | 9.95 | -6.6 % | 37.14 | 35.96 | -3.4 % |
+  | B300 | 8 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.49 | 3.35 | -4.1 % | 13.38 | 13.12 | -1.7 % |
+  | B300 | 8 | H 4096 / 288 experts, top 8 | uniform | 16,384 | 7.26 | 6.71 | -7.5 % | 25.30 | 24.60 | -2.8 % |
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
   The capacity is `T * topk * max(2, ceil(EP * m))` rows for
