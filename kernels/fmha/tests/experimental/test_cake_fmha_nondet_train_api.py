@@ -36,9 +36,11 @@ captured in a CUDA graph replays to results that meet the tier; a device outside
 and operands on two devices are a ``ValueError``.  The stream, graph and second-device checks run on three routes of
 head dimension 128 without the mask: the 1-CTA main kernel and, with every call in a pair region, the pair route's 2-CTA
 main kernel, each with the one-launch route turned off (``fused_record`` patched to give None), and the route the
-one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region).  A given
-``softmax_scale``, the alert and ``warn_only`` are checked on the three-kernel routes with the one-launch route turned
-off, and again on a small call without the mask unpatched, which the shipped regions place on the one-launch route.
+one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region).  The entry's
+results for every variant, operands off a 256-byte boundary, a given ``softmax_scale``, the alert and ``warn_only`` are
+checked on the three-kernel routes with the one-launch route turned off, and again on a small call without the mask
+unpatched, which the shipped regions place on the one-launch route (the entry and the offsets at head dimension 64
+and 128).
 The package promises no bits: no test here compares two runs bit for bit. """
 
 from __future__ import annotations
@@ -181,19 +183,20 @@ def _grads(dq, dk, dv) -> dict:
     return {"dq": dq, "dk": dk, "dv": dv}
 
 
-def _route(label: str, case: Case, device: torch.device, monkeypatch) -> tuple:
-    """``(record, launches)`` of a head-dimension 128 call without the mask on ``case`` and ``device``, the route
-    checked against ``label`` under the regions the test runs with: ``one_cta`` (the 1-CTA route) and ``pair`` (the
-    pair route) with the one-launch route turned off first (``fused_record`` patched to give None); ``fused``
-    unpatched.  ``record`` is the one-launch record ``fused_record`` gives the call (None on the three-kernel routes);
-    every ``launch_bwd_fused`` call from then on appends its record name to ``launches``."""
+def _route(label: str, case: Case, device: torch.device, monkeypatch, D: int = 128) -> tuple:
+    """``(record, launches)`` of a head-dimension ``D`` call (128 unless given; ``one_cta`` and ``pair`` take 128)
+    without the mask on ``case`` and ``device``, the route checked against ``label`` under the regions the test runs
+    with: ``one_cta`` (the 1-CTA route) and ``pair`` (the pair route) with the one-launch route turned off first
+    (``fused_record`` patched to give None); ``fused`` unpatched.  ``record`` is the one-launch record
+    ``fused_record`` gives the call (None on the three-kernel routes); every ``launch_bwd_fused`` call from then on
+    appends its record name to ``launches``."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     backend = _backend()
     if label != "fused":
         monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     arch = backend.device_arch(device.index)
-    record = cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, 128, False)
+    record = cake_jit.fused_record(arch, case.B, case.H, case.S, case.kv, D, False)
     if label != "fused":
         assert record is None, (label, record)
         _assert_route(device, case, label == "pair")
@@ -208,14 +211,15 @@ def _route(label: str, case: Case, device: torch.device, monkeypatch) -> tuple:
     return record, launches
 
 
-def _one_launch(case: Case, device: torch.device, monkeypatch) -> tuple:
-    """``(record, launches)`` of a head-dimension 128 call without the mask on ``case`` and ``device``, unpatched, which
-    the shipped regions place on the one-launch route: ``record`` is ``FUSED_OF[(128, False)]``, and every
-    ``launch_bwd_fused`` call from then on appends its record name to ``launches``."""
+def _one_launch(case: Case, device: torch.device, monkeypatch, D: int = 128) -> tuple:
+    """``(record, launches)`` of a head-dimension ``D`` call (128 unless given) without the mask on ``case`` and
+    ``device``, unpatched, which the shipped regions place on the one-launch route: ``record`` is
+    ``FUSED_OF[(D, False)]``, and every ``launch_bwd_fused`` call from then on appends its record name to
+    ``launches``."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
-    record, launches = _route("fused", case, device, monkeypatch)
-    assert record == cake_jit.FUSED_OF[(128, False)], (case, record)
+    record, launches = _route("fused", case, device, monkeypatch, D)
+    assert record == cake_jit.FUSED_OF[(D, False)], (case, D, record)
     return record, launches
 
 
@@ -285,10 +289,14 @@ def test_cpu_operands_are_refused() -> None:
 
 
 @pytest.mark.parametrize(("D", "causal"), VARIANTS, ids=VARIANT_IDS)
-def test_the_entry_matches_the_reference(D, causal, record_property) -> None:
-    """Every variant through the public entry, ``softmax_scale`` defaulting to ``D^-0.5``, three heads, more keys
-    than queries without the causal mask: the gradients hold the contract and meet the tier; no warning."""
+def test_the_entry_matches_the_reference(D, causal, monkeypatch, record_property) -> None:
+    """Every three-kernel variant through the public entry, ``softmax_scale`` defaulting to ``D^-0.5``, three heads,
+    more keys than queries without the causal mask, with the one-launch route turned off (``fused_record`` patched to
+    give None): the gradients hold the contract and meet the tier; no warning."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     case = Case(2, 3, 384) if causal else Case(2, 3, 256, 384)
 
     def draw(seed: int):
@@ -296,6 +304,27 @@ def test_the_entry_matches_the_reference(D, causal, record_property) -> None:
         with warnings.catch_warnings():
             warnings.simplefilter("error")
             got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout, causal=causal)
+        return judged_backward(x, {"entry": _grads(*got)})
+
+    judge_draws(record_property, draw)
+
+
+@pytest.mark.parametrize("D", (128, 64), ids=("d128", "d64"))
+def test_the_entry_matches_the_reference_on_the_one_launch_route(D, monkeypatch, record_property) -> None:
+    """Each one-launch variant through the public entry, ``softmax_scale`` defaulting to ``D^-0.5``: a call without
+    the mask, unpatched, which the shipped regions place on the one-launch route on every architecture; each call
+    launches the one-launch kernel once, and the gradients hold the contract and meet the tier; no warning."""
+    device = _device_or_skip()
+    case = Case(1, 2, 256)
+    record, launches = _one_launch(case, device, monkeypatch, D)
+
+    def draw(seed: int):
+        x = make_inputs(case, D, causal=False, seed=seed, device=device)
+        launches.clear()
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")
+            got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+        assert launches == [record], launches
         return judged_backward(x, {"entry": _grads(*got)})
 
     judge_draws(record_property, draw)
@@ -343,15 +372,39 @@ def test_a_given_softmax_scale_matches_the_reference_on_the_one_launch_route(mon
 
 
 @pytest.mark.parametrize("D", (128, 64), ids=("d128", "d64"))
-def test_operands_off_a_256_byte_boundary_match_the_reference(D, record_property) -> None:
-    """Operands that start 16 bytes past an allocation (``lse`` 4 bytes past): accepted, and the gradients meet the
-    tier."""
+def test_operands_off_a_256_byte_boundary_match_the_reference(D, monkeypatch, record_property) -> None:
+    """Operands that start 16 bytes past an allocation (``lse`` 4 bytes past), on the 1-CTA route with the one-launch
+    route turned off (``fused_record`` patched to give None): accepted, and the gradients meet the tier."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
 
     def draw(seed: int):
         x = make_inputs(Case(1, 2, 256, 384), D, causal=False, seed=seed, device=device)
         ops = {name: _offset(getattr(x, name), 1 if name == "lse" else 8) for name in OPERANDS}
         return judged_backward(x, {"offset": _grads(*_call(ops))})
+
+    judge_draws(record_property, draw)
+
+
+@pytest.mark.parametrize("D", (128, 64), ids=("d128", "d64"))
+def test_operands_off_a_256_byte_boundary_match_the_reference_on_the_one_launch_route(
+    D, monkeypatch, record_property
+) -> None:
+    """The same offsets on a call without the mask, unpatched, which the shipped regions place on the one-launch route
+    on every architecture: each call launches the one-launch kernel once, and the gradients meet the tier."""
+    device = _device_or_skip()
+    case = Case(1, 2, 256)
+    record, launches = _one_launch(case, device, monkeypatch, D)
+
+    def draw(seed: int):
+        x = make_inputs(case, D, causal=False, seed=seed, device=device)
+        ops = {name: _offset(getattr(x, name), 1 if name == "lse" else 8) for name in OPERANDS}
+        launches.clear()
+        got = _call(ops)
+        assert launches == [record], launches
+        return judged_backward(x, {"offset": _grads(*got)})
 
     judge_draws(record_property, draw)
 
