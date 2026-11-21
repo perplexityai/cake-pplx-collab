@@ -159,6 +159,11 @@ the (chunk, key head) items in a fixed order):
   smallest one whose first wave fits one CTA per SM; it depends on the
   sequence lengths, `HV` and the SM count only.
 
+In 0.2.5 `wy_a` and `fwd_ho_a` are built from newer kernel source under the
+same program names: in `wy_a` each compute warp owns the ring slots of its
+parity, and `fwd_ho_a` loads the row scales of `beta v` and `beta 2^g kn` in
+batches.  Routes, launch records and output bits are those of 0.2.4.
+
 The route is chosen from shapes, dtypes, the architecture, the SM count and the
 pins, never from an address or a value: a Q, K or V that a kernel cannot read
 in place, or a `g` / `beta` not at a 16-byte aligned base, is copied first.

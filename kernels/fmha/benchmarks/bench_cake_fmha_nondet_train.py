@@ -34,8 +34,9 @@ is installed, else a chunked FP32 torch forward. ``--inputs DIR`` loads ``DIR/<s
 tensors), so separate processes time the same bits.
 
 Shapes (``--shapes``): ``T1`` B4 H32 S8192 D128, ``T2`` the same causal, ``T3`` B8 H32 S8192 D64, ``T4`` the same
-causal, ``S1`` B1 H1 S128 D128, ``S2`` B1 H1 S256 D128, ``S3`` B1 H1 S128 D64, ``S4`` B1 H1 S256 D64, or
-``B:H:S:D[:causal]``.
+causal, ``S1`` B1 H1 S128 D128, ``S2`` B1 H1 S256 D128, ``S3`` B1 H1 S128 D64, ``S4`` B1 H1 S256 D64, ``L1`` B1 H1
+S512 D128, ``L2`` B1 H1 S1024 D128, or ``B:H:S:D[:causal]``, where ``S`` is the query and the key length, or
+``SqxSkv`` gives them apart (``1:1:128x8192:128``: 128 queries, 8192 keys).
 
 Timing: CUDA events, eager, warm L2. One sample is ``--loop`` back-to-back calls (default 1, or 50 for a shape with
 fewer than 65536 query rows over all heads, whose call is bound by the host); the per-call time is reported, with the
@@ -75,6 +76,8 @@ SHAPES = {
     "S2": (1, 1, 256, 128, False),
     "S3": (1, 1, 128, 64, False),
     "S4": (1, 1, 256, 64, False),
+    "L1": (1, 1, 512, 128, False),
+    "L2": (1, 1, 1024, 128, False),
 }
 ARMS = ("cake", "fa4", "fa4_det", "cudnn", "cudnn_det")
 FROST = "CUDNN_FRONTEND_ENABLE_FROST_ENGINES"
@@ -96,11 +99,14 @@ def _env(name: str, value: str):
 def shape(spec: str) -> dict[str, Any]:
     if spec in SHAPES:
         B, H, S, D, causal = SHAPES[spec]
+        Sq = Skv = S
     else:
         parts = spec.split(":")
-        B, H, S, D = (int(p) for p in parts[:4])
+        B, H, D = int(parts[0]), int(parts[1]), int(parts[3])
+        q_len, _, kv_len = parts[2].partition("x")  # S, or Sq x Skv
+        Sq, Skv = int(q_len), int(kv_len or q_len)
         causal = len(parts) > 4 and parts[4].lower() in ("1", "true", "causal", "yes")
-    return {"id": spec, "B": B, "H": H, "Sq": S, "Skv": S, "D": D, "causal": causal, "scale": D**-0.5}
+    return {"id": spec, "B": B, "H": H, "Sq": Sq, "Skv": Skv, "D": D, "causal": causal, "scale": D**-0.5}
 
 
 def flops(s: dict[str, Any]) -> float:

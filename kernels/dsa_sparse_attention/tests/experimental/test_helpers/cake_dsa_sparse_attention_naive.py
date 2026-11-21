@@ -47,7 +47,8 @@ term per row (0 on a row whose scores and sink are all ``-inf``, as its ``P``), 
 
 :func:`judged` holds the outputs of one or several calls on a problem to their contract (:func:`assert_contract`:
 shapes, dtypes, finite values, the exact zeros) and pairs each with the oracle and the tier of the same draw.  The
-forward's ``o_lo`` (the BF16 residual of the FP32 output) is judged as ``o_sum = out + o_lo`` in FP32.  An
+forward's ``o_lo`` (the BF16 residual of the FP32 output) is judged as ``o_sum = out + o_lo`` in FP32; a
+``with_o_lo=False`` call returns ``None`` there, which is left out (:data:`WITH_O_LO`).  An
 accumulating call (``dkv_acc``) is judged by its increment: the buffer after the call minus the buffer before it,
 exact in float64, against the key gradients added through the destination map (the error of that increment is the
 error of the buffer against the oracle's ``before + gradient``).  :func:`judge_draws` runs the template's
@@ -56,11 +57,14 @@ error of the buffer against the oracle's ``before + gradient``).  :func:`judge_d
 
 from __future__ import annotations
 
+import inspect
 import math
+from collections import OrderedDict
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Optional
 
+import pytest
 import torch
 
 from tests.cake_naive import DRAWS, TIER_DTYPES, TIERS, judge_case
@@ -417,13 +421,88 @@ def _mapped(grad: torch.Tensor, acc: Acc, width: int, dtype: torch.dtype) -> tor
     return dst.index_add_(0, acc.dst_map.long(), grad.to(dtype))
 
 
+#: Whether the calls a test judges write ``o_lo`` (``with_o_lo=True``, the default).  :func:`with_o_lo_case` sets it
+#: to ``False`` for the ``with_o_lo=False`` cases: every ``o_lo`` a run reports must then be ``None`` and is left out,
+#: so the judge builds no ``o_sum`` (``out``, ``lse`` and the gradients keep their judgement); under the default an
+#: ``o_lo`` a run reports must be a tensor.
+WITH_O_LO = True
+
+#: ``pytest.fixture`` arguments of the training suites' ``with_o_lo`` fixture: the default, then ``with_o_lo=False``
+#: under the ``no_olo`` marker.
+WITH_O_LO_FIXTURE = dict(
+    params=[True, pytest.param(False, marks=pytest.mark.no_olo)],
+    ids=["with_o_lo", "no_olo"],
+)
+
+
+def with_o_lo_case(with_o_lo: bool, monkeypatch, backend, jit, *modules, caller=None):
+    """Run one case of a training-suite test under ``with_o_lo`` (the body of the suites' ``with_o_lo`` fixture,
+    a generator: ``yield from`` it).  ``False`` makes ``with_o_lo=False`` the default of every function of
+    ``backend`` and ``modules`` that takes the keyword with a default -- the entries, the step entries, the prepared
+    runners and the binding-key builders, not ``generated_program_available`` (a missing stage then fails the case
+    instead of skipping it) -- so each call of the test, its helpers included, runs the mode as a caller passing
+    ``with_o_lo=False`` does; :data:`WITH_O_LO` follows.  ``caller`` (the test module) has the same done to the
+    functions of those modules it holds under its own names: a reload of a module replaces its functions there but
+    not the ones the test module imported.  Every case gets an empty binding cache, and the stages its plans resolve
+    (``backend._stage_entry``) are recorded: when the case ends none may belong to the other mode -- under ``False``
+    no forward or delta stage that has a ``with_o_lo=False`` twin (``jit.NO_OLO_STAGES``), so every plan of the case
+    ran the twins (a plan resolves its forward stage first), under ``True`` no twin."""
+    resolved: list = []
+    stage_entry = backend._stage_entry
+
+    def recorded(stage, *args, **kwargs):
+        resolved.append(stage)
+        return stage_entry(stage, *args, **kwargs)
+
+    monkeypatch.setattr(backend, "_stage_entry", recorded)
+    monkeypatch.setattr(backend.BINDING_CACHE, "_entries", OrderedDict())
+    monkeypatch.setitem(globals(), "WITH_O_LO", with_o_lo)
+    if not with_o_lo:
+        defining = {module.__name__ for module in (backend, *modules)}
+        holders = (backend, *modules) + (() if caller is None else (caller,))
+        for holder in holders:
+            for value in list(vars(holder).values()):
+                function = inspect.unwrap(value) if inspect.isfunction(value) else None
+                if (
+                    function is None
+                    or function.__module__ not in defining
+                    or function.__name__ == "generated_program_available"
+                ):
+                    continue
+                defaults = function.__kwdefaults__
+                if defaults is not None and defaults.get("with_o_lo") is True:
+                    monkeypatch.setitem(defaults, "with_o_lo", False)
+    yield with_o_lo
+    other = set(jit.NO_OLO_STAGES.values()) if with_o_lo else set(jit.NO_OLO_STAGES)
+    wrong = sorted(other.intersection(resolved))
+    assert not wrong, (
+        f"a with_o_lo={with_o_lo} case planned the stages {wrong} of the other mode"
+    )
+
+
+def _o_lo_slot(label: str, got: Mapping) -> Mapping:
+    """``got`` as :func:`judged` reads it under :data:`WITH_O_LO`: a ``with_o_lo=False`` call's ``None`` ``o_lo``
+    left out, a default call's ``o_lo`` a tensor."""
+    if "o_lo" not in got:
+        return got
+    if WITH_O_LO:
+        assert got["o_lo"] is not None, (
+            f"{label}: a with_o_lo=True call returned no o_lo"
+        )
+        return got
+    assert got["o_lo"] is None, f"{label}: a with_o_lo=False call returned an o_lo"
+    return {name: value for name, value in got.items() if name != "o_lo"}
+
+
 def judged(
     p: Problem, runs: Mapping[str, Mapping], *, prefix: str = ""
 ) -> tuple[dict, dict, dict]:
     """``(outputs, oracle, naive)`` of one draw for :func:`judge_draws`: the calls ``runs`` (label -> outputs by
     name, see :data:`OUTPUTS_ROPE` / :data:`OUTPUTS_NOPE`) on the problem ``p``, each held to
     :func:`assert_contract`, beside the FP64 oracle and the naive tier of ``p``.  With several calls each output is
-    named ``"<label> <output>"``; ``prefix`` goes in front of every name (several problems in one draw)."""
+    named ``"<label> <output>"``; ``prefix`` goes in front of every name (several problems in one draw).  An
+    ``o_lo`` follows :data:`WITH_O_LO`."""
+    runs = {label: _o_lo_slot(label or "call", got) for label, got in runs.items()}
     backward = any(name not in FORWARD for got in runs.values() for name in got)
     ref = outputs(p, torch.float64, backward=backward)
     low = outputs(p, NAIVE_DTYPE, backward=backward)

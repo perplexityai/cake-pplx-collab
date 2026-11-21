@@ -19,7 +19,7 @@ The public names are the facade's ``__all__`` and the backend objects it forward
 (``cake_pplx._backends.cake_engram_gate_nondet_train``): each carries the mode (``nondet``) as a token, the other
 package's names are not bound (no alias), and no entry point takes a ``deterministic`` keyword.  The rules shared by
 every family are checked with ``tests.cake.test_helpers.cake_mode_names``; the checks here are this family's own.
-The backend reads torch's deterministic mode (the backward's alert); the facade does not.
+Nothing reads torch's deterministic mode: the package raises no alert.
 Build identities (library stems ``cake_engram_gate_train_<hex>``, kernel symbols, csrc file names) keep their names.
 """
 
@@ -202,19 +202,15 @@ def test_no_entry_takes_a_mode_keyword():
                 getattr(public, name)(*args, deterministic=value)
 
 
-def test_only_the_backward_reads_torch_mode():
-    """The facade never reads torch's deterministic mode; the backend reads it in one place, the alert, which the
-    backward calls (both backward entries through ``_launch_backward``) and the forward does not."""
+def test_nothing_reads_torch_mode():
+    """The facade and the backend never read torch's deterministic mode and never raise its alert: the package launches
+    the deterministic package's kernels, every sum in one fixed order (the API suite checks the strict and
+    ``warn_only`` modes on a device)."""
     assert not READS_TORCH_MODE.search(inspect.getsource(public))
-    backend = _backend("cake_backend")
-    assert READS_TORCH_MODE.search(inspect.getsource(backend._alert_nondeterministic))
-    for fn in (backend._forward, backend.cake_engram_gate_nondet_train_forward, backend.launch_fwd):
-        source = inspect.getsource(fn)
-        assert not READS_TORCH_MODE.search(source) and "_alert_nondeterministic" not in source, fn.__name__
-    assert "_alert_nondeterministic(" in inspect.getsource(backend._launch_backward)
-    for fn in (backend._backward, backend._autograd_backward):
-        assert "_launch_backward(" in inspect.getsource(fn), fn.__name__
-    assert not READS_TORCH_MODE.search(inspect.getsource(_backend("cake_jit")))
+    for module_name in ("cake_backend", "cake_jit", None):
+        source = inspect.getsource(_backend(module_name))
+        assert not READS_TORCH_MODE.search(source), module_name
+        assert "_alert_nondeterministic" not in source, module_name
 
 
 def test_package_identity_and_build_identity():

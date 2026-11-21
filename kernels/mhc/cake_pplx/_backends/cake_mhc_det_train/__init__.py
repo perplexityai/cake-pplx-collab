@@ -29,7 +29,26 @@ forms ``bwd_token__<form>_ho``), and the standalone collapse routes
 ``collapse_forward`` / ``collapse_backward`` (no workspace); every output
 repeats bit for bit for a given token count on a given device.  On SM107 the
 three collapse records are that architecture's own forms with the same bits
-(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``).
+(``fwd_collapse__m2_pi_pn``, ``collapse_fwd__m2``, ``collapse_bwd__vjpwa_pfq2``);
+``collapse_forward`` runs ``collapse_fwd__m2`` up to 2047 tokens,
+``collapse_fwd__m2_xhnone_rv`` (the ``collapse_fwd__m2_xhnone`` form with its
+trips in reverse launch order, the same bits) from 2048 to 6655 tokens and
+``collapse_fwd__m2_xhnone`` (the same form without the L2 evict-first policy on
+``X``, the same bits) from 6656 tokens; ``collapse_backward`` runs
+``collapse_bwd__vjpwa_sp4_mb4`` / ``collapse_bwd__vjpwa_sp2_mb4`` (the
+``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, the same bits)
+up to 215 / from 216 to 383 tokens, ``collapse_bwd__vjpwa`` (the same VJP
+without the L2 prefetch, the same bits) from 384 to 640 tokens and
+``collapse_bwd__vjpwa_pfq2`` from 641 tokens.  On SM100 / SM103
+``collapse_backward`` runs ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens and
+``collapse_bwd`` from 1024 tokens; between them SM100 runs
+``collapse_bwd__vjpwa_sp2_mb4`` (under the record name
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``) from 216 to 1023 tokens, and
+SM103 runs it from 216 to 247 and from 320 to 1023 tokens (record names
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le247`` /
+``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``) and ``collapse_bwd``
+from 248 to 319 tokens (record name ``collapse_bwd__h5120__le319``), the same
+bits.
 """
 
 from __future__ import annotations

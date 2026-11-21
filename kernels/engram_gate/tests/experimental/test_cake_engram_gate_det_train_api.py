@@ -17,7 +17,7 @@ Public-API suite of ``cake_pplx.cake_engram_gate_det_train``, the deterministic 
 
 Without a device: the entries are stable APIs, importing the module imports no backend, the module reads no
 environment variable, every keyword of an entry is the backend's keyword of the same name, the autograd entries and
-the explicit forward take the keyword-only ``dot_sum="compensated"`` (the explicit backward and the workspace query do
+the explicit forward take the keyword-only ``dot_sum="fp32"`` (the explicit backward and the workspace query do
 not) and refuse another choice before they look at the operands, the entries document their behaviour under
 ``torch.use_deterministic_algorithms``, operands on the CPU are a ``ValueError``, and a device of capability (10, 7)
 maps to ``sm_107a``.
@@ -83,7 +83,7 @@ ENTRIES = (
 GRADS = ("dx", "dkey", "dvalue", "dq", "dk")
 # The ``dot_sum`` choices (the default first) and the forward record suffix each launches; every backward launches
 # ``bwd_dot2``.
-DOT_SUMS = {"compensated": "dot2", "fp32": "f32"}
+DOT_SUMS = {"fp32": "f32", "compensated": "dot2"}
 # The entries that take ``dot_sum``: the forward's sum (the backward is the same for both).
 SUM_ENTRIES = ("cake_engram_gate_det", "cake_engram_gate_det_kv", "cake_engram_gate_det_train_forward")
 # The gradients with one fixed order: all of them.
@@ -220,7 +220,7 @@ def test_keywords_match_the_backend() -> None:
     assert gate["token_mask"].default is None
     for name in SUM_ENTRIES:
         param = inspect.signature(inspect.unwrap(getattr(api, name))).parameters["dot_sum"]
-        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "compensated", name
+        assert param.kind is inspect.Parameter.KEYWORD_ONLY and param.default == "fp32", name
     for name in sorted(set(ENTRIES) - set(SUM_ENTRIES)):
         assert "dot_sum" not in inspect.signature(inspect.unwrap(getattr(api, name))).parameters, name
     for cls in ("CakeEngramGateDetFunction", "CakeEngramGateDetKvFunction"):
@@ -252,11 +252,11 @@ def test_another_dot_sum_is_refused_before_the_operands() -> None:
     assert set(SUM_ENTRIES) <= set(calls)
     for label, call in calls.items():
         for bad in ("dot2", "f32", "FP32", ""):
-            with pytest.raises(ValueError, match=r"dot_sum must be one of \['compensated', 'fp32'\]"):
+            with pytest.raises(ValueError, match=r"dot_sum must be one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
         for bad in (None, 1):
-            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['compensated', 'fp32'\]"):
+            with pytest.raises(TypeError, match=r"dot_sum must be a str, one of \['fp32', 'compensated'\]"):
                 call(dot_sum=bad)
                 pytest.fail(f"{label} accepted dot_sum={bad!r}")
     # Both choices pass the check; the CPU operands are refused next.
@@ -337,10 +337,46 @@ def test_each_dot_sum_launches_its_forward_record_and_the_one_backward(dot_sum, 
     api.cake_engram_gate_det_train_forward(*args, dot_sum=dot_sum)
     api.cake_engram_gate_det_train_backward(ns.dout, *args)
     assert launched == [f"fwd_{acc}", "bwd_dot2", "dw_reduce"]
-    if dot_sum == "compensated":
+    if dot_sum == "fp32":
         launched.clear()
         _autograd(ns, packed=packed)
-        assert launched == ["fwd_dot2", "bwd_dot2", "dw_reduce"], "the default is the compensated sum"
+        assert launched == ["fwd_f32", "bwd_dot2", "dw_reduce"], "the default is the one-word FP32 sum"
+
+
+@pytest.mark.parametrize("T", (1, 129, 4096))
+def test_a_call_without_a_mask_launches_the_backward_of_its_architecture(T, monkeypatch) -> None:
+    """Without a token mask the backward launches ``bwd_dot2_stage`` from ``STAGE_BWD_MIN_TOKENS`` tokens on an
+    architecture of ``STAGE_BWD_ARCHES`` and ``bwd_dot2`` otherwise; an all-true mask tensor launches ``bwd_dot2``.
+    The two calls give the same bits of every gradient (an all-true mask is no mask), so the two backward programs
+    agree on the call's inputs."""
+    device = _device_or_skip()
+    backend = _backend()
+    launched: list[str] = []
+    entry = backend._entry
+
+    def recording(name, arch):
+        run = entry(name, arch)
+
+        def call(*args):
+            launched.append(name)
+            return run(*args)
+
+        return call
+
+    monkeypatch.setattr(backend, "_entry", recording)
+    ns = make_inputs(T, seed=71, device=device, weights="bf16", mask="none", layout="kv")
+    args = (ns.x, ns.key, ns.value, ns.q_weight, ns.k_weight)
+    unmasked = api.cake_engram_gate_det_train_backward(ns.dout, *args, None)
+    staged = backend.device_arch(device.index) in backend.cake_jit.STAGE_BWD_ARCHES
+    staged = staged and T >= backend.cake_jit.STAGE_BWD_MIN_TOKENS
+    assert launched == ["bwd_dot2_stage" if staged else "bwd_dot2", "dw_reduce"]
+    launched.clear()
+    kept = torch.ones(T, dtype=torch.bool, device=device)
+    masked = api.cake_engram_gate_det_train_backward(ns.dout, *args, kept)
+    assert launched == ["bwd_dot2", "dw_reduce"]
+    for name, a, b in zip(GRADS, unmasked, masked):
+        if name in EXACT_GRADS:
+            assert _same_bits(a, b), name
 
 
 def _gpu_activities(call) -> Optional[list[str]]:
