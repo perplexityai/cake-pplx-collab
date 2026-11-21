@@ -282,7 +282,9 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
         ("fwd_dt", 776, 824): (1, 24576),
-        ("fwd_dt", 832, 896): (1, 20480),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
         ("fwd_dt", 904, 1024): (1, 32768),
     },
 }
@@ -708,9 +710,14 @@ DIRECT_ROWS_OF_RECORD = {
             24576,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
-        ("fwd_dt", 832, 896): (
+        ("fwd_dt", 832, 832): (
             20481,
             24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            20481,
+            32768,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
     },

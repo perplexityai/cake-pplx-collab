@@ -453,7 +453,9 @@ FALLBACK_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] 
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
         ("fwd_dt", 776, 824): (1, 24576),
-        ("fwd_dt", 832, 896): (1, 20480),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
         ("fwd_dt", 904, 1024): (1, 32768),
     },
 }
@@ -541,7 +543,8 @@ DIRECT_ROWS_OF_RECORD: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = 
         ("fwd_dt", 576, 640): (12289, 32768),
         ("fwd_dt", 648, 704): (12289, 24576),
         ("fwd_dt", 720, 768): (12289, 24576),
-        ("fwd_dt", 832, 896): (20481, 24576),
+        ("fwd_dt", 832, 832): (20481, 24576),
+        ("fwd_dt", 896, 896): (20481, 32768),
     },
 }
 # The direct programs' channel tiles: arch -> route -> (ct_vec, n_sub), so a
