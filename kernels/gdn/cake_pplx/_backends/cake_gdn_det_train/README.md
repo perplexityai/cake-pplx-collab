@@ -212,6 +212,23 @@ with the pre-scan; `o`, `dq` and the final state keep theirs, and the gradients
 repeat bit for bit.  The segment table, the stitch, the second pass, the tails
 and the route rules are unchanged.
 
+Where the maps' grid of one CTA per entry and value head fills at most half of
+the SMs (`2 x entries x HV <= SMs`), `dhu_tc2_dvl32_gm2` stores them instead:
+two CTAs per entry and value head (grid z 2), `B` and `seg_flag` on one and `M`
+on the other, each with the products, roundings and orders of
+`dhu_tc2_dvl32_gm` on its half, so the maps and every output keep their bits.
+The rule (`split_map_launch`) reads host facts only: the entries come with the
+host table, and the most entries of the two-CTA form is decided once per
+architecture, value-head count and SM count.  A grid of more than one wave
+keeps `dhu_tc2_dvl32_gm`.
+
+In 0.2.8 the segment maps of a split pass 2 at `G = 3` on `dhu_tc2_dvl32` come
+from `dhu_tc2_dvl32_gm` or `dhu_tc2_dvl32_gm2` (above), where 0.2.3 to 0.2.7
+ran the fused pre-scan.  Where a map carries state into the segment before it,
+`dk`, `dv`, `dg`, `dbeta` and the initial-state gradient of such a call take
+other bits than in 0.2.7; `o`, `dq` and the final state keep them, and every
+other route keeps the 0.2.7 bits.
+
 In 0.2.7 the package tail and `dhu_tc2_dvl32` serve `G = 1` and `G >= 4`,
 where 0.2.3 to 0.2.6 ran the unfused tail on `dhu_tc2`.  Groups of two and
 three keep the 0.2.6 bits on every route; `o` and the final state keep them
@@ -228,9 +245,11 @@ bits, and the bits may change between versions.
 The switches are module constants of `cake_chain` with the off value `()`:
 `PACKAGE_TAIL_ARCHS` (off: the unfused tail on the same adjoint scan at `G = 1`
 and `G >= 4`), `DVL32_ARCHS` (off: `dhu_tc2` for every group, `G = 3`
-included) and `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`).  With the first
-two off, `G = 1` and `G >= 4` run their 0.2.6 route, the unfused tail on
-`dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
+included), `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`), `ADJOINT_MAP_ARCHS`
+(off: the fused pre-scan forms the segment maps at `G = 3`, the 0.2.7 route
+with its bits) and `ADJOINT_MAP_SPLIT_ARCHS` (off: `dhu_tc2_dvl32_gm` on every
+grid, the same bits).  With the first two off, `G = 1` and `G >= 4` run their
+0.2.6 route, the unfused tail on `dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
 architecture to its threshold; an architecture missing from it, or 0, has
 none.
 
