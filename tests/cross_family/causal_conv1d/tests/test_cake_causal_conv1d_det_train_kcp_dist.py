@@ -92,8 +92,9 @@ ROWS = [
 # Rows of C = 528 and 568 around the forward's token floor of the channel count on the running architecture
 # (``cake_jit.NARROW_ROW_FLOORS["fwd"]``; the nondet package's ``FORWARD_NARROW_ROW_FLOORS`` holds the same floors):
 # from its floor the single-rank main program of a rank runs the narrower tiles of the row, below it the single tile.
-# The rows run with the forward's small-S rows removed (:func:`_small_s_rows_removed`): those rows cover most of these
-# token counts, where a rank runs the static or the direct program instead (``S_ROWS`` runs those programs).
+# The rows run with ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` empty (:func:`_small_s_rows_removed`; in nondet also the
+# backward keys of ``FALLBACK_ROWS``, which no KCP call reads): the forward's small-S rows cover most of these token
+# counts, where a rank runs the static or the direct program instead (``S_ROWS`` runs those programs).
 # The ``floor:`` rows (C = 528, W = 2 and 4) take their ranks' token counts from that table at run time
 # (:func:`_floor_row`; ``f`` is the floor): a rank at the floor and one a token below it, so on every architecture one
 # rank runs the narrower tiles and another the single tile; the last document takes the tokens the others leave.  A
@@ -186,9 +187,10 @@ def _floor_row(row, arch: str):
 
 @contextlib.contextmanager
 def _small_s_rows_removed(row):
-    """While a row of :data:`F_ROWS` runs, the forward's small-S rows (``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of both
-    packages' ``cake_jit``) are empty, so each rank's single-rank main program is the one the token floor decides: the
-    narrower tiles from the floor, the single tile below it.  Every other row runs with the rows of record."""
+    """While a row of :data:`F_ROWS` runs, ``FALLBACK_ROWS`` and ``DIRECT_ROWS`` of both packages' ``cake_jit`` are
+    empty (in nondet also the backward keys of ``FALLBACK_ROWS``, which no KCP call reads), so each rank's single-rank
+    main program is the one the token floor decides: the narrower tiles from the floor, the single tile below it.
+    Every other row runs with the rows of record."""
 
     if row not in F_ROWS:
         yield
