@@ -62,7 +62,8 @@ IMBALANCE_THRESHOLD = IMBALANCE_THRESHOLDS["bf16"]
 
 # Fixed (forward, backward) communication-SM split for ``fwd_num_comm_sms="auto"``
 # / ``bwd_num_comm_sms="auto"`` (the default), keyed by device compute
-# capability, SM count, routed precision and EP group size. Only devices,
+# capability, SM count, routed precision (of each launch's routed weights, not
+# the workspace's ``precision``) and EP group size. Only devices,
 # precisions and group sizes with a measured gain have a row; "auto" resolves to
 # the factory split (40 / 40) elsewhere. The split never changes a bit of any
 # output (see the README), only time.
@@ -92,48 +93,13 @@ IMBALANCE_THRESHOLD = IMBALANCE_THRESHOLDS["bf16"]
 # -18.1 / -2.4 %; round spread at most 1.2 %. Rubin BF16 measured no consistent
 # gain at EP8 (36 / 36 and 28 / 32 within the +-3 % round spread or slower).
 #
-# B200 (compute capability (10, 0), 148 SMs) BF16 EP8, GB200 (compute capability
-# (10, 0), 152 SMs) BF16 EP4 and B300 (compute capability (10, 3), 148 SMs) BF16
-# EP8 rows 16 / 40 against the factory 40 / 40: the forward count only (the
-# backward keeps 40), chosen from forward counts 8-16 (B200), 12-20 (GB200) and
-# 8-16 (B300). One node per device, BF16 routed experts, FP32 weight-gradient
-# accumulators, the counts and 40 / 40 interleaved in one process over three
-# rounds, slowest-rank median of timed repetitions 41-60 of 60, eager.
-# Forward / checkpointed step (schedule, forward, context recompute, backward).
-# Router weight before the down projection (H 5120 / I 2304 / 384
-# experts / top 6, clamped SwiGLU, schedule and forward without context):
-#
-# B200 4,096 tokens per rank uniform -10.1 / -2.0 %, 1.5x hot rank
-# -7.2 / -3.4 %, ragged -2.8 / -0.5 %; 16,384 tokens per rank uniform
-# -6.2 / -1.7 %, 1.5x hot rank -5.7 / -0.6 %, ragged -7.2 / -1.8 %.
-#
-# GB200 4,096 tokens per rank uniform -4.1 / -1.2 %, 1.5x hot rank
-# -1.5 / -0.9 %, ragged -0.4 / -0.1 %; 16,384 tokens per rank uniform
-# -3.0 / -1.5 %, 1.5x hot rank -6.4 / -2.0 %, ragged -2.8 / -1.5 %.
-#
-# B300 4,096 tokens per rank uniform -6.6 / -1.2 %, 1.5x hot rank -5.2 / -1.6 %,
-# ragged -3.1 / +2.6 %; 16,384 tokens per rank uniform -5.0 / -1.6 %, 1.5x
-# hot rank -4.5 / -0.4 %, ragged -8.4 / -1.6 %.
-#
-# Router weight after the down projection, 16,384 tokens per rank, uniform:
-#
-# B200 H 6144 / 256 experts top 8 -7.5 / -3.2 %, top 2 -7.7 / -2.4 %,
-# H 4096 / 288 experts top 8 (clamped) -11.1 / -3.4 %.
-#
-# GB200 H 6144 / 256 experts top 8 -6.1 / -1.8 %, top 2 -3.4 / -1.8 %, 16
-# experts (EP4 diagnostic layout) top 2 -0.9 / -1.4 %, router weight before the
-# down projection top 2 -0.6 / +0.3 %, top 8 -0.5 / -0.8 %.
-#
-# B300 H 6144 / 256 experts top 8 -6.6 / -3.4 %, top 2 -4.1 / -1.7 %,
-# H 4096 / 288 experts top 8 (clamped) -7.5 / -2.8 %.
-#
-# Every output bit is the same at every measured split. MXFP8 routed experts on
-# a workspace created with precision "bf16" resolve these rows and measured
-# slower (H 6144 / 256 experts / top 8, forward / checkpointed step: B200
-# +29.8 / +21.6 %, GB200 +38.9 / +18.1 %, B300 +29.2 / +18.9 %); with MXFP8 pass
-# precision="mxfp8" (no MXFP8 fixed row on these devices: 40 / 40). On B200 a
-# step whose hottest rank is at least the BF16 imbalance threshold still
-# switches to the imbalance split above.
+# B200 (compute capability (10, 0), 148 SMs) BF16 EP8, GB200 ((10, 0), 152 SMs)
+# BF16 EP4 and B300 ((10, 3), 148 SMs) BF16 EP8 rows 16 / 40 against the
+# factory 40 / 40: the forward count only (the backward keeps 40). Like every
+# row they apply to launches with routed weights of their precision (BF16):
+# MXFP8 launches on the same workspace take the MXFP8 key, which has no row on
+# these devices (40 / 40). Protocol, absolute times and the configurations not
+# measured: backend README, "Fixed split per device and group size".
 #
 # GB300 BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain).
 COMM_SMS = {
@@ -335,14 +301,17 @@ def create_mok_bf16_workspace(
 
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)
-    takes the measured row of the device, ``precision`` and EP group size
+    gives each launch the measured row of the device, the launch's routed
+    precision (BF16 or MXFP8 routed weights) and the EP group size
     (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B200 BF16 at EP8, GB200 BF16
     at EP4 and B300 BF16 at EP8: 16 / 40, GB300 BF16 at EP4-64: 20 / 24, GB300
     MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
-    factory split 40 / 40 where there is no row; a pair of integers fixes the
-    split. The split changes time only, never an output bit. With MXFP8 routed
-    experts pass ``precision="mxfp8"``: the BF16 rows with fewer forward
-    communication SMs make MXFP8 forwards slower (backend README).
+    factory split 40 / 40 where there is no row, whatever ``precision`` the
+    workspace was created with (``MoKConfig.bf16_comm_sms`` /
+    ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms`` hold the row of ``precision``). A pair of integers
+    fixes the split of every launch. The split changes time only, never an
+    output bit.
     ``imbalance_comm_sms`` is the (forward, backward) communication-SM split the
     launches switch to while the hottest rank's routed-row load is at least
     ``imbalance_threshold`` times the mean per-rank load (observed on the
@@ -353,7 +322,7 @@ def create_mok_bf16_workspace(
     capability and SM count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, Rubin
     (212 SMs) MXFP8: 72 / 60, no row elsewhere - GB200 and GB300 included - so
     the fixed split stays in force there), ``None`` keeps the fixed split and a
-    pair sets it. ``precision`` only selects that row and the threshold.
+    pair sets it. ``precision`` selects that row and the threshold.
     ``imbalance_threshold`` ``"auto"`` (default) takes the measured ratio of
     the device and ``precision`` (:func:`resolve_imbalance_threshold`;
     :data:`IMBALANCE_DEVICE_THRESHOLDS`, else :data:`IMBALANCE_THRESHOLDS`):
@@ -393,13 +362,16 @@ def create_mok_bf16_workspace(
             )
     if isinstance(imbalance_threshold, str) and imbalance_threshold != "auto":
         raise ValueError('imbalance_threshold must be "auto" or a number')
+    routed_comm_sms = {}
     if all(auto):
         import torch.distributed as dist
 
-        fwd_num_comm_sms, bwd_num_comm_sms = (
-            resolve_comm_sms(precision, dist.get_world_size(group), device)
-            or _FACTORY_COMM_SMS
-        )
+        ep_size = dist.get_world_size(group)
+        routed_comm_sms = {
+            routed: resolve_comm_sms(routed, ep_size, device) or _FACTORY_COMM_SMS
+            for routed in MOK_PRECISIONS
+        }
+        fwd_num_comm_sms, bwd_num_comm_sms = routed_comm_sms[precision]
     if isinstance(imbalance_comm_sms, str):
         imbalance_comm_sms = resolve_imbalance_comm_sms(precision, device)
     if isinstance(imbalance_threshold, str):
@@ -416,6 +388,8 @@ def create_mok_bf16_workspace(
         minibatch_size=minibatch_size,
         macrobatch_size=macrobatch_size,
         schedule_capacity_multiplier=schedule_capacity_multiplier,
+        bf16_comm_sms=routed_comm_sms.get("bf16"),
+        mxfp8_comm_sms=routed_comm_sms.get("mxfp8"),
     )
     return config, create_source_workspace(
         config,

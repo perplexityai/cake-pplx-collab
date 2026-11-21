@@ -439,10 +439,13 @@ across communication-SM splits and under CUDA Graph replay.
 - Fixed split per device and group size: `fwd_num_comm_sms` / `bwd_num_comm_sms`
   default to `"auto"` in `create_mok_bf16_workspace` (package and
   `cake_mok_det_train` facade): the measured `COMM_SMS` row (compute capability, SM
-  count, precision, EP group size), else the factory 40 / 40. Integers fix the
-  split; `"auto"` for only one of the two is an error. With MXFP8 routed experts
-  pass `precision="mxfp8"` for the MXFP8 row (`precision` only selects rows and
-  thresholds). The split changes time, never bits (see Repeatability). GB300
+  count, routed precision, EP group size), else the factory 40 / 40. The routed
+  precision is that of each launch's routed weights (BF16 or MXFP8), not the
+  workspace's `precision`: one workspace gives BF16 and MXFP8 launches the row
+  of their own precision (`MoKConfig.bf16_comm_sms` / `mxfp8_comm_sms`; the
+  workspace's `precision` selects the imbalance row and threshold). Integers fix
+  the split of every launch; `"auto"` for only one of the two is an error. The
+  split changes time, never bits (see Repeatability). GB300
   (152 SMs): BF16 20 / 24 at EP4/8/16/32/64; MXFP8 44 / 36 at EP8/32/64, none
   at EP4/16 (no gain measured). Checkpointed training steps captured in CUDA
   Graphs, 40 / 40 and the row interleaved in one process on the same nodes,
@@ -487,11 +490,8 @@ across communication-SM splits and under CUDA Graph replay.
   before the down projection (H 5120 / I 2304 / 384 experts, clamped SwiGLU), the
   forward otherwise (H 6144 / I 2048 plain, H 4096 / I 2048 clamped, 16 experts
   H 5120 / I 2304 clamped). Every output bit is the same at every split. GB300
-  BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain). MXFP8 routed
-  experts on a workspace created with the default `precision="bf16"` resolve the
-  BF16 row and measured slower (H 6144 / 256 experts, forward / checkpointed step:
-  B200 +29.8 / +21.6 %, GB200 +38.9 / +18.1 %, B300 +29.2 / +18.9 %); pass
-  `precision="mxfp8"`, whose key has no fixed row on these devices (40 / 40):
+  BF16 EP4 keeps 20 / 24 (16 / 24 and 12 / 24 measured no gain). MXFP8 launches
+  take the MXFP8 key, which has no row on these devices (40 / 40):
 
   | device | EP | configuration | routing | tokens per rank | forward 40 / 40 (ms) | forward row (ms) | change | checkpointed step 40 / 40 (ms) | row (ms) | change |
   | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |

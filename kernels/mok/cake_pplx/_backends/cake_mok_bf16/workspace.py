@@ -56,6 +56,16 @@ class MoKConfig:
     # value is compared across ranks at workspace creation like every field; a
     # later ``dataclasses.replace`` on one rank only changes that rank's log.
     comm_split_log: bool = False
+    # Fixed (forward, backward) split per routed precision: launches with BF16
+    # routed weights use ``bf16_comm_sms``, launches with MXFP8 routed weights
+    # ``mxfp8_comm_sms``; ``None`` (the default) uses ``fwd_num_comm_sms`` /
+    # ``bwd_num_comm_sms``. The facade's ``"auto"`` sets both from the measured
+    # rows of the device and EP group size, so one workspace gives BF16 and
+    # MXFP8 launches the row of their own routed precision; integer counts
+    # leave both ``None``. The imbalance split above replaces either while the
+    # load is skewed. The split changes time only, never an output bit.
+    bf16_comm_sms: tuple[int, int] | None = None
+    mxfp8_comm_sms: tuple[int, int] | None = None
 
 
 @dataclass(frozen=True, slots=True)

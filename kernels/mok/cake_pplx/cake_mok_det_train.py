@@ -171,14 +171,17 @@ def create_mok_bf16_workspace(
 
     ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` are the fixed (forward, backward)
     communication-SM counts of every launch. ``"auto"`` (default, for both)
-    takes the measured row of the device, ``precision`` and EP group size
+    gives each launch the measured row of the device, the launch's routed
+    precision (BF16 or MXFP8 routed weights) and the EP group size
     (:func:`resolve_comm_sms`, :data:`COMM_SMS`; B200 BF16 at EP8, GB200 BF16
     at EP4 and B300 BF16 at EP8: 16 / 40, GB300 BF16 at EP4-64: 20 / 24, GB300
     MXFP8 at EP8/32/64: 44 / 36, Rubin (212 SMs) MXFP8 at EP8: 60 / 60) and the
-    factory split 40 / 40 where there is no row; a pair of integers fixes the
-    split. The split changes time only, never an output bit. With MXFP8 routed
-    experts pass ``precision="mxfp8"``: the BF16 rows with fewer forward
-    communication SMs make MXFP8 forwards slower (backend README).
+    factory split 40 / 40 where there is no row, whatever ``precision`` the
+    workspace was created with (``MoKConfig.bf16_comm_sms`` /
+    ``mxfp8_comm_sms``; the returned ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms`` hold the row of ``precision``). A pair of integers
+    fixes the split of every launch. The split changes time only, never an
+    output bit.
     ``imbalance_comm_sms`` is the (forward, backward) communication-SM split the
     launches switch to while the hottest rank's routed-row load is at least
     ``imbalance_threshold`` times the mean per-rank load (observed on the
@@ -189,7 +192,7 @@ def create_mok_bf16_workspace(
     capability and SM count; B200 BF16: 24 / 28, B200 MXFP8: 44 / 36, Rubin
     (212 SMs) MXFP8: 72 / 60, no row elsewhere - GB200 and GB300 included - so
     the fixed split stays in force there), ``None`` keeps the fixed split and a
-    pair sets it. ``precision`` only selects that row and the threshold.
+    pair sets it. ``precision`` selects that row and the threshold.
     ``imbalance_threshold`` ``"auto"`` (default) takes the measured ratio of
     the device and ``precision`` (:func:`resolve_imbalance_threshold`;
     :data:`IMBALANCE_DEVICE_THRESHOLDS`, else :data:`IMBALANCE_THRESHOLDS`):

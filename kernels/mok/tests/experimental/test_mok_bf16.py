@@ -1605,6 +1605,113 @@ def test_comm_sms_defaults_resolve_the_measured_rows():
         )
 
 
+@pytest.mark.parametrize(
+    "capability,sm_count,ep_size,precision,expected",
+    [
+        # (fwd_num_comm_sms / bwd_num_comm_sms, bf16_comm_sms, mxfp8_comm_sms)
+        ((10, 0), 148, 8, "bf16", ((16, 40), (16, 40), (40, 40))),  # B200 EP8
+        ((10, 0), 148, 8, "mxfp8", ((40, 40), (16, 40), (40, 40))),
+        ((10, 0), 148, 4, "bf16", ((40, 40), (40, 40), (40, 40))),
+        ((10, 0), 152, 4, "bf16", ((16, 40), (16, 40), (40, 40))),  # GB200 EP4
+        ((10, 3), 148, 8, "bf16", ((16, 40), (16, 40), (40, 40))),  # B300 EP8
+        ((10, 3), 152, 4, "bf16", ((20, 24), (20, 24), (40, 40))),  # GB300 EP4
+        ((10, 3), 152, 8, "bf16", ((20, 24), (20, 24), (44, 36))),  # GB300 EP8
+        ((10, 3), 152, 8, "mxfp8", ((44, 36), (20, 24), (44, 36))),
+        ((10, 7), 212, 8, "bf16", ((40, 40), (40, 40), (60, 60))),  # Rubin EP8
+        ((10, 7), 212, 4, "mxfp8", ((40, 40), (40, 40), (40, 40))),
+    ],
+)
+def test_comm_sms_auto_gives_each_routed_precision_its_row(
+    monkeypatch, capability, sm_count, ep_size, precision, expected
+):
+    """Host-only: ``"auto"`` resolves the row of each routed precision for the
+    device and group size (the factory split where there is none) into
+    ``bf16_comm_sms`` / ``mxfp8_comm_sms``, whatever the workspace's
+    ``precision``; ``fwd_num_comm_sms`` / ``bwd_num_comm_sms`` hold the row of
+    ``precision``. Integer counts leave both per-precision splits unset."""
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
+    monkeypatch.setattr(
+        torch.cuda, "get_device_capability", lambda device=None: capability
+    )
+    monkeypatch.setattr(
+        torch.cuda,
+        "get_device_properties",
+        lambda device=None: SimpleNamespace(multi_processor_count=sm_count),
+    )
+    monkeypatch.setattr(torch.distributed, "get_world_size", lambda group=None: ep_size)
+    created = []
+
+    def create_source_workspace(config, group, **kwargs):
+        created.append(config)
+        return "workspace"
+
+    monkeypatch.setattr(backend, "create_source_workspace", create_source_workspace)
+    kwargs = dict(
+        group=None, device=None, num_local_tokens=512, hidden_size=512, topk=2
+    )
+    config, workspace = api.create_mok_bf16_workspace(precision=precision, **kwargs)
+    assert workspace == "workspace" and created == [config]
+    assert (config.fwd_num_comm_sms, config.bwd_num_comm_sms) == expected[0]
+    assert (config.bf16_comm_sms, config.mxfp8_comm_sms) == expected[1:]
+    config, _ = api.create_mok_bf16_workspace(
+        precision=precision, fwd_num_comm_sms=24, bwd_num_comm_sms=28, **kwargs
+    )
+    assert (config.fwd_num_comm_sms, config.bwd_num_comm_sms) == (24, 28)
+    assert config.bf16_comm_sms is None and config.mxfp8_comm_sms is None
+
+
+def test_comm_split_follows_the_routed_precision():
+    """Host-only: without an imbalance split, a launch's fixed split is the row of
+    its routed precision (``mxfp8_comm_sms`` for MXFP8 routed weights,
+    ``bf16_comm_sms`` for BF16), else ``fwd_num_comm_sms`` /
+    ``bwd_num_comm_sms``, and the config defaults leave both rows unset."""
+    split = backend.MoKFunctional._comm_split
+    assert MoKConfig().bf16_comm_sms is None and MoKConfig().mxfp8_comm_sms is None
+    rows = MoKConfig(
+        fwd_num_comm_sms=16,
+        bwd_num_comm_sms=40,
+        bf16_comm_sms=(16, 40),
+        mxfp8_comm_sms=(40, 40),
+    )
+    assert split(None, rows, None) == (16, 40)
+    assert split(None, rows, None, False) == (16, 40)
+    assert split(None, rows, None, True) == (40, 40)
+    # A workspace created with precision "mxfp8": its BF16 launches keep the BF16 row.
+    mxfp8 = dataclasses.replace(rows, fwd_num_comm_sms=40, bwd_num_comm_sms=40)
+    assert split(None, mxfp8, None, False) == (16, 40)
+    assert split(None, mxfp8, None, True) == (40, 40)
+    fixed = MoKConfig(fwd_num_comm_sms=20, bwd_num_comm_sms=24)
+    assert split(None, fixed, None, False) == (20, 24)
+    assert split(None, fixed, None, True) == (20, 24)
+
+
+def test_routed_precision_splits_are_validated():
+    """``bf16_comm_sms`` / ``mxfp8_comm_sms`` must each be ``None`` or a
+    (forward, backward) tuple of positive, even counts that leave compute SMs;
+    ``build_schedule`` rejects any other value before it launches anything."""
+    require_gpu()
+    ep, experts, topk, tokens = 4, 4, 2, 256
+    device = torch.device("cuda", torch.cuda.current_device())
+    sms = torch.cuda.get_device_properties(device).multi_processor_count
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    capacity = ep * tokens * topk + experts * 256
+    workspace = one_gpu_workspace(ep, tokens, 256, topk, capacity, device)
+    ids = torch.zeros(tokens, topk, dtype=torch.int32, device=device)
+    for name, bad in (
+        ("bf16_comm_sms", (16,)),
+        ("bf16_comm_sms", [16, 40]),
+        ("mxfp8_comm_sms", (15, 40)),
+        ("mxfp8_comm_sms", (40, sms)),
+        ("mxfp8_comm_sms", (40, 0)),
+    ):
+        config = MoKConfig(fwd_num_comm_sms=8, bwd_num_comm_sms=8, **{name: bad})
+        with pytest.raises(ValueError, match=name):
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts)
+
+
 def test_comm_split_log_prints_each_split_change(capsys):
     """``MoKConfig.comm_split_log`` prints one stderr line per rank each time the
     imbalance-aware split of the next launch changes; the default is silent and
