@@ -27,6 +27,8 @@ is_cake_causal_conv1d_det_train_supported(device)
 
 `x` is one packed BF16 `[S, C]` (or `[1, S, C]`) activation, and `C` must be a multiple of 8. `cu_seqlens` holds the document boundaries as int32 `[num_docs + 1]` prefix sums on the device. Each document starts with zero history. The taps `weight[C, 4]` and the optional `bias[C]` can each be FP32 or BF16, independently of each other. Arithmetic is FP32, and the bias is added last, in the same order as flash-linear-attention. `y` and `dx` are BF16. `dweight` and `dbias` are FP32 or BF16: they take the dtype of their parameter unless you pass preallocated outputs.
 
+The kernels access the operands as vectors, so each address (`data_ptr()`) must be aligned: `x`, `dy`, `out` and `dx` to 16 bytes, FP32 taps to 16 and BF16 taps to 8, a BF16 bias to 16, and an FP32 bias to 32 (16 for a standalone backward call). A misaligned tensor raises `ValueError` before anything launches. A fresh tensor or a `.clone()` is aligned, and so is a view that starts at a whole row (`x[1:]`, `weight[1:]`).
+
 - **Forward:** one ordinary launch. Co-resident CTAs take token chunks from int32 counters in the forward workspace. The workspace must be zero before the first launch, and every launch leaves it zero.
 - **Forward at small S:** from version 0.2.5, inside the token range of a row of `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 576-768, by architecture and route), the forward runs one of two programs that take no counters. Each row gives its own token range. From version 0.2.6, every architecture and route has a row at each C 576-768 (0.2.5 had none for sm_100a `fwd_bias` at C 640, sm_103a `fwd_bias` at C 576 and 712, and sm_103a `fwd` at C 768). For most C the first range starts at S 1. The sm_103a `fwd_bias` rows at C 720-768 start at S 13824 (C 736: 14336) and have only a static range. Outside a row's range, and where an architecture, route and C have no row, the forward runs as in 0.2.4, with counters in the workspace. The static program runs on the route's tile plan. The direct program runs on its own channel tiles (`cake_jit.DIRECT_PLANS`) with at most one CTA per token block. Inside a row's range the call zeroes and uses no forward workspace, eager or captured, and a passed `workspace` is checked and not read. The forward workspace size is unchanged. Every forward program writes the same `y` bits.
 - **Backward:** two ordinary (non-cooperative) launches on one stream. A persistent main program writes `dx` and one FP32 partial row of `dweight` (and `dbias`) per CTA. A reduce program then sums those rows in a fixed order. No floating-point atomics are used.
@@ -102,9 +104,12 @@ q, k, v = cake_causal_conv1d_det_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
 | operand | shape | dtype | notes |
 |---|---|---|---|
-| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous; the rank's fragments back to back in the order of `ctx.cu_seqlens_local`; `C` a multiple of 8; `T_r` may be 0 |
-| `weight`, `dweight` | `[C, 4]` | FP32 | `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous, 16-byte aligned; the rank's fragments back to back in the order of `ctx.cu_seqlens_local`; `C` a multiple of 8; `T_r` may be 0 |
+| `weight`, `dweight` | `[C, 4]` | FP32 | 16-byte aligned; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
 | `ctx` | | | the rank's KCP context, built by the calling family's context builder (for example `cake_kda_det_train_kcp_build_context(..., conv_kernel_size=4)`): fragment table, halo plan, device tables, process group |
+
+A misaligned operand raises `ValueError` before anything launches; a fresh
+tensor or a `.clone()` is aligned.
 
 Every rank of `ctx.group` calls the entry once per layer, in the same order,
 with the same tensor count and channel counts; the ranks are not compared (a

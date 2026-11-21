@@ -39,6 +39,7 @@ C = 10240 and 16384 tokens at C = 8192).  A ``CakeKDADetKcpContext`` is built wi
 
 from __future__ import annotations
 
+import functools
 import types
 
 import pytest
@@ -323,6 +324,61 @@ def test_kcp_keeps_fp32_taps_and_no_bias():
         cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx, bias=bias)
     with pytest.raises(TypeError):
         cake_causal_conv1d_det_kcp(p.x_local, p.w, p.ctx, bias)
+
+
+def test_tokens_taps_and_dweight_must_be_16_byte_aligned():
+    """The KCP programs move the token rows (``x_local``, ``dy``, ``out``, ``dx``) as 16-byte vectors, one channel's
+    four FP32 taps as one 16-byte vector, and some backward programs store one channel's four FP32 ``dweight`` taps
+    with one 16-byte store: a tensor off the 16-byte grid is refused (``ValueError``) by the forward, the backward and
+    the autograd entry of a one-rank context before anything launches or exchanges (the buffers stay zero).  A
+    16-byte aligned ``dweight`` view inside a larger buffer gets ``dx`` and ``dweight`` bitwise equal to a fresh
+    one's."""
+
+    device = torch.device("cuda")
+    p = _problem((5000, 1003), (1, 2, 4997, 1003), 512, device)
+    _, hist = cake_causal_conv1d_det_train_kcp_forward(p.x_local, p.w, p.ctx)
+    shape, n, m = tuple(p.x_local.shape), p.x_local.numel(), p.C * WIDTH
+    flat = torch.zeros(n + 1, dtype=torch.bfloat16, device=device)
+    v = flat[1:].view(shape)
+    buf = torch.zeros(m + 4, dtype=torch.float32, device=device)
+    taps = buf[1 : 1 + m].view(p.C, WIDTH)
+    assert v.data_ptr() % 16 != 0 and taps.data_ptr() % 16 != 0
+
+    def fwd(x, w, **kw):
+        return cake_causal_conv1d_det_train_kcp_forward(x, w, p.ctx, **kw)
+
+    def bwd(x, w, dy, **kw):
+        return cake_causal_conv1d_det_train_kcp_backward(x, w, p.ctx, dy, hist, **kw)
+
+    calls = [
+        ("x_local", lambda: fwd(v, p.w)),
+        ("x_local", lambda: cake_causal_conv1d_det_kcp(v, p.w, p.ctx)),
+        ("x_local", lambda: bwd(v, p.w, p.dy_local)),
+        ("out", lambda: fwd(p.x_local, p.w, out=v)),
+        ("dy", lambda: bwd(p.x_local, p.w, v)),
+        ("dx", lambda: bwd(p.x_local, p.w, p.dy_local, dx=v)),
+        ("weight", lambda: fwd(p.x_local, taps)),
+        ("weight", lambda: bwd(p.x_local, taps, p.dy_local)),
+    ]
+    for offset in (1, 2, 3):
+        dweight = buf[offset : offset + m].view(p.C, WIDTH)
+        assert dweight.data_ptr() % 16 != 0
+        call = functools.partial(bwd, p.x_local, p.w, p.dy_local, dweight=dweight)
+        calls.append(("dweight", call))
+    for name, call in calls:
+        with pytest.raises(ValueError, match=f"{name} must be 16-byte aligned"):
+            call()
+    torch.cuda.synchronize()
+    assert int(torch.count_nonzero(flat)) == 0 and int(torch.count_nonzero(buf)) == 0
+    aligned = buf[4:].view(p.C, WIDTH)
+    dx, dw = bwd(p.x_local, p.w, p.dy_local, dweight=aligned)
+    _, hist_ref = fwd(p.x_local, p.w)
+    dx_ref, dw_ref = cake_causal_conv1d_det_train_kcp_backward(
+        p.x_local, p.w, p.ctx, p.dy_local, hist_ref
+    )
+    assert dw is aligned
+    assert torch.equal(_bits(dx), _bits(dx_ref))
+    assert torch.equal(_bits(dw), _bits(dw_ref))
 
 
 def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):

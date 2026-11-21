@@ -222,6 +222,40 @@ def test_fp32_dweight_must_be_16_byte_aligned():
     judge_kcp(lens, cuts, C, run, label="16-byte aligned dweight view")
 
 
+def test_tokens_and_taps_must_be_16_byte_aligned():
+    """The KCP programs move the token rows (``x_local``, ``dy``, ``out``, ``dx``) as 16-byte vectors and one
+    channel's four FP32 taps as one 16-byte vector: a tensor off the 16-byte grid is refused (``ValueError``) by the
+    forward, the backward and the autograd entry of a one-rank context before anything launches or exchanges (the
+    buffers stay zero)."""
+
+    device = torch.device("cuda")
+    lens, cuts, C = (5000, 1003), (1, 2, 4997, 1003), 512
+    p = _problem(lens, cuts, C, device)
+    _, hist = _fwd(p.x_local, p.w, p.ctx)
+    shape, n = tuple(p.x_local.shape), p.x_local.numel()
+    flat = torch.zeros(n + 1, dtype=torch.bfloat16, device=device)
+    v = flat[1:].view(shape)
+    taps = torch.zeros(p.C * WIDTH + 1, dtype=torch.float32, device=device)
+    taps = taps[1:].view(p.C, WIDTH)
+    assert v.data_ptr() % 16 != 0 and taps.data_ptr() % 16 != 0
+    for name, call in (
+        ("x_local", lambda: _fwd(v, p.w, p.ctx)),
+        ("x_local", lambda: conv_kcp.cake_causal_conv1d_nondet_kcp(v, p.w, p.ctx)),
+        ("x_local", lambda: _bwd(v, p.w, p.ctx, p.dy_local, hist)),
+        ("out", lambda: _fwd(p.x_local, p.w, p.ctx, out=v)),
+        ("dy", lambda: _bwd(p.x_local, p.w, p.ctx, v, hist)),
+        ("dx", lambda: _bwd(p.x_local, p.w, p.ctx, p.dy_local, hist, dx=v)),
+        ("weight", lambda: _fwd(p.x_local, taps, p.ctx)),
+        ("weight", lambda: _bwd(p.x_local, taps, p.ctx, p.dy_local, hist)),
+    ):
+        with pytest.raises(ValueError, match=f"{name} must be 16-byte aligned"):
+            call()
+    torch.cuda.synchronize()
+    assert int(torch.count_nonzero(flat)) == 0 and int(torch.count_nonzero(taps)) == 0
+    held = _stream_workspace()
+    assert held is None or int(torch.count_nonzero(held)) == 0
+
+
 def test_kcp_plans_with_the_legacy_tile_rule(monkeypatch):
     """The KCP programs plan their launches with ``cake_jit.plan(..., legacy=True)``: the single backward program
     (the ``bwd_route`` test knob ``"single"``; the overlapped pair plans with its own work plan) and the one-launch

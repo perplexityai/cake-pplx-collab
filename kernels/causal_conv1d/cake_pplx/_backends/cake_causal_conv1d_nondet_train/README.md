@@ -59,9 +59,12 @@ q, k, v = cake_causal_conv1d_nondet_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
 | operand | shape | dtype | notes |
 |---|---|---|---|
-| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
-| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous, 16-byte aligned; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
+| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous, 16-byte aligned; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
 | `ctx` | | | the context of the rank's KDA step (`CakeKDADetKcpContext`, from `cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`): fragment table, halo plan, device tables, process group |
+
+A misaligned operand raises `ValueError` before anything launches; a fresh
+tensor or a `.clone()` is aligned.
 
 Each name maps to the deterministic name with `det` in place of `nondet`. A
 recompute handle (any object with an `entries` dict) serves either package.

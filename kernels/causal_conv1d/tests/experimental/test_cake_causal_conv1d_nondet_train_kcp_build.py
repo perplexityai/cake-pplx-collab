@@ -287,7 +287,7 @@ def test_single_call_forward_single_rank_launch_without_pdl(monkeypatch) -> None
         kcp, "_context", lambda ctx, *, device, T_r: (torch.tensor([0, T_r], dtype=torch.int32), 1)
     )
     monkeypatch.setattr(
-        kcp, "_output", lambda out, what, *, shape, dtype, device: torch.zeros(shape, dtype=dtype)
+        kcp, "_output", lambda out, what, *, shape, dtype, device, align=1: torch.zeros(shape, dtype=dtype)
     )
     monkeypatch.setattr(
         kcp, "_table", lambda ctx, what, *, shape, dtype, device: torch.zeros(shape, dtype=dtype)

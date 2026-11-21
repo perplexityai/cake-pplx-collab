@@ -179,6 +179,8 @@ import torch.distributed as dist
 import tvm_ffi
 
 from . import (
+    DWEIGHT_FP32_ALIGN,
+    TOKEN_ALIGN,
     _cu_seqlens,
     _device_arch,
     _device_index,
@@ -1093,7 +1095,14 @@ def _kcp_forward(
     w = _weight(weight, C, device=device)
     cu, n_frag = _context(ctx, device=device, T_r=S)
     halo = ctx.halo
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     if _hist is None:
         hist_index = _require_tensor(
             ctx.halo_tables["hist_index"], "ctx.halo_tables['hist_index']"
@@ -1224,7 +1233,14 @@ def _fwd_host(
 
     S, C, x_flat = _tokens(x, "x_local", device=device)
     w = _weight(weight, C, device=device)
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     arch = _device_arch(device)
     sr, overlap = _fwd_form(arch, multi=multi)
     e = _host_cache_entry(
@@ -1497,7 +1513,9 @@ def cake_causal_conv1d_det_train_kcp_backward(
     one call).  ``cooperative``: the main program's launch form (``None`` = :data:`COOPERATIVE_DEFAULT`, ``False``;
     ``False`` the ordinary launch and the reduce program, ``True`` the cooperative launch; see the module docstring);
     ``dx`` is bitwise the same in both, ``dweight`` is reproducible in each but differs in its bits between them.
-    Every rank of the group passes the same ``cooperative``.
+    Every rank of the group passes the same ``cooperative``.  Preallocated outputs: ``dx`` BF16 of ``x_local``'s
+    shape and ``dweight`` FP32 ``[C, 4]``, contiguous and 16-byte aligned (16-byte stores; ``ValueError``
+    otherwise).
     """
 
     coop = _cooperative(cooperative)
@@ -1575,10 +1593,20 @@ def _kcp_backward(
         # A valid pointer for the kernels; no table entry names a row of it.
         hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _output(
-        dweight, "dweight", shape=(C, WIDTH), dtype=torch.float32, device=device
+        dweight,
+        "dweight",
+        shape=(C, WIDTH),
+        dtype=torch.float32,
+        device=device,
+        align=DWEIGHT_FP32_ALIGN,
     )
     device_index = _device_index(device)
     n_head = int(halo.n_head_rows)
@@ -1725,10 +1753,20 @@ def _bwd_host(
     if hist_t.shape[0] == 0:
         hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _output(
-        dweight, "dweight", shape=(C, WIDTH), dtype=torch.float32, device=device
+        dweight,
+        "dweight",
+        shape=(C, WIDTH),
+        dtype=torch.float32,
+        device=device,
+        align=DWEIGHT_FP32_ALIGN,
     )
     e = _host_cache_entry(
         ctx,

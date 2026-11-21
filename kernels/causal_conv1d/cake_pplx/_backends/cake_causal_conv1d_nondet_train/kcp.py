@@ -215,6 +215,7 @@ import torch.distributed as dist
 import tvm_ffi
 
 from . import (
+    TOKEN_ALIGN,
     _accumulator_layout,
     _alert_nondeterministic,
     _backward_accumulators,
@@ -1534,7 +1535,14 @@ def _kcp_forward(
     w = _weight(weight, C, device=device)
     cu, n_frag = _context(ctx, device=device, T_r=S)
     halo = ctx.halo
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     if _hist is None:
         hist_index = _require_tensor(
             ctx.halo_tables["hist_index"], "ctx.halo_tables['hist_index']"
@@ -1654,7 +1662,14 @@ def _fwd_host(
 
     S, C, x_flat = _tokens(x, "x_local", device=device)
     w = _weight(weight, C, device=device)
-    y = _output(out, "out", shape=tuple(x.shape), dtype=torch.bfloat16, device=device)
+    y = _output(
+        out,
+        "out",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
+    )
     arch = _device_arch(device)
     sr, overlap = _fwd_form(arch, multi=multi)
     e = _host_cache_entry(
@@ -1948,7 +1963,7 @@ def cake_causal_conv1d_nondet_train_kcp_backward(
     follows the forward's by one call).  Under ``torch.use_deterministic_algorithms(True)`` (read when the call
     runs) the call raises a ``RuntimeError`` (a ``UserWarning``, then it runs, with ``warn_only=True``) before it
     launches or exchanges anything.  Preallocated outputs: ``dx`` BF16 of ``x_local``'s shape and ``dweight`` FP32
-    ``[C, 4]``, contiguous; ``dweight`` must be 16-byte aligned (one 16-byte store per channel; ``ValueError``
+    ``[C, 4]``, contiguous; ``dx`` and ``dweight`` must be 16-byte aligned (16-byte stores; ``ValueError``
     otherwise).  ``bwd_reserve_sms`` (``None`` = ``RESERVE_DEFAULT``):
     the main backward's grid gives up that many SMs (:func:`_bwd_grid`); the graph key holds it.  ``ValueError`` for
     ``K >= 1`` on sm_107a (:data:`RESERVE_UNSUPPORTED`) or at the device's SM count or above.  ``dweight_sum``
@@ -2087,7 +2102,12 @@ def _kcp_backward(
         # A valid pointer for the kernels; no table entry names a row of it.
         hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _dweight_aligned(
         _output(
@@ -2269,7 +2289,12 @@ def _bwd_host(
     if hist_t.shape[0] == 0:
         hist_t = _pool(0, C, dtype=torch.bfloat16, device=device)
     dx_out = _output(
-        dx, "dx", shape=tuple(x.shape), dtype=torch.bfloat16, device=device
+        dx,
+        "dx",
+        shape=tuple(x.shape),
+        dtype=torch.bfloat16,
+        device=device,
+        align=TOKEN_ALIGN,
     )
     dw_out = _dweight_aligned(
         _output(
