@@ -54,18 +54,19 @@ CTA that arrives last sums, so only their weight gradient may vary in its
 last bits from run to run).
 ``ROUTES[arch][role]`` names the one module a role runs on an architecture;
 a module may be delivered for more architectures than route it (every
-forward module of this package's own kernels is delivered for every
-architecture, so a new cut between them is a host-plan change; the pipelined
-forwards are delivered where they are routed: the deterministic package's
-forward program on sm_100a and sm_103a, its program of packed rows on
-sm_107a; the repeatable backwards and their long programs of both
-weight-gradient dtypes, the deterministic package's fused backward
+forward module of this package's own kernels but the 32-lane tiny forward is
+delivered for every architecture, so a new cut between them is a host-plan
+change; the 32-lane tiny forward and the pipelined forwards are delivered
+where they are routed: the 32-lane tiny forward on sm_100a and sm_103a, the
+deterministic package's forward program on sm_100a and sm_103a, its program
+of packed rows on sm_107a; the repeatable backwards and their long programs
+of both weight-gradient dtypes, the deterministic package's fused backward
 programs, are delivered and routed on every architecture).
 :func:`module_for_rows` picks a call's module from the rows, the device's SM
 count and the layout of the inputs: the forward of packed rows (``x`` and
 ``z`` hold row ``n`` at element ``128 n``, fewer than ``PACKED_ROWS`` rows)
 by ``FORWARD_BANDS``, of other layouts by ``STRIDED_FORWARD_BANDS``, bands of
-rows per SM (the tiny forward, which reads packed rows only, the short
+rows per SM (the tiny forwards, which read packed rows only, the short
 forward, the mid, long and extra-long forwards, the pipelined forwards and
 the forward of the call role, each where the architecture's bands name it);
 the backward by ``BACKWARD_BANDS``, bands of rows or of rows per SM: its
@@ -84,7 +85,10 @@ row-claims roles (``_rc``, ``_rc_mid``) and its mid role (the claimed
 backward), which no band runs.
 The forward's programs: the tiny forward (16 threads to a row, one 8-row
 block per 128-thread CTA, the gate before the sum of squares, packed rows
-only; the short forward's arithmetic and bits), the short forward (16
+only; the short forward's arithmetic and bits), the 32-lane tiny forward
+(sm_100a and sm_103a: the tiny forward with 32 threads to a row, two to each
+group of 8 elements, one 4-row block per 128-thread CTA; the tiny forward's
+sum of squares, so the short forward's bits), the short forward (16
 threads to a row, one 16-row block per CTA, the gate before the sum of
 squares), the forward (64-thread
 CTAs, 8 threads to a row), the mid forward (128-thread CTAs walking 16-row
@@ -108,7 +112,9 @@ packed rows, with four sum chains, ``rsqrt.approx.ftz``, ``w`` loaded behind
 the first block's loads and one 32-byte store per lane).  Each program's
 arithmetic is fixed; the programs associate a row's sum of squares differently
 (the tiny and the short forward: four 2-term FMA chains of 16 lanes added in
-pairs, then folded by XOR shuffles 1, 2, 4, 8; the mid forward, the
+pairs, then folded by XOR shuffles 1, 2, 4, 8, and the 32-lane tiny forward
+the same chains of its 16 lane pairs, then folded by XOR shuffles 2, 4, 8,
+16: the same additions; the mid forward, the
 extra-long forward but on sm_100a and the sm_107a pipelined forward: four
 4-term chains of 8 lanes added in pairs, then folded by 1, 2, 4; the plain
 forward and the pipelined forward on sm_100a and sm_103a: two 8-term chains
@@ -671,6 +677,54 @@ MODULES: dict[str, dict[str, Any]] = {
             "z": "z",
         },
         "role": "fwd_tiny",
+    },
+    # The 32-lane tiny forward: 128 threads, 32 lanes per row (4-row blocks,
+    # a row per warp, two lanes to each group of 8 elements, each lane the
+    # outputs of its 4), one block per CTA, packed rows only (row n at element
+    # 128 n), the tiny forward's sum of squares (each group's on its two
+    # chains, the groups folded by XOR shuffles 2, 4, 8, 16), so the short
+    # forward's bits (build {"lanes": 32, "split_gate": 1, "threads": 128});
+    # FORWARD_BANDS gives it its rows on sm_100a and sm_103a.
+    "cake_rmsnorm_silu_gate_train_b9af069174152aae5f62": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "y"],
+            ["parameter", "rows"],
+            ["parameter", "eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "row_blocks",
+            "rows_per_cta": 4,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_train_b9af069174152aae5f62",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_train_b9af069174152aae5f62",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_train_b9af069174152aae5f62",
+        "logical": {
+            "eps": "eps",
+            "rows": "rows",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+            "z": "z",
+        },
+        "role": "fwd_l32_tiny",
     },
     # The pipelined forward: the deterministic package's forward program with
     # a gate that does not flush (split_gate 1, under this package's name): 128
@@ -2735,6 +2789,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_mid": "cake_rmsnorm_silu_gate_train_33ef19a28735b3e470b3",
         "fwd_short": "cake_rmsnorm_silu_gate_train_7b542c846911aca66512",
         "fwd_tiny": "cake_rmsnorm_silu_gate_train_242b29d118997473fc3e",
+        "fwd_l32_tiny": "cake_rmsnorm_silu_gate_train_b9af069174152aae5f62",
         "fwd_pipe": "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99",
         "bwd_bf16_mid": "cake_rmsnorm_silu_gate_train_2a3bbf332a501a11ca31",
         "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
@@ -2762,6 +2817,7 @@ ROUTES: dict[str, dict[str, str]] = {
         "fwd_mid": "cake_rmsnorm_silu_gate_train_33ef19a28735b3e470b3",
         "fwd_short": "cake_rmsnorm_silu_gate_train_7b542c846911aca66512",
         "fwd_tiny": "cake_rmsnorm_silu_gate_train_242b29d118997473fc3e",
+        "fwd_l32_tiny": "cake_rmsnorm_silu_gate_train_b9af069174152aae5f62",
         "fwd_pipe": "cake_rmsnorm_silu_gate_train_e6e0bf4c758851cabc99",
         "bwd_bf16_mid": "cake_rmsnorm_silu_gate_train_2a3bbf332a501a11ca31",
         "bwd_bf16_rc": "cake_rmsnorm_silu_gate_train_58f1ac96c476c73ec5c8",
@@ -2825,15 +2881,24 @@ ROUTES: dict[str, dict[str, str]] = {
 # pipelined forward still launches a CTA per block.  One cut is not the
 # step's: on sm_107a the pipelined forward runs past 280 rows per SM, where
 # it is about 10 % faster alone than the extra-long forward and makes the
-# step at most about 3.5 % slower.  The tiny forward ends where beside a
-# kernel holding 16 SMs it still ends no later than the deterministic
-# package's forward: 36 rows per SM on sm_100a and sm_103a (on sm_100a,
-# from 37 rows per SM beside 16 CTAs of 1024 threads with the max-shared
-# carveout, it can end about 2 microseconds later, and the pipelined forward,
-# which is that forward, runs from there up to 85 rows per SM), and 65 on
-# sm_107a.  Host plan only: a new cut needs no new program.
+# step at most about 3.5 % slower.  The tiny forwards end where beside a
+# kernel holding 16 SMs they still end no later than the deterministic
+# package's forward as it routes the rows.  The 32-lane tiny forward (that
+# package's tiny row blocks: 32 lanes a row, one 4-row block per CTA) runs on
+# sm_100a up to 4 rows per SM, one CTA per SM, past which CUDA Graph replays
+# of back-to-back calls run its twice as many CTAs up to about 1.5 % slower
+# than the tiny forward, and on sm_103a up to 12 rows per SM, past which,
+# with the rows in L2, they make it slower (with cold L2 it is up to about
+# 1.5 % faster up to there); the tiny forward runs from there up to 36 rows
+# per SM (on sm_100a, from 37 rows per SM beside 16
+# CTAs of 1024 threads with the max-shared carveout, it can end about 2
+# microseconds later than that package's forward, and the pipelined forward,
+# which is that forward, runs from there up to 85 rows per SM); on sm_107a
+# the tiny forward runs up to 65 rows per SM.  Host plan only: a new cut
+# needs no new program.
 FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
     "sm_100a": (
+        (4, "fwd_l32_tiny"),
         (36, "fwd_tiny"),
         (85, "fwd_pipe"),
         (160, "fwd_mid"),
@@ -2843,6 +2908,7 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
         (None, "fwd_mid"),
     ),
     "sm_103a": (
+        (12, "fwd_l32_tiny"),
         (36, "fwd_tiny"),
         (240, "fwd_mid"),
         (600, "fwd_xlong"),
@@ -2859,7 +2925,7 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 }
 
 # The forward bands of a call whose ``x`` or ``z`` rows are not packed (the
-# tiny forward reads packed rows only), or of packed rows from
+# tiny forwards read packed rows only), or of packed rows from
 # ``PACKED_ROWS`` on, as ``FORWARD_BANDS``.  The cuts follow the
 # checkpointed training step as ``FORWARD_BANDS`` do, except the short
 # forward's end: 12 rows per SM on sm_100a and sm_103a, where its grid of
@@ -3069,8 +3135,9 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
     (10, 7): "sm_107a",
 }
 # The kernels of a call.  The forward runs on every architecture, its other
-# roles (``fwd_tiny``, ``fwd_short``, ``fwd_mid``, ``fwd_long``,
-# ``fwd_xlong``) in the rows of their ``FORWARD_BANDS`` bands; a backward
+# roles (``fwd_tiny``, ``fwd_l32_tiny`` on sm_100a and sm_103a,
+# ``fwd_short``, ``fwd_mid``, ``fwd_long``, ``fwd_xlong``) in the rows of
+# their ``FORWARD_BANDS`` bands; a backward
 # role (its own module, the static backward, where an architecture routes
 # one: ``bwd_bf16`` on sm_107a, which no band runs; ``bwd_f32`` on sm_100a
 # and sm_103a, in a band of rows per SM), its small-row roles
@@ -3147,7 +3214,7 @@ HEAD_DIM = 128
 ALIGNMENT_ELEMENTS = 16
 # The kernels index rows with 32-bit integers.
 INT32_MAX = 2**31 - 1
-# A forward of packed rows (the tiny forward, the pipelined forward of packed
+# A forward of packed rows (the tiny forwards, the pipelined forward of packed
 # rows) takes the offset of an element of row ``n`` as ``n * 128 + column`` in
 # 32-bit arithmetic: ``FORWARD_BANDS`` serves fewer rows than this (2**31 //
 # HEAD_DIM), a call of more takes ``STRIDED_FORWARD_BANDS``.
