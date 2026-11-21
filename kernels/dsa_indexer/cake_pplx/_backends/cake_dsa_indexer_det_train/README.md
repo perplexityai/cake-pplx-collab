@@ -419,8 +419,8 @@ that writes the registry verifies the record against them before it is frozen.
   scan never touches the ticket word; none for a program of the
   `static_scan_kinds` of its form's record, which keeps the static unit
   enumeration on every call: on `sm_107a` every FP8 program; for a program
-  that reads a ticket argument, only the word of its ticket block, below); the
-  prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates
+  that reads a ticket argument, only the eager entry's ticket word, below);
+  the prepared runner (`cake_backend.prepare_dsa_indexer_det_topk`) allocates
   nothing at launch and is CUDA-graph capturable.
   * On `sm_107a`, a scan program listed in `ticket_arg_arches` draws from a
     16-byte ticket block passed as an argument instead of the tail.  A

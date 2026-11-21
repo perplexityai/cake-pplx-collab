@@ -628,10 +628,10 @@ def _same_as_plain(got, plain) -> bool:
 def test_prepared_runner_draws_its_tickets_on_a_poisoned_caller_workspace():
     """A call with more work units than the grid draws them from a ticket word: on the architectures of
     ``TICKET_WORD_ARCHES`` from a 16-byte block of the prepared runner's own, outside the caller-owned workspace,
-    elsewhere from the workspace's ticket tail, which the scan binding zeroes before every scan launch.  With the
-    whole caller-owned workspace filled with 0xFF before each of three runs, every run of that runner and of a
-    backend-owned one returns the eager call's result, the word reads 0 after every run, and ``indices`` / ``scores``
-    are the plain call's."""
+    elsewhere from a ticket tail: the caller-owned workspace's, which the scan binding zeroes before every scan launch,
+    or the backend-owned runner's, zeroed once at prepare.  With the whole caller-owned workspace filled with 0xFF
+    before each of three runs, every run of that runner and of a backend-owned one returns the eager call's result, the
+    word reads 0 after every run, and ``indices`` / ``scores`` are the plain call's."""
     _require_cb_program()
     inputs = ref.make_random_inputs(
         *DRAWING_SHAPE, top_k=TOP_K, seed=7801, device="cuda"
