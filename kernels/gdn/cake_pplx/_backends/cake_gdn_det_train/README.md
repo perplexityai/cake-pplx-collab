@@ -26,7 +26,8 @@ Experimental backend for the forward and backward of packed GDN (scalar-gated
 DeltaNet) layers in training: head dimension 128, chunk 64, grouped Q/K heads
 (`HV` a multiple of `H`), no context parallelism.  Every launch is a plain
 stream-ordered kernel: no atomic on a value (the wavefront pair below counts
-stored tiles with atomic counters, whose order no value depends on), no
+stored tiles, and the package tail counts the CTAs of a tile, with atomic
+integer counters, whose order no value depends on), no
 data-dependent ordering, so the outputs and every gradient repeat bit for bit
 from run to run for one layout and one plan.  Some stages run as two groups of sequences on the caller's stream and a
 side stream; the groups write disjoint outputs, so this holds with one or two
@@ -108,12 +109,68 @@ split `(64, 1)` plan runs the second pass of its adjoint scan on `dhu_tc2`,
 from the stitched segment states, where a second cost rule prices it at most
 0.95 of `dv_local` plus the register pass and, on `sm_100a`, at least 40 us
 cheaper; its pre-scan then computes the `dv_local` tiles of its chunks itself,
-so no `dv_local` stage runs.  Both forms give the same bits on `dhu_tc2`; a
-value-head group of three on the architectures of `DVL32_ARCHS` runs
-`dhu_tc2_dvl32` instead (below).  For a value-head
-group of two (`HV == 2 * H`) or of three (`HV == 3 * H`) one fused tcgen05
-cluster kernel then computes `dq`, `dk`, `dv`, `dg` and `dbeta`; other groups
-run `dqkwg`, the WY pullback and the finalize.
+so no `dv_local` stage runs.  Both forms give the same bits on `dhu_tc2`;
+every value-head group but two (`G = HV / H`) runs `dhu_tc2_dvl32` instead on
+the architectures of `DVL32_ARCHS` (below).  Then the tail computes `dq`, `dk`,
+`dv`, `dg` and `dbeta`:
+
+| `G` | tail | tcgen05 adjoint scan |
+|---|---|---|
+| 1 | the package tail (`tail` / `tail_bf16`) | `dhu_tc2_dvl32` |
+| 2 | `tail_g2`, a two-CTA cluster kernel (or the wavefront pair below) | `dhu_tc2` |
+| 3 | `tail_g3_f32x`, a three-CTA cluster kernel that rounds `dq` / `dk` once | `dhu_tc2_dvl32` |
+| 4 or more, at least `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` tokens per sequence | the package tail | `dhu_tc2_dvl32` |
+| 4 or more, fewer tokens per sequence | `dqkwg`, the WY pullback and the finalize | `dhu_tc2_dvl32` |
+
+A `finalize` pin runs `dqkwg`, the WY pullback and that finalize for every
+group but two.  The tokens per sequence are the call's mean: its tokens divided
+by its sequences (`len(cu_seqlens) - 1`, or `B`).  Empty sequences count, so
+repeated offsets in `cu_seqlens` lower the mean.  Both counts are host facts
+on both table routes, so both routes, an eager call and its CUDA graph capture
+take the same tail.
+
+`PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` is 8 on `sm_100a` and `sm_103a` and 32 on
+`sm_107a`.  Each value is the smallest mean tokens per sequence from which no
+backward on the tail it picks ran slower than 0.2.3 (the unfused tail on
+`dhu_tc2`) beyond the noise band.  The sweep ran `G = 4` and 8, sequences of
+4, 8, 16, 24, 32, 48 and 64 tokens over 4096, 16384 and 32768 (chunk, value
+head) CTAs and mixed layouts, the backward and the checkpointed step, eager
+and CUDA graph, on B200 (`sm_100a`, 148 SMs), GB300 (`sm_103a`, 152 SMs) and
+R200 (`sm_107a`, 212 SMs).  On `sm_100a` and `sm_103a` the package tail ran
+slower at `G = 4` over sequences of 4 tokens (by up to 1.9 %, most at 32768
+CTAs).  On `sm_107a` it ran slower at `G = 4` up to 24 tokens per sequence,
+at 16384 and 32768 CTAs (at 24 tokens on each GPU's own band).  Below each
+value the package tail still ran faster than the unfused tail on some
+layouts, at `G = 8` and at 4096 CTAs among them; one threshold cannot keep
+those gains and drop every loss.
+
+The package tail runs one tcgen05 kernel per (chunk, value head), with no
+cluster, at every size.  At `G = 1` each CTA writes its `dq` / `dk` tile.  At
+`G >= 4` each CTA writes its FP32 `dq` / `dk` partials to its own workspace
+slot and adds one to the 32-bit arrival counter of its (chunk, key head) tile,
+an integer increment that wraps to zero at `G`; the CTA that completes the
+tile sums the group's slots in value-head order, its own included, and rounds
+`dq` / `dk` to BF16 once.  The sum does not depend on which CTA completes the
+tile, and `dv`, `dg` and `dbeta` have one writer each, so the tail repeats its
+bits run to run.  At `G >= 4` the tail launches the chunk table in segments
+of at most `TAIL_WORKSPACE_TILES // HV` chunks (4096 slots; at least one
+chunk), in stream order; at `G = 1` it is one launch that uses no slot.
+
+The workspace holds one 64 KiB FP32 slot per (chunk, value head) of a launch
+and one counter per (chunk, key head).  The slots are never zeroed or
+filled, also not under `torch.use_deterministic_algorithms(True)` (the chain
+turns `torch.utils.deterministic.fill_uninitialized_memory` off around their
+allocation only): the CTA that completes a tile reads only the slot rows of
+the chunk's tokens, which the tile's CTAs write in that launch.  The counters
+are created zero and every launch leaves them zero.  With `host_cache=True`
+the chain keeps one workspace per (device, stream of the call), grown to the
+largest call and not released: up to 256 MiB of slots (4096) once a call runs
+the package tail at `G >= 4` with `chunks x HV >= 4096`, and one slot (64 KiB,
+not read) after calls at `G = 1`.  Calls below the threshold take no slots.
+Calls on different streams take different workspaces.  An uncached call takes
+a fresh workspace.  A CUDA graph capture takes its own from the graph's memory
+pool and zeroes its counters inside the graph (the slots are not filled);
+replay one captured graph at a time, not concurrently with itself.
 
 For a value-head group of three, on `sm_100a`, `sm_103a` and `sm_107a`, the
 fused tail rounds `dq` and `dk` once: its three CTAs exchange the group's FP32
@@ -128,13 +185,36 @@ same bits as on the views.  The tcgen05 adjoint scan of such a call adds the
 FP32 `dv_local` values to `dv2` before its one rounding (`dhu_tc2_dvl32`), on
 serial plans and in the second pass of split ones.
 Both are fixed-order with one writer per element, so the gradients repeat bit
-for bit; they differ from the previous release of this package.  The
+for bit; they can differ from the bits of `tail_g3` on `dhu_tc2`, which a group
+of three runs with `F32X_TAIL_ARCHS` and `DVL32_ARCHS` off (below).  The
 register adjoint forms still round `dv_local` to BF16
 first, so for such a call they give the same `o` and final state as
 `dhu_tc2_dvl32`, but other bits of `dk`, `dv`, `dg`, `dbeta` and the
 initial-state gradient: the cost rules and the `dhu_scan`
 pin pick the bits, and on a split `(64, 1)` plan the device-table route always
 runs the register pass.  Groups of two keep `tail_g2` and `dhu_tc2`.
+
+In 0.2.7 the package tail and `dhu_tc2_dvl32` serve `G = 1` and `G >= 4`,
+where 0.2.3 to 0.2.6 ran the unfused tail on `dhu_tc2`.  Groups of two and
+three keep the 0.2.6 bits on every route; `o` and the final state keep them
+everywhere.
+At `G = 1` and on the package tail at `G >= 4`, `dq`, `dk`, `dv`, `dg`,
+`dbeta` and the initial-state gradient may change where the tcgen05 adjoint
+runs, and only `dq` / `dk` may change where the register adjoint runs.  Below
+the tokens per sequence of `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` at `G >= 4`, `dk`,
+`dv`, `dg`, `dbeta` and the initial-state gradient may change where the tcgen05
+adjoint runs, and nothing changes where the register adjoint runs.
+Determinism is run to run within one version: each version repeats its own
+bits, and the bits may change between versions.
+
+The switches are module constants of `cake_chain` with the off value `()`:
+`PACKAGE_TAIL_ARCHS` (off: the unfused tail on the same adjoint scan at `G = 1`
+and `G >= 4`), `DVL32_ARCHS` (off: `dhu_tc2` for every group, `G = 3`
+included) and `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`).  With the first
+two off, `G = 1` and `G >= 4` run their 0.2.6 route, the unfused tail on
+`dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
+architecture to its threshold; an architecture missing from it, or 0, has
+none.
 
 On the host-table route, a call with FP32 `beta`, `use_qk_l2norm_in_kernel`,
 `HV <= 3 * H` and no `prep`, `scan_config` or `segment_chunks` pin runs one of
@@ -170,14 +250,13 @@ in place, or a `g` / `beta` not at a 16-byte aligned base, is copied first.
 Both forwards are fixed-order (no atomic, wave 1 and the maps write disjoint
 segments), so they are bitwise run to run with one or two streams.  Their
 bits differ from the prep forward's, so the outputs and gradients of these
-FP32-`beta` host-table calls change from the previous release of this package.
-Every other call (a BF16 `beta`, Q/K not
-normalized, the device route, a larger value-head group, a `prep`,
-`scan_config` or `segment_chunks` pin) runs the prep forward with the same
-bits as before, and with the same launches except one: Q and K that are the
-head views of a packed row run `prep_tma` inside the plain-prep band unless a
-`prep` pin decides (no copy; see the prep above).  The other options
-(`dhu_scan`, `finalize`, `warmup_log2`, `lpt`, `streams`, `save_state`,
+FP32-`beta` host-table calls can differ from those of the same call under a
+`prep` pin, which runs the prep forward.  Every other call (a BF16 `beta`, Q/K
+not normalized, the device route, a larger value-head group, a `prep`,
+`scan_config` or `segment_chunks` pin) runs the prep forward; there, Q and K
+that are the head views of a packed row run `prep_tma` inside the plain-prep
+band unless a `prep` pin decides (no copy; see the prep above).  The other
+options (`dhu_scan`, `finalize`, `warmup_log2`, `lpt`, `streams`, `save_state`,
 `host_cache`) do not change the forward route.
 
 The forward keeps for the backward only the state of the architecture's tape
@@ -263,12 +342,12 @@ per-stream ones.
 |---|---|---|
 | `scan_config` | planner | register-scan `(value block, key split)` of both scans: `(32, 2)`, `(32, 1)` or `(64, 1)`; keeps the call on the prep forward |
 | `segment_chunks` | planner | segment length in chunks of the segment-parallel scans; `0` forces the serial scan; lengths above 128 (the chunks one pre-scan CTA covers) are not supported: a call whose plan then splits a sequence raises `ValueError`; keeps the call on the prep forward |
-| `finalize` | by size | finalize of the unfused tail (`HV != 2 * H`): `"finalize"` or `"finalize_mlp"` (the latter needs `HV == 3 * H`); for `HV == 3 * H` a pin runs the unfused tail instead of the fused kernel (`dv`, `dg` and `dbeta` the same bits; `dq` / `dk` rounded per value head) |
+| `finalize` | by size | finalize of the unfused tail (`HV != 2 * H`): `"finalize"` or `"finalize_mlp"` (the latter needs `HV == 3 * H`); a pin runs the unfused tail instead of `tail_g3_f32x` or the package tail (`dv`, `dg` and `dbeta` the same bits; `dq` / `dk` rounded per value head) |
 | `warmup_log2` | `-10 / ln 2` | warm-up threshold of the pre-scans |
-| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV == 3 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits |
+| `dhu_scan` | rule | adjoint scan of a serial plan: `"reg"` (`dv_local` + register scan) or `"tc"` (`dhu_tc2`; `dhu_tc2_dvl32` for `HV != 2 * H` on `DVL32_ARCHS`); also the second pass of a split `(64, 1)` plan on the host-table route (`"tc"` with the fused pre-scan); `"tc"` gives the bits of `"reg"` on `dhu_tc2`, and on `dhu_tc2_dvl32` the same `o` and final state with other gradient bits |
 | `prep` | rule | forward prep: `"plain"` or `"tma"` (`prep_tma`; Q or K not 16-byte aligned still take the plain prep); keeps the call on the prep forward |
 | `save_state` | `True` | keep the forward state of the tape level (`w`, `h`, `v_new`) for the backward; `False` recomputes them |
-| `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections and the per-stream workspaces between calls (a CUDA graph capture takes its own workspaces) |
+| `host_cache` | `True` | keep the chunk tables, the `dhu_tc2` selections and the per-stream workspaces between calls, the package tail's among them (a CUDA graph capture takes its own workspaces) |
 | `lpt` | `True` | host-table route: dispatch the sequences and the forward segments longest first; `False` keeps the caller's order (the same bits) |
 | `streams` | `2` | host-table route: `2` lets a serial scan run as two sequence groups on two streams where the rule above splits it; `1` keeps one stream (the same bits) |
 
