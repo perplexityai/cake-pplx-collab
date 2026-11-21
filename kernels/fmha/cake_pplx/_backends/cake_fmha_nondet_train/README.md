@@ -56,9 +56,10 @@ A call takes the one-launch route when `cake_jit.fused_record` gives it a
 record: no mask, and the call inside the region `FUSED_REGION[(arch, D)]` in
 `cake_jit.py`, which bounds the CTAs of the one-launch grid
 (`B * H * (Sq / 128 + Skv / 128)`), the longer sequence and the key length
-(`Skv` at most a bound, or at most a multiple of `Sq`).  A region is set per
-architecture and head dimension from measurements against the three-kernel
-routes; an entry `None` routes no call.  Every other head-dimension 128 call
+(`Skv` at most a bound, or at most a multiple of `Sq`).  Each region is the
+measured region of its architecture and head dimension, where the one-launch
+route measured faster than the three-kernel routes (the one-launch table
+below).  Every other head-dimension 128 call
 whose key length is a multiple of 256 and not longer than its query
 length takes the pair route where a region of `PAIR_REGIONS` in `cake_jit.py`
 holds its `B * H` and `Skv` for its architecture and mask (`cake_jit.variant`
@@ -67,6 +68,15 @@ four rows.  On `sm_100a` the causal pair build ships and no call takes it.  The
 `build.json` minimum CUDA toolkit is 12.8 for every `sm_100a` library, 12.9
 for every `sm_103a` library and 13.5 for every `sm_107a` library; an older
 local toolkit raises `RuntimeError` when the library is built.
+
+The regions of the one-launch route (`FUSED_REGION`: `(max_ctas, s_max, skv_any, skv_per_sq)`; no mask), with CTAs
+`B * H * (Sq / 128 + Skv / 128)`:
+
+| architecture | head dim 128 | head dim 64 |
+|---|---|---|
+| `sm_100a` | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq` | `(152, 2048, 512, 2)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq` |
+| `sm_103a` | `(152, 2048, 512, 1)`: CTAs `<= 152`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= Sq` | `(204, 2048, 256, 0)`: CTAs `<= 204`, `max(Sq, Skv) <= 2048`, `Skv <= 256` |
+| `sm_107a` | `(256, 2048, 512, 0)`: CTAs `<= 256`, `max(Sq, Skv) <= 2048`, `Skv <= 512` | `(212, 2048, 512, 2)`: CTAs `<= 212`, `max(Sq, Skv) <= 2048`, `Skv <= 512` or `Skv <= 2 * Sq` |
 
 The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
 

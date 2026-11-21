@@ -396,16 +396,19 @@ def variant(
 
 
 # (architecture, head dim) -> the region of the one-launch route there, or
-# None (no call takes it): (max_ctas, s_max, skv_any, skv_per_sq), see
-# :func:`fused_record`.  Measured per architecture against the three-kernel
-# routes; None until measured.
+# None (no call takes it): (max_ctas, s_max, skv_any, skv_per_sq).  A call
+# without the mask is inside when ``B * H * (Sq / 128 + Skv / 128) <=
+# max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <= s_max`` and
+# ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq`` (:func:`fused_record`).
+# Each entry is the measured region of its architecture and head dimension,
+# where the one-launch route measured faster than the three-kernel routes.
 FUSED_REGION: dict[tuple[str, int], tuple[int, int, int, int] | None] = {
-    ("sm_100a", 128): None,
-    ("sm_100a", 64): None,
-    ("sm_103a", 128): None,
-    ("sm_103a", 64): None,
-    ("sm_107a", 128): None,
-    ("sm_107a", 64): None,
+    ("sm_100a", 128): (152, 2048, 512, 1),
+    ("sm_100a", 64): (152, 2048, 512, 2),
+    ("sm_103a", 128): (152, 2048, 512, 1),
+    ("sm_103a", 64): (204, 2048, 256, 0),
+    ("sm_107a", 128): (256, 2048, 512, 0),
+    ("sm_107a", 64): (212, 2048, 512, 2),
 }
 
 

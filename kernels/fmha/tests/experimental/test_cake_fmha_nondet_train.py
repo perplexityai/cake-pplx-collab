@@ -29,7 +29,9 @@ or ``FUSED_OF``, and no variant or host sequence names a one-launch record) and 
 (``SEQUENCES``: its three records), the route of a call (``variant``: the pair route for head dimension 128, a key
 length that is a multiple of 256, at least as many queries as keys and ``B * H`` and ``Skv`` in a region of
 ``PAIR_REGIONS``; every measured crossover call on its decided route, ``DECIDED_LEAST``; ``fused_record``: the
-one-launch route inside the region of ``FUSED_REGION``, on both sides of each of its bounds), the launch grids, the
+one-launch route inside the region of ``FUSED_REGION``, on both sides of each of its bounds; the shipped region of
+each architecture and head dimension, ``SHIPPED_FUSED_REGION``, on both sides of each of its bounds, and the long
+calls of the benchmark's ``T1`` to ``T4`` rows on the three-kernel routes on every architecture), the launch grids, the
 stage launchers' keywords, their positional launch of every routed record (the FFI arguments and grid of the
 registry-ordered launch), the two layouts of the dQ accumulator in the judge's helper, the build manifest (every
 record's and host sequence's library, the recorded source digests), the standalone loader, the prebuilt libraries
@@ -480,7 +482,7 @@ def test_the_one_launch_route_of_a_call(monkeypatch) -> None:
     assert set(shipped) == {(arch, D) for arch in ARCHES for D in HEAD_DIMS}
     calls = [shape for shape, _ in FUSED_REGION_CALLS]
     for (arch, D), region in shipped.items():
-        assert region is None or (len(region) == 4 and all(type(n) is int and n > 0 for n in region)), (arch, D)
+        assert region is None or (len(region) == 4 and all(type(n) is int and n >= 0 for n in region)), (arch, D)
         for B, H, Sq, Skv in calls:
             assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
             if region is None:
@@ -497,6 +499,108 @@ def test_the_one_launch_route_of_a_call(monkeypatch) -> None:
                 for other in table:
                     if other != (arch, D):
                         assert cake_jit.fused_record(other[0], B, H, Sq, Skv, other[1], False) is None, other
+
+
+# The shipped regions of the one-launch route, per (architecture, head dimension): ``(max_ctas, s_max, skv_any,
+# skv_per_sq)``.  ``FUSED_REGION`` must be this table.
+SHIPPED_FUSED_REGION = {
+    ("sm_100a", 128): (152, 2048, 512, 1),
+    ("sm_100a", 64): (152, 2048, 512, 2),
+    ("sm_103a", 128): (152, 2048, 512, 1),
+    ("sm_103a", 64): (204, 2048, 256, 0),
+    ("sm_107a", 128): (256, 2048, 512, 0),
+    ("sm_107a", 64): (212, 2048, 512, 2),
+}
+# Calls on both sides of each bound of each shipped region, as ((B, H, Sq, Skv), routed), every other bound held: the
+# CTAs of the one-launch grid at max_ctas and one step past it, at 128 and at 256 queries and keys; the longer sequence
+# at 2048 and 2176 (the queries, and with skv_per_sq > 0 the keys too); the key length at skv_any and 128 past it
+# against 128 queries; the key length at skv_per_sq times the queries and 128 past it, above skv_any, or with
+# skv_per_sq 0 at skv_any and 128 past it against 2048 queries.
+SHIPPED_FUSED_CALLS = {
+    (152, 2048, 512, 1): (
+        ((1, 76, 128, 128), True),
+        ((77, 1, 128, 128), False),
+        ((2, 19, 256, 256), True),
+        ((3, 13, 256, 256), False),
+        ((1, 1, 2048, 128), True),
+        ((1, 1, 2176, 128), False),
+        ((1, 1, 2048, 2048), True),
+        ((1, 1, 2176, 2176), False),
+        ((1, 1, 128, 512), True),
+        ((1, 1, 128, 640), False),
+        ((1, 1, 640, 640), True),
+        ((1, 1, 640, 768), False),
+    ),
+    (152, 2048, 512, 2): (
+        ((1, 76, 128, 128), True),
+        ((77, 1, 128, 128), False),
+        ((2, 19, 256, 256), True),
+        ((3, 13, 256, 256), False),
+        ((1, 1, 2048, 128), True),
+        ((1, 1, 2176, 128), False),
+        ((1, 1, 2048, 2048), True),
+        ((1, 1, 2176, 2176), False),
+        ((1, 1, 128, 512), True),
+        ((1, 1, 128, 640), False),
+        ((1, 1, 384, 768), True),
+        ((1, 1, 384, 896), False),
+    ),
+    (204, 2048, 256, 0): (
+        ((1, 102, 128, 128), True),
+        ((103, 1, 128, 128), False),
+        ((3, 17, 256, 256), True),
+        ((4, 13, 256, 256), False),
+        ((1, 1, 2048, 128), True),
+        ((1, 1, 2176, 128), False),
+        ((1, 1, 128, 256), True),
+        ((1, 1, 128, 384), False),
+        ((1, 1, 2048, 256), True),
+        ((1, 1, 2048, 384), False),
+    ),
+    (256, 2048, 512, 0): (
+        ((1, 128, 128, 128), True),
+        ((129, 1, 128, 128), False),
+        ((4, 16, 256, 256), True),
+        ((5, 13, 256, 256), False),
+        ((1, 1, 2048, 128), True),
+        ((1, 1, 2176, 128), False),
+        ((1, 1, 128, 512), True),
+        ((1, 1, 128, 640), False),
+        ((1, 1, 2048, 512), True),
+        ((1, 1, 2048, 640), False),
+    ),
+    (212, 2048, 512, 2): (
+        ((1, 106, 128, 128), True),
+        ((107, 1, 128, 128), False),
+        ((1, 53, 256, 256), True),
+        ((2, 27, 256, 256), False),
+        ((1, 1, 2048, 128), True),
+        ((1, 1, 2176, 128), False),
+        ((1, 1, 2048, 2048), True),
+        ((1, 1, 2176, 2176), False),
+        ((1, 1, 128, 512), True),
+        ((1, 1, 128, 640), False),
+        ((1, 1, 384, 768), True),
+        ((1, 1, 384, 896), False),
+    ),
+}
+# The benchmark's long rows ``T1`` to ``T4``, 8192 queries and keys, as (B, H, D, causal).
+LONG_ROWS = ((4, 32, 128, False), (4, 32, 128, True), (8, 32, 64, False), (8, 32, 64, True))
+
+
+def test_the_shipped_one_launch_regions() -> None:
+    """``FUSED_REGION`` is the shipped table ``SHIPPED_FUSED_REGION``, and ``fused_record`` keeps each region on both
+    sides of each of its bounds: the one-launch record inside, None one step past the bound and for every causal call.
+    The benchmark's long rows take the three-kernel routes on every architecture."""
+    assert dict(cake_jit.FUSED_REGION) == SHIPPED_FUSED_REGION
+    for (arch, D), region in SHIPPED_FUSED_REGION.items():
+        for (B, H, Sq, Skv), routed in SHIPPED_FUSED_CALLS[region]:
+            found = cake_jit.fused_record(arch, B, H, Sq, Skv, D, False)
+            assert found == (FUSED_OF[(D, False)] if routed else None), (arch, D, B, H, Sq, Skv, found)
+            assert cake_jit.fused_record(arch, B, H, Sq, Skv, D, True) is None, (arch, D, B, H, Sq, Skv)
+    for arch in ARCHES:
+        for B, H, D, causal in LONG_ROWS:
+            assert cake_jit.fused_record(arch, B, H, 8192, 8192, D, causal) is None, (arch, B, H, D, causal)
 
 
 def test_the_accumulator_layouts() -> None:

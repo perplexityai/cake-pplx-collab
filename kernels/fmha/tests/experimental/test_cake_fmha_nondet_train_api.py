@@ -36,9 +36,10 @@ captured in a CUDA graph replays to results that meet the tier; a device outside
 and operands on two devices are a ``ValueError``.  The stream, graph and second-device checks run on three routes of
 head dimension 128 without the mask: the 1-CTA main kernel and, with every call in a pair region, the pair route's 2-CTA
 main kernel, each with the one-launch route turned off (``fused_record`` patched to give None), and the route the
-one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region); the alert is raised
-on that small call unpatched and on a three-kernel route.  The package promises no bits: no test here compares two runs
-bit for bit. """
+one-launch predicate ``fused_record`` gives a small call (the one-launch kernel inside its region).  A given
+``softmax_scale``, the alert and ``warn_only`` are checked on the three-kernel routes with the one-launch route turned
+off, and again on a small call without the mask unpatched, which the shipped regions place on the one-launch route.
+The package promises no bits: no test here compares two runs bit for bit. """
 
 from __future__ import annotations
 
@@ -207,6 +208,17 @@ def _route(label: str, case: Case, device: torch.device, monkeypatch) -> tuple:
     return record, launches
 
 
+def _one_launch(case: Case, device: torch.device, monkeypatch) -> tuple:
+    """``(record, launches)`` of a head-dimension 128 call without the mask on ``case`` and ``device``, unpatched, which
+    the shipped regions place on the one-launch route: ``record`` is ``FUSED_OF[(128, False)]``, and every
+    ``launch_bwd_fused`` call from then on appends its record name to ``launches``."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
+    record, launches = _route("fused", case, device, monkeypatch)
+    assert record == cake_jit.FUSED_OF[(128, False)], (case, record)
+    return record, launches
+
+
 # ----------------------------------------------------------------------------------------------------------------
 # Without a device
 
@@ -293,8 +305,12 @@ def test_the_entry_matches_the_reference(D, causal, record_property) -> None:
 @pytest.mark.parametrize("causal", (False, True), ids=("plain", "causal"))
 def test_a_given_softmax_scale_matches_the_reference(causal, pair, monkeypatch, record_property) -> None:
     """A ``softmax_scale`` other than ``D^-0.5`` (the forward's): the gradients meet the tier of that scale, on both
-    routes of head dimension 128."""
+    three-kernel routes of head dimension 128, with the one-launch route turned off (``fused_record`` patched to give
+    None)."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     _pin_route(monkeypatch, pair)
     _assert_route(device, Case(1, 4, 256), pair, causal)
     scale = 0.0625
@@ -304,6 +320,23 @@ def test_a_given_softmax_scale_matches_the_reference(causal, pair, monkeypatch, 
         got = api.cake_fmha_nondet_train_backward(
             x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=scale, causal=causal
         )
+        return judged_backward(x, {"scaled": _grads(*got)})
+
+    judge_draws(record_property, draw)
+
+
+def test_a_given_softmax_scale_matches_the_reference_on_the_one_launch_route(monkeypatch, record_property) -> None:
+    """The same ``softmax_scale`` on the same call without the mask, unpatched, which the shipped regions place on the
+    one-launch route: each call launches the one-launch kernel once, and the gradients meet the tier of that scale."""
+    device = _device_or_skip()
+    record, launches = _one_launch(Case(1, 4, 256), device, monkeypatch)
+    scale = 0.0625
+
+    def draw(seed: int):
+        x = make_inputs(Case(1, 4, 256), 128, causal=False, seed=seed, device=device, softmax_scale=scale)
+        launches.clear()
+        got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout, softmax_scale=scale)
+        assert launches == [record], launches
         return judged_backward(x, {"scaled": _grads(*got)})
 
     judge_draws(record_property, draw)
@@ -486,8 +519,12 @@ def test_a_workspace_that_does_not_fit_is_torch_out_of_memory_error(monkeypatch)
 
 def test_deterministic_mode_raises_the_alert(monkeypatch) -> None:
     """Under ``torch.use_deterministic_algorithms(True)`` the call raises PyTorch's ``RuntimeError``, naming the entry
-    and no other package to fall back to; outside the mode the same call runs."""
+    and no other package to fall back to; outside the mode the same call runs.  On the pair route, with the one-launch
+    route turned off (``fused_record`` patched to give None)."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     _pin_route(monkeypatch, True)
     _assert_route(device, Case(1, 2, 256), True)
     x = make_inputs(Case(1, 2, 256), 128, causal=False, seed=5, device=device)
@@ -500,8 +537,9 @@ def test_deterministic_mode_raises_the_alert(monkeypatch) -> None:
 
 
 def test_deterministic_mode_raises_the_alert_on_a_three_kernel_route(monkeypatch) -> None:
-    """The same alert on the same call with the one-launch route turned off (``fused_record`` patched to give None):
-    the three-kernel route of its variant raises it before it launches; outside the mode the call runs there."""
+    """The same alert on the same call with the one-launch route turned off (``fused_record`` patched to give None)
+    and no region pinned (the 1-CTA route: no shipped pair region holds 256 keys): the three-kernel route of its
+    variant raises it before it launches; outside the mode the call runs there."""
     from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
 
     device = _device_or_skip()
@@ -514,11 +552,30 @@ def test_deterministic_mode_raises_the_alert_on_a_three_kernel_route(monkeypatch
     assert_backward_contract("outside the mode", x, _grads(*got))
 
 
+def test_deterministic_mode_raises_the_alert_on_the_one_launch_route(monkeypatch) -> None:
+    """The same alert on the same call unpatched, which the shipped regions place on the one-launch route: raised
+    before the one-launch kernel launches; outside the mode the call runs there, one launch."""
+    device = _device_or_skip()
+    record, launches = _one_launch(Case(1, 2, 256), device, monkeypatch)
+    x = make_inputs(Case(1, 2, 256), 128, causal=False, seed=5, device=device)
+    with _torch_deterministic(warn_only=False), pytest.raises(RuntimeError, match=ALERT) as info:
+        api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+    assert "_det_train" not in str(info.value)
+    assert launches == [], launches
+    got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+    assert launches == [record], launches
+    assert_backward_contract("outside the mode", x, _grads(*got))
+
+
 @pytest.mark.parametrize("causal", (False, True), ids=("plain", "causal"))
 def test_warn_only_warns_once_and_runs(causal, monkeypatch, record_property) -> None:
     """With ``warn_only=True`` each call warns once (``UserWarning``, naming the entry and no other package) and runs:
-    its gradients meet the tier."""
+    its gradients meet the tier.  On the pair route, with the one-launch route turned off (``fused_record`` patched to
+    give None)."""
+    from cake_pplx._backends.cake_fmha_nondet_train import cake_jit
+
     device = _device_or_skip()
+    monkeypatch.setattr(cake_jit, "fused_record", lambda *args: None)
     _pin_route(monkeypatch, True)
     _assert_route(device, Case(1, 2, 256), True, causal)
 
@@ -530,6 +587,26 @@ def test_warn_only_warns_once_and_runs(causal, monkeypatch, record_property) -> 
         ours = [str(w.message) for w in record if ALERT in str(w.message)]
         assert len(ours) == 1 and ours[0].startswith(ALERT), ours
         assert "_det_train" not in ours[0]
+        return judged_backward(x, {"warn_only": _grads(*got)})
+
+    judge_draws(record_property, draw)
+
+
+def test_warn_only_warns_once_and_runs_on_the_one_launch_route(monkeypatch, record_property) -> None:
+    """The same on the call without the mask unpatched, which the shipped regions place on the one-launch route: each
+    call warns once, launches the one-launch kernel once, and its gradients meet the tier."""
+    device = _device_or_skip()
+    record, launches = _one_launch(Case(1, 2, 256), device, monkeypatch)
+
+    def draw(seed: int):
+        x = make_inputs(Case(1, 2, 256), 128, causal=False, seed=seed, device=device)
+        launches.clear()
+        with _torch_deterministic(warn_only=True), pytest.warns(UserWarning) as warned:
+            got = api.cake_fmha_nondet_train_backward(x.q, x.k, x.v, x.out, x.lse, x.dout)
+        ours = [str(w.message) for w in warned if ALERT in str(w.message)]
+        assert len(ours) == 1 and ours[0].startswith(ALERT), ours
+        assert "_det_train" not in ours[0]
+        assert launches == [record], launches
         return judged_backward(x, {"warn_only": _grads(*got)})
 
     judge_draws(record_property, draw)
