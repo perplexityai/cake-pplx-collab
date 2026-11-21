@@ -180,6 +180,11 @@ CAPS: dict[str, dict[str, dict[str, float]]] = {
         "sm_103a": {"max": 1.1638},
         "sm_107a": {"max": 1.1638},
     },
+    "test_training_features[ep1-mxfp8-fp32-wgrad.dw_routed_gate]": {
+        "sm_100a": {"max": 1.0338},
+        "sm_103a": {"max": 1.0338},
+        "sm_107a": {"max": 1.0338},
+    },
     "test_unequal_sources[counts-0-513-769-8193.dw_routed_down]": {
         "sm_100a": {"l2": 1.0339, "max": 1.2988},
         "sm_103a": {"l2": 1.0339, "max": 1.2988},
@@ -210,6 +215,11 @@ BF16_STRADDLE_DW_WHAT = (
     "BF16, so an expert whose rows cross a macrobatch boundary misses the naive tier (one GEMM per expert)"
 )
 BF16_STRADDLE_DW_FIX = "A follow-up kernel change (an FP32 carry for straddling experts) fixes it."
+MXFP8_FP32_DW_GATE_WHAT = (
+    "with MXFP8 routed experts and FP32 weight-gradient accumulation, the routed gate projection's weight gradient "
+    "misses the naive tier in the max norm (its L2 norm meets the tier)"
+)
+MXFP8_FP32_DW_GATE_FIX = "A follow-up kernel change fixes it."
 
 
 class GapCapError(Exception):
@@ -267,6 +277,11 @@ def mxfp8_d_scores(item: str) -> pytest.MarkDecorator:
 def bf16_straddle_dw(item: str) -> pytest.MarkDecorator:
     """The marker of a BF16 straddle routed dW item."""
     return marker(item, BF16_STRADDLE_DW_WHAT, BF16_STRADDLE_DW_FIX)
+
+
+def mxfp8_fp32_dw_gate(item: str) -> pytest.MarkDecorator:
+    """The marker of an MXFP8 FP32-accumulated routed gate dW item."""
+    return marker(item, MXFP8_FP32_DW_GATE_WHAT, MXFP8_FP32_DW_GATE_FIX)
 
 
 def item_id(output: str) -> str:
