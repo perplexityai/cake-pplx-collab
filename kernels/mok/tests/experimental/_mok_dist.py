@@ -890,7 +890,7 @@ def backward_scratch():
         hidden_size=h,
         topk=k,
     )
-    generator = torch.Generator().manual_seed(2026 + dist.get_rank())
+    generator = torch.Generator(device=device).manual_seed(2026 + dist.get_rank())
     options = dict(device=device, dtype=torch.bfloat16)
     x = randn(n, h, generator=generator, **options) * 0.125
     dy = randn(n, h, generator=generator, **options) * 0.125
@@ -990,7 +990,7 @@ def _source_rows(count, topk):
 
 def _r8_signs(hidden, device):
     """The ``+-1`` row of the pinned token's ``x`` (fixed seed)."""
-    generator = torch.Generator().manual_seed(R8_SIGN_SEED)
+    generator = torch.Generator(device=device).manual_seed(R8_SIGN_SEED)
     return torch.where(randn(hidden, device=device, generator=generator) < 0, -1.0, 1.0)
 
 

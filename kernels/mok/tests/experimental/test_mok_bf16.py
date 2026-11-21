@@ -453,7 +453,7 @@ def test_scheduler(ep, experts):
     topk = _scheduler_topk(ep, experts)
     scheduler = MoKScheduler(ep, experts)
     tokens = 512
-    generator = torch.Generator().manual_seed(1107)
+    generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
         rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
@@ -506,7 +506,7 @@ def test_scheduler_owner_loads_match_count_routed_load_with_invalid_ids(ep, expe
     require_gpu()
     topk = 2 if ep * experts <= 16 else 8
     limit = ep * experts
-    generator = torch.Generator().manual_seed(2203)
+    generator = torch.Generator(device="cuda").manual_seed(2203)
     ids = randint(
         -1, limit + 8, (ep, 256, topk), device="cuda", dtype=torch.int32,
         generator=generator,
@@ -540,7 +540,7 @@ def test_scheduler_at_training_geometries(ep, experts, tokens, rank, real):
     rows per rank, ragged ranks (empty ones included) or full ranks."""
     require_gpu()
     topk = 8
-    generator = torch.Generator().manual_seed(5309 + ep)
+    generator = torch.Generator(device="cuda").manual_seed(5309 + ep)
     ids = (
         rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
@@ -791,7 +791,7 @@ def test_expert_layout_matches_torch_reference(ep, experts):
     topk = _scheduler_topk(ep, experts)
     scheduler = MoKScheduler(ep, experts)
     tokens = 512
-    generator = torch.Generator().manual_seed(1107)
+    generator = torch.Generator(device="cuda").manual_seed(1107)
     ids = (
         rand(ep * tokens, ep * experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
@@ -1064,7 +1064,7 @@ def test_launch_counters_are_one_slab_per_launch():
     scheduler = MoKScheduler(ep, experts)
     recorder = _LaunchRecorder()
     scheduler.count = scheduler.pad = scheduler.rows = recorder
-    generator = torch.Generator().manual_seed(77)
+    generator = torch.Generator(device="cuda").manual_seed(77)
     ids = randint(
         0, ep * experts, (ep, tokens, topk), device="cuda", dtype=torch.int32,
         generator=generator,
@@ -2301,7 +2301,7 @@ def test_scheduler_at_the_capacity_bound(ep, experts):
     capacity = workspace_module.schedule_capacity_for(
         tokens, topk, ep, bound_multiplier(tokens, topk, ep, experts)
     )
-    generator = torch.Generator().manual_seed(4409 + ep)
+    generator = torch.Generator(device="cuda").manual_seed(4409 + ep)
     ids = (
         rand(ep * tokens, experts, device="cuda", generator=generator)
         .argsort(-1)[:, :topk]
@@ -2421,7 +2421,7 @@ def test_before_down_adapter_at_the_capacity_bound(ep, experts):
         macrobatch_size=macro,
         schedule_capacity_multiplier=multiplier,
     )
-    generator = torch.Generator().manual_seed(7211 + ep)
+    generator = torch.Generator(device=device).manual_seed(7211 + ep)
     options = dict(device=device, dtype=torch.bfloat16)
     x = randn(tokens, hidden, device=device, generator=generator)
     x = (x / x.square().mean(-1, keepdim=True).sqrt()).bfloat16()

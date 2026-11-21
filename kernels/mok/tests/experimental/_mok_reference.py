@@ -21,17 +21,23 @@ consecutive K elements share a UE8M0 byte ``round_up(max(amax * 0.002232142857,
 nearest even, saturating), and 128 x 128 scale tiles store byte
 ``(row % 32) * 16 + (row // 32) * 4 + k_block`` as ``[R/128, K/128, 32, 16]``.
 
-Random inputs are drawn on the CPU and then moved to the GPU (:func:`randn`,
-:func:`randn_like`, :func:`rand`, :func:`randint`, :func:`normal_`,
-:func:`uniform_`), so every GPU gets the same inputs.  torch's CUDA random
-kernels launch at most a fixed number of threads per SM, and element ``i``
-takes the numbers of thread ``i`` modulo the threads launched: a tensor of more
-elements than that has other values on a GPU with another SM count (148 against
-152, for example), and so do the later draws of its generator.  The helpers
-draw from a CPU generator: ``generator``, or the CPU default generator, which
-``torch.manual_seed`` seeds (as it seeds the CUDA generators).  Floating
-tensors are drawn in FP32 and rounded once to their dtype, as torch's CUDA
-kernels draw a BF16 tensor.
+Random inputs are drawn through :func:`randn`, :func:`randn_like`,
+:func:`rand`, :func:`randint`, :func:`normal_` and :func:`uniform_`, so every
+GPU gets the same inputs.  torch's CUDA random kernels launch ``ceil(n / 256)``
+blocks of 256 threads for ``n`` elements, but at most ``threads per SM / 256``
+blocks per SM, and element ``i`` takes the numbers of thread ``i`` modulo the
+threads launched: one call of more elements than that has other values on a GPU
+with another SM count (148 against 152, for example), and the generator's
+offset, so every later draw of it, moves by another step.  The helpers fill a
+CUDA tensor in consecutive torch calls of :data:`DRAW_CHUNK` elements each.  A
+call of at most 2^18 elements runs one thread per element on every GPU with
+2^18 threads or more (128 SMs of 2048 threads; the supported GPUs have 148 to
+216 SMs), so its values and the offset step it takes (4) do not depend on the
+SM count.  Each call is torch's own: the generator (``generator``, or the
+default one that ``torch.manual_seed`` seeds), the dtype (a BF16 tensor holds
+float normals rounded to BF16) and the order of the draws are unchanged, and a
+draw of at most :data:`DRAW_CHUNK` elements is a single torch call.  A CPU
+tensor is drawn in one torch call.
 """
 
 import pytest
@@ -48,12 +54,37 @@ def require_gpu():
         pytest.skip("Requires an SM100a, SM103a or SM107a CUDA device")
 
 
+#: Elements of one torch random call of the draw helpers on a CUDA device.
+DRAW_CHUNK = 1 << 18
+#: Threads per block of torch's CUDA random kernels.
+_RANDOM_BLOCK = 256
+
+
+def fill_in_chunks(out, fill):
+    """``fill(part)`` for the consecutive parts of :data:`DRAW_CHUNK` elements of
+    the contiguous ``out`` (the last part the rest), in order.  Returns ``out``."""
+    for part in out.view(-1).split(DRAW_CHUNK):
+        fill(part)
+    return out
+
+
+def _draw(out, fill):
+    """Fills ``out`` with ``fill`` (a torch random call on its argument): a CUDA
+    tensor by :func:`fill_in_chunks`, any other tensor in one call."""
+    if out.device.type != "cuda":
+        fill(out)
+        return out
+    p = torch.cuda.get_device_properties(out.device)
+    per_sm = p.max_threads_per_multi_processor // _RANDOM_BLOCK
+    assert p.multi_processor_count * per_sm * _RANDOM_BLOCK >= DRAW_CHUNK, p.name
+    return fill_in_chunks(out, fill)
+
+
 def randn(*size, generator=None, dtype=None, device=None):
-    """``torch.randn(*size, dtype=dtype, device=device)`` drawn on the CPU:
-    FP32 normals of the CPU ``generator`` (the default one if ``None``), rounded
-    to ``dtype`` (FP32 if ``None``) and moved to ``device``."""
-    host = torch.randn(*size, generator=generator, dtype=torch.float32, device="cpu")
-    return host.to(device=device, dtype=dtype or torch.float32)
+    """``torch.randn(*size, generator=generator, dtype=dtype, device=device)``,
+    the same values on every GPU (:data:`DRAW_CHUNK`)."""
+    out = torch.empty(*size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.normal_(generator=generator))
 
 
 def randn_like(x, *, generator=None):
@@ -62,32 +93,28 @@ def randn_like(x, *, generator=None):
 
 
 def rand(*size, generator=None, dtype=None, device=None):
-    """``torch.rand`` drawn on the CPU: FP32 uniforms in [0, 1) of the CPU
-    ``generator``, rounded to ``dtype`` and moved to ``device``."""
-    host = torch.rand(*size, generator=generator, dtype=torch.float32, device="cpu")
-    return host.to(device=device, dtype=dtype or torch.float32)
+    """``torch.rand(*size, generator=generator, dtype=dtype, device=device)``,
+    the same values on every GPU."""
+    out = torch.empty(*size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.uniform_(generator=generator))
 
 
 def randint(low, high, size, *, generator=None, dtype=torch.int64, device=None):
-    """``torch.randint`` drawn on the CPU ``generator``, moved to ``device``."""
-    host = torch.randint(
-        low, high, size, generator=generator, dtype=dtype, device="cpu"
-    )
-    return host.to(device=device)
+    """``torch.randint(low, high, size, ...)``, the same values on every GPU."""
+    out = torch.empty(size, dtype=dtype, device=device)
+    return _draw(out, lambda t: t.random_(low, high, generator=generator))
 
 
 def normal_(x, mean=0.0, std=1.0, *, generator=None):
-    """``x.normal_(mean, std)`` drawn on the CPU: FP32 normals of the CPU
-    ``generator`` written into ``x`` (its storage kept).  Returns ``x``."""
-    host = torch.empty(x.shape, dtype=torch.float32, device="cpu")
-    return x.copy_(host.normal_(mean, std, generator=generator))
+    """``x.normal_(mean, std)`` in place (a CUDA ``x`` contiguous), the same
+    values on every GPU.  Returns ``x``."""
+    return _draw(x, lambda t: t.normal_(mean, std, generator=generator))
 
 
 def uniform_(x, low=0.0, high=1.0, *, generator=None):
-    """``x.uniform_(low, high)`` drawn on the CPU: FP32 uniforms of the CPU
-    ``generator`` written into ``x`` (its storage kept).  Returns ``x``."""
-    host = torch.empty(x.shape, dtype=torch.float32, device="cpu")
-    return x.copy_(host.uniform_(low, high, generator=generator))
+    """``x.uniform_(low, high)`` in place (a CUDA ``x`` contiguous), the same
+    values on every GPU.  Returns ``x``."""
+    return _draw(x, lambda t: t.uniform_(low, high, generator=generator))
 
 
 def single_rank_schedule(routes, experts, extra=512):
@@ -194,8 +221,8 @@ def production_inputs(tokens, hidden, intermediate, experts, topk, limit, *, dev
     hidden``, so its gate is exactly ``limit`` and its up exactly ``+limit`` and ``-limit`` there (``limit / hidden``
     must be a BF16 value).  Returns a dict of ``x``, ``dy``, ``ids`` (int64 ``[T, topk]``), ``weights`` (FP32
     ``[T, topk]``), ``shared`` and ``routed`` (BF16, the package's shapes) and ``pinned`` (token, expert).  The draws
-    come from a CPU generator seeded with ``seed`` (:func:`randn`)."""
-    generator = torch.Generator().manual_seed(seed)
+    come from a generator of ``device`` seeded with ``seed`` (:func:`randn`)."""
+    generator = torch.Generator(device=device).manual_seed(seed)
 
     def normal(*shape):
         return randn(*shape, generator=generator, device=device)
