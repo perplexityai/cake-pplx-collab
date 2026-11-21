@@ -5125,7 +5125,7 @@ FALLBACK_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int]]] = {
         ("fwd", 512, 512): (1, 8192),
         ("fwd", 520, 520): (1, 24575),
         ("fwd", 528, 528): (1, 16384),
-        ("fwd", 536, 536): (1, 20479),
+        ("fwd", 536, 536): (1, 16384),
         ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
@@ -5492,7 +5492,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd", 536, 536): (
-            20480,
+            16385,
             32768,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
@@ -5523,7 +5523,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
         ),
         ("fwd", 840, 888): (
             8193,
-            32768,
+            16384,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd", 896, 896): (
@@ -5533,7 +5533,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
         ),
         ("fwd", 904, 1016): (
             12289,
-            32768,
+            16384,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
         ("fwd_dt", 520, 528): (
@@ -5568,7 +5568,7 @@ DIRECT_ROWS: dict[str, dict[tuple[str, int, int], tuple[int, int, str]]] = {
         ),
         ("fwd_dt", 832, 896): (
             20481,
-            32768,
+            24576,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
         ("fwd_bias", 576, 576): (
