@@ -8317,13 +8317,19 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
 
     The backward's compact dX cast folds the label residuals of the one-slice chunks (``_cast_fold``,
     :func:`.cake_backend.cast_fold_rows`) only when ``W`` is a leaf that requires a gradient (a parameter, which
-    outlives the backward anyway).  Such a call saves ``W`` through the autograd context with the other saved tensors
-    (the fast form; the recompute forms and a checkpointed call save it already), the fold operands kept on ``ctx``
-    carry no ``W``, and the backward hands the unpacked saved ``W`` to the fold: an in-place write to ``W`` between the
-    forward and the backward raises PyTorch's saved-tensor version error.  Any other call (a non-leaf ``W``, or one
-    that requires no gradient) folds every residual in its forward's slab sums, and its dX finalize reads no ``W``:
-    the fast form keeps no reference to ``W`` past its forward (a recompute form and a checkpointed call save ``W``
-    for their recomputation, as in 0.3.2).  The same kernels and operands either way: the same bits."""
+    outlives the backward anyway) and no saved-tensor hooks other than a non-reentrant ``torch.utils.checkpoint``'s are
+    on top.  Such a call saves ``W`` through the autograd context with the other saved tensors (the fast form; the
+    recompute forms and a checkpointed call save it already), the fold operands kept on ``ctx`` carry no ``W``, and the
+    backward hands the unpacked saved ``W`` to the fold and drops its own reference after the dX finalize.  Outside a
+    checkpoint, an in-place write to ``W`` between the forward and the backward then raises PyTorch's saved-tensor
+    version error; a checkpointed call takes ``W`` from its recomputation, as in 0.3.2 (a write raises only where
+    ``torch.utils.checkpoint`` checks it).  Any other call (a non-leaf ``W``, one that requires no gradient, or one
+    under other saved-tensor hooks, such as ``save_on_cpu``, which would copy ``W`` each step) folds every residual in
+    its forward's slab sums, and its dX finalize reads no ``W``: the fast form keeps no reference to ``W`` past its
+    forward (a recompute form and a checkpointed call save ``W`` for their recomputation, as in 0.3.2).  The two paths
+    launch different programs (a fold in the backward: no fold-alone slab sum on those chunks, the fold program
+    ``scale_cast_scatter_fold_bf16``; a fold in the forward: the fold-alone slab sum, ``scale_cast_scatter_bf16``) and
+    give the same ``dX`` and ``dW`` bits."""
 
     @staticmethod
     def forward(
@@ -8351,7 +8357,8 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
         # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
-        # (saved through the autograd context below); any other call folds them in the forward's slab sums
+        # (saved through the autograd context below), and not under other saved-tensor hooks (below); any other call
+        # folds them in the forward's slab sums
         cast_fold = need_dw and W.is_leaf
         # gradient placement "auto" inside a non-reentrant torch.utils.checkpoint (as in :mod:`.cake_backend`): the
         # checkpointed forward computes the loss only and saves the inputs; the recomputation runs this forward and
@@ -8391,6 +8398,10 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 ctx, X, grad_weight_dtype, backend, memory_mode
             )
             ckpt = _main._checkpoint_pass()
+            if ckpt is None:
+                # other saved-tensor hooks on top (CPU offload such as save_on_cpu): the forward's slab sums fold, as
+                # in 0.3.2 -- a fold in the backward would pass the head through those hooks (a copy of W each step)
+                cast_fold = False
         if ckpt is not None:
             options = dict(
                 objective=objective,
@@ -8573,7 +8584,8 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             inputs = ctx.saved_tensors
             state = _main._split_state(ctx, inputs, forward_loss)
             CakeLMHeadDetLossFunction._keep(ctx, state)
-            head = inputs[1]
+            if ctx.dx_fold is not None:
+                head = inputs[1]
             saved = (state.dz_last, state.x_last, state.x_src, state.x_idx) + (
                 tuple(inputs[:2])
                 if state.memory_plan is not None and state.memory_plan.recompute
@@ -8631,7 +8643,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 backend=ctx.backend,
                 fold=None if dx_fold is None else dict(dx_fold, W=head),
             )
-            dx_fold = None
+            # the head serves the fold only: dropped before the weight gradient's buffers exist (a checkpoint inside
+            # offload hooks hands the backward a copy of it)
+            dx_fold = head = None
             if not keep:
                 ctx.dx_acc = None  # released before the weight gradient's buffers exist
                 ctx.dx_fold = None

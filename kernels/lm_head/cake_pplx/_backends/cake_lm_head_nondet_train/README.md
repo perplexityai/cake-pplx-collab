@@ -731,7 +731,9 @@ scan).  The one stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   whose fold the dX cast makes, as in the deterministic package.  A
   compacted plan under the fused dX finalize whose `dX` goes through the
   scatter cast (the autograd loss entry of `cake_backend.py` when `W` is a
-  leaf that requires a gradient, and its log-probability backward, without
+  leaf that requires a gradient and no saved-tensor hooks other than a
+  non-reentrant `torch.utils.checkpoint`'s are on top, and its
+  log-probability backward, without
   the kept logits, a temperature or the vocabulary-major form) hands the
   longest run of adjacent one-slice chunks
   (`cake_backend.cast_fold_rows`) to `scale_cast_scatter_fold_bf16`, which
@@ -740,12 +742,15 @@ scan).  The one stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   exceptions) folds them in its in-loop flat cast, `scale_cast_fold_bf16`.
   The autograd loss entry holds those rows' labels and `rlab` from the
   forward to its backward's dX finalize and saves `W` through its autograd
-  context (an in-place write to `W` before the backward raises PyTorch's
-  saved-tensor version error); a backward that frees the graph drops the
-  labels and `rlab` there, before the weight gradient's buffers exist.  A
-  loss call whose `W` is not a leaf or requires no gradient folds every row
-  in the forward's slab sums and keeps no reference to `W` (a checkpointed
-  call saves `W` for its recomputation, as in 0.3.2).  A
+  context (outside a checkpoint, an in-place write to `W` before the
+  backward raises PyTorch's saved-tensor version error; a checkpointed call
+  takes `W` from its recomputation, as in 0.3.2); a backward that frees the
+  graph drops the labels and `rlab` there, before the weight gradient's
+  buffers exist.  A loss call whose `W` is not a leaf or requires no
+  gradient, or a call under other saved-tensor hooks (CPU offload such as
+  `save_on_cpu`, which would copy `W` each step), folds every row in the
+  forward's slab sums and keeps no reference to `W` (a checkpointed call
+  saves `W` for its recomputation, as in 0.3.2).  A
   log-probability autograd graph holds the `rlab` its backwards bind as in
   the deterministic package (its README, "FP32 label residual"): the first
   backward that binds it takes the buffer from the free list of the caller's

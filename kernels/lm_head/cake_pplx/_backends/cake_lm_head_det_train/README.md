@@ -128,8 +128,10 @@ keyword.
   (4 bytes a row of the chunk loop).  A compacted plan under the fused dX
   finalize whose `dX` goes through the scatter cast (the autograd loss entry
   of `cake_backend_opt_in.py` -- the facade's route for a loss call whose
-  `W` requires a gradient -- when `W` is a leaf, and `cake_backend.py`'s
-  log-probability backward, kept logits included; not a temperature plan)
+  `W` requires a gradient -- when `W` is a leaf and no saved-tensor hooks
+  other than a non-reentrant `torch.utils.checkpoint`'s are on top, and
+  `cake_backend.py`'s log-probability backward, kept logits included; not a
+  temperature plan)
   launches no fold-alone `slab_sum` on its longest run of adjacent
   one-slice chunks (`cake_backend.cast_fold_rows`): it hands those rows'
   labels, `rlab` and `W` to the scatter cast's fold program
@@ -137,15 +139,19 @@ keyword.
   before its scale (a call that folds no row launches
   `scale_cast_scatter_bf16`, which reads no fold operand).  The loss entry
   then holds the labels and `rlab` from the forward to its backward's dX
-  finalize and saves `W` through its autograd context, so an in-place write
-  to `W` between the forward and the backward raises PyTorch's saved-tensor
-  version error; a backward that frees the graph drops the labels and `rlab`
-  there, before the weight gradient's buffers exist.  A loss call whose `W`
-  is not a leaf or requires no gradient, and every call of
-  `cake_backend.py`'s own loss entry, fold every row in the forward's slab
+  finalize and saves `W` through its autograd context.  Outside a
+  checkpoint, an in-place write to `W` between the forward and the backward
+  then raises PyTorch's saved-tensor version error; a checkpointed call
+  takes `W` from its recomputation, as in 0.3.2.  A backward that frees the
+  graph drops the labels and `rlab` at the dX finalize, before the weight
+  gradient's buffers exist.  A loss call whose `W` is not a leaf or requires
+  no gradient, a call under other saved-tensor hooks (CPU offload such as
+  `save_on_cpu`, which would copy `W` each step), and every call of
+  `cake_backend.py`'s own loss entry fold every row in the forward's slab
   sums: the dX finalize reads no `W`, and the fast form keeps no reference
   to it (a recompute form or a checkpointed call saves `W` for its
-  recomputation, as in 0.3.2).
+  recomputation, as in 0.3.2).  The two paths launch different programs and
+  give the same `dX` and `dW` bits.
   An uncompacted log-probability backward of
   `cake_backend.py` (not a kept-logits or temperature plan) folds the same
   run in its in-loop flat cast, the fold program `scale_cast_fold_bf16`,

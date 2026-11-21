@@ -14271,16 +14271,13 @@ def _split_state(ctx, inputs, forward):
 
 
 def _loss_forward_hooked(
-    ctx, X, W, labels, infer_logp, loss_weights, need_dx, need_dw, options
+    ctx, ckpt, X, W, labels, infer_logp, loss_weights, need_dx, need_dw, options
 ):
-    """The loss entry's forward under saved-tensor hooks: inside a non-reentrant ``torch.utils.checkpoint`` with the
-    gradient placement ``"auto"`` the checkpointed forward computes the loss (and logp) only and the recomputation
-    hands its fused forward's gradient state to the checkpointed call's backward (``ctx.split``); both save the call's
-    inputs.  ``None``: the fused forward (other hooks on top, an unsupported torch, the placement ``"forward"`` or
-    torch's deterministic algorithms, :func:`_checkpoint_defers`)."""
-    ckpt = _checkpoint_pass()
-    if ckpt is None:
-        return None
+    """The loss entry's forward in the non-reentrant ``torch.utils.checkpoint`` pass ``ckpt`` (:func:`_checkpoint_pass`,
+    not ``None``): with the gradient placement ``"auto"`` the checkpointed forward computes the loss (and logp) only
+    and the recomputation hands its fused forward's gradient state to the checkpointed call's backward
+    (``ctx.split``); both save the call's inputs.  ``None``: the fused forward (the placement ``"forward"`` or torch's
+    deterministic algorithms, :func:`_checkpoint_defers`)."""
     split, handed = _loss_checkpoint_split(
         ctx, ckpt, X, W, labels, infer_logp, loss_weights, need_dx, need_dw, options
     )
@@ -14368,9 +14365,17 @@ def _fold_finalize(owner, grad_loss, num_rows: int, backend: str, head):
 
 def _loss_backward_split(ctx, grad_loss):
     """``(dX, dW)`` of a call with ``ctx.split``: its gradient state is the recomputation's (unpacking the inputs runs
-    it) or, without a handed result, this backward's own fused forward; a fold reads the call's saved ``W``."""
+    it) or, without a handed result, this backward's own fused forward; a fold reads the call's saved ``W``, and only a
+    fold keeps it past the recomputation, until its dX finalize (a checkpoint inside offload hooks hands the backward a
+    copy of it)."""
     inputs = ctx.saved_tensors
     state = _split_state(ctx, inputs, _loss_forward)
+    head = None
+    if getattr(state, "dx_fold", None) is not None:
+        # the fold reads the saved W; the recomputed state's own reference goes
+        state.dx_fold.pop("W", None)
+        head = inputs[1]
+    inputs = None
     one_pass = getattr(state, "one_pass", None)
     if one_pass is not None:
         return _one_pass_backward(one_pass, state.x_last, state.dx_acc, grad_loss)
@@ -14393,7 +14398,8 @@ def _loss_backward_split(ctx, grad_loss):
         )  # cast(g * 0), as ForwardResult.backward forms it
         return dx, dw
     # a fold's dX first (:func:`_fold_finalize`), then the rest of :func:`backward_loss`: the same launches in order
-    dx = _fold_finalize(state, grad_loss, ctx.num_rows, ctx.backend, inputs[1])
+    dx = _fold_finalize(state, grad_loss, ctx.num_rows, ctx.backend, head)
+    head = None
     dx_rest, dw = backward_loss(
         None if dx is not None else state.dx_acc,
         state.dw_acc,
@@ -14780,13 +14786,18 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
 
     The backward's compact dX cast folds the label residuals of the one-slice chunks (``_cast_fold``,
     :func:`cast_fold_rows`) only when ``W`` is a leaf that requires a gradient (a parameter, which outlives the backward
-    anyway).  Such a call saves ``W`` through the autograd context with the other saved tensors (a checkpointed call
-    saves it already), the fold operands kept on ``ctx`` carry no ``W``, and the backward hands the unpacked saved ``W``
-    to the fold (:func:`_fold_finalize`): an in-place write to ``W`` between the forward and the backward raises
-    PyTorch's saved-tensor version error.  Any other call (a non-leaf ``W``, or one that requires no gradient) folds
-    every residual in its forward's slab sums, and its dX finalize reads no ``W``: the call keeps no reference to
-    ``W`` past its forward (a checkpointed call saves ``W`` for its recomputation, as in 0.3.2).  The same kernels and
-    operands either way."""
+    anyway) and no saved-tensor hooks other than a non-reentrant ``torch.utils.checkpoint``'s are on top.  Such a call
+    saves ``W`` through the autograd context with the other saved tensors (a checkpointed call saves it already), the
+    fold operands kept on ``ctx`` carry no ``W``, and the backward hands the unpacked saved ``W`` to the fold
+    (:func:`_fold_finalize`).  Outside a checkpoint, an in-place write to ``W`` between the forward and the backward
+    then raises PyTorch's saved-tensor version error; a checkpointed call takes ``W`` from its recomputation, as in
+    0.3.2 (a write raises only where ``torch.utils.checkpoint`` checks it).  Any other call (a non-leaf ``W``, one that
+    requires no gradient, or one under other saved-tensor hooks, such as ``save_on_cpu``, which would copy ``W`` each
+    step) folds every residual in its forward's slab sums, and its dX finalize reads no ``W``: the call keeps no
+    reference to ``W`` past its forward (a checkpointed call saves ``W`` for its recomputation, as in 0.3.2).  The two
+    paths launch different programs (a fold in the backward: no fold-alone slab sum on those chunks, the fold program
+    ``scale_cast_scatter_fold_bf16``; a fold in the forward: the fold-alone slab sum, ``scale_cast_scatter_bf16``); the
+    kernels of each run in one fixed order."""
 
     @staticmethod
     def forward(
@@ -14811,7 +14822,8 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
         # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
-        # (saved through the autograd context below); any other call folds them in the forward's slab sums
+        # (saved through the autograd context below), and not under other saved-tensor hooks (below); any other call
+        # folds them in the forward's slab sums
         cast_fold = need_dw and W.is_leaf
         # a cross-entropy call of the one-pass row counts (one_pass_rows) with a BF16 dW: the one-pass programs, in every
         # placement
@@ -14855,34 +14867,42 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                         hidden_count,
                         gemm_tuning,
                     )
-            out = _loss_forward_hooked(
-                ctx,
-                X,
-                W,
-                labels,
-                infer_logp,
-                loss_weights,
-                need_dx,
-                need_dw,
-                dict(
-                    objective=objective,
-                    loss_div=loss_div,
-                    chunk_size=chunk_size,
-                    grad_weight_dtype=grad_weight_dtype,
-                    backend=backend,
-                    compact_rows=compact_rows,
-                    fuse_dw_cast=fuse_dw_cast,
-                    dx_finalize=dx_finalize,
-                    dw_stream=dw_stream,
-                    hidden_count=hidden_count,
-                    gemm_tuning=gemm_tuning,
-                    return_logp=bool(return_logp),
-                    one_pass=one_pass,
-                    _cast_fold=cast_fold,
-                ),
-            )
-            if out is not None:
-                return out
+            ckpt = _checkpoint_pass()
+            if ckpt is None:
+                # other saved-tensor hooks on top (CPU offload such as save_on_cpu), or an unsupported torch: the fused
+                # forward, whose slab sums fold, as in 0.3.2 -- a fold in the backward would pass the head through
+                # those hooks (a copy of W each step)
+                cast_fold = False
+            else:
+                out = _loss_forward_hooked(
+                    ctx,
+                    ckpt,
+                    X,
+                    W,
+                    labels,
+                    infer_logp,
+                    loss_weights,
+                    need_dx,
+                    need_dw,
+                    dict(
+                        objective=objective,
+                        loss_div=loss_div,
+                        chunk_size=chunk_size,
+                        grad_weight_dtype=grad_weight_dtype,
+                        backend=backend,
+                        compact_rows=compact_rows,
+                        fuse_dw_cast=fuse_dw_cast,
+                        dx_finalize=dx_finalize,
+                        dw_stream=dw_stream,
+                        hidden_count=hidden_count,
+                        gemm_tuning=gemm_tuning,
+                        return_logp=bool(return_logp),
+                        one_pass=one_pass,
+                        _cast_fold=cast_fold,
+                    ),
+                )
+                if out is not None:
+                    return out
         result = _loss_forward(
             X,
             W,
