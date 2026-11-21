@@ -69,6 +69,37 @@ once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
 tensor); a launch still runs on torch's current stream of its tensors'
 device, as in 0.2.5.
+Version 0.2.7 changes nothing in this package and no bits: the deterministic
+package's backward without the weight gradient runs its 128-thread strided
+build on rows of any layout up to 32 rows per SM, and on packed rows up to
+128 rows per SM a build of packed rows only (SM100 and SM103), with the same
+``dx`` and ``dz`` bits.
+Version 0.2.8 changes nothing in this package and no bits: on SM107 the
+deterministic package's backward without the weight gradient runs its
+128-thread strided build on rows of any layout up to 96 rows per SM, and on
+packed rows (and one token) up to 192 rows per SM a build of packed rows
+only, with the same ``dx`` and ``dz`` bits.
+Version 0.2.9 changes the ``dx`` and ``dz`` bits of some calls with
+``compute_grad_weight=False`` (no other call): on SM100 and SM103 packed rows
+(and one token of head stride 128, which such a call passes as packed rows)
+up to 128 rows per SM run this package's copy of the deterministic package's
+build of packed rows only in the place of the band's program without the
+weight gradient, so their ``dx`` and ``dz`` are the repeatable backward's
+bits; they were the bits of the call that computes a BF16 weight gradient,
+from which they now differ in their last bits in the one-cluster bands and,
+on SM103, in the fused band.  Every other call, and every call on SM107,
+runs the program and gives the bits of 0.2.8.
+Version 0.2.10 changes nothing in this package and no bits: the
+deterministic package's backward that computes the weight gradient runs, up
+to 16 rows, a program of one CTA and, from 17 to 256 rows on a device of at
+least 16 SMs that is not a MIG instance, a program of one cluster of 16
+CTAs, neither of which uses a workspace, with the same ``dx``, ``dz`` and
+``dw`` bits on a device of at least 4 SMs.
+Version 0.2.11 changes nothing in this package and no bits: the
+deterministic package's forward runs, on short inputs whose rows are
+packed (contiguous ``x`` and ``z``, or one token of head stride 128) up to a
+cut of rows per SM (on SM107 not from 17 to 32 rows), a program of one row
+block per CTA with no loop, with the same ``y`` bits.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -190,7 +221,8 @@ edges the gain can be smaller).  The kernels are those of the standalone package
 - A call with ``compute_grad_weight=False`` takes the BF16 bands and runs the
   band's program built without the weight gradient (all weight-gradient
   work removed at build time), so its ``dx`` and ``dz`` are the bits of the
-  BF16 call that computes the weight gradient: in the one-cluster bands that
+  BF16 call that computes the weight gradient (but on the packed rows of the
+  build of packed rows only, below): in the one-cluster bands that
   cluster program without its column sums and cluster synchronization; a
   strided program (CTAs walking their row blocks with no claim, no ticket
   and no workspace: 256-thread CTAs of 16-row blocks, but 128-thread CTAs of
@@ -200,7 +232,16 @@ edges the gain can be smaller).  The kernels are those of the standalone package
   repeatable bands on SM107; the
   claimed program on the workspace past those cuts and in the repeatable
   band on SM100 and SM103; where packed rows run the look-ahead program,
-  that program without the weight gradient.
+  that program without the weight gradient.  On SM100 and SM103, on packed
+  rows (and one token of head stride 128, whose token stride is never read:
+  the call passes it as ``H * 128``) up to 128 rows per SM, every band runs
+  instead the repeatable band's build of packed rows only (128-thread CTAs
+  of 8-row blocks with no claim, no ticket and no workspace, no stride
+  test, every row read at its linear offset, a row's two reductions across
+  its lanes overlapped): its ``dx`` and ``dz`` are the repeatable backward's
+  bits, which in the one-cluster bands, and on SM103 in the fused band, can
+  differ in their last bits from those of the call that computes the weight
+  gradient.
 
 Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
 either weight gradient, accumulated or not) to the PyTorch BF16 naive
@@ -616,7 +657,13 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     compute_grad_weight : bool
         ``False`` returns ``None`` for the weight gradient and runs the BF16
         band's program built without it, whose ``dx`` and ``dz`` are the bits
-        of the BF16 call that computes it; it touches no ``grad_weight``.  A
+        of the BF16 call that computes it; it touches no ``grad_weight``.  On
+        SM100 and SM103 packed rows (and one token of head stride 128) up to
+        128 rows per SM run instead the repeatable band's build of packed rows
+        only, with the repeatable backward's ``dx`` and ``dz`` bits (in the
+        one-cluster bands, and on SM103 in the fused band, their last bits can
+        differ from the call that computes the weight gradient); it uses no
+        workspace.  Otherwise a
         call of up to 512 rows (256 on SM103) runs a one-cluster program, a
         call in the fused band up to 512 rows per SM on SM100 and 448 on
         SM103, or in the fused or the repeatable band on SM107 (but for the

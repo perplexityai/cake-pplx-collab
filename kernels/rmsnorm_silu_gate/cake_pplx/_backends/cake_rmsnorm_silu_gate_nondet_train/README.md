@@ -53,6 +53,38 @@ once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
 tensor); a launch still runs on torch's current stream of its tensors'
 device, as in 0.2.5.
+Version 0.2.7 changes nothing in this package and no bits: the deterministic
+package's backward without the weight gradient runs its 128-thread strided
+build on rows of any layout up to 32 rows per SM, and on packed rows up to
+128 rows per SM a build of packed rows only (`sm_100a` and `sm_103a`), with
+the same `dx` and `dz` bits.
+Version 0.2.8 changes nothing in this package and no bits: on `sm_107a` the
+deterministic package's backward without the weight gradient runs its
+128-thread strided build on rows of any layout up to 96 rows per SM, and on
+packed rows (and one token) up to 192 rows per SM a build of packed rows
+only, with the same `dx` and `dz` bits.
+Version 0.2.9 changes the `dx` and `dz` bits of some calls with
+`compute_grad_weight=False` (no other call): on `sm_100a` and `sm_103a`
+packed rows (and one token of head stride 128, which such a call passes as
+packed rows) up to 128 rows per SM run this package's copy of the
+deterministic package's build of packed rows only
+(`bwd_bf16_rep_nodw_strided_packed_small`) in the place of the band's
+program without the weight gradient, so their `dx` and `dz` are the
+repeatable backward's bits; they were the bits of the call that computes a
+BF16 `dw`, from which they now differ in their last bits in the one-cluster
+bands and, on `sm_103a`, in the fused band.  Every other call, and every
+call on `sm_107a`, runs the program and gives the bits of 0.2.8.
+Version 0.2.10 changes nothing in this package and no bits: the
+deterministic package's backward that computes the weight gradient runs, up
+to 16 rows, a program of one CTA and, from 17 to 256 rows on a device of at
+least 16 SMs that is not a MIG instance, a program of one cluster of 16
+CTAs, neither of which uses a workspace, with the same `dx`, `dz` and `dw`
+bits on a device of at least 4 SMs.
+Version 0.2.11 changes nothing in this package and no bits: the
+deterministic package's forward runs, on short inputs whose rows are
+packed (contiguous `x` and `z`, or one token of head stride 128) up to a cut
+of rows per SM (on SM107 not from 17 to 32 rows), a program of one row block
+per CTA with no loop, with the same `y` bits.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -284,6 +316,7 @@ each program repeats `y` bit for bit for the same inputs on the same device.
 | `bwd_bf16_fused_nodw` (`sm_100a`, `sm_103a`) | the fused backward built without the weight gradient (its build and `"dw": False`): its claims, ticket, grid and workspace; `bwd_bf16_fused`'s `dx` and `dz` bits | `compute_grad_weight=False` in the fused band past `NODW_STRIDED_ROWS_PER_SM` |
 | `bwd_bf16_rep_nodw_strided` (`sm_107a`) | the repeatable backward built without the weight gradient, strided (its build and `"dw": False, "strided": True`): as `bwd_bf16_fused_nodw_strided`; `bwd_bf16_rep`'s `dx` and `dz` bits at any grid | `compute_grad_weight=False` in a repeatable band on rows that are not packed |
 | `bwd_bf16_rep_nodw_strided_packed` (`sm_107a`) | the repeatable backward built without the weight gradient, strided, in 128-thread CTAs (its build with `"threads": 128, "min_blocks": 8, "dw": False, "strided": True`): 16 lanes a row as in `bwd_bf16_rep`, CTA `b` runs the 8-row blocks `b`, `b + grid`, ... with no claim, no ticket and no workspace word, at most 8 CTAs per SM; `bwd_bf16_rep`'s `dx` and `dz` bits at any grid | `compute_grad_weight=False` in a repeatable band on packed rows (`dy`, `x` and `z` of head stride 128 and token stride `H * 128`, more than one token), but where `bwd_bf16_rep_long` runs |
+| `bwd_bf16_rep_nodw_strided_packed_small` (`sm_100a`, `sm_103a`) | the repeatable backward built without the weight gradient, strided, in 128-thread CTAs of packed rows only (its build with `"threads": 128, "min_blocks": 8, "dw": False, "strided": True, "packed_rows": 1, "schedule": "joint"`: the deterministic package's build of packed rows only): 16 lanes a row as in `bwd_bf16_rep`, CTA `b` runs the 8-row blocks `b`, `b + grid`, ... with no claim, no ticket and no workspace word, no stride test, every row read at its linear offset, a row's sum of squares and dot product reduced across its lanes together, at most 8 CTAs per SM; `bwd_bf16_rep`'s `dx` and `dz` bits at any grid | `compute_grad_weight=False` on packed rows (and one token of head stride 128) up to `PACKED_SMALL_ROWS_PER_SM` (128 rows per SM), in the place of the program without the weight gradient of the band that runs the rows |
 | `bwd_bf16_rep_nodw` (`sm_100a`, `sm_103a`) | the repeatable backward built without the weight gradient (its build and `"dw": False`): its claims, ticket, grid and workspace; `bwd_bf16_rep`'s `dx` and `dz` bits | `compute_grad_weight=False` in a repeatable band, but where `bwd_bf16_rep_long` runs |
 | `bwd_bf16_rep_nodw_long` | the repeatable backward's long program built without the weight gradient (its build and `"dw": False`): its look-ahead loop, claims, ticket, grid and workspace; `bwd_bf16_rep`'s `dx` and `dz` bits | `compute_grad_weight=False` where `bwd_bf16_rep_long` runs |
 
@@ -319,6 +352,7 @@ the 20 hex digits shown):
 | `bwd_bf16_fused_nodw` | `20a7c07ccc0866350d49` | `20a7c07ccc0866350d49` | (none) |
 | `bwd_bf16_rep_nodw_strided` | (none) | (none) | `cfe88bc164eeaa58821d` |
 | `bwd_bf16_rep_nodw_strided_packed` | (none) | (none) | `07de4b4c9a438a52ff79` |
+| `bwd_bf16_rep_nodw_strided_packed_small` | `38d04fbfa79b1461bc0c` | `38d04fbfa79b1461bc0c` | (none) |
 | `bwd_bf16_rep_nodw` | `cefc51faec88b7212f3c` | `cefc51faec88b7212f3c` | (none) |
 | `bwd_bf16_rep_nodw_long` | `d8dd2e7dae0ca8233241` | `d8dd2e7dae0ca8233241` | `d8dd2e7dae0ca8233241` |
 
@@ -399,19 +433,30 @@ BF16 long program does); the BF16 fused band holds 513 to 148000 rows on a
 A call with `compute_grad_weight=False` takes the BF16 bands and runs, in
 its band module's place, that program built without the weight gradient
 (`nodw_module`; `NODW_ROLES`), whose `dx` and `dz` are the bits of the BF16
-call that computes the weight gradient at every grid:
+call that computes the weight gradient at every grid (but in step 2):
 
 1. packed rows past the long cut (where `bwd_bf16_rep_long` runs):
    `bwd_bf16_rep_nodw_long`, or, where none is routed, `bwd_bf16_rep_long`
    with `weight_grad` 0;
-2. else `<band>_nodw_strided` where routed and `rows <=
+2. else, on packed rows (`dy`, `x` and `z` of head stride 128 and token
+   stride `H * 128`; the call also passes one token of head stride 128 as
+   packed rows where this cut is) up to
+   `PACKED_SMALL_ROWS_PER_SM[arch]["bwd_bf16"] * SMs` rows (128 rows per SM
+   on `sm_100a` and `sm_103a`, no cut on `sm_107a`),
+   `bwd_bf16_rep_nodw_strided_packed_small` where routed, in any band that
+   routes a program without the weight gradient: its `dx` and `dz` are the
+   repeatable backward's bits, which in the one-cluster bands, and on
+   `sm_103a` in the fused band, can differ in their last bits from those of
+   the call that computes the weight gradient (on `sm_100a` the fused
+   band's are the repeatable backward's bits);
+3. else `<band>_nodw_strided` where routed and `rows <=
    NODW_STRIDED_ROWS_PER_SM[arch][band] * SMs`;
-3. else `<band>_nodw` where routed (the claimed program, or the
+4. else `<band>_nodw` where routed (the claimed program, or the
    one-cluster program of a small-row band);
-4. else `<band>_nodw_strided` where routed;
-5. else the band's module with `weight_grad` 0.
+5. else `<band>_nodw_strided` where routed;
+6. else the band's module with `weight_grad` 0.
 
-In steps 2 and 4 packed rows (`dy`, `x` and `z` of head stride 128 and
+In steps 3 and 5 packed rows (`dy`, `x` and `z` of head stride 128 and
 token stride `H * 128`, more than one token) run
 `<band>_nodw_strided_packed` in the strided
 program's place where it is routed: the repeatable band's 128-thread build
@@ -422,7 +467,7 @@ its claimed program.  The cuts were measured per architecture (CUDA Graph
 replays, cold L2): up to them the strided program is the faster.  The
 repeatable band routes only its claimed program on `sm_100a` and `sm_103a`,
 and `sm_107a` routes no claimed program, so there the fused and the
-repeatable bands run their strided programs at every row count (step 4):
+repeatable bands run their strided programs at every row count (step 5):
 
 | architecture | `bwd_bf16_fused` | `bwd_bf16_rep` |
 | --- | --- | --- |
@@ -456,11 +501,13 @@ memory each), 256 threads each for the short backward (6144 bytes each).
 A strided program without the weight gradient launches `min(blocks,
 ctas_per_sm * SMs)` CTAs of its own rule (`backward_ctas`), CTA `b` running
 the blocks `b`, `b + grid`, ...: 256-thread CTAs over 16-row blocks, 4 per
-SM, and on the repeatable band's packed rows (`sm_107a`) 128-thread CTAs
-over 8-row blocks, 8 per SM.  Where `dy`, `x` and `z` hold packed rows
+SM, and on the repeatable band's packed rows (`sm_107a`; and the build of
+packed rows only, `sm_100a` and `sm_103a`) 128-thread CTAs over 8-row
+blocks, 8 per SM.  Where `dy`, `x` and `z` hold packed rows
 the fused band's strided program and the 128-thread one read each row at
 its linear offset, and a CTA of theirs with one block takes no integer
-division before its loads.  The claimed, long and
+division before its loads; the build of packed rows only takes no stride
+test at all.  The claimed, long and
 one-cluster programs without the weight gradient launch their band
 programs' grids.
 
@@ -576,7 +623,8 @@ captured call.  With none ready, the graph zero-fills a workspace of its own.
   exporter writes the derived fields), `ROUTES`, the row-count routing
   (`FORWARD_BANDS`, `STRIDED_FORWARD_BANDS`, `BACKWARD_BANDS`,
   `module_for_rows`; without the weight gradient `NODW_STRIDED_ROWS_PER_SM`,
-  `nodw_module`), the backward's chunks and grid (`backward_chunks`,
+  `PACKED_SMALL_ROWS_PER_SM`, `nodw_module` and the plans it reads,
+  `_NODW_PLANS`, read once at import), the backward's chunks and grid (`backward_chunks`,
   `backward_ctas`, `launch_grid`), the workspace layout
   (`workspace_layout`, `workspace_bytes`) and the loader glue.
 * `cake_build.py` + `build.json` -- the loader shared by every Cake-exported
@@ -599,7 +647,9 @@ each captured call takes its own reserve workspace); the JIT fallback of
   grids, the programs without the weight gradient (the `dx` and `dz` bits of
   the BF16 call around their strided cut, on packed rows and other layouts
   and at small grids, no workspace for the strided and one-cluster ones,
-  CUDA Graph capture included),
+  CUDA Graph capture included; the build of packed rows only at its cut,
+  on one token and at small grids, with the repeatable backward's `dx` and
+  `dz` bits and within the naive tier),
   `torch.use_deterministic_algorithms` (the alert in the fused band, no alert
   elsewhere).
 * `tests/norm/test_cake_rmsnorm_silu_gate_nondet_train_api.py` -- the public

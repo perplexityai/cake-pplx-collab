@@ -57,6 +57,38 @@ once, the launch reads the handle of torch's current stream without making a
 stream object, and a caller's workspace is checked and viewed once per
 tensor); a launch still runs on torch's current stream of its tensors'
 device, as in 0.2.5.
+Version 0.2.7 changes nothing in this package and no bits: the deterministic
+package's backward without the weight gradient runs its 128-thread strided
+build on rows of any layout up to 32 rows per SM, and on packed rows up to
+128 rows per SM a build of packed rows only (sm_100a and sm_103a), with the
+same ``dx`` and ``dz`` bits.
+Version 0.2.8 changes nothing in this package and no bits: on sm_107a the
+deterministic package's backward without the weight gradient runs its
+128-thread strided build on rows of any layout up to 96 rows per SM, and on
+packed rows (and one token) up to 192 rows per SM a build of packed rows
+only, with the same ``dx`` and ``dz`` bits.
+Version 0.2.9 changes the ``dx`` and ``dz`` bits of some calls with
+``compute_grad_weight=False`` (no other call): on sm_100a and sm_103a packed
+rows (and one token of head stride 128, which such a call passes as packed
+rows) up to 128 rows per SM run this package's copy of the deterministic
+package's build of packed rows only (``cake_jit.PACKED_SMALL_ROLE``) in the
+place of the band's program without the weight gradient, so their ``dx``
+and ``dz`` are the repeatable backward's bits; they were the bits of the
+call that computes a BF16 weight gradient, from which they now differ in
+their last bits in the one-cluster bands and, on sm_103a, in the fused
+band.  Every other call, and every call on sm_107a, runs the program and
+gives the bits of 0.2.8.
+Version 0.2.10 changes nothing in this package and no bits: the
+deterministic package's backward that computes the weight gradient runs, up
+to 16 rows, a program of one CTA and, from 17 to 256 rows on a device of at
+least 16 SMs that is not a MIG instance, a program of one cluster of 16
+CTAs, neither of which uses a workspace, with the same ``dx``, ``dz`` and
+``dw`` bits on a device of at least 4 SMs.
+Version 0.2.11 changes nothing in this package and no bits: the
+deterministic package's forward runs, on short inputs whose rows are
+packed (contiguous ``x`` and ``z``, or one token of head stride 128) up to a
+cut of rows per SM (on SM107 not from 17 to 32 rows), a program of one row
+block per CTA with no loop, with the same ``y`` bits.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -146,7 +178,8 @@ A call with ``compute_grad_weight=False`` takes the BF16 bands and runs, in
 its band module's place, that program built without the weight gradient
 where the architecture routes one (``cake_jit.nodw_module``; all of its
 weight-gradient work removed at build time), so ``dx`` and ``dz`` are the
-bits of the BF16 call that computes the weight gradient, at every grid: in
+bits of the BF16 call that computes the weight gradient, at every grid
+(but on the packed rows of the build of packed rows only, below): in
 a small-row band its one-cluster program without the weight gradient; on
 sm_100a and sm_103a in the fused band up to
 ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM (measured: 512 on
@@ -161,7 +194,18 @@ repeatable backward); a strided program reads packed rows at their linear
 offsets; where the repeatable
 band runs its long role, the long
 program without the weight gradient (or, where none is routed, the long
-role with ``weight_grad`` 0).
+role with ``weight_grad`` 0).  On sm_100a and sm_103a, on packed rows (and
+one token of head stride 128, whose token stride is never read: the call
+passes it as ``H * 128``) up to ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows
+per SM (128), every band but the long role runs instead the repeatable
+band's build of packed rows only (``cake_jit.PACKED_SMALL_ROLE``: the
+deterministic package's 128-thread strided build with no stride test, every
+row read at its linear offset and a row's two reductions across its lanes
+overlapped, CTAs walking 8-row blocks with no claim, no ticket and no
+workspace word), whose ``dx`` and ``dz`` are the repeatable backward's bits
+at any grid: in the one-cluster bands, and on sm_103a in the fused band,
+their last bits can differ from those of the call that computes the weight
+gradient (sm_107a has no such cut).
 
 Accuracy: the tests hold every floating output (``y``, ``dx``, ``dz`` and
 either weight gradient, accumulated or not) to the PyTorch BF16 naive
@@ -381,6 +425,8 @@ import warnings
 from typing import Any, Optional
 
 import torch
+import torch.utils.dlpack
+import tvm_ffi
 
 from . import cake_jit as _loader
 from .cake_jit import (
@@ -389,6 +435,7 @@ from .cake_jit import (
     ARCHES,
     HEAD_DIM,
     INT32_MAX,
+    PACKED_SMALL_ROWS_PER_SM,
     ROLES,
     ROUTES,
     arch_for_capability,
@@ -406,6 +453,19 @@ SUPPORTED_COMPUTE_CAPABILITIES: tuple[tuple[int, int], ...] = tuple(
     sorted(ARCH_BY_CAPABILITY)
 )
 _ALIGNMENT_BYTES = ALIGNMENT_ELEMENTS * 2
+# Whether this torch build has dimension names (named tensors; torch 2.14 has
+# none): without them no tensor carries names, and the short paths of
+# ``_kernel_view`` and ``_output`` skip the test.
+_NAMED_TENSORS = hasattr(torch.Tensor, "has_names")
+# The architectures on which a backward without the weight gradient passes
+# one token of head stride 128 as packed rows (token stride ``H * 128``):
+# those with a cut of the build of packed rows only
+# (``cake_jit.PACKED_SMALL_ROWS_PER_SM``; sm_100a and sm_103a).  Elsewhere
+# (sm_107a, where this package has no such cut) one token keeps the token
+# stride 0 and runs the programs of other layouts, as in 0.2.8.
+_ONE_TOKEN_PACKED_ARCHES = frozenset(
+    arch for arch, cuts in PACKED_SMALL_ROWS_PER_SM.items() if cuts.get("bwd_bf16")
+)
 
 
 # The deterministic package, named when a caller passes its workspace and, for
@@ -536,7 +596,47 @@ def _kernel_view(
     follow one another, so a ``[T, 1, 128]`` or ``[T, 128]`` input whose token
     stride is 128 passes the kernels' packed-rows test (head stride 128 and
     token stride ``H * 128``) as a ``[T, H, 128]`` input with packed rows does.
+
+    A plain BF16 ``[T, H, 128]`` CUDA tensor on ``device`` takes a shorter
+    path to the same result (fewer tensor calls per launch): read in place,
+    or copied once unless it has dimension names; every other input goes
+    through :func:`_kernel_view_checked`.
     """
+
+    if (
+        type(tensor) is torch.Tensor
+        and tensor.is_cuda
+        and tensor.get_device() == device.index
+        and tensor.dtype is torch.bfloat16
+        and len(shape) == 3
+        and shape[2] == HEAD_DIM
+        and tensor.shape == shape
+    ):
+        tokens, heads, _ = shape
+        token_stride, head_stride, last_stride = tensor.stride()
+        tok = token_stride if tokens > 1 else 0
+        head = head_stride if heads > 1 else HEAD_DIM
+        if (
+            last_stride == 1
+            and tok % ALIGNMENT_ELEMENTS == 0
+            and head % ALIGNMENT_ELEMENTS == 0
+            and tensor.data_ptr() % _ALIGNMENT_BYTES == 0
+        ):
+            return tensor, tok, head
+        if not (_NAMED_TENSORS and tensor.has_names()):
+            return (
+                tensor.clone(memory_format=torch.contiguous_format),
+                heads * HEAD_DIM if tokens > 1 else 0,
+                HEAD_DIM,
+            )
+    return _kernel_view_checked(tensor, name, shape=shape, device=device)
+
+
+def _kernel_view_checked(
+    tensor: torch.Tensor, name: str, *, shape: torch.Size, device: torch.device
+) -> tuple[torch.Tensor, int, int]:
+    """:func:`_kernel_view` of any input: every check, then the view read in
+    place or the copy."""
 
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"{name} must be a torch.Tensor")
@@ -599,13 +699,25 @@ def _output(
     *,
     shape: torch.Size,
     device: torch.device,
+    like: Optional[torch.Tensor] = None,
     dtype: torch.dtype = torch.bfloat16,
 ) -> tuple[torch.Tensor, Optional[torch.Tensor]]:
     """``(kernel buffer, caller's tensor to copy into or None)``: the kernels
     write contiguous 32-byte aligned rows; a caller's tensor of another layout
-    receives a copy after the launch."""
+    receives a copy after the launch.  ``like``: an input of ``shape`` on
+    ``device``; when it is a plain strided ``dtype`` tensor without dimension
+    names, a new buffer is ``torch.empty_like(like)`` in the contiguous format
+    (the buffer of ``torch.empty(shape, dtype=dtype, device=device)`` with
+    less host work)."""
 
     if tensor is None:
+        if (
+            type(like) is torch.Tensor
+            and like.dtype is dtype
+            and like.layout is torch.strided
+            and not (_NAMED_TENSORS and like.has_names())
+        ):
+            return torch.empty_like(like, memory_format=torch.contiguous_format), None
         return torch.empty(shape, dtype=dtype, device=device), None
     if not isinstance(tensor, torch.Tensor):
         raise TypeError(f"{name} must be a torch.Tensor")
@@ -644,7 +756,7 @@ def _forward(
     tokens, heads = _rows_shape(shape)
     rows = _check_rows(tokens, heads)
     w = _weight(weight, device)
-    y, y_user = _output(out, "out", shape=shape, device=device)
+    y, y_user = _output(out, "out", shape=shape, device=device, like=x)
     if rows == 0:
         return y if y_user is None else y_user
     xv, x_tok, x_head = _kernel_view(x, "x", shape=shape, device=device)
@@ -817,21 +929,34 @@ def _placeholder(device_index: int, dtype: torch.dtype) -> torch.Tensor:
     the argument of a kernel parameter the launch does not read (the weight
     gradient of a call without it, the workspace buffers of a program
     without the weight gradient that takes no workspace).  The bindings
-    check only its device, dtype and contiguity."""
+    check only its device, dtype and contiguity; a launch passes it as
+    :func:`_launch_placeholder`."""
 
     return torch.empty((0,), dtype=dtype, device=torch.device("cuda", device_index))
 
 
 @functools.cache
-def _no_workspace(device_index: int) -> dict[str, torch.Tensor]:
+def _launch_placeholder(device_index: int, dtype: torch.dtype) -> Any:
+    """:func:`_placeholder` converted once to a ``tvm_ffi.Tensor`` (the same
+    empty tensor) through a legacy DLPack capsule, with no stream exchange in
+    any torch version: a launch passes it as it is, without converting a torch
+    tensor on every call."""
+
+    return tvm_ffi.from_dlpack(
+        torch.utils.dlpack.to_dlpack(_placeholder(device_index, dtype))
+    )
+
+
+@functools.cache
+def _no_workspace(device_index: int) -> dict[str, Any]:
     """Every workspace buffer (``cake_jit.WORKSPACE_BUFFERS``) as an empty
     tensor of its dtype (``_WORKSPACE_DTYPES``, the dtypes the bindings
-    check) on CUDA device ``device_index``: the workspace parameters of a
-    launch that reads no workspace (a strided program without the weight
-    gradient).  Never modified."""
+    check) on CUDA device ``device_index`` (:func:`_launch_placeholder`): the
+    workspace parameters of a launch that reads no workspace (a strided
+    program without the weight gradient).  Never modified."""
 
     return {
-        buffer: _placeholder(device_index, dtype)
+        buffer: _launch_placeholder(device_index, dtype)
         for buffer, dtype in _WORKSPACE_DTYPES.items()
     }
 
@@ -1184,8 +1309,8 @@ def _backward(
                     f"tensor on {device}"
                 )
             dw = grad_weight
-    dx, dx_user = _output(grad_x, "grad_x", shape=shape, device=device)
-    dz, dz_user = _output(grad_z, "grad_z", shape=shape, device=device)
+    dx, dx_user = _output(grad_x, "grad_x", shape=shape, device=device, like=x)
+    dz, dz_user = _output(grad_z, "grad_z", shape=shape, device=device, like=x)
     # The other mode's workspace is refused for any row count, so before the
     # return of a call with no rows; the size checks below depend on the
     # backward module that the row count selects.
@@ -1210,10 +1335,28 @@ def _backward(
         # The band's program built without the weight gradient (the same dx
         # and dz bits): strided up to its cut (or at every row count where
         # the band routes no claimed one; on packed rows its 128-thread build
-        # where routed), else claimed, or the long or the one-cluster one.
+        # where routed), else claimed, or the long or the one-cluster one; on
+        # packed rows up to the cut of the build of packed rows only, that
+        # build (the repeatable backward's dx and dz bits).
+        if (
+            tokens == 1
+            and arch in _ONE_TOKEN_PACKED_ARCHES
+            and dy_head == HEAD_DIM
+            and x_head == HEAD_DIM
+            and z_head == HEAD_DIM
+        ):
+            # One token: its token index is 0 in every row, so its token
+            # stride (0 from _kernel_view) is never read, and its rows of
+            # head stride 128 lie at the linear offsets of packed rows.  This
+            # call alone passes them as packed rows (token stride heads * 128:
+            # the same addresses in every program), on an architecture with a
+            # cut of the build of packed rows only; the forward, the call that
+            # computes the weight gradient and the band's choice above keep 0.
+            dy_tok = x_tok = z_tok = heads * HEAD_DIM
+            packed = True
         name = nodw_module(arch, name, rows, sm_count, packed)
     ctas = backward_ctas(name, rows, sm_count)
-    buffers: dict[str, Optional[torch.Tensor]] = {
+    buffers: dict[str, Any] = {
         "dw_win": None,
         "dw_sums": None,
         "dw_spec": None,
@@ -1264,7 +1407,7 @@ def _backward(
         "dx": dx,
         "dz": dz,
         **buffers,
-        "dw": dw if dw is not None else _placeholder(index, torch.bfloat16),
+        "dw": dw if dw is not None else _launch_placeholder(index, torch.bfloat16),
         "rows": rows,
         "heads": heads,
         "dy_tok": dy_tok,
@@ -1352,7 +1495,13 @@ def cake_rmsnorm_silu_gate_nondet_train_backward(
     weight gradient on chip in a fixed order) and uses none.  A call with
     ``compute_grad_weight=False`` takes the BF16 bands and runs the band's
     program built without the weight gradient (``cake_jit.nodw_module``):
-    ``dx`` and ``dz`` the bits of the call that computes it.  It uses no
+    ``dx`` and ``dz`` the bits of the call that computes it, but on sm_100a
+    and sm_103a on packed rows (and one token of head stride 128) up to
+    ``cake_jit.PACKED_SMALL_ROWS_PER_SM`` rows per SM, where the
+    repeatable band's build of packed rows only runs instead: there ``dx``
+    and ``dz`` are the repeatable backward's bits, which in the one-cluster
+    bands, and on sm_103a in the fused band, can differ in their last bits
+    from those of the call that computes the weight gradient.  It uses no
     workspace in the small-row bands, on sm_100a and sm_103a in the fused
     band up to ``cake_jit.NODW_STRIDED_ROWS_PER_SM`` rows per SM, and on
     sm_107a in every band short of the long program; the claimed and long

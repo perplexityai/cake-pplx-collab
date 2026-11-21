@@ -97,12 +97,13 @@ max-shared carveout and one resident CTA per SM, every call outside the list
 below starts while that CTA holds at most 27 KB of shared memory on SM100 /
 SM103 and at most 24 KB on SM107.  Even beside one resident CTA of 128
 threads without shared memory, these calls wait, with BF16 and FP32 weights
-alike, because one of their kernels needs a whole SM:
+alike unless noted, because one of their kernels needs a whole SM:
 
 - SM100 / SM103: none.
-- SM107: the backward of H 1536 above 1024 tokens, the backward of H 2048
-  above 256 tokens, the backward of H 4096 above 1024 tokens and the forward
-  of H 6144 above 4096 tokens.
+- SM107: the backward of H 1536 above 12288 tokens, the backward of H 2048
+  above 256 up to 1024 tokens and above 16384 tokens, the backward of H 4096
+  above 1024 tokens (except with BF16 weights from 24064 to 50176 tokens) and
+  the forward of H 6144 above 4096 tokens.
 
 Beside those, leave some SMs free of the resident kernel.  Kernels that hold
 only some SMs (communication kernels with 16-32 CTAs) do not delay the start

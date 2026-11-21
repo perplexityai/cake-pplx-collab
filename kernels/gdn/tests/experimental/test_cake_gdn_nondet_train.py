@@ -6831,8 +6831,9 @@ def test_fwd_split_route_rule(monkeypatch) -> None:
 
 
 # the split rows whose split forward keeps the waves on the WY stage's w / u, per architecture (FWD_SPLIT_A_MIN_PIECE):
-# on sm_103a the pair row of HV 24 (63-chunk pieces); every other split row runs on wy_a's A
-FWD_SPLIT_W_FORM_ROWS = {"sm_103a": frozenset({"pair_hv24"})}
+# none.  On sm_103a the pair row of HV 24 cuts 63-chunk pieces at 148 and 152 SMs, the shortest pieces on wy_a's A
+# there; every split row runs on wy_a's A
+FWD_SPLIT_W_FORM_ROWS: dict[str, frozenset[str]] = {}
 
 
 @pytest.mark.parametrize("sm_count", [148, 152])
@@ -6853,6 +6854,19 @@ def test_fwd_split_shape_class(row, sm_count, monkeypatch) -> None:
         if got is not None:
             a_form = row not in FWD_SPLIT_W_FORM_ROWS.get(arch, frozenset())
             assert cake_chain._fwd_split_a(arch, got) is a_form, (arch, got)
+
+
+def test_fwd_split_a_min_piece(monkeypatch) -> None:
+    # the shortest piece of the split forward on wy_a's A: on sm_103a 63 chunks (the measured pair row of HV 24), so
+    # the split's pieces of 48-62 chunks, none of them measured, keep the waves on the WY stage's w / u; on sm_100a
+    # every split forward runs on A
+    monkeypatch.setattr(cake_chain, "_available", lambda _stage, _arch: True)
+    assert dict(cake_chain.FWD_SPLIT_A_MIN_PIECE) == {"sm_103a": 63}
+    lengths = (cake_plan.FORWARD_SPLIT_MIN_PIECE["sm_103a"], 62, 63, 96)
+    got = [cake_chain._fwd_split_a("sm_103a", n) for n in lengths]
+    assert got == [False, False, True, True], got
+    lengths = (cake_plan.FORWARD_SPLIT_MIN_PIECE["sm_100a"], 62, 63)
+    assert all(cake_chain._fwd_split_a("sm_100a", n) for n in lengths)
 
 
 @pytest.mark.usefixtures("fwd_split_test_class")
@@ -7221,6 +7235,95 @@ def test_fwd_split_a_tape_and_the_w_form_naive_tier_verdict(
         return _judged(runs, _oracle(inputs, seq_lens), OUTPUT_NAMES)
 
     _judge(record_property, 437, draw)
+
+
+# the forwards that run fwd_ho_a, which keeps u in FP32: the serial A form and the split forward on wy_a's A
+FWD_HO_A_ROUTES = ("a", "split_a")
+
+
+def _fwd_ho_a_taped_word(device) -> int:
+    """fwd_ho_a's tape word of a taped call on the device: the state of its tape level in FWD_A_TAPE."""
+    arch = cake_backend.device_arch(cake_chain._device_index(device))
+    tape = cake_chain.FWD_A_TAPE
+    return sum(tape[name] for name in cake_plan.tape_state(arch, True) if name in tape)
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_without_a_tape_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # save_state=False on the forwards that run fwd_ho_a: fwd_ho_a stores no tape (word 0) and keeps u in FP32 for o
+    # and the final state, and the backward rebuilds w, h and v_new with the WY stage on the tape's A (which rounds u
+    # to BF16) and the forward scan; o, the final state and every gradient (the initial state's too) are judged
+    (heads, seq_lens), _marker = _route_or_skip(route, device, monkeypatch)
+    arch = cake_backend.device_arch(cake_chain._device_index(device))
+    per_call = 1 if route == "a" else 2
+    launches = _record_launch_values(monkeypatch)
+
+    def draw(j, s):
+        inputs = _inputs(seq_lens, heads, torch.float32, device, seed=s)
+        h0, dht = _states(seq_lens, heads[1], device, s + 1)
+        launches.clear()
+        got = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht, save_state=False)  # fmt: skip
+        stages = [stage for stage, _values in launches]
+        assert stages.count("wy_a") == 1, stages
+        assert stages.count("fwd_ho_a") == per_call, stages
+        assert _tape_words(launches) == [0] * per_call, _tape_words(launches)
+        backward = stages[len(_forward_stages(stages)) :]
+        assert cake_chain.wy_stage(arch) in backward, backward
+        assert any(stage.startswith("fwd_h_") for stage in backward), backward
+        launches.clear()
+        oracle = _oracle(inputs, seq_lens, initial_state=h0, dht=dht)
+        return _judged({"": got}, oracle, STATE_OUTPUTS)
+
+    _judge(record_property, 491, draw)
+
+
+@pytest.mark.parametrize("route", FWD_HO_A_ROUTES)
+def test_fwd_ho_a_checkpointed_step_matches_the_fp64_recurrence(
+    route, device, monkeypatch, record_property
+) -> None:
+    # a non-reentrant checkpointed step (torch.utils.checkpoint, use_reentrant=False: the first pass stores no tape,
+    # the recompute writes it) and the plain call on the forwards that run fwd_ho_a, from an initial state with a
+    # final-state gradient: o, the final state and every gradient (the initial state's too) of each are judged
+    (heads, seq_lens), _marker = _route_or_skip(route, device, monkeypatch)
+    per_call = 1 if route == "a" else 2
+    word = _fwd_ho_a_taped_word(device)
+    cu = _cu(seq_lens)
+    cu_seqlens = torch.tensor(cu, dtype=torch.int64, device=device)
+    cu_seqlens_cpu = torch.tensor(cu, dtype=torch.int64)
+
+    def layer(q, k, v, g, beta, h):
+        return cake_gdn_nondet(q, k, v, g, beta, scale=1.0 / math.sqrt(HEAD_DIM), initial_state=h,
+                               output_final_state=True, cu_seqlens=cu_seqlens, cu_seqlens_cpu=cu_seqlens_cpu,
+                               use_qk_l2norm_in_kernel=True)  # fmt: skip
+
+    launches = _record_launch_values(monkeypatch)
+
+    def forms(inputs, h0, dht, j):
+        want = _run(inputs, seq_lens, initial_state=h0, output_final_state=True, dht=dht)  # fmt: skip
+        leaves = {
+            n: inputs[n].detach().clone().requires_grad_(True)
+            for n in ("q", "k", "v", "g", "beta")
+        }
+        leaves["h0"] = h0.detach().clone().requires_grad_(True)
+        launches.clear()
+        o, final = checkpoint(layer, *leaves.values(), use_reentrant=False)
+        torch.autograd.backward((o, final), (inputs["do"], dht))
+        torch.cuda.synchronize()
+        words = _tape_words(launches)
+        launches.clear()
+        assert words == [0] * per_call + [word] * per_call, words
+        got = {
+            "o": o.detach(),
+            "final_state": final.detach(),
+            **{"d" + n: leaves[n].grad for n in ("q", "k", "v", "g", "beta")},
+            "dh0": leaves["h0"].grad,
+        }
+        return {"plain": want, "checkpoint": got}
+
+    _judge_forms(record_property, 493, seq_lens, heads, device, forms, beta_dtype=torch.float32, names=STATE_OUTPUTS,
+                 states=True)  # fmt: skip
 
 
 # --------------------------------------------------------------------------- M-share: the backward on the forward's maps

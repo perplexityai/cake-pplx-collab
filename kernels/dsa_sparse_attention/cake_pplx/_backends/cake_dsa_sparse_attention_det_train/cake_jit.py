@@ -290,7 +290,16 @@ MODULES: dict[str, dict[str, Any]] = {
     # key-range-pass policy is the non-deterministic package's NoPE record
     # values (``key_bytes`` 2048; ``dq_partial_bytes_per_token`` = 64 heads x
     # 512 x 4 B of FP32 dQ partial per token; ``max_passes`` 1: the policy
-    # never plans a second pass, and ``key_passes`` forces the pass form).
+    # never plans a second pass, and ``key_passes`` forces the pass form).  A
+    # call with a trainable per-head sink runs the forward's sink build
+    # (``nope_fwd_sink``: the forward's arguments plus the FP32 ``sink [64]``,
+    # the forward's launch geometry; ``sm_100a`` / ``sm_103a``) in place of
+    # ``nope_fwd`` -- on ``sm_107a`` its scanner-warp build
+    # (``nope_fwd_scan_sink``), as ``nope_fwd_scan`` serves ``nope_fwd`` there
+    # -- and, in its backward, the sink-gradient stage (``nope_bwd_dsink``, 256
+    # threads, every architecture of the record) once right after the delta
+    # stage.  These are the non-deterministic package's sink kernels (fixed
+    # order: bitwise reproducible) under this package's program names.
     "cake_dsa_h64_det_nope_train": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "stages": [
@@ -313,6 +322,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "nope_bwd_bound_pipe",
             "nope_bwd_bound_pack27_pipe",
             "nope_fwd_scan",
+            "nope_fwd_sink",
+            "nope_bwd_dsink",
+            "nope_fwd_scan_sink",
         ],
         # The key-range-pass policy: the non-deterministic package's NoPE record
         # values (``cake_backend.KeyPassPolicy``).
@@ -537,6 +549,41 @@ MODULES: dict[str, dict[str, Any]] = {
                 "use_pdl": True,
             },
         },
+        "nope_fwd_sink": {
+            "library": "cake_dsa_h64_det_nope_train_f41a0f9f0e10448aaf94",
+            "ffi_entry": "run",
+            "arches": ["sm_100a", "sm_103a"],
+            "launch": {
+                "block": [320, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
+        "nope_bwd_dsink": {
+            "library": "cake_dsa_h64_det_nope_train_36d862698eea1ea770ef",
+            "ffi_entry": "run",
+            "launch": {
+                "block": [256, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 1152,
+                "use_pdl": False,
+            },
+        },
+        "nope_fwd_scan_sink": {
+            "library": "cake_dsa_h64_det_nope_train_e1e7a7620a259632759f",
+            "ffi_entry": "run",
+            "arches": ["sm_107a"],
+            "launch": {
+                "block": [352, 1, 1],
+                "cluster": [1, 1, 1],
+                "cooperative": False,
+                "dynamic_smem_bytes": 223488,
+                "use_pdl": True,
+            },
+        },
     },
 }
 
@@ -615,17 +662,31 @@ _NOPE_ALTERNATES = (
     + tuple(NOPE_ACCUMULATE_STAGES.values())
     + tuple(NOPE_PIPE_STAGES.values())
 )
-# The scanner-warp builds of the two forwards: on the architectures of their
-# stage entries' ``arches`` (``sm_107a``) the host runs them in place of the
-# forward stage; the device's architecture alone chooses.  Same arguments,
-# grid and outputs as the forward they replace.
-SCAN_STAGES = {"fwd": "fwd_scan", "nope_fwd": "nope_fwd_scan"}
+# The scanner-warp builds of the two forwards and of the NoPE forward's sink
+# build: on the architectures of their stage entries' ``arches``
+# (``sm_107a``) the host runs them in place of the forward stage; the
+# device's architecture alone chooses.  Same arguments, grid and outputs as
+# the forward they replace.
+SCAN_STAGES = {
+    "fwd": "fwd_scan",
+    "nope_fwd": "nope_fwd_scan",
+    "nope_fwd_sink": "nope_fwd_scan_sink",
+}
+# The NoPE program's trainable-sink stages: the forward's sink build, which runs in place of ``nope_fwd`` when a call
+# passes a sink (same arguments plus ``sink``, same grid and outputs; its ``lse`` includes the sink; its scanner-warp
+# build ``SCAN_STAGES["nope_fwd_sink"]`` where that ships), and the sink-gradient stage the backward of such a call
+# launches once after the delta stage.  Their entries' ``arches`` name the architectures that ship them.
+NOPE_SINK_FORWARD_STAGE = "nope_fwd_sink"
+NOPE_DSINK_STAGE = "nope_bwd_dsink"
+NOPE_SINK_STAGES = (NOPE_SINK_FORWARD_STAGE, NOPE_DSINK_STAGE)
 STAGES_OF = {
     PROGRAM: STAGES + KEY_PASS_STAGES + _ROPE_ALTERNATES + (SCAN_STAGES["fwd"],),
     NOPE_PROGRAM: NOPE_STAGES
     + NOPE_KEY_PASS_STAGES
     + _NOPE_ALTERNATES
-    + (SCAN_STAGES["nope_fwd"],),
+    + (SCAN_STAGES["nope_fwd"],)
+    + NOPE_SINK_STAGES
+    + (SCAN_STAGES[NOPE_SINK_FORWARD_STAGE],),
 }
 BACKWARD_STAGES_OF = {PROGRAM: BACKWARD_STAGES, NOPE_PROGRAM: NOPE_BACKWARD_STAGES}
 

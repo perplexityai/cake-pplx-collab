@@ -21,7 +21,13 @@ The backward is ONE ordinary launch whose CTAs add their ``dweight`` /
 ``dbias`` rows into zeroed accumulators with unordered global reductions (the
 backward of the deterministic package
 (:mod:`cake_pplx.cake_causal_conv1d_det_train`) is a main launch plus a
-fixed-order reduce launch).  This module never runs the deterministic package.
+fixed-order reduce launch).  At the rows of the backend's
+``cake_jit.SM_WIDE_ROWS`` (the default backward route at C = 520 to 608 from
+S = 24576 on sm_100a and from S = 20480 on sm_103a, at C = 520 to 680 from
+S = 32768 on sm_107a) that launch is an SM-wide program: one CTA per SM for
+the whole launch, each CTA a whole token stream, so a kernel that keeps an SM
+busy on another stream can delay it.  This module never runs the
+deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.
@@ -60,6 +66,21 @@ varies run to run.  The inputs,
 output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
+The forward programs (each the deterministic package's program of the same row):
+at C = 576 to 768, inside the token range of a row of the backend's
+``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` (by architecture and
+route), the static program (a fixed token range per CTA) or the direct
+program (the next token blocks per CTA, no shared memory) runs, neither with
+``work`` counters: a passed forward ``workspace`` is checked and not passed
+to the program, and such a call zeroes no package buffer.  Each row gives
+its own token range.  For most ``C`` the first range starts at S = 1.  The
+sm_103a ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736:
+14336) and have only a static range.  Every other call (outside a row's
+range, or where an architecture, route and ``C`` have no row) runs the
+dynamic program, as in 0.2.4, which takes its token chunks from zeroed int32
+counters.
+The forward workspace size is the same in every case.
+
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
 returns it zeroed; size depends on ``C`` and the route, not on ``S``; never
@@ -72,9 +93,11 @@ graph records no fill node for it (the graph holds it until the graph and
 its instantiations are destroyed and their launches have completed; it
 returns to the package, zero again, at the package's next refill).  The
 replays of one graph must not overlap.  Only eager calls without
-``workspace=`` zero these buffers, the forward's and the backward's
-separately, sized to the largest need of such a call whose zeroing succeeded
-(one that runs out of memory keeps no new buffer and keeps their size).
+``workspace=`` that take counters zero these buffers (a forward inside the
+token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the
+forward's and the backward's separately, sized to the largest need of such a call whose
+zeroing succeeded (one that runs out of memory keeps no new buffer and keeps
+their size).
 When none is ready (no such eager call of the kind before the capture, all
 taken by earlier captures, too small, or their zero fills not complete yet:
 a ``CUDAGraph.capture_begin`` right after such an eager call with no
@@ -111,7 +134,9 @@ streams.  The CTAs of each channel tile split its tokens among themselves at
 any grid size, so ``dx`` is computed the same way and
 ``dweight`` / ``dbias`` are summed the same way; the workspace size does not depend
 on it (one accumulator set and one counter per channel tile, whatever the
-grid).
+grid).  At the rows of ``cake_jit.SM_WIDE_ROWS`` the SM-wide program holds
+one CTA per SM, so ``bwd_grid_mult`` times the SM count runs in that many
+waves of CTAs.
 
 Name map (the deterministic package -> the non-deterministic package)::
 

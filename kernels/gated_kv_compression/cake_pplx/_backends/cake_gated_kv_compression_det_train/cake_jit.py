@@ -24,7 +24,8 @@ architecture.  A record is keyed by its role name (or ``<role>_<arch>`` for a
 role that ships a different program per architecture) and carries the host
 plan: the ``role`` it serves, the architectures it is delivered for, the
 ``run`` entry and its ``grid_rule``.  Every role is served on every
-architecture of ``ARCHES`` by exactly one record; :func:`role_record` names
+architecture of ``ARCHES`` (of its ``ROLE_ARCHES`` entry, for a role served
+on some architectures only) by exactly one record; :func:`role_record` names
 it, and :func:`run_module` launches the record of the device's
 architecture.  The derived leaves (``library``, ``kernel_symbol``,
 ``launch``, ``arg_plan``) are written by the generator from the rendered
@@ -39,26 +40,56 @@ JIT shim from the same sources and flags.
 
 The roles, in launch order:
 
-* ``pair_table``: the exclusive prefix of the pair counts,
-  ``cu_pairs[0] = 0`` and ``cu_pairs[s + 1] = cu_pairs[s] + (cu_seqlens[s + 1]
-  - cu_seqlens[s]) // 2`` (int32 ``[S + 1]``), by one CTA that walks the
-  documents in tiles with a carried running total.
-* ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
+* ``pair_table`` and ``pair_table_small``: the exclusive prefix of the pair
+  counts, ``cu_pairs[0] = 0`` and ``cu_pairs[s + 1] = cu_pairs[s] +
+  (cu_seqlens[s + 1] - cu_seqlens[s]) // 2`` (int32 ``[S + 1]``), by one CTA
+  that walks the documents in passes with a carried running total:
+  ``pair_table`` in passes of 8192 documents (1024 threads of 8),
+  ``pair_table_small`` in passes of 256 (256 threads of one), the faster for
+  one or two passes.  A pair-table launch of ``S <= small_docs`` documents
+  (:func:`small_docs`, 512) runs ``pair_table_small``, of more ``pair_table``;
+  both write the same bytes.  A forward launches a pair table only for
+  ``S > fuse_docs`` (:func:`fuse_docs`); an explicit backward without a table
+  launches one for every ``S``.
+* ``fwd`` and ``fwd_unfused``: the forward.  A launch of ``S <= fuse_docs``
+  documents runs ``fwd``, of more ``fwd_unfused``; both write the same bytes.
+  ``fwd``: one row of 512 columns per output row ``r < G``: the document ``s``
   of ``r`` by a binary search of ``cu_pairs``, the tokens
   ``t0 = cu_seqlens[s] + 2 (r - cu_pairs[s])`` and ``t1 = t0 + 1``, and
   ``out[r] = BF16(softmax-weighted sum of C[t0], C[t1])`` in FP32.  A row
   ``r >= cu_pairs[S]`` (a caller ``G`` above the pair count) is stored as
-  zeros and reads nothing.  The role has two records, one kernel with two
-  schedules, each the faster on its architectures: ``fwd`` on ``sm_100a``
-  and ``sm_103a`` reads ``C`` and ``Z`` in 128-bit lanes (4 FP32 channels,
-  128 lanes a row); ``fwd_sm_107a`` on ``sm_107a`` reads them in 256-bit
-  lanes (8 channels, 64 lanes a row), with the same FP32 operations per
-  element.
-* ``bwd``: virtual rows ``v < G + S``.  Row ``v < G`` is pair ``v``: it writes
-  the ``dC`` and ``dZ`` rows of ``t0`` and ``t1`` (nothing for a pair
-  ``v >= cu_pairs[S]``).  Row ``v >= G`` is document ``s = v - G``: when its
-  length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its last
-  token.  Every token row below ``cu_seqlens[S]`` is written exactly once.
+  zeros and reads nothing.  A launch of ``S <= fuse_docs`` documents (the
+  record's ``fuse_docs`` leaf) builds the pair table itself and does not
+  search: row ``r``'s ``t0`` is ``cu_seqlens[0] + 2 r`` plus the number of
+  odd-length documents before ``r``'s document, counted from ``cu_seqlens``.
+  It reads no entry of ``cu_pairs``, and CTA 0 writes all ``S + 1`` entries,
+  the bytes ``pair_table`` writes, for the backward.  ``fwd_unfused`` is the
+  same forward without the table build: it searches the table the pair table
+  wrote, a declared read-only input, and is no slower for a pack of more
+  than ``fuse_docs`` documents.  Each forward role has two records, one
+  kernel with two schedules, each the faster on its architectures: ``fwd``
+  and ``fwd_unfused`` on ``sm_100a`` and ``sm_103a`` read ``C`` and ``Z`` in
+  128-bit lanes (4 FP32 channels, 128 lanes a row); ``fwd_sm_107a`` and
+  ``fwd_unfused_sm_107a`` on ``sm_107a`` read them in 256-bit lanes (8
+  channels, 64 lanes a row), with the same FP32 operations per element.
+* ``bwd`` and ``bwd_small``: the backward.  Virtual rows ``v < G + S``.  Row
+  ``v < G`` is pair ``v``: it writes the ``dC`` and ``dZ`` rows of ``t0`` and
+  ``t1`` (nothing for a pair ``v >= cu_pairs[S]``), its document ``s`` by a
+  binary search of ``cu_pairs``.  Row ``v >= G`` is document ``s = v - G``:
+  when its length is odd it stores +0.0 into the ``dC`` and ``dZ`` rows of its
+  last token.  Every token row below ``cu_seqlens[S]`` is written exactly
+  once.  One kernel with two searches: ``bwd`` on ``sm_100a`` and ``sm_103a``
+  searches a launch of ``S <= 16384`` documents in two levels (each CTA with
+  pair rows copies every 16th entry of ``cu_pairs`` to shared memory, and a
+  row picks its window of 16 entries there and searches only that window of
+  ``cu_pairs``); ``bwd_sm_107a`` on ``sm_107a`` searches all of ``cu_pairs``
+  in one level, and so does ``bwd_small``, the same program, on ``sm_100a``
+  and ``sm_103a``.  A backward launch of ``S <= bwd_small_docs`` documents
+  (:func:`bwd_small_docs`, 26 on ``sm_100a`` and ``sm_103a``) runs
+  ``bwd_small``, of more ``bwd``; ``bwd_small`` serves ``sm_100a`` and
+  ``sm_103a`` only (``ROLE_ARCHES``), since on ``sm_107a`` ``bwd`` is that
+  program for every launch.  Both searches find the same document for every
+  row, so both backwards write the same bytes.
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
@@ -82,9 +113,15 @@ PACKAGE = "cake_pplx._backends.cake_gated_kv_compression_det_train"
 LIBRARY_PREFIX = "cake_gated_kv_compression_det_train"
 MANIFEST = "build.json"
 
-# The roles of the package's programs, in launch order (the pair table first, then the forward or the backward).  Every
-# role is served on every architecture by exactly one record of MODULES (``role_record``).
-ROLES = ("pair_table", "fwd", "bwd")
+# The roles of the package's programs, in launch order (a pair table first, ``pair_table_small`` for at most
+# ``small_docs`` documents and ``pair_table`` for more, then the forward, ``fwd`` for at most ``fuse_docs`` documents
+# and ``fwd_unfused`` for more, or the backward, ``bwd_small`` for at most ``bwd_small_docs`` documents and ``bwd`` for
+# more).  Every role is served on every architecture of ROLE_ARCHES (of ARCHES for a role it does not name) by exactly
+# one record of MODULES (``role_record``).
+ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small")
+# Role -> the architectures it is served on, for a role not served on every architecture: ``bwd_small`` on sm_100a
+# and sm_103a only, since on sm_107a ``bwd`` is the one-level program for every launch.
+ROLE_ARCHES: dict[str, tuple[str, ...]] = {"bwd_small": ("sm_100a", "sm_103a")}
 GRID_KINDS = ("one_cta", "rows")
 
 # Columns of C, Z, dC, dZ, out and dout; ``cz`` holds C in columns [0, 512) and Z in [512, 1024).
@@ -118,10 +155,36 @@ MAX_DOCS = 1 << 24
 MAX_TOKENS = INT32_MAX
 
 # The derived leaves of every record (``library``, ``kernel_symbol``, ``launch.block``, ``launch.cluster``,
-# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``) are rewritten by the
-# generator from the rendered program; every other field is host plan.
+# ``launch.cooperative``, ``launch.dynamic_smem_bytes``, ``launch.use_pdl`` and ``arg_plan``), the ``fuse_docs`` of
+# the ``fwd`` records (the most documents a forward launch builds the pair table for), the ``small_docs`` of
+# ``pair_table_small`` (the most documents a pair-table launch runs it for) and the ``bwd_small_docs`` of ``bwd_small``
+# (the most documents a backward launch runs it for) are rewritten by the generator; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "one_cta"},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_8997a924b74a8200ddac",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_8997a924b74a8200ddac",
+        "role": "pair_table",
+    },
+    "pair_table_small": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
         "arg_plan": [
             ["buffer", "cu_seqlens"],
@@ -143,9 +206,72 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_68cbef2c67f1d183366f",
-        "role": "pair_table",
+        "role": "pair_table_small",
+        "small_docs": 512,
     },
     "fwd": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "fuse_docs": 256,
+        "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_748a06110130c8ab8ec4",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_748a06110130c8ab8ec4",
+        "role": "fwd",
+    },
+    "fwd_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "fuse_docs": 256,
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_3bf8a60e0ac13a63d496",
+        "role": "fwd",
+    },
+    "fwd_unfused": {
         "arches": ["sm_100a", "sm_103a"],
         "arg_plan": [
             ["buffer", "c"],
@@ -173,9 +299,9 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_0ef98d6170a08bd594f9",
-        "role": "fwd",
+        "role": "fwd_unfused",
     },
-    "fwd_sm_107a": {
+    "fwd_unfused_sm_107a": {
         "arches": ["sm_107a"],
         "arg_plan": [
             ["buffer", "c"],
@@ -203,10 +329,44 @@ MODULES: dict[str, dict[str, Any]] = {
             "use_pdl": "runtime",
         },
         "library": "cake_gated_kv_compression_det_train_4996bf21a2138f378939",
-        "role": "fwd",
+        "role": "fwd_unfused",
     },
     "bwd": {
-        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_857e5499b5edd675ffd3",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 4096,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_857e5499b5edd675ffd3",
+        "role": "bwd",
+    },
+    "bwd_sm_107a": {
+        "arches": ["sm_107a"],
         "arg_plan": [
             ["buffer", "dout"],
             ["buffer", "c"],
@@ -238,6 +398,41 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
         "role": "bwd",
+    },
+    "bwd_small": {
+        "arches": ["sm_100a", "sm_103a"],
+        "arg_plan": [
+            ["buffer", "dout"],
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "dc"],
+            ["buffer", "dz"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["parameter", "dc_ld"],
+            ["parameter", "dz_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "bwd_small_docs": 26,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_0a0e2df45d6eb8316daf",
+        "role": "bwd_small",
     },
 }
 
@@ -273,6 +468,32 @@ def role_record(role: str, arch: str) -> str:
         if found["role"] == role and arch in found["arches"]:
             return name
     raise KeyError(f"no record of the Cake gated KV compression registry serves role {role!r} on {arch}")
+
+
+@functools.cache
+def small_docs(arch: str) -> int:
+    """The most documents a pair-table launch on ``arch`` runs ``pair_table_small`` for (the ``small_docs`` leaf of
+    the record serving that role on ``arch``); a launch of more documents runs ``pair_table``.  Cached per
+    architecture."""
+    return int(record(role_record("pair_table_small", arch))["small_docs"])
+
+
+@functools.cache
+def bwd_small_docs(arch: str) -> int:
+    """The most documents a backward launch on ``arch`` runs ``bwd_small`` for (the ``bwd_small_docs`` leaf of the
+    record serving that role on ``arch``; 0 on an architecture outside the role's ``ROLE_ARCHES``, where no record
+    serves it): a launch of more documents runs ``bwd``.  Cached per architecture."""
+    if arch not in ROLE_ARCHES["bwd_small"]:
+        return 0
+    return int(record(role_record("bwd_small", arch))["bwd_small_docs"])
+
+
+@functools.cache
+def fuse_docs(arch: str) -> int:
+    """The most documents a forward launch on ``arch`` builds the pair table for itself (the ``fuse_docs`` leaf of the
+    ``fwd`` record serving ``arch``; 0 when the record has none): the host launches ``fwd`` for at most that many
+    documents, and for more a pair table then ``fwd_unfused``.  Cached per architecture."""
+    return int(record(role_record("fwd", arch)).get("fuse_docs", 0))
 
 
 def record(name: str) -> dict[str, Any]:
@@ -360,6 +581,7 @@ def launch_grid(name: str, rows: int) -> tuple[int, int, int]:
 
 _TVM_FFI: Any = None
 _TVM_DEVICES: dict[int, Any] = {}
+_RAW_STREAM: Any = None
 
 
 def _tvm_ffi() -> Any:
@@ -378,43 +600,96 @@ def _tvm_device(device_index: int) -> Any:
     return found
 
 
+def _raw_stream(device_index: int) -> int:
+    """The handle of torch's current stream on CUDA device ``device_index``: the value of
+    ``torch.cuda.current_stream(device_index).cuda_stream``, read through ``torch._C._cuda_getCurrentRawStream`` when
+    torch has it (no stream object is made)."""
+    global _RAW_STREAM
+    if _RAW_STREAM is None:
+        import torch  # noqa: PLC0415
+
+        raw = getattr(torch._C, "_cuda_getCurrentRawStream", None)
+        _RAW_STREAM = raw if raw is not None else lambda index: torch.cuda.current_stream(index).cuda_stream
+    return _RAW_STREAM(device_index)
+
+
+_GRID_AXES = ("grid_x", "grid_y", "grid_z")
+
+
+@functools.cache
+def _launch_plan(name: str) -> tuple[int, tuple[tuple[int, Any, str], ...]]:
+    """``(per, slots)`` of record ``name``, made once per process (the records are constant).  ``per`` is
+    :func:`rows_per_cta` for a ``rows`` grid rule and 0 for a ``one_cta`` rule, so the grid of ``rows`` rows is
+    :func:`launch_grid`'s.  ``slots`` is the argument plan in ``run`` order: ``(0, axis, key)`` for a grid dimension
+    (``axis`` 0, 1 or 2), ``(1, key, key)`` for a launch option and ``(2, name in values, key)`` for a kernel
+    parameter (through the record's ``logical`` map)."""
+    found = record(name)
+    kind = found["grid_rule"]["kind"]
+    if kind == "one_cta":
+        per = 0
+    elif kind == "rows":
+        per = rows_per_cta(name)
+    else:
+        raise ValueError(f"unknown Cake gated KV compression grid rule {kind!r} (known: {GRID_KINDS})")
+    logical = found.get("logical", {})
+    slots: list[tuple[int, Any, str]] = []
+    for kind, key in found["arg_plan"]:
+        if kind == "grid":
+            slots.append((0, _GRID_AXES.index(key), key))
+        elif kind == "launch":
+            slots.append((1, key, key))
+        else:
+            slots.append((2, logical.get(key, key), key))
+    return per, tuple(slots)
+
+
+@functools.cache
+def _libraries(arch: str) -> None:
+    """Load the library of every role of :data:`ROLES` served on ``arch`` (:data:`ROLE_ARCHES`), once per process.
+    The pair table, the forward and the backward of a launch depend on its document count, so loading only the records
+    a first call launched would leave ``pair_table``, ``fwd_unfused`` or ``bwd`` to load (or build) at the first pack
+    of more than ``small_docs``, ``fuse_docs`` or ``bwd_small_docs`` documents, possibly inside a CUDA graph
+    capture."""
+    for role in ROLES:
+        if arch in ROLE_ARCHES.get(role, ARCHES):
+            load(role_record(role, arch), arch)
+
+
 @functools.cache
 def _entry(name: str, arch: str) -> Any:
-    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process)."""
+    """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process).  The first lookup on
+    ``arch`` loads every library of that architecture (:func:`_libraries`), so later calls of any shape load none."""
+    _libraries(arch)
     return getattr(load(name, arch), record(name)["ffi_entry"])
 
 
-def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int) -> None:
+def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int, arch: str | None = None) -> None:
     """Launch the record serving ``role`` on the architecture of device ``device_index`` (:func:`role_record`) with
     its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives ``rows``, on the current torch
-    stream of that device.
+    stream of that device.  ``arch``: that architecture when the caller has looked it up
+    (``device_arch(device_index)``); ``None`` looks it up here.
 
     ``values`` maps the kernel parameter names of the record (through its ``logical`` map when the record has one) to
     tensors and Python scalars.  A ``["launch", "enable_pdl"]`` entry of the argument plan (a binding whose PDL launch
-    is chosen per call, an int64 host parameter) gets ``1`` unless ``values`` sets it.  Nothing here reads device
-    memory or synchronizes."""
-    import torch  # noqa: PLC0415
-
-    arch = device_arch(device_index)
+    is chosen per call, an int64 host parameter) gets ``1`` unless ``values`` sets it.  The record's argument plan and
+    grid rule are read once per process (:func:`_launch_plan`).  Nothing here reads device memory or synchronizes."""
+    if arch is None:
+        arch = device_arch(device_index)
     name = role_record(role, arch)
-    found = record(name)
-    logical = found.get("logical", {})
-    grid = launch_grid(name, rows)
-    axes = {"grid_x": grid[0], "grid_y": grid[1], "grid_z": grid[2]}
-    args = []
-    for kind, key in found["arg_plan"]:
-        if kind == "grid":
-            args.append(axes[key])
-        elif kind == "launch":
-            args.append(int(bool(values.get(key, True))))
-        else:
-            want = logical.get(key, key)
-            if want not in values:
-                raise ValueError(f"record {name} needs {want!r} (kernel parameter {key!r})")
-            args.append(values[want])
+    per, slots = _launch_plan(name)
+    grid = (max(1, -(-int(rows) // per)) if per else 1, 1, 1)
+    try:
+        args = [
+            grid[slot] if kind == 0 else values[slot] if kind == 2 else int(bool(values.get(slot, True)))
+            for kind, slot, _ in slots
+        ]
+    except KeyError:
+        for kind, slot, key in slots:
+            if kind == 2 and slot not in values:
+                raise ValueError(f"record {name} needs {slot!r} (kernel parameter {key!r})") from None
+        raise
     run = _entry(name, arch)
-    stream = torch.cuda.current_stream(device_index).cuda_stream
-    with _tvm_ffi().use_raw_stream(_tvm_device(device_index), stream):
+    with _tvm_ffi().use_raw_stream(_tvm_device(device_index), _raw_stream(device_index)):
         run(*args)
 
 
@@ -433,10 +708,13 @@ __all__ = [
     "MODULES",
     "PACKAGE",
     "ROLES",
+    "ROLE_ARCHES",
     "ROW_STRIDE_MULTIPLE",
     "WIDTH",
     "arch_for_capability",
+    "bwd_small_docs",
     "device_arch",
+    "fuse_docs",
     "launch_grid",
     "library_name",
     "load",
@@ -445,5 +723,6 @@ __all__ = [
     "role_record",
     "rows_per_cta",
     "run_module",
+    "small_docs",
     "specs_for_arch",
 ]

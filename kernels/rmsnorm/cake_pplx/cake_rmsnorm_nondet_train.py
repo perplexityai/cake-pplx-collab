@@ -144,9 +144,10 @@ waits (``cake_windows.SMEM_SIDE_KB``: the sizes measured).  Programs that need a
 whole SM wait beside any kernel resident on every SM, whatever its carveout: the
 deterministic package's whole-SM programs where this package runs them -- the
 residual-fused hidden 6144 backward in its deterministic-pair windows, and on
-R200 (``sm_107a``) the backward of hidden 1536 and 4096 above 1024 tokens and of
-hidden 2048 above 256 tokens in deterministic-pair windows (FP32-weight twins
-included) and the forward of hidden 6144 above 4096 tokens.
+R200 (``sm_107a``) the backward of hidden 1536 above 12288 tokens, of hidden
+4096 above 1024 tokens and of hidden 2048 above 256 up to 1024 tokens and above
+16384 tokens in deterministic-pair windows (FP32-weight twins included) and the
+forward of hidden 6144 above 4096 tokens.
 ``cake_windows.WHOLE_SM`` and the backend's forward and backward notes list them
 per architecture, route and token range; no single-kernel window of this
 package needs a whole SM at the token counts measured (256 to 16384).  Beside

@@ -74,8 +74,11 @@ WIDTHS = (
     (4096, 1e-5),
     (2048, 1e-6),
     (1536, 1e-6),
+    (1280, 1e-20),
+    (1024, 1e-6),
     (512, 1e-6),
     (256, 1e-6),
+    (128, 1e-20),
 )
 EPS = {hidden: eps for hidden, eps in WIDTHS}
 # (hidden, residual): every backward route of the package.
@@ -285,18 +288,28 @@ MAX_ALL_SM_EXTRA_MS = 1.0
 MIN_WAIT_MS = 0.5 * ALL_SM_SPIN_MS
 # cudaSharedmemCarveoutMaxShared
 CARVEOUT_MAX_SHARED = 100
-# The calls that need a whole SM, with BF16 and FP32 weights alike (the facade's
-# per-architecture list): arch -> (kind, hidden, residual, above), every window
-# of the route above ``above`` tokens (none on sm_100a / sm_103a).
+# The calls that need a whole SM (the facade's per-architecture list): arch ->
+# (kind, hidden, residual, above, at_most), every window of the route above
+# ``above`` tokens and, when ``at_most`` is not None, up to ``at_most`` tokens,
+# with BF16 and FP32 weights alike (none on sm_100a / sm_103a), but those of
+# ``WHOLE_SM_STARTS``.
 WHOLE_SM = {
     "sm_100a": (),
     "sm_103a": (),
     "sm_107a": (
-        ("bwd", 1536, False, 1024),
-        ("bwd", 2048, False, 256),
-        ("bwd", 4096, False, 1024),
-        ("fwd", 6144, False, 4096),
+        ("bwd", 1536, False, 12288, None),
+        ("bwd", 2048, False, 256, 1024),
+        ("bwd", 2048, False, 16384, None),
+        ("bwd", 4096, False, 1024, None),
+        ("fwd", 6144, False, 4096, None),
     ),
+}
+# The windows of a ``WHOLE_SM`` route that start all the same with one weight
+# dtype (the facade's "except" clause): arch -> (kind, hidden, residual, w dtype,
+# above, at_most).  SM107 H 4096 with BF16 weights runs a program that holds
+# part of an SM from 24064 to 50176 tokens.
+WHOLE_SM_STARTS = {
+    "sm_107a": (("bwd", 4096, False, "bf16", 24064, 50176),),
 }
 # The largest dynamic shared memory (bytes) one resident CTA per SM may hold
 # while every call outside ``WHOLE_SM`` still starts beside it (the facade's
@@ -313,11 +326,28 @@ def _arch() -> str:
 
 
 def _needs_whole_sm(
-    arch: str, kind: str, hidden: int, residual: bool, above: int
+    arch: str,
+    kind: str,
+    hidden: int,
+    residual: bool,
+    w_dtype: str,
+    above: int,
+    at_most: int | None,
 ) -> bool:
-    """Whether the window starting above ``above`` tokens is in ``WHOLE_SM``."""
-    return any(
-        (kind, hidden, residual) == entry[:3] and above >= entry[3]
+    """Whether the window ``(above, at_most]`` (``at_most`` None: unbounded) of
+    ``w_dtype`` is in ``WHOLE_SM`` and not in ``WHOLE_SM_STARTS``: it starts at
+    or above an entry's ``above`` and, for an entry with an ``at_most``, ends at
+    or below it."""
+    starts = any(
+        (kind, hidden, residual, w_dtype) == entry[:4]
+        and entry[4] <= above
+        and (entry[5] is None or above < entry[5])
+        for entry in WHOLE_SM_STARTS.get(arch, ())
+    )
+    return not starts and any(
+        (kind, hidden, residual) == entry[:3]
+        and above >= entry[3]
+        and (entry[4] is None or (at_most is not None and at_most <= entry[4]))
         for entry in WHOLE_SM.get(arch, ())
     )
 
@@ -547,8 +577,8 @@ def _beside(spin: _AllSmSpin) -> tuple[list[tuple], list[tuple]]:
 
 
 def _listed(window: tuple) -> bool:
-    kind, hidden, residual, _w_dtype, above, _at_most, _rows = window
-    return _needs_whole_sm(_arch(), kind, hidden, residual, above)
+    kind, hidden, residual, w_dtype, above, at_most, _rows = window
+    return _needs_whole_sm(_arch(), kind, hidden, residual, w_dtype, above, at_most)
 
 
 def test_calls_beside_an_all_sm_kernel_with_the_max_shared_carveout() -> None:

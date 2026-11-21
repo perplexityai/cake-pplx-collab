@@ -55,14 +55,14 @@
     }
   },
   "generator": {
-    "cake_revision": "6999002c6fb6bd5cc4cce7c7fb536d8bdcc8b7ec",
+    "cake_revision": "1a8ed121d60ebbafd1f13bd2d32f4377b37dbafc",
     "cuda": "13.5.37",
-    "rendered_at": "2026-11-18T13:02:48Z"
+    "rendered_at": "2026-11-20T15:20:57Z"
   },
   "libraries": [
     {
       "arch": "sm_100a",
-      "closure_sha256": "013f3dd02b77f67e3f666325a0e62cb1ef80fb089d8530bb925d240a107d6de5",
+      "closure_sha256": "25aadfac8a4925983edda5549515be2ee30d85e8ab03b9af489d6cd8e974d93f",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
@@ -72,7 +72,7 @@
       "path": "aot/cake_engram_gate_train_1857a748ab0245abafbe_sm_100a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_binding.cu": "99eff3fd768b7a8891c79c7ec1261ed458d96296169656753aa02e071ef5690a",
-        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "29f9e90d4fd968b3447ee834fa20afe1017e5fecf5d5d6302e2e9f7d922ccb9e"
+        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "87fa915c170bc4dd8d4fcc464fdb6b0a014a29455630da144b692bc8750b0cb0"
       },
       "sources": [
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu",
@@ -81,7 +81,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "f6d0fa96a4ddbb7a936ece77ec88d3e9e3b0f8d6ff44d2e299dc5e420849ff11",
+      "closure_sha256": "dd6b551c4fd7aff559ae5a87a41dce02e6b419a94967a796212b8de735121cf9",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -91,7 +91,7 @@
       "path": "aot/cake_engram_gate_train_1857a748ab0245abafbe_sm_103a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_binding.cu": "99eff3fd768b7a8891c79c7ec1261ed458d96296169656753aa02e071ef5690a",
-        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "29f9e90d4fd968b3447ee834fa20afe1017e5fecf5d5d6302e2e9f7d922ccb9e"
+        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "87fa915c170bc4dd8d4fcc464fdb6b0a014a29455630da144b692bc8750b0cb0"
       },
       "sources": [
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu",
@@ -100,7 +100,7 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "f649bbe4faeed1618de30180ac5e7a2313900512edd2d5e0fe3f1c8b0a6f6b3b",
+      "closure_sha256": "ffec15d9d4057053e8f951a2b17b02bfa797b534732c8f91a36f61b021b51cf6",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
@@ -110,7 +110,7 @@
       "path": "aot/cake_engram_gate_train_1857a748ab0245abafbe_sm_107a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_binding.cu": "99eff3fd768b7a8891c79c7ec1261ed458d96296169656753aa02e071ef5690a",
-        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "29f9e90d4fd968b3447ee834fa20afe1017e5fecf5d5d6302e2e9f7d922ccb9e"
+        "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu": "87fa915c170bc4dd8d4fcc464fdb6b0a014a29455630da144b692bc8750b0cb0"
       },
       "sources": [
         "csrc/cake_engram_gate_train_1857a748ab0245abafbe_kernel.cu",
@@ -119,64 +119,64 @@
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "e92b76640ebb1875cf7ac6d4f931decd5b45065e81697d100ff5e62311e70187",
+      "closure_sha256": "addc0bfbe5654ab99b0ccd969417bb06fd5f1be4d05b58c08e2b3b3857d468b5",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
-      "name": "cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_100a",
+      "name": "cake_engram_gate_train_638509badcd8ffb2085c_sm_100a",
       "nvcc_flags": [],
       "nvcc_flags_if": [],
-      "path": "aot/cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_100a.so",
+      "path": "aot/cake_engram_gate_train_638509badcd8ffb2085c_sm_100a.so",
       "sha256": {
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu": "10298b4d25e03fcf10712c78ec2ddb12f311dfe4fbee0da62f87412b8bda3934",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu": "14a46cbc686e44f887e6b216ea1e0095109c1b9cb9c4112b7779e50daa432812"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu": "82865831f4aa08d2dcde564e55c6f4eec563bdf7b29cbac2098abda0f510136b",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu": "e22735f16b86722bb021ff0a60c24352b455fae707c4c9bca9f418bf01a17e3c"
       },
       "sources": [
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu"
       ]
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "f7f2679993a9e402f8a63ad57b2b566a0852b0bf55c03a9959f5b60392f149ea",
+      "closure_sha256": "faf13266d0f36e5bb7435378aeced84926f4a28f20b70cc5d0122ea07c8e2324",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
-      "name": "cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_103a",
+      "name": "cake_engram_gate_train_638509badcd8ffb2085c_sm_103a",
       "nvcc_flags": [],
       "nvcc_flags_if": [],
-      "path": "aot/cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_103a.so",
+      "path": "aot/cake_engram_gate_train_638509badcd8ffb2085c_sm_103a.so",
       "sha256": {
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu": "10298b4d25e03fcf10712c78ec2ddb12f311dfe4fbee0da62f87412b8bda3934",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu": "14a46cbc686e44f887e6b216ea1e0095109c1b9cb9c4112b7779e50daa432812"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu": "82865831f4aa08d2dcde564e55c6f4eec563bdf7b29cbac2098abda0f510136b",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu": "e22735f16b86722bb021ff0a60c24352b455fae707c4c9bca9f418bf01a17e3c"
       },
       "sources": [
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu"
       ]
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "70f9b9edc232aebfc17c52bcf53c0af538fe016045ddfc3a0e4a5526a2d9157a",
+      "closure_sha256": "c79944e2c4737d14b40c4aa1cbc5b302255e090127a63a9027e389b9f90440eb",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
-      "name": "cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_107a",
+      "name": "cake_engram_gate_train_638509badcd8ffb2085c_sm_107a",
       "nvcc_flags": [],
       "nvcc_flags_if": [],
-      "path": "aot/cake_engram_gate_train_a8cb26cf619ca16fe4c9_sm_107a.so",
+      "path": "aot/cake_engram_gate_train_638509badcd8ffb2085c_sm_107a.so",
       "sha256": {
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu": "10298b4d25e03fcf10712c78ec2ddb12f311dfe4fbee0da62f87412b8bda3934",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu": "14a46cbc686e44f887e6b216ea1e0095109c1b9cb9c4112b7779e50daa432812"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu": "82865831f4aa08d2dcde564e55c6f4eec563bdf7b29cbac2098abda0f510136b",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu": "e22735f16b86722bb021ff0a60c24352b455fae707c4c9bca9f418bf01a17e3c"
       },
       "sources": [
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_kernel.cu",
-        "csrc/cake_engram_gate_train_a8cb26cf619ca16fe4c9_binding.cu"
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_kernel.cu",
+        "csrc/cake_engram_gate_train_638509badcd8ffb2085c_binding.cu"
       ]
     },
     {
       "arch": "sm_100a",
-      "closure_sha256": "9cabc4684bce672f73c739a419336f60b88ca056ac3edd6a317451929744a111",
+      "closure_sha256": "cca9fbb928edbac4bab071307bf748b84a8fb280848291f5a1db49c0ac2faf23",
       "entry": "run",
       "gencode": "-gencode=arch=compute_100a,code=sm_100a",
       "min_cuda": "12.8",
@@ -186,7 +186,7 @@
       "path": "aot/cake_engram_gate_train_d68e1766584b775b8f3f_sm_100a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_binding.cu": "ff1f40a4b8edc81b1a77c92c31b5c61e6e3abd57b3a8bb5f95f1dba34123fd16",
-        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "c8a2f0b7f4758401cdc2e1bb89694c2848fafc66e54eca2b7bfa39c0a7884e94"
+        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "58ea3870f7690f4d72a257d53d4293e5dc95a405002889ee47fea93ccf1e7912"
       },
       "sources": [
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu",
@@ -195,7 +195,7 @@
     },
     {
       "arch": "sm_103a",
-      "closure_sha256": "a9ed8df035684069cee1cfa8da050af15d43fe658d6fd0f8b113fc0acb2945af",
+      "closure_sha256": "a305cff7b8581996782d99035ffe29d5c8256eb08bd69640d8d510b2c540d4ed",
       "entry": "run",
       "gencode": "-gencode=arch=compute_103a,code=sm_103a",
       "min_cuda": "12.9",
@@ -205,7 +205,7 @@
       "path": "aot/cake_engram_gate_train_d68e1766584b775b8f3f_sm_103a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_binding.cu": "ff1f40a4b8edc81b1a77c92c31b5c61e6e3abd57b3a8bb5f95f1dba34123fd16",
-        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "c8a2f0b7f4758401cdc2e1bb89694c2848fafc66e54eca2b7bfa39c0a7884e94"
+        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "58ea3870f7690f4d72a257d53d4293e5dc95a405002889ee47fea93ccf1e7912"
       },
       "sources": [
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu",
@@ -214,7 +214,7 @@
     },
     {
       "arch": "sm_107a",
-      "closure_sha256": "430e38c65df982af9abf60edbcaab068a4b0084b209574f9337da66e30d826ab",
+      "closure_sha256": "af103954fa7183d12196677dab7349d77ee1de5cc5f34cac7e50910305ec2cd8",
       "entry": "run",
       "gencode": "-gencode=arch=compute_107a,code=sm_107a",
       "min_cuda": "13.5",
@@ -224,7 +224,7 @@
       "path": "aot/cake_engram_gate_train_d68e1766584b775b8f3f_sm_107a.so",
       "sha256": {
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_binding.cu": "ff1f40a4b8edc81b1a77c92c31b5c61e6e3abd57b3a8bb5f95f1dba34123fd16",
-        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "c8a2f0b7f4758401cdc2e1bb89694c2848fafc66e54eca2b7bfa39c0a7884e94"
+        "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu": "58ea3870f7690f4d72a257d53d4293e5dc95a405002889ee47fea93ccf1e7912"
       },
       "sources": [
         "csrc/cake_engram_gate_train_d68e1766584b775b8f3f_kernel.cu",

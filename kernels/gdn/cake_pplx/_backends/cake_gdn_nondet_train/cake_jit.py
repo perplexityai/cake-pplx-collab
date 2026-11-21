@@ -62,10 +62,11 @@ over the two value halves, two CTAs per segment and value head; the same
 bits; on ``sm_107a`` record ``fwd_ho_vh2_sm_107a``, on ``sm_100a`` and
 ``sm_103a``, which never run it, the ``fwd_ho`` program), ``fwd_ho_a`` (the
 fused scan and output on ``wy_a``'s A, qn and kn: u and w formed in the CTA,
-the h / v_new / w tapes by its ``tape`` word), ``fwd_fused`` (the fused scan
-and output on the WY stage's w / u, both waves of the split forward: the first
-pieces' end states into the stitch's segment state by ``split_out``, the h /
-v_new tapes by its ``tape`` word), ``dv_local``, the adjoint register scans
+u kept in FP32, the h / v_new / w tapes by its ``tape`` word), ``fwd_fused``
+(the fused scan and output on the WY stage's w / u, both waves of the split
+forward: the first pieces' end states into the stitch's segment state by
+``split_out``, the h / v_new tapes by its ``tape`` word), ``dv_local``, the
+adjoint register scans
 ``dhu_r<vb>k<ks>`` with their pre-scans, ``dhu_pre_dvl_r64k1`` (the ``(64, 1)``
 pre-scan with the ``dv_local`` tiles of its chunks computed in the CTA) and
 ``dhu_pre_dvl32_r64k1`` (the same pre-scan adding its FP32 ``dv_local`` tiles
@@ -1016,7 +1017,7 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_z"],
         ],
         "ffi_entry": "run",
-        "kernel_symbol": "kernel_cake_gdn_train_aa4bcb291b491239d72c",
+        "kernel_symbol": "kernel_cake_gdn_train_734e5972d5b3478964d5",
         "launch": {
             "block": (512, 1, 1),
             "cluster": (1, 1, 1),
@@ -1024,7 +1025,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "dynamic_smem_bytes": 227840,
             "use_pdl": False,
         },
-        "library": "cake_gdn_train_aa4bcb291b491239d72c",
+        "library": "cake_gdn_train_734e5972d5b3478964d5",
         "stage": "fwd_ho_a",
     },
     "fwd_fused": {

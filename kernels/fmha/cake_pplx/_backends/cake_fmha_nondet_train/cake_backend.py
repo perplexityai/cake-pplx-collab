@@ -18,11 +18,12 @@ Loader, checks and launches of the Cake dense multi-head attention backward
 
 The registry (:mod:`.cake_jit`) is data plus the host plan: ``MODULES`` holds
 one record per program (its ``library`` stem; the ``build.json`` entries are
-``<library>_<arch>``), ``RECORD_OF`` the three records of each variant and
-:func:`.cake_jit.grid` the launch grids.  :mod:`.cake_build` serves a library
-from a prebuilt ``aot/`` file when a builder compiled it and otherwise
-through the package's JIT build shim (``_cake_pplx_jit.py``) from the sources
-and flags of ``build.json``.
+``<library>_<arch>``), ``RECORD_OF`` the three records of each variant,
+``SEQUENCES`` the host sequence of each variant (its ``library`` stem and
+records) and :func:`.cake_jit.grid` the launch grids.  :mod:`.cake_build`
+serves a library from a prebuilt ``aot/`` file when a builder compiled it and
+otherwise through the package's JIT build shim (``_cake_pplx_jit.py``) from the
+sources and flags of ``build.json``.
 
 One backward call runs three kernels on the current torch stream of the
 operands' device, in this order:
@@ -34,10 +35,29 @@ operands' device, in this order:
    the dQ tiles added into the FP32 accumulator by bulk reductions.
 3. ``bwd_post``: ``dq = bf16(acc * softmax_scale)`` in the layout of ``q``.
 
+A head-dimension 128 call whose key length is a multiple of 256, with at least
+as many queries as keys, takes the pair route where a region of
+``cake_jit.PAIR_REGIONS`` for its architecture and mask holds its ``B * H`` and
+key length (long sequences; :func:`.cake_jit.variant` picks the ``RECORD_OF``
+variant): its main stage is the 2-CTA kernel, one CTA pair per 256 keys, which
+adds the dQ tiles in the pair-row order, and its postprocess is the build that
+reads that order.  The kernel parameters, grids and workspace are the same on
+both routes.
+
+The backward runs the three launches in one host call: the library of the
+variant's host sequence compiles the three kernel units beside a host unit
+that launches them in order, with the arguments and grids of the stage
+launchers, and takes ``lse_log2``, ``dpsum`` and ``dq_accum`` from the tvm-ffi
+environment allocator (PyTorch's caching allocator, on the current stream).
+Without an environment allocator the backward allocates them and passes them
+in.  The stage launchers ``launch_bwd_pre``, ``launch_bwd_main`` and
+``launch_bwd_post`` launch one stage each.
+
 Every launch is a plain stream-ordered launch: nothing cooperative, no PDL, no
-co-residency requirement.  Nothing here reads an environment variable, reads
-device memory or synchronizes; grids and buffer sizes come from tensor
-shapes.
+co-residency requirement beyond the clusters of two CTAs of the pair route's
+main kernel, which the launch itself schedules together.  Nothing here
+reads an environment variable, reads device memory or synchronizes; grids and
+buffer sizes come from tensor shapes.
 
 This is the non-deterministic package of its family, and the family has no
 deterministic package: the dQ tiles of the key blocks of one head reach the
@@ -189,6 +209,32 @@ def parameters(name: str) -> tuple[str, ...]:
 def _entry(name: str, arch: str) -> Any:
     """The FFI entry of record ``name`` in its ``arch`` library (looked up once per process)."""
     return getattr(load(name, arch), record(name)["ffi_entry"])
+
+
+@functools.cache
+def _sequence(variant: tuple[int, bool, bool], arch: str) -> Optional[tuple[Any, Any, Any]]:
+    """``(library, run, run_with_workspace)`` of the host sequence of ``variant`` (a ``RECORD_OF`` key ``(D, causal,
+    pair)``, :func:`.cake_jit.variant`) built for ``arch`` (looked up once per process), or ``None`` when
+    ``SEQUENCES`` has none for the variant on ``arch``; the backward then launches through the stage launchers.
+
+    The library compiles the variant's three kernel units beside one host unit.  ``run(q, k, v, out, lse, dout, dq,
+    dk, dv, softmax_scale, softmax_scale_log2)`` launches the records ``RECORD_OF`` names for the variant, in order,
+    with the arguments and grids of their stage launchers, in one host call; ``lse_log2``, ``dpsum`` and ``dq_accum``
+    come from the tvm-ffi environment allocator (PyTorch's caching allocator, on the current stream).  It returns
+    ``False`` without launching when no environment allocator is set, and raises the builtin ``MemoryError``
+    before any launch when an allocation fails.  ``run_with_workspace(q, k, v, out, lse, dout,
+    dq, dk, dv, lse_log2, dpsum, dq_accum, softmax_scale, softmax_scale_log2)`` takes the three buffers from the
+    caller."""
+    found = cake_jit.SEQUENCES.get(variant)
+    if found is None or arch not in found["arches"]:
+        return None
+    if tuple(found["records"]) != tuple(cake_jit.RECORD_OF[variant]):
+        raise RuntimeError(
+            f"the host sequence of variant {variant} runs {found['records']}, not the records "
+            f"{cake_jit.RECORD_OF[variant]} of RECORD_OF"
+        )
+    library = cake_build.load_library(f"{found['library']}_{arch}")
+    return library, library.run, library.run_with_workspace
 
 
 def _launch(stage: str, name: str, values: Mapping[str, Any], dims: Mapping[str, int], device: torch.device) -> None:
@@ -630,9 +676,36 @@ def cake_fmha_nondet_train_backward(
         dq = torch.empty(0, Sq, H, D, dtype=torch.bfloat16, device=device)
         dk = torch.empty(0, Skv, H, D, dtype=torch.bfloat16, device=device)
         return dq, dk, torch.empty_like(dk)
-    device_arch(device.index)  # RuntimeError on a device outside ARCHES, before the alert
-    pre, main, post = cake_jit.RECORD_OF[(D, bool(causal))]
+    arch = device_arch(device.index)  # RuntimeError on a device outside ARCHES, before the alert
+    variant = cake_jit.variant(D, causal, batch=B, heads=H, seqlen_q=Sq, seqlen_kv=Skv, arch=arch)
+    pre, main, post = cake_jit.RECORD_OF[variant]
     _alert_nondeterministic(_ENTRY)
+    sequence = _sequence(variant, arch)
+    if sequence is not None:
+        # One host call runs the three records: the kernels, arguments and grids of the stage launchers below.
+        _, run, run_with_workspace = sequence
+        dq = torch.empty(B, Sq, H, D, dtype=torch.bfloat16, device=device)
+        dk = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
+        dv = torch.empty(B, Skv, H, D, dtype=torch.bfloat16, device=device)
+        scale_log2 = _fp32(scale * LOG2_E)
+        try:
+            done = run(q, k, v, out, lse, dout, dq, dk, dv, scale, scale_log2)
+        except MemoryError:
+            # The environment allocator failed, before any launch (tvm-ffi raises the builtin MemoryError): the
+            # workspace is allocated here instead, so a lasting shortage raises torch.OutOfMemoryError, as 0.1.3 did
+            # (the failing allocation and its message can differ: 0.1.4 allocates dq, dk and dv first).  Such a call
+            # reports two out-of-memory events to the caching allocator (``num_ooms`` of torch.cuda.memory_stats()
+            # and the registered OOM observers), the environment allocator's and this one, where 0.1.3 reported
+            # one.
+            done = False
+        if done:
+            return dq, dk, dv
+        # No tvm-ffi environment allocator, or it failed: the workspace is allocated here.
+        lse_log2 = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
+        dpsum = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
+        dq_accum = torch.empty(B * H * Sq * D, dtype=torch.float32, device=device)  # cleared by bwd_pre
+        run_with_workspace(q, k, v, out, lse, dout, dq, dk, dv, lse_log2, dpsum, dq_accum, scale, scale_log2)
+        return dq, dk, dv
     lse_log2 = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
     dpsum = torch.empty(B * H, Sq, dtype=torch.float32, device=device)
     dq_accum = torch.empty(B * H * Sq * D, dtype=torch.float32, device=device)  # cleared by bwd_pre

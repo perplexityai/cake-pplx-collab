@@ -39,26 +39,27 @@ loader = cake_package("cake_rmsnorm_det_train", "cake_jit")
 windows = cake_package("cake_rmsnorm_det_train", "cake_windows")
 
 SUPPORTED_CAPABILITIES = ((10, 0), (10, 3), (10, 7))
-HIDDEN_SIZES = (6144, 5120, 4096, 2048, 1536, 512, 256)
+HIDDEN_SIZES = (6144, 5120, 4096, 2048, 1536, 1280, 1024, 512, 256, 128)
 REDUCE_ROLE = "bwd_reduce"
 # The workspace kinds: a main program with its dw reduce companion keeps FP32 partial rows; a column-task program
 # (role ``bwd_col``) runs alone, its first ``H / col`` tickets summing whole columns of dw, and keeps no sums.
 PAIR_WORKSPACE = "chunk_partials"
 COL_WORKSPACE = "claim_sum_f32"
-# The column widths of the dw reduce slabs, one CTA each: 4 for the column-split H = 256 reduce (one column of a
-# four-column slab per lane).
-SHIPPED_SLABS = (4, 16, 32, 64)
+# The column widths of the dw reduce slabs, one CTA each: 4 and 8 for the column-split reduces of H = 256, 1280 and
+# 1024 (one column of the slab per lane).
+SHIPPED_SLABS = (4, 8, 16, 32, 64)
 # Row counts of the contract: the small counts, both sides of every backward window edge of every route
 # (``test_rows_cover_every_backward_window_edge``) and the training shapes.
 ROWS = (
-    1, 2, 3, 4, 5, 6, 7, 8, 20, 21, 25, 26, 31, 32, 33, 63, 64, 65, 87, 88, 109, 110, 121, 122, 127, 128, 129, 152, 153,
-    171, 172, 203, 204, 214, 215, 227, 228, 255, 256, 257, 288, 289, 368, 369, 384, 385, 512, 513, 576, 577, 767, 768,
-    769, 960, 961, 1023, 1024, 1025, 1152, 1153, 1216, 1217, 1280, 1281, 1664, 1665, 1680, 1681, 2047, 2048, 2049, 3072,
-    3073, 4096, 4097, 5120, 5121, 6144, 6145, 12288, 12289, 14928, 14929, 15566, 15567, 16231, 16263, 16384, 16385,
-    19456, 19457, 19968, 19969, 20480, 20481, 22528, 22529, 24064, 24065, 24576, 24577, 32768, 32769, 36352, 36353,
-    40448, 40449, 40960, 40961, 42496, 42497, 44032, 44033, 45056, 45057, 48640, 48641, 50176, 50177, 50688, 50689,
-    51200, 51201, 52736, 52737, 55296, 55297, 58880, 58881, 65536, 65537, 70656, 70657, 80896, 80897, 81920, 81921,
-    99840, 99841, 114688, 114689, 139264, 139265, 720896, 720897, 1179648, 1179649, 1572864, 1572865,
+    1, 2, 3, 4, 5, 6, 7, 8, 9, 20, 21, 25, 26, 31, 32, 33, 63, 64, 65, 87, 88, 109, 110, 121, 122, 127, 128, 129, 152,
+    153, 171, 172, 203, 204, 214, 215, 227, 228, 255, 256, 257, 288, 289, 368, 369, 384, 385, 512, 513, 576, 577, 767,
+    768, 769, 960, 961, 1023, 1024, 1025, 1152, 1153, 1184, 1185, 1216, 1217, 1280, 1281, 1536, 1537, 1664, 1665, 1680,
+    1681, 2047, 2048, 2049, 3072, 3073, 4096, 4097, 5120, 5121, 6144, 6145, 8192, 8193, 12288, 12289, 14928, 14929,
+    15566, 15567, 16231, 16263, 16384, 16385, 19456, 19457, 19968, 19969, 20480, 20481, 22528, 22529, 24064, 24065,
+    24576, 24577, 32768, 32769, 36352, 36353, 36544, 36545, 36864, 36865, 40448, 40449, 40960, 40961, 42496, 42497,
+    44032, 44033, 45056, 45057, 48640, 48641, 50176, 50177, 50688, 50689, 51200, 51201, 52736, 52737, 55296, 55297,
+    58880, 58881, 65536, 65537, 70656, 70657, 80896, 80897, 81920, 81921, 99840, 99841, 114688, 114689, 139264, 139265,
+    161792, 161793, 214016, 214017, 720896, 720897, 1179648, 1179649, 1572864, 1572865,
 )  # fmt: skip
 # The row count standing in for an unbounded window's upper edge.
 OPEN_WINDOW_ROWS = 65536
@@ -483,24 +484,99 @@ RECUT_FP32_ROUTES: dict[
     # FP32-weight route keeps the programs of its earlier windows there, each with the dw reduce of its window
     ("sm_100a", 2048, "bwd", False): ((768, 1024), (1024, 16384), (16384, 58880)),
     ("sm_100a", 6144, "bwd", False): ((384, 4096),),
+    # the backward window where the BF16 route runs a faster program whose FP32-weight twin is not: the FP32-weight
+    # route keeps the twin it ran (SM107 H = 4096 over (24064, 50176])
+    ("sm_107a", 4096, "bwd", False): ((24064, 50176),),
     # and T = 1, where the FP32-weight route runs another column-task program than the BF16 route (the twin of the
     # next window's program on SM100 H = 5120, its earlier column-task program on SM103 H = 4096 and 6144); a re-cut
     # span takes the BF16 window it splits whole
     ("sm_100a", 5120, "bwd", False): ((0, 1),),
     ("sm_103a", 4096, "bwd", False): ((0, 1), (1, 512)),
     ("sm_103a", 6144, "bwd", False): ((0, 1), (1, 256), (256, 4096)),
+    # H = 1280, 1024 and 128: the windows where the FP32-weight twin of another program than the BF16 route's
+    # measured faster (the windows between kept by the route's own twin under override records of its program)
+    ("sm_100a", 1280, "fwd", False): (
+        (0, 1),
+        (1, 4),
+        (4, 8),
+        (8, 16),
+        (16, 256),
+        (256, 1024),
+        (1024, 2048),
+        (2048, 32768),
+    ),
+    ("sm_100a", 1024, "fwd", False): (
+        (4, 32),
+        (32, 64),
+        (64, 512),
+        (512, 1024),
+        (1024, 32768),
+    ),
+    ("sm_100a", 128, "fwd", False): ((4, 64), (64, 128), (128, 16384)),
+    ("sm_103a", 1280, "fwd", False): (
+        (0, 512),
+        (512, 1024),
+        (1024, 2048),
+        (2048, 8192),
+        (8192, 24576),
+        (24576, 32768),
+        (32768, None),
+    ),
+    ("sm_103a", 1024, "fwd", False): (
+        (0, 2),
+        (2, 4),
+        (4, 32),
+        (32, 64),
+        (64, 512),
+        (512, 1024),
+        (1024, 32768),
+    ),
+    ("sm_107a", 1280, "fwd", False): (
+        (0, 4),
+        (4, 8),
+        (8, 128),
+        (128, 512),
+        (512, 1024),
+        (1024, 1536),
+        (1536, 2048),
+        (2048, 8192),
+        (8192, 16384),
+    ),
+    ("sm_107a", 1024, "fwd", False): (
+        (16, 512),
+        (512, 1536),
+        (1536, 4096),
+        (4096, 8192),
+        (8192, 12288),
+        (12288, 16384),
+        (16384, 24576),
+        (24576, 32768),
+        (32768, None),
+    ),
+    ("sm_107a", 128, "fwd", False): ((4096, 16384), (16384, 32768)),
+    ("sm_100a", 1024, "bwd", False): ((1, 1024),),
+    ("sm_103a", 1280, "bwd", False): ((512, 4096), (4096, None)),
+    ("sm_103a", 1024, "bwd", False): (
+        (1, 1024),
+        (1024, 1536),
+        (1536, 2048),
+        (2048, 16384),
+        (16384, 24576),
+    ),
+    ("sm_107a", 1280, "bwd", False): ((512, 4096), (4096, 16384)),
 }
 
 
 # The FP32-weight routes whose window runs the FP32-weight twin of another program than the BF16 route's there, under
-# a record of the same host plan (the window, grid rule and workspace of the BF16 record): SM100 H = 5120 above 6144
-# rows and SM103 H = 4096 over (48640, 51200], where the FP32-weight route runs the twin of another program, and
-# SM100 H = 6144 with a residual over (42496, inf), where the BF16 route runs another program and the FP32-weight
-# route keeps the twin of the program of its earlier window.
+# a record of the same host plan (the window, grid rule and workspace of the BF16 record of that program): SM100
+# H = 5120 above 6144 rows, where the FP32-weight route runs the twin of another program, and SM100 H = 6144 with a
+# residual over (42496, inf) and SM107 H = 4096 over (24064, 50176], where the BF16 route runs another program and the
+# FP32-weight route keeps the twin of the program it ran there (the last a re-cut window of ``RECUT_FP32_ROUTES`` as
+# well).
 SWAPPED_FP32_ROUTES: set[tuple[str, int, str, bool]] = {
     ("sm_100a", 5120, "bwd", False),
-    ("sm_103a", 4096, "bwd", False),
     ("sm_100a", 6144, "bwd", True),
+    ("sm_107a", 4096, "bwd", False),
 }
 
 
@@ -1034,7 +1110,17 @@ def test_workspace_puts_the_counters_first_and_grows_with_the_rows(hidden: int) 
         assert sizes[0] == loader.COUNTERS_BYTES
     else:
         assert sizes[0] > loader.COUNTERS_BYTES
-    assert sizes[-1] > loader.COUNTERS_BYTES
+    # the most rows size the partial rows of the route's pairs; a route of column-task
+    # programs alone keeps the counters alone at every row count
+    pairs = [
+        name
+        for name in loader.route_modules(arch, hidden, "bwd", False)
+        if (loader.MODULES[name]["workspace_rule"] or {}).get("kind") == PAIR_WORKSPACE
+    ]
+    if pairs:
+        assert sizes[-1] > loader.COUNTERS_BYTES
+    else:
+        assert sizes == [loader.COUNTERS_BYTES] * len(sizes)
     for name in loader.route_modules(arch, hidden, "bwd", False):
         record = loader.MODULES[name]
         if record.get("workspace_rule") is None:
@@ -1111,7 +1197,7 @@ def test_workspace_puts_the_counters_first_and_grows_with_the_rows(hidden: int) 
     not _supported(),
     reason="needs an SM100 / SM103 / SM107 device with exported routes",
 )
-@pytest.mark.parametrize("hidden", (6144, 5120, 4096, 2048, 1536, 256))
+@pytest.mark.parametrize("hidden", (6144, 5120, 4096, 2048, 1536, 1280, 1024, 256, 128))
 def test_workspace_holds_the_compensated_programs_below_the_measured_sm_count(
     hidden: int, monkeypatch: pytest.MonkeyPatch
 ) -> None:

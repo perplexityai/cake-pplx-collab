@@ -29,8 +29,8 @@ out = cake_engram_gate_nondet(x, key, value, q_weight, k_weight, token_mask, eps
 out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, eps=1e-20, clamp_value=1e-6)
 out.backward(dout)
 
-# opt-in: the forward sums the dot product P in one FP32 word (faster; see Accuracy); the backward is the same
-out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="fp32")
+# opt-in: the forward sums the dot product P compensated (slower; see Accuracy); the backward is the same
+out = cake_engram_gate_nondet_kv(x, kv, q_weight, k_weight, token_mask, dot_sum="compensated")
 ```
 
 `cake_engram_gate_nondet_train_forward` / `cake_engram_gate_nondet_train_backward` are the two halves without autograd;
@@ -84,9 +84,9 @@ on the current torch stream: nothing cooperative.
 The two forward records differ only in the sum of `P`, which the autograd entries and the explicit forward select
 with `dot_sum`:
 
-- `dot_sum="compensated"` (the default) launches `fwd_dot2`: a compensated FP32 dot product (each product split by an
-  FMA, each running sum by an error-free two-sum, the error words added once at the end).
-- `dot_sum="fp32"` (opt-in) launches `fwd_f32`: one FP32 word.
+- `dot_sum="fp32"` (the default) launches `fwd_f32`: one FP32 word.
+- `dot_sum="compensated"` (opt-in) launches `fwd_dot2`: a compensated FP32 dot product (each product split by an FMA,
+  each running sum by an error-free two-sum, the error words added once at the end).
 
 There is one backward, `bwd_dot2`: it recomputes `P` as a compensated dot product after either forward, so the
 gradients do not depend on `dot_sum`, and the explicit backward and `*_workspace_bytes` take no `dot_sum`. A
@@ -105,15 +105,16 @@ VR200. Measured on GB300 (`T = 16`, 25 draws of each kind); relative L2 error, m
 | `out`, random (either `dot_sum`) | 1.448e-3 / 1.457e-3 | 2.896e-3 / 2.914e-3 |
 | `out`, near-cancelling (either `dot_sum`) | 1.661e-3 / 1.669e-3 | 3.321e-3 / 3.338e-3 |
 | `dx`, `dkey`, near-cancelling, per stream | 1.7e-3 / 1.7e-3 | 3.3e-3 / 3.4e-3 |
-| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.4e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
+| `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.3e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
-The gradients are those of the one backward. The `out` errors of the two forwards agree to four digits, but
-`dot_sum="fp32"` rounds more output elements away from the correctly rounded (BF16 of FP64) result where the products
-nearly cancel: 17802 of the 8.19 million output elements of the near-cancelling draws, against 117 for the default
-(an FP32 evaluation of the formula: 21917); 152 against 113 on the random draws. The `"fp32"` forward takes about
-5-10% less time, depending on the GPU (`T = 16384`, FP32 weights: B200 0.320 ms against 0.347 ms, GB200 0.309 ms
-against 0.332 ms, GB300 0.313 ms against 0.329 ms, VR200 0.197 ms against 0.218 ms).
+The gradients are those of the one backward. The `out` errors of the two forwards agree to four digits, but the
+opt-in `dot_sum="compensated"` rounds fewer output elements away from the correctly rounded (BF16 of FP64) result
+where the products nearly cancel: 117 of the 8.19 million output elements of the near-cancelling draws, against 17802
+for the default (an FP32 evaluation of the formula: 21917); 113 against 152 on the random draws. The compensated
+forward takes about 5-18% more time, depending on the GPU (`T = 16384`, FP32 weights, `token_mask=None`: B200
+0.348 ms against 0.320 ms, GB200 0.330 ms against 0.309 ms, GB300 0.329 ms against 0.313 ms, VR200 0.205 ms against
+0.174 ms).
 
 ## Workspace and retained state
 
@@ -121,17 +122,19 @@ against 0.332 ms, GB300 0.313 ms against 0.329 ms, VR200 0.197 ms against 0.218 
   statistics are saved.
 - Forward workspace: none. The forward kernel reads BF16 and FP32 weights as stored and forms their FP32 product
   itself; a forward call is one launch.
-- Backward workspace: one FP32 `[4, 5120]` weight-gradient accumulator (80 KiB, zeroed per call);
-  `cake_engram_gate_nondet_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32 weights as
-  stored and write the autograd weight gradients in each parameter's dtype.
+- Backward workspace: one FP32 `[4, 5120]` row of weight-gradient partial sums per cluster of the backward grid
+  (80 KiB each); `cake_engram_gate_nondet_train_workspace_bytes(T, device)`. The backward kernels read BF16 and FP32
+  weights as stored and write the autograd weight gradients in each parameter's dtype.
 
 ## Determinism
 
-The clusters add their weight-gradient partial sums into one FP32 accumulator with float atomics, in arrival order:
-`dq_weight` and `dk_weight` may differ in their last bits run to run. `out`, `dx`, `dkey` and `dvalue` have one fixed
-order. Under `torch.use_deterministic_algorithms(True)` every backward call that launches raises PyTorch's
-`RuntimeError`, naming the entry of `cake_pplx.cake_engram_gate_det_train` of the same role; with `warn_only=True` it
-warns once and runs. The forward never alerts; a backward over no token neither launches nor alerts.
+`out`, `dx`, `dkey` and `dvalue` have one fixed order; `dq_weight` and `dk_weight` promise no bits run to run. The
+package launches the kernels of `cake_pplx.cake_engram_gate_det_train` under its own library names: each cluster
+writes its own row of weight-gradient partial sums, and `dw_reduce` adds the rows in one order. Adding the clusters'
+sums into one cleared FP32 accumulator with float atomics instead, counting the clear, was slower on B200, GB200,
+GB300 and VR200 in eager calls, and faster only in some CUDA-graph calls with a token mask at 129 to 16384 tokens.
+Nothing reads `torch.use_deterministic_algorithms`: no launch adds in an order that changes run to run, so nothing
+alerts.
 
 ## Limitations
 

@@ -46,9 +46,13 @@ not guaranteed bitwise reproducible either).  The deterministic
 package's pair (``chunk_partials``; its programs renamed into this package)
 is two launches: the main kernel writes one FP32 partial row of ``dw`` per
 chunk, then the dw reduce kernel (role ``bwd_reduce``) folds the rows into
-``dw`` in chunk order.  No launch is cooperative, so a backward never waits
-for the whole device.  Token counts are runtime scalars, so a changed number
-of rows never recompiles anything.
+``dw`` in chunk order.  A pair whose grid rule spells ``free_sms`` (a
+one-row-per-stage pair: one slot per resident CTA, the SMs it leaves to a
+side stream) builds its chunk table, its grid and its workspace bound on
+the other SMs (:func:`launch_sms`), as the deterministic package does.  No
+launch is cooperative, so a backward never waits for the whole device.
+Token counts are runtime scalars, so a changed number of rows never
+recompiles anything.
 
 A module record is one (kernel, launch policy) pair.  A kernel launched under
 several policies -- a different persistent grid or row range per stage -- has
@@ -4505,8 +4509,64 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 bf16 weight: (131072, inf] the single kernel ae610afd (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_ae610afdf77ff6714a5b__131072_inf": {
+    # sm_100a H1536 bf16 weight: (131072, 214016] the deterministic package's one-row-per-stage det pair main kernel 38e32d90 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_38e32d90f62f7cfc7b51__131072_214016": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 131072,
+            "at_most": 214016,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__131072_214016": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 131072,
+            "at_most": 214016,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    # sm_100a H1536 bf16 weight: (214016, inf] the single kernel ae610afd (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_ae610afdf77ff6714a5b__214016_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4528,7 +4588,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_ae610afdf77ff6714a5b",
         "role": "bwd_main",
         "select_rule": {
-            "above": 131072,
+            "above": 214016,
             "at_most": None,
             "kind": "rows_between",
         },
@@ -4538,41 +4598,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (32768, 75776] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__32768_75776": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_4b6981c10fd40a9d8aec",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_4b6981c10fd40a9d8aec",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 32768,
-            "at_most": 75776,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
-        },
-    },
-    # sm_100a H1536 f32 weight: (75776, 131072] the single kernel 363eabb3 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_363eabb3661dab78f3d3": {
+    # sm_100a H1536 f32 weight: (77824, 131072] the single kernel 363eabb3 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_363eabb3661dab78f3d3__77824_131072": {
         "arches": [
             "sm_100a",
         ],
@@ -4594,7 +4621,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_363eabb3661dab78f3d3",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 75776,
+            "above": 77824,
             "at_most": 131072,
             "kind": "rows_between",
         },
@@ -4604,8 +4631,41 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (131072, inf] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__131072_inf": {
+    # sm_100a H1536 f32 weight: (131072, 214016] the deterministic package's one-row-per-stage det pair main kernel e30c1899 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e30c1899e859da4f4c68__131072_214016": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_e30c1899e859da4f4c68",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_e30c1899e859da4f4c68",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 131072,
+            "at_most": 214016,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    # sm_100a H1536 f32 weight: (214016, inf] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__214016_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -4627,7 +4687,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_4b6981c10fd40a9d8aec",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 131072,
+            "above": 214016,
             "at_most": None,
             "kind": "rows_between",
         },
@@ -4637,8 +4697,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H1536 f32 weight: (1024, 4096] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_4096": {
+    # sm_100a H1536 f32 weight: (1024, 1184] the single kernel 4b6981c1 (FP32 dw sums added in FP32 in no fixed order).
+    "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_1184": {
         "arches": [
             "sm_100a",
         ],
@@ -4661,7 +4721,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 1024,
-            "at_most": 4096,
+            "at_most": 1184,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -4670,37 +4730,37 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 24576,
         },
     },
-    # sm_100a H5120 f32 weight: (1792, 6144] the single kernel de8f6091 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_de8f6091077dc7ac5947__1792_6144": {
+    # sm_100a H5120 f32 weight: (767, 36864] the deterministic package's one-row-per-stage det pair main kernel f9b2d42c with its fixed-order dw reduce.
+    "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__767_36864": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 1,
+            "ctas_per_sm": 2,
+            "free_sms": 8,
+            "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 12,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_de8f6091077dc7ac5947",
+        "kernel": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_de8f6091077dc7ac5947",
+        "library": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 1792,
-            "at_most": 6144,
+            "above": 767,
+            "at_most": 36864,
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 81920,
+            "counters": 160,
+            "kind": "chunk_partials",
         },
     },
     # sm_100a H2048 f32 weight: (336, 1024] the column-task kernel 17493054 (64 column tasks).
@@ -5235,8 +5295,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H2048 f32 weight: (64, 336] the column-task kernel 17493054 (64 column tasks).
-    "cake_rmsnorm_train_17493054fed5409b6df9__64_336": {
+    # sm_100a H2048 f32 weight: (64, 336] the column-task program 9030dbeb of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_9030dbeb948761ec2258__64_336": {
         "arches": [
             "sm_100a",
         ],
@@ -5251,12 +5311,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_17493054fed5409b6df9",
+        "kernel": "cake_rmsnorm_train_9030dbeb948761ec2258",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_17493054fed5409b6df9",
+        "library": "cake_rmsnorm_train_9030dbeb948761ec2258",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
@@ -5439,8 +5499,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 bf16 weight: (64, 896] the column-task kernel 080e0a6c (80 column tasks).
-    "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_896": {
+    # sm_100a H5120 bf16 weight: (64, 767] the column-task kernel 080e0a6c (80 column tasks).
+    "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_767": {
         "arches": [
             "sm_100a",
         ],
@@ -5464,7 +5524,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_main",
         "select_rule": {
             "above": 64,
-            "at_most": 896,
+            "at_most": 767,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -7020,31 +7080,32 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_103a H1536 bf16 weight: (53184, 76352] the deterministic package's det pair main kernel 9cd3c766 with its fixed-order dw reduce.
-    "cake_rmsnorm_train_9cd3c766db4b70ed7213__53184_76352": {
+    # sm_103a H1536 bf16 weight: (53184, inf] the deterministic package's one-row-per-stage det pair main kernel 38e32d90 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_38e32d90f62f7cfc7b51__53184_inf": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_9cd3c766db4b70ed7213",
+        "kernel": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_9cd3c766db4b70ed7213",
-        "role": "bwd_large",
+        "library": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
+        "role": "bwd_main",
         "select_rule": {
             "above": 53184,
-            "at_most": 76352,
+            "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -7052,7 +7113,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_1863320f3158d35eead6__53184_76352": {
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__53184_inf": {
         "arches": [
             "sm_103a",
         ],
@@ -7061,121 +7122,22 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
+        "kernel": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
+        "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 53184,
-            "at_most": 76352,
+            "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 bf16 weight: (76352, 131072] the single kernel 20d7a230 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_20d7a230ed8dc161a93a__76352_131072": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_20d7a230ed8dc161a93a",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 76352,
-            "at_most": 131072,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
-        },
-    },
-    # sm_103a H1536 bf16 weight: (131072, inf] the single kernel 3f75f4a8 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_3f75f4a81f2fb8269389__131072_inf": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_3f75f4a81f2fb8269389",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_3f75f4a81f2fb8269389",
-        "role": "bwd_main",
-        "select_rule": {
-            "above": 131072,
-            "at_most": None,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
-        },
-    },
-    # sm_103a H1536 f32 weight: (37888, 40448] the single kernel 17846048 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_178460487a7835e97912__37888_40448": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_178460487a7835e97912",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_178460487a7835e97912",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 37888,
-            "at_most": 40448,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
-        },
-    },
-    # sm_103a H1536 f32 weight: (40448, 76352] the deterministic package's det pair main kernel 51f46ff1 with its fixed-order dw reduce.
-    "cake_rmsnorm_train_51f46ff164b142ec8888__40448_76352": {
+    # sm_103a H1536 f32 weight: (46592, 53184] the deterministic package's det pair main kernel 51f46ff1 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_51f46ff164b142ec8888__46592_53184": {
         "arches": [
             "sm_103a",
         ],
@@ -7197,8 +7159,8 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_51f46ff164b142ec8888",
         "role": "bwd_large_w32",
         "select_rule": {
-            "above": 40448,
-            "at_most": 76352,
+            "above": 46592,
+            "at_most": 53184,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -7206,7 +7168,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_1863320f3158d35eead6__40448_76352": {
+    "cake_rmsnorm_train_1863320f3158d35eead6__46592_53184": {
         "arches": [
             "sm_103a",
         ],
@@ -7223,76 +7185,43 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_1863320f3158d35eead6",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 40448,
-            "at_most": 76352,
+            "above": 46592,
+            "at_most": 53184,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    # sm_103a H1536 f32 weight: (76352, 131072] the single kernel 17846048 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_178460487a7835e97912__76352_131072": {
+    # sm_103a H1536 f32 weight: (53184, inf] the deterministic package's one-row-per-stage det pair main kernel e30c1899 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e30c1899e859da4f4c68__53184_inf": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_178460487a7835e97912",
+        "kernel": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_178460487a7835e97912",
+        "library": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 76352,
-            "at_most": 131072,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
-        },
-    },
-    # sm_103a H1536 f32 weight: (131072, inf] the single kernel 7c0dd63f (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_7c0dd63f0b011049603e__131072_inf": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 2,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 2,
-            "max_halving": 5,
-            "rows_per_issue": 2,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_7c0dd63f0b011049603e",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_7c0dd63f0b011049603e",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 131072,
+            "above": 53184,
             "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 24576,
+            "counters": 48,
+            "kind": "chunk_partials",
         },
     },
     # sm_103a H4096 bf16 weight: (32, 152] the deterministic package's column-task program of these token counts (128 column tasks).
@@ -9165,8 +9094,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_100a H5120 f32 weight: (64, 1792] the column-task kernel 139d162a (80 column tasks).
-    "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_1792": {
+    # sm_100a H5120 f32 weight: (64, 767] the column-task kernel 139d162a (80 column tasks).
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_767": {
         "arches": [
             "sm_100a",
         ],
@@ -9190,7 +9119,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 64,
-            "at_most": 1792,
+            "at_most": 767,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -10911,8 +10840,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    # sm_107a H5120 f32 weight: (895, 896] the column-task program 139d162a of the deterministic package, renamed into this package.
-    "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896": {
+    # sm_107a H5120 f32 weight: (895, 1280] the column-task program 139d162a of the deterministic package, renamed into this package.
+    "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_1280": {
         "arches": [
             "sm_107a",
         ],
@@ -10936,7 +10865,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 895,
-            "at_most": 896,
+            "at_most": 1280,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -11043,9 +10972,39 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c1a9efdf06c3087b4efe": {
+    "cake_rmsnorm_train_c1a9efdf06c3087b4efe__1024_1184": {
         "arches": [
             "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 1,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 6,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
+        "role": "bwd_mid",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1184,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_c1a9efdf06c3087b4efe__1024_1216": {
+        "arches": [
             "sm_103a",
         ],
         "grid_rule": {
@@ -11067,7 +11026,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_mid",
         "select_rule": {
             "above": 1024,
-            "at_most": 4096,
+            "at_most": 1216,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -11075,30 +11034,32 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_21c8bb55c8d672b63952": {
+    # sm_100a H1536 bf16 weight: (1184, 77824] the deterministic package's one-row-per-stage det pair main kernel 38e32d90 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_38e32d90f62f7cfc7b51__1184_77824": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_21c8bb55c8d672b63952",
+        "kernel": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_21c8bb55c8d672b63952",
+        "library": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
         "role": "bwd_main",
         "select_rule": {
-            "above": 4096,
-            "at_most": 32768,
+            "above": 1184,
+            "at_most": 77824,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -11106,7 +11067,30 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_b457c4d134e44476dc6f__32768_36352": {
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__1184_77824": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1184,
+            "at_most": 77824,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_b457c4d134e44476dc6f__77824_78784": {
         "arches": [
             "sm_100a",
         ],
@@ -11128,38 +11112,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_b457c4d134e44476dc6f",
         "role": "bwd_large",
         "select_rule": {
-            "above": 32768,
-            "at_most": 36352,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 48,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_b457c4d134e44476dc6f__36352_78784": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_b457c4d134e44476dc6f",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_b457c4d134e44476dc6f",
-        "role": "bwd_large",
-        "select_rule": {
-            "above": 36352,
+            "above": 77824,
             "at_most": 78784,
             "kind": "rows_between",
         },
@@ -11214,9 +11167,31 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_1863320f3158d35eead6": {
+    "cake_rmsnorm_train_1863320f3158d35eead6__1024_1184": {
         "arches": [
             "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1184,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1863320f3158d35eead6__1024_1216": {
+        "arches": [
             "sm_103a",
         ],
         "grid_rule": {
@@ -11233,35 +11208,12 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_reduce",
         "select_rule": {
             "above": 1024,
-            "at_most": 4096,
+            "at_most": 1216,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_1863320f3158d35eead6__4096_32768": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 4096,
-            "at_most": 32768,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_train_9b727c2c9933b2ca6724__32768_36352": {
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__77824_78784": {
         "arches": [
             "sm_100a",
         ],
@@ -11278,30 +11230,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 32768,
-            "at_most": 36352,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_train_9b727c2c9933b2ca6724__36352_78784": {
-        "arches": [
-            "sm_100a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 36352,
+            "above": 77824,
             "at_most": 78784,
             "kind": "rows_between",
         },
@@ -11338,9 +11267,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_17d9cdfd157ba4b86c2b": {
+    "cake_rmsnorm_train_17d9cdfd157ba4b86c2b__1024_1216": {
         "arches": [
-            "sm_100a",
             "sm_103a",
         ],
         "grid_rule": {
@@ -11362,7 +11290,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_mid_w32",
         "select_rule": {
             "above": 1024,
-            "at_most": 4096,
+            "at_most": 1216,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -11370,30 +11298,32 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_4bf450b6af0314ed03be": {
+    # sm_100a H1536 f32 weight: (1184, 77824] the deterministic package's one-row-per-stage det pair main kernel e30c1899 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e30c1899e859da4f4c68__1184_77824": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_4bf450b6af0314ed03be",
+        "kernel": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_4bf450b6af0314ed03be",
+        "library": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 4096,
-            "at_most": 32768,
+            "above": 1184,
+            "at_most": 77824,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -12064,6 +11994,7 @@ MODULES: dict[str, dict[str, Any]] = {
     "cake_rmsnorm_train_7097069b8eea6ba44d5a__227_1024": {
         "arches": [
             "sm_100a",
+            "sm_103a",
         ],
         "grid_rule": {
             "ctas": 16,
@@ -12185,8 +12116,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H512 f32 weight: (227, 960] the deterministic package's det pair main kernel 9f07cea1 with its fixed-order dw reduce.
-    "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_960": {
+    # sm_103a H512 f32 weight: (227, 1024] the deterministic package's det pair main kernel 9f07cea1 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_1024": {
         "arches": [
             "sm_103a",
         ],
@@ -12209,7 +12140,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_small_w32",
         "select_rule": {
             "above": 227,
-            "at_most": 960,
+            "at_most": 1024,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -12241,61 +12172,40 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_7097069b8eea6ba44d5a__227_960": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas": 16,
-            "kind": "fixed",
-        },
-        "hidden": 512,
-        "kernel": "cake_rmsnorm_train_7097069b8eea6ba44d5a",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_7097069b8eea6ba44d5a",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 227,
-            "at_most": 960,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_train_b482c84dbffcd75a4a4c__896_6144": {
+    # sm_100a H5120 bf16 weight: (767, 36864] the deterministic package's one-row-per-stage det pair main kernel bfde9b88 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_bfde9b88e800fc34722c__767_36864": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
+            "ctas_per_sm": 2,
+            "free_sms": 8,
             "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 4,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_b482c84dbffcd75a4a4c",
+        "kernel": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_b482c84dbffcd75a4a4c",
+        "library": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "role": "bwd_main",
         "select_rule": {
-            "above": 896,
-            "at_most": 6144,
+            "above": 767,
+            "at_most": 36864,
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 128,
+            "counters": 160,
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_b482c84dbffcd75a4a4c__6144_56256": {
+    "cake_rmsnorm_train_b482c84dbffcd75a4a4c__36864_56256": {
         "arches": [
             "sm_100a",
         ],
@@ -12317,7 +12227,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_b482c84dbffcd75a4a4c",
         "role": "bwd_main",
         "select_rule": {
-            "above": 6144,
+            "above": 36864,
             "at_most": 56256,
             "kind": "rows_between",
         },
@@ -12359,27 +12269,28 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 81920,
         },
     },
-    # sm_100a H5120 bf16 weight: (131072, inf] the single kernel 2f05000c (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_2f05000ca9242ea4d6cb__131072_inf": {
+    # sm_100a H5120 bf16 weight: (131072, inf] the deterministic package's one-row-per-stage det pair main kernel bfde9b88 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_bfde9b88e800fc34722c__131072_inf": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 1,
+            "ctas_per_sm": 2,
+            "free_sms": 8,
+            "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 12,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_2f05000ca9242ea4d6cb",
+        "kernel": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2f05000ca9242ea4d6cb",
+        "library": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "role": "bwd_main",
         "select_rule": {
             "above": 131072,
@@ -12387,12 +12298,11 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 81920,
+            "counters": 160,
+            "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c5831b29d17867842e5f__896_6144": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__131072_inf": {
         "arches": [
             "sm_100a",
         ],
@@ -12409,13 +12319,13 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_c5831b29d17867842e5f",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 896,
-            "at_most": 6144,
+            "above": 131072,
+            "at_most": None,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_c5831b29d17867842e5f__6144_56256": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__767_36864": {
         "arches": [
             "sm_100a",
         ],
@@ -12432,13 +12342,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_c5831b29d17867842e5f",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 6144,
+            "above": 767,
+            "at_most": 36864,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c5831b29d17867842e5f__36864_56256": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 160,
+            "kind": "fixed",
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_train_c5831b29d17867842e5f",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_c5831b29d17867842e5f",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 36864,
             "at_most": 56256,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_9479b1298a1b19d4d996__6144_56256": {
+    "cake_rmsnorm_train_9479b1298a1b19d4d996__36864_56256": {
         "arches": [
             "sm_100a",
         ],
@@ -12460,7 +12393,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_9479b1298a1b19d4d996",
         "role": "bwd_main_w32",
         "select_rule": {
-            "above": 6144,
+            "above": 36864,
             "at_most": 56256,
             "kind": "rows_between",
         },
@@ -12502,27 +12435,28 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 81920,
         },
     },
-    # sm_100a H5120 f32 weight: (131072, inf] the single kernel de8f6091 (FP32 dw sums added in FP32 in no fixed order).
-    "cake_rmsnorm_train_de8f6091077dc7ac5947__131072_inf": {
+    # sm_100a H5120 f32 weight: (131072, inf] the deterministic package's one-row-per-stage det pair main kernel f9b2d42c with its fixed-order dw reduce.
+    "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__131072_inf": {
         "arches": [
             "sm_100a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 1,
+            "ctas_per_sm": 2,
+            "free_sms": 8,
+            "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 12,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_de8f6091077dc7ac5947",
+        "kernel": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_de8f6091077dc7ac5947",
+        "library": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 131072,
@@ -12530,9 +12464,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 2,
-            "kind": "claim_sum_f32",
-            "sum_bytes": 81920,
+            "counters": 160,
+            "kind": "chunk_partials",
         },
     },
     "cake_rmsnorm_train_5c804aed7ad14b99e1d0__1152_4096": {
@@ -12698,91 +12631,63 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_1df7db17277d363b5168": {
+    # sm_103a H1536 bf16 weight: (1216, 4096] the deterministic package's one-row-per-stage det pair main kernel 38e32d90 with its fixed-order dw reduce, launched on every SM.
+    "cake_rmsnorm_train_38e32d90f62f7cfc7b51__1216_4096": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1df7db17277d363b5168",
+        "kernel": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_1df7db17277d363b5168",
+        "library": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1216,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    # sm_103a H1536 bf16 weight: (4096, 46592] the deterministic package's one-row-per-stage det pair main kernel 38e32d90 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_38e32d90f62f7cfc7b51__4096_46592": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_38e32d90f62f7cfc7b51",
         "role": "bwd_main",
         "select_rule": {
             "above": 4096,
-            "at_most": 14928,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 48,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_4df08ce51fb01ba1193f": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 4,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_4df08ce51fb01ba1193f",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_4df08ce51fb01ba1193f",
-        "role": "bwd_large",
-        "select_rule": {
-            "above": 14928,
-            "at_most": 15566,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 48,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_f522f5b8d4343d96ca04__15566_46592": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_f522f5b8d4343d96ca04",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_f522f5b8d4343d96ca04",
-        "role": "bwd_large",
-        "select_rule": {
-            "above": 15566,
             "at_most": 46592,
             "kind": "rows_between",
         },
@@ -12791,7 +12696,30 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_14928": {
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__1216_4096": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_9b727c2c9933b2ca6724",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1216,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_46592": {
         "arches": [
             "sm_103a",
         ],
@@ -12809,52 +12737,6 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_reduce",
         "select_rule": {
             "above": 4096,
-            "at_most": 14928,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_train_1863320f3158d35eead6__14928_15566": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 14928,
-            "at_most": 15566,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
-    },
-    "cake_rmsnorm_train_1863320f3158d35eead6__15566_46592": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 15566,
             "at_most": 46592,
             "kind": "rows_between",
         },
@@ -12892,121 +12774,70 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_a99e2b380514c4d86d60": {
+    # sm_103a H1536 f32 weight: (1216, 4096] the deterministic package's one-row-per-stage det pair main kernel e30c1899 with its fixed-order dw reduce, launched on every SM.
+    "cake_rmsnorm_train_e30c1899e859da4f4c68__1216_4096": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 6,
+            "grid_factor": 6,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_a99e2b380514c4d86d60",
+        "kernel": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_a99e2b380514c4d86d60",
+        "library": "cake_rmsnorm_train_e30c1899e859da4f4c68",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1216,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    # sm_103a H1536 f32 weight: (4096, 46592] the deterministic package's one-row-per-stage det pair main kernel e30c1899 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_e30c1899e859da4f4c68__4096_46592": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "free_sms": 8,
+            "grid_factor": 6,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_e30c1899e859da4f4c68",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_e30c1899e859da4f4c68",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 4096,
-            "at_most": 14928,
+            "at_most": 46592,
             "kind": "rows_between",
         },
         "workspace_rule": {
             "counters": 48,
             "kind": "chunk_partials",
         },
-    },
-    "cake_rmsnorm_train_7a72e97bd6cb4dc0efc2": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 4,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_7a72e97bd6cb4dc0efc2",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_7a72e97bd6cb4dc0efc2",
-        "role": "bwd_large_w32",
-        "select_rule": {
-            "above": 14928,
-            "at_most": 15566,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 48,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_109f19bb177c8f20cadc__15566_37888": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 5,
-            "rows_per_issue": 4,
-            "tail_div": 12,
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_109f19bb177c8f20cadc",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_109f19bb177c8f20cadc",
-        "role": "bwd_large_w32",
-        "select_rule": {
-            "above": 15566,
-            "at_most": 37888,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 48,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_1863320f3158d35eead6__15566_37888": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_1863320f3158d35eead6",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 15566,
-            "at_most": 37888,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
     },
     "cake_rmsnorm_train_caf6978ed0a17fbf65b9__171_3072": {
         "arches": [
@@ -14334,8 +14165,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_103a H4096 f32 weight: (48640, 65536] the deterministic package's FP32-pair det pair main kernel cb164a27 with its fixed-order dw reduce.
-    "cake_rmsnorm_train_cb164a27c0157ed0712d__48640_65536": {
+    # sm_103a H4096 f32 weight: (48640, 65536] the deterministic package's det pair main kernel a8eb7547 with its fixed-order dw reduce (A/B on GB300).
+    "cake_rmsnorm_train_a8eb754739a1589de3ec__48640_65536": {
         "arches": [
             "sm_103a",
         ],
@@ -14344,17 +14175,17 @@ MODULES: dict[str, dict[str, Any]] = {
             "grid_factor": 2,
             "kind": "claimed_chunks",
             "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 1,
-            "tail_div": 4,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_cb164a27c0157ed0712d",
+        "kernel": "cake_rmsnorm_train_a8eb754739a1589de3ec",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_cb164a27c0157ed0712d",
+        "library": "cake_rmsnorm_train_a8eb754739a1589de3ec",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 48640,
@@ -14574,7 +14405,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_56ee8e66479625fd078a__960_32768": {
+    "cake_rmsnorm_train_56ee8e66479625fd078a__1024_32768": {
         "arches": [
             "sm_103a",
         ],
@@ -14596,7 +14427,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_56ee8e66479625fd078a",
         "role": "bwd_mid_w32",
         "select_rule": {
-            "above": 960,
+            "above": 1024,
             "at_most": 32768,
             "kind": "rows_between",
         },
@@ -14636,7 +14467,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_122721bd6b4650866553__960_32768": {
+    "cake_rmsnorm_train_122721bd6b4650866553__1024_32768": {
         "arches": [
             "sm_103a",
         ],
@@ -14653,7 +14484,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_122721bd6b4650866553",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 960,
+            "above": 1024,
             "at_most": 32768,
             "kind": "rows_between",
         },
@@ -14693,7 +14524,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    "cake_rmsnorm_train_2fc4932fbde0bc848b32__64_1024": {
+    "cake_rmsnorm_train_2fc4932fbde0bc848b32__64_192": {
         "arches": [
             "sm_103a",
         ],
@@ -14716,7 +14547,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_main",
         "select_rule": {
             "above": 64,
-            "at_most": 1024,
+            "at_most": 192,
             "kind": "rows_between",
         },
         "workspace_rule": {
@@ -14724,7 +14555,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c5831b29d17867842e5f__64_1024": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__64_192": {
         "arches": [
             "sm_103a",
         ],
@@ -14742,43 +14573,77 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_reduce",
         "select_rule": {
             "above": 64,
-            "at_most": 1024,
+            "at_most": 192,
             "kind": "rows_between",
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_2fc4932fbde0bc848b32__1024_5120": {
+    # sm_103a H5120 bf16 weight: (192, 1024] the deterministic package's one-row-per-stage det pair main kernel bfde9b88 with its fixed-order dw reduce, launched on every SM.
+    "cake_rmsnorm_train_bfde9b88e800fc34722c__192_1024": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
+            "ctas_per_sm": 2,
             "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 4,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_2fc4932fbde0bc848b32",
+        "kernel": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_2fc4932fbde0bc848b32",
+        "library": "cake_rmsnorm_train_bfde9b88e800fc34722c",
         "role": "bwd_main",
         "select_rule": {
-            "above": 1024,
-            "at_most": 5120,
+            "above": 192,
+            "at_most": 1024,
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 128,
+            "counters": 160,
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_2fc4932fbde0bc848b32__5120_61952": {
+    # sm_103a H5120 bf16 weight: (1024, 36301] the deterministic package's one-row-per-stage det pair main kernel bfde9b88 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_bfde9b88e800fc34722c__1024_36301": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "free_sms": 8,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_train_bfde9b88e800fc34722c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_bfde9b88e800fc34722c",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 36301,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 160,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_2fc4932fbde0bc848b32__36301_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -14800,7 +14665,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_2fc4932fbde0bc848b32",
         "role": "bwd_main",
         "select_rule": {
-            "above": 5120,
+            "above": 36301,
             "at_most": 61952,
             "kind": "rows_between",
         },
@@ -14809,7 +14674,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_c5831b29d17867842e5f__5120_61952": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__36301_61952": {
         "arches": [
             "sm_103a",
         ],
@@ -14826,7 +14691,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_c5831b29d17867842e5f",
         "role": "bwd_reduce",
         "select_rule": {
-            "above": 5120,
+            "above": 36301,
             "at_most": 61952,
             "kind": "rows_between",
         },
@@ -14866,26 +14731,27 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
-    "cake_rmsnorm_train_79811a76205d7d7dd197__192_1024": {
+    # sm_103a H5120 f32 weight: (192, 1024] the deterministic package's one-row-per-stage det pair main kernel f9b2d42c with its fixed-order dw reduce, launched on every SM.
+    "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__192_1024": {
         "arches": [
             "sm_103a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
+            "ctas_per_sm": 2,
             "grid_factor": 2,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
             "rows_per_issue": 1,
-            "tail_div": 4,
+            "tail_div": 1,
         },
         "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_79811a76205d7d7dd197",
+        "kernel": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_79811a76205d7d7dd197",
+        "library": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
         "role": "bwd_main_w32",
         "select_rule": {
             "above": 192,
@@ -14893,7 +14759,40 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "rows_between",
         },
         "workspace_rule": {
-            "counters": 128,
+            "counters": 160,
+            "kind": "chunk_partials",
+        },
+    },
+    # sm_103a H5120 f32 weight: (1024, 36301] the deterministic package's one-row-per-stage det pair main kernel f9b2d42c with its fixed-order dw reduce.
+    "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__1024_36301": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "free_sms": 8,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 36301,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 160,
             "kind": "chunk_partials",
         },
     },
@@ -14920,69 +14819,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_79811a76205d7d7dd197__1024_5120": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 1,
-            "tail_div": 4,
-        },
-        "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_79811a76205d7d7dd197",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_79811a76205d7d7dd197",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 1024,
-            "at_most": 5120,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 128,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_79811a76205d7d7dd197__5120_61952": {
-        "arches": [
-            "sm_103a",
-        ],
-        "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
-            "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 1,
-            "tail_div": 4,
-        },
-        "hidden": 5120,
-        "kernel": "cake_rmsnorm_train_79811a76205d7d7dd197",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": False,
-        },
-        "library": "cake_rmsnorm_train_79811a76205d7d7dd197",
-        "role": "bwd_main_w32",
-        "select_rule": {
-            "above": 5120,
-            "at_most": 61952,
-            "kind": "rows_between",
-        },
-        "workspace_rule": {
-            "counters": 128,
-            "kind": "chunk_partials",
-        },
-    },
-    "cake_rmsnorm_train_c5831b29d17867842e5f__1024_5120": {
+    "cake_rmsnorm_train_c5831b29d17867842e5f__1024_36301": {
         "arches": [
             "sm_103a",
         ],
@@ -15000,10 +14837,41 @@ MODULES: dict[str, dict[str, Any]] = {
         "role": "bwd_reduce",
         "select_rule": {
             "above": 1024,
-            "at_most": 5120,
+            "at_most": 36301,
             "kind": "rows_between",
         },
         "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_79811a76205d7d7dd197__36301_61952": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 1,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 2,
+            "rows_per_issue": 1,
+            "tail_div": 4,
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_train_79811a76205d7d7dd197",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_79811a76205d7d7dd197",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 36301,
+            "at_most": 61952,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 128,
+            "kind": "chunk_partials",
+        },
     },
     # sm_103a H6144 bf16 weight: (16, 896] the column-task kernel 44508df7 (96 column tasks).
     "cake_rmsnorm_train_44508df7dab2ab688f85__16_896": {
@@ -15419,7 +15287,62 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_6a428da2227972ae18ae": {
+    # sm_107a H1536 bf16 weight: (1024, 12288] the deterministic package's one-row-per-stage det pair main kernel 88510c60 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_88510c609fd688aab969__1024_12288": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 6,
+            "grid_factor": 6,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 6,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_88510c609fd688aab969",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_88510c609fd688aab969",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 48,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_db5c0b673c516bd0295d__1024_12288": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_db5c0b673c516bd0295d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_db5c0b673c516bd0295d",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6a428da2227972ae18ae__12288_16384": {
         "arches": [
             "sm_107a",
         ],
@@ -15441,7 +15364,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_6a428da2227972ae18ae",
         "role": "bwd_mid",
         "select_rule": {
-            "above": 1024,
+            "above": 12288,
             "at_most": 16384,
             "kind": "rows_between",
         },
@@ -15449,6 +15372,29 @@ MODULES: dict[str, dict[str, Any]] = {
             "counters": 48,
             "kind": "chunk_partials",
         },
+    },
+    "cake_rmsnorm_train_db5c0b673c516bd0295d__12288_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 48,
+            "kind": "fixed",
+        },
+        "hidden": 1536,
+        "kernel": "cake_rmsnorm_train_db5c0b673c516bd0295d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_db5c0b673c516bd0295d",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
     },
     "cake_rmsnorm_train_56d26996239835327501__16384_45056": {
         "arches": [
@@ -15512,29 +15458,6 @@ MODULES: dict[str, dict[str, Any]] = {
             "counters": 48,
             "kind": "chunk_partials",
         },
-    },
-    "cake_rmsnorm_train_db5c0b673c516bd0295d": {
-        "arches": [
-            "sm_107a",
-        ],
-        "grid_rule": {
-            "ctas": 48,
-            "kind": "fixed",
-        },
-        "hidden": 1536,
-        "kernel": "cake_rmsnorm_train_db5c0b673c516bd0295d",
-        "launch": {
-            "cooperative": False,
-            "use_pdl": True,
-        },
-        "library": "cake_rmsnorm_train_db5c0b673c516bd0295d",
-        "role": "bwd_reduce",
-        "select_rule": {
-            "above": 1024,
-            "at_most": 16384,
-            "kind": "rows_between",
-        },
-        "workspace_rule": None,
     },
     "cake_rmsnorm_train_db5c0b673c516bd0295d__16384_45056": {
         "arches": [
@@ -15730,26 +15653,27 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_81c3d8ab0a482e3af043": {
+    # sm_107a H2048 bf16 weight: (1024, 16384] the deterministic package's one-row-per-stage det pair main kernel cc26e316 with its fixed-order dw reduce.
+    "cake_rmsnorm_train_cc26e316ae40d683a118__1024_16384": {
         "arches": [
             "sm_107a",
         ],
         "grid_rule": {
-            "ctas_per_sm": 1,
-            "grid_factor": 2,
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
             "kind": "claimed_chunks",
-            "launch_bound_ctas_per_sm": 1,
-            "max_halving": 2,
-            "rows_per_issue": 4,
-            "tail_div": 12,
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
         },
         "hidden": 2048,
-        "kernel": "cake_rmsnorm_train_81c3d8ab0a482e3af043",
+        "kernel": "cake_rmsnorm_train_cc26e316ae40d683a118",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_81c3d8ab0a482e3af043",
+        "library": "cake_rmsnorm_train_cc26e316ae40d683a118",
         "role": "bwd_mid",
         "select_rule": {
             "above": 1024,
@@ -16017,8 +15941,8 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's det pair main kernel e9e21bbe with its fixed-order dw reduce.
-    "cake_rmsnorm_train_e9e21bbe4fa478075868__24064_24576": {
+    # sm_107a H4096 bf16 weight: (24064, 24576] the deterministic package's det pair main kernel a647fccc with its fixed-order dw reduce (A/B on VR200, 212 SMs).
+    "cake_rmsnorm_train_a647fccc3d9fa9134733__24064_24576": {
         "arches": [
             "sm_107a",
         ],
@@ -16032,12 +15956,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "tail_div": 12,
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_e9e21bbe4fa478075868",
+        "kernel": "cake_rmsnorm_train_a647fccc3d9fa9134733",
         "launch": {
             "cooperative": False,
             "use_pdl": False,
         },
-        "library": "cake_rmsnorm_train_e9e21bbe4fa478075868",
+        "library": "cake_rmsnorm_train_a647fccc3d9fa9134733",
         "role": "bwd_main",
         "select_rule": {
             "above": 24064,
@@ -16245,7 +16169,7 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "workspace_rule": None,
     },
-    "cake_rmsnorm_train_10e24516314c244771f4__24064_24576": {
+    "cake_rmsnorm_train_69bf6e104bb48b6b74bf__24064_24576": {
         "arches": [
             "sm_107a",
         ],
@@ -16254,12 +16178,12 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "fixed",
         },
         "hidden": 4096,
-        "kernel": "cake_rmsnorm_train_10e24516314c244771f4",
+        "kernel": "cake_rmsnorm_train_69bf6e104bb48b6b74bf",
         "launch": {
             "cooperative": False,
             "use_pdl": True,
         },
-        "library": "cake_rmsnorm_train_10e24516314c244771f4",
+        "library": "cake_rmsnorm_train_69bf6e104bb48b6b74bf",
         "role": "bwd_reduce",
         "select_rule": {
             "above": 24064,
@@ -17076,7 +17000,7 @@ MODULES: dict[str, dict[str, Any]] = {
             "kind": "chunk_partials",
         },
     },
-    "cake_rmsnorm_train_cd612de56c0985bb4caa__896_4096": {
+    "cake_rmsnorm_train_cd612de56c0985bb4caa__1280_4096": {
         "arches": [
             "sm_107a",
         ],
@@ -17098,7 +17022,7 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_rmsnorm_train_cd612de56c0985bb4caa",
         "role": "bwd_small_w32",
         "select_rule": {
-            "above": 896,
+            "above": 1280,
             "at_most": 4096,
             "kind": "rows_between",
         },
@@ -17106,6 +17030,29 @@ MODULES: dict[str, dict[str, Any]] = {
             "counters": 128,
             "kind": "chunk_partials",
         },
+    },
+    "cake_rmsnorm_train_2af4cf2f58ba58f78099__1280_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 160,
+            "kind": "fixed",
+        },
+        "hidden": 5120,
+        "kernel": "cake_rmsnorm_train_2af4cf2f58ba58f78099",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_2af4cf2f58ba58f78099",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1280,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
     },
     # sm_107a H5120 f32 weight: (19968, 32767] the deterministic package's det pair main kernel de0cf457 with its fixed-order dw reduce.
     "cake_rmsnorm_train_de0cf457cd240f9c6422__19968_32767": {
@@ -18885,10 +18832,5688 @@ MODULES: dict[str, dict[str, Any]] = {
             "sum_bytes": 0,
         },
     },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_2": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 2,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__2_4": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 2,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__4_512": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__512_1024": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__1024_2048": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__32768_inf": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 2,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__4_32": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 32,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__32_64": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__64_512": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 64,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__512_1024": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__1024_32768": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__32768_inf": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 2,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_628267fc724c2c8f0e07__2_4": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 2,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16__4_16384": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_628267fc724c2c8f0e07": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 2,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1ecf9c260e418bc70046__2_4": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__4_64": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1ecf9c260e418bc70046__64_128": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 64,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__128_16384": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 128,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1ecf9c260e418bc70046": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__16_32": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16,
+            "at_most": 32,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__32_256": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32,
+            "at_most": 256,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__256_512": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 256,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__512_8192": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 512,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_39b9b41b16769252153d": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_39b9b41b16769252153d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_39b9b41b16769252153d",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac__24576_32768": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 24576,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03b5516039c533b453b9__32768_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_1": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__4_8": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c__8_16": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__16_256": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16,
+            "at_most": 256,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c__256_1024": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 256,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_58c2fce1ea0b40758e91__2048_32768": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_99b209a37f0203af57ce__32768_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9346600882e53a589509": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 8,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 16,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_9346600882e53a589509",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9346600882e53a589509",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_401a018c68bc082078b2": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 16,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_401a018c68bc082078b2",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_401a018c68bc082078b2",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_8b0b86c827709e73ee26": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_c50d3bbd794af91a2538": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_c50d3bbd794af91a2538",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c50d3bbd794af91a2538",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_8b0b86c827709e73ee26__16384_inf": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_ab8a320c36b909e7bf1e": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 8,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 16,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_ab8a320c36b909e7bf1e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_ab8a320c36b909e7bf1e",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea__1024_1536": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 16,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_a45d09aebf1bdca80e95": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_a45d09aebf1bdca80e95",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_a45d09aebf1bdca80e95",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_d0fe504e1d8611c0b2dc": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_3e751b6f0ebbd6be9481": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__12288_16384": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_3e751b6f0ebbd6be9481__16384_inf": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_330930e9329d1e53aa5c": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 1,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_330930e9329d1e53aa5c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_330930e9329d1e53aa5c",
+        "role": "bwd_tiny",
+        "select_rule": {
+            "above": 0,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_28647b7ceb414d4fd02c__4_8": {
+        "arches": [
+            "sm_100a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 4,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_28647b7ceb414d4fd02c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_28647b7ceb414d4fd02c",
+        "role": "bwd_tiny",
+        "select_rule": {
+            "above": 4,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__8_64": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 8,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_5ad5f0962d5c5e8f63ac": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_5ad5f0962d5c5e8f63ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_5ad5f0962d5c5e8f63ac",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 64,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_89fa3e964f6ac26dc6a2": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 128,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_0c581a133624ff396ab4": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_0c581a133624ff396ab4",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_0c581a133624ff396ab4",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_af798d1034849cc692e9": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_af798d1034849cc692e9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_af798d1034849cc692e9",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_cfc0c892442996e73159": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_cfc0c892442996e73159",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_cfc0c892442996e73159",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_3b5dc80e2313fd64010e": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 64,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_81e742d5d2cf1e0f790a": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 1,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_81e742d5d2cf1e0f790a",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_81e742d5d2cf1e0f790a",
+        "role": "bwd_tiny_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_8501e95ea685c476cb50__4_8": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas": 4,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_8501e95ea685c476cb50",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8501e95ea685c476cb50",
+        "role": "bwd_tiny_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_744d74299c2d45867c94": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_744d74299c2d45867c94",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_744d74299c2d45867c94",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 8,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_561bea88a25c2f245c29": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_561bea88a25c2f245c29",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_561bea88a25c2f245c29",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_1a45ade5011422a0d019": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_aa1d3e29ef1b72a71d51": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_1a45ade5011422a0d019__12288_32768": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_2980f513dd6581ec98e7": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_2980f513dd6581ec98e7",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_2980f513dd6581ec98e7",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_8895b0224bb3d596a3a6": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 1,
+            "grid_factor": 1,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_8895b0224bb3d596a3a6",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8895b0224bb3d596a3a6",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_a5f2942d61e591f57a76": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_a5f2942d61e591f57a76",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_a5f2942d61e591f57a76",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_809235a3965d337a6877": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_809235a3965d337a6877",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_809235a3965d337a6877",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 128,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_12bbedff93fcaafa475d": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 512,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_c646e0976e08c6fe8a91": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 5,
+            "grid_factor": 5,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 5,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c646e0976e08c6fe8a91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c646e0976e08c6fe8a91",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_b2cf87e64c9399e38407__8192_inf": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 8192,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 10240,
+        },
+    },
+    "cake_rmsnorm_train_59474336746fb32d4e51": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas": 80,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 512,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_59474336746fb32d4e51__4096_8192": {
+        "arches": [
+            "sm_100a",
+        ],
+        "grid_rule": {
+            "ctas": 80,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_103805d93149c8668264": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 1,
+            "grid_factor": 1,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 1,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_103805d93149c8668264",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_103805d93149c8668264",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_8d8ef930b7d650c5538a": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_e476d0b2c0bd4285f16d": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_e476d0b2c0bd4285f16d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_e476d0b2c0bd4285f16d",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 128,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_80956d258172dfa76c2a": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_80956d258172dfa76c2a",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_80956d258172dfa76c2a",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 512,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_f6956a41e69eb126197e": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_f6956a41e69eb126197e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_f6956a41e69eb126197e",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 10240,
+        },
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_2048": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16__0_16384": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__0_16384": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__0_256": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 256,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__256_1024": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 256,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1024_8192": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac__24576_inf": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 24576,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_512": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c__512_1024": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_99b209a37f0203af57ce": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_62e8e2756e015c39bf5c__8192_24576": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_58c2fce1ea0b40758e91__24576_32768": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 24576,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__32768_inf": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea": {
+        "arches": [
+            "sm_103a",
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 16,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_a45d09aebf1bdca80e95__2048_4096": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_a45d09aebf1bdca80e95",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_a45d09aebf1bdca80e95",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 1024,
+        },
+    },
+    "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__4_64": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 4,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_5e32dd889d72a75e348b": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_5e32dd889d72a75e348b",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_5e32dd889d72a75e348b",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_33d9025920659f515c9f": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_33d9025920659f515c9f",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_33d9025920659f515c9f",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_3b5dc80e2313fd64010e__1024_1536": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas": 64,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_ba8feeec37d2bdde1fca": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_ba8feeec37d2bdde1fca",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_ba8feeec37d2bdde1fca",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_aa1d3e29ef1b72a71d51__1536_2048": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 5,
+            "rows_per_issue": 2,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 8192,
+        },
+    },
+    "cake_rmsnorm_train_12bbedff93fcaafa475d__512_2048": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 512,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_b2cf87e64c9399e38407": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 2048,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 10240,
+        },
+    },
+    "cake_rmsnorm_train_59474336746fb32d4e51__512_2048": {
+        "arches": [
+            "sm_103a",
+        ],
+        "grid_rule": {
+            "ctas": 80,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_59474336746fb32d4e51",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 512,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_8": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__8_16": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 8,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__16_256": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16,
+            "at_most": 256,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__256_1024": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 256,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__1024_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__4096_8192": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_cffbc5c8de9c874b207c": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_cffbc5c8de9c874b207c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_cffbc5c8de9c874b207c",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_9e8a70075f28be558bba__12288_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_9e8a70075f28be558bba",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_cffbc5c8de9c874b207c__32768_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_cffbc5c8de9c874b207c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_cffbc5c8de9c874b207c",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_141ce1cb9005dddeee33": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_141ce1cb9005dddeee33",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_141ce1cb9005dddeee33",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_91c090c06a5add02f1fd": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_91c090c06a5add02f1fd",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_91c090c06a5add02f1fd",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__0_8": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__8_16": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__16_512": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__512_1536": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__1536_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__4096_8192": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_f5110367098beea13130": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_f5110367098beea13130",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_f5110367098beea13130",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_364ed18ca31e5b754d4e__12288_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_8bd2d83654da4780c48a": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_8bd2d83654da4780c48a",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8bd2d83654da4780c48a",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_d99009bfce4043a5dffe__24576_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d99009bfce4043a5dffe",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 24576,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_008fb179743126fb2d35": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_008fb179743126fb2d35",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_008fb179743126fb2d35",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16__0_32": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 32,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_628267fc724c2c8f0e07__32_64": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16__64_2048": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 64,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_7221de56ded18727adaf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_7221de56ded18727adaf",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_7221de56ded18727adaf",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3808022dd402387eed16__4096_24576": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3808022dd402387eed16",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3808022dd402387eed16",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_7221de56ded18727adaf__24576_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_7221de56ded18727adaf",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_7221de56ded18727adaf",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 24576,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_a05a2262fd5fa6912442": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_a05a2262fd5fa6912442",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_a05a2262fd5fa6912442",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__0_32": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 32,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1ecf9c260e418bc70046__32_64": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32,
+            "at_most": 64,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__64_2048": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 64,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_04ea6484fdf4a9b14ee0": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_04ea6484fdf4a9b14ee0",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_04ea6484fdf4a9b14ee0",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_513f4ffbfefd9d019863__4096_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 16,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_513f4ffbfefd9d019863",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_1ecf9c260e418bc70046__16384_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_67e0dfc12fbae0354e51": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 32,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_67e0dfc12fbae0354e51",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_67e0dfc12fbae0354e51",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 0,
+            "at_most": 1,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1_4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__4_8": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 8,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__16_128": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__128_512": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 128,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac__512_1024": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03b5516039c533b453b9": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1536_2048": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03a74dfe62df95c2a752__2048_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03a74dfe62df95c2a752",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac__4096_12288": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_03b5516039c533b453b9__12288_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_03b5516039c533b453b9",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_007e82b24390c88156ac__16384_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_007e82b24390c88156ac",
+        "role": "fwd_rows",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c__4_8": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 8,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__8_128": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_c43709cadf31ed04033c__128_512": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 4,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c43709cadf31ed04033c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 128,
+            "at_most": 512,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_58c2fce1ea0b40758e91": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 512,
+            "at_most": 1024,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_62e8e2756e015c39bf5c": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1024,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_6258b6dac6840cc6bd58__1536_2048": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 2,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_62e8e2756e015c39bf5c__2048_8192": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_99b209a37f0203af57ce__8192_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_99b209a37f0203af57ce",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_58c2fce1ea0b40758e91__16384_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "grid_limit": 0,
+            "grid_per_sm": 0,
+            "kind": "rows_per_cta",
+            "rows_per_cta": 8,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+        "role": "fwd_rows_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_8b0b86c827709e73ee26__2048_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_c50d3bbd794af91a2538__4096_12288": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_c50d3bbd794af91a2538",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c50d3bbd794af91a2538",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_8b0b86c827709e73ee26__12288_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8b0b86c827709e73ee26",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 12288,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__2048_8192": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_3e751b6f0ebbd6be9481__8192_12288": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 12288,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__107_12288_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 12288,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_3e751b6f0ebbd6be9481__107_16384_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 5,
+            "rows_per_issue": 8,
+            "tail_div": 12,
+        },
+        "hidden": 128,
+        "kernel": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 32768,
+        },
+    },
+    "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__8_1536": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 8,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_0c581a133624ff396ab4__1536_2048": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_0c581a133624ff396ab4",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_0c581a133624ff396ab4",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_5e32dd889d72a75e348b__2048_24576": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_5e32dd889d72a75e348b",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_5e32dd889d72a75e348b",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_af798d1034849cc692e9__24576_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_af798d1034849cc692e9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_af798d1034849cc692e9",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 24576,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
+        },
+    },
+    "cake_rmsnorm_train_c76585c95d46d37d27b4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_c76585c95d46d37d27b4",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c76585c95d46d37d27b4",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
+        },
+    },
+    "cake_rmsnorm_train_4830a91c2471462a29c8": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 128,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_4830a91c2471462a29c8",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_4830a91c2471462a29c8",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 2048,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3b5dc80e2313fd64010e__2048_24576": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 64,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 2048,
+            "at_most": 24576,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_8501e95ea685c476cb50__4_16": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 4,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_8501e95ea685c476cb50",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8501e95ea685c476cb50",
+        "role": "bwd_tiny_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 16,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_744d74299c2d45867c94__16_1536": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 32,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_744d74299c2d45867c94",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_744d74299c2d45867c94",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 16,
+            "at_most": 1536,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_561bea88a25c2f245c29__1536_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_561bea88a25c2f245c29",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_561bea88a25c2f245c29",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_ba8feeec37d2bdde1fca__4096_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 4,
+            "grid_factor": 4,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 4,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_ba8feeec37d2bdde1fca",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_ba8feeec37d2bdde1fca",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 32,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_1a45ade5011422a0d019__16384_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_1a45ade5011422a0d019",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
+        },
+    },
+    "cake_rmsnorm_train_b8310bbe93fc0391e8d1": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_b8310bbe93fc0391e8d1",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b8310bbe93fc0391e8d1",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 131072,
+        },
+    },
+    "cake_rmsnorm_train_4830a91c2471462a29c8__1536_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 128,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_4830a91c2471462a29c8",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_4830a91c2471462a29c8",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 1536,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_3b5dc80e2313fd64010e__4096_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 64,
+            "kind": "fixed",
+        },
+        "hidden": 1024,
+        "kernel": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_12bbedff93fcaafa475d__512_8192": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 3,
+            "grid_factor": 3,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 3,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_12bbedff93fcaafa475d",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 512,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_c646e0976e08c6fe8a91__8192_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 5,
+            "grid_factor": 5,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 5,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c646e0976e08c6fe8a91",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c646e0976e08c6fe8a91",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_b2cf87e64c9399e38407__16384_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_b2cf87e64c9399e38407",
+        "role": "bwd_main",
+        "select_rule": {
+            "above": 16384,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 128000,
+        },
+    },
+    "cake_rmsnorm_train_849ee5d846ddc145e3a9": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 160,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_849ee5d846ddc145e3a9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_849ee5d846ddc145e3a9",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 512,
+            "at_most": 8192,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_382c8727d8b150884d7f__8192_16384": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 320,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_382c8727d8b150884d7f",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_382c8727d8b150884d7f",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 8192,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_62559c1037dd2c61140b__0_4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 1,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_62559c1037dd2c61140b",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_62559c1037dd2c61140b",
+        "role": "bwd_tiny",
+        "select_rule": {
+            "above": 0,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_7905241de01123c84d2d__0_4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 1,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_7905241de01123c84d2d",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_7905241de01123c84d2d",
+        "role": "bwd_tiny_w32",
+        "select_rule": {
+            "above": 0,
+            "at_most": 4,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 0,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_8d8ef930b7d650c5538a__4_128": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "col_tasks": 16,
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 1,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4,
+            "at_most": 128,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 1,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 0,
+        },
+    },
+    "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 5,
+            "grid_factor": 5,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 5,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4__16384_32768": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 5,
+            "grid_factor": 5,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 5,
+            "max_halving": 0,
+            "rows_per_issue": 1,
+            "tail_div": 1,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 40,
+            "kind": "chunk_partials",
+        },
+    },
+    "cake_rmsnorm_train_f6956a41e69eb126197e__32768_inf": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas_per_sm": 2,
+            "grid_factor": 2,
+            "kind": "claimed_chunks",
+            "launch_bound_ctas_per_sm": 2,
+            "max_halving": 5,
+            "rows_per_issue": 4,
+            "tail_div": 12,
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_f6956a41e69eb126197e",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_train_f6956a41e69eb126197e",
+        "role": "bwd_main_w32",
+        "select_rule": {
+            "above": 32768,
+            "at_most": None,
+            "kind": "rows_between",
+        },
+        "workspace_rule": {
+            "counters": 2,
+            "kind": "claim_sum_f32",
+            "sum_bytes": 128000,
+        },
+    },
+    "cake_rmsnorm_train_849ee5d846ddc145e3a9__512_4096": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 160,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_849ee5d846ddc145e3a9",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_849ee5d846ddc145e3a9",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 512,
+            "at_most": 4096,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_382c8727d8b150884d7f": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 320,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_382c8727d8b150884d7f",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_382c8727d8b150884d7f",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 4096,
+            "at_most": 16384,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
+    "cake_rmsnorm_train_55c3530541ac1903b775": {
+        "arches": [
+            "sm_107a",
+        ],
+        "grid_rule": {
+            "ctas": 80,
+            "kind": "fixed",
+        },
+        "hidden": 1280,
+        "kernel": "cake_rmsnorm_train_55c3530541ac1903b775",
+        "launch": {
+            "cooperative": False,
+            "use_pdl": True,
+        },
+        "library": "cake_rmsnorm_train_55c3530541ac1903b775",
+        "role": "bwd_reduce",
+        "select_rule": {
+            "above": 16384,
+            "at_most": 32768,
+            "kind": "rows_between",
+        },
+        "workspace_rule": None,
+    },
 }
 
 ROUTES: dict[str, dict[str, list[str]]] = {
     "sm_100a": {
+        "fwd_h1024": [
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_2",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__2_4",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__4_512",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__512_1024",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__1024_2048",
+            "cake_rmsnorm_train_9e8a70075f28be558bba",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__32768_inf",
+        ],
+        "fwd_w32_h1024": [
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__4_32",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__32_64",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__64_512",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__512_1024",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__1024_32768",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__32768_inf",
+        ],
+        "fwd_h128": [
+            "cake_rmsnorm_train_3808022dd402387eed16",
+            "cake_rmsnorm_train_628267fc724c2c8f0e07__2_4",
+            "cake_rmsnorm_train_3808022dd402387eed16__4_16384",
+            "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        ],
+        "fwd_w32_h128": [
+            "cake_rmsnorm_train_513f4ffbfefd9d019863",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046__2_4",
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__4_64",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046__64_128",
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__128_16384",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        ],
+        "fwd_h1280": [
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__16_32",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__32_256",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__256_512",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__512_8192",
+            "cake_rmsnorm_train_39b9b41b16769252153d",
+            "cake_rmsnorm_train_007e82b24390c88156ac__24576_32768",
+            "cake_rmsnorm_train_03b5516039c533b453b9__32768_inf",
+        ],
+        "fwd_w32_h1280": [
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_1",
+            "cake_rmsnorm_train_c43709cadf31ed04033c",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__4_8",
+            "cake_rmsnorm_train_c43709cadf31ed04033c__8_16",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__16_256",
+            "cake_rmsnorm_train_c43709cadf31ed04033c__256_1024",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+            "cake_rmsnorm_train_58c2fce1ea0b40758e91__2048_32768",
+            "cake_rmsnorm_train_99b209a37f0203af57ce__32768_inf",
+        ],
         "fwd_h1536": [
             "cake_rmsnorm_train_1ea88523077fc340e55f",
             "cake_rmsnorm_train_2fdbab2af48db42cd2a9__low",
@@ -18987,6 +24612,22 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_e5a3aa2548fc41ee0485",
             "cake_rmsnorm_train_6325c474ad9955a319e9",
         ],
+        "bwd_h128": [
+            "cake_rmsnorm_train_9346600882e53a589509",
+            "cake_rmsnorm_train_401a018c68bc082078b2",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26",
+            "cake_rmsnorm_train_c50d3bbd794af91a2538",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26__16384_inf",
+        ],
+        "bwd_w32_h128": [
+            "cake_rmsnorm_train_ab8a320c36b909e7bf1e",
+            "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea__1024_1536",
+            "cake_rmsnorm_train_a45d09aebf1bdca80e95",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__12288_16384",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481__16384_inf",
+        ],
         "bwd_h256": [
             "cake_rmsnorm_train_780c64c6f2c4615bfbcf",
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
@@ -19030,35 +24671,76 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_fd08c6f436eb6071fa22",
             "cake_rmsnorm_train_7097069b8eea6ba44d5a__292_960",
         ],
+        "bwd_h1024": [
+            "cake_rmsnorm_train_330930e9329d1e53aa5c",
+            "cake_rmsnorm_train_28647b7ceb414d4fd02c__4_8",
+            "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__8_64",
+            "cake_rmsnorm_train_5ad5f0962d5c5e8f63ac",
+            "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+            "cake_rmsnorm_train_0c581a133624ff396ab4",
+            "cake_rmsnorm_train_af798d1034849cc692e9",
+            "cake_rmsnorm_train_cfc0c892442996e73159",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        ],
+        "bwd_w32_h1024": [
+            "cake_rmsnorm_train_81e742d5d2cf1e0f790a",
+            "cake_rmsnorm_train_8501e95ea685c476cb50__4_8",
+            "cake_rmsnorm_train_744d74299c2d45867c94",
+            "cake_rmsnorm_train_561bea88a25c2f245c29",
+            "cake_rmsnorm_train_1a45ade5011422a0d019",
+            "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+            "cake_rmsnorm_train_1a45ade5011422a0d019__12288_32768",
+            "cake_rmsnorm_train_2980f513dd6581ec98e7",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e",
+        ],
+        "bwd_h1280": [
+            "cake_rmsnorm_train_8895b0224bb3d596a3a6",
+            "cake_rmsnorm_train_a5f2942d61e591f57a76",
+            "cake_rmsnorm_train_809235a3965d337a6877",
+            "cake_rmsnorm_train_12bbedff93fcaafa475d",
+            "cake_rmsnorm_train_c646e0976e08c6fe8a91",
+            "cake_rmsnorm_train_b2cf87e64c9399e38407__8192_inf",
+            "cake_rmsnorm_train_59474336746fb32d4e51",
+            "cake_rmsnorm_train_59474336746fb32d4e51__4096_8192",
+        ],
+        "bwd_w32_h1280": [
+            "cake_rmsnorm_train_103805d93149c8668264",
+            "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+            "cake_rmsnorm_train_e476d0b2c0bd4285f16d",
+            "cake_rmsnorm_train_80956d258172dfa76c2a",
+            "cake_rmsnorm_train_f6956a41e69eb126197e",
+            "cake_rmsnorm_train_59474336746fb32d4e51",
+        ],
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_2",
             "cake_rmsnorm_train_02e761bcf94053af6fc3__2_64",
             "cake_rmsnorm_train_dc478ac1195882aedee6__64_384",
             "cake_rmsnorm_train_7dc29629ff21625607f8__384_1024",
-            "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
-            "cake_rmsnorm_train_21c8bb55c8d672b63952",
-            "cake_rmsnorm_train_b457c4d134e44476dc6f__32768_36352",
-            "cake_rmsnorm_train_b457c4d134e44476dc6f__36352_78784",
+            "cake_rmsnorm_train_c1a9efdf06c3087b4efe__1024_1184",
+            "cake_rmsnorm_train_38e32d90f62f7cfc7b51__1184_77824",
+            "cake_rmsnorm_train_b457c4d134e44476dc6f__77824_78784",
             "cake_rmsnorm_train_0d5dc239536f113f4926",
-            "cake_rmsnorm_train_ae610afdf77ff6714a5b__131072_inf",
+            "cake_rmsnorm_train_38e32d90f62f7cfc7b51__131072_214016",
+            "cake_rmsnorm_train_ae610afdf77ff6714a5b__214016_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__384_1024",
-            "cake_rmsnorm_train_1863320f3158d35eead6",
-            "cake_rmsnorm_train_1863320f3158d35eead6__4096_32768",
-            "cake_rmsnorm_train_9b727c2c9933b2ca6724__32768_36352",
-            "cake_rmsnorm_train_9b727c2c9933b2ca6724__36352_78784",
+            "cake_rmsnorm_train_1863320f3158d35eead6__1024_1184",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__1184_77824",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__77824_78784",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__131072_214016",
         ],
         "bwd_w32_h1536": [
             "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_2",
             "cake_rmsnorm_train_166e288c9192be6b994c__2_64",
             "cake_rmsnorm_train_e83ee45f66352eaef755__64_384",
             "cake_rmsnorm_train_baff9ecbafe7de1e6030__384_1024",
-            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_4096",
-            "cake_rmsnorm_train_4bf450b6af0314ed03be",
-            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__32768_75776",
-            "cake_rmsnorm_train_363eabb3661dab78f3d3",
-            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__131072_inf",
+            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__1024_1184",
+            "cake_rmsnorm_train_e30c1899e859da4f4c68__1184_77824",
+            "cake_rmsnorm_train_363eabb3661dab78f3d3__77824_131072",
+            "cake_rmsnorm_train_e30c1899e859da4f4c68__131072_214016",
+            "cake_rmsnorm_train_4b6981c10fd40a9d8aec__214016_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__384_1024",
-            "cake_rmsnorm_train_1863320f3158d35eead6__4096_32768",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__1184_77824",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__131072_214016",
         ],
         "bwd_h2048": [
             "cake_rmsnorm_train_c5f62407b828a85f82ec",
@@ -19083,7 +24765,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_0017ab41f68d8689ebc2",
             "cake_rmsnorm_train_65e5f2024d26a36f2e18__4_14",
             "cake_rmsnorm_train_c2f08c957d4b0f17dddd__14_64",
-            "cake_rmsnorm_train_17493054fed5409b6df9__64_336",
+            "cake_rmsnorm_train_9030dbeb948761ec2258__64_336",
             "cake_rmsnorm_train_17493054fed5409b6df9__336_1024",
             "cake_rmsnorm_train_ba7dbf6a07744268705e__1024_4096",
             "cake_rmsnorm_train_b187e5989302def22b2d__4096_15403",
@@ -19130,23 +24812,26 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         "bwd_h5120": [
             "cake_rmsnorm_train_dbc680f356be4cd643de",
             "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_64",
-            "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_896",
-            "cake_rmsnorm_train_b482c84dbffcd75a4a4c__896_6144",
-            "cake_rmsnorm_train_b482c84dbffcd75a4a4c__6144_56256",
+            "cake_rmsnorm_train_080e0a6c3b18e9bad790__64_767",
+            "cake_rmsnorm_train_bfde9b88e800fc34722c__767_36864",
+            "cake_rmsnorm_train_b482c84dbffcd75a4a4c__36864_56256",
             "cake_rmsnorm_train_670f4cafe8c34a429d30__56256_131072",
-            "cake_rmsnorm_train_2f05000ca9242ea4d6cb__131072_inf",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__896_6144",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__6144_56256",
+            "cake_rmsnorm_train_bfde9b88e800fc34722c__131072_inf",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__767_36864",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__36864_56256",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__131072_inf",
         ],
         "bwd_w32_h5120": [
             "cake_rmsnorm_train_d47138228b123e55fe5d",
             "cake_rmsnorm_train_cb6539573725ac861f94__4_64",
-            "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_1792",
-            "cake_rmsnorm_train_de8f6091077dc7ac5947__1792_6144",
-            "cake_rmsnorm_train_9479b1298a1b19d4d996__6144_56256",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__64_767",
+            "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__767_36864",
+            "cake_rmsnorm_train_9479b1298a1b19d4d996__36864_56256",
             "cake_rmsnorm_train_13bd0c5f56e37867eb26__56256_131072",
-            "cake_rmsnorm_train_de8f6091077dc7ac5947__131072_inf",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__6144_56256",
+            "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__131072_inf",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__767_36864",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__36864_56256",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__131072_inf",
         ],
         "bwd_h6144": [
             "cake_rmsnorm_train_e37752b056dd4e4a0bee",
@@ -19188,6 +24873,46 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
     },
     "sm_103a": {
+        "fwd_h1024": [
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_2048",
+            "cake_rmsnorm_train_9e8a70075f28be558bba",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__32768_inf",
+        ],
+        "fwd_w32_h1024": [
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__4_32",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__32_64",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__64_512",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__512_1024",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__1024_32768",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__32768_inf",
+        ],
+        "fwd_h128": [
+            "cake_rmsnorm_train_3808022dd402387eed16__0_16384",
+            "cake_rmsnorm_train_628267fc724c2c8f0e07",
+        ],
+        "fwd_w32_h128": [
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__0_16384",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046",
+        ],
+        "fwd_h1280": [
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__0_256",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__256_1024",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1024_8192",
+            "cake_rmsnorm_train_39b9b41b16769252153d",
+            "cake_rmsnorm_train_007e82b24390c88156ac__24576_inf",
+        ],
+        "fwd_w32_h1280": [
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_512",
+            "cake_rmsnorm_train_c43709cadf31ed04033c__512_1024",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58",
+            "cake_rmsnorm_train_99b209a37f0203af57ce",
+            "cake_rmsnorm_train_62e8e2756e015c39bf5c__8192_24576",
+            "cake_rmsnorm_train_58c2fce1ea0b40758e91__24576_32768",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__32768_inf",
+        ],
         "fwd_h1536": [
             "cake_rmsnorm_train_1ea88523077fc340e55f",
             "cake_rmsnorm_train_2fdbab2af48db42cd2a9__low",
@@ -19287,6 +25012,22 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_e5a3aa2548fc41ee0485",
             "cake_rmsnorm_train_6325c474ad9955a319e9",
         ],
+        "bwd_h128": [
+            "cake_rmsnorm_train_9346600882e53a589509",
+            "cake_rmsnorm_train_401a018c68bc082078b2",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26",
+            "cake_rmsnorm_train_c50d3bbd794af91a2538",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26__16384_inf",
+        ],
+        "bwd_w32_h128": [
+            "cake_rmsnorm_train_ab8a320c36b909e7bf1e",
+            "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+            "cake_rmsnorm_train_a45d09aebf1bdca80e95__2048_4096",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__12288_16384",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481__16384_inf",
+        ],
         "bwd_h256": [
             "cake_rmsnorm_train_780c64c6f2c4615bfbcf",
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
@@ -19346,12 +25087,51 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_8c261dfc6e34351d7a11",
             "cake_rmsnorm_train_88e6252beaf7d056d555",
             "cake_rmsnorm_train_2c60470d16e0a7fb6089__16_227",
-            "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_960",
-            "cake_rmsnorm_train_56ee8e66479625fd078a__960_32768",
+            "cake_rmsnorm_train_9f07cea1d13b923ed91e__227_1024",
+            "cake_rmsnorm_train_56ee8e66479625fd078a__1024_32768",
             "cake_rmsnorm_train_a546f410ec8cf03ef20d",
-            "cake_rmsnorm_train_7097069b8eea6ba44d5a__227_960",
-            "cake_rmsnorm_train_122721bd6b4650866553__960_32768",
+            "cake_rmsnorm_train_7097069b8eea6ba44d5a__227_1024",
+            "cake_rmsnorm_train_122721bd6b4650866553__1024_32768",
             "cake_rmsnorm_train_122721bd6b4650866553",
+        ],
+        "bwd_h1024": [
+            "cake_rmsnorm_train_330930e9329d1e53aa5c",
+            "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__4_64",
+            "cake_rmsnorm_train_5ad5f0962d5c5e8f63ac",
+            "cake_rmsnorm_train_89fa3e964f6ac26dc6a2",
+            "cake_rmsnorm_train_5e32dd889d72a75e348b",
+            "cake_rmsnorm_train_33d9025920659f515c9f",
+            "cake_rmsnorm_train_af798d1034849cc692e9",
+            "cake_rmsnorm_train_cfc0c892442996e73159",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e__1024_1536",
+        ],
+        "bwd_w32_h1024": [
+            "cake_rmsnorm_train_81e742d5d2cf1e0f790a",
+            "cake_rmsnorm_train_8501e95ea685c476cb50__4_8",
+            "cake_rmsnorm_train_744d74299c2d45867c94",
+            "cake_rmsnorm_train_ba8feeec37d2bdde1fca",
+            "cake_rmsnorm_train_aa1d3e29ef1b72a71d51__1536_2048",
+            "cake_rmsnorm_train_1a45ade5011422a0d019",
+            "cake_rmsnorm_train_aa1d3e29ef1b72a71d51",
+            "cake_rmsnorm_train_1a45ade5011422a0d019__12288_32768",
+            "cake_rmsnorm_train_2980f513dd6581ec98e7",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e__1024_1536",
+        ],
+        "bwd_h1280": [
+            "cake_rmsnorm_train_8895b0224bb3d596a3a6",
+            "cake_rmsnorm_train_a5f2942d61e591f57a76",
+            "cake_rmsnorm_train_809235a3965d337a6877",
+            "cake_rmsnorm_train_12bbedff93fcaafa475d__512_2048",
+            "cake_rmsnorm_train_b2cf87e64c9399e38407",
+            "cake_rmsnorm_train_59474336746fb32d4e51__512_2048",
+        ],
+        "bwd_w32_h1280": [
+            "cake_rmsnorm_train_103805d93149c8668264",
+            "cake_rmsnorm_train_8d8ef930b7d650c5538a",
+            "cake_rmsnorm_train_e476d0b2c0bd4285f16d",
+            "cake_rmsnorm_train_80956d258172dfa76c2a",
+            "cake_rmsnorm_train_f6956a41e69eb126197e",
+            "cake_rmsnorm_train_59474336746fb32d4e51",
         ],
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4",
@@ -19359,20 +25139,16 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_02e761bcf94053af6fc3__0_64_103",
             "cake_rmsnorm_train_4aef8d1ff2c1c2af7b80__64_214",
             "cake_rmsnorm_train_7dc29629ff21625607f8__214_1024",
-            "cake_rmsnorm_train_c1a9efdf06c3087b4efe",
-            "cake_rmsnorm_train_1df7db17277d363b5168",
-            "cake_rmsnorm_train_4df08ce51fb01ba1193f",
-            "cake_rmsnorm_train_f522f5b8d4343d96ca04__15566_46592",
+            "cake_rmsnorm_train_c1a9efdf06c3087b4efe__1024_1216",
+            "cake_rmsnorm_train_38e32d90f62f7cfc7b51__1216_4096",
+            "cake_rmsnorm_train_38e32d90f62f7cfc7b51__4096_46592",
             "cake_rmsnorm_train_20d7a230ed8dc161a93a__46592_53184",
-            "cake_rmsnorm_train_9cd3c766db4b70ed7213__53184_76352",
-            "cake_rmsnorm_train_20d7a230ed8dc161a93a__76352_131072",
-            "cake_rmsnorm_train_3f75f4a81f2fb8269389__131072_inf",
+            "cake_rmsnorm_train_38e32d90f62f7cfc7b51__53184_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__214_1024",
-            "cake_rmsnorm_train_1863320f3158d35eead6",
-            "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_14928",
-            "cake_rmsnorm_train_1863320f3158d35eead6__14928_15566",
-            "cake_rmsnorm_train_1863320f3158d35eead6__15566_46592",
-            "cake_rmsnorm_train_1863320f3158d35eead6__53184_76352",
+            "cake_rmsnorm_train_1863320f3158d35eead6__1024_1216",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__1216_4096",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_46592",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__53184_inf",
         ],
         "bwd_w32_h1536": [
             "cake_rmsnorm_train_6d3986ee0dd962cafd21__0_4",
@@ -19380,20 +25156,17 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_166e288c9192be6b994c__0_64_103",
             "cake_rmsnorm_train_698c3d36d67408394ccf__64_214",
             "cake_rmsnorm_train_baff9ecbafe7de1e6030__214_1024",
-            "cake_rmsnorm_train_17d9cdfd157ba4b86c2b",
-            "cake_rmsnorm_train_a99e2b380514c4d86d60",
-            "cake_rmsnorm_train_7a72e97bd6cb4dc0efc2",
-            "cake_rmsnorm_train_109f19bb177c8f20cadc__15566_37888",
-            "cake_rmsnorm_train_178460487a7835e97912__37888_40448",
-            "cake_rmsnorm_train_51f46ff164b142ec8888__40448_76352",
-            "cake_rmsnorm_train_178460487a7835e97912__76352_131072",
-            "cake_rmsnorm_train_7c0dd63f0b011049603e__131072_inf",
+            "cake_rmsnorm_train_17d9cdfd157ba4b86c2b__1024_1216",
+            "cake_rmsnorm_train_e30c1899e859da4f4c68__1216_4096",
+            "cake_rmsnorm_train_e30c1899e859da4f4c68__4096_46592",
+            "cake_rmsnorm_train_51f46ff164b142ec8888__46592_53184",
+            "cake_rmsnorm_train_e30c1899e859da4f4c68__53184_inf",
             "cake_rmsnorm_train_9b727c2c9933b2ca6724__214_1024",
-            "cake_rmsnorm_train_1863320f3158d35eead6",
-            "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_14928",
-            "cake_rmsnorm_train_1863320f3158d35eead6__14928_15566",
-            "cake_rmsnorm_train_1863320f3158d35eead6__15566_37888",
-            "cake_rmsnorm_train_1863320f3158d35eead6__40448_76352",
+            "cake_rmsnorm_train_1863320f3158d35eead6__1024_1216",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__1216_4096",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__4096_46592",
+            "cake_rmsnorm_train_1863320f3158d35eead6__46592_53184",
+            "cake_rmsnorm_train_9b727c2c9933b2ca6724__53184_inf",
         ],
         "bwd_h2048": [
             "cake_rmsnorm_train_c5f62407b828a85f82ec",
@@ -19465,7 +25238,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_16545056022785f2a7d8",
             "cake_rmsnorm_train_78c26a53e83c9803bcbf",
             "cake_rmsnorm_train_626aed743358c27513f1__4096_48640",
-            "cake_rmsnorm_train_cb164a27c0157ed0712d__48640_65536",
+            "cake_rmsnorm_train_a8eb754739a1589de3ec__48640_65536",
             "cake_rmsnorm_train_bd22da7e2d4914167050__65536_262144",
             "cake_rmsnorm_train_36790f79b8845172d188__262144_inf",
             "cake_rmsnorm_train_5d75ea5f3c25579af496__152_256",
@@ -19478,28 +25251,30 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_dbc680f356be4cd643de",
             "cake_rmsnorm_train_29bcbde1d271ea989fa8__4_16",
             "cake_rmsnorm_train_080e0a6c3b18e9bad790__16_64",
-            "cake_rmsnorm_train_2fc4932fbde0bc848b32__64_1024",
-            "cake_rmsnorm_train_2fc4932fbde0bc848b32__1024_5120",
-            "cake_rmsnorm_train_2fc4932fbde0bc848b32__5120_61952",
+            "cake_rmsnorm_train_2fc4932fbde0bc848b32__64_192",
+            "cake_rmsnorm_train_bfde9b88e800fc34722c__192_1024",
+            "cake_rmsnorm_train_bfde9b88e800fc34722c__1024_36301",
+            "cake_rmsnorm_train_2fc4932fbde0bc848b32__36301_61952",
             "cake_rmsnorm_train_e21acade55e05f342053__61952_393216",
             "cake_rmsnorm_train_826e6a14a93bd988be4d__393216_inf",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__64_1024",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__1024_5120",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__5120_61952",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__64_192",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__192_1024",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__1024_36301",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__36301_61952",
         ],
         "bwd_w32_h5120": [
             "cake_rmsnorm_train_d47138228b123e55fe5d",
             "cake_rmsnorm_train_05396cd3a077d3772fdc__4_5",
             "cake_rmsnorm_train_cb6539573725ac861f94__5_16",
             "cake_rmsnorm_train_139d162a8bb29d1b2d35__16_192",
-            "cake_rmsnorm_train_79811a76205d7d7dd197__192_1024",
-            "cake_rmsnorm_train_79811a76205d7d7dd197__1024_5120",
-            "cake_rmsnorm_train_79811a76205d7d7dd197__5120_61952",
+            "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__192_1024",
+            "cake_rmsnorm_train_f9b2d42c4fc7a5a1aa48__1024_36301",
+            "cake_rmsnorm_train_79811a76205d7d7dd197__36301_61952",
             "cake_rmsnorm_train_05078a174a09119cfe3c__61952_196608",
             "cake_rmsnorm_train_91a40f3094182a35c784__196608_inf",
             "cake_rmsnorm_train_c5831b29d17867842e5f__192_1024",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__1024_5120",
-            "cake_rmsnorm_train_c5831b29d17867842e5f__5120_61952",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__1024_36301",
+            "cake_rmsnorm_train_c5831b29d17867842e5f__36301_61952",
         ],
         "bwd_h6144": [
             "cake_rmsnorm_train_e37752b056dd4e4a0bee",
@@ -19555,6 +25330,75 @@ ROUTES: dict[str, dict[str, list[str]]] = {
         ],
     },
     "sm_107a": {
+        "fwd_h1024": [
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__0_8",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__8_16",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__16_256",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__256_1024",
+            "cake_rmsnorm_train_6e5ca1f45eefb79bee7e__1024_4096",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__4096_8192",
+            "cake_rmsnorm_train_cffbc5c8de9c874b207c",
+            "cake_rmsnorm_train_9e8a70075f28be558bba__12288_32768",
+            "cake_rmsnorm_train_cffbc5c8de9c874b207c__32768_inf",
+        ],
+        "fwd_w32_h1024": [
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__0_8",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__8_16",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__16_512",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__512_1536",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__1536_4096",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__4096_8192",
+            "cake_rmsnorm_train_f5110367098beea13130",
+            "cake_rmsnorm_train_364ed18ca31e5b754d4e__12288_16384",
+            "cake_rmsnorm_train_8bd2d83654da4780c48a",
+            "cake_rmsnorm_train_d99009bfce4043a5dffe__24576_32768",
+            "cake_rmsnorm_train_008fb179743126fb2d35",
+        ],
+        "fwd_h128": [
+            "cake_rmsnorm_train_3808022dd402387eed16__0_32",
+            "cake_rmsnorm_train_628267fc724c2c8f0e07__32_64",
+            "cake_rmsnorm_train_3808022dd402387eed16__64_2048",
+            "cake_rmsnorm_train_7221de56ded18727adaf",
+            "cake_rmsnorm_train_3808022dd402387eed16__4096_24576",
+            "cake_rmsnorm_train_7221de56ded18727adaf__24576_32768",
+            "cake_rmsnorm_train_a05a2262fd5fa6912442",
+        ],
+        "fwd_w32_h128": [
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__0_32",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046__32_64",
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__64_2048",
+            "cake_rmsnorm_train_04ea6484fdf4a9b14ee0",
+            "cake_rmsnorm_train_513f4ffbfefd9d019863__4096_16384",
+            "cake_rmsnorm_train_1ecf9c260e418bc70046__16384_32768",
+            "cake_rmsnorm_train_67e0dfc12fbae0354e51",
+        ],
+        "fwd_h1280": [
+            "cake_rmsnorm_train_03a74dfe62df95c2a752",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1_4",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__4_8",
+            "cake_rmsnorm_train_007e82b24390c88156ac",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__16_128",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__128_512",
+            "cake_rmsnorm_train_007e82b24390c88156ac__512_1024",
+            "cake_rmsnorm_train_03b5516039c533b453b9",
+            "cake_rmsnorm_train_4d9988d4680c7c3c02a5__1536_2048",
+            "cake_rmsnorm_train_03a74dfe62df95c2a752__2048_4096",
+            "cake_rmsnorm_train_007e82b24390c88156ac__4096_12288",
+            "cake_rmsnorm_train_03b5516039c533b453b9__12288_16384",
+            "cake_rmsnorm_train_007e82b24390c88156ac__16384_inf",
+        ],
+        "fwd_w32_h1280": [
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__0_4",
+            "cake_rmsnorm_train_c43709cadf31ed04033c__4_8",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__8_128",
+            "cake_rmsnorm_train_c43709cadf31ed04033c__128_512",
+            "cake_rmsnorm_train_58c2fce1ea0b40758e91",
+            "cake_rmsnorm_train_62e8e2756e015c39bf5c",
+            "cake_rmsnorm_train_6258b6dac6840cc6bd58__1536_2048",
+            "cake_rmsnorm_train_62e8e2756e015c39bf5c__2048_8192",
+            "cake_rmsnorm_train_99b209a37f0203af57ce__8192_16384",
+            "cake_rmsnorm_train_58c2fce1ea0b40758e91__16384_inf",
+        ],
         "fwd_h1536": [
             "cake_rmsnorm_train_1ea88523077fc340e55f__107",
             "cake_rmsnorm_train_4cdc4c495b3f59ff5069",
@@ -19653,6 +25497,21 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_e5a3aa2548fc41ee0485",
             "cake_rmsnorm_train_6325c474ad9955a319e9",
         ],
+        "bwd_h128": [
+            "cake_rmsnorm_train_9346600882e53a589509",
+            "cake_rmsnorm_train_401a018c68bc082078b2",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26__2048_4096",
+            "cake_rmsnorm_train_c50d3bbd794af91a2538__4096_12288",
+            "cake_rmsnorm_train_8b0b86c827709e73ee26__12288_inf",
+        ],
+        "bwd_w32_h128": [
+            "cake_rmsnorm_train_ab8a320c36b909e7bf1e",
+            "cake_rmsnorm_train_b5f8c6c9e6ae65a17cea",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__2048_8192",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481__8192_12288",
+            "cake_rmsnorm_train_d0fe504e1d8611c0b2dc__107_12288_16384",
+            "cake_rmsnorm_train_3e751b6f0ebbd6be9481__107_16384_inf",
+        ],
         "bwd_h256": [
             "cake_rmsnorm_train_780c64c6f2c4615bfbcf",
             "cake_rmsnorm_train_f2ccf7197a641c39acbf",
@@ -19696,17 +25555,63 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_8f032213ba6eeb5d959f",
             "cake_rmsnorm_train_8f032213ba6eeb5d959f__16384_49152",
         ],
+        "bwd_h1024": [
+            "cake_rmsnorm_train_330930e9329d1e53aa5c",
+            "cake_rmsnorm_train_28647b7ceb414d4fd02c__4_8",
+            "cake_rmsnorm_train_89fa3e964f6ac26dc6a2__8_1536",
+            "cake_rmsnorm_train_0c581a133624ff396ab4__1536_2048",
+            "cake_rmsnorm_train_5e32dd889d72a75e348b__2048_24576",
+            "cake_rmsnorm_train_af798d1034849cc692e9__24576_32768",
+            "cake_rmsnorm_train_c76585c95d46d37d27b4",
+            "cake_rmsnorm_train_4830a91c2471462a29c8",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e__2048_24576",
+        ],
+        "bwd_w32_h1024": [
+            "cake_rmsnorm_train_81e742d5d2cf1e0f790a",
+            "cake_rmsnorm_train_8501e95ea685c476cb50__4_16",
+            "cake_rmsnorm_train_744d74299c2d45867c94__16_1536",
+            "cake_rmsnorm_train_561bea88a25c2f245c29__1536_4096",
+            "cake_rmsnorm_train_ba8feeec37d2bdde1fca__4096_16384",
+            "cake_rmsnorm_train_1a45ade5011422a0d019__16384_32768",
+            "cake_rmsnorm_train_b8310bbe93fc0391e8d1",
+            "cake_rmsnorm_train_4830a91c2471462a29c8__1536_4096",
+            "cake_rmsnorm_train_3b5dc80e2313fd64010e__4096_16384",
+        ],
+        "bwd_h1280": [
+            "cake_rmsnorm_train_8895b0224bb3d596a3a6",
+            "cake_rmsnorm_train_a5f2942d61e591f57a76",
+            "cake_rmsnorm_train_809235a3965d337a6877",
+            "cake_rmsnorm_train_12bbedff93fcaafa475d__512_8192",
+            "cake_rmsnorm_train_c646e0976e08c6fe8a91__8192_16384",
+            "cake_rmsnorm_train_b2cf87e64c9399e38407__16384_inf",
+            "cake_rmsnorm_train_849ee5d846ddc145e3a9",
+            "cake_rmsnorm_train_382c8727d8b150884d7f__8192_16384",
+        ],
+        "bwd_w32_h1280": [
+            "cake_rmsnorm_train_7905241de01123c84d2d__0_4",
+            "cake_rmsnorm_train_8d8ef930b7d650c5538a__4_128",
+            "cake_rmsnorm_train_e476d0b2c0bd4285f16d",
+            "cake_rmsnorm_train_80956d258172dfa76c2a",
+            "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4",
+            "cake_rmsnorm_train_c66b8cbd5626e2c1f2b4__16384_32768",
+            "cake_rmsnorm_train_f6956a41e69eb126197e__32768_inf",
+            "cake_rmsnorm_train_849ee5d846ddc145e3a9__512_4096",
+            "cake_rmsnorm_train_382c8727d8b150884d7f",
+            "cake_rmsnorm_train_55c3530541ac1903b775",
+        ],
         "bwd_h1536": [
             "cake_rmsnorm_train_db218c92c4c86b9da85a__0_4",
             "cake_rmsnorm_train_c2a523de1ff578621a88__4_16",
             "cake_rmsnorm_train_1207b05663ed2b4de14b__16_320",
             "cake_rmsnorm_train_7dc29629ff21625607f8__320_1024",
-            "cake_rmsnorm_train_6a428da2227972ae18ae",
+            "cake_rmsnorm_train_88510c609fd688aab969__1024_12288",
+            "cake_rmsnorm_train_6a428da2227972ae18ae__12288_16384",
             "cake_rmsnorm_train_56d26996239835327501__16384_45056",
             "cake_rmsnorm_train_411e270c0575d26a77f4__45056_65536",
             "cake_rmsnorm_train_c93d0266065acad326fb__65536_inf",
             "cake_rmsnorm_train_628248febbdfe17c3325__320_1024",
-            "cake_rmsnorm_train_db5c0b673c516bd0295d",
+            "cake_rmsnorm_train_db5c0b673c516bd0295d__1024_12288",
+            "cake_rmsnorm_train_db5c0b673c516bd0295d__12288_16384",
             "cake_rmsnorm_train_db5c0b673c516bd0295d__16384_45056",
             "cake_rmsnorm_train_db5c0b673c516bd0295d__45056_65536",
         ],
@@ -19729,7 +25634,7 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_518cf16a7bf8e88042ee__16_31",
             "cake_rmsnorm_train_6720b4a159be2b84b325__31_256",
             "cake_rmsnorm_train_845cdcd8145ada631461__256_1024",
-            "cake_rmsnorm_train_81c3d8ab0a482e3af043",
+            "cake_rmsnorm_train_cc26e316ae40d683a118__1024_16384",
             "cake_rmsnorm_train_845cdcd8145ada631461__16384_50176",
             "cake_rmsnorm_train_395fedebf0299f78a745__50176_50688",
             "cake_rmsnorm_train_21ee6fc93139c5e0cd41__50688_65536",
@@ -19757,13 +25662,13 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_a647fccc3d9fa9134733",
             "cake_rmsnorm_train_d41a514f5210e9adc39f",
             "cake_rmsnorm_train_ee4a9053bb25b8d49fcf__4096_24064",
-            "cake_rmsnorm_train_e9e21bbe4fa478075868__24064_24576",
+            "cake_rmsnorm_train_a647fccc3d9fa9134733__24064_24576",
             "cake_rmsnorm_train_23573e0c42a194a04876__24576_65536",
             "cake_rmsnorm_train_f11a86167db4f8e9a5da__65536_inf",
             "cake_rmsnorm_train_69bf6e104bb48b6b74bf__256_1024",
             "cake_rmsnorm_train_2030d80884deb8abcf7b",
             "cake_rmsnorm_train_10e24516314c244771f4__4096_24064",
-            "cake_rmsnorm_train_10e24516314c244771f4__24064_24576",
+            "cake_rmsnorm_train_69bf6e104bb48b6b74bf__24064_24576",
         ],
         "bwd_w32_h4096": [
             "cake_rmsnorm_train_f6bd1634a115bd281055",
@@ -19805,15 +25710,15 @@ ROUTES: dict[str, dict[str, list[str]]] = {
             "cake_rmsnorm_train_cd612de56c0985bb4caa__256_511",
             "cake_rmsnorm_train_139d162a8bb29d1b2d35__511_640",
             "cake_rmsnorm_train_cd612de56c0985bb4caa__640_895",
-            "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_896",
-            "cake_rmsnorm_train_cd612de56c0985bb4caa__896_4096",
+            "cake_rmsnorm_train_139d162a8bb29d1b2d35__895_1280",
+            "cake_rmsnorm_train_cd612de56c0985bb4caa__1280_4096",
             "cake_rmsnorm_train_468cc4d1b8128187b4b3__4096_19968",
             "cake_rmsnorm_train_de0cf457cd240f9c6422__19968_32767",
             "cake_rmsnorm_train_e7cb6972099b7e10c035__32767_131072",
             "cake_rmsnorm_train_13bd0c5f56e37867eb26__131072_inf",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__256_511",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__640_895",
-            "cake_rmsnorm_train_2af4cf2f58ba58f78099__896_4096",
+            "cake_rmsnorm_train_2af4cf2f58ba58f78099__1280_4096",
             "cake_rmsnorm_train_2af4cf2f58ba58f78099__4096_19968",
             "cake_rmsnorm_train_c5831b29d17867842e5f__19968_32767",
         ],
@@ -19883,7 +25788,18 @@ for _record in MODULES.values():
     _record.update(_CLASSES[_plan_class(_record)])
 
 
-HIDDEN_SIZES: tuple[int, ...] = (256, 512, 1536, 2048, 4096, 5120, 6144)
+HIDDEN_SIZES: tuple[int, ...] = (
+    128,
+    256,
+    512,
+    1024,
+    1280,
+    1536,
+    2048,
+    4096,
+    5120,
+    6144,
+)
 
 # One verified build per architecture: B200 (``sm_100a``), B300 (``sm_103a``)
 # and R200 (``sm_107a``).  Every architecture is compiled with its exact
@@ -20327,18 +26243,38 @@ def chunk_capacity(rows: int, slots: int) -> int:
     return min(rows, MAX_ROUNDS * slots)
 
 
+def launch_sms(rule: dict[str, Any], *, device_index: int) -> int:
+    """SMs a ``claimed_chunks`` grid rule launches on: ``SM count - free_sms``.
+
+    A record whose kernel runs beside a side stream that keeps SMs spells
+    their count under its grid rule (``free_sms``: the deterministic
+    package's one-row-per-stage pairs, which this package hosts with the
+    deterministic package's host plan); every other record counts every SM.
+    The chunk table's slots, the launch grid's bound and the workspace bound
+    are built on this count, as the deterministic package's ``slot_count``
+    builds them.
+    """
+
+    sms = sm_count(device_index)
+    free = int(rule.get("free_sms", 0))
+    if not 0 <= free < sms:
+        raise ValueError(f"grid rule free_sms {free} is outside [0, {sms})")
+    return sms - free
+
+
 def table_slots(rule: dict[str, Any], *, device_index: int) -> int:
     """Chunk-table slots of a ``claimed_chunks`` grid rule on the device.
 
-    ``table_slots_per_sm * SM count`` when the rule spells
-    ``table_slots_per_sm`` (a build whose table is cut for more, shorter
-    chunks than its launch has CTAs: each CTA claims several), else the
-    launch's own ``ctas_per_sm * SM count``.  The main kernel takes it as its
-    ``slots`` argument; the grid stays bounded by ``ctas_per_sm * SM count``.
+    ``table_slots_per_sm * SMs`` when the rule spells ``table_slots_per_sm``
+    (a build whose table is cut for more, shorter chunks than its launch has
+    CTAs: each CTA claims several), else the launch's own ``ctas_per_sm *
+    SMs``, ``SMs`` the :func:`launch_sms` of the rule (the SM count less the
+    ``free_sms`` it spells).  The main kernel takes it as its ``slots``
+    argument; the grid stays bounded by ``ctas_per_sm * SMs``.
     """
 
     per_sm = int(rule.get("table_slots_per_sm", 0)) or int(rule["ctas_per_sm"])
-    return per_sm * sm_count(device_index)
+    return per_sm * launch_sms(rule, device_index=device_index)
 
 
 def launch_grid(
@@ -20354,13 +26290,14 @@ def launch_grid(
     one-cluster backward kernel: the CTAs of its one thread-block cluster, the
     cluster dimension its binding launches with).
     ``claimed_chunks`` modules are the main backward kernel: up to
-    ``ctas_per_sm * SM count`` persistent CTAs claim the chunks of the table of
-    :func:`chunk_rounds` built on :func:`table_slots` slots (``rows_per_issue``
-    rows per pipeline step of the kernel, under the taper its record spells:
-    :func:`chunk_taper`), so the grid is ``min(ctas_per_sm * SM count,
-    n_chunks)``; a column-task kernel's rule spells its ``col_tasks`` (``H /
+    ``ctas_per_sm * SMs`` persistent CTAs (``SMs`` the :func:`launch_sms` of
+    the rule: the SM count less the ``free_sms`` it spells) claim the chunks of
+    the table of :func:`chunk_rounds` built on :func:`table_slots` slots
+    (``rows_per_issue`` rows per pipeline step of the kernel, under the taper
+    its record spells: :func:`chunk_taper`), so the grid is ``min(ctas_per_sm
+    * SMs, n_chunks)``; a column-task kernel's rule spells its ``col_tasks`` (``H /
     col`` column tasks, tickets beside the chunks), so its grid is
-    ``min(ctas_per_sm * SM count, n_chunks + col_tasks)`` and a small ``T``
+    ``min(ctas_per_sm * SMs, n_chunks + col_tasks)`` and a small ``T``
     runs every task at once.  The launch is a plain
     one -- no co-residency is required -- and ``ctas_per_sm`` is the production
     grid factor capped at the launch bound the kernel declares.  ``rows`` must
@@ -20386,7 +26323,7 @@ def launch_grid(
     elif kind == "claimed_chunks":
         slots = table_slots(rule, device_index=device_index)
         grid_x = min(
-            int(rule["ctas_per_sm"]) * sm_count(device_index),
+            int(rule["ctas_per_sm"]) * launch_sms(rule, device_index=device_index),
             n_chunks(rows, slots, int(rule["rows_per_issue"]), *chunk_taper(rule))
             + int(rule.get("col_tasks", 0)),
         )
@@ -20455,8 +26392,9 @@ def workspace_layout(
     :data:`PAIR_ROWS_OFFSET`, ``part_row_bytes`` of FP32 scratch per CTA of its
     launch grid (:func:`launch_grid`, returned as ``grid``; the chunk table's
     ``slots`` may differ from it); a buffer sized for ``rows`` holds a row for
-    every CTA of any launch up to ``rows`` (``min(rows, ctas_per_sm * SM
-    count)`` rows, the bound of the launch grid).  The main kernel of a
+    every CTA of any launch up to ``rows`` (``min(rows, ctas_per_sm * SMs)``
+    rows, ``SMs`` the :func:`launch_sms` of its grid rule: the bound of the
+    launch grid).  The main kernel of a
     deterministic pair
     (``chunk_partials``) binds the pair counters and the FP32
     ``[capacity, hidden]`` per-chunk partial rows, ``capacity`` the
@@ -20509,7 +26447,9 @@ def workspace_layout(
                 "one FP32 row is a positive multiple of 4 bytes"
             )
         grid = launch_grid(record, rows, device_index=device_index)[0]
-        ctas = int(record["grid_rule"]["ctas_per_sm"]) * sm_count(device_index)
+        ctas = int(record["grid_rule"]["ctas_per_sm"]) * launch_sms(
+            record["grid_rule"], device_index=device_index
+        )
         return {
             "n_chunks": chunks,
             "slots": slots,
@@ -20657,6 +26597,7 @@ __all__ = [
     "chunking",
     "device_arch",
     "launch_grid",
+    "launch_sms",
     "library_name",
     "load",
     "n_chunks",

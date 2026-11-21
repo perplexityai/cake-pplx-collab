@@ -35,22 +35,23 @@ so a zero-weight row gets exactly 0 in ``h``, ``d_gate`` and ``d_up`` and its
 full ``d_weight``.  ``R`` is a run-time value (any ``R >= 0``; ``R = 0``
 returns empty outputs and launches nothing), and so are ``L`` and the weight
 flag: one library per program and architecture serves every call, with no
-recompilation (the row count picks the program).  ``limit`` has no
-default: pass the model's value (``swiglu_limit``, 10.0 for
-DeepSeek-V4.1-Flash) on every call.
+recompilation (the row count picks the program, and in the backward so does
+whether a weight is given).  ``limit`` has no default: pass the model's
+value (``swiglu_limit``, 10.0 for DeepSeek-V4.1-Flash) on every call.
 
 The sigmoid uses the approximate FP32 base-2 exponential and the approximate
-reciprocal with one round-to-nearest Newton step (exact below the flushed
-reciprocal's range); every product rounds to nearest without flushing
-subnormals, and nothing is FP64.  The tests hold ``h``, ``d_gate``, ``d_up``
-and ``d_weight`` to the PyTorch BF16 naive implementation of the same
-operation (the clamps written as selects, so autograd gives the inclusive
-masks; the FP32 weight kept FP32; the gradients from PyTorch autograd), each
-against a float64 reference computed from the BF16 inputs: over 32 random
-inputs of a case, in the L2 and in the max norm of the error, the median and
-the largest error of each output are at most 1.005 times the naive
-implementation's, and 0 on every input where the naive implementation's is
-0.  No output has an error budget of its own.
+reciprocal with one round-to-nearest Newton step (below the flushed
+reciprocal's range a scaled reciprocal, within one subnormal ulp); every
+product rounds to nearest without flushing subnormals, and nothing is FP64.
+The tests hold ``h``, ``d_gate``, ``d_up`` and ``d_weight`` to the PyTorch
+BF16 naive implementation of the same operation (the clamps written as
+selects, so autograd gives the inclusive masks; the FP32 weight kept FP32;
+the gradients from PyTorch autograd), each against a float64 reference
+computed from the BF16 inputs: over 32 random inputs of a case, in the L2
+and in the max norm of the error, the median and the largest error of each
+output are at most 1.005 times the naive implementation's, and 0 on every
+input where the naive implementation's is 0.  No output has an error budget
+of its own.
 
 Mode rules:
 
@@ -68,34 +69,53 @@ Mode rules:
    output bit changes.  With
    ``torch.utils.deterministic.fill_uninitialized_memory`` (on by default),
    PyTorch then fills each tensor a call allocates with NaN before the
-   kernel writes it: one more fill launch per new output (also the weight
-   gradient an unweighted backward drops) and per copied input.  Output
-   buffers allocated once and passed to every call avoid the fills of the
-   outputs.
+   kernel writes it: one more fill launch per new output and per copied
+   input.  Output buffers allocated once and passed to every call avoid the
+   fills of the outputs.
 4. Autograd: ``CakeClampedSwiGLUDetFunction`` saves only its inputs (the
    gate and up, or the merged tensor, and the weight; no activation) and
    recomputes the activation in the backward: retained state is the inputs.
    ``torch.utils.checkpoint(..., use_reentrant=False)`` keeps the same inputs;
-   the function adds no saved state of its own and no activation.  No double
+   the function adds no saved state of its own and no activation.  So
+   checkpointing ``cake_clamped_swiglu_det`` alone saves no memory: the down
+   projection that reads ``h`` keeps ``h`` for its weight gradient.  A
+   region of the gate/up projection and the op drops the projection's
+   ``[R, 4608]`` output until the backward; one that also holds the down
+   projection drops ``h``.  In the backward of a non-reentrant checkpoint,
+   whose recomputation sets saved-tensors hooks, ``cake_clamped_swiglu_det``
+   launches its forward kernel after autograd saved its inputs, as a
+   built-in op does.  So with early stop on (the default) the recomputation
+   skips that launch when nothing later in the region saves a tensor (the op
+   alone, or the gate/up projection and the op, the down projection
+   outside) and runs it when a later operation saves one (the down
+   projection saves ``h``; so does the whole expert block).  A reentrant
+   checkpoint, early stop off and a direct
+   ``CakeClampedSwiGLUDetFunction.apply`` recompute the forward in every
+   region, even when its output is dropped.  Anywhere else (no hooks, the
+   checkpoint's own forward pass) ``forward`` launches, as in 0.1.7.  Not
+   tested under ``torch.compile``.  No double
    backward: differentiating gradients computed with ``create_graph=True``
    raises ``RuntimeError``.  No call uses a workspace or keeps state between
-   calls, but for the ignored weight of unweighted calls: one cached
-   one-element FP32 buffer per device, set to 1, which the kernels read and
-   ignore.
+   calls, but for the ignored weight of unweighted forward calls: one cached
+   one-element FP32 buffer per device, set to 1, which the forward kernels
+   read and ignore.  An unweighted backward runs a kernel that takes no
+   weight and writes no weight gradient.
 
 No call synchronizes the host or the device or reads tensor contents on the
 host; every kernel runs on the current torch stream of the operands' device.
 Every argument is checked before a call copies an input or allocates an
 output, so a call refused for its arguments copies, allocates and launches
-nothing.  Each stage has a small-``R`` and a large-``R`` program, chosen by
-``R`` and the device's SM count; a program's library loads (and, without a
+nothing.  The forward and the weighted backward each have a small-``R`` and
+a large-``R`` program, chosen by ``R`` and the device's SM count; the
+unweighted backward has one program, which stores the bits of the weighted
+backward's programs at ``w = 1``.  A program's library loads (and, without a
 prebuilt one, JIT-builds) at its first launch.  Before capturing a CUDA
-graph, run an eager call at each row count the graph captures (or build
-every library of the architecture with the backend's ``specs_for_arch``) so
-that no JIT build happens during capture.  A JIT build needs a CUDA toolkit
-of at least 12.8 for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for
-``sm_107a``.  This module imports its backend package on first use and reads
-no environment variable.
+graph, run an eager call of each kind the graph captures (weighted and
+unweighted) at each row count it captures (or build every library of the
+architecture with the backend's ``specs_for_arch``) so that no JIT build
+happens during capture.  A JIT build needs a CUDA toolkit of at least 12.8
+for ``sm_100a``, 12.9 for ``sm_103a`` and 13.5 for ``sm_107a``.  This module
+imports its backend package on first use and reads no environment variable.
 
 Usage::
 
@@ -122,7 +142,13 @@ from ._cake_pplx_api_clamped_swiglu import cake_api
 # The entry points are real ``def``s here (public-API tooling reads the
 # decorated signatures of this module); their bodies live in the self-contained
 # backend package next to the generated CUDA sources.  The backend package is
-# imported on first use.
+# imported on first use.  The steps and the autograd entry call the backend's
+# own step functions, ``CakeClampedSwiGLUDetFunction.apply`` and, in a
+# backward with saved-tensors hooks set, its held-launch entry ``_held``,
+# which the backend functions of the same names call: the same work, one
+# Python call fewer per call.  Each is bound to a global of this module at
+# its first call (:func:`_step_forward`, :func:`_step_backward`,
+# :func:`_apply`, :func:`_held`), so a later call reads no cache.
 
 
 @functools.cache
@@ -130,6 +156,44 @@ def _backend() -> Any:
     from ._backends import cake_clamped_swiglu_det_train  # noqa: PLC0415 - the backend package, imported on first use
 
     return cake_clamped_swiglu_det_train
+
+
+def _step_forward(*arguments: Any) -> torch.Tensor:
+    """The backend's forward step; the first call imports the backend and binds this global to its own function."""
+    global _step_forward
+    _step_forward = _backend()._forward_step
+    return _step_forward(*arguments)
+
+
+def _step_backward(*arguments: Any) -> tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """The backend's backward step; the first call imports the backend and binds this global to its own function."""
+    global _step_backward
+    _step_backward = _backend()._backward_step
+    return _step_backward(*arguments)
+
+
+def _apply(*arguments: Any) -> torch.Tensor:
+    """The backend's ``CakeClampedSwiGLUDetFunction.apply``; the first call imports the backend and binds this global
+    to it."""
+    global _apply
+    _apply = _backend().CakeClampedSwiGLUDetFunction.apply
+    return _apply(*arguments)
+
+
+def _held(*arguments: Any) -> torch.Tensor:
+    """The backend's held-launch autograd entry (its ``_HeldFunction.apply``, then the forward launch), for a call in a
+    backward with saved-tensors hooks set; the first call imports the backend and binds this global to it."""
+    global _held
+    _held = _backend()._held
+    return _held(*arguments)
+
+
+# The id of the backward graph task running on this thread, -1 outside a backward (torch's checkpoint reads it the
+# same way), and the innermost saved-tensors hooks, a (pack, unpack) pair or None, as the backend reads them.
+# Without either function (another torch) its stand-in answers "in a backward" / "hooks set", so the calls it decides
+# take the held launch.
+_graph_task = getattr(torch._C, "_current_graph_task_id", None) or (lambda: 0)
+_hooks = getattr(torch._C._autograd, "_top_saved_tensors_default_hooks", None) or (lambda ignore_is_tracing: ())
 
 
 # The backend package's own objects (the autograd class and the constants),
@@ -218,7 +282,7 @@ def cake_clamped_swiglu_det_train_forward(
     and passed to every call avoids the fill of ``h``.
     """
 
-    return _backend().cake_clamped_swiglu_det_train_forward(gate_up_or_gate, up, weight, limit=limit, out=out)
+    return _step_forward(gate_up_or_gate, up, weight, limit, out)
 
 
 @cake_api
@@ -281,22 +345,15 @@ def cake_clamped_swiglu_det_train_backward(
     -----
     ``d_weight`` is one FP32 word per row: each lane's two FMA chains (even and odd columns) in load order, added,
     then XOR shuffles across the row's 32 lanes, in one fixed order.  It uses the unweighted ``a``, so a zero-weight
-    row keeps its sum.  The kernel writes a weight gradient on every call; an unweighted call allocates it and drops
-    it (``R`` FP32 values).  Every argument is checked before an input is copied or an output allocated.  Under
-    ``torch.use_deterministic_algorithms(True)`` with ``torch.utils.deterministic.fill_uninitialized_memory``,
-    PyTorch fills each new output (the dropped weight gradient too) and each copied input with NaN first, one fill
-    launch each; preallocated outputs passed to every call avoid the fills of those outputs.
+    row keeps its sum.  An unweighted call runs a kernel that stores ``d_gate`` and ``d_up`` only (the bits of a
+    weighted call with ``w = 1``): it allocates and writes no weight gradient.  Every argument is checked before an
+    input is copied or an output allocated.  Under ``torch.use_deterministic_algorithms(True)`` with
+    ``torch.utils.deterministic.fill_uninitialized_memory``, PyTorch fills each new output and each copied input with
+    NaN first, one fill launch each; preallocated outputs passed to every call avoid the fills of those outputs.
     """
 
-    return _backend().cake_clamped_swiglu_det_train_backward(
-        grad_out,
-        gate_up_or_gate,
-        up,
-        weight,
-        limit=limit,
-        grad_gate_up_or_gate=grad_gate_up_or_gate,
-        grad_up=grad_up,
-        grad_weight=grad_weight,
+    return _step_backward(
+        grad_out, gate_up_or_gate, up, weight, limit, grad_gate_up_or_gate, grad_up, grad_weight, False
     )
 
 
@@ -330,11 +387,21 @@ def cake_clamped_swiglu_det(
     Notes
     -----
     Saves only the inputs and recomputes the activation in the backward (no activation retained; works under
-    ``torch.utils.checkpoint(..., use_reentrant=False)``).  ``limit`` is checked once, in the forward.  No double
-    backward: differentiating gradients computed with ``create_graph=True`` raises ``RuntimeError``.
+    ``torch.utils.checkpoint(..., use_reentrant=False)``).  Checkpointing this op alone saves no memory (the down
+    projection keeps ``h``); a region of the gate/up projection and this op drops the projection's output until the
+    backward, and one that also holds the down projection drops ``h``.  In the backward of a non-reentrant checkpoint
+    the forward kernel runs after autograd saved the inputs, so with early stop on (the default) the recomputation
+    launches it only when a later operation of its region saves a tensor (the down projection saves ``h``); a
+    reentrant checkpoint, early stop off and a direct ``CakeClampedSwiGLUDetFunction.apply`` launch it in every
+    region.
+    ``limit`` is checked in the forward (twice there for a number that is neither a Python float nor an int that a
+    float holds exactly), not in the backward, which reuses its FP32 rounding.  No double backward: differentiating
+    gradients computed with ``create_graph=True`` raises ``RuntimeError``.
     """
 
-    return _backend().cake_clamped_swiglu_det(gate_up_or_gate, up, weight, limit=limit)
+    if _graph_task() == -1 or _hooks(False) is None:
+        return _apply(gate_up_or_gate, up, weight, limit)  # no recomputation to stop: the forward launches in place
+    return _held(gate_up_or_gate, up, weight, limit)
 
 
 def __getattr__(name: str) -> Any:

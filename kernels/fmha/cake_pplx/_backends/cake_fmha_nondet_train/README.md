@@ -42,14 +42,29 @@ dq, dk, dv = cake_fmha_nondet_train_backward(
 | 128 | causal | yes | yes | yes | `bwd_pre` / `bwd_main_causal` / `bwd_post` |
 | 64 | none | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64` / `bwd_post_hd64` |
 | 64 | causal | yes | yes | yes | `bwd_pre_hd64` / `bwd_main_hd64_causal` / `bwd_post_hd64` |
+| 128, pair route | none | yes | yes | yes | `bwd_pre` / `bwd_main_2cta` / `bwd_post_pair` |
+| 128, pair route | causal | built, not routed | yes | yes | `bwd_pre` / `bwd_main_2cta_causal` / `bwd_post_pair` |
 
 Every variant takes any head count `H >= 1` (the same `H` for `q` and
-`k` / `v`) and query and key lengths that are positive multiples of 128.
-Without the mask `Sq` and `Skv` are independent; the causal mask needs
-`Sq == Skv`.  The `build.json` minimum CUDA toolkit is 12.8 for every
-`sm_100a` library, 12.9 for every `sm_103a` library and 13.5 for every
-`sm_107a` library; an older local toolkit raises `RuntimeError` when the
-library is built.
+`k` / `v`) and query and key lengths that are positive multiples of 128 (the
+pair route: key lengths that are multiples of 256).  Without the mask `Sq`
+and `Skv` are independent; the causal mask needs `Sq == Skv`.  A head-dimension
+128 call whose key length is a multiple of 256 and not longer than its query
+length takes the pair route where a region of `PAIR_REGIONS` in `cake_jit.py`
+holds its `B * H` and `Skv` for its architecture and mask (`cake_jit.variant`
+picks the variant of a call); every other call takes the records of the first
+four rows.  On `sm_100a` the causal pair build ships and no call takes it.  The
+`build.json` minimum CUDA toolkit is 12.8 for every `sm_100a` library, 12.9
+for every `sm_103a` library and 13.5 for every `sm_107a` library; an older
+local toolkit raises `RuntimeError` when the library is built.
+
+The regions of the pair route (`PAIR_REGIONS`; `Sq >= Skv` in every region):
+
+| architecture | no mask | causal |
+|---|---|---|
+| `sm_100a` | `B * H` 1: `Skv >= 4096`; `B * H <= 4`: `Skv >= 8192`; `B * H >= 128`: `Skv >= 8192` | none |
+| `sm_103a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 8192` | `B * H <= 4`: `Skv >= 2048` |
+| `sm_107a` | `B * H <= 4`: `Skv >= 2048`; any `B * H`: `Skv >= 4096` | `B * H <= 4`: `Skv >= 2048`; `B * H <= 16`: `Skv >= 4096`; any `B * H`: `Skv >= 8192` |
 
 ## Kernels
 
@@ -60,23 +75,30 @@ stream of the operands' device:
 |---|---|
 | `bwd_pre` | one CTA per 128 query rows of one (head, batch): `dPsum = rowsum(out * dout)` and `LSE_log2 = lse * log2(e)` (FP32 `[B*H, Sq]`), and the FP32 dQ accumulator cleared |
 | `bwd_main` | one CTA per 128 keys of one (head, batch), walking the query blocks in ascending order (with the causal mask, from the diagonal block on): S, P, dP and dS per query block, dK and dV accumulated in FP32 in tensor memory and stored once as BF16, the dQ tiles added into the FP32 accumulator by bulk reductions |
+| `bwd_main`, pair route | one cluster of two CTAs per 256 keys of one (head, batch), each CTA owning 128 keys: the same work as above with the MMAs issued for the pair, the peer's dS of the CTA's 64 query rows copied in through distributed shared memory for the dQ product; the dQ tiles added in the pair-row order (each CTA adds its 64 rows of a 128-row tile as one block) |
 | `bwd_post` | one CTA per 128 query rows of one (head, batch): `dq = bf16(acc * softmax_scale)` in the layout of `q` |
+| `bwd_post`, pair route | the same, reading the accumulator in the pair-row order |
 
 Grids are `(Sq / 128, H, B)` for `bwd_pre` and `bwd_post` and
-`(Skv / 128, H, B)` for `bwd_main`.  Numerics: FP32 accumulation for the
+`(Skv / 128, H, B)` for `bwd_main` (on the pair route in clusters `(2, 1, 1)`:
+`Skv / 128` is even).  Numerics: FP32 accumulation for the
 scores, `dP`, `dK`, `dV`, `dQ` and the row sums; `P` and `dS` are rounded to
 BF16 only as MMA operands.  Every launch is a plain stream-ordered launch:
 nothing cooperative, no PDL.
 
-Each call allocates its outputs and an FP32 workspace from PyTorch's caching
-allocator: `dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
-(`B * H * Sq` elements each).
+The three launches run in one host call: each variant has a host sequence
+library (`SEQUENCES` in `cake_jit.py`) whose `build.json` entries compile the
+three kernel units with a host unit that launches them in order.  Each call
+allocates its outputs and an FP32 workspace from PyTorch's caching allocator:
+`dq_accum` (`B * H * Sq * D` elements), `lse_log2` and `dpsum`
+(`B * H * Sq` elements each).  The host call takes the workspace through the
+tvm-ffi environment allocator, on the current stream.
 
 ## Determinism
 
 The dQ tiles of the key blocks of one head reach the FP32 accumulator in
-scheduling order, so `dq` is not bitwise reproducible run to run.  `dk`,
-`dv` and the preprocess outputs have one fixed order.  No deterministic
+scheduling order, so `dq` is not bitwise reproducible run to run, on either
+route.  `dk`, `dv` and the preprocess outputs have one fixed order.  No deterministic
 package of these kernels exists; the module name carries `nondet` and no entry
 takes a `deterministic` keyword.  Under `torch.use_deterministic_algorithms(True)`
 the call raises PyTorch's `RuntimeError` (`cake_fmha_nondet_train_backward does
@@ -98,3 +120,36 @@ with `B == 0` returns empty gradients and does not alert.
   boundary and `lse` on a 4-byte boundary.  A violation is a `ValueError`
   before any launch.
 - No build for any architecture other than SM100, SM103 and SM107.
+
+## Tests
+
+The tests are in `tests/experimental/` of the family: the backend
+(`test_cake_fmha_nondet_train.py`), the public module
+(`test_cake_fmha_nondet_train_api.py`) and the names
+(`test_cake_fmha_nondet_train_names.py`).  Run them against the installed
+distribution as [`ARCHITECTURE.md`](../../../../../ARCHITECTURE.md)
+describes; without a supported device the device tests skip.
+
+Twenty-eight tests observe the kernels that one backward call launches through
+`torch.profiler`: `test_the_backward_launches_the_records_of_its_variant`
+and `test_the_backward_without_run_launches_the_same_records`.  The profiler
+records kernels only with a CUPTI that supports the device.  On `sm_107a`,
+CUPTI 13.0.85 (the one torch 2.14.1+cu130 installs) records no kernel
+(`CUPTI_ERROR_INVALID_DEVICE`); CUPTI 13.5.25 records them.  Each of
+these tests first profiles a plain torch operation on the device.  When the
+profiler records no kernel for it, the test runs its other checks without
+the profiler, then skips the kernel observation with the reason
+`torch.profiler records no CUDA kernel on this device (CUPTI); install a
+CUPTI that supports it`.
+
+To observe the kernels on `sm_107a`, install CUPTI 13.5.25 into a separate
+directory and preload it:
+
+```bash
+pip install --target DIR nvidia-cuda-cupti==13.5.25
+LD_PRELOAD=DIR/nvidia/cu13/lib/libcupti.so.13 \
+  python -m pytest -p no:cacheprovider tests/experimental/test_cake_fmha_nondet_train.py
+```
+
+Installing it into the torch environment instead replaces the CUPTI that
+torch pins.

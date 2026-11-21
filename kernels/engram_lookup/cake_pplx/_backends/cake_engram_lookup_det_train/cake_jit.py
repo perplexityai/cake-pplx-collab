@@ -17,24 +17,31 @@ Registry of the Cake Engram row lookup: FP8 E4M3 rows with one E8M0 scale per
 32 columns, gathered by row id and written as BF16 (SM100 / SM103 / SM107).
 The loader and the launch plan are :mod:`.cake_backend`.
 
-``MODULES`` has one record, ``lookup``: one mechanically exported program (a
-CUDA device translation unit plus a tvm-ffi binding), compiled once per
-architecture.  The record carries the host plan: the ``stage`` it serves, the
-architectures it is delivered for and the ``run`` entry.  The derived leaves
-(``library``, ``kernel_symbol``, ``launch``, ``arg_plan``) are written by the
-exporter from the rendered binding; ``library`` is the program identity
-(``cake_engram_lookup_det_train_<20 hex>``), so a kernel swap renames it.
-``MODULES`` is a literal table (the exporter and the manifest checker read it
-with ``ast.literal_eval``).
+``MODULES`` has two records of the one stage ``lookup``, each a mechanically
+exported program (a CUDA device translation unit plus a tvm-ffi binding),
+compiled once per architecture: ``lookup``, the main program, and
+``lookup_small``, the small program, which a call launches for at most
+:data:`SMALL_MAX_POSITIONS` looked-up rows (the main program above).  The two
+programs compute every element the same way and write the same bytes, so the
+choice changes no output bit; the small one has the shorter load path that a
+lookup of a few rows waits on.  A record carries the host plan: the ``stage``
+it serves, the architectures it is delivered for and the ``run`` entry.  The
+derived leaves (``library``, ``kernel_symbol``, ``launch``, ``arg_plan``) are
+written by the exporter from the rendered binding; ``library`` is the program
+identity (``cake_engram_lookup_det_train_<20 hex>``), so a kernel swap renames
+it.  ``MODULES`` is a literal table (the exporter and the manifest checker read
+it with ``ast.literal_eval``).
 
-The one program serves both table layouts (two contiguous tensors, or two
-views into one packed ``[R, 264]`` byte buffer) and every ``row_ids`` shape:
-the binding reads the row strides of ``weight`` and ``scale`` from the tensors,
+Each program serves both table layouts (two contiguous tensors, or two views
+into one packed ``[R, 264]`` byte buffer) and every ``row_ids`` shape: the
+binding reads the row strides of ``weight`` and ``scale`` from the tensors,
 and the number of looked-up rows ``P`` is a run-time value.  A CTA has
 :data:`WARPS_PER_CTA` warps; a warp takes :data:`ROWS_PER_WARP` consecutive
 looked-up rows per step and walks the rows grid-stride, so any grid covers
 every row.  The launch is a plain stream-ordered launch: nothing cooperative,
-no PDL, no shared memory, no workspace.
+no PDL, no shared memory, no workspace.  :data:`CTAS_PER_SM` and
+:data:`SMALL_MAX_POSITIONS` are the kernel source's values; the exporter
+refuses a registry that states others.
 """
 
 from __future__ import annotations
@@ -57,11 +64,15 @@ GROUP = 32
 GROUPS = ROW_DIM // GROUP
 PACKED_ROW_BYTES = ROW_DIM + GROUPS
 
-# Launch geometry: warps per CTA (the program's block), looked-up rows per warp and step (the program's unroll), and
-# per architecture the CTAs of the program an SM holds at once, which the grid is capped at.
+# Launch geometry: warps per CTA (the programs' block), looked-up rows per warp and step (the programs' unroll), and
+# per architecture the CTAs of either program an SM holds at once, which the grid is capped at.
 WARPS_PER_CTA = 8
 ROWS_PER_WARP = 4
 CTAS_PER_SM = {"sm_100a": 8, "sm_103a": 8, "sm_107a": 4}
+
+# The most looked-up rows a call launches the small program (record ``lookup_small``) for; above it the main program
+# (record ``lookup``).
+SMALL_MAX_POSITIONS = 256
 
 MODULES: dict[str, dict[str, Any]] = {
     "lookup": {
@@ -79,12 +90,28 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_engram_lookup_det_train_50c6822299d93af1d6a6",
         "stage": "lookup",
     },
+    "lookup_small": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "w"], ["buffer", "s"], ["buffer", "row_ids"], ["buffer", "out"], ["parameter", "P"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_engram_lookup_det_train_620a1dc4a90a4a3c38f0",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_engram_lookup_det_train_620a1dc4a90a4a3c38f0",
+        "stage": "lookup",
+    },
 }
 
 
 def grid(positions: int, sm_count: int, arch: str) -> tuple[int, int, int]:
-    """The launch grid of a lookup of ``positions`` rows on a device of ``sm_count`` SMs and architecture ``arch``:
-    one CTA per ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM[arch]`` CTAs per SM, the CTAs the
-    device holds at once (the kernel walks the rows grid-stride, so the cap leaves no row out), at least one CTA."""
+    """The launch grid of a lookup of ``positions`` rows on a device of ``sm_count`` SMs and architecture ``arch``,
+    for either program: one CTA per ``WARPS_PER_CTA * ROWS_PER_WARP`` rows, capped at ``CTAS_PER_SM[arch]`` CTAs per
+    SM, the CTAs the device holds at once (the kernel walks the rows grid-stride, so the cap leaves no row out), at
+    least one CTA."""
     per_cta = WARPS_PER_CTA * ROWS_PER_WARP
     return (max(1, min(-(-int(positions) // per_cta), int(sm_count) * CTAS_PER_SM[arch])), 1, 1)

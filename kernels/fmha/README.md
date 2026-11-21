@@ -6,7 +6,9 @@ causal, on `sm_100a`, `sm_103a` and `sm_107a`. Public module:
 - `cake_pplx.cake_fmha_nondet_train`
 
 The family has a non-deterministic module only (no `det` module) and a backward step only (no forward, no autograd
-entry).
+entry). A head-dimension 128 call whose key length is a multiple of 256 runs a main kernel on clusters of two CTAs (the
+pair route) for the long sequences where it is faster on the architecture (without the mask on `sm_100a`, `sm_103a` and
+`sm_107a`, with the causal mask on `sm_103a` and `sm_107a`); `dq` is non-deterministic on both routes.
 
 Install this family alone, pinned to a commit:
 
