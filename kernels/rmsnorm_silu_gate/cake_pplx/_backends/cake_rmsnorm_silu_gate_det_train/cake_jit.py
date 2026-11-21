@@ -37,7 +37,16 @@ architecture may also route ``fwd_packed`` (``PACKED_ROLES``): a forward that
 addresses the rows of contiguous ``[T, H, 128]`` inputs as one packed array,
 without the token and head strides.  :func:`forward_module` runs it for such
 inputs and ``fwd`` otherwise; both compute a row with the same FP32 operations
-in the same order, so ``y`` is the same bits on either route.  Each backward
+in the same order, so ``y`` is the same bits on either route.  An
+architecture may also route ``fwd_tiny`` (``TINY_ROLES``): a forward of
+packed rows only (row ``n`` of ``x`` and ``z`` at element ``128 n``; it takes
+no strides) that runs one block of its rule's ``rows_per_cta`` rows a CTA,
+with no loop.  :func:`forward_module` runs it in the place of ``fwd_packed``
+or ``fwd`` up to ``FWD_TINY_ROWS_PER_SM`` rows per SM of contiguous
+``[T, H, 128]`` inputs or of one token of head stride 128, except the rows of
+``FWD_TINY_GAP_ROWS``; it computes a row
+with the row arithmetic of the architecture's ``fwd`` and ``fwd_packed``
+modules, op for op, so ``y`` is their bits.  Each backward
 role also routes a long role (``LONG_ROLES``: ``bwd_bf16_long``,
 ``bwd_f32_long``): the same backward in a loop that loads a block's rows while
 the previous block's row math runs, faster where a CTA runs many blocks.
@@ -91,7 +100,9 @@ from there the fewest whole waves of ``ctas_per_sm * SMs`` CTAs (the CTAs per
 SM its launch bounds are compiled for) whose CTAs walk at most
 ``max_blocks_per_cta`` blocks each, and never more CTAs than blocks, CTA ``b``
 walking the blocks ``b``, ``b + grid``, ``b + 2 * grid``, ... and loading each
-next block while it computes the current one.  The backward launches
+next block while it computes the current one.  The tiny forward launches
+``ceil(rows / rows_per_cta)`` CTAs whatever the SM count, CTA ``b`` running
+block ``b`` alone.  The backward launches
 ``min(blocks, ctas_per_sm * SMs)`` CTAs of ``rows_per_block``-row blocks; past
 one block per CTA its CTAs claim the blocks in chunks whose rows are fixed by
 the row count and the grid, add each thread's FP32 runs of rows into plain
@@ -320,6 +331,102 @@ MODULES: dict[str, dict[str, Any]] = {
             "z_tok": "z_tok",
         },
         "role": "fwd_packed",
+    },
+    # The tiny forward: 128 threads, 32 lanes per row (4-row blocks, a row
+    # per warp), one block per CTA and no loop, packed rows only (row n of x
+    # and z at element 128 n; no strides), with the row arithmetic of the
+    # sm_100a and sm_103a forward op for op (each 16-element slice's sum of
+    # squares on one f32x2 FMA chain, the slices folded in its order,
+    # rsqrt.approx), so y is its bits (build {"chains": 1, "handoff": 0,
+    # "lanes": 32, "min_blocks": 8, "rsqrt_ftz": 0, "threads": 128});
+    # forward_module runs it up to FWD_TINY_ROWS_PER_SM rows per SM.
+    "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99": {
+        "arches": [
+            "sm_100a",
+            "sm_103a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "y"],
+            ["parameter", "rows"],
+            ["parameter", "eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "row_blocks",
+            "rows_per_cta": 4,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
+        "logical": {
+            "eps": "eps",
+            "rows": "rows",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+            "z": "z",
+        },
+        "role": "fwd_tiny",
+    },
+    # The sm_107a tiny forward: 128 threads, 16 lanes per row (8-row blocks,
+    # two rows per warp), one block per CTA and no loop, packed rows only,
+    # with the row arithmetic of the sm_107a forwards op for op (four FMA
+    # chains, rsqrt.approx.ftz), so y is their bits (build {"chains": 2,
+    # "handoff": 0, "lanes": 16, "min_blocks": 8, "rsqrt_ftz": 1, "threads":
+    # 128}); forward_module runs it up to FWD_TINY_ROWS_PER_SM rows per SM,
+    # except 17 to 32 rows (FWD_TINY_GAP_ROWS).
+    "cake_rmsnorm_silu_gate_det_train_1e611ed07e9f796d9857": {
+        "arches": [
+            "sm_107a",
+        ],
+        "arg_plan": [
+            ["buffer", "x"],
+            ["buffer", "z"],
+            ["buffer", "w"],
+            ["buffer", "y"],
+            ["parameter", "rows"],
+            ["parameter", "eps"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {
+            "kind": "row_blocks",
+            "rows_per_cta": 8,
+        },
+        "kernel": "cake_rmsnorm_silu_gate_det_train_1e611ed07e9f796d9857",
+        "kernel_symbol": "kernel_cake_rmsnorm_silu_gate_det_train_1e611ed07e9f796d9857",
+        "launch": {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": False,
+        },
+        "library": "cake_rmsnorm_silu_gate_det_train_1e611ed07e9f796d9857",
+        "logical": {
+            "eps": "eps",
+            "rows": "rows",
+            "w": "w",
+            "x": "x",
+            "y": "y",
+            "z": "z",
+        },
+        "role": "fwd_tiny",
     },
     # The backward, BF16 weight gradient: 256 threads, 16 lanes per row
     # (16-row blocks), at most 4 CTAs per SM, claimed chunks, the weight
@@ -1447,6 +1554,7 @@ MODULES: dict[str, dict[str, Any]] = {
 ROUTES: dict[str, dict[str, str]] = {
     "sm_100a": {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
+        "fwd_tiny": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_cluster": "cake_rmsnorm_silu_gate_det_train_1bc627a7e9eaa9aee52c",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
@@ -1463,6 +1571,7 @@ ROUTES: dict[str, dict[str, str]] = {
     },
     "sm_103a": {
         "fwd": "cake_rmsnorm_silu_gate_det_train_36610c51a93167071e05",
+        "fwd_tiny": "cake_rmsnorm_silu_gate_det_train_5a0540c2621ae3dbdb99",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_cluster": "cake_rmsnorm_silu_gate_det_train_1bc627a7e9eaa9aee52c",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
@@ -1480,6 +1589,7 @@ ROUTES: dict[str, dict[str, str]] = {
     "sm_107a": {
         "fwd": "cake_rmsnorm_silu_gate_det_train_5120481dd90c794f29e4",
         "fwd_packed": "cake_rmsnorm_silu_gate_det_train_8a371a49c065b60c88a9",
+        "fwd_tiny": "cake_rmsnorm_silu_gate_det_train_1e611ed07e9f796d9857",
         "bwd_bf16": "cake_rmsnorm_silu_gate_det_train_8a6cb16beff15b6ffbfe",
         "bwd_bf16_cluster": "cake_rmsnorm_silu_gate_det_train_1bc627a7e9eaa9aee52c",
         "bwd_bf16_long": "cake_rmsnorm_silu_gate_det_train_fef9d1cc2cc267219992",
@@ -1505,6 +1615,13 @@ ARCH_BY_CAPABILITY: dict[tuple[int, int], str] = {
 ROLES = ("fwd", "bwd_bf16", "bwd_f32")
 # The forwards of packed rows, routed on some architectures beside ``fwd``.
 PACKED_ROLES = ("fwd_packed",)
+# The tiny forward of packed rows, routed on the architectures with a cut in
+# ``FWD_TINY_ROWS_PER_SM``: one block of its rule's ``rows_per_cta`` rows a
+# CTA, no loop and no strides; it runs in the place of ``fwd_packed`` or
+# ``fwd`` up to the cut, outside the rows of ``FWD_TINY_GAP_ROWS``
+# (:func:`forward_module`), not at every row count, so it is not one of
+# ``PACKED_ROLES``.
+TINY_ROLES = ("fwd_tiny",)
 # The suffix of a backward role's long role, and the long roles: a module that
 # runs in its role's place from its rule's ``min_rows_per_sm`` rows per SM, on
 # packed rows only when its rule says ``packed_rows`` (:func:`module_for_rows`).
@@ -1556,6 +1673,7 @@ GRID_KINDS = (
     "claimed_row_blocks",
     "strided_row_blocks",
     "cluster",
+    "row_blocks",
 )
 # A call without the weight gradient runs the strided program (``role + NODW
 # + STRIDED``, on packed rows ``role + NODW + STRIDED + PACKED`` where
@@ -1616,6 +1734,38 @@ NODW_ANY_LAYOUT_ROWS_PER_SM: dict[str, dict[str, int]] = {
     "sm_100a": {"bwd_bf16": 32},
     "sm_103a": {"bwd_bf16": 32},
     "sm_107a": {"bwd_bf16": 96},
+}
+# A forward of packed rows (head stride 128 and token stride ``H * 128`` on
+# ``x`` and ``z``, or one token of head stride 128) runs the tiny forward
+# (``fwd_tiny``) in the place of ``fwd_packed`` or ``fwd`` up to this many
+# rows per SM, by architecture (:func:`forward_module`); an architecture with
+# a cut of 0 routes no tiny forward and never runs one.  A cut is the largest
+# measured rows per SM up to which the tiny forward is at no measured point
+# slower than the forward it replaces: alone (cold L2, also after a delay
+# kernel, and warm L2), in the checkpointed training step (two forwards and
+# the backward) and beside kernels that hold some SMs.  Measured at 1 to 96
+# rows per SM (48 heads): the tiny forward was first slower with warm L2, at
+# 32 rows per SM on sm_100a, 36 on sm_103a and 48 on sm_107a.  Host plan
+# only: a new cut above 0 needs no new program.
+FWD_TINY_ROWS_PER_SM: dict[str, int] = {
+    "sm_100a": 24,
+    "sm_103a": 32,
+    "sm_107a": 40,
+}
+# Rows ``(lo, hi]`` inside an architecture's tiny band that run the forward
+# the tiny forward replaces (``fwd_packed`` or ``fwd``, as without the band;
+# :func:`forward_module`); ``(0, 0)`` keeps none.  On sm_107a a call of 17 to
+# 32 rows needs three or four CTAs of the tiny forward's 8-row blocks but
+# two of the 16-row blocks of the forward it replaces, and with a cold L2 the
+# third CTA costs more than the rows it takes.  Measured with a cold L2 at 8
+# to 48 rows of one token and of packed rows, the replaced forward's time
+# over the tiny forward's fell to 0.85 (the checkpointed training step's to
+# 0.93) from 17 to 32 rows.  It was within noise of 1 or above from 8 to 16
+# rows, and from 33 to 48 rows, where both forwards launch a third CTA.
+FWD_TINY_GAP_ROWS: dict[str, tuple[int, int]] = {
+    "sm_100a": (0, 0),
+    "sm_103a": (0, 0),
+    "sm_107a": (16, 32),
 }
 # Elements of one normalized row.
 HEAD_DIM = 128
@@ -1678,6 +1828,32 @@ def module_for_rows(
     return route_module(arch, role)
 
 
+def _fwd_plan(arch: str) -> tuple[str | None, int, str | None, str | None, int, int]:
+    """``arch``'s forward plan: its ``fwd_tiny`` module and cut
+    (``FWD_TINY_ROWS_PER_SM[arch]``) where it routes one and the cut is
+    above 0, else None and 0; its ``fwd_packed`` module where it routes one,
+    else None; its ``fwd`` module where it routes no long ``fwd`` module
+    (then :func:`module_for_rows` of ``fwd`` names it at every row count),
+    else None; and the rows ``(lo, hi]`` of its tiny band that run without
+    it (``FWD_TINY_GAP_ROWS[arch]``, ``(0, 0)`` where none)."""
+
+    routes = ROUTES[arch]
+    cut = FWD_TINY_ROWS_PER_SM.get(arch, 0)
+    base = routes.get("fwd") if "fwd" + LONG not in routes else None
+    lo, hi = FWD_TINY_GAP_ROWS.get(arch, (0, 0))
+    if "fwd_tiny" in routes and cut > 0:
+        return routes["fwd_tiny"], cut, routes.get("fwd_packed"), base, lo, hi
+    return None, 0, routes.get("fwd_packed"), base, 0, 0
+
+
+# The forward plan of every routed architecture, read once at import: a
+# forward looks its plan up once, tests its strides, compares ints and
+# returns a module of the plan (its host path is most of the time of a small
+# call).  Patching ``ROUTES``, ``FWD_TINY_ROWS_PER_SM`` or
+# ``FWD_TINY_GAP_ROWS`` alone changes no forward route.
+_FWD_PLANS = {arch: _fwd_plan(arch) for arch in ROUTES}
+
+
 def forward_module(
     arch: str,
     rows: int,
@@ -1690,22 +1866,45 @@ def forward_module(
 ) -> str:
     """The forward module for ``rows`` rows of ``heads`` heads on ``arch`` with
     ``sm_count`` SMs, given the token and head strides (in elements) the
-    kernel reads ``x`` and ``z`` with: the arch's ``fwd_packed`` module when it
-    routes one and the rows are packed (both head strides 128, both token
-    strides ``heads * 128``, fewer than ``PACKED_ROWS`` rows), else
-    :func:`module_for_rows` of ``fwd``.  Both give the same bits."""
+    kernel reads ``x`` and ``z`` with:
 
-    packed = ROUTES.get(arch, {}).get("fwd_packed")
-    row = heads * HEAD_DIM
-    if (
-        packed is not None
-        and 0 < rows < PACKED_ROWS
-        and x_head == HEAD_DIM
-        and z_head == HEAD_DIM
-        and x_tok == row
-        and z_tok == row
-    ):
-        return packed
+    - the arch's ``fwd_tiny`` module up to ``FWD_TINY_ROWS_PER_SM[arch] *
+      sm_count`` rows, outside the rows ``(lo, hi]`` of
+      ``FWD_TINY_GAP_ROWS[arch]``, when it routes one and the rows are
+      packed: both head strides 128 and both token strides ``heads * 128``,
+      or one token (``rows == heads``) of token stride 0, which never enters
+      an address (a broadcast of more tokens is not packed rows);
+    - else the arch's ``fwd_packed`` module when it routes one and the rows
+      are packed (both head strides 128, both token strides ``heads * 128``,
+      fewer than ``PACKED_ROWS`` rows);
+    - else :func:`module_for_rows` of ``fwd``.
+
+    All give the same bits.  The tiny module, its cut, the packed module,
+    the ``fwd`` module and the gap come from ``_FWD_PLANS``, read once at
+    import; an architecture with no plan, or one that routes a long ``fwd``
+    module, asks :func:`module_for_rows`."""
+
+    plan = _FWD_PLANS.get(arch)
+    if plan is None:
+        return module_for_rows(arch, "fwd", rows, sm_count)
+    if rows > 0 and x_head == HEAD_DIM and z_head == HEAD_DIM:
+        row = heads * HEAD_DIM
+        if x_tok == row and z_tok == row:
+            if rows <= plan[1] * sm_count and not plan[4] < rows <= plan[5]:
+                return plan[0]
+            if plan[2] is not None and rows < PACKED_ROWS:
+                return plan[2]
+        elif (
+            # one token: its token index is 0, so its stride is never read
+            rows == heads
+            and (x_tok == row or x_tok == 0)
+            and (z_tok == row or z_tok == 0)
+            and rows <= plan[1] * sm_count
+            and not plan[4] < rows <= plan[5]
+        ):
+            return plan[0]
+    if plan[3] is not None:
+        return plan[3]
     return module_for_rows(arch, "fwd", rows, sm_count)
 
 
@@ -1983,15 +2182,19 @@ def launch_grid(
     ``rows_per_block`` rows below ``persistent_from_rows_per_sm`` rows per SM,
     and from there the fewest whole waves of ``ctas_per_sm * sm_count`` CTAs
     whose CTAs walk at most ``max_blocks_per_cta`` blocks each, and at most one
-    CTA per block; the backward ``min(blocks, ctas_per_sm * sm_count)`` CTAs,
-    and so do the strided programs, each of its own rule; a small-row
-    program its rule's ``cluster`` CTAs (one cluster, or one CTA) whatever
-    the rows and the SM count (its rule has no blocks or CTAs per SM)."""
+    CTA per block; the tiny forward ``ceil(rows / rows_per_cta)`` CTAs, one
+    block each, whatever the SM count; the backward ``min(blocks,
+    ctas_per_sm * sm_count)`` CTAs, and so do the strided programs, each of
+    its own rule; a small-row program its rule's ``cluster`` CTAs (one
+    cluster, or one CTA) whatever the rows and the SM count (its rule has no
+    blocks or CTAs per SM)."""
 
     rule = record["grid_rule"]
     kind = rule["kind"]
     # The small-row kind is tested last, so the other kinds' launches pay
-    # no extra compare; its rule has no blocks or CTAs per SM to read.
+    # no extra compare; its rule has no blocks or CTAs per SM to read.  The
+    # tiny forward's kind is tested right after the forward's: the
+    # backward's launches pay one compare for it.
     if kind == "persistent_row_blocks":
         blocks = -(-int(rows) // int(rule["rows_per_block"]))
         wave = max(1, int(rule["ctas_per_sm"]) * int(sm_count))
@@ -1999,6 +2202,8 @@ def launch_grid(
             return (blocks, 1, 1)
         waves = max(1, -(-blocks // (wave * int(rule["max_blocks_per_cta"]))))
         return (min(blocks, waves * wave), 1, 1)
+    if kind == "row_blocks":
+        return (-(-int(rows) // int(rule["rows_per_cta"])), 1, 1)
     if kind in ("claimed_row_blocks", "strided_row_blocks"):
         blocks = -(-int(rows) // int(rule["rows_per_block"]))
         wave = max(1, int(rule["ctas_per_sm"]) * int(sm_count))
@@ -2178,6 +2383,8 @@ __all__ = [
     "CLUSTER_MIN_SMS",
     "CLUSTER_ROLES",
     "DW_SMALL_ROWS",
+    "FWD_TINY_GAP_ROWS",
+    "FWD_TINY_ROWS_PER_SM",
     "GRID_KINDS",
     "HEAD_DIM",
     "INT32_MAX",
@@ -2197,6 +2404,7 @@ __all__ = [
     "SMALL",
     "SOLO",
     "STRIDED",
+    "TINY_ROLES",
     "arch_for_capability",
     "backward_module",
     "backward_packed",

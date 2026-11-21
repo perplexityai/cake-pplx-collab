@@ -39,7 +39,15 @@ Host design (every control is a keyword; no environment variable):
   on SM107 a second one for packed rows (``x`` and ``z`` both read as
   contiguous ``[T, H, 128]``; ``cake_jit.forward_module``) that computes a row
   with the same FP32 operations in the same order, so the layout changes no
-  bits.  The sum of squares runs in one fixed order per architecture: on
+  bits.  Up to ``cake_jit.FWD_TINY_ROWS_PER_SM`` rows per SM, outside the
+  rows of ``cake_jit.FWD_TINY_GAP_ROWS`` (17 to 32 on SM107), inputs whose
+  rows are packed (``x`` and ``z`` both read as contiguous ``[T, H, 128]``,
+  or one token of head stride 128, whose token stride is never read) run the
+  architecture's tiny forward in their place: one CTA per block of a few
+  rows (its record's ``rows_per_cta``) with no loop, each row read at its
+  linear offset, and each row computed with the row arithmetic of the module
+  it replaces, op for op, so the same bits.  The sum of squares runs in one
+  fixed order per architecture: on
   SM100 and SM103 as two FMA chains (the even and the odd elements, the two
   lanes of one ``.f32x2`` FMA chain) added before the lanes' XOR shuffles, on
   SM107 as four interleaved chains.  ``rstd`` comes from the approximate FP32
@@ -1065,8 +1073,10 @@ def cake_rmsnorm_silu_gate_det_train_backward(
                 # heads * 128: the same addresses in every program), on an
                 # architecture with a cut of the build of packed rows only and
                 # up to its limit (_ONE_TOKEN_PACKED_ROWS_PER_SM); the
-                # forward, the call that computes the weight gradient and the
-                # long module's choice above keep 0.
+                # forward (whose tiny module takes one token's 0 as packed
+                # rows itself, cake_jit.forward_module), the call that
+                # computes the weight gradient and the long module's choice
+                # above keep 0.
                 dy_tok = x_tok = z_tok = row
                 packed = True
             else:

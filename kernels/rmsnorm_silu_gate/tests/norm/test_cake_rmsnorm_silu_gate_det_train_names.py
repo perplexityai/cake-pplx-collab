@@ -401,12 +401,14 @@ def test_the_two_modes_are_separate_modules() -> None:
     # the deterministic package routes its call roles, the long modules of its
     # backward roles, the programs of a backward without the weight gradient,
     # the programs of one CTA and of one cluster of a backward of up to 256
-    # rows and, on some architectures, a forward of packed rows
+    # rows and, on some architectures, a forward of packed rows and the tiny
+    # forward
     det_loader = det_backend.cake_jit
     roles = {record["role"] for record in det_loader.MODULES.values()}
     routed = {*det_loader.ROLES, *det_loader.LONG_ROLES}
     others = {
         *det_loader.PACKED_ROLES,
+        *det_loader.TINY_ROLES,
         *det_loader.NODW_ROLES,
         *det_loader.CLUSTER_ROLES,
     }
