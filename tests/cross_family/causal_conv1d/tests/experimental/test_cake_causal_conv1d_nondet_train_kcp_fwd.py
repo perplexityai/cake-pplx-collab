@@ -51,8 +51,10 @@ deterministic package.  Per row of the single-GPU suites:
 - the single-rank main program is the record ``cake_jit.selected_modules`` picks for the call, on both host paths:
   rows of ``C`` = 2048 and of ``C`` = 256 at 65536 tokens and below, which on sm_107a are the dynamic programs of the
   route, rows of ``C`` = 640 at local token counts inside every architecture's static range and direct range of its
-  forward key (the static and the direct program, which take no counters), and a row of ``C`` = 640 above every
-  architecture's token floor of the narrow forward's whole tiles and above the key;
+  forward key (the static and the direct program, which take no counters), a row of ``C`` = 640 above every
+  architecture's token floor of the narrow forward's whole tiles and above the key, and rows of ``C`` = 768 inside
+  every architecture's direct range and above the direct ranges and narrow-plan floors of sm_100a and sm_103a (the
+  dynamic program on 32-vector tiles there);
 - the multi entry with tensors of a static row and of dynamic rows in one call (one counter buffer, sized for the
   dynamic ones).
 
@@ -96,7 +98,9 @@ FORMS = [(0, 0), (1, 0), (0, 1), (1, 1)]
 # (the static program), at 12003 tokens inside its direct range (the direct program); from 40003 tokens, above every
 # key and every architecture's floor of the whole 40-vector tiles of the narrow forward plan, the dynamic program, so
 # the main program's plan names the architecture as the single-rank forward's does.  C = 768 at 14003 tokens lies
-# inside the direct range of every architecture's ``fwd`` key covering C 768 (the direct program).
+# inside the direct range of every architecture's ``fwd`` key covering C 768 (the direct program); at 21003 tokens,
+# above the direct ranges of sm_100a and sm_103a (20480, 19456) and their floors of the narrow forward plan (20480,
+# 12288), the dynamic program on 32-vector tiles there (inside sm_107a's direct range: the direct program).
 ROUTE_ROWS = [
     ("c2048", (5000, 1003), (1, 2, 4997, 1003), 2048),
     ("c256-s66536", (40000, 25536, 1000), (1, 2, 39997, 26536), 256),
@@ -105,6 +109,7 @@ ROUTE_ROWS = [
     ("c640-s12003", (8000, 4003), (1, 2, 7997, 4003), 640),
     ("c640-s40003", (30000, 10003), (1, 2, 29997, 10003), 640),
     ("c768-s14003", (10000, 4003), (1, 2, 9997, 4003), 768),
+    ("c768-s21003", (15000, 6003), (1, 2, 14997, 6003), 768),
 ]
 # A multi-entry row whose first tensor's local token count lies inside every architecture's static range at C = 640
 # (no counters) and whose other tensors run dynamic programs (C = 512, 1024): one counter buffer per call.
@@ -633,8 +638,10 @@ def test_two_launch_forward_steady_round_does_not_block_or_allocate(
 def test_route_rows_select_every_program(arch) -> None:
     """The rows of ``ROUTE_ROWS`` select every program of the architecture's zero-history ``fwd`` route (a route with
     another program set needs rows of its own here): the static and the direct program at the C = 640 rows inside
-    the key's ranges, which take no counters, and the dynamic programs at the others; the C = 640 row of the
-    multi-entry row of ``MROWS_KEYS`` selects the static program."""
+    the key's ranges, which take no counters, the direct program at the C = 768 rows inside a direct range, and the
+    dynamic programs at the others; on sm_100a and sm_103a the C = 768 row above the direct ranges plans the
+    32-vector tiles of the narrow forward plan; the C = 640 row of the multi-entry row of ``MROWS_KEYS`` selects the
+    static program."""
     picked = {
         name: cake_jit.selected_modules(
             arch, conv_kcp.FWD_MAIN_ROUTE, C=C, S=sum(lens)
@@ -651,6 +658,23 @@ def test_route_rows_select_every_program(arch) -> None:
             name,
         )
         assert record["workspace_rule"] is None, (arch, name)
+    if arch in ("sm_100a", "sm_103a"):
+        _name, lens, _cuts, C = next(
+            row for row in ROUTE_ROWS if row[0] == "c768-s21003"
+        )
+        name = picked["c768-s21003"]
+        assert name not in (picked["c640-s3003"], picked["c640-s12003"]), (arch, name)
+        record = cake_jit.MODULES[name]
+        split = cake_jit.plan(
+            sum(lens),
+            C,
+            len(lens),
+            geometry=record["grid_rule"]["geometry"],
+            role=record["role"],
+            arch=arch,
+            route=conv_kcp.FWD_MAIN_ROUTE,
+        )
+        assert split["ct_vec"] == 32, (arch, name, split)
     for _name, lens, _cuts, Cs in MROWS_KEYS:
         (name,) = cake_jit.selected_modules(
             arch, conv_kcp.FWD_MAIN_ROUTE, C=Cs[0], S=sum(lens)
