@@ -27,14 +27,21 @@ The pin of FLA's autotuned kernels (``cake_kda_fla.FLA_PINS``) is checked here o
 are real Triton autotuners (one under a real ``@triton.heuristics`` wrapper) over Python launches: the pin leaves each
 its first config, so it launches that config with no benchmark; a first config other than its pin, or a kernel that
 is not autotuned, fails the pin and changes nothing; an autotuner that chooses a config at run time fails the reference
-after the call; and a forbidden variable or another FLA / Triton version fails the reference of a draw FLA runs (a
-:class:`FlaReferenceError`), while operands FLA does not run keep their naive-tier-only reason.
+after the call; and a forbidden variable, another FLA / Triton version or any error of the FLA call fails the reference
+of a draw FLA runs (a :class:`FlaReferenceError`), while operands FLA does not run keep their naive-tier-only reason.
+The record of the reference names the versions of FLA, Triton and torch, FLA's sources, the variables set and the ptxas
+Triton runs; the steps of a test that calls FLA without recording them, in its own process and in a spawned rank, are
+recorded for it.
 """
 
 from __future__ import annotations
 
+import contextlib
+import hashlib
 import json
+import multiprocessing
 import os
+import platform
 import sys
 import types
 
@@ -46,6 +53,7 @@ from tests.experimental.test_helpers import cake_kda_fla
 from tests.experimental.test_helpers import cake_kda_known_gaps as known_gaps
 from tests.experimental.test_helpers.cake_kda_fla import (
     NOT_PINNED,
+    PROPERTY,
     UNAVAILABLE,
     FlaReference,
     FlaReferenceError,
@@ -155,7 +163,7 @@ def test_the_max_norm_is_judged_draw_by_draw_on_half_of_the_draws(count) -> None
 
 
 def test_fla_unavailable_judges_the_naive_tier_only() -> None:
-    reason = f"{UNAVAILABLE}: fla does not import (ModuleNotFoundError: No module named 'fla')"
+    reason = f"{UNAVAILABLE}: the operands are on cpu, FLA runs on CUDA devices"
     passed = _judge(_const(0.0625), _const(0.125), _const(reason))
     (verdict,) = passed.verdicts().values()
     assert verdict["tier"] == "bf16" and verdict["met"] == {"bf16": True, REFERENCE: None}
@@ -182,10 +190,11 @@ def test_an_output_without_an_fla_counterpart_is_judged_against_the_naive_tier_o
 
 
 def test_fla_on_some_draws_only_is_not_a_reference() -> None:
-    judge = _judge(_const(0.1875), _const(0.125), lambda j: 0.25 if j else f"{UNAVAILABLE}: raised on draw 0")
+    reason = f"{UNAVAILABLE}: the activated gate is outside FLA's safe gate range"
+    judge = _judge(_const(0.1875), _const(0.125), lambda j: 0.25 if j else reason)
     (verdict,) = judge.verdicts().values()
     assert verdict["tier"] is None and verdict["met"][REFERENCE] is None
-    assert verdict["fla_reason"] == f"{UNAVAILABLE}: raised on draw 0 (no FLA value on draws [0] of 32)"
+    assert verdict["fla_reason"] == f"{reason} (no FLA value on draws [0] of 32)"
 
 
 def test_the_zero_rule_holds_for_each_reference() -> None:
@@ -311,6 +320,176 @@ def test_fla_of_fails_where_fla_runs_and_the_pinned_reference_cannot(monkeypatch
     monkeypatch.setattr(cake_kda_fla, "_loaded", (None, f"{NOT_PINNED}: test"))
     with pytest.raises(FlaReferenceError, match=f"^{NOT_PINNED}: test$"):
         fla_of(_operands(), 128**-0.5, -5.0, False)
+
+
+def _raises(error: BaseException):
+    """A stand-in for FLA's ``chunk_kda`` that raises ``error``."""
+
+    def chunk_kda(*args, **kwargs):
+        raise error
+
+    return chunk_kda
+
+
+def _out_of_resources():
+    from triton.runtime.errors import OutOfResources
+
+    return OutOfResources(262144, 232448, "shared")
+
+
+# errors of the FLA call: a Triton 3.8 MLIR pass, a CUDA launch, out of memory, FLA's own input check, Triton's own
+ERRORS = {
+    "mlir": lambda: RuntimeError("PassManager::run failed"),
+    "cuda": lambda: RuntimeError("Triton Error [CUDA]: an illegal memory access was encountered"),
+    "oom": lambda: torch.OutOfMemoryError("CUDA out of memory. Tried to allocate 2.00 GiB"),
+    "fla": lambda: ValueError("`lower_bound` must be in the safe range [-5, 0), got -6.0."),
+    "triton": _out_of_resources,
+}
+
+
+@pytest.mark.parametrize("error", ERRORS)
+def test_any_error_of_the_fla_call_fails_the_reference(monkeypatch, error) -> None:
+    # FLA runs the operands (the operand check passes): an error of the call fails the test, the draw is not judged
+    # against the naive tier only (the CPU operands enter a stand-in device scope)
+    pytest.importorskip("triton")
+    cause = ERRORS[error]()
+    monkeypatch.setattr(cake_kda_fla, "_check", lambda inputs: None)
+    monkeypatch.setattr(cake_kda_fla, "_loaded", (_raises(cause), None))
+    monkeypatch.setattr(torch.cuda, "device", lambda device: contextlib.nullcontext())
+    with pytest.raises(FlaReferenceError) as got:
+        fla_of(_operands(), 128**-0.5, -5.0, False)
+    assert str(got.value) == f"{NOT_PINNED}: {cake_kda_fla.FLA_ENTRY} raised {type(cause).__name__}: {cause}"
+    assert got.value.__cause__ is cause
+
+
+def test_operands_fla_does_not_run_keep_the_naive_tier_only(monkeypatch) -> None:
+    # the operand check rejects them before any FLA call (here a call would raise): fla_of gives the reason, and the
+    # judge judges the output against the naive tier only and names it
+    monkeypatch.setattr(cake_kda_fla, "_loaded", (_raises(AssertionError("FLA was called")), None))
+    on_gpu = types.SimpleNamespace(is_cuda=True, device="cuda:0", shape=(5, 2, 128), dim=lambda: 3)
+    flat = types.SimpleNamespace(is_cuda=True, device="cuda:0", shape=(5, 256), dim=lambda: 2)
+    g = torch.full((5, 2, 128), -1.0)
+    g[2, 1, 7] = -6.0
+    cases = {
+        "the operands are on cpu, FLA runs on CUDA devices": _operands(),
+        "operands of shape (5, 256), not [S, H, D]": {**_operands(), "q": flat},
+        "the activated gate is outside FLA's safe gate range [-5.0, 0.0] (min -6.0, max -1.0, finite True)": {
+            **_operands(g=g),
+            "q": on_gpu,
+        },
+    }
+    for want, inputs in cases.items():
+        got = fla_of(inputs, 128**-0.5, -5.0, False)
+        assert got.values is None and got.reason == f"{UNAVAILABLE}: {want}"
+        judge = _judge(_const(0.0625), _const(0.125), _const(got.reason))
+        (verdict,) = judge.verdicts().values()
+        assert verdict["tier"] == "bf16" and verdict["met"] == {"bf16": True, REFERENCE: None}
+        assert tier_line("t", verdict).endswith(f"| fla: {got.reason}, naive tier only")
+
+
+def test_the_record_names_versions_sources_variables_and_the_ptxas_triton_runs(monkeypatch, tmp_path) -> None:
+    triton = pytest.importorskip("triton")
+    compiler = pytest.importorskip("triton.backends.nvidia.compiler")
+    # a stand-in FLA package of two source files, a device of compute capability 10.3, and the "ptxas" Triton runs for
+    # it (the Python interpreter here: its --version is one line)
+    package = tmp_path / "site" / "fla"
+    (package / "ops").mkdir(parents=True)
+    (package / "__init__.py").write_text("__version__ = '0.6.0'\n")
+    (package / "ops" / "kda.py").write_text("chunk_kda = None\n")
+    (package / "ops" / "notes.txt").write_text("not a source\n")
+    fla = types.ModuleType("fla")
+    fla.__version__, fla.__file__ = "0.6.0", str(package / "__init__.py")
+    utils = types.ModuleType("fla.utils")
+    utils.get_all_max_shared_mem = lambda: [232448]
+    monkeypatch.setitem(sys.modules, "fla", fla)
+    monkeypatch.setitem(sys.modules, "fla.utils", utils)
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device=None: (10, 3))
+    monkeypatch.setattr(torch.cuda, "get_device_name", lambda device=None: "Stand-in GPU")
+    archs = []
+    python = types.SimpleNamespace(path=sys.executable)
+    monkeypatch.setattr(compiler, "get_ptxas", lambda arch: archs.append(arch) or python)
+    for key in list(os.environ):
+        if key.startswith(cake_kda_fla.RECORDED_PREFIXES):
+            monkeypatch.delenv(key)
+    monkeypatch.setenv("TRITON_CACHE_DIR", "/triton/cache")
+    monkeypatch.setenv("PTXAS_STAND_IN", "1")
+    monkeypatch.setenv("NOT_RECORDED", "1")
+    with cake_kda_fla._environment(cake_kda_fla.FLA_ENV):
+        record = cake_kda_fla._record(fla, triton)
+    assert archs == [103]
+    with open(sys.executable, "rb") as fh:
+        digest = hashlib.sha256(fh.read()).hexdigest()
+    assert record["ptxas_used"] == f"sm_103 {sys.executable} sha256 {digest} :: Python {platform.python_version()}"
+    lines = "".join(
+        f"{hashlib.sha256((tmp_path / 'site' / name).read_bytes()).hexdigest()}  {name}\n"
+        for name in ("fla/__init__.py", "fla/ops/kda.py")
+    )
+    sources = hashlib.sha256(lines.encode()).hexdigest()
+    assert record["fla_sources"] == f"sha256 {sources} over 2 .py files under {package}"
+    assert record["torch"] == f"{torch.__version__} (CUDA {torch.version.cuda})"
+    assert record["env"] == "FLA_FLASH_KDA=0 FLA_TILELANG=0 PTXAS_STAND_IN=1 TRITON_CACHE_DIR=/triton/cache"
+    assert record["device"] == "Stand-in GPU sm_103" and record["max_shared_mem"] == 232448
+    assert {"fla", "triton", "pin", "ptxas", "ptxas_blackwell", *cake_kda_fla.RECORDED_ENV} <= set(record)
+    # a part of the record that cannot be read is recorded as such: it never fails the reference
+    monkeypatch.setattr(compiler, "get_ptxas", lambda arch: types.SimpleNamespace(path=str(tmp_path / "absent")))
+    assert cake_kda_fla._record(fla, triton)["ptxas_used"].startswith("not resolved (FileNotFoundError: ")
+
+
+def _spawned_rank(record: dict, store: str) -> None:
+    """The rank :func:`test_the_steps_of_a_test_include_its_spawned_ranks` spawns: rank 0 of a one-rank gloo group with
+    the record of a pinned reference of its own, one FLA step without values (its operands are on the CPU)."""
+    torch.distributed.init_process_group("gloo", init_method=f"file://{store}", rank=0, world_size=1)
+    try:
+        cake_kda_fla._reference = record
+        fla_of(_operands(), 128**-0.5, -5.0, False)
+    finally:
+        torch.distributed.destroy_process_group()
+
+
+def test_the_steps_of_a_test_include_its_spawned_ranks(monkeypatch, tmp_path) -> None:
+    # a test that calls FLA without recording its steps: the steps of its own process and of the rank it spawned are
+    # recorded for it, the record of the rank's reference among them
+    monkeypatch.setattr(cake_kda_fla, "_reference", None)
+    monkeypatch.setattr(cake_kda_fla, "_steps", None)
+    record = {"fla": "0.6.0", "triton": "3.8.0", "pin": "first-config x14", "device": "rank 0's GPU"}
+    reason = f"{UNAVAILABLE}: the operands are on cpu, FLA runs on CUDA devices"
+    item = types.SimpleNamespace(user_properties=[("naive_tier", {})])
+    with cake_kda_fla.steps_of_test(item):
+        directory = os.environ[cake_kda_fla.STEPS_DIR]
+        fla_of(_operands(), 128**-0.5, -5.0, False)
+        rank = multiprocessing.get_context("spawn").Process(target=_spawned_rank, args=(record, str(tmp_path / "s")))
+        rank.start()
+        rank.join(600)
+        assert rank.exitcode == 0
+    assert not os.path.exists(directory) and os.environ.get(cake_kda_fla.STEPS_DIR) != directory
+    processes = [f"pid {os.getpid()}", f"rank 0 (pid {rank.pid})"]
+    steps = {"calls": 2, "seconds": 0.0, "reasons": {reason: 2}, "reference": record, "processes": processes}
+    assert item.user_properties == [("naive_tier", {}), (PROPERTY, steps)]
+    assert fla_line("t", steps) == f"FLA t calls=2 seconds=0.0 ({', '.join(processes)}) | {reason} x2"
+    # a test that records its FLA steps itself keeps them; a test that calls no FLA gets none
+    item = types.SimpleNamespace(user_properties=[])
+    with cake_kda_fla.steps_of_test(item):
+        own = FlaSteps()
+        own.add(fla_of(_operands(), 128**-0.5, -5.0, False))
+        own.record(lambda key, value: item.user_properties.append((key, value)))
+    assert item.user_properties == [(PROPERTY, own.summary())]
+    item = types.SimpleNamespace(user_properties=[])
+    with cake_kda_fla.steps_of_test(item):
+        pass
+    assert item.user_properties == []
+
+
+def test_the_summary_prints_the_record_of_every_process(monkeypatch) -> None:
+    one, two = {"fla": "0.6.0", "device": "A"}, {"fla": "0.6.0", "device": "B"}
+    processes = ["rank 0 (pid 1)", "rank 1 (pid 2)"]
+    steps = {"calls": 3, "seconds": 0.5, "reasons": {}, "reference": one, "processes": processes}
+    recorded = [(PROPERTY, {**steps, "other_references": [two]})]
+    report = types.SimpleNamespace(when="call", nodeid="t", user_properties=recorded)
+    lines = []
+    reporter = types.SimpleNamespace(stats={"passed": [report]}, section=lines.append, write_line=lines.append)
+    cake_kda_fla.summarize_fla(reporter)
+    line = "FLA t calls=3 seconds=0.5 (rank 0 (pid 1), rank 1 (pid 2))"
+    assert lines[1:] == [reference_line(one), reference_line(two), line]
 
 
 @pytest.mark.parametrize("key", cake_kda_fla.FORBIDDEN_ENV)

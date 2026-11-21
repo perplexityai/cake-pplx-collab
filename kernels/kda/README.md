@@ -21,17 +21,21 @@ flash-linear-attention 0.6.0 `chunk_kda` (FLA) for the layer's output and gradie
 passes when it meets either reference, and fails only when it misses both. To meet a reference, its median and
 largest L2 error over the draws are at most 1.005 times the reference's, its max-norm error is within 1.005 times
 the reference's on at least half of the draws, and its error is 0 on every draw where the reference's is 0. An
-output with no FLA counterpart, or a case that FLA does not run (operands that are not on a GPU, an activated gate
-outside FLA's safe range), is judged against the naive implementation only. Each `TIER` line of the test summary
-names the reference met and shows the errors against both. The tests set no tolerance, and they never compare `det`
-with `nondet`. A `det` package is also checked for bitwise identical results from run to run.
+output with no FLA counterpart, or a case that FLA does not run (operands that are not on a GPU or not `[S, H, D]`,
+an activated gate outside FLA's safe range), is judged against the naive implementation only. Each `TIER` line of
+the test summary names the reference met and shows the errors against both. The tests set no tolerance, and they
+never compare `det` with `nondet`. A `det` package is also checked for bitwise identical results from run to run.
 
 FLA runs with Triton 3.8.0, and each autotuned FLA kernel runs the first config FLA lists for it, not a config that
-Triton's autotuner picks by timing (`tests/experimental/test_helpers/cake_kda_fla.py`, `FLA_PINS`). A GPU test that
-judges with FLA fails when this reference cannot run: FLA 0.6.0 or Triton 3.8.0 is not installed (install the `fla`
-extra), a first config differs from its pin, Triton cannot build a pinned config, or a variable that changes FLA's
-or Triton's code or numbers is set (`FORBIDDEN_ENV`). The `FLA reference` line of the test summary records the
-versions, the pin, the GPU and its shared memory, and the ptxas that Triton uses.
+Triton's autotuner picks by timing (`tests/experimental/test_helpers/cake_kda_fla.py`, `FLA_PINS`). A GPU test fails
+when FLA runs its case and this reference gives no values: FLA 0.6.0 is not installed (install the `fla` extra), the
+installed Triton is not 3.8.0, a first config differs from its pin, a variable that changes FLA's or Triton's code or
+numbers is set (`FORBIDDEN_ENV`), or the FLA call raises an error. Triton comes with torch, and each torch release
+requires one Triton minor release (torch 2.14.1 requires `triton~=3.8.0`). The `fla` extra therefore does not pin
+Triton, as the package does not pin torch: with a torch that brings another Triton, these GPU tests fail until a
+torch that brings Triton 3.8.0 is installed. The `FLA reference` line of the test summary records the versions of
+FLA, Triton and torch, a digest of FLA's sources, the pin, the GPU and its shared memory, the `TRITON_*`, `FLA_*` and
+`PTXAS_*` variables that are set, and the ptxas that Triton runs (its path, sha256 and version).
 
 The benchmarks `benchmarks/bench_cake_kda_baselines.py` (one GPU) and `benchmarks/bench_cake_kda_kcp_baselines.py`
 (KCP, `torchrun`) time both packages against the cuDNN frontend's KDA (plan `kda_frost`, `batch_invariant=True` for

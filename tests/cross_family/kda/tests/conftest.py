@@ -15,17 +15,20 @@ limitations under the License.
 
 The terminal summary prints one ``TIER`` line per output the tests judged against the naive BF16 tier and FLA
 (:mod:`.cake_naive`), passing and xfailed tests included, one ``FLA reference`` line per pinned FLA reference the
-tests ran (its versions, pin, GPU, shared memory and ptxas) and one ``FLA`` line per test with the count and seconds
-of its FLA reference steps (``experimental/test_helpers/cake_kda_fla.py``).  A test that passed with owner-accepted
-gaps within their caps is reported as xfailed, its reason naming each gap; a test that passed without judging an
-output listed as a gap for it fails (``experimental/test_helpers/cake_kda_known_gaps.py``).
+tests ran (the versions of FLA, Triton and torch, a digest of FLA's sources, the pin, the GPU and its shared memory,
+the variables set and the ptxas Triton runs) and one ``FLA`` line per test that called FLA with the count and seconds
+of its FLA reference steps (``experimental/test_helpers/cake_kda_fla.py``).  Each test runs under
+``cake_kda_fla.steps_of_test``, so a test that calls FLA without recording its steps, in its own process or in the
+ranks it spawns, gets the steps of those processes.  A test that passed with owner-accepted gaps within their caps is
+reported as xfailed, its reason naming each gap; a test that passed without judging an output listed as a gap for it
+fails (``experimental/test_helpers/cake_kda_known_gaps.py``).
 """
 
 import pytest
 
 from .cake_naive import summarize_tiers
 from .experimental.test_helpers import cake_kda_known_gaps as known_gaps
-from .experimental.test_helpers.cake_kda_fla import summarize_fla
+from .experimental.test_helpers.cake_kda_fla import steps_of_test, summarize_fla
 
 
 def pytest_terminal_summary(terminalreporter, exitstatus, config):
@@ -35,8 +38,8 @@ def pytest_terminal_summary(terminalreporter, exitstatus, config):
 
 @pytest.hookimpl(wrapper=True)
 def pytest_runtest_call(item):
-    # the running test of the gaps' settling (cake_kda_known_gaps.settle)
-    with known_gaps.running(item.nodeid):
+    # the running test of the gaps' settling (cake_kda_known_gaps.settle); the FLA steps of the processes it runs
+    with known_gaps.running(item.nodeid), steps_of_test(item):
         return (yield)
 
 

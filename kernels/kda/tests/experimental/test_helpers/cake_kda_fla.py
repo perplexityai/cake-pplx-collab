@@ -34,28 +34,41 @@ processes and nodes.  The reference therefore runs every autotuned FLA kernel on
 FLA 0.6.0 lists for it (``configs[0]``, after FLA's own platform filters), chosen by no timing: :data:`FLA_PINS`.
 :func:`load` checks that no variable of :data:`FORBIDDEN_ENV` is set, imports FLA, checks FLA :data:`FLA_VERSION` and
 Triton :data:`TRITON_VERSION`, checks that the first config of each kernel of :data:`FLA_PINS` is its pin, and leaves
-each that one config: Triton's autotuner then runs it with no benchmark and no autotune cache.  It records the
-reference in each judge's FLA steps (:meth:`FlaSteps.summary`): the versions, the pin, the device and its shared memory
-per block (which decides FLA's config lists), ``TRITON_PTXAS_PATH`` and ``TRITON_PTXAS_BLACKWELL_PATH`` as set (kept,
-never changed) and the ptxas Triton resolves.  After each call :func:`fla_of` checks that no FLA kernel chose its
-config at run time.  The pin changes FLA objects for the whole test process; the benchmarks do not import this module.
+each that one config: Triton's autotuner then runs it with no benchmark and no autotune cache.  After each call
+:func:`fla_of` checks that no FLA kernel chose its config at run time.  The pin changes FLA objects for the whole test
+process; the benchmarks do not import this module.
 
-FLA is a reference only where it runs the case.  When the operands are not on a CUDA device or not ``[S, H, D]``, an
-activated gate is outside FLA's safe gate range (:data:`SAFE_GATE_RANGE`) or the call raises an error other than
-Triton's, :func:`fla_of` returns the reason (``fla unavailable: ...``) instead of values; the judge then judges the
-output against the naive tier only, and a miss of the tier stays a failure.  When FLA runs the case and the pinned
-reference cannot (FLA or Triton does not import or is another version, a variable of :data:`FORBIDDEN_ENV` is set, a
-first config is not its pin, Triton cannot build a pinned config, an FLA kernel chose its config at run time),
-:func:`fla_of` raises :class:`FlaReferenceError` (``the pinned FLA reference cannot run: ...``) and the test fails.  FLA
-runs on every draw (not only after a miss): after its first call in a process its step costs a small part of the FP64
-reference and of the naive tier.
+The record.  :func:`load` records the reference of its process (:func:`_record`): the versions of FLA, Triton and
+torch, a digest of FLA's installed sources, the pin, the device and its shared memory per block (which decides FLA's
+config lists), every ``TRITON_*``, ``FLA_*`` and ``PTXAS_*`` variable set while FLA runs, ``TRITON_PTXAS_PATH`` and
+``TRITON_PTXAS_BLACKWELL_PATH`` as set (kept, never changed), the two ptxas Triton resolves and the one it runs for the
+device (path, sha256 and ``--version``).  A judge's FLA steps carry it (:meth:`FlaSteps.summary`).  The family's
+conftest runs each test under :func:`steps_of_test`: every process that calls :func:`fla_of` during the test (the
+pytest process and the ranks the test spawns) writes its FLA steps to the test's directory (:data:`STEPS_DIR`), and a
+test that records no FLA steps itself gets theirs.  The terminal summary (:func:`summarize_fla`) so prints the record
+of every reference a test ran, in the pytest process or in a spawned rank.
+
+FLA is a reference only where it runs the case.  When the operands are not on a CUDA device or not ``[S, H, D]``, or
+an activated gate is outside FLA's safe gate range (:data:`SAFE_GATE_RANGE`), FLA does not run them: :func:`fla_of`
+returns the reason (``fla unavailable: ...``, :func:`_check`, before any FLA call) instead of values, the judge judges
+the output against the naive tier only, and a miss of the tier stays a failure.  FLA runs every other draw, and
+:func:`fla_of` raises :class:`FlaReferenceError` (``the pinned FLA reference cannot run: ...``) and the test fails when
+the pinned reference gives no values for it: FLA or Triton does not import or is another version, a variable of
+:data:`FORBIDDEN_ENV` is set, a first config is not its pin, the FLA call raises (a Triton build error, a CUDA error,
+out of memory or an error of FLA's own), or an FLA kernel chose its config at run time.  FLA runs on every draw (not
+only after a miss): after its first call in a process its step costs a small part of the FP64 reference and of the
+naive tier.
 """
 
 from __future__ import annotations
 
 import contextlib
+import hashlib
+import json
 import os
+import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Iterator, Mapping
 
@@ -120,6 +133,8 @@ FORBIDDEN_ENV = (
 )
 #: The ptxas Triton uses: recorded as set and never changed (sm_107a with CUDA 13.5 needs both set).
 RECORDED_ENV = ("TRITON_PTXAS_PATH", "TRITON_PTXAS_BLACKWELL_PATH")
+#: Every variable set with one of these prefixes while FLA runs is in the record of the reference.
+RECORDED_PREFIXES = ("TRITON_", "FLA_", "PTXAS_")
 #: The activated gates FLA's ``safe_gate=True`` takes.
 SAFE_GATE_RANGE = (-5.0, 0.0)
 #: The start of every reason FLA gives no values for a draw.
@@ -130,10 +145,15 @@ GRAD_NAMES = ("dq", "dk", "dv", "dg", "dbeta")
 RAW_GRAD_NAMES = GRAD_NAMES + ("dA_log", "ddt_bias")
 #: The record of the FLA steps of a judge (``record_property``), which the family's ``conftest.py`` prints.
 PROPERTY = "fla_reference"
+#: The directory where each process writes its FLA steps of the running test (:func:`steps_of_test`): set for each test
+#: by the family's ``conftest.py``, inherited by the ranks the test spawns.
+STEPS_DIR = "CAKE_KDA_FLA_STEPS_DIR"
 
 _loaded: tuple | None = None
 #: The record of the pinned reference of this process (:func:`load`), or None before FLA ran in it.
 _reference: dict | None = None
+#: This process's FLA steps of the running test, ``(STEPS_DIR, pid, FlaSteps)`` (:func:`_note`).
+_steps: tuple | None = None
 
 
 class FlaReferenceError(RuntimeError):
@@ -270,14 +290,54 @@ def _record(fla, triton) -> dict:
             record[tool] = f"{found.path} (release {found.version})"
         except Exception as exc:  # noqa: BLE001 -- recorded only
             record[tool] = f"not resolved ({type(exc).__name__}: {exc})"
+    record["ptxas_used"] = _recorded(_ptxas_used, 10 * major + minor)
+    record["torch"] = f"{torch.__version__} (CUDA {torch.version.cuda})"
+    record["fla_sources"] = _recorded(_sources, fla)
+    record["env"] = " ".join(f"{k}={v}" for k, v in sorted(os.environ.items()) if k.startswith(RECORDED_PREFIXES))
     return record
 
 
-def _triton_error(exc: BaseException) -> bool:
-    """Whether ``exc`` is Triton's: it cannot build a pinned config (a compile error, out of resources, ptxas)."""
-    from triton.errors import TritonError
+def _recorded(value, *args) -> str:
+    """``value(*args)``, or why it is not known: an entry of the record, never a reason the reference cannot run."""
+    try:
+        return value(*args)
+    except Exception as exc:  # noqa: BLE001 -- recorded only
+        return f"not resolved ({type(exc).__name__}: {exc})"
 
-    return isinstance(exc, TritonError)
+
+def _sha256(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as fh:
+        for block in iter(lambda: fh.read(1 << 20), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _ptxas_used(arch: int) -> str:
+    """The ptxas Triton runs for compute capability ``arch`` (``10 * major + minor``, Triton's ``get_ptxas``): its
+    path, sha256 and ``--version`` output (its lines joined by `` / ``)."""
+    from triton.backends.nvidia.compiler import get_ptxas
+
+    path = get_ptxas(arch).path
+    out = subprocess.run([path, "--version"], capture_output=True, text=True, timeout=120, check=True).stdout
+    version = " / ".join(line.strip() for line in out.splitlines() if line.strip())
+    return f"sm_{arch} {path} sha256 {_sha256(path)} :: {version}"
+
+
+def _sources(fla) -> str:
+    """The sha256 of the ``sha256sum`` lines of every ``.py`` file of the installed package ``fla``, in C order of their
+    paths relative to its parent directory: ``find fla -name '*.py' | LC_ALL=C sort | xargs sha256sum | sha256sum``
+    there."""
+    package = os.path.dirname(fla.__file__)
+    parent = os.path.dirname(package)
+    names = sorted(
+        os.path.relpath(os.path.join(root, name), parent)
+        for root, _, files in os.walk(package)
+        for name in files
+        if name.endswith(".py")
+    )
+    lines = "".join(f"{_sha256(os.path.join(parent, name))}  {name}\n" for name in names)
+    return f"sha256 {hashlib.sha256(lines.encode()).hexdigest()} over {len(names)} .py files under {package}"
 
 
 class FlaReference:
@@ -321,11 +381,12 @@ def fla_of(inputs: Mapping[str, torch.Tensor], scale: float, lower_bound: float,
     """FLA's ``out`` and gradients on the operands of a judged draw (as the FP64 reference reads them, without a batch
     axis: ``q, k, v, g, beta, dout, cu_seqlens`` and in the raw gate mode ``A_log``, ``dt_bias``), keyed as
     ``cake_kda_naive.oracle_with_grads``, with ``scale``, the raw gate's ``lower_bound`` and with ``l2n`` the in-kernel
-    Q/K L2 norm; or the reason FLA does not run them (:data:`UNAVAILABLE`).  Raises :class:`FlaReferenceError` when FLA
-    runs them and the pinned reference cannot (:data:`NOT_PINNED`)."""
+    Q/K L2 norm; or the reason FLA does not run them (:data:`UNAVAILABLE`, :func:`_check`).  Raises
+    :class:`FlaReferenceError` (:data:`NOT_PINNED`) when FLA runs them and the pinned reference gives no values: it
+    cannot load, the FLA call raises any error, or an FLA kernel chose its config at run time."""
     reason = _check(inputs)
     if reason is not None:
-        return FlaReference(None, reason)
+        return _note(FlaReference(None, reason))
     chunk_kda, reason = load()
     if chunk_kda is None:
         raise FlaReferenceError(reason)
@@ -360,16 +421,14 @@ def fla_of(inputs: Mapping[str, torch.Tensor], scale: float, lower_bound: float,
             o = o.squeeze(0)
             grads = torch.autograd.grad(o, leaves, inputs["dout"].to(o.dtype).contiguous(), allow_unused=True)
             torch.cuda.synchronize(device)
-    except Exception as exc:  # FLA does not run the case (the judge reads the naive tier only), or a Triton error
-        if _triton_error(exc):  # a pinned config Triton cannot build: the reference cannot run
-            raise FlaReferenceError(f"{NOT_PINNED}: {FLA_ENTRY} raised {type(exc).__name__}: {exc}"[:800]) from exc
-        return FlaReference(None, f"{UNAVAILABLE}: {FLA_ENTRY} raised {type(exc).__name__}: {exc}"[:400])
+    except Exception as exc:  # FLA runs the case (_check): any error of the call fails the reference
+        raise FlaReferenceError(f"{NOT_PINNED}: {FLA_ENTRY} raised {type(exc).__name__}: {exc}"[:800]) from exc
     _assert_pinned(before)
     values = {"out": o.detach()}
     for name, grad in zip(RAW_GRAD_NAMES if raw else GRAD_NAMES, grads, strict=True):
         if grad is not None:
             values[name] = grad.detach()
-    return FlaReference(values, None, time.perf_counter() - start)
+    return _note(FlaReference(values, None, time.perf_counter() - start))
 
 
 class FlaSteps:
@@ -398,10 +457,89 @@ class FlaSteps:
         record_property(PROPERTY, self.summary())
 
 
+def _process() -> str:
+    """This process in the FLA steps of a test: its rank when it is in a process group, and its pid."""
+    if torch.distributed.is_available() and torch.distributed.is_initialized():
+        return f"rank {torch.distributed.get_rank()} (pid {os.getpid()})"
+    return f"pid {os.getpid()}"
+
+
+def _note(ref: FlaReference) -> FlaReference:
+    """``ref``, added to this process's FLA steps of the running test, which go to ``<STEPS_DIR>/<pid>.json``."""
+    global _steps
+    directory = os.environ.get(STEPS_DIR)
+    if not directory:
+        return ref
+    if _steps is None or _steps[:2] != (directory, os.getpid()):  # a new test, or a forked process
+        _steps = (directory, os.getpid(), FlaSteps())
+    _steps[2].add(ref)
+    path = os.path.join(directory, f"{os.getpid()}.json")
+    try:
+        with open(path + ".part", "w") as fh:
+            json.dump({**_steps[2].summary(), "process": _process()}, fh)
+        os.replace(path + ".part", path)
+    except OSError:  # the test's directory is gone (a process that outlived its test): nothing left to record
+        pass
+    return ref
+
+
+def _steps_of(directory: str) -> dict | None:
+    """The FLA steps the processes of a test wrote (:func:`_note`), summed (``calls``, ``seconds``, ``reasons``), the
+    first record of a pinned reference among them (``reference``; any other in ``other_references``) and the processes
+    (``processes``); None when no process called :func:`fla_of`."""
+    found = []
+    for name in sorted(os.listdir(directory)):
+        if name.endswith(".json"):
+            with open(os.path.join(directory, name)) as fh:
+                found.append(json.load(fh))
+    if not found:
+        return None
+    found.sort(key=lambda steps: steps["process"])
+    reasons: dict = {}
+    records: list = []
+    for steps in found:
+        for reason, count in steps["reasons"].items():
+            reasons[reason] = reasons.get(reason, 0) + count
+        if steps["reference"] and steps["reference"] not in records:
+            records.append(steps["reference"])
+    summed = {
+        "calls": sum(steps["calls"] for steps in found),
+        "seconds": round(sum(steps["seconds"] for steps in found), 3),
+        "reasons": reasons,
+        "reference": records[0] if records else None,
+        "processes": [steps["process"] for steps in found],
+    }
+    if len(records) > 1:
+        summed["other_references"] = records[1:]
+    return summed
+
+
+@contextlib.contextmanager
+def steps_of_test(item) -> Iterator[None]:
+    """Run test ``item`` with :data:`STEPS_DIR` set to a directory of its own.  Afterwards, unless the test recorded FLA
+    steps itself (:data:`PROPERTY`), record the FLA steps of every process that called :func:`fla_of` during it (the
+    pytest process and the ranks it spawned, :func:`_steps_of`).  The family conftest's ``pytest_runtest_call``."""
+    with (
+        tempfile.TemporaryDirectory(prefix="cake_kda_fla_steps_", ignore_cleanup_errors=True) as directory,
+        _environment({STEPS_DIR: directory}),
+    ):
+        try:
+            yield
+        finally:
+            if all(key != PROPERTY for key, _ in item.user_properties):
+                steps = _steps_of(directory)
+                if steps is not None:
+                    item.user_properties.append((PROPERTY, steps))
+
+
 def fla_line(test_id: str, steps: Mapping) -> str:
-    """``FLA <test> calls=<n> seconds=<s>`` and the reasons of the draws without FLA values."""
+    """``FLA <test> calls=<n> seconds=<s>``, the processes that called FLA when they are recorded (:func:`_steps_of`)
+    and the reasons of the draws without FLA values."""
     reasons = "; ".join(f"{reason} x{count}" for reason, count in steps.get("reasons", {}).items())
-    return f"FLA {test_id} calls={steps['calls']} seconds={steps['seconds']}" + (f" | {reasons}" if reasons else "")
+    processes = f" ({', '.join(steps['processes'])})" if steps.get("processes") else ""
+    return f"FLA {test_id} calls={steps['calls']} seconds={steps['seconds']}{processes}" + (
+        f" | {reasons}" if reasons else ""
+    )
 
 
 def reference_line(record: Mapping) -> str:
@@ -411,7 +549,7 @@ def reference_line(record: Mapping) -> str:
 
 def summarize_fla(terminalreporter) -> None:
     """The terminal summary's ``FLA`` lines: the record of each pinned reference the tests ran, then one line per test
-    that judged with FLA.  Call it from the family conftest's ``pytest_terminal_summary``."""
+    that called FLA.  Call it from the family conftest's ``pytest_terminal_summary``."""
     lines, records = [], []
     for reports in terminalreporter.stats.values():
         for report in reports:
@@ -420,9 +558,9 @@ def summarize_fla(terminalreporter) -> None:
             for key, steps in getattr(report, "user_properties", ()):
                 if key == PROPERTY:
                     lines.append(fla_line(report.nodeid, steps))
-                    record = steps.get("reference")
-                    if record and record not in records:
-                        records.append(record)
+                    for record in (steps.get("reference"), *steps.get("other_references", ())):
+                        if record and record not in records:
+                            records.append(record)
     if lines:
         terminalreporter.section("training accuracy: the FLA reference steps of each judged test")
         for record in records:
@@ -441,7 +579,9 @@ __all__ = [
     "NOT_PINNED",
     "PROPERTY",
     "RECORDED_ENV",
+    "RECORDED_PREFIXES",
     "SAFE_GATE_RANGE",
+    "STEPS_DIR",
     "TRITON_VERSION",
     "UNAVAILABLE",
     "FlaReference",
@@ -451,5 +591,6 @@ __all__ = [
     "fla_of",
     "load",
     "reference_line",
+    "steps_of_test",
     "summarize_fla",
 ]
