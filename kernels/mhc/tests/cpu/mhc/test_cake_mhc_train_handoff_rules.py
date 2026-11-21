@@ -27,8 +27,8 @@ and workspaces:
   word per stream, reduced in the kernel's own order);
 * ``collapse_forward`` / ``collapse_backward`` run the records ``collapse_fwd`` / ``collapse_bwd`` on sm_100a /
   sm_103a, with their own library stems and no workspace (on sm_100a / sm_103a ``collapse_backward`` is a token-count
-  band of three records, ``collapse_bwd`` from 1024 tokens; on sm_107a ``collapse_forward`` is a token-count band of
-  three records and ``collapse_backward`` one of four, below); the forward takes the per-call PDL attribute on its own
+  band of three records on sm_100a and of five on sm_103a, ``collapse_bwd`` from 1024 tokens; on sm_107a
+  ``collapse_forward`` is a token-count band of three records and ``collapse_backward`` one of four, below); the forward takes the per-call PDL attribute on its own
   edge ``K4->C`` (no band: on), the VJP none; the VJP is the coalesced form: its dynamic shared memory stages each
   warp's slab of the ``dU`` row and of the four ``X`` rows (6400 bytes a warp, 8 warps) beside its 256 bytes of partial
   sums.

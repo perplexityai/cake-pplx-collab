@@ -261,12 +261,19 @@ base record with ``pre_in``, ``dpre_next`` and ``dpre_in`` after the parameter
 record; same grid, block and selection); ``collapse_forward_h5120`` is one
 record on sm_100a / sm_103a (``collapse_fwd__h5120``: own library stem, no
 workspace; the per-call PDL attribute on its own edge ``K4->C``, no band), and
-``collapse_backward_h5120`` there holds three records selected by the token
-count (``rows_between``): ``collapse_bwd__vjpwa_sp4_mb4__h5120`` up to 215
-tokens, ``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (the
-``_vjpwa_sp2_mb4`` library under its own record name and rule) from 216 to
-1023 tokens and ``collapse_bwd__h5120`` (own library stem, no workspace) from
-1024 tokens; the split VJPs give ``collapse_bwd__h5120``'s outputs bit for bit
+``collapse_backward_h5120`` there is selected by the token count
+(``rows_between``).  On sm_100a it holds three records:
+``collapse_bwd__vjpwa_sp4_mb4__h5120`` up to 215 tokens,
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023`` (the ``_vjpwa_sp2_mb4``
+library under its own record name and rule) from 216 to 1023 tokens and
+``collapse_bwd__h5120`` (own library stem, no workspace) from 1024 tokens.
+On sm_103a it holds five: ``collapse_bwd__vjpwa_sp4_mb4__h5120`` up to 215
+tokens, the ``_vjpwa_sp2_mb4`` library from 216 to 247 and from 320 to 1023
+tokens under the record names ``collapse_bwd__vjpwa_sp2_mb4__h5120__le247``
+and ``collapse_bwd__vjpwa_sp2_mb4__h5120__gt319_le1023``, the
+``collapse_bwd__h5120`` library from 248 to 319 tokens under the record name
+``collapse_bwd__h5120__le319``, and ``collapse_bwd__h5120`` itself from 1024
+tokens.  The split VJPs give ``collapse_bwd__h5120``'s outputs bit for bit
 (grid 4 T / 2 T, 20736 / 30976 bytes of dynamic shared memory).  On sm_107a
 the three collapse records are that architecture's own forms, with the same
 outputs bit for bit:
