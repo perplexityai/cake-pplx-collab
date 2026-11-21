@@ -324,7 +324,10 @@ Host design (the input layout rules are the deterministic package's):
 - Grids (``cake_jit.module_for_rows`` picks the module from the rows and
   the device's SM count, the forward's by the bands of rows per SM of
   ``cake_jit.FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows, row
-  ``n`` at element ``128 n``, else of ``cake_jit.STRIDED_FORWARD_BANDS``): a
+  ``n`` at element ``128 n``, else of ``cake_jit.STRIDED_FORWARD_BANDS``; an
+  ``x`` or ``z`` broadcast over more than one token counts as packed rows,
+  but runs the band of other layouts where its band of packed rows runs a
+  program that reads them at their linear offsets): a
   call runs a tiny, the short, the plain, the mid, the long, the
   extra-long or a pipelined forward.  The 32-lane tiny forward (packed rows
   up to 4 rows per SM on sm_100a and 12 on sm_103a) launches one 128-thread
@@ -799,7 +802,7 @@ def _forward(
         "eps": float(eps),
     }
     index = _device_index(device)
-    # packed rows: row n of x and z at element 128 n (the tiny forward reads
+    # packed rows: row n of x and z at element 128 n (the tiny forwards read
     # no other layout): head stride 128 and token stride H * 128, or token
     # stride 0 (one token, whose token stride is never read, or x or z
     # broadcast over tokens); plain comparisons, not a generator, keep the
@@ -820,7 +823,7 @@ def _forward(
         and name in _linear_forwards(arch)
     ):
         # x or z broadcast over more than one token: a program that reads
-        # packed rows at their linear offsets (the tiny forward takes
+        # packed rows at their linear offsets (the tiny forwards take
         # contiguous x and z only; the pipelined forward of packed rows is
         # passed the token stride H * 128) cannot read it, so the band of
         # other layouts runs, which reads the token stride
@@ -878,8 +881,9 @@ def _workspace_bytes(arch: str) -> int:
 @functools.cache
 def _linear_forwards(arch: str) -> frozenset[str]:
     """The forward modules of ``arch`` that read packed rows at their linear
-    offsets (the tiny forward and the pipelined forward of packed rows): a
-    broadcast ``x`` or ``z`` runs the band of other layouts instead."""
+    offsets (the tiny forwards, of 16 and of 32 lanes a row, and the
+    pipelined forward of packed rows): a broadcast ``x`` or ``z`` runs the
+    band of other layouts instead."""
 
     return frozenset(
         name

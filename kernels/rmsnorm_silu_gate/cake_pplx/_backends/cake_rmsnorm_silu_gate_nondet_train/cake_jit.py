@@ -3214,10 +3214,11 @@ HEAD_DIM = 128
 ALIGNMENT_ELEMENTS = 16
 # The kernels index rows with 32-bit integers.
 INT32_MAX = 2**31 - 1
-# A forward of packed rows (the tiny forwards, the pipelined forward of packed
-# rows) takes the offset of an element of row ``n`` as ``n * 128 + column`` in
-# 32-bit arithmetic: ``FORWARD_BANDS`` serves fewer rows than this (2**31 //
-# HEAD_DIM), a call of more takes ``STRIDED_FORWARD_BANDS``.
+# The pipelined forward of packed rows takes the offset of an element of row
+# ``n`` as ``n * 128 + column`` in 32-bit arithmetic (the tiny forwards, which
+# read packed rows too, take it in 64-bit arithmetic): ``FORWARD_BANDS``
+# serves fewer rows than this (2**31 // HEAD_DIM), a call of more takes
+# ``STRIDED_FORWARD_BANDS``.
 PACKED_ROWS = 16777216
 
 

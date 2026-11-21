@@ -84,8 +84,10 @@ checks:
   the fused and the row-claims bands, and every output is judged; so are
   the forward around the ends of its ``FORWARD_BANDS`` bands (packed rows)
   and ``STRIDED_FORWARD_BANDS`` bands (other layouts), the forward of ``x``
-  and ``z`` broadcast over more than one token (token stride 0: not packed
-  rows, so the forward of other layouts) and the backward at
+  or ``z`` broadcast over more than one token (token stride 0: the band of
+  other layouts where the band of packed rows runs a program that reads them
+  at their linear offsets, else the program of packed rows with the token
+  stride 0) and the backward at
   the first and the last rows of each ``BACKWARD_BANDS`` band of this device
   (the small-row backwards, one cluster each, the static backward of an
   FP32 weight gradient on sm_100a and sm_103a, the fused backward and the
@@ -1798,7 +1800,9 @@ def _linear_forwards(arch):
     }
 
 
-def _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, seed):
+def _judge_broadcast(
+    tokens, heads, broadcast, name, monkeypatch, record_property, seed
+):
     """Two forwards of ``tokens`` x ``heads`` rows with ``x``, ``z`` or both
     (``broadcast``) one token broadcast over the others: each launches
     ``name`` with the inputs' token strides (0 for a broadcast input), ``y``
@@ -1866,7 +1870,9 @@ def test_forward_of_inputs_broadcast_over_tokens_elsewhere_runs_the_program_of_p
     rows = tokens * heads
     name = loader.module_for_rows(arch, "fwd", rows, sms)
     if name in _linear_forwards(arch):
-        pytest.skip(f"{rows} rows on {sms} SMs: packed rows run {name} (BROADCAST_CASES)")
+        pytest.skip(
+            f"{rows} rows on {sms} SMs: packed rows run {name} (BROADCAST_CASES)"
+        )
     _judge_broadcast(tokens, heads, broadcast, name, monkeypatch, record_property, 29)
 
 

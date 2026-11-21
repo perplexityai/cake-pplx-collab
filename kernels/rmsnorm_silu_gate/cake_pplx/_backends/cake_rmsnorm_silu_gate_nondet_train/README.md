@@ -384,7 +384,11 @@ The forward bands (rows per SM: a call of `rows` rows on a device of `SMs`
 SMs runs the first band with `rows <= last * SMs`): `FORWARD_BANDS` where `x`
 and `z` hold packed rows (row `n` at element `128 n`, as contiguous
 `[T, H, 128]` and `[T * H, 128]` inputs do) and there are fewer than
-`PACKED_ROWS` (2^24) rows, `STRIDED_FORWARD_BANDS` otherwise.  The cuts
+`PACKED_ROWS` (2^24) rows, `STRIDED_FORWARD_BANDS` otherwise.  An `x` or
+`z` broadcast over more than one token (token stride 0) counts as packed rows,
+but where its band of packed rows runs a program that reads the rows at their
+linear offsets (a tiny forward, or on `sm_107a` the pipelined forward of
+packed rows) it runs the band of other layouts.  The cuts
 follow the checkpointed training step (two forwards and the backward) on
 every architecture: the pipelined forward loads `x` and `z` with the L2
 `evict_first` policy, so where the rows fit in L2 it is faster alone but
@@ -399,10 +403,12 @@ persistent forwards' bands: where measured there (from 1000 rows per SM on
 alone and makes the step 1 % .. 6 % faster; no band of other layouts runs a
 pipelined forward.  The tiny forwards and the short forward end where beside
 a kernel holding 16 SMs they still end no later than the deterministic
-package's forward as it routes the rows; on `sm_100a` and `sm_103a` the
-32-lane tiny forward, which has that package's tiny row blocks, ends at 12
-rows per SM, past which, with the rows in L2, its twice as many CTAs make it
-slower than the tiny forward.  The bands:
+package's forward as it routes the rows.  The 32-lane tiny forward
+(`sm_100a` and `sm_103a`), which has that package's tiny row blocks and so
+twice as many CTAs as the tiny forward, ends at 4 rows per SM on `sm_100a`,
+past which CUDA Graph replays of back-to-back calls run it up to about 1.5 %
+slower than the tiny forward, and at 12 on `sm_103a`, past which, with the
+rows in L2, it is slower.  The bands:
 
 | architecture | packed rows (rows per SM) | other layouts (rows per SM) |
 | --- | --- | --- |
