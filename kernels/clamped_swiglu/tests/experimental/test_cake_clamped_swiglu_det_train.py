@@ -683,7 +683,8 @@ def test_grid_is_one_cta_per_block_of_tasks() -> None:
     """A CTA owns ``threads / lanes * rows_per_thread`` tasks and a row is ``tasks_per_row`` tasks (a row in the
     small-R and large-R ``fwd`` and ``bwd`` programs, 3 (row, run) tasks in the small-R ``bwd_unweighted`` one, 9
     tasks in a fine program): the grid is ``ceil(rows * tasks_per_row / per_cta)`` CTAs, at most ``2**31 - 1``
-    (``cake_jit.MAX_GRID``) at the most rows."""
+    (``cake_jit.MAX_GRID``) at the most rows (a count only for ``bwd_fine``, which takes at most ``2**30`` rows on its
+    grid of ``R`` CTAs)."""
     assert cake_jit.MAX_GRID == 2**31 - 1
     for name in cake_jit.MODULES:
         per_cta, per_row = cake_jit.cta_tasks(name)
@@ -925,7 +926,7 @@ def test_the_fine_programs_and_their_grids() -> None:
     threads, ``ceil(9 R / 4)`` CTAs, at most ``2**31 - 1`` (past it from about 954 M rows; the kernels count in 64 bits
     and stride over the blocks).  ``bwd_fine`` runs a CTA of 288 threads (9 warps) per row, ``R`` CTAs; it counts its
     rows in 32 bits, so it takes at most ``2**30`` rows (the grids below are counts only; the route sends it at most
-    ``2 * SMs`` rows)."""
+    its window's ``hi * SMs`` rows: at most ``MAX_FINE_ROWS_PER_SM * SMs``, and ``2 * SMs`` as shipped)."""
     facts = {"fwd": ((128, 1, 1), (4, 9)), "bwd": ((288, 1, 1), (9, 9)), "bwd_unweighted": ((128, 1, 1), (4, 9))}
     for stage, (block, tasks) in facts.items():
         names = [name for name, record in cake_jit.MODULES.items() if record["role"] == stage + FINE]
@@ -953,9 +954,10 @@ def test_the_route_refuses_a_fine_window_past_the_most_rows_per_sm(stage, host_d
     """A fine record's window ``[0, hi]`` with ``hi`` past ``MAX_FINE_ROWS_PER_SM`` (64) is a ``RuntimeError`` naming
     the record, from ``cake_jit.fine`` and from the package's route (the launcher is not made), also where no large-R
     window bounds it (``bwd_unweighted``; ``fwd``, whose first large-R window is from 112 rows per SM).  The window
-    ``[0, 64]`` is a route on every delivered SM count: its table ends at its last row count, ``64 * SMs``, and the
-    small-R program runs above it in ``bwd_unweighted``.  The bound keeps ``bwd_fine``, which counts its rows in 32
-    bits, far below its ``2**30`` rows."""
+    ``[0, 64]`` is a route on every delivered SM count: the fine plan covers rows 1 to ``64 * SMs`` and the small-R
+    plan runs at the next row count (in ``fwd`` up to the first large-R edge).  In ``bwd_unweighted`` the table ends
+    there (``limit`` ``64 * SMs + 1``) and the tail is small-R.  On the delivered SM counts the bound keeps
+    ``bwd_fine``, which counts its rows in 32 bits, far below its ``2**30`` rows."""
     most = cake_jit.MAX_FINE_ROWS_PER_SM
     assert most == 64 and 2 * most * max(SM_COUNTS) <= 2**31
     fine = cake_jit.PROGRAM_OF[stage + FINE]["sm_100a"]

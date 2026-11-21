@@ -334,16 +334,20 @@ MAX_ROWS = 2**31 - 256
 # tasks and blocks in 64 bits and stride over the blocks by the grid, so :func:`grid` caps a launch of more rows here.
 # ``bwd_fine`` counts its rows in 32 bits: its row loop (``row += gridDim.x``) stays in range only while the row
 # count plus the grid is at most ``2**31``, so on its grid of ``rows`` CTAs it takes at most ``2**30`` rows.  The route
-# sends it at most ``2 * sm_count`` rows (its window ``[0, 2]``).  :func:`fine` refuses a fine window past
+# sends it at most its window's ``hi * sm_count`` rows: at most ``MAX_FINE_ROWS_PER_SM * sm_count``, and
+# ``2 * sm_count`` with its shipped window ``[0, 2]``.  :func:`fine` refuses a fine window past
 # :data:`MAX_FINE_ROWS_PER_SM` rows per SM and one whose last row count needs a grid past this cap, so a routed launch
-# never reaches the cap and every fine program stays far below these 32-bit limits.
+# never reaches the cap.  That bound keeps ``bwd_fine`` within its ``2**30`` rows on a GPU of at most ``2**24`` SMs
+# (about 16.8 M); :func:`fine` checks no SM count.  On the delivered SM counts (148 to 212) a fine program takes at
+# most 13,568 rows, far below these 32-bit limits.
 MAX_GRID = 2**31 - 1
 
 # The most rows per SM a fine window may reach (its ``hi``).  The fine programs are for the fewest rows: the shipped
-# windows end at 2 to 8 rows per SM.  64 is 8 times the largest of them, room for a retune.  The bound keeps the route
-# small: the package's route table holds one entry per row count up to the fine window's last row count, so at most
-# ``64 * sm_count`` entries for the fine window (13,568 on 212 SMs).  It also keeps a fine grid far below the 32-bit
-# limits above (``bwd_fine``: at most ``64 * sm_count`` CTAs and rows).
+# windows end at 2 to 8 rows per SM.  64 is 8 times the largest of them, room for a retune.  The package's route table
+# holds one entry per row count up to the fine window's last row count or the last large-R edge, whichever is larger,
+# so the bound lets the fine window add at most ``64 * sm_count`` entries (13,568 on 212 SMs).  On the delivered SM
+# counts (148 to 212) it also keeps a fine grid far below the 32-bit limits above (``bwd_fine``: at most
+# ``64 * sm_count`` CTAs and rows).
 MAX_FINE_ROWS_PER_SM = 64
 
 
@@ -382,11 +386,12 @@ def fine(stage: str, arch: str, sm_count: int) -> tuple[int, str]:
     is one window ``[0, hi]`` with an integer ``hi >= 1``, so ``last = hi * sm_count``.  The window must end below
     the first window of the stage's large-R program (``hi`` below its ``lo``: ``last`` at most the first edge of
     :func:`route`), so the fine program never takes a row count that :func:`route` gives the large-R one.  ``hi``
-    must be at most :data:`MAX_FINE_ROWS_PER_SM`, so the package's route table stays small.  Its grid at ``last`` rows
-    must not pass :data:`MAX_GRID`, so a routed launch's grid is :func:`grid`'s, never capped.  ``bwd_fine`` counts
-    its rows in 32 bits and takes at most ``2**30`` rows (:data:`MAX_GRID`); with its window ``[0, 2]`` the route
-    sends it at most ``2 * sm_count`` rows.  Without a fine program on ``arch``, ``last`` is 0 (no launch runs it) and
-    ``name`` is the stage's small-R program."""
+    must be at most :data:`MAX_FINE_ROWS_PER_SM`, so the fine window adds at most ``MAX_FINE_ROWS_PER_SM * sm_count``
+    entries to the package's route table.  Its grid at ``last`` rows must not pass :data:`MAX_GRID`, so a routed
+    launch's grid is :func:`grid`'s, never capped.  ``bwd_fine`` counts its rows in 32 bits and takes at most
+    ``2**30`` rows (see the :data:`MAX_GRID` comment); the route sends it at most ``last`` rows (``2 * sm_count``
+    with its shipped window ``[0, 2]`` on every architecture).  Without a fine program on ``arch``, ``last`` is 0 (no
+    launch runs it) and ``name`` is the stage's small-R program."""
     name = PROGRAM_OF[stage + FINE].get(arch)
     if name is None:
         return 0, PROGRAM_OF[stage][arch]
