@@ -17396,6 +17396,75 @@ def test_device_graph_rlab_allocator_configs():
                         assert exp is None or is_expandable == exp, row
 
 
+_RLAB_DEFAULT_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+index = torch.cuda.current_device()
+device = torch.device("cuda", index)
+query = be._CUDA_ALLOC_SETTINGS, be._CUDA_ALLOC_BACKEND
+settings, backend = [None if q is None else q() for q in query]
+ok = be._rlab_holding_ok()
+default = torch.cuda.default_stream(index)
+with torch.cuda.stream(default):
+    t = be._graph_rlab_tensor(300, True, device)
+torch.cuda.synchronize()
+main = be._RLAB_STREAMS.get(index)
+ptr = t.data_ptr()
+segments = [
+    [s["stream"], s.get("is_expandable")]
+    for s in torch.cuda.memory_snapshot()
+    if s["device"] == index and 0 <= ptr - s["address"] < s["total_size"]
+]
+print("DEFAULT " + json.dumps(dict(
+    settings=settings,
+    backend=backend,
+    ok=ok,
+    default=default.cuda_stream,
+    main=None if main is None else main.cuda_stream,
+    zero=int(torch.count_nonzero(t)) == 0,
+    segments=segments,
+)))
+"""
+
+
+def test_device_graph_rlab_torch_default_fixed_segments():
+    """With torch's default allocator configuration (no ``PYTORCH_CUDA_ALLOC_CONF`` / ``PYTORCH_ALLOC_CONF``, no
+    settings call; a fresh process), the allocator settings string is empty, the backend is ``native``, and the
+    graphs' label residuals of a request on the default stream take the holding stream (``_rlab_holding_ok``) in a
+    fixed segment: the segment that holds the tensor is the holding stream's and is not expandable.  A torch whose
+    default (empty) settings mean expandable segments fails here: the holding streams' ordering argument holds only
+    for fixed segments.  The tensor is zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+    }
+    env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    script = _RLAB_DEFAULT_SCRIPT.format(root=root, package="cake_lm_head_det_train")
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=root,
+        timeout=900,
+    )
+    assert proc.returncode == 0, (
+        f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+    )
+    line = [x for x in proc.stdout.splitlines() if x.startswith("DEFAULT ")][-1]
+    got = json.loads(line[len("DEFAULT ") :])
+    assert got["settings"] == "" and got["backend"] == "native", got
+    assert got["ok"] is True and got["zero"], got
+    assert got["main"] is not None and got["main"] != got["default"], got
+    assert got["segments"] == [[got["main"], False]], got
+
+
 def test_device_graph_rlab_stream_error_cleared(monkeypatch):
     """A holding stream whose ``cudaStreamCreate`` fails in the CUDA runtime (here a null result pointer: a real
     runtime error) is ``None`` (``_rlab_new_stream``), and the runtime's last error the call set is cleared: the
