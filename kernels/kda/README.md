@@ -32,10 +32,12 @@ when FLA runs its case and this reference gives no values: FLA 0.6.0 is not inst
 installed Triton is not 3.8.0, a first config differs from its pin, a variable that changes FLA's or Triton's code or
 numbers is set (`FORBIDDEN_ENV`), or the FLA call raises an error. Triton comes with torch, and each torch release
 requires one Triton minor release (torch 2.14.1 requires `triton~=3.8.0`). The `fla` extra therefore does not pin
-Triton, as the package does not pin torch: with a torch that brings another Triton, these GPU tests fail until a
-torch that brings Triton 3.8.0 is installed. The `FLA reference` line of the test summary records the versions of
-FLA, Triton and torch, a digest of FLA's sources, the pin, the GPU and its shared memory, the `TRITON_*`, `FLA_*` and
-`PTXAS_*` variables that are set, and the ptxas that Triton runs (its path, sha256 and version).
+Triton, as the package does not pin torch. When the installed Triton is not 3.8.0, these GPU tests fail. With a torch
+that requires `triton~=3.8.0` (torch 2.14.1), which also admits a later 3.8.x release, install `triton==3.8.0` alongside
+it; with a torch that requires another Triton minor release, install a torch that requires `triton~=3.8.0`. The
+`FLA reference` line of the test summary records the versions of FLA, Triton and torch, a digest of FLA's sources, the
+pin, the GPU and its shared memory, the `TRITON_*`, `FLA_*` and `PTXAS_*` variables that are set, the variables in the
+key of Triton's compile cache that are set, and the ptxas that Triton runs (its path, sha256 and version).
 
 The benchmarks `benchmarks/bench_cake_kda_baselines.py` (one GPU) and `benchmarks/bench_cake_kda_kcp_baselines.py`
 (KCP, `torchrun`) time both packages against the cuDNN frontend's KDA (plan `kda_frost`, `batch_invariant=True` for

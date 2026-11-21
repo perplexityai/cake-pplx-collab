@@ -40,7 +40,8 @@ process; the benchmarks do not import this module.
 
 The record.  :func:`load` records the reference of its process (:func:`_record`): the versions of FLA, Triton and
 torch, a digest of FLA's installed sources, the pin, the device and its shared memory per block (which decides FLA's
-config lists), every ``TRITON_*``, ``FLA_*`` and ``PTXAS_*`` variable set while FLA runs, ``TRITON_PTXAS_PATH`` and
+config lists), every ``TRITON_*``, ``FLA_*`` and ``PTXAS_*`` variable set while FLA runs, the variables of Triton's
+compile cache key as Triton reads them (:func:`_triton_env`, some without these prefixes), ``TRITON_PTXAS_PATH`` and
 ``TRITON_PTXAS_BLACKWELL_PATH`` as set (kept, never changed), the two ptxas Triton resolves and the one it runs for the
 device (path, sha256 and ``--version``).  A judge's FLA steps carry it (:meth:`FlaSteps.summary`).  The family's
 conftest runs each test under :func:`steps_of_test`: every process that calls :func:`fla_of` during the test (the
@@ -294,6 +295,7 @@ def _record(fla, triton) -> dict:
     record["torch"] = f"{torch.__version__} (CUDA {torch.version.cuda})"
     record["fla_sources"] = _recorded(_sources, fla)
     record["env"] = " ".join(f"{k}={v}" for k, v in sorted(os.environ.items()) if k.startswith(RECORDED_PREFIXES))
+    record["triton_env"] = _recorded(_triton_env)
     return record
 
 
@@ -338,6 +340,18 @@ def _sources(fla) -> str:
     )
     lines = "".join(f"{_sha256(os.path.join(parent, name))}  {name}\n" for name in names)
     return f"sha256 {hashlib.sha256(lines.encode()).hexdigest()} over {len(names)} .py files under {package}"
+
+
+def _triton_env() -> str:
+    """The variables in the key of Triton's compile cache that are set, as Triton reads them (``NAME=value``, a boolean
+    value as ``true`` or ``false``): Triton 3.8.0's ``get_cache_invalidating_env_vars`` (``triton.runtime.jit``, from
+    ``triton._C.libtriton``).  Its list has variables without :data:`RECORDED_PREFIXES` (``DISABLE_LLVM_OPT``,
+    ``LLVM_PASS_PLUGIN_PATH``, ...).  ``unavailable (...)`` when the installed Triton has no such function."""
+    try:
+        from triton.runtime.jit import get_cache_invalidating_env_vars
+    except ImportError as exc:
+        return f"unavailable ({type(exc).__name__}: {exc})"
+    return " ".join(f"{k}={v}" for k, v in sorted(get_cache_invalidating_env_vars().items()))
 
 
 class FlaReference:

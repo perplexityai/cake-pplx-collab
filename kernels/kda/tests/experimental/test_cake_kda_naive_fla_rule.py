@@ -414,6 +414,12 @@ def test_the_record_names_versions_sources_variables_and_the_ptxas_triton_runs(m
     monkeypatch.setenv("TRITON_CACHE_DIR", "/triton/cache")
     monkeypatch.setenv("PTXAS_STAND_IN", "1")
     monkeypatch.setenv("NOT_RECORDED", "1")
+    # two variables of the key of Triton's compile cache without a recorded prefix, as the installed Triton reads them
+    jit = pytest.importorskip("triton.runtime.jit")
+    for key in jit.get_cache_invalidating_env_vars():
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DISABLE_LLVM_OPT", "1")
+    monkeypatch.setenv("LLVM_PASS_PLUGIN_PATH", "/stand/in/plugin.so")
     with cake_kda_fla._environment(cake_kda_fla.FLA_ENV):
         record = cake_kda_fla._record(fla, triton)
     assert archs == [103]
@@ -428,11 +434,15 @@ def test_the_record_names_versions_sources_variables_and_the_ptxas_triton_runs(m
     assert record["fla_sources"] == f"sha256 {sources} over 2 .py files under {package}"
     assert record["torch"] == f"{torch.__version__} (CUDA {torch.version.cuda})"
     assert record["env"] == "FLA_FLASH_KDA=0 FLA_TILELANG=0 PTXAS_STAND_IN=1 TRITON_CACHE_DIR=/triton/cache"
+    assert record["triton_env"] == "DISABLE_LLVM_OPT=true LLVM_PASS_PLUGIN_PATH=/stand/in/plugin.so"
     assert record["device"] == "Stand-in GPU sm_103" and record["max_shared_mem"] == 232448
     assert {"fla", "triton", "pin", "ptxas", "ptxas_blackwell", *cake_kda_fla.RECORDED_ENV} <= set(record)
     # a part of the record that cannot be read is recorded as such: it never fails the reference
     monkeypatch.setattr(compiler, "get_ptxas", lambda arch: types.SimpleNamespace(path=str(tmp_path / "absent")))
     assert cake_kda_fla._record(fla, triton)["ptxas_used"].startswith("not resolved (FileNotFoundError: ")
+    # a Triton without get_cache_invalidating_env_vars: those variables are recorded as unavailable
+    monkeypatch.delattr(jit, "get_cache_invalidating_env_vars")
+    assert cake_kda_fla._record(fla, triton)["triton_env"].startswith("unavailable (ImportError: ")
 
 
 def _spawned_rank(record: dict, store: str) -> None:
