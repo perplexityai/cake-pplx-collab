@@ -771,6 +771,25 @@ def _fallback_program(arch: str, kind: str = "bwd") -> str:
     return names[0]
 
 
+def _program_of_record(arch: str, kind: str, C: int, S: int, ruled: str) -> str:
+    """The program route ``kind`` on ``arch`` runs at ``C`` channels and ``S`` tokens where the selection rules pick
+    ``ruled``: the route's direct program inside a range of ``DIRECT_ROWS_OF_RECORD``, its fallback (the static
+    program) inside a range of ``FALLBACK_ROWS_OF_RECORD``, ``ruled`` elsewhere."""
+
+    if _direct_of_record(arch, kind, C, S) is not None:
+        direct = [
+            name
+            for name in loader.route_modules(arch, kind)
+            if (loader.select_rule(loader.MODULES[name]) or {}).get("kind")
+            == loader.ROWS_KIND
+        ]
+        assert len(direct) == 1, (arch, kind, direct)
+        return direct[0]
+    if _static_of_record(arch, kind, C, S):
+        return _fallback_program(arch, kind)
+    return ruled
+
+
 def _generator(*keys: int, seed: int = SEED) -> torch.Generator:
     """A generator of the device seeded from ``seed`` (a draw's, or :data:`SEED`) and ``keys``."""
 
@@ -4604,7 +4623,7 @@ def test_registry_records_reference_the_build_manifest() -> None:
     # sm_107a backward has five since its 520 channel band's copy -- and at most two with one), one program
     # selected per channel count and token count -- the highest threshold at
     # most C whose token floor (if any) S meets, the floored program first at a shared one, the fallback
-    # below the lowest.
+    # below the lowest; inside a small-S row of record the row's program runs instead.
     for arch in loader.ARCHES:
         for kind in loader.KINDS:
             if kind not in loader.ROUTES[arch]:
@@ -4647,13 +4666,20 @@ def test_registry_records_reference_the_build_manifest() -> None:
                 for threshold in sorted(owners):
                     at = loader.selected_modules(arch, kind, C=threshold, S=S)
                     below = loader.selected_modules(arch, kind, C=threshold - 8, S=S)
-                    assert below == (previous,), (arch, kind, S, threshold)
+                    assert below == (
+                        _program_of_record(arch, kind, threshold - 8, S, previous),
+                    ), (arch, kind, S, threshold)
                     by_floor = owners[threshold]
                     name = by_floor.get(True)
                     if name is None or floors[name][1] > S:
                         # Below its token floor a floored program never runs.
                         name = by_floor.get(False, previous)
-                    assert at == (name,), (arch, kind, S, threshold)
+                    assert at == (_program_of_record(arch, kind, threshold, S, name),), (
+                        arch,
+                        kind,
+                        S,
+                        threshold,
+                    )
                     previous = name
                 top = loader.selected_modules(arch, kind, C=8192, S=S)
                 assert top == (previous,), (arch, kind, S)
