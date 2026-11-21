@@ -39,7 +39,11 @@ trips in reverse launch order, the same bits) from 2048 to 6655 tokens and
 ``collapse_bwd__vjpwa`` VJP split over four / two CTAs a token, the same bits)
 up to 215 / from 216 to 383 tokens, ``collapse_bwd__vjpwa`` (the same VJP
 without the L2 prefetch, the same bits) from 384 to 640 tokens and
-``collapse_bwd__vjpwa_pfq2`` from 641 tokens.
+``collapse_bwd__vjpwa_pfq2`` from 641 tokens.  On SM100 / SM103
+``collapse_backward`` runs ``collapse_bwd__vjpwa_sp4_mb4`` up to 215 tokens,
+``collapse_bwd__vjpwa_sp2_mb4`` (under the record name
+``collapse_bwd__vjpwa_sp2_mb4__h5120__le1023``) from 216 to 1023 tokens and
+``collapse_bwd`` from 1024 tokens, the same bits.
 """
 
 from __future__ import annotations
