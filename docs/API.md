@@ -31,7 +31,7 @@ The facades load their backends (`cake_pplx._backends.*`, which are private) laz
 | mhc_head | Same kernels as det | No alert |
 | engram_gate | Same kernels as det. `out`, `dX`, `dK`, `dV` have one fixed order; no bit promise for `dq_weight` / `dk_weight`. | No alert |
 | gqa | No atomics. No promise that an output repeats bit for bit, run to run or across workspace budgets and host boundaries. | No alert |
-| fmha | Has no det module. `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. | Raises before launch |
+| fmha | Has no det module. On the three-kernel routes `dq` sums FP32 tiles in arrival order; `dk`/`dv` have one fixed order. On the one-launch route all three have one fixed order. | Raises before launch |
 | dsa_indexer | Each row holds its selected set in no specified slot order | Raises before launch |
 | dsa_sparse_attention | `dkv` uses unordered FP32 atomics. No output is promised to repeat bit for bit. The opt-in `with_o_lo=False` forms `delta` from the BF16 `out` alone. | Backward raises |
 | dense_gemm | Some routes add partials in arrival order. No run-to-run guarantee. | Alerts only for order-varying launches (explicit split counts) |
@@ -1088,7 +1088,8 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 
 - Per batch and head, `P = softmax(softmax_scale * q k^T)` (with `causal=True`, query row `i` sees the keys `j <= i`) and `out = P v`.
 - The backward returns `dv = P^T dout`, `dq = softmax_scale * dS k` and `dk = softmax_scale * dS^T q`, with `dS = P * (dout v^T - rowsum(out * dout))`.
-- Three kernels run in order on the current stream. The preprocess computes `rowsum(out * dout)` and `lse * log2(e)` and clears an FP32 `dQ` accumulator. The main kernel runs one CTA per 128 keys of one head: it sums `dK`/`dV` in FP32, stores them once, and adds its `dQ` tiles into the accumulator. The postprocess writes `dq = bf16(acc * softmax_scale)`.
+- Most calls run three kernels in order on the current stream. The preprocess computes `rowsum(out * dout)` and `lse * log2(e)` and clears an FP32 `dQ` accumulator. The main kernel runs one CTA per 128 keys of one head: it sums `dK`/`dV` in FP32, stores them once, and adds its `dQ` tiles into the accumulator. The postprocess writes `dq = bf16(acc * softmax_scale)`.
+- A call without the mask whose shape lies in the measured region of its architecture and head dimension runs one kernel instead (the one-launch route). Per head, one CTA per 128 query rows writes the `dq` of those rows and one CTA per 128 keys writes the `dk`/`dv` of those keys. The kernel computes `rowsum(out * dout)` and `lse * log2(e)` itself and needs no workspace. The regions are listed in the [backend README](../kernels/fmha/cake_pplx/_backends/cake_fmha_nondet_train/README.md).
 - The family has no forward kernel and no autograd entry. The caller brings `out` and `lse` from its own forward and calls the backward from its own `torch.autograd.Function`.
 
 **Architectures.** `sm_100a`, `sm_103a`, `sm_107a`, with every variant (head dim 64 and 128, causal or not) on each. Other devices raise `RuntimeError`. The `build.json` minimum CUDA toolkit is 12.8 for `sm_100a`, 12.9 for `sm_103a` and 13.5 for `sm_107a`.
@@ -1103,11 +1104,11 @@ out.backward(dout)                        # BF16 q.grad, k.grad, v.grad
 
 ### `cake_pplx.cake_fmha_nondet_train`
 
-The only module of the family. The `dQ` tiles of the key blocks of one head are added into an FP32 accumulator in arrival order, so `dq` may differ in its last bits run to run. `dk` and `dv` are summed in one fixed order. Under `torch.use_deterministic_algorithms(True)` the backward raises PyTorch's `RuntimeError` before it allocates or launches; with `warn_only=True` it warns once and runs. Source: [`kernels/fmha/cake_pplx/cake_fmha_nondet_train.py`](../kernels/fmha/cake_pplx/cake_fmha_nondet_train.py).
+The only module of the family. On the three-kernel routes the `dQ` tiles of the key blocks of one head are added into an FP32 accumulator in arrival order, so `dq` may differ in its last bits run to run, and `dk` and `dv` are summed in one fixed order. On the one-launch route `dq`, `dk` and `dv` each have one fixed order; the module stays non-deterministic all the same. Under `torch.use_deterministic_algorithms(True)` the backward raises PyTorch's `RuntimeError` before it allocates or launches; with `warn_only=True` it warns once and runs. Source: [`kernels/fmha/cake_pplx/cake_fmha_nondet_train.py`](../kernels/fmha/cake_pplx/cake_fmha_nondet_train.py).
 
 | Name | Signature | Inputs | Returns / notes |
 |---|---|---|---|
-| `cake_fmha_nondet_train_backward` | `(q, k, v, out, lse, dout, *, softmax_scale=None, causal=False)` | As above. `softmax_scale` defaults to `D**-0.5`, must be finite, and must be the forward's. | Returns contiguous BF16 `(dq, dk, dv)`: `dq [B, Sq, H, D]`, `dk`/`dv [B, Skv, H, D]`. Not autograd. `B == 0` returns empty gradients without a launch or an alert. A malformed call raises `ValueError` before any launch. Each call allocates its outputs and an FP32 workspace of `B * H * Sq * (D + 2)` elements. |
+| `cake_fmha_nondet_train_backward` | `(q, k, v, out, lse, dout, *, softmax_scale=None, causal=False)` | As above. `softmax_scale` defaults to `D**-0.5`, must be finite, and must be the forward's. | Returns contiguous BF16 `(dq, dk, dv)`: `dq [B, Sq, H, D]`, `dk`/`dv [B, Skv, H, D]`. Not autograd. `B == 0` returns empty gradients without a launch or an alert. A malformed call raises `ValueError` before any launch. A call on the three-kernel routes allocates its outputs and an FP32 workspace of `B * H * Sq * (D + 2)` elements; a call on the one-launch route allocates its outputs only. |
 
 **Options and environment.** `softmax_scale` and `causal` are the only keywords. The facade reads no environment variable.
 
