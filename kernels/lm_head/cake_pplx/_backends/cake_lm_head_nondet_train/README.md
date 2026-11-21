@@ -383,9 +383,10 @@ warps.
 
 The switches and the `CAKE_PPLX_LM_HEAD_LOSS_*` variables are those of
 the deterministic package (its README's table): every switch is a keyword of
-the entries it affects, `None` selecting the documented default, and the
-package reads no environment variable.  `cake_pplx.cake_lm_head_nondet_train`
-resolves the variables through `cake_pplx._cake_lm_head_train_knobs` (the
+the entries it affects, `None` selecting the documented default, and no
+switch reads an environment variable (the build loader reads only its build
+variables, as in the deterministic package).
+`cake_pplx.cake_lm_head_nondet_train` resolves the variables through `cake_pplx._cake_lm_head_train_knobs` (the
 parser the deterministic module uses too) and configures this package's two
 binding caches (`cake_backend.BINDING_CACHE`,
 `cake_backend_opt_in.BINDING_CACHE`) with the binding-cache settings it read
@@ -729,16 +730,21 @@ scan).  The one stage that differs is the dX GEMM (`dX_c = dz_c @ W`):
   stored rows and folds their FP32 label residuals), except on the chunks
   whose fold the dX cast makes, as in the deterministic package.  A
   compacted plan under the fused dX finalize whose `dX` goes through the
-  scatter cast (the autograd loss entry and the log-probability backward of
-  `cake_backend.py`, without the kept logits, a temperature or the
-  vocabulary-major form) hands the longest run of adjacent one-slice chunks
+  scatter cast (the autograd loss entry of `cake_backend.py` when `W` is a
+  leaf that requires a gradient, and its log-probability backward, without
+  the kept logits, a temperature or the vocabulary-major form) hands the
+  longest run of adjacent one-slice chunks
   (`cake_backend.cast_fold_rows`) to `scale_cast_scatter_fold_bf16`, which
   folds those rows with the same `fma` and predicate before its scale; an
   uncompacted log-probability backward of `cake_backend.py` (with the same
   exceptions) folds them in its in-loop flat cast, `scale_cast_fold_bf16`.
   The autograd loss entry holds those rows' labels and `rlab` from the
-  forward to its backward's dX finalize; a backward that frees the graph
-  drops them there, before the weight gradient's buffers exist.  A
+  forward to its backward's dX finalize and saves `W` through its autograd
+  context (an in-place write to `W` before the backward raises PyTorch's
+  saved-tensor version error); a backward that frees the graph drops the
+  labels and `rlab` there, before the weight gradient's buffers exist.  A
+  loss call whose `W` is not a leaf or requires no gradient folds every row
+  in the forward's slab sums and keeps no reference to `W`.  A
   log-probability autograd graph holds the `rlab` its backwards bind as in
   the deterministic package (its README, "FP32 label residual"): the first
   backward that binds it takes the buffer from the free list of the caller's

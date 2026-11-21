@@ -2920,10 +2920,16 @@ MODULES: dict[str, dict[str, Any]] = _expand_registry(_REGISTRY, _ARG_PLANS, _LA
 #                          (and once after the vocabulary-major backward's
 #                          last block) it is the fold alone (``n_slabs = 0``:
 #                          it reads the stored rows).  Launched
-#                          with programmatic dependent launch (it waits on the
-#                          GEMM first).  ``dx_slab_sum_dcnt`` stores the rows
-#                          below the chunk's live-row bound and -0.0 into the
-#                          rows after (after a ``_dcnt`` GEMM).
+#                          with programmatic dependent launch: before its
+#                          ``griddepcontrol.wait`` a thread reads only its
+#                          first vector's label and FP32 label residual (their
+#                          writers run before the launch it follows -- the dX
+#                          GEMM, or the vocabulary-major backward's last block
+#                          -- which carries no PDL attribute); every read of
+#                          that launch's output follows the wait.
+#                          ``dx_slab_sum_dcnt`` stores the rows below the
+#                          chunk's live-row bound and -0.0 into the rows after
+#                          (after a ``_dcnt`` GEMM).
 # ``dx_slab_sum_acc``      dX_c[rows] += ((s_0 + s_1) + ...), one FP32 add per
 #                          element: the candidate-support path's dense dX after
 #                          a later vocabulary block above one slice (the

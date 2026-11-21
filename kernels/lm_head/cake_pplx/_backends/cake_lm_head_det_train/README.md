@@ -92,10 +92,12 @@ keyword.
   not counted and its chunks tile the rows (the `dz` arms store the same rows
   on each backward of one graph).  The forward takes no buffer: the first
   backward that binds the graph's `rlab` takes one (zero-filled for a `dz`
-  recompute) from a free list of the caller's stream, and the freed graph
-  puts it back (at most 4 free buffers per stream, which stay allocated, for
-  at most 64 streams; capacities rounded up to 128 rows; no list under a CUDA
-  graph capture, from another current device or above 1 MiB).  A new buffer
+  recompute) from a free list of the caller's stream; a backward that frees
+  the graph (no `retain_graph` / `create_graph`) puts it back when it
+  returns, a retained graph when the graph is freed (at most 4 free buffers
+  per stream, which stay allocated, for at most 64 streams; capacities
+  rounded up to 128 rows; no list under a CUDA graph capture, from another
+  current device or above 1 MiB).  A new buffer
   is requested with a per-device holding stream current, so the held tensor
   does not split the small caching-allocator blocks a forward running while
   the graph is alive reuses.  The package makes two holding streams per
@@ -109,7 +111,7 @@ keyword.
   another allocator backend or settings string, a torch without these
   queries, under a CUDA graph capture, above 1 MiB or where a stream cannot
   be made, the request is an ordinary allocation on the caller's stream (the
-  package reads no environment variable).
+  gate reads no environment variable).
   Every chunk's `dX` rows end with the `slab_sum` kernel, which folds it
   (except the rows the dX cast folds, below):
   `dX_acc[t, h] = fma(r_t, f32(W[y_t, h]), A)`, `A` the row's FP32 `dz @ W`
@@ -124,17 +126,25 @@ keyword.
   `dW` are bitwise those of version 0.2.1, and only `dX` changes.  The
   candidate-support entries fold nothing.  The call holds `rlab` beside `lse`
   (4 bytes a row of the chunk loop).  A compacted plan under the fused dX
-  finalize whose `dX` goes through the scatter cast (the autograd loss
-  entries and `cake_backend.py`'s log-probability backward, kept logits
-  included; not a temperature plan) launches no fold-alone `slab_sum` on its
-  longest run of adjacent one-slice chunks (`cake_backend.cast_fold_rows`):
-  it hands those rows' labels, `rlab` and `W` to the scatter cast's fold
-  program `scale_cast_scatter_fold_bf16`, which applies the same `fma` and
-  predicate before its scale (a call that folds no row launches
-  `scale_cast_scatter_bf16`, which reads no fold operand).  The autograd loss
-  entry then holds them from the forward to its backward's dX finalize; a
-  backward that frees the graph drops them there, before the weight
-  gradient's buffers exist.  An uncompacted log-probability backward of
+  finalize whose `dX` goes through the scatter cast (the autograd loss entry
+  of `cake_backend_opt_in.py` -- the facade's route for a loss call whose
+  `W` requires a gradient -- when `W` is a leaf, and `cake_backend.py`'s
+  log-probability backward, kept logits included; not a temperature plan)
+  launches no fold-alone `slab_sum` on its longest run of adjacent
+  one-slice chunks (`cake_backend.cast_fold_rows`): it hands those rows'
+  labels, `rlab` and `W` to the scatter cast's fold program
+  `scale_cast_scatter_fold_bf16`, which applies the same `fma` and predicate
+  before its scale (a call that folds no row launches
+  `scale_cast_scatter_bf16`, which reads no fold operand).  The loss entry
+  then holds the labels and `rlab` from the forward to its backward's dX
+  finalize and saves `W` through its autograd context, so an in-place write
+  to `W` between the forward and the backward raises PyTorch's saved-tensor
+  version error; a backward that frees the graph drops the labels and `rlab`
+  there, before the weight gradient's buffers exist.  A loss call whose `W`
+  is not a leaf or requires no gradient, and every call of
+  `cake_backend.py`'s own loss entry, fold every row in the forward's slab
+  sums: the backward reads no `W`, and the call keeps no reference to it.
+  An uncompacted log-probability backward of
   `cake_backend.py` (not a kept-logits or temperature plan) folds the same
   run in its in-loop flat cast, the fold program `scale_cast_fold_bf16`,
   with the labels and the head its autograd context saved.  An uncompacted
@@ -674,7 +684,7 @@ keyword.
   the fast call the memory rule picks (the split or the call without it,
   with the logp-only pass where it runs) and, when it does not fit and a
   budget plan does, runs as a `"budget"` call (without the hidden count).
-  The package reads no environment variable; through the public facade the
+  No switch reads an environment variable; through the public facade the
   `CAKE_PPLX_LM_HEAD_LOSS_*` variables (`COMPACT_ROWS`,
   `FUSE_DW_CAST`, `DX_FINALIZE`, `HIDDEN_COUNT`, `GEMM_TUNING`) set switches
   that are inputs of this rule -- an uncompacted default call keeps the fast
@@ -1128,10 +1138,12 @@ the valid-row tensor, default `False`, and no `hidden_count`; `forward_logprob`
 and `backward_loss` take no `dw_stream`; `logprob_lbl` belongs to the
 log-probability forward and `logprob_dz` to its backward), `None` selecting the documented default
 (`cake_backend.compact_rows_default()` and friends return the constants); the
-autograd entries resolve every switch once in the forward.  **The package reads
-no environment variable.**  The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are
-the facades' own A/B knobs, read only by the LM-head facades (through
-`cake_pplx/_cake_lm_head_train_knobs.py`): a
+autograd entries resolve every switch once in the forward.  **No switch reads
+an environment variable** (the build loader `_cake_pplx_jit.py` reads only its
+build variables: `CUDA_HOME` / `CUDA_PATH`, `CAKE_PPLX_CACHE_DIR`,
+`CAKE_PPLX_NVCC`, `CXX`, `CAKE_PPLX_DISABLE_JIT`, `CAKE_PPLX_JIT_WORKERS`).
+The `CAKE_PPLX_LM_HEAD_LOSS_*` variables are the facades' own A/B knobs, read
+only by the LM-head facades (through `cake_pplx/_cake_lm_head_train_knobs.py`): a
 switch keyword left at `None` there falls back to its variable and the resolved
 value is passed down; the two binding-cache variables are read when that
 module is imported and applied through `BINDING_CACHE.configure` when it first

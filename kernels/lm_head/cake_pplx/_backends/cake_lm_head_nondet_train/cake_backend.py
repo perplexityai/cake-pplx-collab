@@ -12460,7 +12460,7 @@ def _rlab_fixed_segments(settings: str) -> bool:
     torch's caching allocator uses fixed segments: it names ``expandable_segments`` with the last value ``False``, or
     it is empty (no allocator settings in the environment and no settings call: torch's default, fixed segments).  Any
     other string is ``False``: a string that does not name ``expandable_segments`` leaves the value that an earlier
-    settings call or the environment set, which no query returns (the package reads no environment variable)."""
+    settings call or the environment set, which no query returns (this module reads no environment variable)."""
     named = _EXPANDABLE_SEGMENTS.findall(settings)
     if named:
         return named[-1] == "False"
@@ -14319,7 +14319,7 @@ def _keep_graph() -> bool:
     """Whether the running backward keeps its graph (``retain_graph=True``, ``create_graph=True``), read from PyTorch's
     current graph task (a private API, resolved at import as ``_GRAPH_TASK_KEEP_GRAPH``; as in
     :mod:`.cake_backend_opt_in`).  ``True`` when that API is missing or cannot answer: the loss entry then keeps the
-    fold operands until the graph is freed."""
+    fold operands, and a log-probability graph its label residuals, until the graph is freed."""
     getter = _GRAPH_TASK_KEEP_GRAPH
     if getter is None:
         return True
@@ -14329,14 +14329,27 @@ def _keep_graph() -> bool:
         return True
 
 
-def _fold_finalize(owner, grad_loss, num_rows: int, backend: str):
+def _release_graph_rlab(ctx) -> None:
+    """After a log-probability backward through the graph whose label residual holder is ``ctx.rlab``
+    (:class:`_GraphRlab`): a backward that frees the graph (no ``retain_graph`` / ``create_graph``, :func:`_keep_graph`)
+    drops the holder, so the buffer it owns goes back to the free list of its stream when the backward returns
+    (:meth:`_GraphRlab.__del__`; every launch that reads it is queued on that stream by then) instead of when the
+    autograd node is freed -- a graph kept alive past its backward (its output held) holds no buffer; a retained graph
+    keeps it for its next backward."""
+    if getattr(ctx, "rlab", None) is not None and not _keep_graph():
+        ctx.rlab = None
+
+
+def _fold_finalize(owner, grad_loss, num_rows: int, backend: str, head):
     """The dX finalize of a loss backward whose gradient state carries the label residual fold's operands
-    (``owner.dx_fold``, :func:`cast_fold_operands`; ``owner`` the autograd context or the recomputed result): the
-    scatter cast :func:`backward_loss` launches first, run here so that a backward that frees the graph (no
-    ``retain_graph`` / ``create_graph``, :func:`_keep_graph`) drops the operands -- the forward's compact labels and
-    FP32 label residuals -- before the weight gradient's buffers exist; a retained graph keeps them for its next
-    backward.  ``None`` (nothing launched) without a fold."""
-    if getattr(owner, "dx_fold", None) is None or owner.dx_acc is None:
+    (``owner.dx_fold``, :func:`cast_fold_operands`; ``owner`` the autograd context or the recomputed result) with the
+    head ``head`` (``W`` as the call's autograd context saved it, unpacked by the backward; the operands kept on the
+    context carry none): the scatter cast :func:`backward_loss` launches first, run here so that a backward that frees
+    the graph (no ``retain_graph`` / ``create_graph``, :func:`_keep_graph`) drops the operands -- the forward's compact
+    labels and FP32 label residuals -- before the weight gradient's buffers exist; a retained graph keeps them for its
+    next backward.  ``None`` (nothing launched) without a fold."""
+    fold = getattr(owner, "dx_fold", None)
+    if fold is None or owner.dx_acc is None:
         return None
     dx = finalize_dx(
         owner.dx_acc,
@@ -14345,8 +14358,9 @@ def _fold_finalize(owner, grad_loss, num_rows: int, backend: str):
         owner.row_valid,
         num_rows,
         backend=backend,
-        fold=owner.dx_fold,
+        fold=dict(fold, W=head),
     )
+    fold = None
     if not _keep_graph():
         owner.dx_fold = None
     return dx
@@ -14354,8 +14368,9 @@ def _fold_finalize(owner, grad_loss, num_rows: int, backend: str):
 
 def _loss_backward_split(ctx, grad_loss):
     """``(dX, dW)`` of a call with ``ctx.split``: its gradient state is the recomputation's (unpacking the inputs runs
-    it) or, without a handed result, this backward's own fused forward."""
-    state = _split_state(ctx, ctx.saved_tensors, _loss_forward)
+    it) or, without a handed result, this backward's own fused forward; a fold reads the call's saved ``W``."""
+    inputs = ctx.saved_tensors
+    state = _split_state(ctx, inputs, _loss_forward)
     one_pass = getattr(state, "one_pass", None)
     if one_pass is not None:
         return _one_pass_backward(one_pass, state.x_last, state.dx_acc, grad_loss)
@@ -14378,7 +14393,7 @@ def _loss_backward_split(ctx, grad_loss):
         )  # cast(g * 0), as ForwardResult.backward forms it
         return dx, dw
     # a fold's dX first (:func:`_fold_finalize`), then the rest of :func:`backward_loss`: the same launches in order
-    dx = _fold_finalize(state, grad_loss, ctx.num_rows, ctx.backend)
+    dx = _fold_finalize(state, grad_loss, ctx.num_rows, ctx.backend, inputs[1])
     dx_rest, dw = backward_loss(
         None if dx is not None else state.dx_acc,
         state.dw_acc,
@@ -14761,7 +14776,16 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
     the checkpointed forward computes the loss only and saves the call's inputs; the recomputation in the backward runs
     the fused forward, saves the same inputs and hands its result to the checkpointed call's backward (which runs the
     fused forward itself when nothing was handed over).  Either way the fused forward's kernels run in one fixed order
-    (no run-to-run bit promise)."""
+    (no run-to-run bit promise).
+
+    The backward's compact dX cast folds the label residuals of the one-slice chunks (``_cast_fold``,
+    :func:`cast_fold_rows`) only when ``W`` is a leaf that requires a gradient (a parameter, which outlives the backward
+    anyway).  Such a call saves ``W`` through the autograd context with the other saved tensors (a checkpointed call
+    saves it already), the fold operands kept on ``ctx`` carry no ``W``, and the backward hands the unpacked saved ``W``
+    to the fold (:func:`_fold_finalize`): an in-place write to ``W`` between the forward and the backward raises
+    PyTorch's saved-tensor version error.  Any other call (a non-leaf ``W``, or one that requires no gradient) folds
+    every residual in its forward's slab sums, and its backward reads no ``W``: the call keeps no reference to ``W``
+    past its forward.  The same kernels and operands either way."""
 
     @staticmethod
     def forward(
@@ -14785,6 +14809,9 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
         gemm_tuning,
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
+        # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
+        # (saved through the autograd context below); any other call folds them in the forward's slab sums
+        cast_fold = need_dw and W.is_leaf
         # a cross-entropy call of the one-pass row counts (one_pass_rows) with a BF16 dW: the one-pass programs, in every
         # placement
         one_pass = grad_weight_dtype == torch.bfloat16 and _one_pass_call(
@@ -14850,7 +14877,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                     gemm_tuning=gemm_tuning,
                     return_logp=bool(return_logp),
                     one_pass=one_pass,
-                    _cast_fold=True,
+                    _cast_fold=cast_fold,
                 ),
             )
             if out is not None:
@@ -14876,7 +14903,7 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
             hidden_count=hidden_count,
             gemm_tuning=gemm_tuning,
             return_logp=bool(return_logp),
-            _cast_fold=True,
+            _cast_fold=cast_fold,
         )
         ctx.set_materialize_grads(False)
         ctx.dx_acc, ctx.dw_acc = (
@@ -14886,8 +14913,21 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
         # the deferred weight gradient's operands: the last chunk's dz rows and its X rows, the latter a view of the
         # input X (or X itself with the chunk's row index when compacted) -- saved through the autograd context so an
         # in-place write to X between the forward and the backward raises PyTorch's saved-tensor version error
-        # instead of yielding a stale dW
-        ctx.save_for_backward(result.dz_last, result.x_last, result.x_src, result.x_idx)
+        # instead of yielding a stale dW.  A fold in the backward's dX cast (``dx_fold``) also saves the head the fold
+        # reads, likewise; the fold operands kept on ctx carry no head (the backward unpacks the saved one)
+        dx_fold = getattr(result, "dx_fold", None)
+        if dx_fold is None:
+            ctx.save_for_backward(
+                result.dz_last, result.x_last, result.x_src, result.x_idx
+            )
+        else:
+            ctx.save_for_backward(
+                result.dz_last,
+                result.x_last,
+                result.x_src,
+                result.x_idx,
+                dx_fold.pop("W"),
+            )
         ctx.row_index, ctx.num_rows = (
             result.row_index,
             int(X.shape[0]),
@@ -14895,8 +14935,8 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
         ctx.row_valid = (
             result.row_valid
         )  # the fused dX finalize's valid-row mask (None otherwise)
-        # the label residuals the compact dX cast folds (:func:`cast_fold_operands`; None: none)
-        ctx.dx_fold = getattr(result, "dx_fold", None)
+        # the label residuals the compact dX cast folds (:func:`cast_fold_operands`, without the head; None: none)
+        ctx.dx_fold = dx_fold
         ctx.grad_weight_dtype = grad_weight_dtype
         ctx.backend = backend
         # the forward's resolved GEMM knobs: the deferred weight-gradient GEMM takes them
@@ -14934,13 +14974,21 @@ class CakeLMHeadNondetLossFunction(torch.autograd.Function):
                 else _zero_gradient(ctx.dw_acc, grad_loss, ctx.grad_weight_dtype)
             )  # cast(g * 0), as ForwardResult.backward forms it
             return (dx, dw) + none[2:]
-        dz_last, x_last, x_src, x_idx = ctx.saved_tensors
+        saved = ctx.saved_tensors
+        dz_last, x_last, x_src, x_idx = saved[:4]
         if ctx.one_pass is not None:
             dx, dw = _one_pass_backward(ctx.one_pass, x_last, ctx.dx_acc, grad_loss)
             return (dx, dw) + none[2:]
-        # a fold's dX first (:func:`_fold_finalize`: a backward that frees the graph drops the fold operands before the
-        # weight gradient's buffers exist), then the rest of :func:`backward_loss`: the same launches in order
-        dx = _fold_finalize(ctx, grad_loss, ctx.num_rows, ctx.backend)
+        # a fold's dX first (:func:`_fold_finalize`, with the saved head: a backward that frees the graph drops the fold
+        # operands before the weight gradient's buffers exist), then the rest of :func:`backward_loss`: the same
+        # launches in order
+        dx = _fold_finalize(
+            ctx,
+            grad_loss,
+            ctx.num_rows,
+            ctx.backend,
+            saved[4] if len(saved) > 4 else None,
+        )
         dx_rest, dw = backward_loss(
             None if dx is not None else ctx.dx_acc,
             ctx.dw_acc,
@@ -15268,6 +15316,7 @@ class CakeLMHeadNondetLogprobFunction(torch.autograd.Function):
             _problem=ctx.problem,
             _rlab=getattr(ctx, "rlab", None),
         )
+        _release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 11
 
 
@@ -15453,6 +15502,7 @@ class CakeLMHeadNondetLogprobTemperatureFunction(torch.autograd.Function):
             _problem=ctx.problem,
             _rlab=getattr(ctx, "rlab", None),
         )
+        _release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 13
 
 
@@ -15618,6 +15668,7 @@ class CakeLMHeadNondetLogprobKeepFunction(torch.autograd.Function):
                 logprob_dz=ctx.logprob_dz,
                 **common,
             )
+        _release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 9
 
 

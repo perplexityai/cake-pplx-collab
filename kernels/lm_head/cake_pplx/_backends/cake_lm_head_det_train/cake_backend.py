@@ -3512,7 +3512,7 @@ def _rlab_fixed_segments(settings: str) -> bool:
     torch's caching allocator uses fixed segments: it names ``expandable_segments`` with the last value ``False``, or
     it is empty (no allocator settings in the environment and no settings call: torch's default, fixed segments).  Any
     other string is ``False``: a string that does not name ``expandable_segments`` leaves the value that an earlier
-    settings call or the environment set, which no query returns (the package reads no environment variable)."""
+    settings call or the environment set, which no query returns (this module reads no environment variable)."""
     named = _EXPANDABLE_SEGMENTS.findall(settings)
     if named:
         return named[-1] == "False"
@@ -3682,6 +3682,37 @@ def _logprob_graph_rlab(
     if rows <= 0:
         return None
     return _GraphRlab()
+
+
+# PyTorch's current-graph-task query (a private API), resolved once: ``None`` when this PyTorch lacks it
+_GRAPH_TASK_KEEP_GRAPH = getattr(
+    getattr(torch._C, "_autograd", None), "_get_current_graph_task_keep_graph", None
+)
+
+
+def _keep_graph() -> bool:
+    """Whether the running backward keeps its graph (``retain_graph=True``, ``create_graph=True``), read from PyTorch's
+    current graph task (a private API, resolved at import as ``_GRAPH_TASK_KEEP_GRAPH``; as in
+    :mod:`.cake_backend_opt_in`).  ``True`` when that API is missing or cannot answer: the log-probability graph then
+    keeps its label residuals until it is freed."""
+    getter = _GRAPH_TASK_KEEP_GRAPH
+    if getter is None:
+        return True
+    try:
+        return bool(getter())
+    except Exception:  # noqa: BLE001 -- outside a graph task (or an API change): keep
+        return True
+
+
+def _release_graph_rlab(ctx) -> None:
+    """After a log-probability backward through the graph whose label residual holder is ``ctx.rlab``
+    (:class:`_GraphRlab`): a backward that frees the graph (no ``retain_graph`` / ``create_graph``, :func:`_keep_graph`)
+    drops the holder, so the buffer it owns goes back to the free list of its stream when the backward returns
+    (:meth:`_GraphRlab.__del__`; every launch that reads it is queued on that stream by then) instead of when the
+    autograd node is freed -- a graph kept alive past its backward (its output held) holds no buffer; a retained graph
+    keeps it for its next backward."""
+    if getattr(ctx, "rlab", None) is not None and not _keep_graph():
+        ctx.rlab = None
 
 
 def scatter_rows(
@@ -13038,7 +13069,7 @@ def _logprob_backward(ctx, dlogp, saved) -> tuple:
     package's opt-in automatic form among them; a second unpack inside a non-reentrant checkpoint raises)."""
     X, W, labels, lse, row_index = saved
     need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
-    return backward_logprob(
+    grads = backward_logprob(
         X,
         W,
         labels,
@@ -13058,6 +13089,8 @@ def _logprob_backward(ctx, dlogp, saved) -> tuple:
         row_index=row_index,
         _rlab=getattr(ctx, "rlab", None),
     )
+    _release_graph_rlab(ctx)
+    return grads
 
 
 class CakeLMHeadDetLogprobTemperatureFunction(torch.autograd.Function):
@@ -13223,7 +13256,7 @@ def _logprob_temperature_backward(ctx, dlogp, saved) -> tuple:
         else None
     )
     need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
-    return backward_logprob_temperature(
+    grads = backward_logprob_temperature(
         X,
         W,
         labels,
@@ -13245,6 +13278,8 @@ def _logprob_temperature_backward(ctx, dlogp, saved) -> tuple:
         temperature_rows=tau_rows,
         _rlab=getattr(ctx, "rlab", None),
     )
+    _release_graph_rlab(ctx)
+    return grads
 
 
 class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
@@ -13363,6 +13398,7 @@ class CakeLMHeadDetLogprobKeepFunction(torch.autograd.Function):
                 logprob_dz=ctx.logprob_dz,
                 **common,
             )
+        _release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 10
 
 

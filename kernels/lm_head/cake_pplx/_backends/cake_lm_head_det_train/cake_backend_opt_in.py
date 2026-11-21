@@ -8313,7 +8313,16 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
     through the same graph then raises.  Otherwise, and in a retained graph, it keeps everything until the graph is
     freed (the backward is repeatable, the accumulators are read, never written) -- except the label residual fold's
     operands (``dx_fold``, :func:`.cake_backend.cast_fold_operands`), which a backward that frees the graph drops right
-    after the dX finalize that reads them."""
+    after the dX finalize that reads them.
+
+    The backward's compact dX cast folds the label residuals of the one-slice chunks (``_cast_fold``,
+    :func:`.cake_backend.cast_fold_rows`) only when ``W`` is a leaf that requires a gradient (a parameter, which
+    outlives the backward anyway).  Such a call saves ``W`` through the autograd context with the other saved tensors
+    (the fast form; the recompute forms and a checkpointed call save it already), the fold operands kept on ``ctx``
+    carry no ``W``, and the backward hands the unpacked saved ``W`` to the fold: an in-place write to ``W`` between the
+    forward and the backward raises PyTorch's saved-tensor version error.  Any other call (a non-leaf ``W``, or one
+    that requires no gradient) folds every residual in its forward's slab sums, and its backward reads no ``W``: the
+    call keeps no reference to ``W`` past its forward.  The same kernels and operands either way: the same bits."""
 
     @staticmethod
     def forward(
@@ -8340,6 +8349,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         check_num_valid_rows,
     ):
         need_dx, need_dw = bool(ctx.needs_input_grad[0]), bool(ctx.needs_input_grad[1])
+        # the backward's compact dX cast folds label residuals only for a head that is a leaf requiring a gradient
+        # (saved through the autograd context below); any other call folds them in the forward's slab sums
+        cast_fold = need_dw and W.is_leaf
         # gradient placement "auto" inside a non-reentrant torch.utils.checkpoint (as in :mod:`.cake_backend`): the
         # checkpointed forward computes the loss only and saves the inputs; the recomputation runs this forward and
         # hands its result to the checkpointed call's backward.  Outside one (the plain step): the fused forward
@@ -8395,7 +8407,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 num_valid_rows=num_valid_rows,
                 check_num_valid_rows=check_num_valid_rows,
                 return_logp=bool(return_logp),
-                _cast_fold=True,
+                _cast_fold=cast_fold,
             )
             split, handed = _main._loss_checkpoint_split(
                 ctx,
@@ -8449,7 +8461,7 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             num_valid_rows=num_valid_rows,
             check_num_valid_rows=check_num_valid_rows,
             return_logp=bool(return_logp),
-            _cast_fold=True,
+            _cast_fold=cast_fold,
         )
         CakeLMHeadDetLossFunction._setup(
             ctx, X, grad_weight_dtype, backend, memory_mode
@@ -8459,11 +8471,23 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         # in-place write to X between the forward and the backward raises PyTorch's saved-tensor version error
         # instead of yielding a stale dW.  ``memory_mode="budget"``: the picked form (``None`` = the fast form); a
         # recompute form also saves X, W and labels likewise (an uncompacted call's row-state labels are the caller's
-        # tensor itself) and keeps the row state and plan its recompute reads
+        # tensor itself) and keeps the row state and plan its recompute reads.  A fold in the backward's dX cast
+        # (``dx_fold``): the fast form also saves the head the fold reads, likewise (the backward unpacks it, :meth:`_keep`
+        # leaves none on ctx)
         if result.memory_plan is None or not result.memory_plan.recompute:
-            ctx.save_for_backward(
-                result.dz_last, result.x_last, result.x_src, result.x_idx
-            )
+            dx_fold = getattr(result, "dx_fold", None)
+            if dx_fold is None:
+                ctx.save_for_backward(
+                    result.dz_last, result.x_last, result.x_src, result.x_idx
+                )
+            else:
+                ctx.save_for_backward(
+                    result.dz_last,
+                    result.x_last,
+                    result.x_src,
+                    result.x_idx,
+                    dx_fold["W"],
+                )
         else:
             ctx.save_for_backward(
                 result.dz_last,
@@ -8514,8 +8538,12 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         ctx.row_valid = (
             result.row_valid
         )  # the fused dX finalize's valid-row mask (None otherwise)
-        # the label residuals the compact dX cast folds (:func:`.cake_backend.cast_fold_operands`; None: none)
-        ctx.dx_fold = getattr(result, "dx_fold", None)
+        # the label residuals the compact dX cast folds (:func:`.cake_backend.cast_fold_operands`; None: none), without
+        # the head: the backward hands the fold its saved W (the forward's save, or a checkpointed call's inputs)
+        dx_fold = getattr(result, "dx_fold", None)
+        if dx_fold is not None:
+            dx_fold.pop("W", None)
+        ctx.dx_fold = dx_fold
         # the forward's resolved GEMM knobs: the deferred weight-gradient GEMM takes them
         ctx.gemm_tuning = result.gemm_tuning
         ctx.empty = ctx.num_rows == 0 or (
@@ -8537,13 +8565,14 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
             return none
         if ctx.released:
             raise RuntimeError(_SECOND_BACKWARD)
-        saved = None
+        saved = head = None
         if ctx.split is not None:
             # a checkpointed call: unpacking its inputs runs the recomputation, whose fused forward's result (or this
-            # backward's own fused forward) is the gradient state
+            # backward's own fused forward) is the gradient state; the fold's head is the call's saved W
             inputs = ctx.saved_tensors
             state = _main._split_state(ctx, inputs, forward_loss)
             CakeLMHeadDetLossFunction._keep(ctx, state)
+            head = inputs[1]
             saved = (state.dz_last, state.x_last, state.x_src, state.x_idx) + (
                 tuple(inputs[:2])
                 if state.memory_plan is not None and state.memory_plan.recompute
@@ -8581,12 +8610,17 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
         if mplan is not None and mplan.recompute:
             # (the saved labels only version-check the row state's labels; a checkpointed call saves its inputs)
             dz_last, x_last, x_src, x_idx, X, W = saved[:6]
+            if head is None:
+                head = W
         else:
             mplan = None  # the fast form, or a budget form without a recompute: the weight gradient as before
-            dz_last, x_last, x_src, x_idx = saved
+            dz_last, x_last, x_src, x_idx = saved[:4]
+            if head is None and len(saved) > 4:
+                head = saved[4]  # the fold's head (the forward saves it with a fold)
         # the operations of :func:`backward_loss`, with the saved state released as soon as it is used
         dx = None
         if ctx.dx_acc is not None:
+            dx_fold = getattr(ctx, "dx_fold", None)
             dx = finalize_dx(
                 ctx.dx_acc,
                 grad_loss,
@@ -8594,8 +8628,9 @@ class CakeLMHeadDetLossFunction(torch.autograd.Function):
                 ctx.row_valid,
                 ctx.num_rows,
                 backend=ctx.backend,
-                fold=getattr(ctx, "dx_fold", None),
+                fold=None if dx_fold is None else dict(dx_fold, W=head),
             )
+            dx_fold = None
             if not keep:
                 ctx.dx_acc = None  # released before the weight gradient's buffers exist
                 ctx.dx_fold = None
@@ -9239,6 +9274,8 @@ class CakeLMHeadDetLogprobAutoFunction(_main.CakeLMHeadDetLogprobFunction):
                 row_index=row_index,
                 mplan=mplan,
             )
+            # (the budget form binds no graph label residuals; a graph-freeing backward drops a held buffer as well)
+            _main._release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 11
 
 
@@ -9300,6 +9337,7 @@ class CakeLMHeadDetLogprobTemperatureAutoFunction(
             dx, dw = _backward_logprob_budget_temperature(
                 X, W, labels, lse, dlogp, temperature_rows=tau_rows, **common
             )
+        _main._release_graph_rlab(ctx)
         return (dx, dw) + (None,) * 13
 
 
