@@ -536,6 +536,20 @@ def test_planned_scheduler_matches_the_unplanned_launches(ep, experts):
             assert p_layout.data_ptr() % 512 == 0 and p_layout.numel() == 3 * experts + capacity // 256
 
 
+def _schedule_fields(schedule, experts):
+    """The defined fields of a schedule: peer ranks, the peer token of every real row, the row count, the padded
+    counts and the written layout prefix."""
+    written = 3 * experts + int(schedule.num_tokens.item()) // 256
+    real = schedule.peer_rank >= 0
+    return (
+        schedule.peer_rank,
+        schedule.peer_token_idx[real],
+        schedule.num_tokens,
+        schedule.tokens_per_expert,
+        schedule.layout[:written],
+    )
+
+
 @pytest.mark.parametrize("count", [1024, 777], ids=["full", "partial"])
 def test_build_schedule_plan_matches_the_unplanned_launches(count):
     """``build_schedule`` through the workspace's schedule plan gives the unplanned launches' schedule bit for bit on
@@ -556,15 +570,7 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     )
 
     def fields(schedule):
-        written = 3 * experts + int(schedule.num_tokens.item()) // 256
-        real = schedule.peer_rank >= 0
-        return (
-            schedule.peer_rank,
-            schedule.peer_token_idx[real],
-            schedule.num_tokens,
-            schedule.tokens_per_expert,
-            schedule.layout[:written],
-        )
+        return _schedule_fields(schedule, experts)
 
     workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
     key = ("schedule", functional.scheduler, functional.communication)
@@ -595,6 +601,51 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     graph.replay()
     torch.cuda.synchronize()
     assert _same(fields(captured), unplanned)
+
+
+def test_build_schedule_plan_built_under_inference_mode():
+    """A workspace's first ``build_schedule`` under ``torch.inference_mode()`` builds the schedule plan with normal
+    tensors, so the next ``build_schedule`` outside inference mode can overwrite the plan's route buffer, and a third
+    one inside inference mode uses the same plan; all three give the unplanned launches' schedule bit for bit
+    (one-GPU emulation of rank 0 of EP 4, :class:`OneGpuGroup`)."""
+    require_gpu()
+    ep, experts, topk, hidden, count = 4, 4, 2, 256, 1024
+    device = torch.device("cuda", torch.cuda.current_device())
+    functional = backend.MoKFunctional(ep, experts, topk)
+    functional.communication = OneGpuGroup()
+    config = MoKConfig(fwd_num_comm_sms=4, bwd_num_comm_sms=4)
+    generator = torch.Generator(device=device).manual_seed(3391)
+    ids = (
+        torch.rand(count, ep * experts, device=device, generator=generator)
+        .argsort(-1)[:, :topk]
+        .contiguous()
+    )
+    workspace, _ = one_gpu_source_workspace(ep, experts, (count,), hidden, topk, device)
+    key = ("schedule", functional.scheduler, functional.communication)
+    with torch.inference_mode():
+        first = _schedule_fields(
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+        )
+    plan = workspace.storage.launch_plans[key]
+    assert not plan.routes.is_inference() and not plan.scheduler.template.is_inference()
+    second = _schedule_fields(
+        functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+    )
+    with torch.inference_mode():
+        third = _schedule_fields(
+            functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
+        )
+    assert workspace.storage.launch_plans[key] is plan
+    rank, token, total, counts, layout = functional._schedule_launches(
+        workspace.storage, config, ids, count
+    )
+    unplanned = _schedule_fields(
+        workspace_module.MoKSchedule(
+            peer_rank=rank, peer_token_idx=token, num_tokens=total, tokens_per_expert=counts, layout=layout
+        ),
+        experts,
+    )
+    assert _same(first, unplanned) and _same(second, unplanned) and _same(third, unplanned)
 
 
 @pytest.mark.parametrize("ep,experts", [(4, 4), (8, 32)])

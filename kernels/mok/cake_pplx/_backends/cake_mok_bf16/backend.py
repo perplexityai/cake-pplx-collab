@@ -632,39 +632,43 @@ class MoKFunctional:
         gather reads it, as the workspace's shared buffers already require),
         the gather and barrier plans and the scheduler plan. None during CUDA
         Graph capture before the first eager build: the plan writes its
-        template eagerly, so that capture runs ``_schedule_launches``."""
+        template eagerly, so that capture runs ``_schedule_launches``. The
+        plan's tensors are normal tensors also when the first build runs under
+        ``torch.inference_mode()``, so later builds in or outside inference
+        mode can write the route buffer."""
         key = ("schedule", self.scheduler, self.communication)
         plans = workspace.launch_plans
         plan = plans.get(key)
         if plan is None:
             if torch.cuda.is_current_stream_capturing():
                 return None
-            routes = torch.empty(
-                (workspace.num_local_tokens, workspace.topk),
-                dtype=torch.int32,
-                device=workspace.device,
-            )
-            # A stand-in communication object without ``gather_plan`` gathers
-            # through ``all_gather_top_experts`` (as at EP 1, where the gather
-            # is a copy).
-            planner = getattr(self.communication, "gather_plan", None)
-            plan = plans[key] = _SchedulePlan(
-                routes=routes,
-                gather=None
-                if planner is None
-                else planner(
-                    routes,
-                    workspace.all_gather_top_experts_buffer,
-                    workspace.all_gather_top_experts_buffer_multicast_ptr,
-                    workspace.ep_rank,
-                ),
-                barrier=self._barrier_plan(workspace),
-                scheduler=self.scheduler.plan(
-                    workspace.all_gather_top_experts_buffer,
-                    workspace.schedule_capacity,
-                    workspace.ep_rank,
-                ),
-            )
+            with torch.inference_mode(False):
+                routes = torch.empty(
+                    (workspace.num_local_tokens, workspace.topk),
+                    dtype=torch.int32,
+                    device=workspace.device,
+                )
+                # A stand-in communication object without ``gather_plan``
+                # gathers through ``all_gather_top_experts`` (as at EP 1, where
+                # the gather is a copy).
+                planner = getattr(self.communication, "gather_plan", None)
+                plan = plans[key] = _SchedulePlan(
+                    routes=routes,
+                    gather=None
+                    if planner is None
+                    else planner(
+                        routes,
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    ),
+                    barrier=self._barrier_plan(workspace),
+                    scheduler=self.scheduler.plan(
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.schedule_capacity,
+                        workspace.ep_rank,
+                    ),
+                )
         return plan
 
     def _schedule_launches(self, workspace, config, top_experts, count):

@@ -301,7 +301,9 @@ allocation (`peer_token`, `peer_rank`, the counters and the layout) whose
 `-1` sentinel and zero counters are written by one copy. The kernels, their
 order and their argument values are those of the unplanned launches, which
 the first `build_schedule` of a workspace runs when it happens during CUDA
-Graph capture.
+Graph capture. The plan holds normal tensors also when the first
+`build_schedule` runs under `torch.inference_mode()`, so later calls may run
+in or outside inference mode.
 
 ## Repeatability
 
