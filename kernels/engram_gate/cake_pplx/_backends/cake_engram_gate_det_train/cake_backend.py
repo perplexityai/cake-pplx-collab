@@ -57,9 +57,10 @@ gradients.
 a compensated FP32 dot product (each product split with an FMA, each running
 sum with an error-free two-sum, the error words added once at the end), slower,
 which rounds fewer output elements away from the correctly rounded result where
-the products nearly cancel.  The backward is the same for both: ``bwd_dot2``
-recomputes ``P`` from the inputs as a compensated dot product, so the gradients
-do not depend on the forward's choice.
+the products nearly cancel.  The backward is the same for both: it recomputes
+``P`` from the inputs as a compensated dot product (``bwd_dot2``, or
+``bwd_dot2_stage`` with the same bits; :func:`.cake_jit.backward_record`), so
+the gradients do not depend on the forward's choice.
 
 ``fwd`` and ``bwd`` run a persistent grid of four-CTA clusters: as many as the
 token count and as the device holds at once (:func:`.cake_jit.clusters`, from
@@ -128,7 +129,9 @@ KV_WIDTH: int = (STREAMS + 1) * HIDDEN
 
 # The forward sums of the dot product ``P = sum_d w_d h_d k_d`` a caller selects with ``dot_sum``, each with the
 # suffix of the ``fwd`` record it launches (:data:`.cake_jit.ACC_MODES`): ``"fp32"`` (the default) one FP32 word,
-# ``"compensated"`` (opt-in) a compensated FP32 dot product.  Every backward launches ``bwd_dot2``.
+# ``"compensated"`` (opt-in) a compensated FP32 dot product.  Every backward launches ``bwd_dot2`` or, without a
+# token mask on an architecture of :data:`.cake_jit.STAGE_BWD_ARCHES` and with at least
+# :data:`.cake_jit.STAGE_BWD_MIN_TOKENS` tokens, ``bwd_dot2_stage`` (the same bits).
 _DOT_SUMS: dict[str, str] = {"fp32": "f32", "compensated": "dot2"}
 
 # Token strides of the strided operands are multiples of 8 elements and every
@@ -139,10 +142,9 @@ _ALIGNMENT = 16
 _MAX_TOKENS = 2**31 - 1
 # Bytes of one FP32 [4, 5120] row (a partial row of the backward's weight gradients).
 _ROW_BYTES = STREAMS * HIDDEN * 4
-# The records the launches use, looked up once: the forward record of each summation, the one backward record and
-# ``dw_reduce`` with its grid (the same for every call).
+# The records the launches use, looked up once: the forward record of each summation and ``dw_reduce`` with its grid
+# (the same for every call).  The backward record follows the call (:func:`.cake_jit.backward_record`).
 _FWD_RECORDS: dict[str, str] = {acc: cake_jit.record("fwd", acc) for acc in cake_jit.ACC_MODES["fwd"]}
-_BWD_RECORD: str = cake_jit.record("bwd", "dot2")
 _DW_REDUCE_RECORD: str = cake_jit.record("dw_reduce")
 _DW_REDUCE_GRID: tuple[int, int, int] = cake_jit.dw_reduce_grid()
 
@@ -712,15 +714,16 @@ def _launch_backward(
             torch.zeros((STREAMS, HIDDEN), dtype=dk_dtype, device=device),
         )
     index = device.index
-    device_arch(index)  # RuntimeError on a device outside ARCHES
+    arch = device_arch(index)  # RuntimeError on a device outside ARCHES
     if dx is None:
         dx = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
     if dkey is None:
         dkey = torch.empty((T, STREAMS, HIDDEN), dtype=torch.bfloat16, device=device)
     if dvalue is None:
         dvalue = torch.empty((T, HIDDEN), dtype=torch.bfloat16, device=device)
-    # One backward for either forward sum: it recomputes P as a compensated dot product.
-    name = _BWD_RECORD
+    # One backward for either forward sum: it recomputes P as a compensated dot product, in the program that is the
+    # faster one for the call (a token mask given or not, the tokens, the architecture); both give the same bits.
+    name = cake_jit.backward_record(arch, token_mask is not None, T)
     clusters = _clusters(name, T, index)
     # One row per cluster, each written in full by its cluster.
     dw = torch.empty((clusters, STREAMS, HIDDEN), dtype=torch.float32, device=device)

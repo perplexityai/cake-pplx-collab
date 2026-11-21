@@ -58,7 +58,7 @@ Output rows must not overlap.
 | Stage | Records | Grid | Work |
 | --- | --- | --- | --- |
 | `fwd` | `fwd_dot2`, `fwd_f32` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: the four CTAs of a cluster each sum 1280 columns of every stream, exchange the partial sums, and write `out` |
-| `bwd` | `bwd_dot2` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
+| `bwd` | `bwd_dot2`, `bwd_dot2_stage` | `(4 * clusters, 1, 1)`, clusters of 4 CTAs | per token: recompute the sums (and `sum_d g v`), write `dx`, `dkey`, `dvalue`; sum `c h k` over the cluster's tokens |
 | `dw_reduce` | `dw_reduce` | over the `4 * 5120` weight-gradient columns | sum the partial rows, multiply by `k_weight` / `q_weight` |
 
 `clusters = min(T, resident clusters)` (`cake_jit.clusters`); a cluster walks the tokens `c, c + clusters, ...`. The
@@ -88,9 +88,13 @@ with `dot_sum`:
 - `dot_sum="compensated"` (opt-in) launches `fwd_dot2`: a compensated FP32 dot product (each product split by an FMA,
   each running sum by an error-free two-sum, the error words added once at the end).
 
-There is one backward, `bwd_dot2`: it recomputes `P` as a compensated dot product after either forward, so the
-gradients do not depend on `dot_sum`, and the explicit backward and `*_workspace_bytes` take no `dot_sum`. A
-checkpoint's recomputed forward uses the forward's `dot_sum`.
+The backward recomputes `P` as a compensated dot product after either forward, so the gradients do not depend on
+`dot_sum`, and the explicit backward and `*_workspace_bytes` take no `dot_sum`. A checkpoint's recomputed forward
+uses the forward's `dot_sum`. The backward has two programs with the same bits and the same grid: `bwd_dot2`, and
+`bwd_dot2_stage`, which also copies the next token's `dout`, `x` and `key` slices into a per-thread shared-memory
+stage with `cp.async`. A call without a `token_mask` of at least `cake_jit.STAGE_BWD_MIN_TOKENS` (4096) tokens on an
+architecture of `cake_jit.STAGE_BWD_ARCHES` (`sm_103a`) launches `bwd_dot2_stage`; every other call launches
+`bwd_dot2` (`cake_jit.backward_record`).
 
 ## Accuracy
 
@@ -108,7 +112,7 @@ VR200. Measured on GB300 (`T = 16`, 25 draws of each kind); relative L2 error, m
 | `dq_weight`, `dk_weight`, near-cancelling, per stream | 1.3e-7 / 2.3e-7 | 3.2e-7 / 4.7e-7 |
 | `dq_weight`, `dk_weight`, random | 1.4e-7 / 3.4e-7 | 1.8e-6 / 7.7e-5 |
 
-The gradients are those of the one backward. The `out` errors of the two forwards agree to four digits, but the
+The gradients are those of the backward (either program: the same bits). The `out` errors of the two forwards agree to four digits, but the
 opt-in `dot_sum="compensated"` rounds fewer output elements away from the correctly rounded (BF16 of FP64) result
 where the products nearly cancel: 117 of the 8.19 million output elements of the near-cancelling draws, against 17802
 for the default (an FP32 evaluation of the formula: 21917); 113 against 152 on the random draws. The compensated
