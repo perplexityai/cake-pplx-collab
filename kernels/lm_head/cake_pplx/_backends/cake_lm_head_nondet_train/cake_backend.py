@@ -12366,9 +12366,21 @@ _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
 _CUDA_ALLOC_BACKEND = getattr(torch._C, "_cuda_getAllocatorBackend", None)
 _CUDA_ALLOC_SETTINGS = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
 _EXPANDABLE_SEGMENTS = re.compile(r"expandable_segments\s*:\s*(\w+)")
-# whether the last allocator settings string that named ``expandable_segments`` set it ``True``
-# (:func:`_rlab_holding_ok`)
-_RLAB_EXPANDABLE = [False]
+# the allocator settings of the environment, read when the module loads (:func:`_rlab_fixed_segments`): the strings of
+# ``PYTORCH_ALLOC_CONF`` and ``PYTORCH_CUDA_ALLOC_CONF`` that are set, and whether one sets ``expandable_segments`` True
+_RLAB_ENV_SETTINGS = tuple(
+    s
+    for s in (
+        os.environ.get("PYTORCH_ALLOC_CONF"),
+        os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    )
+    if s
+)
+_RLAB_ENV_EXPANDABLE = any(
+    _EXPANDABLE_SEGMENTS.findall(s)[-1:] == ["True"] for s in _RLAB_ENV_SETTINGS
+)
+# the last settings string :func:`_rlab_holding_ok` read, and :func:`_rlab_fixed_segments` of it
+_RLAB_SETTINGS: tuple = (None, False)
 # the value of a device not yet in a holding stream dict (:func:`_rlab_stream`)
 _RLAB_UNMADE = object()
 
@@ -12441,19 +12453,33 @@ def _rlab_holding_ok() -> bool:
     segment's pages after waiting for that segment's stream only (the idle holding stream); the ``cudaMallocAsync``
     backend frees the block in the holding stream's order into a pool that every stream takes from; a pluggable
     allocator gives no such order either.  There it is ``False``: the request is an ordinary allocation on the caller's
-    stream.  torch's settings query returns the last settings string torch parsed (``PYTORCH_CUDA_ALLOC_CONF`` /
-    ``PYTORCH_ALLOC_CONF``, then each ``torch._C._accelerator_setAllocatorSettings`` call), so the value of the last
-    string that named ``expandable_segments`` is kept (:data:`_RLAB_EXPANDABLE`; the environment's is read when the
-    module loads).  ``False`` on a build without the queries."""
+    stream.  It is ``True`` only when the backend is the native one and the allocator settings show fixed segments
+    (:func:`_rlab_fixed_segments`); where they cannot show it, it is ``False``.  torch's settings query returns only the
+    last settings string torch parsed (the environment's, then each ``torch._C._accelerator_setAllocatorSettings``
+    call's), so the answer is found again whenever that string changes: :data:`_RLAB_SETTINGS` keeps the last string
+    and its answer, and the backend is read on every call.  ``False`` on a build without the queries."""
+    global _RLAB_SETTINGS
     if _CUDA_ALLOC_BACKEND is None or _CUDA_ALLOC_SETTINGS is None:
         return False
-    named = _EXPANDABLE_SEGMENTS.findall(_CUDA_ALLOC_SETTINGS())
+    settings = _CUDA_ALLOC_SETTINGS()
+    seen = _RLAB_SETTINGS
+    if settings != seen[0]:
+        seen = _RLAB_SETTINGS = (settings, _rlab_fixed_segments(settings))
+    return seen[1] and _CUDA_ALLOC_BACKEND() == "native"
+
+
+def _rlab_fixed_segments(settings: str) -> bool:
+    """Whether allocator settings string ``settings`` (torch's settings query, :func:`_rlab_holding_ok`) shows that
+    torch's caching allocator uses fixed segments: it names ``expandable_segments`` with the last value ``False``, or
+    it is the environment's settings string (empty where the environment sets none, :data:`_RLAB_ENV_SETTINGS`) and the
+    environment does not set ``expandable_segments`` True.  Any other string is ``False``: a settings call that does not
+    name ``expandable_segments`` keeps the value an earlier call or the environment set, which no query returns."""
+    named = _EXPANDABLE_SEGMENTS.findall(settings)
     if named:
-        _RLAB_EXPANDABLE[0] = named[-1] == "True"
-    return not _RLAB_EXPANDABLE[0] and _CUDA_ALLOC_BACKEND() == "native"
-
-
-_rlab_holding_ok()  # the settings of the environment
+        return named[-1] == "False"
+    if settings not in (_RLAB_ENV_SETTINGS or ("",)):
+        return False
+    return not _RLAB_ENV_EXPANDABLE
 
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:

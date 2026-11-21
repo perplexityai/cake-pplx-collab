@@ -17196,18 +17196,19 @@ def _rlab_segment_stream(t, index):
 
 
 def test_device_graph_rlab_allocator_gate(monkeypatch):
-    """The graphs' label residuals take a holding stream only under torch's native caching allocator with fixed
-    segments (``_rlab_holding_ok``): under another allocator backend, and once an allocator settings string named
-    ``expandable_segments:True`` (kept until one names it ``False``), a request on the default stream and one on
-    another stream are ordinary allocations on the caller's stream: in that stream's segment, no stream marked on the
-    tensor, no holding stream made.  Every tensor is zero-filled."""
+    """The graphs' label residuals take a holding stream only where torch's native caching allocator is shown to use
+    fixed segments (``_rlab_holding_ok``): the backend is ``native`` and the last allocator settings string names
+    ``expandable_segments`` with the last value ``False``, or is the environment's string while the environment does
+    not set it True.  Under another backend, with ``expandable_segments:True``, after any other settings string (an
+    earlier True may still hold), and with an environment that sets it True, a request on the default stream and one
+    on another stream are ordinary allocations on the caller's stream: in that stream's segment, no stream marked on
+    the tensor, no holding stream made before the first holding case.  Every tensor is zero-filled."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     index = torch.cuda.current_device()
     device = torch.device("cuda", index)
     monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
     monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
-    monkeypatch.setattr(cake_backend, "_RLAB_EXPANDABLE", [False])
     query = {}
     monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_BACKEND", lambda: query["backend"])
     monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_SETTINGS", lambda: query["settings"])
@@ -17221,15 +17222,24 @@ def test_device_graph_rlab_allocator_gate(monkeypatch):
     monkeypatch.setattr(torch.Tensor, "record_stream", record)
     default = torch.cuda.default_stream(index)
     caller = torch.cuda.Stream(device=device)
-    held = []
-    for backend, settings, holding in (
-        ("cudaMallocAsync", "", False),
-        ("pluggable", "garbage_collection_threshold:0.6", False),
-        ("native", "expandable_segments:True", False),
-        ("native", "garbage_collection_threshold:0.6", False),
-        ("native", "max_split_size_mb:512,expandable_segments:False", True),
+    held, made = [], False
+    split = "max_split_size_mb:512"
+    for env, env_es, backend, settings, holding in (
+        ((), False, "cudaMallocAsync", "", False),
+        ((), False, "pluggable", "", False),
+        ((), False, "native", "expandable_segments:True", False),
+        ((), False, "native", "garbage_collection_threshold:0.6", False),
+        ((split,), True, "native", split, False),
+        ((split,), False, "native", "", False),
+        ((), False, "native", split + ",expandable_segments:False", True),
+        ((split,), False, "native", split, True),
+        ((), False, "native", "", True),
     ):
+        monkeypatch.setattr(cake_backend, "_RLAB_ENV_SETTINGS", env)
+        monkeypatch.setattr(cake_backend, "_RLAB_ENV_EXPANDABLE", env_es)
+        monkeypatch.setattr(cake_backend, "_RLAB_SETTINGS", (None, False))
         query.update(backend=backend, settings=settings)
+        made = made or holding
         for stream in (default, caller):
             marked.clear()
             with torch.cuda.stream(stream):
@@ -17237,12 +17247,12 @@ def test_device_graph_rlab_allocator_gate(monkeypatch):
                 assert int(torch.count_nonzero(t)) == 0
             torch.cuda.synchronize()
             held.append(t)
-            case = (backend, settings, stream == default)
+            case = (env, env_es, backend, settings, stream == default)
             if not holding:
                 assert marked == [], case
                 assert _rlab_segment_stream(t, index) == stream.cuda_stream, case
-                assert index not in cake_backend._RLAB_STREAMS, case
-                assert index not in cake_backend._RLAB_SIDE_STREAMS, case
+                assert made or index not in cake_backend._RLAB_STREAMS, case
+                assert made or index not in cake_backend._RLAB_SIDE_STREAMS, case
             elif stream == default:
                 assert marked == [], case
                 want = cake_backend._RLAB_STREAMS[index].cuda_stream
@@ -17256,6 +17266,8 @@ def test_device_graph_rlab_allocator_gate(monkeypatch):
 _RLAB_ALLOCATOR_SCRIPT = """
 import json, sys, torch
 sys.path.insert(0, {root!r})
+for settings in {pre!r}:  # before the package is imported
+    torch._C._accelerator_setAllocatorSettings(settings)
 from tests.cake.test_helpers.cake_package import cake_package
 be = cake_package("cake.{package}", "cake_backend")
 index = torch.cuda.current_device()
@@ -17276,9 +17288,9 @@ def made(streams):
 
 torch.Tensor.record_stream = record
 caller = torch.cuda.Stream(device=device)
-held, rows = [], []
-for settings in {settings!r}:
-    if settings is not None:
+held, out = [], []
+for before in {rows!r}:  # the settings calls before each pair of requests
+    for settings in before:
         torch._C._accelerator_setAllocatorSettings(settings)
     calls = []
     for stream in (torch.cuda.default_stream(index), caller):
@@ -17289,7 +17301,7 @@ for settings in {settings!r}:
         held.append(t)
         zero = int(torch.count_nonzero(t)) == 0
         calls.append([stream.cuda_stream, t.data_ptr(), zero, list(marked)])
-    rows.append([settings, calls, made(be._RLAB_STREAMS), made(be._RLAB_SIDE_STREAMS)])
+    out.append([before, calls, made(be._RLAB_STREAMS), made(be._RLAB_SIDE_STREAMS)])
 segments = []
 if torch._C._cuda_getAllocatorBackend() == "native":
     segments = [
@@ -17297,43 +17309,47 @@ if torch._C._cuda_getAllocatorBackend() == "native":
         for s in torch.cuda.memory_snapshot()
         if s["device"] == index
     ]
-print("ALLOCATOR " + json.dumps(dict(rows=rows, segments=segments)))
+print("ALLOCATOR " + json.dumps(dict(rows=out, segments=segments)))
 """
 
 
 def test_device_graph_rlab_allocator_configs():
-    """Under real allocator configurations, in fresh processes (``_rlab_holding_ok``): with
-    ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` and with ``backend:cudaMallocAsync`` the graphs' label
-    residuals of a request on the default stream and of one on another stream are ordinary allocations (no holding
-    stream made, no stream marked on the tensor; with expandable segments, in an expandable segment of the caller's
-    stream).  Under the default configuration they take the holding streams, are ordinary allocations once
-    ``expandable_segments:True`` is set at run time and after a later setting that does not name it, and take the
-    holding streams again once ``expandable_segments:False`` is set (then in their fixed segments).  Every tensor is
-    zero-filled."""
+    """Under real allocator configurations, in fresh processes (``_rlab_holding_ok``), the graphs' label residuals of a
+    request on the default stream and of one on another stream are ordinary allocations (no holding stream made, no
+    stream marked on the tensor) with ``expandable_segments:True`` from ``PYTORCH_CUDA_ALLOC_CONF`` or
+    ``PYTORCH_ALLOC_CONF`` (in an expandable segment of the caller's stream), with ``backend:cudaMallocAsync``, with
+    ``expandable_segments:True`` from the environment and an unrelated settings call before the package is imported,
+    and with a settings call of ``expandable_segments:True`` and an unrelated one (in either order) before the first
+    request.  With no environment and no settings call they take the holding streams; they are ordinary allocations
+    once ``expandable_segments:True`` is set and after a later unrelated setting, and take the holding streams again
+    (in their fixed segments) once ``expandable_segments:False`` is set.  Every tensor is zero-filled."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    toggles = [
-        None,
+    es, gc, off, nonnative = (
         "expandable_segments:True",
         "garbage_collection_threshold:0.6",
         "expandable_segments:False",
-    ]
-    for conf, settings, holding, expandable in (
-        ("expandable_segments:True", [None], [False], [True]),
-        ("backend:cudaMallocAsync", [None], [False], [None]),
-        (None, toggles, [True, False, False, True], [None] * 4),
+        "backend:cudaMallocAsync",
+    )
+    for conf, pre, rows, holding, expandable in (
+        ({"PYTORCH_CUDA_ALLOC_CONF": es}, [], [[]], [False], [True]),
+        ({"PYTORCH_ALLOC_CONF": es}, [], [[]], [False], [True]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": nonnative}, [], [[]], [False], [None]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": es}, [gc], [[]], [False], [True]),
+        ({}, [], [[es, gc]], [False], [None]),
+        ({}, [], [[gc, es]], [False], [None]),
+        ({}, [], [[], [es], [gc], [off]], [True, False, False, True], [None] * 4),
     ):
         env = {
             k: v
             for k, v in os.environ.items()
             if k not in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
         }
+        env.update(conf)
         env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
-        if conf is not None:
-            env["PYTORCH_CUDA_ALLOC_CONF"] = conf
         script = _RLAB_ALLOCATOR_SCRIPT.format(
-            root=root, package="cake_lm_head_det_train", settings=settings
+            root=root, package="cake_lm_head_det_train", pre=pre, rows=rows
         )
         proc = subprocess.run(
             [sys.executable, "-c", script],
@@ -17343,15 +17359,15 @@ def test_device_graph_rlab_allocator_configs():
             cwd=root,
             timeout=900,
         )
+        case = (conf, pre)
         assert proc.returncode == 0, (
-            f"fresh process ({conf}) failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+            f"fresh process {case} failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
         )
         line = [x for x in proc.stdout.splitlines() if x.startswith("ALLOCATOR ")][-1]
         got = json.loads(line[len("ALLOCATOR ") :])
-        rows, segments = got["rows"], got["segments"]
-        assert len(rows) == len(settings) and bool(segments) == (
-            conf is None or "expandable" in conf
-        )
+        out, segments = got["rows"], got["segments"]
+        assert len(out) == len(rows), case
+        assert bool(segments) == (nonnative not in conf.values()), case
 
         def segment(ptr):
             for address, size, stream, is_expandable in segments:
@@ -17359,24 +17375,24 @@ def test_device_graph_rlab_allocator_configs():
                     return stream, is_expandable
             raise AssertionError(f"no segment holds {ptr:#x}")
 
-        for (setting, calls, main, side), want, exp in zip(
-            rows, holding, expandable, strict=True
+        for (before, calls, main, side), want, exp in zip(
+            out, holding, expandable, strict=True
         ):
-            case = (conf, setting)
-            if conf is not None:
-                assert main is None and side is None, case
+            row = case + (before,)
+            if not any(holding):
+                assert main is None and side is None, row
             for (stream, ptr, zero, marks), on in zip(calls, (main, side), strict=True):
-                assert zero, case
+                assert zero, row
                 if want:
-                    assert on is not None and on != stream, case
-                    assert marks == ([] if on == main else [stream]), case
-                    assert segment(ptr) == (on, False), case
+                    assert on is not None and on != stream, row
+                    assert marks == ([] if on == main else [stream]), row
+                    assert segment(ptr) == (on, False), row
                 else:
-                    assert marks == [], case
+                    assert marks == [], row
                     if segments:
                         on_stream, is_expandable = segment(ptr)
-                        assert on_stream == stream, case
-                        assert exp is None or is_expandable == exp, case
+                        assert on_stream == stream, row
+                        assert exp is None or is_expandable == exp, row
 
 
 def test_device_graph_rlab_stream_error_cleared(monkeypatch):
