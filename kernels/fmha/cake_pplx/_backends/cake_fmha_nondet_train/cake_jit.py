@@ -30,17 +30,18 @@ exporter from the rendered binding; ``library`` is the program identity
 literal table (the exporter and the manifest checker read it with
 ``ast.literal_eval``).
 
-The stages, in launch order: ``bwd_pre`` (``dPsum = rowsum(O * dO)``,
-``LSE * log2(e)`` and the cleared FP32 dQ accumulator), ``bwd_main`` (per key
-block: S, P, dP and dS against every query block, dK and dV stored once, the
-dQ tiles added into the FP32 accumulator by bulk reductions) and ``bwd_post``
-(``dQ = bf16(acc * softmax_scale)`` in the layout of Q).  The dQ tiles of the
+The stages of the three-kernel routes, in launch order: ``bwd_pre``
+(``dPsum = rowsum(O * dO)``, ``LSE * log2(e)`` and the cleared FP32 dQ
+accumulator), ``bwd_main`` (per key block: S, P, dP and dS against every
+query block, dK and dV stored once, the dQ tiles added into the FP32
+accumulator by bulk reductions) and ``bwd_post`` (``dQ = bf16(acc *
+softmax_scale)`` in the layout of Q).  The dQ tiles of the
 key blocks of one head reach the accumulator in scheduling order, so dQ is
 not bitwise reproducible run to run; dK, dV and the preprocess outputs have
 one fixed order.  Every launch is a plain stream-ordered launch: nothing
-cooperative, no PDL.  Every kernel runs on the grid ``(S / 128, H, B)``: S is
-the query length for ``bwd_pre`` and ``bwd_post`` and the key length for
-``bwd_main``.
+cooperative, no PDL.  Each of these kernels runs on the grid
+``(S / 128, H, B)``: S is the query length for ``bwd_pre`` and ``bwd_post``
+and the key length for ``bwd_main``.
 
 The pair route (head dimension 128, a key length that is a multiple of 256, at
 least as many queries as keys, and ``B * H`` and the key length in a region of
@@ -53,6 +54,18 @@ read the pair-row order as the tile order.  :func:`variant` picks the route of
 a call.  Every record ships for the three architectures; where no region
 routes a call (``sm_100a`` with the mask) the pair build ships and no call
 takes it.
+
+The one-launch route (head dimension 128 or 64, no mask): one kernel, the
+``bwd_fused`` stage (``bwd_fused`` / ``bwd_fused_hd64``), does the whole
+backward of a small shape.  On the grid ``(Sq / 128 + Skv / 128, H, B)`` the
+first ``Sq / 128`` CTAs of a (head, batch) are Q-owners, each the dq of one
+query block, and the others are KV-owners, each dk and dv of one key block;
+the kernel makes ``LSE * log2(e)`` and ``dPsum`` itself, needs no workspace
+and writes dq, dk and dv once each in one fixed order.  ``FUSED_OF`` names its
+record per (head dimension, causal) and :func:`fused_record` picks the
+one-launch route for a call inside ``FUSED_REGION``; every other call takes
+the route of :func:`variant`.  No ``RECORD_OF`` variant and no host sequence
+names a ``bwd_fused`` record.
 """
 
 from __future__ import annotations
@@ -68,8 +81,9 @@ PACKAGE = "cake_pplx._backends.cake_fmha_nondet_train"
 LIBRARY_PREFIX = "cake_fmha_train"
 MANIFEST = "build.json"
 
-# The stages of one backward call, in launch order.
-STAGES = ("bwd_pre", "bwd_main", "bwd_post")
+# The stages: the three of one three-kernel backward call, in launch order,
+# then the one-launch backward.
+STAGES = ("bwd_pre", "bwd_main", "bwd_post", "bwd_fused")
 
 MODULES: dict[str, dict[str, Any]] = {
     "bwd_pre": {
@@ -237,6 +251,36 @@ MODULES: dict[str, dict[str, Any]] = {
         "library": "cake_fmha_train_1a125639d68d30b57111",
         "stage": "bwd_post",
     },
+    "bwd_fused": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_956bb8b5689c91f2dafe",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 199168,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_956bb8b5689c91f2dafe",
+        "stage": "bwd_fused",
+    },
+    "bwd_fused_hd64": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [["buffer", "dQ"], ["buffer", "LSE"], ["buffer", "O_gmem"], ["buffer", "dO_gmem"], ["buffer", "Q"], ["buffer", "K"], ["buffer", "V"], ["buffer", "dO"], ["buffer", "dK"], ["buffer", "dV"], ["parameter", "seqlen_q"], ["parameter", "seqlen_kv"], ["parameter", "softmax_scale"], ["parameter", "softmax_scale_log2"], ["parameter", "num_m_blocks"], ["parameter", "num_n_blocks"], ["parameter", "num_heads"], ["grid", "grid_x"], ["grid", "grid_y"], ["grid", "grid_z"]],
+        "ffi_entry": "run",
+        "kernel_symbol": "kernel_cake_fmha_train_535529048441929389ae",
+        "launch": {
+            "block": (512, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 117248,
+            "use_pdl": False,
+        },
+        "library": "cake_fmha_train_535529048441929389ae",
+        "stage": "bwd_fused",
+    },
 }
 
 # (head dim, causal, pair) -> the records of the three stages, in launch order.
@@ -288,14 +332,21 @@ SEQUENCES: dict[tuple[int, bool, bool], dict[str, Any]] = {
     },
 }
 
+# (head dim, causal) -> the record of the one-launch backward (the ``bwd_fused``
+# stage).  Non-causal only: the kernel has no mask.
+FUSED_OF: dict[tuple[int, bool], str] = {(128, False): "bwd_fused", (64, False): "bwd_fused_hd64"}
+
 
 def grid(stage: str, batch: int, heads: int, seqlen_q: int, seqlen_kv: int) -> tuple[int, int, int]:
     """The launch grid of ``stage``: one CTA per 128-row block of one (head,
     batch); query blocks for ``bwd_pre`` and ``bwd_post``, key blocks for
-    ``bwd_main``.  The kernels read the head from ``blockIdx.y`` and the batch
-    from ``blockIdx.z``."""
+    ``bwd_main``, and for ``bwd_fused`` the query blocks (the Q-owners) then
+    the key blocks (the KV-owners).  The kernels read the head from
+    ``blockIdx.y`` and the batch from ``blockIdx.z``."""
     if stage not in STAGES:
         raise ValueError(f"unknown stage {stage!r}; the stages are {list(STAGES)}")
+    if stage == "bwd_fused":
+        return (seqlen_q // BLOCK + seqlen_kv // BLOCK, heads, batch)
     rows = seqlen_kv if stage == "bwd_main" else seqlen_q
     return (rows // BLOCK, heads, batch)
 
@@ -342,3 +393,43 @@ def variant(
         if low <= count and (high is None or count <= high) and seqlen_kv >= length:
             return (D, causal, True)
     return (D, causal, False)
+
+
+# (architecture, head dim) -> the region of the one-launch route there, or
+# None (no call takes it): (max_ctas, s_max, skv_any, skv_per_sq).  A call
+# without the mask is inside when ``B * H * (Sq / 128 + Skv / 128) <=
+# max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <= s_max`` and
+# ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq`` (:func:`fused_record`).
+# Each entry is the measured region of its architecture and head dimension,
+# where the one-launch route measured faster than the three-kernel routes.
+FUSED_REGION: dict[tuple[str, int], tuple[int, int, int, int] | None] = {
+    ("sm_100a", 128): (152, 2048, 512, 1),
+    ("sm_100a", 64): (152, 2048, 512, 2),
+    ("sm_103a", 128): (152, 2048, 512, 1),
+    ("sm_103a", 64): (204, 2048, 256, 0),
+    ("sm_107a", 128): (256, 2048, 512, 0),
+    ("sm_107a", 64): (212, 2048, 512, 2),
+}
+
+
+def fused_record(arch: str, B: int, H: int, Sq: int, Skv: int, D: int, causal: bool) -> str | None:
+    """The ``bwd_fused`` record of a call on ``arch`` (one of ``ARCHES``), or
+    None: the call then takes the route of :func:`variant`.  The record is
+    ``FUSED_OF[(D, causal)]`` when ``FUSED_OF`` has one (no mask), the
+    region ``FUSED_REGION[(arch, D)]`` is not None and, with ``(max_ctas,
+    s_max, skv_any, skv_per_sq)`` its bounds, ``B * H * (Sq // BLOCK + Skv //
+    BLOCK) <= max_ctas`` (the CTAs of the one-launch grid), ``max(Sq, Skv) <=
+    s_max`` and ``Skv <= skv_any`` or ``Skv <= skv_per_sq * Sq``.  Reads the
+    shapes and the architecture only."""
+    record = FUSED_OF.get((D, bool(causal)))
+    if record is None:
+        return None
+    region = FUSED_REGION.get((arch, D))
+    if region is None:
+        return None
+    max_ctas, s_max, skv_any, skv_per_sq = region
+    if B * H * (Sq // BLOCK + Skv // BLOCK) > max_ctas or max(Sq, Skv) > s_max:
+        return None
+    if Skv <= skv_any or Skv <= skv_per_sq * Sq:
+        return record
+    return None
