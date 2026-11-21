@@ -48,6 +48,15 @@ unweighted output (``y_route``), the gradient of ``x`` through that route (``dx_
 
 Each routed expert's rows are given in the kernel's schedule order (a padded segment: ``-1`` rows are padding), since
 the MX recipe's blocks along the rows and the macrobatches follow that order.
+
+The router weight before the down projection (``weight_before_down``, the package's
+``router_weight_position="before_down"``): a token's output is ``y = S(x) + sum_k E'_{e_k}(x)`` with
+``E'(x) = BF16(s * a) Wd^T``, ``a`` the SwiGLU activation: the routed experts' outputs (``y_route``) carry their
+scores and are summed unweighted, ``dY`` reaches the down projection unscaled, the activation's gradient is
+``s * dh`` (``dh`` the gradient of the down projection's input) and ``d_scores = (dh * a).sum(-1)``, defined at a zero
+score.  The naive implementation forms ``s * a`` as PyTorch does, the FP32 score promoting the BF16 activation and the
+product cast to BF16 once, and takes ``(dh * a).sum(-1)`` of the two BF16 tensors in BF16 (the oracle all in
+float64); it has no MXFP8 form and no kernel-shaped score alternative.
 """
 
 from __future__ import annotations
@@ -130,9 +139,14 @@ def _clamped(gate, up, limit):
     return _Clamp.apply(gate, None, limit), _Clamp.apply(up, -limit, limit)
 
 
-def mlp(x, weights, dy, limit, dtype):
+def mlp(x, weights, dy, limit, dtype, route_weight=None):
     """One SwiGLU MLP and its backward in ``dtype``, by autograd: ``y``, ``dx``, ``d_gate``, ``d_up``, ``dh`` (the
-    gradient of the activation), the activation and the three weight gradients."""
+    gradient of the down projection's input), ``hidden`` (that input) and the three weight gradients.
+
+    ``route_weight`` (``[rows]``; FP32 in the naive implementation, float64 in the oracle) multiplies the activation
+    ``a`` before the down projection: ``hidden = (a * w).to(dtype)``, the FP32 weight promoting the BF16 ``a`` and one
+    cast; autograd gives ``a`` the gradient ``w * dh`` cast once.  Then also ``a`` and the route weight's gradient
+    ``d_route = (dh * a).sum(-1)`` in ``dtype``."""
     with torch.enable_grad(), cublaslt():
         x = x.to(dtype).detach().requires_grad_()
         w = [t.to(dtype).detach().requires_grad_() for t in weights]
@@ -142,17 +156,25 @@ def mlp(x, weights, dy, limit, dtype):
         gc, uc = _clamped(gate, up, limit)
         hidden = F.silu(gc) * uc
         hidden.retain_grad()
-        y = hidden @ w[2].T
+        down_in = hidden
+        if route_weight is not None:
+            down_in = (hidden * route_weight.detach()[:, None]).to(dtype)
+            down_in.retain_grad()
+        y = down_in @ w[2].T
         y.backward(dy.to(dtype))
-    return dict(
+    out = dict(
         y=y.detach(),
         dx=x.grad,
         d_gate=gate.grad,
         d_up=up.grad,
-        dh=hidden.grad,
-        hidden=hidden.detach(),
+        dh=down_in.grad,
+        hidden=down_in.detach(),
         dw=[t.grad for t in w],
     )
+    if route_weight is not None:
+        out["a"] = hidden.detach()
+        out["d_route"] = (down_in.grad * out["a"]).sum(-1)
+    return out
 
 
 @dataclass
@@ -198,6 +220,7 @@ def routed(
     *,
     mx=None,
     macro=None,
+    weight_before_down=False,
 ):
     """The routed experts on per-route inputs (``x_routes``, ``dy_routes``: ``[routes, hidden]`` BF16, the source row
     of each route; ``s_routes``: ``[routes]`` FP32), in ``dtype`` (:data:`ORACLE` or :data:`NAIVE`).
@@ -208,14 +231,20 @@ def routed(
     ``dw`` (three ``[experts, ...]``) and, with ``macro``, the kernel-shaped alternatives ``alt_dw`` and
     ``alt_d_scores`` (:data:`ALTERNATIVE`; naive only).  With ``mx`` also the per-row values the kernel stores as
     E4M3 codes, per segment (``mx_rows``: ``(offset, routes, dict(gate=, up=, hidden=))``, the values before
-    quantization; :func:`slab` places them)."""
+    quantization; :func:`slab` places them).
+
+    ``weight_before_down``: the score multiplies the activation before the down projection (module docstring):
+    ``y_route`` is the weighted expert output, ``d_scores`` is ``(dh * a).sum(-1)`` and there is no ``alt_d_scores``;
+    BF16 routed weights only."""
+    if weight_before_down and mx is not None:
+        raise ValueError("The router weight before the down projection has no MXFP8 form")
     n, hidden_size = x_routes.shape
     experts = (weights[0] if mx is None else mx["forward"][0][0]).shape[0]
     device = x_routes.device
     y_route = torch.zeros(n, hidden_size, dtype=dtype, device=device)
     dx_route = torch.zeros_like(y_route)
     d_scores = torch.zeros(n, dtype=dtype, device=device)
-    alt_d_scores = torch.zeros_like(d_scores) if dtype == NAIVE else None
+    alt_d_scores = torch.zeros_like(d_scores) if dtype == NAIVE and not weight_before_down else None
     if mx is None:
         shapes = [w.shape for w in weights]
     else:
@@ -242,11 +271,19 @@ def routed(
             x = _rows(routes, x_routes)
             s = _rows(routes, s_routes.float())
             dy = _rows(routes, dy_routes)
-            if dtype == ORACLE:
+            if weight_before_down:
+                dys = dy.to(dtype)
+            elif dtype == ORACLE:
                 dys = dy.double() * s.double()[:, None]
             else:
                 dys = (dy.float() * s[:, None]).bfloat16()
-            if mx is None:
+            if weight_before_down:
+                route_weight = s.double() if dtype == ORACLE else s
+                out = mlp(x, [w[e] for w in weights], dys, limit, dtype, route_weight=route_weight)
+                y, dx, dws = out["y"], out["dx"], out["dw"]
+                hidden_value, dh = out["hidden"], out["dh"]
+                d_gate, d_up, x_t = out["d_gate"], out["d_up"], x.to(dtype)
+            elif mx is None:
                 out = mlp(x, [w[e] for w in weights], dys, limit, dtype)
                 y, dx, dws = out["y"], out["dx"], out["dw"]
                 hidden_value, dh = out["hidden"], out["dh"]
@@ -259,10 +296,15 @@ def routed(
             index = routes[valid].long()
             y_route[index] = y[valid]
             dx_route[index] = dx[valid]
-            # d_scores of the standard form: (dY * y_e).sum(-1), dY the unweighted upstream gradient and y_e the expert's
-            # output as the backward holds it (with MXFP8 routed experts the backward's copy of Wd, _mx_expert).
-            y_e = y if mx is None else extra["y_e"]
-            d_scores[index] = (dy.to(dtype) * y_e.to(dtype)).sum(-1)[valid]
+            if weight_before_down:
+                # The score multiplies a before the down projection: d_scores = (dh * a).sum(-1).
+                d_scores[index] = out["d_route"][valid]
+            else:
+                # d_scores of the standard form: (dY * y_e).sum(-1), dY the unweighted upstream gradient and y_e the
+                # expert's output as the backward holds it (with MXFP8 routed experts the backward's copy of Wd,
+                # _mx_expert).
+                y_e = y if mx is None else extra["y_e"]
+                d_scores[index] = (dy.to(dtype) * y_e.to(dtype)).sum(-1)[valid]
             for dest, grad in zip(dw, dws, strict=True):
                 dest[e] = grad
             if alt_d_scores is not None:
@@ -364,13 +406,16 @@ def shared(x, dy, weights, limit, dtype):
     return mlp(x, weights, dy, limit, dtype)
 
 
-def combine(shared_y, shared_dx, route, scores, dtype):
+def combine(shared_y, shared_dx, route, scores, dtype, *, weight_before_down=False):
     """The layer's ``y`` and ``dx`` from the shared expert's ``y`` / ``dx`` (``[T, hidden]``) and the routed experts'
     per-route values of :func:`routed` (``y_route``, ``dx_route``), with the FP32 ``scores`` ``[T, topk]``: ``y = shared
     + sum_k s_k y_route_k`` (BF16 routed outputs times FP32 scores promote to FP32; the sum is rounded to BF16 once)
-    and ``dx = shared_dx + sum_k dx_route_k`` (BF16)."""
+    and ``dx = shared_dx + sum_k dx_route_k`` (BF16).  With ``weight_before_down`` the routed outputs carry their
+    scores: ``y = shared + sum_k y_route_k``, in the form of ``dx``."""
     t, topk = scores.shape
-    if dtype == ORACLE:
+    if weight_before_down:
+        y = shared_y + route["y_route"].view(t, topk, -1).sum(1)
+    elif dtype == ORACLE:
         y = shared_y + (route["y_route"].view(t, topk, -1) * scores.double()[..., None]).sum(1)
     else:
         y = (shared_y + (route["y_route"].view(t, topk, -1) * scores[..., None]).sum(1)).to(dtype)
@@ -378,7 +423,10 @@ def combine(shared_y, shared_dx, route, scores, dtype):
     return y, dx
 
 
-def layer(x, dy, scores, shared_w, routed_w, segments, limit, dtype, *, sections=None, mx=None, macro=None):
+def layer(
+    x, dy, scores, shared_w, routed_w, segments, limit, dtype, *, sections=None, mx=None, macro=None,
+    weight_before_down=False,
+):  # fmt: skip
     """The whole layer over the tokens of a group: ``x``, ``dy`` ``[T, hidden]``, ``scores`` ``[T, topk]``,
     ``segments`` per routed expert of the group (route index ``t * topk + k``; every route in one segment).  The
     shared expert runs per source rank (``sections``: the token count of each rank, default one rank), so its weight
@@ -389,15 +437,16 @@ def layer(x, dy, scores, shared_w, routed_w, segments, limit, dtype, *, sections
     sections = [t] if sections is None else list(sections)
     r = routed(
         x.repeat_interleave(topk, 0), dy.repeat_interleave(topk, 0), scores.flatten(), segments, routed_w, limit,
-        dtype, mx=mx, macro=macro,
+        dtype, mx=mx, macro=macro, weight_before_down=weight_before_down,
     )  # fmt: skip
     parts, start = [], 0
     for n in sections:
         parts.append(shared(x[start : start + n], dy[start : start + n], shared_w, limit, dtype))
         start += n
     y, dx = combine(
-        torch.cat([p["y"] for p in parts]), torch.cat([p["dx"] for p in parts]), r, scores, dtype
-    )
+        torch.cat([p["y"] for p in parts]), torch.cat([p["dx"] for p in parts]), r, scores, dtype,
+        weight_before_down=weight_before_down,
+    )  # fmt: skip
     out = dict(
         y=y,
         dx=dx,

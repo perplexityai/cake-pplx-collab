@@ -1899,9 +1899,10 @@ out = cake_engram_lookup_det_train_forward(w, s, torch.arange(M, device="cuda"))
 - Routed experts run in BF16, or in MXFP8 with caller-prequantized weights. The shared expert runs in BF16.
 - `swiglu_limit` (a per-call value) selects clamped SwiGLU, `silu(min(gate, L)) * clamp(up, -L, L)`.
 - With `fp32_wgrad=True`, the backward adds every weight gradient into six caller-owned FP32 accumulators.
-- Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, EP group, build and GPU model).
+- `router_weight_position="before_down"` applies each route's FP32 router weight `w` to the SwiGLU activation `a` before the down projection, `h = BF16(w * a)`, and sums the routed outputs unweighted; the router-weight gradient is `dot(dh, a)` (`dh` the gradient of `h`), defined at a zero weight. It runs top-k 6 over 384 routed experts (and top-k 2 on the diagnostic layouts) with clamped SwiGLU, FP32 weight gradients and BF16 routed weights. The default `"after_down"` weights each routed output in the combine.
+- Every output repeats bit for bit from run to run, within the scope in the backend README (same inputs, weights, configuration other than the communication-SM split, precision, router-weight position, EP group, build and GPU model).
 
-**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
+**Architectures.** `sm_100a`, `sm_103a`, `sm_107a`; `router_weight_position="before_down"`: `sm_100a` and `sm_103a`. Minimum CUDA toolkit: 12.8, 12.9 and 13.5. The MXFP8 schedule is 256 x 256 tiles on `sm_100a` / `sm_103a` and 256 x 512 tiles on `sm_107a`.
 
 **Distributed requirements.** The caller passes an initialized `torch.distributed` process group with its CUDA device current. All ranks share one peer-accessible NVLink domain with multicast (PyTorch symmetric memory). EP sizes: 1, 4, 8, 16, 32 and 64. EP1 uses plain tensors.
 
@@ -1911,13 +1912,13 @@ This family has a det module only. The backend package is `cake_pplx._backends.c
 
 | Name | Signature | Returns / notes |
 |---|---|---|
-| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False)` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. |
+| `prepare_mok_bf16` | `(*, ep_size=16, local_experts=16, topk=8, clamped_swiglu=False, fp32_wgrad=False, router_weight_position="after_down")` | An adapter with `prepare`, `prepare_recompute`, `create_workspace`, `build_schedule`, `forward`, `recompute_forward_context` and `backward`. It compiles one BF16 variant at once; call `prepare` / `prepare_recompute` for any other variant before CUDA Graph capture. With `router_weight_position="before_down"`, `recompute_forward_context` takes `router_weights` (the forward's). An unsupported combination raises before any kernel is loaded or launched: `TypeError` for a position that is not a `str`, an `ep_size`, `local_experts` or `topk` that is not an `int` (a `bool` included) and a `clamped_swiglu` or `fp32_wgrad` that is not a `bool`, in both positions; `ValueError` for every other value. |
 | `create_mok_bf16_workspace` | `(*, group, device, num_local_tokens, hidden_size, topk, source_capacity=None, fwd_num_comm_sms="auto", bwd_num_comm_sms="auto", minibatch_size=4096, macrobatch_size=32768, schedule_capacity_multiplier=3/16, precision="bf16", imbalance_comm_sms="auto", imbalance_threshold="auto")` | Collective. Returns `(config, workspace)`. Call it outside CUDA Graph capture. |
 | `quantize_mok_mxfp8_weights` | `(gate, up, down)` | `(forward_weights, backward_weights)` of BF16 routed weights `gate`/`up [E_local, I, H]`, `down [E_local, H, I]` in the MXFP8 recipe. PyTorch operations; requantize after every weight update. |
 
-Other public names: `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOLDS`, `IMBALANCE_THRESHOLD`, `IMBALANCE_THRESHOLDS`, `MOK_PRECISIONS`, `resolve_comm_sms`, `resolve_imbalance_comm_sms`, `resolve_imbalance_threshold` (loaded from the backend on first access).
+Other public names: `COMM_SMS`, `IMBALANCE_COMM_SMS`, `IMBALANCE_DEVICE_THRESHOLDS`, `IMBALANCE_THRESHOLD`, `IMBALANCE_THRESHOLDS`, `MOK_PRECISIONS`, `ROUTER_WEIGHT_POSITIONS`, `resolve_comm_sms`, `resolve_imbalance_comm_sms`, `resolve_imbalance_threshold` (loaded from the backend on first access).
 
-**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
+**Contract.** Scheduler layouts `(EP, local experts)`: `(1, 4)`, `(4, 4)`, `(4, 64)`, `(8, 32)`, `(16, 16)`, `(32, 8)`, `(64, 4)`, `(8, 36)`, `(32, 9)`; top-k 2 or 8. With `router_weight_position="before_down"`: `(4, 96)`, `(8, 48)`, `(16, 24)`, `(32, 12)`, `(64, 6)` at top-k 6, `(1, 4)` and `(4, 4)` at top-k 2; `clamped_swiglu=True` and a `swiglu_limit` on every call, `fp32_wgrad=True`, BF16 routed weights, router weights `>= 0`. A `schedule_capacity_multiplier` of at least `ceil((min(topk, E) * T * EP + E * 255) / (T * topk)) / EP` (`E` local experts, `T` the workspace's physical source rows, at least the largest rank's source rows or `source_capacity`) holds every routing; no upper bound is enforced. Every rank passes the same multiplier, so compute it from a row bound all ranks agree on, such as `source_capacity`: the bound decreases as `T` grows. Hidden and intermediate widths are multiples of 256 (MXFP8: hidden a multiple of 512). Source counts may differ across ranks, including zero. Communication-SM counts are positive and even. The locality-domain (`_domain`) builds are not shipped. The backend README (`kernels/mok/cake_pplx/_backends/cake_mok_bf16/README.md`) holds the full contract, the memory and recompute rules and the measured communication-SM tables.
 
 **Options and environment.** The options are the keywords of `prepare_mok_bf16` and `create_mok_bf16_workspace` above. The facade reads no family-specific environment variable; the JIT variables in the README apply.
 
@@ -1947,6 +1948,8 @@ grads = backend.backward(config, workspace, schedule, context, dy, x, scores, *w
 - Prepare and warm up before CUDA Graph capture. Pass the matching context and schedule to `backward`.
 - The MXFP8 forward always saves its context and rejects `save_context=False`.
 - Schedule capacity must hold every padded route; an overflow traps.
+- A context serves one `backward`: when the routed rows exceed one macrobatch, `backward` replays the later macrobatches into the context's routed ring tensors, in either router-weight position. Do not read a context after its `backward`; call `recompute_forward_context` again before another `backward`.
+- `router_weight_position="before_down"` has no `sm_107a` build, no plain SwiGLU, no MXFP8 routed weights and no BF16 weight-gradient accumulation; the package ships no autograd wrapper (a checkpointing caller wraps forward, recompute and backward in its own `torch.autograd.Function`).
 
 ---
 
