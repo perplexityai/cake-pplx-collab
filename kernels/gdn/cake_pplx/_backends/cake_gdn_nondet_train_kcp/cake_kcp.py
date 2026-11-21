@@ -2808,6 +2808,7 @@ class _Tables:
         if t is None:
             # one asynchronous pinned copy (no synchronizing call; cake_kcp_plan.upload_tables)
             t = cake_kcp_plan.upload_tables({"t": (k[4], dtype, None)}, device)["t"]
+            cake_kcp_plan._note_table_write(self.ctx, (t,))
             cache[k] = t
         return t
 
@@ -2997,6 +2998,7 @@ def _identity_tile(
         t = _alloc((int(n),), dtype, device)
         t.view(D, D).copy_(torch.eye(D, dtype=dtype, device=device))
         if isinstance(caches, dict):
+            cake_kcp_plan._note_table_write(ctx, (t,))
             caches[key] = t
     return t
 
@@ -5648,6 +5650,7 @@ def _graph_capture(
     entry.arena = _arena_sig(call.ws)
     entry.seen += 1
     GRAPH_STATS["capture"] += 1
+    cake_kcp_plan._seal_table_writes(call.ctx)
     call.backend.end_call(call)
     return result
 
@@ -5798,6 +5801,8 @@ def _prepare(
         packed_grads=packed_grads,
     )
     call.scratch["workspace"] = "per_call" if per_call else "caller"
+    # the context's tables written on another caller stream: waited for before this call's first launch
+    cake_kcp_plan._use_context_tables(ctx, device)
     backend.begin_call(call)
     return call, batched
 
@@ -6113,6 +6118,7 @@ def _fwd_entry(
     _record("fwd", call)
     if opts.graph != "off":
         _graph_eager("fwd", entry)
+    cake_kcp_plan._seal_table_writes(call.ctx)
     call.backend.end_call(call)
     return _ranked(out, batched), _with_stamped_kept(saved)
 
@@ -6731,6 +6737,7 @@ def _bwd_entry(
     _record("bwd", call)
     if opts.graph != "off":
         _graph_eager("bwd", entry)
+    cake_kcp_plan._seal_table_writes(call.ctx)
     call.backend.end_call(call)
     return tuple(_ranked(t, batched) for t in grads)
 
