@@ -21,9 +21,11 @@ The forward runs the program of its architecture's band of rows per SM:
 of ``FORWARD_BANDS`` where ``x`` and ``z`` hold packed rows (row ``n`` at
 element ``128 n``, fewer than ``PACKED_ROWS`` rows), else of
 ``STRIDED_FORWARD_BANDS``.  The plain forward launches a grid of independent
-CTAs, one 64-thread CTA per block of 8 rows.  Packed rows up to 36 rows per SM
-on SM100 and SM103 and 65 on SM107 run the tiny forward, one 128-thread CTA
-per block of 8 rows.  Other layouts up to 12 rows per SM on SM100 and SM103
+CTAs, one 64-thread CTA per block of 8 rows.  Packed rows up to 4 rows per SM
+on SM100 and 12 on SM103 run the 32-lane tiny forward, one 128-thread CTA per
+block of 4 rows; packed rows from there up to 36 rows per SM on SM100 and
+SM103, and up to 65 on SM107, run the tiny forward, one 128-thread CTA per
+block of 8 rows.  Other layouts up to 12 rows per SM on SM100 and SM103
 (59 on SM107) run the short forward, one 256-thread CTA per block of 16 rows
 (with 64 SMs or more on SM100 and SM103, as with 148 or 152, fewer CTAs than
 the SMs less 16; on SM107 with 205 SMs or more, as with 212 or 216, at most 4
@@ -34,10 +36,11 @@ of 16 rows below 8192 rows per SM and from there whole waves of 6 CTAs per SM
 that each walk at most 2 blocks; the mid forward launches whole waves of 6
 CTAs per SM that each walk at most 2 blocks of 16 rows; the long and the
 extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
-6 blocks of 32 rows.  Their bands past the tiny or the short forward's: packed
-rows on SM100 run the pipelined forward up to 85 rows per SM, the mid forward
-up to 160, the long forward up to 400, the extra-long forward up to 520, the
-pipelined forward up to 6500 and the mid forward past it; on SM103 the mid
+6 blocks of 32 rows.  Their bands past the tiny forwards' or the short
+forward's: packed rows on SM100 run the pipelined forward up to 85 rows per
+SM, the mid forward up to 160, the long forward up to 400, the extra-long
+forward up to 520, the pipelined forward up to 6500 and the mid forward past
+it; on SM103 the mid
 forward up to 240, the extra-long forward up to 600, the pipelined forward up
 to 6000, the mid forward up to 8192 and the pipelined forward past it; on
 SM107 the mid forward up to 175, the extra-long forward up to 280 and the
@@ -212,9 +215,10 @@ bound, in each of their bands
 at its first and last rows per SM and at the deterministic package's probes
 the band holds: 85 blocks of 16 rows per slot (the most below 8192 rows per
 SM, where a CTA runs one block), 86 (the fewest whole waves from there) and
-344.  The forwards of the first band, the tiny forward of packed rows (at 1,
-12, 31 and 36 rows per SM on SM100 and SM103, 1, 10, 30,
-43 and 65 on SM107) and
+344.  The forwards of the first bands, the 32-lane tiny forward of packed rows
+(at 1 and 4 rows per SM on SM100, 1 and 12 on SM103), the tiny forward of packed
+rows (at 5, 12, 24, 25, 31 and 36 rows per SM on SM100, 13, 24, 32, 33 and 36
+on SM103, 1, 10, 30, 43 and 65 on SM107) and
 the short forward of the strided layout (at 1 and 12 rows per SM on SM100 and
 SM103, at 1, 10, 30 and 59 on SM107), each up to the end of its band, keep
 their speed beside the one-thread kernel, start beside the all-SM kernel with
@@ -461,8 +465,8 @@ PROPORTIONAL_SIDES = ((1, 128), (16, 640), (32, 640))
 PROPORTIONAL_BLOCKS_PER_CTA = (16, 32, 160)
 PROPORTIONAL_RUNS = 7
 # The margin for timing noise of busy / alone over N / (N - k) plus one row
-# block's share, and of the tiny, the short forward's and the short backward's
-# busy medians over those of the calls they are compared with.
+# block's share, and of the tiny forwards', the short forward's and the short
+# backward's busy medians over those of the calls they are compared with.
 PROPORTIONAL_SLACK = 0.02
 
 _SPIN_KERNEL = "cake_rmsnorm_silu_gate_train_stall_spin"
@@ -1597,19 +1601,28 @@ def test_pipelined_forward_slows_in_proportion_to_the_sms_held(
     _forward_slows_in_proportion(role, edge, nth, ctas, threads, layout, probe)
 
 
-# The forwards of the first forward band: the tiny forward (packed rows) and
-# the short forward (other layouts, here ``z`` the gate columns of a wider
-# projection).  The rows per SM of their token counts on each architecture
-# (one row per SM, rows between, and the end of the band, the largest, up to
-# which the architecture runs the module: the tiny forward 36 on sm_100a and
-# sm_103a and 65 on sm_107a; the short forward 12 on sm_100a and sm_103a
-# and 59 on sm_107a), and the side kernels of the item 1 test beside
-# them, the issue's three with the default carveout and 16 CTAs of 1024
-# threads with the max-shared carveout.
+# The forwards of the first forward bands: the tiny forwards (packed rows:
+# on sm_100a and sm_103a the 32-lane tiny forward, then the tiny forward; on
+# sm_107a the tiny forward) and the short forward (other layouts, here ``z``
+# the gate columns of a wider projection).  The rows per SM of their token
+# counts on each architecture (rows in the band, its first ones past the
+# previous band's end, and the end of the band, the largest, up to which the
+# architecture runs the module: the 32-lane tiny forward 4 on sm_100a and 12
+# on sm_103a; the tiny forward 36 on sm_100a and sm_103a, past the deterministic
+# package's cut of its own tiny forward, 24 on sm_100a and 32 on sm_103a, up
+# to which that package runs its 32-lane tiny forward (probed at that cut and
+# past it), and 65 on sm_107a; the short forward 12 on sm_100a and sm_103a
+# and 59 on sm_107a; every probe in its band on 148 and 152 SMs), and the
+# side kernels of the item 1 test beside them, the issue's three with the
+# default carveout and 16 CTAs of 1024 threads with the max-shared carveout.
 FIRST_FORWARD_ROWS_PER_SM = {
+    "fwd_l32_tiny": {
+        "sm_100a": (1, 4),
+        "sm_103a": (1, 12),
+    },
     "fwd_tiny": {
-        "sm_100a": (1, 12, 31, 36),
-        "sm_103a": (1, 12, 31, 36),
+        "sm_100a": (5, 12, 24, 25, 31, 36),
+        "sm_103a": (13, 24, 32, 33, 36),
         "sm_107a": (1, 10, 30, 43, 65),
     },
     "fwd_short": {
@@ -1639,22 +1652,25 @@ def _first_forward(role: str, rows_per_sm: int) -> tuple[int, str, str]:
     """``(T, layout, module)``: the most tokens ``T`` whose ``T * H`` rows stay
     within ``rows_per_sm`` rows per SM, one of the architecture's
     ``FIRST_FORWARD_ROWS_PER_SM`` of ``role`` (the largest the end of its
-    band), at least one token of packed rows for the tiny forward and two of
-    the strided layout for the short forward (a single token's rows are
-    packed whatever the layout), the layout and ``role``'s module, where the
-    architecture routes it (skips elsewhere)."""
+    band, the role's one band of the layout), at least one token of packed
+    rows for the tiny forwards and two of the strided layout for the short
+    forward (a single token's rows are packed whatever the layout), the
+    layout and ``role``'s module, where the architecture routes it (skips
+    elsewhere)."""
     device_index = torch.cuda.current_device()
     arch = loader.device_arch(device_index)
     name = loader.ROUTES[arch].get(role)
     if name is None:
         pytest.skip(f"{arch} routes no {role} module")
-    probes = FIRST_FORWARD_ROWS_PER_SM[role][arch]
+    probes = FIRST_FORWARD_ROWS_PER_SM[role].get(arch, ())
     if rows_per_sm not in probes:
         pytest.skip(f"{arch} does not probe {rows_per_sm} rows per SM of {role}")
     sms = torch.cuda.get_device_properties(device_index).multi_processor_count
-    layout = "packed" if role == "fwd_tiny" else "strided"
-    (last, first_role) = _forward_bands(layout)[arch][0]
-    assert first_role == role and last == max(probes), (arch, role)
+    layout = "packed" if role.endswith("_tiny") else "strided"
+    bands = _forward_bands(layout)[arch]
+    assert sum(band == role for _last, band in bands) == 1, (arch, role, bands)
+    first, last = _forward_band(arch, role, 1, layout)
+    assert last == max(probes) and first <= min(probes), (arch, role, first, last)
     tokens = max(1 if layout == "packed" else 2, rows_per_sm * sms // H)
     packed = layout == "packed"
     assert loader.module_for_rows(arch, "fwd", tokens * H, sms, packed=packed) == name
