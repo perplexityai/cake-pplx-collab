@@ -110,9 +110,8 @@ first eight hex digits of the program name.
 | `bwd_h256` | (87, 2048] | a385ae16 | plain | tail_div 4, max_halving 5 | 72138dce (chain) |
 | `bwd_h256` | (2048, 5120] | af005462 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
 | `bwd_h256` | (5120, 12288] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (12288, 40960] | af005462 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (40960, 80896] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (80896, 1572864] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
+| `bwd_h256` | (12288, 262144] | 6bdbfe61 | plain | row-strided slots, 8 SMs left out | affa1b95 (chain, column-split) |
+| `bwd_h256` | (262144, 1572864] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
 | `bwd_h256` | (1572864, inf) | a385ae16 | plain | tail_div 4, max_halving 5 | 72138dce (chain) |
 | `bwd_h4096` | (0, 203] | 4822793e | column task | - | - |
 | `bwd_h4096` | (203, 256] | 3e644ea1 | plain | tail_div 12, max_halving 5 | 5d75ea5f (tree) |
@@ -202,11 +201,8 @@ first eight hex digits of the program name.
 | `bwd_h2048` | (55296, inf) | 302f64db | plain | tail_div 12, max_halving 5 | d0960be9 (tree) |
 | `bwd_h256` | (0, 1680] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
 | `bwd_h256` | (1680, 2048] | a385ae16 | plain | tail_div 4, max_halving 5 | 72138dce (chain) |
-| `bwd_h256` | (2048, 5120] | af005462 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (5120, 12288] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (12288, 40960] | af005462 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (40960, 99840] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
-| `bwd_h256` | (99840, 720896] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
+| `bwd_h256` | (2048, 262144] | 6bdbfe61 | plain | row-strided slots, 8 SMs left out | affa1b95 (chain, column-split) |
+| `bwd_h256` | (262144, 720896] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
 | `bwd_h256` | (720896, 1572864] | a385ae16 | plain | tail_div 4, max_halving 5 | affa1b95 (chain, column-split) |
 | `bwd_h256` | (1572864, inf) | a385ae16 | plain | tail_div 4, max_halving 5 | 72138dce (chain) |
 | `bwd_h4096` | (0, 512] | 5efbf78a | column task | - | - |

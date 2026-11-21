@@ -59,7 +59,7 @@ ROWS = (
     24576, 24577, 32768, 32769, 36352, 36353, 36544, 36545, 36864, 36865, 40448, 40449, 40960, 40961, 42496, 42497,
     44032, 44033, 45056, 45057, 48640, 48641, 50176, 50177, 50688, 50689, 51200, 51201, 52736, 52737, 55296, 55297,
     58880, 58881, 65536, 65537, 70656, 70657, 80896, 80897, 81920, 81921, 99840, 99841, 114688, 114689, 139264, 139265,
-    161792, 161793, 214016, 214017, 720896, 720897, 1179648, 1179649, 1572864, 1572865,
+    161792, 161793, 214016, 214017, 262144, 262145, 720896, 720897, 1179648, 1179649, 1572864, 1572865,
 )  # fmt: skip
 # The row count standing in for an unbounded window's upper edge.
 OPEN_WINDOW_ROWS = 65536
@@ -370,38 +370,36 @@ def test_rows_cover_every_backward_window_edge() -> None:
                 assert edge in ROWS and edge + 1 in ROWS, (arch, route, edge)
 
 
-# The H = 256 backward route: per sm_100a / sm_103a window the faster of the four-CTA pipeline (``pd4``) and the
-# five-CTA ring at issue distance three without the L2 hint (``a3``), both at ``tail_div=4``, in two sessions per
-# architecture (BF16 and FP32 weight alike).  The ring also serves every row count above 40960 (its windows split at
-# 80896 rows on sm_100a, at 99840 and 720896 rows on sm_103a, and at 1572864 rows, where the dw reduce geometry
-# changes).  On sm_103a the ring also runs the smallest row counts (to 1680 rows, then to 2048 rows with another
-# reduce); on sm_100a the column-task program ``fcwl`` runs them (to 87 rows; one CTA sums each column of dw over
-# every row, so dw does not depend on the SM count); sm_107a runs the ring at every row count (split at 1572864).
+# The H = 256 backward route: the one-row-per-stage ``rpw`` program (``rpw2``: four row warps of two rows each, five
+# CTAs per SM, eight SMs left out) from 12288 to 262144 rows on sm_100a and from 2048 to 262144 rows on sm_103a; the
+# five-CTA ring at issue distance three without the L2 hint (``a3``, ``tail_div=4``) to 2048 rows and above 262144 rows
+# (its windows split at 720896 rows on sm_103a and at 1572864 rows, where the dw reduce geometry changes), and on
+# sm_100a also from 5120 to 12288 rows, where the four-CTA pipeline (``pd4``, ``tail_div=4``) runs from 2048 to 5120
+# rows (each the faster of the two there, in two sessions), BF16 and FP32 weight alike.  On sm_103a the ring also runs
+# the smallest row counts (to 1680 rows, then to 2048 rows with another reduce); on sm_100a the column-task program
+# ``fcwl`` runs them (to 87 rows; one CTA sums each column of dw over every row, so dw does not depend on the SM count);
+# sm_107a runs the ring at every row count (split at 1572864).
 H256_BWD_PROGRAMS = {
     "pd4": "rmsnorm_train_bwd_h256_t128x4_pd4_k_s32_split_pts_cl_td4",
     "a3": "rmsnorm_train_bwd_h256_t128x5_cpa8a3nhkc8_k_s32_split_pts_cl_td4_cs",
     "fcwl": "rmsnorm_train_bwd_atomic_h256_i8r8d1b2_c8_fx_wl_l2evict_last",
+    "rpw2": "rmsnorm_train_bwd_pipe_h256_s3_k5_r2_l2none",
 }
-H256_BWD_RING = (
-    (2048, 5120, "pd4"),
-    (5120, 12288, "a3"),
-    (12288, 40960, "pd4"),
-)
 H256_BWD_SPLIT = {
     "sm_100a": (
         (0, 87, "fcwl"),
         (87, 2048, "a3"),
-        *H256_BWD_RING,
-        (40960, 80896, "a3"),
-        (80896, 1572864, "a3"),
+        (2048, 5120, "pd4"),
+        (5120, 12288, "a3"),
+        (12288, 262144, "rpw2"),
+        (262144, 1572864, "a3"),
         (1572864, None, "a3"),
     ),
     "sm_103a": (
         (0, 1680, "a3"),
         (1680, 2048, "a3"),
-        *H256_BWD_RING,
-        (40960, 99840, "a3"),
-        (99840, 720896, "a3"),
+        (2048, 262144, "rpw2"),
+        (262144, 720896, "a3"),
         (720896, 1572864, "a3"),
         (1572864, None, "a3"),
     ),
