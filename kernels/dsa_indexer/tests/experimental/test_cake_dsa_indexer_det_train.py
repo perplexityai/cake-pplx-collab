@@ -358,7 +358,7 @@ def test_registry_records_are_well_formed():
         merge_rank_keys = sorted(k for k in keys if k.startswith("merge:rank:"))
         assert scan_keys and finalize_keys and MERGE_KEY in keys, arch
         cb_keys = sorted(k for k in keys if k.startswith("scan_blocks:"))
-        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a)
+        # the candidate-restricted top-k: the one key ``cand`` (sm_100a / sm_103a / sm_107a)
         cand_keys = sorted(k for k in keys if k == "cand")
         assert set(keys) == set(scan_keys) | set(finalize_keys) | set(rank_keys) | set(
             merge_rank_keys
@@ -5894,17 +5894,26 @@ def test_ticket_arg_arches_name_exactly_the_drawing_programs_of_their_architectu
     ``:lsf`` copy reads it only as the copy of a program that does (sm_107a's l6 ticket programs, whose copies keep the
     segment order in the workspace's tail), and every other scan program of an architecture that has a reader reads
     it -- so the host, which decides by the record alone (``reads_ticket_word``), never hands a drawing program the
-    placeholder."""
+    placeholder.  A candidate-block program (role ``scan_blocks``) reads it exactly where the scan program of its
+    unit does (on sm_107a all of them)."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     for name, record in cake_jit.PROGRAMS.items():
         reads = record.get("ticket_arg_arches")
         if reads is not None:
-            assert record["role"] == "scan" and reads, name
+            assert record["role"] in ("scan", "scan_blocks") and reads, name
             assert list(reads) == [a for a in record["arches"] if a in reads], name
     readers = {}
     for arch, keys in cake_jit.PROGRAM_KEYS.items():
         for key, name in keys.items():
+            if key.startswith("scan_blocks:"):
+                twin = keys["scan:" + key.split(":", 1)[1]]
+                reads = cake_backend.reads_ticket_word(name, arch)
+                assert reads == (
+                    arch in cake_jit.PROGRAMS[name].get("ticket_arg_arches", ())
+                ), (arch, key)
+                assert reads == cake_backend.reads_ticket_word(twin, arch), (arch, key)
+                continue
             if not key.startswith("scan:"):
                 continue
             # the static kinds of the key's form (on sm_107a every FP8 kind is static)

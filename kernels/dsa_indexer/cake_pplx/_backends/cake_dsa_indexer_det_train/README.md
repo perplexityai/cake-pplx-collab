@@ -264,7 +264,7 @@ pattern terminate.
 ## Candidate blocks
 
 `cake_dsa_indexer_det_train_topk_with_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2047`, default 512; `sm_100a` and `sm_103a`) returns
+`1 <= top_k <= 2047`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) returns
 `(indices, scores, candidate_blocks)`.  `indices` and `scores` are those of
 `cake_dsa_indexer_det_train_topk` with the same `top_k`, bit for bit.
 `candidate_blocks` is int32 `[T, 2048]`: block `b` holds the segment-local
@@ -278,12 +278,15 @@ a `-1` tail (all `-1` when `n == 0`), and every id of `indices` lies in a
 block of its row.
 
 The call runs the `scan_blocks` program of its unit (role `scan_blocks`, keys
-`scan_blocks:<narrow|l6>:u1:s0:f<fit>`): the scan program of the same unit
+`scan_blocks:<narrow|l6>:u<n>:s0:f<fit>`): the scan program of the same unit
 that also folds each tile's block maxima into per-query block entries and
 writes the row.  Only the unsplit, unpaired narrow and l6 units carry it, so
 the host maps the decided kind to one of them (a wide unit or a CTA pair to
-its unpaired unit, a key-range split to narrow) with `n_split = 1`; then the
-finalize orders `indices` as in the plain call.  The block entries follow the
+its unpaired unit, a key-range split to narrow) with `n_split = 1`, at the
+decided tile unroll where its program is registered, else the smallest
+registered one (`sm_100a` and `sm_103a` register `u1`; `sm_107a` also
+registers the narrow `u2` program); then the finalize orders `indices` as in
+the plain call.  The block entries follow the
 scan's candidate buffers and ticket tail in the workspace: `blk_cap =
 ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
 `ceil(W / 8) > 2048`, else none, `W` being `max_seqlen_k` when given, else
@@ -291,13 +294,18 @@ ceil(W / 8) - 1` entries of 8 bytes per query slot of the grid when
 segment of the call: a row with more older blocks than `blk_cap` stops the
 kernel with a device-side trap.
 `cake_dsa_indexer_det_train_topk_with_candidates_workspace_size` reports the
-bound; the `[T, 2048]` output is not part of it.  `sm_107a` registers no
-`scan_blocks` program, and the call raises `NotImplementedError` there.
+bound; the `[T, 2048]` output is not part of it.  On `sm_107a` the
+`scan_blocks` programs draw their work units from a 16-byte ticket block
+passed as an argument (registry `ticket_arg_arches`), as the plain call's
+ticket-argument programs there do: a prepared runner whose scan draws owns
+that block, zeroed once at prepare, outside the reported bound; the eager
+entry uses the first 16 bytes of the workspace's ticket tail instead.  An
+architecture without a `scan_blocks` program raises `NotImplementedError`.
 
 ## Candidate-restricted top-k
 
 `cake_dsa_indexer_det_train_topk_in_candidates` (BF16, `ratio = 1`,
-`1 <= top_k <= 2048`, default 512; `sm_100a` and `sm_103a`) takes
+`1 <= top_k <= 2048`, default 512; `sm_100a`, `sm_103a` and `sm_107a`) takes
 `candidate_blocks`, int32 `[T, W]` with `W <= 2048` (the `candidate_blocks`
 output of `cake_dsa_indexer_det_train_topk_with_candidates` fits as is), and
 returns `(indices, scores)`.  For query row `t` with `n` visible keys the pool
@@ -324,8 +332,8 @@ of block lists and the ticket word;
 `cake_dsa_indexer_det_train_topk_in_candidates_workspace_size` reports it,
 and it depends on the grid and `top_k` only.  A backend-owned workspace has its
 ticket word zeroed once at prepare, a caller-owned one before every run.  A
-call with `W == 0` launches nothing and returns all `-1` / `-inf`.  `sm_107a`
-registers no `cand` program, and the call raises `NotImplementedError` there.
+call with `W == 0` launches nothing and returns all `-1` / `-inf`.  An
+architecture without a `cand` program raises `NotImplementedError`.
 
 ## Host dispatch
 
@@ -473,9 +481,11 @@ per entry.  `csrc/.clang-format` disables formatting so the digests stay valid.
 The candidate-block call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_candidates.py`, with the
 FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
-host-only registry, plans at the request's shapes, argument checks and the
-`sm_107a` refusal; on the GPU, the exact sets of `indices` and
-`candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
+host-only registry, plans at the request's shapes on every architecture,
+the registered program of every candidate-block plan on a dense grid of
+shapes and `top_k` up to 2047, argument checks and the refusal of an
+architecture whose registry lacks the programs; on the GPU, the exact sets of
+`indices` and `candidate_blocks` against the oracle on MXFP4-grid inputs (six cases, two
 packed layouts), sampled rows at the request's shapes, the Gaussian rule with
 the scores judged against the naive tier, containment, bitwise repetition and
 the plain call's bits, the caller-owned workspace and outputs, the argument
@@ -487,7 +497,8 @@ The candidate-restricted call has its own suite,
 `tests/experimental/test_cake_dsa_indexer_det_train_in_candidates.py`, with the
 FP64 oracle in `tests/experimental/test_helpers/cake_dsa_indexer_candidates.py`:
 host-only registry, the plan and its workspace bound at the request's shapes,
-argument checks and the `sm_107a` refusal; on the GPU, the exact sets against
+argument checks and the refusal of an architecture whose registry lacks the
+program; on the GPU, the exact sets against
 the oracle on MXFP4-grid inputs (six cases, six kinds of candidate rows, two
 packed layouts), the unrestricted sets from the source layer's own candidate
 blocks and from every visible block, keys outside the pool that never count,

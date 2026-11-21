@@ -16,9 +16,9 @@ limitations under the License.
 Backend tests of the candidate-block call of the deterministic Cake DSA indexer
 (``cake_dsa_indexer_det_train_topk_with_candidates``, ``prepare_dsa_indexer_det_topk_with_candidates``,
 ``plan_dsa_indexer_det_topk_with_candidates`` and the workspace bound): the registry's ``scan_blocks`` programs, the
-host plan at the request's shapes, the call's argument checks and the refusal of an architecture without the programs
-(CPU), then on an SM100 / SM103 device the exact sets against the FP64 oracle
-(``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs, the Gaussian rule,
+host plan at the request's shapes and on a dense grid of call geometries, the call's argument checks and the refusal
+of an architecture whose registry lacks the programs (CPU), then on an SM100 / SM103 / SM107 device the exact sets
+against the FP64 oracle (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs, the Gaussian rule,
 the containment of every id in a returned block, bitwise repetition and the equality with the plain top-k call's bits, the caller-owned workspace and outputs, and the absence of
 host synchronization.
 """
@@ -57,17 +57,24 @@ with_candidates_workspace_size = (
 
 ORDERED = True
 TOP_K = 512
-CB_ARCHES = ("sm_100a", "sm_103a")
+CB_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # the persistent grids (SM counts) of the devices of each architecture
-GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160)}
+GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212, 216)}
 CB_SLOTS_PLAN = [
     ["buffer", "CandBlk"],
     ["buffer", "CandBlocks"],
     ["parameter", "blk_cap"],
 ]
-CB_KEYS = sorted(
+_CB_KEYS_U1 = [
     f"{CB_ROLE}:{kind}:u1:s0:f{fit}" for kind in ("l6", "narrow") for fit in (0, 1)
-)
+]
+# the ``scan_blocks`` keys of each architecture: the unpaired, unsplit narrow and l6 units of both fit forms at tile
+# unroll 1; sm_107a also registers the narrow unit at tile unroll 2 (unsampled fit)
+CB_KEYS = {
+    "sm_100a": sorted(_CB_KEYS_U1),
+    "sm_103a": sorted(_CB_KEYS_U1),
+    "sm_107a": sorted(_CB_KEYS_U1 + [f"{CB_ROLE}:narrow:u2:s0:f0"]),
+}
 # the request's shapes: T = 16,384 queries at the tail of one document of 16,384 / 65,536 / 262,144 keys, and the
 # packed layout of eight segments (T = 16,231, Tkv = 268,757)
 P1_SEG_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
@@ -99,12 +106,12 @@ def _device_supported() -> bool:
 
 def _require_cb_program():
     if not _device_supported():
-        pytest.skip("requires a compute capability 10.0 / 10.3 device")
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     if not generated_program_available(torch.device("cuda")):
         pytest.skip("generated DSA indexer programs not registered for this device")
     if arch_for(torch.device("cuda")) not in CB_ARCHES:
         pytest.skip(
-            "the candidate-block programs are registered for sm_100a and sm_103a only"
+            "the candidate-block programs are registered for sm_100a, sm_103a and sm_107a only"
         )
 
 
@@ -237,9 +244,10 @@ def ref_scores64(q, k, w, cq, ck, offsets, rows, ids) -> torch.Tensor:
 @pytest.mark.cpu_only
 def test_registry_ships_the_candidate_block_programs():
     """``scan_blocks`` is a role of its own after the family's roles; its argument plan is the scan's with ``CandBlk``,
-    ``CandBlocks`` and ``blk_cap`` right before ``K_scale``; sm_100a and sm_103a register the unpaired, unsplit BF16
-    narrow and l6 programs of both fit forms under ``scan_blocks:`` keys, each a program of its own beside the scan
-    program of the same unit; sm_107a registers none."""
+    ``CandBlocks`` and ``blk_cap`` right before ``K_scale``; every architecture registers the unpaired, unsplit BF16
+    narrow and l6 programs of both fit forms at tile unroll 1 under ``scan_blocks:`` keys, and sm_107a also the
+    narrow program at tile unroll 2 of the unsampled fit (``CB_KEYS``), each a program of its own beside the scan
+    program of the same unit."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
     assert cake_jit.STAGES.count(CB_ROLE) == 1
@@ -253,7 +261,7 @@ def test_registry_ships_the_candidate_block_programs():
         if arch not in CB_ARCHES:
             assert cb_keys == [], arch
             continue
-        assert cb_keys == CB_KEYS, arch
+        assert cb_keys == CB_KEYS[arch], arch
         for key in cb_keys:
             name = keys[key]
             record = cake_jit.PROGRAMS[name]
@@ -287,7 +295,9 @@ def test_plan_at_the_request_shapes(arch, shape, bound):
         plan = plan_with_candidates(T, Tkv, S, **kw)
         assert isinstance(plan, CandidateBlocksChoice)
         c = plan.choice
-        assert c.scan_key in CB_KEYS and c.scan_key in cake_jit.PROGRAM_KEYS[arch], (
+        assert (
+            c.scan_key in CB_KEYS[arch] and c.scan_key in cake_jit.PROGRAM_KEYS[arch]
+        ), (
             grid,
             c.scan_key,
         )
@@ -309,16 +319,77 @@ def test_plan_at_the_request_shapes(arch, shape, bound):
 
 
 @pytest.mark.cpu_only
-def test_architecture_without_candidate_block_programs_is_refused():
-    """sm_107a registers no ``scan_blocks`` program: the plan and the workspace bound raise ``NotImplementedError``
-    (the plain call's plan is unaffected)."""
+@pytest.mark.parametrize("arch", CB_ARCHES)
+def test_candidate_block_plans_run_registered_programs_on_a_dense_grid(arch):
+    """Every program a candidate-block plan names is registered for the architecture, on a dense grid of call
+    geometries: 1 to 2^17 queries in 1, 8 or 64 segments, 0 to 2^13 mean key tiles per segment, ``top_k`` 1, 512,
+    1024, 1025 and 2047, with and without ``max_seqlen_k``, both sampling modes and every grid of the architecture.
+    The host fails closed by name on an unregistered program, so a selectable but unregistered ``scan_blocks`` or
+    finalize program would fail in production (the backend suite's dense-grid test does the same for the plain
+    call).  Every plan runs one ``scan_blocks`` program unsplit and without a merge."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
+    keys = cake_jit.PROGRAM_KEYS[arch]
+    tile = cake_backend.policy_for(arch).tile_keys
+    queries = sorted({1, 3, 6018} | {int(round(2 ** (17 * i / 10))) for i in range(11)})
+    tiles = sorted({0, 1} | {int(round(2 ** (13 * i / 8))) for i in range(9)})
+    chosen = set()
+    for grid in GRIDS[arch]:
+        for S in (1, 8, 64):
+            for T in queries:
+                for m in tiles:
+                    Tkv = max(1, int(round(m * tile * S + T / 2)))
+                    for top_k in (1, 512, 1024, 1025, CB_MAX_TOP_K):
+                        for bound in (None, -(-Tkv // S)):
+                            for sample_tiles_max in (None, 0):
+                                plan = plan_with_candidates(
+                                    T,
+                                    Tkv,
+                                    S,
+                                    top_k=top_k,
+                                    arch=arch,
+                                    num_sms=grid,
+                                    max_seqlen_k=bound,
+                                    sample_tiles_max=sample_tiles_max,
+                                )
+                                c = plan.choice
+                                where = (
+                                    grid,
+                                    S,
+                                    T,
+                                    Tkv,
+                                    top_k,
+                                    bound,
+                                    sample_tiles_max,
+                                )
+                                assert c.scan_key.startswith(f"{CB_ROLE}:"), where
+                                assert c.n_split == 1 and c.merge_key is None, where
+                                for key in plan.keys:
+                                    assert key in keys, (*where, key)
+                                chosen.add(c.scan_key)
+    assert chosen <= set(CB_KEYS[arch]), sorted(chosen)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", CB_ARCHES)
+def test_architecture_without_candidate_block_programs_is_refused(arch, monkeypatch):
+    """An architecture whose registry has no ``scan_blocks`` program (here the registry of ``arch`` without its
+    ``scan_blocks:`` keys): the plan and the workspace bound raise ``NotImplementedError``, and the plain call's plan
+    is unaffected."""
+    if not cake_jit.PROGRAM_KEYS:
+        pytest.skip("placeholder registry")
+    keys = cake_backend.PROGRAM_KEYS[arch]
+    stripped = {
+        key: name for key, name in keys.items() if not key.startswith(f"{CB_ROLE}:")
+    }
+    assert len(stripped) < len(keys)
+    monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, stripped)
+    grid = GRIDS[arch][0]
     for fn in (plan_with_candidates, with_candidates_workspace_size):
         with pytest.raises(NotImplementedError):
-            fn(16384, 262144, 1, top_k=TOP_K, arch="sm_107a", num_sms=212)
+            fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid)
     plain = cake_backend.plan_dsa_indexer_det_topk(
-        16384, 262144, 1, top_k=TOP_K, arch="sm_107a", num_sms=212
+        16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=grid
     )
     assert not plain.scan_key.startswith(f"{CB_ROLE}:")
 

@@ -16,8 +16,8 @@ limitations under the License.
 Backend tests of the candidate-restricted top-k of the deterministic Cake DSA indexer
 (``cake_dsa_indexer_det_train_topk_in_candidates``, ``prepare_dsa_indexer_det_topk_in_candidates``,
 ``plan_dsa_indexer_det_topk_in_candidates`` and the workspace bound): the registry's ``cand`` program, the host plan
-and its workspace bound, the argument checks and the refusal of an architecture without the program (CPU), then on an
-SM100 / SM103 device the exact sets against the FP64 oracle
+and its workspace bound, the argument checks and the refusal of an architecture whose registry lacks the program (CPU),
+then on an SM100 / SM103 / SM107 device the exact sets against the FP64 oracle
 (``tests/experimental/test_helpers/cake_dsa_indexer_candidates.py``) on exact MXFP4-grid inputs with source-layer and
 synthetic candidate rows, the unrestricted sets from the source layer's own candidates and from every visible block,
 keys outside the pool that never count, row-strided keys read in place, batches of fewer than 8 keys, rows that
@@ -62,9 +62,9 @@ in_candidates_workspace_size = (
 
 ORDERED = True
 TOP_K = 512
-CAND_ARCHES = ("sm_100a", "sm_103a")
+CAND_ARCHES = ("sm_100a", "sm_103a", "sm_107a")
 # the persistent grids (SM counts) of the devices of each architecture
-GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160)}
+GRIDS = {"sm_100a": (148,), "sm_103a": (148, 152, 160), "sm_107a": (212, 216)}
 # the request's shapes: T = 16,384 queries at the tail of one document of 16,384 / 65,536 / 262,144 keys, and the
 # packed layout of eight segments (T = 16,231, Tkv = 268,757)
 P1_SEG_Q = (1777, 1755, 2123, 2110, 2123, 2110, 2123, 2110)
@@ -125,12 +125,12 @@ def _device_supported() -> bool:
 
 def _require_cand_program():
     if not _device_supported():
-        pytest.skip("requires a compute capability 10.0 / 10.3 device")
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     if not generated_program_available(torch.device("cuda")):
         pytest.skip("generated DSA indexer programs not registered for this device")
     if arch_for(torch.device("cuda")) not in CAND_ARCHES:
         pytest.skip(
-            "the candidate-restricted program is registered for sm_100a and sm_103a only"
+            "the candidate-restricted program is registered for sm_100a, sm_103a and sm_107a only"
         )
 
 
@@ -320,8 +320,8 @@ def _repeated_ids(cand, ns, *, seed):
 def test_registry_ships_the_candidate_restricted_program():
     """``cand`` is the last role, after the family's roles and ``scan_blocks``; its argument plan takes ``Kraw``, the
     caller's ``CandBlocks``, the block lists ``Lists``, the candidate buffers ``Cand`` and its own ``TicketWord``
-    once, and neither ``K_scale`` nor a zeroed region; sm_100a and sm_103a route the key ``cand`` to one program of
-    role ``cand``; sm_107a routes none.  The CUB
+    once, and neither ``K_scale`` nor a zeroed region; every architecture (sm_100a, sm_103a, sm_107a) routes the key
+    ``cand`` to the one program of role ``cand``.  The CUB
     finalize that sorts the rows at ``top_k`` 512 is registered beside it."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
@@ -348,9 +348,10 @@ def test_registry_ships_the_candidate_restricted_program():
         assert routed == [CAND_KEY], arch
         record = cake_jit.PROGRAMS[keys[CAND_KEY]]
         assert record["role"] == CAND_ROLE and arch in record["arches"], arch
+        assert sorted(record["arches"]) == sorted(CAND_ARCHES), arch
         assert (
             plan_in_candidates(
-                16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=148
+                16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=GRIDS[arch][0]
             ).finalize_key
             in keys
         )
@@ -402,13 +403,19 @@ def test_plan_and_workspace_bound(arch, shape):
 
 
 @pytest.mark.cpu_only
-def test_architecture_without_the_program_is_refused():
-    """sm_107a registers no ``cand`` program: the plan and the workspace bound raise ``NotImplementedError``."""
+@pytest.mark.parametrize("arch", CAND_ARCHES)
+def test_architecture_without_the_program_is_refused(arch, monkeypatch):
+    """An architecture whose registry has no ``cand`` program (here the registry of ``arch`` without its ``cand``
+    key): the plan and the workspace bound raise ``NotImplementedError``."""
     if not cake_jit.PROGRAM_KEYS:
         pytest.skip("placeholder registry")
+    keys = cake_backend.PROGRAM_KEYS[arch]
+    stripped = {key: name for key, name in keys.items() if key != CAND_KEY}
+    assert len(stripped) == len(keys) - 1
+    monkeypatch.setitem(cake_backend.PROGRAM_KEYS, arch, stripped)
     for fn in (plan_in_candidates, in_candidates_workspace_size):
         with pytest.raises(NotImplementedError):
-            fn(16384, 262144, 1, top_k=TOP_K, arch="sm_107a", num_sms=212)
+            fn(16384, 262144, 1, top_k=TOP_K, arch=arch, num_sms=GRIDS[arch][0])
 
 
 @pytest.mark.cpu_only
