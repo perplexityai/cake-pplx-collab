@@ -67,6 +67,7 @@ from tests.cake.test_helpers.cake_package import cake_package
 from tests.cake_naive import TierJudge, judge_case
 from tests.experimental import _mok_naive as naive
 from tests.experimental._mok_one_gpu import bound_multiplier
+from tests.experimental._mok_reference import rand, randn, randn_like
 
 api = cake_package("cake_mok_bf16", "api")
 jit = cake_package("cake_mok_bf16", "jit")
@@ -118,15 +119,15 @@ def _weights(ep, local_experts, hidden, intermediate, device, seed=32471):
     options = dict(dtype=torch.bfloat16, device=device)
     torch.manual_seed(seed)
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     total = ep * local_experts
     global_routed = [
-        torch.randn(total, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(total, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(total, hidden, intermediate, **options) / intermediate**0.5,
+        randn(total, intermediate, hidden, **options) / hidden**0.5,
+        randn(total, intermediate, hidden, **options) / hidden**0.5,
+        randn(total, hidden, intermediate, **options) / intermediate**0.5,
     ]
     rank = dist.get_rank()
     routed = [w[rank * local_experts : (rank + 1) * local_experts].contiguous() for w in global_routed]
@@ -138,13 +139,13 @@ def _random_data(counts, hidden, topk, experts, device, weight_before_down=False
     ``weight_before_down`` the router weights are in [0, 1.5) and every 5th token's first one is exactly 0."""
     total = sum(counts)
     options = dict(dtype=torch.bfloat16, device=device)
-    x = torch.randn(total, hidden, **options) * 0.125
-    dy = torch.randn(total, hidden, **options) * 0.125
-    ids = torch.rand(total, experts, device=device).argsort(-1)[:, :topk].contiguous()
-    scores = torch.rand(total, topk, device=device) + 0.1
+    x = randn(total, hidden, **options) * 0.125
+    dy = randn(total, hidden, **options) * 0.125
+    ids = rand(total, experts, device=device).argsort(-1)[:, :topk].contiguous()
+    scores = rand(total, topk, device=device) + 0.1
     scores = scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
     if weight_before_down:
-        scores = torch.rand(total, topk, device=device) * 1.5
+        scores = rand(total, topk, device=device) * 1.5
         scores[::5, 0] = 0.0
     return dict(x=x, d_output=dy, expert_ids=ids, scores=scores)
 
@@ -469,9 +470,9 @@ def training_graph():
 
         def fill(generation, empty):
             torch.manual_seed(8291 + generation)
-            all_x = torch.randn(tokens * ep, hidden, **options) * 0.125
-            all_dy = torch.randn_like(all_x) * 0.125
-            all_scores = torch.rand(tokens * ep, topk, device=device) + 0.1
+            all_x = randn(tokens * ep, hidden, **options) * 0.125
+            all_dy = randn_like(all_x) * 0.125
+            all_scores = rand(tokens * ep, topk, device=device) + 0.1
             all_scores.div_(all_scores.sum(-1, keepdim=True)).mul_(2.5)
             rows = torch.arange(tokens * ep, device=device) + generation
             all_ids = torch.stack(
@@ -537,9 +538,9 @@ def unequal_sources():
         def data_for(lengths, seed, empty_experts):
             torch.manual_seed(seed)
             total = sum(lengths)
-            x = torch.randn(total, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
-            scores = torch.rand(total, topk, device=device) + 0.1
+            x = randn(total, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
+            scores = rand(total, topk, device=device) + 0.1
             scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
             row = torch.arange(total, device=device) + seed
             expert_count = topk if empty_experts else ep * local_experts
@@ -889,16 +890,14 @@ def backward_scratch():
         hidden_size=h,
         topk=k,
     )
-    generator = torch.Generator(device=device).manual_seed(2026 + dist.get_rank())
+    generator = torch.Generator().manual_seed(2026 + dist.get_rank())
     options = dict(device=device, dtype=torch.bfloat16)
-    x = torch.randn(n, h, generator=generator, **options) * 0.125
-    dy = torch.randn(n, h, generator=generator, **options) * 0.125
-    scores = torch.rand(n, k, device=device, generator=generator) + 0.1
-    shared = [
-        torch.randn(h, h, generator=generator, **options) / h**0.5 for _ in range(3)
-    ]
+    x = randn(n, h, generator=generator, **options) * 0.125
+    dy = randn(n, h, generator=generator, **options) * 0.125
+    scores = rand(n, k, device=device, generator=generator) + 0.1
+    shared = [randn(h, h, generator=generator, **options) / h**0.5 for _ in range(3)]
     routed = [
-        torch.randn(le, h, h, generator=generator, **options) / h**0.5 for _ in range(3)
+        randn(le, h, h, generator=generator, **options) / h**0.5 for _ in range(3)
     ]
     row = torch.arange(n, device=device)
     ids = torch.stack([(row + slot) % (ep * le) for slot in range(k)], -1)
@@ -991,8 +990,8 @@ def _source_rows(count, topk):
 
 def _r8_signs(hidden, device):
     """The ``+-1`` row of the pinned token's ``x`` (fixed seed)."""
-    generator = torch.Generator(device=device).manual_seed(R8_SIGN_SEED)
-    return torch.where(torch.randn(hidden, device=device, generator=generator) < 0, -1.0, 1.0)
+    generator = torch.Generator().manual_seed(R8_SIGN_SEED)
+    return torch.where(randn(hidden, device=device, generator=generator) < 0, -1.0, 1.0)
 
 
 def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R8_LIMIT, seed=32479):
@@ -1007,7 +1006,7 @@ def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R
     total = ep * local_experts
 
     def draw(*shape, scale):
-        return (torch.randn(*shape, device=device) * scale).bfloat16()
+        return (randn(*shape, device=device) * scale).bfloat16()
 
     shared = [
         draw(intermediate, hidden, scale=gate_up),
@@ -1032,7 +1031,7 @@ def _r8_weights(ep, local_experts, hidden, intermediate, device, pinned, limit=R
 
 def _r8_scores(tokens, experts, device):
     """The requester's router scores ``sqrt(softplus(randn))`` (current random state)."""
-    return torch.nn.functional.softplus(torch.randn(tokens, experts, device=device)).sqrt()
+    return torch.nn.functional.softplus(randn(tokens, experts, device=device)).sqrt()
 
 
 def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNED):
@@ -1044,7 +1043,7 @@ def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNE
     scores' order).  Token 1 is pinned: its ``x`` row is :func:`_r8_signs` and its first expert ``pinned``, the expert
     :func:`_r8_weights` pinned (moved to the first slot, or replacing its first expert)."""
     total = sum(counts)
-    x = torch.randn(total, hidden, device=device)
+    x = randn(total, hidden, device=device)
     x = x / x.square().mean(-1, keepdim=True).sqrt()
     top, chosen = _r8_scores(total, experts, device).topk(topk, dim=-1)
     weights = top / top.sum(-1, keepdim=True) * 1.5
@@ -1061,7 +1060,7 @@ def _r8_data(counts, hidden, topk, experts, device, *, ids=None, pinned=R8_PINNE
         if held.numel():
             ids[1, int(held[0, 0])] = int(ids[1, 0])
         ids[1, 0] = pinned
-    dy = torch.randn(total, hidden, device=device).bfloat16()
+    dy = randn(total, hidden, device=device).bfloat16()
     return dict(x=x.bfloat16(), d_output=dy, expert_ids=ids.contiguous(), scores=weights.float().contiguous())
 
 

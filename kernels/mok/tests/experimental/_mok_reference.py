@@ -20,6 +20,18 @@ consecutive K elements share a UE8M0 byte ``round_up(max(amax * 0.002232142857,
 1e-12))`` saturated to 254, data is E4M3 ``x * 2**(127 - byte)`` (round to
 nearest even, saturating), and 128 x 128 scale tiles store byte
 ``(row % 32) * 16 + (row // 32) * 4 + k_block`` as ``[R/128, K/128, 32, 16]``.
+
+Random inputs are drawn on the CPU and then moved to the GPU (:func:`randn`,
+:func:`randn_like`, :func:`rand`, :func:`randint`, :func:`normal_`,
+:func:`uniform_`), so every GPU gets the same inputs.  torch's CUDA random
+kernels launch at most a fixed number of threads per SM, and element ``i``
+takes the numbers of thread ``i`` modulo the threads launched: a tensor of more
+elements than that has other values on a GPU with another SM count (148 against
+152, for example), and so do the later draws of its generator.  The helpers
+draw from a CPU generator: ``generator``, or the CPU default generator, which
+``torch.manual_seed`` seeds (as it seeds the CUDA generators).  Floating
+tensors are drawn in FP32 and rounded once to their dtype, as torch's CUDA
+kernels draw a BF16 tensor.
 """
 
 import pytest
@@ -34,6 +46,48 @@ def require_gpu():
         torch.cuda.get_device_capability() not in SUPPORTED
     ):
         pytest.skip("Requires an SM100a, SM103a or SM107a CUDA device")
+
+
+def randn(*size, generator=None, dtype=None, device=None):
+    """``torch.randn(*size, dtype=dtype, device=device)`` drawn on the CPU:
+    FP32 normals of the CPU ``generator`` (the default one if ``None``), rounded
+    to ``dtype`` (FP32 if ``None``) and moved to ``device``."""
+    host = torch.randn(*size, generator=generator, dtype=torch.float32, device="cpu")
+    return host.to(device=device, dtype=dtype or torch.float32)
+
+
+def randn_like(x, *, generator=None):
+    """:func:`randn` of ``x``'s shape, dtype and device."""
+    return randn(x.shape, generator=generator, dtype=x.dtype, device=x.device)
+
+
+def rand(*size, generator=None, dtype=None, device=None):
+    """``torch.rand`` drawn on the CPU: FP32 uniforms in [0, 1) of the CPU
+    ``generator``, rounded to ``dtype`` and moved to ``device``."""
+    host = torch.rand(*size, generator=generator, dtype=torch.float32, device="cpu")
+    return host.to(device=device, dtype=dtype or torch.float32)
+
+
+def randint(low, high, size, *, generator=None, dtype=torch.int64, device=None):
+    """``torch.randint`` drawn on the CPU ``generator``, moved to ``device``."""
+    host = torch.randint(
+        low, high, size, generator=generator, dtype=dtype, device="cpu"
+    )
+    return host.to(device=device)
+
+
+def normal_(x, mean=0.0, std=1.0, *, generator=None):
+    """``x.normal_(mean, std)`` drawn on the CPU: FP32 normals of the CPU
+    ``generator`` written into ``x`` (its storage kept).  Returns ``x``."""
+    host = torch.empty(x.shape, dtype=torch.float32, device="cpu")
+    return x.copy_(host.normal_(mean, std, generator=generator))
+
+
+def uniform_(x, low=0.0, high=1.0, *, generator=None):
+    """``x.uniform_(low, high)`` drawn on the CPU: FP32 uniforms of the CPU
+    ``generator`` written into ``x`` (its storage kept).  Returns ``x``."""
+    host = torch.empty(x.shape, dtype=torch.float32, device="cpu")
+    return x.copy_(host.uniform_(low, high, generator=generator))
 
 
 def single_rank_schedule(routes, experts, extra=512):
@@ -139,15 +193,16 @@ def production_inputs(tokens, hidden, intermediate, experts, topk, limit, *, dev
     is pinned: its ``x`` row is ``+-1`` and its first expert's gate row 0 and up rows 0 and 1 are ``+-x * limit /
     hidden``, so its gate is exactly ``limit`` and its up exactly ``+limit`` and ``-limit`` there (``limit / hidden``
     must be a BF16 value).  Returns a dict of ``x``, ``dy``, ``ids`` (int64 ``[T, topk]``), ``weights`` (FP32
-    ``[T, topk]``), ``shared`` and ``routed`` (BF16, the package's shapes) and ``pinned`` (token, expert)."""
-    generator = torch.Generator(device=device).manual_seed(seed)
+    ``[T, topk]``), ``shared`` and ``routed`` (BF16, the package's shapes) and ``pinned`` (token, expert).  The draws
+    come from a CPU generator seeded with ``seed`` (:func:`randn`)."""
+    generator = torch.Generator().manual_seed(seed)
 
-    def randn(*shape):
-        return torch.randn(*shape, device=device, generator=generator)
+    def normal(*shape):
+        return randn(*shape, generator=generator, device=device)
 
-    x = randn(tokens, hidden)
+    x = normal(tokens, hidden)
     x = (x / x.square().mean(-1, keepdim=True).sqrt()).bfloat16()
-    scores = F.softplus(randn(tokens, experts)).sqrt()
+    scores = F.softplus(normal(tokens, experts)).sqrt()
     top, ids = scores.topk(topk, dim=-1)
     weights = top / top.sum(-1, keepdim=True) * 1.5
     zero = torch.arange(tokens, device=device) % 8 == 7
@@ -159,20 +214,20 @@ def production_inputs(tokens, hidden, intermediate, experts, topk, limit, *, dev
     gate_up = 4.0 / hidden**0.5
     down = 1.0 / intermediate**0.5
     shared = [
-        (randn(intermediate, hidden) * gate_up).bfloat16(),
-        (randn(intermediate, hidden) * gate_up).bfloat16(),
-        (randn(hidden, intermediate) * down).bfloat16(),
+        (normal(intermediate, hidden) * gate_up).bfloat16(),
+        (normal(intermediate, hidden) * gate_up).bfloat16(),
+        (normal(hidden, intermediate) * down).bfloat16(),
     ]
     routed = [
-        (randn(experts, intermediate, hidden) * gate_up).bfloat16(),
-        (randn(experts, intermediate, hidden) * gate_up).bfloat16(),
-        (randn(experts, hidden, intermediate) * down).bfloat16(),
+        (normal(experts, intermediate, hidden) * gate_up).bfloat16(),
+        (normal(experts, intermediate, hidden) * gate_up).bfloat16(),
+        (normal(experts, hidden, intermediate) * down).bfloat16(),
     ]
-    dy = randn(tokens, hidden).bfloat16()
+    dy = normal(tokens, hidden).bfloat16()
     pinned = None
     step = torch.tensor(limit / hidden).bfloat16().double().item()
     if tokens > 1 and step * hidden == limit:
-        signs = torch.where(randn(hidden) < 0, -1.0, 1.0)
+        signs = torch.where(normal(hidden) < 0, -1.0, 1.0)
         x[1] = signs.bfloat16()
         expert = int(ids[1, 0])
         row = (signs * step).bfloat16()
