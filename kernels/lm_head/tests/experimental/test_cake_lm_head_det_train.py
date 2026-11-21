@@ -18446,16 +18446,67 @@ def test_device_cast_fold_programs_without_a_folded_row(monkeypatch):
     assert torch.all(scattered[~valid.to(CUDA)] == 0)
 
 
+# the (rows, H) shapes test_device_flat_cast_fold_is_bitwise tries in this order: one chunk of an uncompacted
+# log-probability call over the inputs' default vocabulary
+_CAST_FOLD_SHAPES = (
+    (4096, 8192),
+    (8192, 8192),
+    (4096, 12288),
+    (8192, 12288),
+    (4096, 16384),
+    (8192, 16384),
+)
+
+
+def _cast_fold_shape(module_name, record, num_sms):
+    """The first ``(rows, H)`` of :data:`_CAST_FOLD_SHAPES` whose one chunk the log-probability plan of registered
+    program ``module_name`` / ``record`` on a device of ``num_sms`` SMs gives a cast-fold range (a one-slice dX chunk:
+    ``make_plan`` with the program's geometry and slice limit, the SM count and the co-resident dX clusters, then
+    ``_cast_fold_range``; the plan only, nothing runs), else ``None``; and ``(rows, H, dX slices)`` of every shape
+    tried."""
+    geometry = cake_backend.Geometry.from_record(record)
+    dx_max = cake_backend.dx_max_slices(cake_backend.registered_stages(module_name))
+    resident = cake_backend.cluster_resident(None, geometry.dx_cluster_ctas, num_sms)
+    tried = []
+    for rows, hidden in _CAST_FOLD_SHAPES:
+        plan = cake_backend.make_plan(
+            _problem(rows, hidden, DEFAULT_V, rows, entry="logprob"),
+            need_dx=True,
+            need_dw=True,
+            geometry=geometry,
+            dx_max_slices=dx_max,
+            num_sms=num_sms,
+            dx_resident=resident,
+            arch=record["arch"],
+            cast_fold=True,
+        )
+        tried.append((rows, hidden, plan.dx_slices_of(0)))
+        lo, hi = cake_backend._cast_fold_range(plan)
+        if hi > lo:
+            return (rows, hidden), tried
+    return None, tried
+
+
 def test_device_flat_cast_fold_is_bitwise(monkeypatch):
     """An uncompacted call (every row valid) of the log-probability autograd entry folds the label residuals of its
     one-slice chunks in its backward's in-loop flat BF16 dX cast (the cast's fold program) and launches no fold-alone
     slab sum on those chunks: bitwise the ``loss``, ``logp``, ``dX`` and ``dW`` of the same call with the fold left to
-    the slab sums (the cast-fold range forced empty: the previous launches).  A device whose slice rule gives the
-    shape no one-slice chunk skips."""
+    the slab sums (the cast-fold range forced empty: the previous launches).  The shape is the first candidate whose
+    one chunk the running device's plan makes a one-slice chunk (:func:`_cast_fold_shape`); a device where no
+    candidate gives one skips, naming each candidate's dX slice count."""
     entry = "logprob"
     _require_program(entry=entry)
-    # H 8192 at 4096 rows in one chunk: a one-slice dX chunk under the B200 slice rule
-    inp = make_inputs(4096, seed=SEED + 97, device=CUDA, H=8192, ignore_frac=0.0)
+    device = torch.device("cuda", torch.cuda.current_device())
+    shape, tried = _cast_fold_shape(
+        *cake_backend.record_for(device),
+        torch.cuda.get_device_properties(device).multi_processor_count,
+    )
+    if shape is None:
+        pytest.skip(
+            f"no candidate shape is a one-slice dX chunk on this device; (rows, H, dX slices): {tried}"
+        )
+    rows, hidden = shape
+    inp = make_inputs(rows, seed=SEED + 97, device=CUDA, H=hidden, ignore_frac=0.0)
     assert bool(inp.valid.all())
     bound = []
     for mod in (cake_backend, opt_in):
@@ -18480,13 +18531,12 @@ def test_device_flat_cast_fold_is_bitwise(monkeypatch):
         return out
 
     monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
-    folded = _run(inp, 4096, **kw)
-    if not any(hi > lo for lo, hi in ranges):
-        pytest.skip("this device's dX slice rule gives the shape no one-slice chunk")
+    folded = _run(inp, rows, **kw)
+    assert any(hi > lo for lo, hi in ranges), (shape, tried, ranges)
     with_fold = list(bound)
     bound.clear()
     monkeypatch.setattr(cake_backend, "_cast_fold_range", lambda plan: (0, 0))
-    plain = _run(inp, 4096, **kw)
+    plain = _run(inp, rows, **kw)
     without = list(bound)
     fold_stage = cake_backend.DX_CAST_FOLD_STAGE
     slab_stages = {"slab_sum"}
