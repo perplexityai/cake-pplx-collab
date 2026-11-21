@@ -802,17 +802,21 @@ def _forward(
     # packed rows: row n of x and z at element 128 n (the tiny forward reads
     # no other layout): head stride 128 and token stride H * 128, or token
     # stride 0 (one token, whose token stride is never read, or x or z
-    # broadcast over tokens)
-    packed = all(
-        head == HEAD_DIM and tok in (0, heads * HEAD_DIM)
-        for tok, head in ((x_tok, x_head), (z_tok, z_head))
+    # broadcast over tokens); plain comparisons, not a generator, keep the
+    # host work of each call small
+    packed_tok = heads * HEAD_DIM
+    packed = (
+        x_head == HEAD_DIM
+        and z_head == HEAD_DIM
+        and (x_tok == 0 or x_tok == packed_tok)
+        and (z_tok == 0 or z_tok == packed_tok)
     )
     sms = device_sm_count(index)
     name = module_for_rows(arch, "fwd", rows, sms, packed=packed)
     if (
         packed
+        and (x_tok == 0 or z_tok == 0)
         and rows != heads
-        and 0 in (x_tok, z_tok)
         and name in _linear_forwards(arch)
     ):
         # x or z broadcast over more than one token: a program that reads
