@@ -480,8 +480,11 @@ def upload_tables(
 # or waited for: a capturing stream cannot wait for an event recorded outside the capture, and ``torch.cuda.graph``
 # synchronizes the device before it captures.  Streams are keyed by ``torch._C._cuda_getCurrentStream`` -- ``(stream id,
 # device index, device type)`` --, the stream objects made once per key.  The steady state costs one raw stream handle
-# and one set lookup per call: a stream that has nothing to wait for (it has seen every sealed write, and no other
-# stream holds an open one) is kept by its raw handle in the context's ``ready`` set, which every note empties.
+# and one set lookup per call: a stream that has nothing to wait for is kept by its raw handle in the context's
+# ``ready`` set, which every note empties.  A stream joins the set when it has seen every sealed write and no other
+# stream holds an open one; it may still hold an open write of its own (a call never waits for its own stream's
+# writes).  A context is used from one host thread at a time: the ``ready`` check and add are not atomic with a note
+# made on another thread.
 
 _TABLE_WRITES = (
     "kcp_table_writes",
@@ -532,8 +535,8 @@ class _TableWrites:
     """The table writes of one context, its tables on device ``index``: ``writes`` the sealed ones in issue order --
     ``(stream key, event, tables)``, one event after the writes of a call on that stream --, ``open`` the tables written
     and not sealed yet per stream key, ``seen`` the number of sealed writes each reader stream has processed, and
-    ``ready`` the raw handles of the streams of that device with nothing to wait for (each has processed every sealed
-    write and no other stream holds an open one; emptied by every note)."""
+    ``ready`` the raw handles of the streams of that device with nothing to wait for (each joined when it had processed
+    every sealed write and no other stream held an open one, its own open write allowed; emptied by every note)."""
 
     __slots__ = ("index", "open", "ready", "seen", "writes")
 

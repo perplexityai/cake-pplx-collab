@@ -35,7 +35,8 @@ packed QKV row, the packed views and contiguous operands with their hooks and ``
 of each form (issue #8367; a CUDA-graph replay alternating the packed and plain views keeps each its own layout), the
 explicit forward / backward entries and autograd (output order ``dq, dk, dv, dbeta, dg``, saved context and replay),
 two caller streams with cached workspaces, one context's tables on two caller streams (a call waits for their write
-at first use on another stream; a dropped context's tables outlive the reads queued on another stream), the fused output walk and tape-and-output walk and the split forward on the
+at first use on another stream; a stream with nothing left to wait for waits again for a later write on another
+stream; a dropped context's tables outlive the reads queued on another stream), the fused output walk and tape-and-output walk and the split forward on the
 same build (test knobs ``fused_o`` / ``fused_o_tape`` 1 / 0), ``save_mode="full"`` without ``save_transfer`` at
 ``P = 2`` and the light form under NaN-filled allocations, ``save_mode="light_akk"`` (the light replay reads the
 forward's ``Akk`` tape: ``fwd_prep_replay_l2n``) and the light form under NaN-filled allocations (with its launch
@@ -1242,6 +1243,96 @@ def test_a_dropped_context_keeps_its_tables_until_another_streams_reads(device) 
     read = _block_states(addresses)
     assert dropped == dict.fromkeys(addresses, "active_pending_free"), dropped
     assert read == dict.fromkeys(addresses, "inactive"), read
+
+
+def _refill_with_zeros(stream, device) -> None:
+    """Empty the caching allocator's cache, then fill ``stream``'s pool with freed zero blocks: a table allocated on
+    ``stream`` next and read ahead of its write reads zeros, never the bytes of an earlier table."""
+    torch.cuda.empty_cache()
+    with torch.cuda.stream(stream):
+        zeros = [
+            torch.zeros((1 << 18,), dtype=torch.int32, device=device) for _ in range(64)
+        ]
+        zeros += [
+            torch.zeros((8 << 20,), dtype=torch.int32, device=device) for _ in range(8)
+        ]
+    stream.synchronize()
+    del zeros
+
+
+def test_a_steady_stream_waits_for_the_tables_another_stream_writes_later(
+    device, record_property
+) -> None:
+    """One context on two caller streams at two head counts, a fresh context per draw.  Three forward + backward steps
+    on stream s1 at HV = 6 leave s1 with nothing to wait for: its raw handle is in the context's ``ready`` set, where a
+    call returns after one set lookup.  Stream s2 then sleeps and makes the context's first call at HV = 12, which
+    writes the tables of that head count (the head plan's, the walk and chain bundles, the launch tables) behind the
+    sleep; the step on s1 at HV = 12 issued next reads them and must stay queued behind those writes, although s1 runs
+    while s2 sleeps (a probe launch on s1 completes; checked on draw 0, whose sleep is the longest): the write on s2
+    empties ``ready``.  The step's ``out`` and five gradients (arm ``ready``) and those of the same steps on one stream
+    of another fresh context, synchronized after each (arm ``synced``; they also warm the process: the kernels loaded
+    and the pinned staging blocks cached, so the call on s2 returns at once), are judged against the FP64 oracle with
+    the naive BF16 tier.  s2's caching-allocator pool is emptied and refilled with zeros before its call, so a read
+    ahead of the writes reads zero tables, never the equal tables an earlier draw left in that pool (such a read may
+    fault)."""
+    cu, small, large = [0, 300, 700, 1000], (2, 6), (4, 12)
+    s2, s1 = _overlapping_streams(device)  # a launch on s1 completes while s2 sleeps
+    checks = {"steady": []}
+
+    def step(ctx, ops, dout) -> dict:
+        out, saved = gdn_pkg.cake_gdn_nondet_train_kcp_forward(*ops, ctx)
+        grads = gdn_pkg.cake_gdn_nondet_train_kcp_backward(*ops, ctx, dout, saved=saved)
+        return {
+            "out": out[0],
+            **{n: t[0] for n, t in zip(EXPLICIT_GRAD_ORDER, grads, strict=True)},
+        }
+
+    def draw(j, s):
+        inputs = {heads: make_inputs(cu, *heads, seed=s) for heads in (small, large)}
+        ops = {h: [x[n].to(device) for n in OPERANDS] for h, x in inputs.items()}
+        dout = {h: x["dout"].to(device) for h, x in inputs.items()}
+        synced = _local_context(cu, device)
+        step(synced, ops[small], dout[small])
+        torch.cuda.synchronize(device)
+        ref = step(synced, ops[large], dout[large])
+        torch.cuda.synchronize(device)
+        ctx = _local_context(cu, device)
+        with torch.cuda.stream(s1):
+            for _ in range(3):
+                step(ctx, ops[small], dout[small])
+        torch.cuda.synchronize(device)
+        writes = ctx._caches.get(("kcp_table_writes",))
+        checks["steady"].append(writes is not None and s1.cuda_stream in writes.ready)
+        _refill_with_zeros(s2, device)
+        woke, probe, done = torch.cuda.Event(), torch.cuda.Event(), torch.cuda.Event()
+        with torch.cuda.stream(s2):
+            torch.cuda._sleep(2_000_000_000 if j == 0 else 100_000_000)
+            woke.record(s2)
+            gdn_pkg.cake_gdn_nondet_train_kcp_forward(
+                *ops[large], ctx, save_for_backward=False
+            )
+        with torch.cuda.stream(s1):
+            torch.ones(1, device=device).add_(1)
+            probe.record(s1)
+            got = step(ctx, ops[large], dout[large])
+            done.record(s1)
+        if j == 0:
+            probe.synchronize()
+            # time for the step on s1 to finish if it does not wait for the writes
+            time.sleep(0.1)
+            checks["asleep"], checks["queued"] = not woke.query(), not done.query()
+        torch.cuda.synchronize(device)
+        ref_oracle, naive = _oracle(inputs[large], device)
+        arms = ("ready", "synced")
+        runs = [_named(got, "ready"), _named(ref, "synced")]
+        return runs, _named(ref_oracle, *arms), _named(naive, *arms)
+
+    judge, failures = _judge(draw, seed=SEED)
+    judge.record(record_property)
+    assert checks["asleep"], "s2 woke before the check (s1 did not run while s2 slept)"
+    assert checks["queued"], "the step on s1 ran before the tables were written on s2"
+    assert not failures, failures
+    assert all(checks["steady"]), "s1 was not in the ready set before the write on s2"
 
 
 # --------------------------------------------------------------------------- the launch scope (one GPU)
