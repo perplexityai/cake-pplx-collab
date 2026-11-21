@@ -460,7 +460,9 @@ def test_routes_mirror_the_deterministic_package():
     take the deterministic argument plans; on the architectures of
     ``ordered_tail_archs`` (every architecture of the k512 routes) the 512-wide k
     tile's take the one-launch split tail's ``tail_sums`` slots and ``tail_tickets`` in
-    place of the partials, and those routes serve no ``tail_reduce`` stage there.  A program may also take the row bases of ``A`` / ``B``
+    place of the partials, and those routes serve no ``tail_reduce`` stage there.  The lead
+    twin routes (``<route>_lead``) mirror the deterministic package's lead twins the
+    same way.  A program may also take the row bases of ``A`` / ``B``
     (``cake_backend.ROW_BASES``: the same tensors again), which a deterministic build
     of an older kernel does not.  A wave-synchronised stage may be missing on an
     architecture whose host plan never selects it (not in ``wave_sync_archs`` for the
@@ -482,7 +484,11 @@ def test_routes_mirror_the_deterministic_package():
         assert route["op"] == det_route["op"]
         assert route["arches"] == det_route["arches"]
         for arch in route["arches"]:
-            tile_k = 512 if name.endswith("_k512") else 256
+            tile_k = (
+                512
+                if name.removesuffix(cake_jit.LEAD_SUFFIX).endswith("_k512")
+                else 256
+            )
             one_launch = cb.wgrad_ordered_tail(
                 tile_k, arch, HOST_PLAN_CONSTANTS
             ) or cb.wgrad_unordered_tail(tile_k, arch, HOST_PLAN_CONSTANTS)
@@ -503,10 +509,11 @@ def test_routes_mirror_the_deterministic_package():
             }
             expected_stages = det_stages - {"tail_reduce"} if one_launch else det_stages
             unselected = set()
-            if route["op"] == "wgrad":
-                tile_k = 512 if name.endswith("_k512") else 256
-                if arch not in HOST_PLAN_CONSTANTS["wave_sync_archs"][tile_k]:
-                    unselected = {"main_wave", "main_wave_halves"}
+            if (
+                route["op"] == "wgrad"
+                and arch not in HOST_PLAN_CONSTANTS["wave_sync_archs"][tile_k]
+            ):
+                unselected = {"main_wave", "main_wave_halves"}
             assert stages <= expected_stages, (name, arch, stages - expected_stages)
             assert expected_stages - stages <= unselected, (
                 name,

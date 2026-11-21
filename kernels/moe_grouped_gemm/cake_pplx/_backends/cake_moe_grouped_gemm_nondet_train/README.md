@@ -15,16 +15,71 @@ backend selection.
 The three operations, their arguments, alignment rules and outputs are the
 deterministic package's (see its README): over `E` groups of rows described by
 an int32 **device** tensor `offs[E]` of cumulative end offsets, or
-`m_indptr[E + 1]`, read by the kernels only.
+`m_indptr[E + 1]`, whose first entry may be above 0 (device slices, below),
+read by the kernels only.
 
 The slice lower bound is `0` for `e == 0` and `offs[e-1]` for `e > 0`.
-For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]`.
+For `m_indptr` input, `offs` in these formulas means `m_indptr[1:]` and the
+lower bound of group 0 is `m_indptr[0]` (device slices, below).
 
 | helper | computation | output |
 | --- | --- | --- |
 | `cake_moe_grouped_gemm_nondet_train_forward(x, w, offs, out=None)` | `Y[offs[e-1]:offs[e]] = X[offs[e-1]:offs[e]] @ W[e].T` | `Y [sum_m, N]` bf16 |
 | `cake_moe_grouped_gemm_nondet_train_dgrad(g, w, offs, out=None)` | `dX[offs[e-1]:offs[e]] = G[offs[e-1]:offs[e]] @ W[e]` (W read in place) | `dX [sum_m, K]` bf16 |
 | `cake_moe_grouped_gemm_nondet_train_wgrad(g, x, offs, out=None, out_dtype=None, num_groups=None, *, accumulate=False)` | `dW[e] = G[offs[e-1]:offs[e]].T @ X[offs[e-1]:offs[e]]`; with `accumulate=True`, `out[e] += dW[e]` | `dW [E, N, K]` bf16 or fp32 |
+
+## Device slices (`m_indptr[0] > 0`)
+
+An `m_indptr[E + 1]` may start above 0. The call then covers the rows
+`[m_indptr[0], m_indptr[E])` of the whole `x` / `g`, in absolute row numbers:
+for example the experts `e0 .. e1 - 1` of a larger table, one chunk of experts
+at a time, without copying rows or reading the table on the host.
+
+```python
+# m_indptr: [E_all + 1] int32 on the device; x: [R, K], g: [R, N]: all routed rows
+chunk = m_indptr[e0 : e1 + 1]  # a view; chunk[0] may be above 0
+y = torch.empty(R, N, dtype=torch.bfloat16, device=x.device)
+cake_moe_grouped_gemm_nondet_train_forward(x, w[e0:e1], chunk, out=y)  # writes rows chunk[0] .. chunk[-1] - 1 of y
+dw = cake_moe_grouped_gemm_nondet_train_wgrad(g, x, chunk, num_groups=e1 - e0)
+```
+
+- Rows outside `[m_indptr[0], m_indptr[E])` do not affect the results and are
+  not written: the forward and the data gradient leave those rows of `out` as
+  they are, so slices of disjoint rows may write one `out`, also from different
+  streams. The entries must be nondecreasing row numbers of the operands, at
+  most `sum_m`.
+- The weight gradient reads the `[E + 1]` form only with `num_groups=E`;
+  without it, `E + 1` entries are `E + 1` end offsets.
+- The kernels read `m_indptr[0]` on the device at every launch: a prepared
+  launch and a CUDA graph that captured it follow new boundaries, the first
+  entry included.
+- Programs: the `m_indptr` form binds the lead twins of the programs (the
+  routes `<route>_lead` of `cake_jit`, programs `<program>_lead` with
+  `twin_of`); the `[E]` form
+  binds the programs themselves (`launch.bound_routes`, `launch.bound_programs`
+  name them). A process JIT-compiles a twin at its first call where the package
+  ships no prebuilt build of it.
+- Cost: the twins read `m_indptr[0]` once per role, and some launches are
+  slightly slower (most a weight gradient with a split tail). When
+  `m_indptr[0]` is 0, pass `m_indptr[1:]` (the `[E]` form): it binds the
+  original programs at no extra cost and gives the same bits.
+- Bits: the plan (k tile, stage, grid, tail split) comes from the shapes, and
+  `sum_m` is `x.shape[0]`, every row, not the rows of the slice. A slice gives
+  the bits of the host-offset call over its rows (`x[m_indptr[0]:m_indptr[E]]`
+  with `offs = m_indptr[1:] - m_indptr[0]`) when the two calls plan the same.
+  When they plan differently (for example the rows per group cross
+  `k512_min_rows_per_group`), it gives the bits of that host-offset call with
+  its rows padded by rows of no group to the same `sum_m`, which plans the
+  same. Both results repeat bit for bit and meet the same accuracy bar.
+- A slice with no row and `accumulate=True` (`m_indptr[0] == m_indptr[E]`)
+  still launches, as the host does not read the table. On the composed route its add of the scratch's exact zeros turns a `-0.0` in
+  `out` into `+0.0`; the fused route does not write empty groups. The values are
+  equal. The host-offset call with no row launches nothing.
+- Autograd: `cake_moe_grouped_gemm_nondet(x, w, chunk)` writes only the slice's rows of
+  `Y` and of the gradient of `x`; the other rows of these new tensors are
+  uninitialized (`torch.empty`). Summing the `x` gradients of several slices
+  of one shared `x` is therefore not supported: a sliced layout calls the
+  op-level functions with caller-owned outputs.
 
 ## Mode rules
 
@@ -482,7 +537,7 @@ still fails.
 ## Tests and benchmark
 
 ```bash
-pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py
+pytest tests/experimental/test_cake_moe_grouped_gemm_nondet_train.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_api.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_names.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_standalone.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_determinism.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_acc.py tests/experimental/test_cake_moe_grouped_gemm_nondet_train_device_slice.py
 python benchmarks/bench_cake_moe_grouped_gemm_nondet_train.py --help
 ```
 
@@ -512,6 +567,15 @@ output repeats bit for bit: repeated launches into outputs prefilled with
 `0x00` and `0x5A` bytes, digests from fresh processes, fused and composed
 accumulation over 1 and 4 launches, the autograd entry with and without
 activation checkpointing, CUDA graph replay, and two CUDA streams.
+`test_cake_moe_grouped_gemm_nondet_train_device_slice.py` covers the device
+slices (above): on the CPU the lead routes against their routes, the lead
+builds' CUDA floor, the row table's views and the lead binding over every
+architecture; on a GPU each slice against the `[E]` call over the same rows
+moved to row 0 (bitwise) and the `[E]` call over the slice's rows alone
+(bitwise where it plans the same), every forced stage, edges with the rows
+outside poisoned, padded rows, graph replay over device-copied routings, two
+streams, accumulation, the autograd entry and the bits of the judged `[E]`
+cases.
 `test_cake_moe_grouped_gemm_nondet_train_standalone.py` imports a copy under another
 top-level name. `test_cake_moe_grouped_gemm_nondet_train_acc.py` covers the accumulate mode: the
 `_acc` stages against the shipped set and their twins, the plans, the routes
@@ -535,5 +599,7 @@ weight-gradient row records its plan (`tail_splits`, `ordered_tail`,
   32-bit element addressing.
 - The deterministic package's alignment rules; compute capability 10.0, 10.3
   or 10.7 only.
+- The autograd entry does not support summing the `x` gradients of several
+  device slices of one shared `x` (device slices, above).
 - The optional fused SwiGLU and routing-scale epilogues are not part
   of this family.
