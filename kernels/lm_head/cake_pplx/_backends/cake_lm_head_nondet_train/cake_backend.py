@@ -12366,19 +12366,6 @@ _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
 _CUDA_ALLOC_BACKEND = getattr(torch._C, "_cuda_getAllocatorBackend", None)
 _CUDA_ALLOC_SETTINGS = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
 _EXPANDABLE_SEGMENTS = re.compile(r"expandable_segments\s*:\s*(\w+)")
-# the allocator settings of the environment, read when the module loads (:func:`_rlab_fixed_segments`): the strings of
-# ``PYTORCH_ALLOC_CONF`` and ``PYTORCH_CUDA_ALLOC_CONF`` that are set, and whether one sets ``expandable_segments`` True
-_RLAB_ENV_SETTINGS = tuple(
-    s
-    for s in (
-        os.environ.get("PYTORCH_ALLOC_CONF"),
-        os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
-    )
-    if s
-)
-_RLAB_ENV_EXPANDABLE = any(
-    _EXPANDABLE_SEGMENTS.findall(s)[-1:] == ["True"] for s in _RLAB_ENV_SETTINGS
-)
 # the last settings string :func:`_rlab_holding_ok` read, and :func:`_rlab_fixed_segments` of it
 _RLAB_SETTINGS: tuple = (None, False)
 # the value of a device not yet in a holding stream dict (:func:`_rlab_stream`)
@@ -12471,15 +12458,13 @@ def _rlab_holding_ok() -> bool:
 def _rlab_fixed_segments(settings: str) -> bool:
     """Whether allocator settings string ``settings`` (torch's settings query, :func:`_rlab_holding_ok`) shows that
     torch's caching allocator uses fixed segments: it names ``expandable_segments`` with the last value ``False``, or
-    it is the environment's settings string (empty where the environment sets none, :data:`_RLAB_ENV_SETTINGS`) and the
-    environment does not set ``expandable_segments`` True.  Any other string is ``False``: a settings call that does not
-    name ``expandable_segments`` keeps the value an earlier call or the environment set, which no query returns."""
+    it is empty (no allocator settings in the environment and no settings call: torch's default, fixed segments).  Any
+    other string is ``False``: a string that does not name ``expandable_segments`` leaves the value that an earlier
+    settings call or the environment set, which no query returns (the package reads no environment variable)."""
     named = _EXPANDABLE_SEGMENTS.findall(settings)
     if named:
         return named[-1] == "False"
-    if settings not in (_RLAB_ENV_SETTINGS or ("",)):
-        return False
-    return not _RLAB_ENV_EXPANDABLE
+    return not settings
 
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:

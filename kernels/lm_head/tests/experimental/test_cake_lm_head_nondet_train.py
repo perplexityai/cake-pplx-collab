@@ -18270,11 +18270,11 @@ def _rlab_segment_stream(t, index):
 def test_device_graph_rlab_allocator_gate(monkeypatch):
     """The graphs' label residuals take a holding stream only where torch's native caching allocator is shown to use
     fixed segments (``_rlab_holding_ok``): the backend is ``native`` and the last allocator settings string names
-    ``expandable_segments`` with the last value ``False``, or is the environment's string while the environment does
-    not set it True.  Under another backend, with ``expandable_segments:True``, after any other settings string (an
-    earlier True may still hold), and with an environment that sets it True, a request on the default stream and one
-    on another stream are ordinary allocations on the caller's stream: in that stream's segment, no stream marked on
-    the tensor, no holding stream made before the first holding case.  Every tensor is zero-filled."""
+    ``expandable_segments`` with the last value ``False``, or is empty.  Under another backend, with
+    ``expandable_segments:True``, and after any other settings string (an earlier True may still hold), a request on
+    the default stream and one on another stream are ordinary allocations on the caller's stream: in that stream's
+    segment, no stream marked on the tensor, no holding stream made before the first holding case.  Every tensor is
+    zero-filled."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     index = torch.cuda.current_device()
@@ -18296,19 +18296,16 @@ def test_device_graph_rlab_allocator_gate(monkeypatch):
     caller = torch.cuda.Stream(device=device)
     held, made = [], False
     split = "max_split_size_mb:512"
-    for env, env_es, backend, settings, holding in (
-        ((), False, "cudaMallocAsync", "", False),
-        ((), False, "pluggable", "", False),
-        ((), False, "native", "expandable_segments:True", False),
-        ((), False, "native", "garbage_collection_threshold:0.6", False),
-        ((split,), True, "native", split, False),
-        ((split,), False, "native", "", False),
-        ((), False, "native", split + ",expandable_segments:False", True),
-        ((split,), False, "native", split, True),
-        ((), False, "native", "", True),
+    for backend, settings, holding in (
+        ("cudaMallocAsync", "", False),
+        ("pluggable", "", False),
+        ("native", "expandable_segments:True", False),
+        ("native", "garbage_collection_threshold:0.6", False),
+        ("native", split, False),
+        ("native", split + ",expandable_segments:False", True),
+        ("native", "", True),
+        ("native", "expandable_segments:False,expandable_segments:True", False),
     ):
-        monkeypatch.setattr(cake_backend, "_RLAB_ENV_SETTINGS", env)
-        monkeypatch.setattr(cake_backend, "_RLAB_ENV_EXPANDABLE", env_es)
         monkeypatch.setattr(cake_backend, "_RLAB_SETTINGS", (None, False))
         query.update(backend=backend, settings=settings)
         made = made or holding
@@ -18319,7 +18316,7 @@ def test_device_graph_rlab_allocator_gate(monkeypatch):
                 assert int(torch.count_nonzero(t)) == 0
             torch.cuda.synchronize()
             held.append(t)
-            case = (env, env_es, backend, settings, stream == default)
+            case = (backend, settings, stream == default)
             if not holding:
                 assert marked == [], case
                 assert _rlab_segment_stream(t, index) == stream.cuda_stream, case
@@ -18391,18 +18388,21 @@ def test_device_graph_rlab_allocator_configs():
     stream marked on the tensor) with ``expandable_segments:True`` from ``PYTORCH_CUDA_ALLOC_CONF`` or
     ``PYTORCH_ALLOC_CONF`` (in an expandable segment of the caller's stream), with ``backend:cudaMallocAsync``, with
     ``expandable_segments:True`` from the environment and an unrelated settings call before the package is imported,
-    and with a settings call of ``expandable_segments:True`` and an unrelated one (in either order) before the first
-    request.  With no environment and no settings call they take the holding streams; they are ordinary allocations
-    once ``expandable_segments:True`` is set and after a later unrelated setting, and take the holding streams again
-    (in their fixed segments) once ``expandable_segments:False`` is set.  Every tensor is zero-filled."""
+    with a settings call of ``expandable_segments:True`` and an unrelated one (in either order) before the first
+    request, and with environment settings that do not name ``expandable_segments`` (fixed segments, but not shown by
+    an empty settings string).  With no environment and no settings call they take the holding streams; they are
+    ordinary allocations once ``expandable_segments:True`` is set and after a later unrelated setting, and take the
+    holding streams again (in their fixed segments) once ``expandable_segments:False`` is set.  Every tensor is
+    zero-filled."""
     if not _device_supported():
         pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
     root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-    es, gc, off, nonnative = (
+    es, gc, off, nonnative, split = (
         "expandable_segments:True",
         "garbage_collection_threshold:0.6",
         "expandable_segments:False",
         "backend:cudaMallocAsync",
+        "max_split_size_mb:512",
     )
     for conf, pre, rows, holding, expandable in (
         ({"PYTORCH_CUDA_ALLOC_CONF": es}, [], [[]], [False], [True]),
@@ -18411,6 +18411,7 @@ def test_device_graph_rlab_allocator_configs():
         ({"PYTORCH_CUDA_ALLOC_CONF": es}, [gc], [[]], [False], [True]),
         ({}, [], [[es, gc]], [False], [None]),
         ({}, [], [[gc, es]], [False], [None]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": split}, [], [[]], [False], [False]),
         ({}, [], [[], [es], [gc], [off]], [True, False, False, True], [None] * 4),
     ):
         env = {
