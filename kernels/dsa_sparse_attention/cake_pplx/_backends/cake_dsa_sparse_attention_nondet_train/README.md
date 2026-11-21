@@ -495,7 +495,10 @@ graph (`benchmarks/bench_cake_dsa_sparse_attention_nondet_train.py --host-us` re
   On `sm_107a` its scanner-warp build `fwd_scan` (416 threads) runs in its
   place, with the same arguments, grid and outputs.  Under `with_o_lo=False`
   its twin `fwd_no_olo` (`fwd_scan_no_olo` on `sm_107a`) runs instead: same
-  arguments and grid, `out` and `lse` only.
+  arguments and grid, `out` and `lse` only.  The forward writes `o_lo` with an
+  L1 no-allocate / L2 evict-first cache hint: nothing reads it before the
+  backward's launch.  In every build the softmax role waits for the
+  shared-memory reads of its last `out` TMA stores before it exits.
 * `bwd_delta`: `delta = rowsum(dO * (O + O_lo))`, one (token, head) row per warp
   (`bwd_delta_no_olo` under `with_o_lo=False`: `delta = rowsum(dO * O)`).
 * `bwd_main`: one CTA per query token (20 warps: gather, compute, reduce, MMA,
