@@ -777,11 +777,14 @@ def _program_of_record(arch: str, kind: str, C: int, S: int, ruled: str) -> str:
     program) inside a range of ``FALLBACK_ROWS_OF_RECORD``, ``ruled`` elsewhere."""
 
     if _direct_of_record(arch, kind, C, S) is not None:
+        rules = {
+            name: loader.select_rule(loader.MODULES[name])
+            for name in loader.route_modules(arch, kind)
+        }
         direct = [
             name
-            for name in loader.route_modules(arch, kind)
-            if (loader.select_rule(loader.MODULES[name]) or {}).get("kind")
-            == loader.ROWS_KIND
+            for name, rule in rules.items()
+            if rule is not None and rule["kind"] == loader.ROWS_KIND
         ]
         assert len(direct) == 1, (arch, kind, direct)
         return direct[0]
@@ -4666,20 +4669,15 @@ def test_registry_records_reference_the_build_manifest() -> None:
                 for threshold in sorted(owners):
                     at = loader.selected_modules(arch, kind, C=threshold, S=S)
                     below = loader.selected_modules(arch, kind, C=threshold - 8, S=S)
-                    assert below == (
-                        _program_of_record(arch, kind, threshold - 8, S, previous),
-                    ), (arch, kind, S, threshold)
+                    want = _program_of_record(arch, kind, threshold - 8, S, previous)
+                    assert below == (want,), (arch, kind, S, threshold)
                     by_floor = owners[threshold]
                     name = by_floor.get(True)
                     if name is None or floors[name][1] > S:
                         # Below its token floor a floored program never runs.
                         name = by_floor.get(False, previous)
-                    assert at == (_program_of_record(arch, kind, threshold, S, name),), (
-                        arch,
-                        kind,
-                        S,
-                        threshold,
-                    )
+                    want = _program_of_record(arch, kind, threshold, S, name)
+                    assert at == (want,), (arch, kind, S, threshold)
                     previous = name
                 top = loader.selected_modules(arch, kind, C=8192, S=S)
                 assert top == (previous,), (arch, kind, S)
