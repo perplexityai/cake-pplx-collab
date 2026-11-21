@@ -17168,6 +17168,247 @@ def test_device_graph_rlab_holding_block_kept(monkeypatch):
     assert not shared, (hex(holding), shared)
 
 
+def test_graph_rlab_stream_made_between_reads(monkeypatch):
+    """A holding stream that another thread makes right after a call's lock-free read found none is the stream that
+    call returns (``_rlab_stream`` reads the streams again under its lock), and the call makes none itself."""
+    made = object()
+
+    class Racing(dict):
+        def get(self, key, *default):
+            value = super().get(key, *default)
+            self.setdefault(key, made)  # the other thread stores the stream it made
+            return value
+
+    def make(index):
+        raise AssertionError(f"a second holding stream made for device {index}")
+
+    monkeypatch.setattr(cake_backend, "_rlab_new_stream", make)
+    assert cake_backend._rlab_stream(Racing(), 0) is made
+
+
+def _rlab_segment_stream(t, index):
+    """The stream of the caching-allocator segment that holds tensor ``t`` on device ``index``."""
+    ptr = t.data_ptr()
+    for seg in torch.cuda.memory_snapshot():
+        if seg["device"] == index and 0 <= ptr - seg["address"] < seg["total_size"]:
+            return seg["stream"]
+    raise AssertionError(f"no segment holds {ptr:#x}")
+
+
+def test_device_graph_rlab_allocator_gate(monkeypatch):
+    """The graphs' label residuals take a holding stream only under torch's native caching allocator with fixed
+    segments (``_rlab_holding_ok``): under another allocator backend, and once an allocator settings string named
+    ``expandable_segments:True`` (kept until one names it ``False``), a request on the default stream and one on
+    another stream are ordinary allocations on the caller's stream: in that stream's segment, no stream marked on the
+    tensor, no holding stream made.  Every tensor is zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    monkeypatch.setattr(cake_backend, "_RLAB_EXPANDABLE", [False])
+    query = {}
+    monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_BACKEND", lambda: query["backend"])
+    monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_SETTINGS", lambda: query["settings"])
+    marked = []
+    real_record = torch.Tensor.record_stream
+
+    def record(self, stream):
+        marked.append(stream)
+        return real_record(self, stream)
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", record)
+    default = torch.cuda.default_stream(index)
+    caller = torch.cuda.Stream(device=device)
+    held = []
+    for backend, settings, holding in (
+        ("cudaMallocAsync", "", False),
+        ("pluggable", "garbage_collection_threshold:0.6", False),
+        ("native", "expandable_segments:True", False),
+        ("native", "garbage_collection_threshold:0.6", False),
+        ("native", "max_split_size_mb:512,expandable_segments:False", True),
+    ):
+        query.update(backend=backend, settings=settings)
+        for stream in (default, caller):
+            marked.clear()
+            with torch.cuda.stream(stream):
+                t = cake_backend._graph_rlab_tensor(300, True, device)
+                assert int(torch.count_nonzero(t)) == 0
+            torch.cuda.synchronize()
+            held.append(t)
+            case = (backend, settings, stream == default)
+            if not holding:
+                assert marked == [], case
+                assert _rlab_segment_stream(t, index) == stream.cuda_stream, case
+                assert index not in cake_backend._RLAB_STREAMS, case
+                assert index not in cake_backend._RLAB_SIDE_STREAMS, case
+            elif stream == default:
+                assert marked == [], case
+                want = cake_backend._RLAB_STREAMS[index].cuda_stream
+                assert _rlab_segment_stream(t, index) == want, case
+            else:
+                assert marked == [stream], case
+                want = cake_backend._RLAB_SIDE_STREAMS[index].cuda_stream
+                assert _rlab_segment_stream(t, index) == want, case
+
+
+_RLAB_ALLOCATOR_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+index = torch.cuda.current_device()
+device = torch.device("cuda", index)
+marked = []
+real_record = torch.Tensor.record_stream
+
+
+def record(self, stream):
+    marked.append(stream.cuda_stream)
+    return real_record(self, stream)
+
+
+def made(streams):
+    s = streams.get(index)
+    return None if s is None else s.cuda_stream
+
+
+torch.Tensor.record_stream = record
+caller = torch.cuda.Stream(device=device)
+held, rows = [], []
+for settings in {settings!r}:
+    if settings is not None:
+        torch._C._accelerator_setAllocatorSettings(settings)
+    calls = []
+    for stream in (torch.cuda.default_stream(index), caller):
+        marked.clear()
+        with torch.cuda.stream(stream):
+            t = be._graph_rlab_tensor(300, True, device)
+        torch.cuda.synchronize()
+        held.append(t)
+        zero = int(torch.count_nonzero(t)) == 0
+        calls.append([stream.cuda_stream, t.data_ptr(), zero, list(marked)])
+    rows.append([settings, calls, made(be._RLAB_STREAMS), made(be._RLAB_SIDE_STREAMS)])
+segments = []
+if torch._C._cuda_getAllocatorBackend() == "native":
+    segments = [
+        [s["address"], s["total_size"], s["stream"], bool(s.get("is_expandable"))]
+        for s in torch.cuda.memory_snapshot()
+        if s["device"] == index
+    ]
+print("ALLOCATOR " + json.dumps(dict(rows=rows, segments=segments)))
+"""
+
+
+def test_device_graph_rlab_allocator_configs():
+    """Under real allocator configurations, in fresh processes (``_rlab_holding_ok``): with
+    ``PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`` and with ``backend:cudaMallocAsync`` the graphs' label
+    residuals of a request on the default stream and of one on another stream are ordinary allocations (no holding
+    stream made, no stream marked on the tensor; with expandable segments, in an expandable segment of the caller's
+    stream).  Under the default configuration they take the holding streams, are ordinary allocations once
+    ``expandable_segments:True`` is set at run time and after a later setting that does not name it, and take the
+    holding streams again once ``expandable_segments:False`` is set (then in their fixed segments).  Every tensor is
+    zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    toggles = [
+        None,
+        "expandable_segments:True",
+        "garbage_collection_threshold:0.6",
+        "expandable_segments:False",
+    ]
+    for conf, settings, holding, expandable in (
+        ("expandable_segments:True", [None], [False], [True]),
+        ("backend:cudaMallocAsync", [None], [False], [None]),
+        (None, toggles, [True, False, False, True], [None] * 4),
+    ):
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+        }
+        env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
+        if conf is not None:
+            env["PYTORCH_CUDA_ALLOC_CONF"] = conf
+        script = _RLAB_ALLOCATOR_SCRIPT.format(
+            root=root, package="cake_lm_head_det_train", settings=settings
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=900,
+        )
+        assert proc.returncode == 0, (
+            f"fresh process ({conf}) failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("ALLOCATOR ")][-1]
+        got = json.loads(line[len("ALLOCATOR ") :])
+        rows, segments = got["rows"], got["segments"]
+        assert len(rows) == len(settings) and bool(segments) == (
+            conf is None or "expandable" in conf
+        )
+
+        def segment(ptr):
+            for address, size, stream, is_expandable in segments:
+                if 0 <= ptr - address < size:
+                    return stream, is_expandable
+            raise AssertionError(f"no segment holds {ptr:#x}")
+
+        for (setting, calls, main, side), want, exp in zip(
+            rows, holding, expandable, strict=True
+        ):
+            case = (conf, setting)
+            if conf is not None:
+                assert main is None and side is None, case
+            for (stream, ptr, zero, marks), on in zip(calls, (main, side), strict=True):
+                assert zero, case
+                if want:
+                    assert on is not None and on != stream, case
+                    assert marks == ([] if on == main else [stream]), case
+                    assert segment(ptr) == (on, False), case
+                else:
+                    assert marks == [], case
+                    if segments:
+                        on_stream, is_expandable = segment(ptr)
+                        assert on_stream == stream, case
+                        assert exp is None or is_expandable == exp, case
+
+
+def test_device_graph_rlab_stream_error_cleared(monkeypatch):
+    """A holding stream whose ``cudaStreamCreate`` fails in the CUDA runtime (here a null result pointer: a real
+    runtime error) is ``None`` (``_rlab_new_stream``), and the runtime's last error the call set is cleared: the
+    ordinary allocation of the graphs' label residuals that follows (its zero fill a kernel launch, checked by torch)
+    and the launches after it run without raising that error."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    real = torch.cuda.cudart()
+    errors = []
+
+    class Failing:
+        @staticmethod
+        def cudaStreamCreate(ptr):
+            errors.append(int(real.cudaStreamCreate(0)))
+            return errors[-1]
+
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: Failing)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    with torch.cuda.stream(torch.cuda.default_stream(index)):
+        t = cake_backend._graph_rlab_tensor(300, True, device)
+        u = torch.ones((4,), device=device) * 2
+    torch.cuda.synchronize()
+    assert len(errors) == 1 and errors[0] != 0, errors
+    assert cake_backend._RLAB_STREAMS[index] is None
+    assert int(torch.count_nonzero(t)) == 0 and u.tolist() == [2.0] * 4
+
+
 _RLAB_PLACEMENT_SCRIPT = """
 import json, sys, torch
 sys.path.insert(0, {root!r})

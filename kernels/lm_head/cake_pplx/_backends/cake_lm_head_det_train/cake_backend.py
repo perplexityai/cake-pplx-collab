@@ -221,6 +221,7 @@ import ctypes
 import functools
 import inspect
 import math
+import os
 import re
 import struct
 import threading
@@ -3412,6 +3413,16 @@ _SMALL_BLOCK_BYTES = 1 << 20  # the caching allocator's small-pool request limit
 _CUDA_GET_DEVICE = getattr(torch._C, "_cuda_getDevice", None)
 _CUDA_GET_STREAM = getattr(torch._C, "_cuda_getCurrentStream", None)
 _CUDA_SET_STREAM = getattr(torch._C, "_cuda_setStream", None)
+# torch's allocator queries (:func:`_rlab_holding_ok`): the allocator backend's name, and the last allocator settings
+# string torch parsed; ``None`` on a build without them
+_CUDA_ALLOC_BACKEND = getattr(torch._C, "_cuda_getAllocatorBackend", None)
+_CUDA_ALLOC_SETTINGS = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+_EXPANDABLE_SEGMENTS = re.compile(r"expandable_segments\s*:\s*(\w+)")
+# whether the last allocator settings string that named ``expandable_segments`` set it ``True``
+# (:func:`_rlab_holding_ok`)
+_RLAB_EXPANDABLE = [False]
+# the value of a device not yet in a holding stream dict (:func:`_rlab_stream`)
+_RLAB_UNMADE = object()
 
 
 def _rlab_default(index: int) -> tuple:
@@ -3422,19 +3433,35 @@ def _rlab_default(index: int) -> tuple:
     return default
 
 
+def _cudart_clear_last_error() -> None:
+    """Clear this thread's last error of the CUDA runtime torch uses (``cudaGetLastError``): torch's
+    ``cudaStreamCreate`` binding returns a failure unchecked and leaves it set, and torch's check after its next kernel
+    launch would raise it there.  The runtime is the ``libcudart.so.<major>`` torch loaded, found among the loaded
+    libraries (never loaded anew); where it is not found (another platform, a static runtime) nothing is cleared."""
+    try:
+        name = "libcudart.so." + str(torch.version.cuda).split(".")[0]
+        ctypes.CDLL(name, mode=os.RTLD_NOLOAD | os.RTLD_NOW).cudaGetLastError()
+    except (AttributeError, OSError):
+        pass
+
+
 def _rlab_new_stream(index: int) -> Optional[torch.cuda.Stream]:
     """A new CUDA stream of device ``index`` that no other code can get: made by the CUDA runtime's
     ``cudaStreamCreate`` (torch's binding, :func:`torch.cuda.cudart`) with the device current, and wrapped as a
     :class:`torch.cuda.ExternalStream`; it is never destroyed.  A ``torch.cuda.Stream`` would be one of torch's pooled
     streams (a fixed number per device and priority, handed out round-robin), which the other holding stream or a
     caller's own stream can also be.  ``None`` when the stream cannot be made (no binding, or the call fails): no
-    pooled stream takes its place."""
+    pooled stream takes its place.  A failed call's error is cleared from the runtime
+    (:func:`_cudart_clear_last_error`), so the ordinary allocation that takes the stream's place, and the launches after
+    it, do not raise it."""
     try:
         cudart = torch.cuda.cudart()
         slot = ctypes.c_void_p()
         with torch.cuda.device(index):
-            err = cudart.cudaStreamCreate(ctypes.addressof(slot))
-        if int(err) != 0 or not slot.value:
+            err = int(cudart.cudaStreamCreate(ctypes.addressof(slot)))
+        if err != 0:
+            _cudart_clear_last_error()
+        if err != 0 or not slot.value:
             return None
         return torch.cuda.ExternalStream(slot.value, device=torch.device("cuda", index))
     except (AttributeError, RuntimeError, TypeError):
@@ -3446,14 +3473,39 @@ def _rlab_stream(
 ) -> Optional[torch.cuda.Stream]:
     """The holding stream of ``streams`` on device ``index``, made on first use (:func:`_rlab_new_stream`, once per
     device and holding stream: under :data:`_RLAB_STREAMS_LOCK`, so two threads never make two); ``None`` when it
-    could not be made."""
-    stream = streams.get(index)
-    if stream is None and index not in streams:
+    could not be made.  A device the lock-free read does not find is read again under the lock, so a call returns the
+    stream another thread made in between."""
+    stream = streams.get(index, _RLAB_UNMADE)
+    if stream is _RLAB_UNMADE:
         with _RLAB_STREAMS_LOCK:
-            if index not in streams:
-                streams[index] = _rlab_new_stream(index)
-            stream = streams[index]
+            stream = streams.get(index, _RLAB_UNMADE)
+            if stream is _RLAB_UNMADE:
+                stream = streams[index] = _rlab_new_stream(index)
     return stream
+
+
+def _rlab_holding_ok() -> bool:
+    """Whether a request of the graphs' label residuals may take a holding stream (:func:`_graph_rlab_tensor`): only
+    under torch's native caching allocator with fixed segments.  The default path frees its block without
+    ``record_stream``.  Its use on the default stream stays ordered there because a block of a holding stream's segment
+    is handed out again only to a request on that stream (another default-path request), and a fixed segment goes back
+    to the device by ``cudaFree``, which waits for the device.  With expandable segments the allocator unmaps a
+    segment's pages after waiting for that segment's stream only (the idle holding stream); the ``cudaMallocAsync``
+    backend frees the block in the holding stream's order into a pool that every stream takes from; a pluggable
+    allocator gives no such order either.  There it is ``False``: the request is an ordinary allocation on the caller's
+    stream.  torch's settings query returns the last settings string torch parsed (``PYTORCH_CUDA_ALLOC_CONF`` /
+    ``PYTORCH_ALLOC_CONF``, then each ``torch._C._accelerator_setAllocatorSettings`` call), so the value of the last
+    string that named ``expandable_segments`` is kept (:data:`_RLAB_EXPANDABLE`; the environment's is read when the
+    module loads).  ``False`` on a build without the queries."""
+    if _CUDA_ALLOC_BACKEND is None or _CUDA_ALLOC_SETTINGS is None:
+        return False
+    named = _EXPANDABLE_SEGMENTS.findall(_CUDA_ALLOC_SETTINGS())
+    if named:
+        _RLAB_EXPANDABLE[0] = named[-1] == "True"
+    return not _RLAB_EXPANDABLE[0] and _CUDA_ALLOC_BACKEND() == "native"
+
+
+_rlab_holding_ok()  # the settings of the environment
 
 
 def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Tensor:
@@ -3475,12 +3527,14 @@ def _graph_rlab_tensor(rows: int, zero: bool, device: torch.device) -> torch.Ten
     takes the side holding stream (:data:`_RLAB_SIDE_STREAMS`) and marks the tensor as used on the caller's stream
     (``record_stream``), so its block is reused only after that stream's work on it.  Each holding stream is a stream of
     its own (:func:`_rlab_new_stream`): no other request, and no caller, is on it.  Under a CUDA graph capture, above
-    the small-pool limit, or where the holding stream could not be made, it is an ordinary allocation on the caller's
-    stream."""
+    the small-pool limit, with an allocator other than torch's native one with fixed segments
+    (:func:`_rlab_holding_ok`), or where the holding stream could not be made, it is an ordinary allocation on the
+    caller's stream."""
     if (
         rows * 4 > _SMALL_BLOCK_BYTES
         or device.type != "cuda"
         or torch.cuda.is_current_stream_capturing()
+        or not _rlab_holding_ok()
     ):
         return (torch.zeros if zero else torch.empty)(
             (rows,), dtype=torch.float32, device=device
