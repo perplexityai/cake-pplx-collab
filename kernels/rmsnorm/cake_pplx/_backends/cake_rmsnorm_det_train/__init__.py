@@ -528,6 +528,14 @@ def cake_rmsnorm_det_train_backward_workspace_bytes(
     return total
 
 
+# Widths whose backward given no workspace allocates only the launched module's
+# layout bytes (the buffer is private to the call): H 128, whose pair windows
+# make the size that serves every window up to the token count much larger than
+# a call of its column-task window binds.  Other widths allocate the size of
+# :func:`cake_rmsnorm_det_train_backward_workspace_bytes`, as the allocator does.
+_PER_CALL_WORKSPACE_WIDTHS = frozenset({128})
+
+
 def cake_rmsnorm_det_train_backward_workspace(
     rows: int, hidden: int, device: torch.device, *, residual: bool = False
 ) -> torch.Tensor:
@@ -900,6 +908,16 @@ def cake_rmsnorm_det_train_backward(
             f"the exported backward route for hidden={hidden} launches "
             f"{len(launched)} workspace-owning modules for {rows} rows; expected one"
         )
+    if workspace is None and hidden in _PER_CALL_WORKSPACE_WIDTHS:
+        # private to this call: only the launched module's layout bytes, with the
+        # partial capacity ``_workspace_views`` binds, not every window's
+        nbytes = _loader.workspace_layout(
+            launched[0],
+            rows,
+            device_index=_device_index(device),
+            capacity_record=launched[0] if owner is None else owner,
+        )["total_bytes"]
+        workspace = torch.zeros(int(nbytes), dtype=torch.uint8, device=device)
     if workspace is None:
         workspace = cake_rmsnorm_det_train_backward_workspace(
             rows, hidden, device, residual=has_residual

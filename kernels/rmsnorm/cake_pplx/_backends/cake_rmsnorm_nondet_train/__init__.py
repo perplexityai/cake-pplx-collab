@@ -594,7 +594,10 @@ def cake_rmsnorm_nondet_train_backward_workspace_bytes(
     The size returned is the largest layout of the records the width's
     backward routes (``hidden``, ``residual``, both weight dtypes) run for up
     to ``rows`` tokens.  The buffer must be zero on first use (allocate with
-    ``torch.zeros`` or use :func:`cake_rmsnorm_nondet_train_backward_workspace`);
+    ``torch.zeros`` or use :func:`cake_rmsnorm_nondet_train_backward_workspace`,
+    which for H = 128 also places it at an address where the backward runs
+    faster; a zeroed buffer of this size that the caller allocates keeps
+    working);
     after every launch the kernels leave the counters at rest and the sums at
     zero, so with no host write one buffer serves any sequence of this
     package's backward calls -- hidden sizes, residual flags, weight dtypes,
@@ -613,6 +616,36 @@ def cake_rmsnorm_nondet_train_backward_workspace_bytes(
     return _workspace_bytes(rows, hidden, device, residual)
 
 
+# The package's own workspaces of the widths listed here (the allocator's, and
+# the backward's when it is given none) start at the listed residue modulo 1024,
+# a view into an allocation 768 bytes larger (CUDA allocations are 256-byte
+# aligned): the single kernel's counter and FP32-sum rows, which every CTA of
+# its launch updates, then sit where that backward measured fastest.  H 128:
+# 256, measured on B200, GB200 and GB300.  Other widths measured slower at 256
+# or are unmeasured, so their workspaces keep the allocator's address.
+_WORKSPACE_MODULUS = 1024
+_WORKSPACE_RESIDUES = {128: 256}
+_WORKSPACE_SLACK = 768
+# Widths whose backward given no workspace allocates only its own call's layout
+# bytes (the buffer is private to the call); other widths allocate the size that
+# serves every window up to the call's token count, as the allocator does.
+_PER_CALL_WORKSPACE_WIDTHS = frozenset({128})
+
+
+def _package_workspace(nbytes: int, device: torch.device, hidden: int) -> torch.Tensor:
+    """A zeroed ``uint8`` workspace of ``nbytes`` bytes on ``device``: for a width
+    of ``_WORKSPACE_RESIDUES``, the view that starts at the first address of its
+    residue modulo ``_WORKSPACE_MODULUS`` in an allocation ``_WORKSPACE_SLACK``
+    bytes larger; for any other width, the allocation itself."""
+
+    residue = _WORKSPACE_RESIDUES.get(int(hidden))
+    if residue is None:
+        return torch.zeros(nbytes, dtype=torch.uint8, device=device)
+    buffer = torch.zeros(nbytes + _WORKSPACE_SLACK, dtype=torch.uint8, device=device)
+    start = (residue - buffer.data_ptr()) % _WORKSPACE_MODULUS
+    return buffer[start : start + nbytes]
+
+
 def cake_rmsnorm_nondet_train_backward_workspace(
     rows: int,
     hidden: int,
@@ -623,12 +656,19 @@ def cake_rmsnorm_nondet_train_backward_workspace(
     """Allocate a zero-initialized backward workspace (see
     :func:`cake_rmsnorm_nondet_train_backward_workspace_bytes`; the deterministic
     package's is
-    :func:`cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det_train_backward_workspace`)."""
+    :func:`cake_pplx.cake_rmsnorm_det_train.cake_rmsnorm_det_train_backward_workspace`).
+
+    The tensor holds exactly the bytes that function returns.  For H = 128 the
+    package places it for speed: it starts at an address of 256 modulo 1024 (a
+    view into an allocation 768 bytes larger), where the single kernel's
+    counters and FP32 column sums make that backward fastest.  A zeroed buffer
+    of the same size that the caller allocates keeps working, without this
+    placement."""
 
     nbytes = cake_rmsnorm_nondet_train_backward_workspace_bytes(
         rows, hidden, device, residual=residual
     )
-    return torch.zeros(nbytes, dtype=torch.uint8, device=torch.device(device))
+    return _package_workspace(nbytes, torch.device(device), hidden)
 
 
 def _workspace_views(
@@ -1011,11 +1051,12 @@ def _backward(
         device_index, arch, hidden, has_residual, w_dtype, rows, _registry_token()
     )
     if workspace is None:
-        workspace = torch.zeros(
-            _workspace_bytes(rows, hidden, device, has_residual),
-            dtype=torch.uint8,
-            device=device,
-        )
+        if hidden in _PER_CALL_WORKSPACE_WIDTHS:
+            # private to this call: only its own layout's bytes, not every window's
+            nbytes = int(layout["total_bytes"])
+        else:
+            nbytes = _workspace_bytes(rows, hidden, device, has_residual)
+        workspace = _package_workspace(nbytes, device, hidden)
     partial, counters = _workspace_views(
         workspace, record, layout=layout, device=device
     )

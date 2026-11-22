@@ -22,8 +22,10 @@ Python's ``TypeError``), the interplay with
 backward alert: ``RuntimeError``; with ``warn_only``, one warning naming the
 det entry point, then this package's kernels), the standalone import of the
 backend, the workspace contract (one buffer serves any sequence of layouts and
-is at rest after every call), the one-kernel launch of a single-kernel window
-and the N-D autograd gradients.  Every output a test here computes meets the
+is at rest after every call; the package's allocator places it at a fast
+address for H = 128; given none, an H = 128 backward allocates only its own
+call's bytes), the one-kernel launch of a single-kernel window and the N-D autograd
+gradients.  Every output a test here computes meets the
 naive PyTorch BF16 tier over the draws (no tolerance: its error against an FP64
 oracle beside the naive's, ``tests/norm/test_helpers/
 cake_rmsnorm_train_reference.py``); the tests never compare this package with
@@ -679,13 +681,38 @@ def test_a_stale_workspace_is_correct_after_the_fresh_form(
 def _single_window(arch: str) -> tuple[int, bool, str, int] | None:
     """``(hidden, residual, w dtype token, tokens)`` inside one single-kernel
     window of ``arch``'s registry, or ``None``."""
+    return _owner_window(arch, "claim_sum_f32")
+
+
+def _owner_window(
+    arch: str, kind: str, hidden: int | None = None
+) -> tuple[int, bool, str, int] | None:
+    """``(hidden, residual, w dtype token, tokens)`` inside one window of
+    ``arch``'s registry (of width ``hidden`` when given) whose workspace owner
+    has the workspace rule ``kind`` (``claim_sum_f32``: a single kernel;
+    ``chunk_partials``: a deterministic pair), or ``None``: the first of
+    :func:`_owner_windows`."""
+    windows = _owner_windows(arch, kind, hidden)
+    return windows[0] if windows else None
+
+
+def _owner_windows(
+    arch: str, kind: str, hidden: int | None = None
+) -> list[tuple[int, bool, str, int]]:
+    """``(hidden, residual, w dtype token, tokens)`` inside every window of
+    ``arch``'s registry (of width ``hidden`` when given) whose workspace owner
+    has the workspace rule ``kind``, in registry order (the backward routes,
+    each route's windows in turn)."""
+    windows = []
     for route, names in loader.ROUTES.get(arch, {}).items():
         if not route.startswith("bwd"):
             continue
         for name in names:
             record = loader.MODULES[name]
             rule = record["workspace_rule"]
-            if rule is None or rule["kind"] != "claim_sum_f32":
+            if rule is None or rule["kind"] != kind:
+                continue
+            if hidden is not None and int(record["hidden"]) != hidden:
                 continue
             window = record["select_rule"]
             above = 0 if window is None else int(window["above"])
@@ -693,8 +720,8 @@ def _single_window(arch: str) -> tuple[int, bool, str, int] | None:
             tokens = above + 1 if at_most is None else (above + 1 + int(at_most)) // 2
             residual = "_residual" in route
             token = "f32" if "_w32" in route else "bf16"
-            return int(record["hidden"]), residual, token, tokens
-    return None
+            windows.append((int(record["hidden"]), residual, token, tokens))
+    return windows
 
 
 @requires_device
@@ -760,6 +787,305 @@ def test_a_single_kernel_window_launches_exactly_one_kernel(no_determinism) -> N
         raise lost
     assert len(names) == 1, names
     assert "rmsnorm" in names[0] and "reduce" not in names[0], names
+
+
+def _assert_placed(ws: torch.Tensor, nbytes: int, label) -> None:
+    """``ws`` is a zeroed, contiguous 1-D ``uint8`` workspace on the device of
+    exactly ``nbytes`` bytes that starts at the package's H = 128 placement
+    address."""
+    assert ws.dtype == torch.uint8 and ws.ndim == 1 and ws.is_contiguous(), label
+    assert ws.device == _device(), (label, ws.device)
+    assert ws.numel() == nbytes, (label, ws.numel(), nbytes)
+    residue = ws.data_ptr() % backend._WORKSPACE_MODULUS
+    assert residue == backend._WORKSPACE_RESIDUES[128], (label, hex(ws.data_ptr()))
+    assert not bool(ws.any()), label
+
+
+def _assert_unplaced(ws: torch.Tensor, nbytes: int, label) -> None:
+    """``ws`` is a zeroed, contiguous 1-D ``uint8`` workspace on the device of
+    exactly ``nbytes`` bytes that is its whole allocation (not shifted)."""
+    assert ws.dtype == torch.uint8 and ws.ndim == 1 and ws.is_contiguous(), label
+    assert ws.device == _device(), (label, ws.device)
+    assert ws.numel() == nbytes, (label, ws.numel(), nbytes)
+    assert ws.storage_offset() == 0, (label, ws.storage_offset())
+    assert ws.untyped_storage().nbytes() == nbytes, label
+    assert not bool(ws.any()), label
+
+
+@requires_device
+def test_the_package_allocator_places_only_the_h128_workspace() -> None:
+    """The package's allocator returns a zeroed workspace of exactly
+    :func:`cake_rmsnorm_nondet_train_backward_workspace_bytes` bytes.  For
+    H = 128 (a single-kernel and a deterministic-pair window of the device's
+    registry among others) it starts at an address of 256 modulo 1024
+    (``_WORKSPACE_RESIDUES`` modulo ``_WORKSPACE_MODULUS``) whatever the address
+    of the allocation under it; for every other width it is the allocation
+    itself, not shifted.  So does the package's workspace helper for any
+    size."""
+    arch = loader.device_arch(_device().index or 0)
+    widths = loader.supported_hidden_sizes(arch)
+    if 128 not in widths:
+        pytest.skip(f"hidden=128 has no exported route on {arch}")
+    cases = [(128, False, tokens) for tokens in (257, 4096, 16384, 65536)]
+    for kind in ("claim_sum_f32", "chunk_partials"):
+        found = _owner_window(arch, kind, 128)
+        if found is not None:
+            hidden, residual, _token, tokens = found
+            cases.append((hidden, residual, tokens))
+    others = [
+        (hidden, residual, tokens)
+        for hidden, residual, tokens in (
+            (512, False, 257),
+            (2048, False, 4096),
+            (6144, True, 3000),
+            (6144, False, 65536),
+        )
+        if loader.weight_dtypes(arch, hidden, "bwd", residual)
+    ]
+    pads = []
+    for index, (hidden, residual, tokens) in enumerate(cases + others):
+        # move the allocation under the next workspace by a block or two
+        pads.append(torch.empty(512 * (index % 3), dtype=torch.uint8, device=_device()))
+        ws = cake_rmsnorm_nondet_train_backward_workspace(
+            tokens, hidden, _device(), residual=residual
+        )
+        nbytes = cake_rmsnorm_nondet_train_backward_workspace_bytes(
+            tokens, hidden, _device(), residual=residual
+        )
+        check = _assert_placed if hidden == 128 else _assert_unplaced
+        check(ws, nbytes, (hidden, residual, tokens))
+    for index, nbytes in enumerate((1, 256, 1000, 4096, 1 << 21)):
+        pads.append(torch.empty(512 * (index % 3), dtype=torch.uint8, device=_device()))
+        ws = backend._package_workspace(nbytes, _device(), 128)
+        _assert_placed(ws, nbytes, (128, nbytes))
+        for hidden in widths:
+            if hidden != 128:
+                ws = backend._package_workspace(nbytes, _device(), hidden)
+                _assert_unplaced(ws, nbytes, (hidden, nbytes))
+
+
+@requires_device
+def test_a_placed_workspace_serves_a_sequence_like_a_zeroed_one(
+    no_determinism, record_property
+) -> None:
+    """ONE workspace from the package's allocator serves a sequence of hidden
+    128 backward calls whose token counts enter every window of the width's
+    routes (both edges of each, single-kernel and deterministic-pair windows
+    among them), the weight dtypes alternating, once per draw: it is at rest
+    after every call, every call's ``dx`` is bitwise the ``dx`` of the same call
+    on a fresh ``torch.zeros`` workspace of the call's own size, and the ``dx``
+    and ``dw`` of both meet the naive PyTorch BF16 tier over the draws."""
+    arch = loader.device_arch(_device().index or 0)
+    hidden = 128
+    if hidden not in loader.supported_hidden_sizes(arch):
+        pytest.skip(f"hidden={hidden} has no exported route on {arch}")
+    tokens_of = loader.weight_dtypes(arch, hidden, "bwd", False)
+    edges = set()
+    for token in tokens_of:
+        for above, at_most, _library in ref.windows(
+            loader, arch, hidden, "bwd", False, token
+        ):
+            edges.add(above + 1)
+            if at_most is not None:
+                edges.add(int(at_most))
+    edges = sorted(edges)
+    # largest, smallest, second largest, ...: every call changes the window
+    order = [edges[i // 2] if i % 2 else edges[-1 - i // 2] for i in range(len(edges))]
+    calls = [(token, tokens) for tokens in order for token in tokens_of]
+    ws = cake_rmsnorm_nondet_train_backward_workspace(edges[-1], hidden, _device())
+
+    def judges(label: str) -> list[ref.Draws]:
+        return [
+            ref.Draws(label, prefix=f"{index}: w={token} tokens={tokens} ")
+            for index, (token, tokens) in enumerate(calls)
+        ]
+
+    placed, zeroed = judges("allocator workspace"), judges("zeroed workspace")
+    eps = EPS[hidden]
+    for draw in range(ref.DRAWS):
+        generator = _generator(SEED + 53, draw)
+        for (token, tokens), check, zero_check in zip(
+            calls, placed, zeroed, strict=True
+        ):
+            x = _randn(tokens, hidden, generator=generator)
+            g = _randn(tokens, hidden, generator=generator)
+            # an FP32 weight holds a BF16 draw (the naive tier reads it exactly)
+            w = (
+                (1.0 + 0.1 * _randn(hidden, generator=generator).float())
+                .to(torch.bfloat16)
+                .to(ref.W_DTYPES[token])
+            )
+            _y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+            fresh = torch.zeros(
+                cake_rmsnorm_nondet_train_backward_workspace_bytes(
+                    tokens, hidden, _device()
+                ),
+                dtype=torch.uint8,
+                device=_device(),
+            )
+            dx0, dw0 = cake_rmsnorm_nondet_train_backward(
+                g, x, w, rstd, workspace=fresh
+            )
+            dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd, workspace=ws)
+            assert _at_rest(ws), (token, tokens, draw)
+            assert torch.equal(dx, dx0), (token, tokens, draw)
+            check.backward(draw, {"dx": dx, "dw": dw}, g, x, w, rstd, eps)
+            zero_check.backward(draw, {"dx": dx0, "dw": dw0}, g, x, w, rstd, eps)
+    ref.check_all(record_property, placed + zeroed)
+
+
+def _no_workspace_bytes(
+    arch: str, window: tuple[int, bool, str, int]
+) -> tuple[dict, int, int]:
+    """``(workspace owner, own, public)`` of a backward call in ``window`` on
+    the device: ``own`` is the ``total_bytes`` of its own call's layout,
+    ``public`` the :func:`cake_rmsnorm_nondet_train_backward_workspace_bytes`
+    of its token count (the size that serves every window up to it)."""
+    hidden, residual, token, tokens = window
+    _names, record, layout = backend._backward_plan(
+        backend._device_index(_device()),
+        arch,
+        hidden,
+        residual,
+        token,
+        tokens,
+        backend._registry_token(),
+    )
+    public = cake_rmsnorm_nondet_train_backward_workspace_bytes(
+        tokens, hidden, _device(), residual=residual
+    )
+    return record, int(layout["total_bytes"]), public
+
+
+def _no_workspace_windows(
+    arch: str,
+) -> list[tuple[str, tuple[int, bool, str, int], bool]]:
+    """``(kind, window, own < public)`` of the calls of
+    ``test_the_backward_given_no_workspace_allocates_only_its_own_bytes``,
+    chosen at run time from ``arch``'s registry (``own`` and ``public`` of
+    :func:`_no_workspace_bytes`): for the H = 128 single kernel and the H = 128
+    pair each, the first window (:func:`_owner_windows`) whose own bytes are
+    strictly fewer than the public size, else the first window; then, as kind
+    ``"other width"``, the first window of another width (pairs before single
+    kernels) whose own bytes are fewer than the public size, else the first
+    window of another width.  So an H = 128 call of fewer own bytes than the
+    public size is among them whenever the registry has one of either kind,
+    and so is an other-width call whose two sizes differ whenever one exists."""
+
+    def first_smaller(kind: str, hidden: int) -> tuple[int, bool, str, int] | None:
+        for window in _owner_windows(arch, kind, hidden):
+            _record, own, public = _no_workspace_bytes(arch, window)
+            if own < public:
+                return window
+        return None
+
+    found = []
+    for kind in ("claim_sum_f32", "chunk_partials"):
+        window = first_smaller(kind, 128)
+        if window is not None:
+            found.append((kind, window, True))
+        elif (window := _owner_window(arch, kind, 128)) is not None:
+            found.append((kind, window, False))
+    if not found:
+        return found
+    others = [
+        (kind, hidden)
+        for kind in ("chunk_partials", "claim_sum_f32")
+        for hidden in loader.supported_hidden_sizes(arch)
+        if hidden != 128
+    ]
+    other = next(
+        (
+            ("other width", window, True)
+            for kind, hidden in others
+            if (window := first_smaller(kind, hidden)) is not None
+        ),
+        None,
+    )
+    if other is None:
+        other = next(
+            (
+                ("other width", window, False)
+                for kind, hidden in others
+                if (window := _owner_window(arch, kind, hidden)) is not None
+            ),
+            None,
+        )
+    if other is not None:
+        found.append(other)
+    return found
+
+
+@requires_device
+def test_the_backward_given_no_workspace_allocates_only_its_own_bytes(
+    no_determinism, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Given no workspace, an H = 128 backward (called directly, and through
+    autograd, which never passes one) allocates its workspace through the
+    package's workspace helper with exactly the ``total_bytes`` of its own
+    call's layout, never more than
+    :func:`cake_rmsnorm_nondet_train_backward_workspace_bytes` (the size that
+    serves every window up to the token count), in a single-kernel window and a
+    deterministic-pair window of the device's registry; a backward of another
+    width allocates that function's size, as before.  The windows are those of
+    :func:`_no_workspace_windows`: where the registry has an H = 128 window
+    whose own bytes are fewer than the public size (a single kernel above the
+    pair windows), one of them is called and the strict inequality asserted,
+    so a backward that allocated the public size there fails; where another
+    width has such a window, the other-width call is in one, so a backward
+    that allocated that call's own bytes there fails.  ``dx`` is bitwise the
+    ``dx`` of the same call on a zeroed buffer of the public size, and so is a
+    pair's fixed-order ``dw``."""
+    arch = loader.device_arch(_device().index or 0)
+    found = _no_workspace_windows(arch)
+    if not found:
+        pytest.skip(f"no H 128 single-kernel or pair backward window on {arch}")
+    sizes: list[tuple[int, int]] = []
+    helper = backend._package_workspace
+
+    def recording(nbytes: int, device: torch.device, hidden: int) -> torch.Tensor:
+        sizes.append((nbytes, hidden))
+        return helper(nbytes, device, hidden)
+
+    monkeypatch.setattr(backend, "_package_workspace", recording)
+    generator = torch.Generator(device=_device()).manual_seed(SEED + 59)
+    for kind, window, smaller in found:
+        hidden, residual, token, tokens = window
+        label = (kind, hidden, residual, token, tokens)
+        eps = EPS.get(hidden, 1e-6)
+        x = _randn(tokens, hidden, generator=generator)
+        g = _randn(tokens, hidden, generator=generator)
+        w = _randn(hidden, generator=generator).to(ref.W_DTYPES[token])
+        gh = _randn(tokens, hidden, generator=generator) if residual else None
+        _y, rstd = cake_rmsnorm_nondet_train_forward(x, w, eps)
+        record, own, public = _no_workspace_bytes(arch, window)
+        assert own <= public, (label, own, public)
+        if smaller:
+            assert own < public, (label, own, public)
+        want = own if hidden == 128 else public
+        sizes.clear()
+        dx, dw = cake_rmsnorm_nondet_train_backward(g, x, w, rstd, g_residual=gh)
+        assert sizes == [(want, hidden)], (label, sizes, want, public)
+        fresh = torch.zeros(public, dtype=torch.uint8, device=_device())
+        dx0, dw0 = cake_rmsnorm_nondet_train_backward(
+            g, x, w, rstd, g_residual=gh, workspace=fresh
+        )
+        assert torch.equal(dx, dx0), label
+        if record["workspace_rule"]["kind"] == "chunk_partials":
+            assert torch.equal(dw, dw0), label
+        xa = x.clone().requires_grad_(True)
+        wa = w.clone().requires_grad_(True)
+        if residual:
+            ra = _randn(tokens, hidden, generator=generator).requires_grad_(True)
+            outputs = cake_rmsnorm_nondet(xa, wa, eps, residual=ra)
+            grads = (g, gh)
+        else:
+            outputs = (cake_rmsnorm_nondet(xa, wa, eps),)
+            grads = (g,)
+        sizes.clear()
+        torch.autograd.backward(outputs, grads)
+        torch.cuda.synchronize()
+        assert sizes == [(want, hidden)], ("autograd", label, sizes, want)
 
 
 @requires_device
