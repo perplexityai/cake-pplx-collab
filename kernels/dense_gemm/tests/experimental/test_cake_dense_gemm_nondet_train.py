@@ -3134,9 +3134,9 @@ def test_k1_chain_programs_are_registered():
 
 
 #: The promoted programs this package ships (:data:`K1_PROMOTE_BLOCKS`): the one-chain BF16 transposed-store programs
-#: of 64-, 128- and 256-wide tiles with chunks of at most 128 K blocks, on sm_100a, sm_103a and sm_107a.
+#: of 64-, 128- and 256-wide tiles with chunks of at most 64 K blocks, on sm_100a, sm_103a and sm_107a.
 K1_PROMOTED_TEMPLATES = tuple(
-    f"dense_proj_gemm_atomic_nn_n{bn}_t_kc128" for bn in (64, 128, 256)
+    f"dense_proj_gemm_atomic_nn_n{bn}_t_kc64" for bn in (64, 128, 256)
 )
 #: The rows the promotion rule leaves without promotion, restated: ``sm_107a`` ``5120 -> 1024`` BF16 (one split of
 #: 256-wide tiles), whose output without promotion met the naive BF16 tier and whose promoted program was slower.
@@ -3148,7 +3148,7 @@ def _k1_template_at(
 ):
     """``(template, promote_blocks)`` of this package's CTA-pair plan of ``block_n`` / ``splits`` / ``chains`` at ``T``
     tokens on ``arch``, by the rule of :data:`K1_PROMOTE_BLOCKS` restated here: the promoted program where the plan
-    has one chain, BF16 out and the transposed store, its largest split holds more than 128 K blocks of 64 tokens and
+    has one chain, BF16 out and the transposed store, its largest split holds more than 64 K blocks of 64 tokens and
     this checkout registers the promoted template for ``arch``; else, and for a row ``key`` of
     :data:`K1_PROMOTE_EXEMPT_ROWS`, the program without promotion."""
     kc = cake_backend.K1_PROMOTE_BLOCKS
@@ -3174,32 +3174,32 @@ def _wgrad_views(T, d_in, d_out, out_dtype=torch.bfloat16):
 
 
 def test_k1_promote_template_and_rule(monkeypatch):
-    """A promoted chunk holds 128 K blocks (:data:`K1_PROMOTE_BLOCKS`); the promoted template ends in ``_kc128``, after
-    the chain and split-order parts.  :func:`k1_promote_blocks` names it (128) for one chain, BF16 out and the
-    transposed store when the largest split, ``ceil(ceil(K / 64) / splits)``, holds more than 128 K blocks and the
-    template is registered for the architecture, and gives 0 otherwise: at 128 blocks or fewer, at more than one
+    """A promoted chunk holds 64 K blocks (:data:`K1_PROMOTE_BLOCKS`); the promoted template ends in ``_kc64``, after
+    the chain and split-order parts.  :func:`k1_promote_blocks` names it (64) for one chain, BF16 out and the
+    transposed store when the largest split, ``ceil(ceil(K / 64) / splits)``, holds more than 64 K blocks and the
+    template is registered for the architecture, and gives 0 otherwise: at 64 blocks or fewer, at more than one
     chain, for FP32 out, for the row-major store (each also with such a template registered) and without the template.
     The rule reads the split's length only: the same answer on every architecture, whatever the row."""
-    assert cake_backend.K1_PROMOTE_BLOCKS == 128
+    assert cake_backend.K1_PROMOTE_BLOCKS == 64
     template = cake_backend.atomic_k1_template
-    assert template(64, False, 1, "arrival", 128) == (
-        "dense_proj_gemm_atomic_nn_n64_t_kc128"
+    assert template(64, False, 1, "arrival", 64) == (
+        "dense_proj_gemm_atomic_nn_n64_t_kc64"
     )
     assert template(64, False, 1, "arrival", 0) == "dense_proj_gemm_atomic_nn_n64_t"
-    assert template(256, True, 2, "mirror", 128) == (
-        "dense_proj_gemm_atomic_nn_n256_f32_t_c2_mirror_kc128"
+    assert template(256, True, 2, "mirror", 64) == (
+        "dense_proj_gemm_atomic_nn_n256_f32_t_c2_mirror_kc64"
     )
-    assert template(192, False, 1, "arrival", 128) == (
-        "dense_proj_gemm_atomic_nn_n192_kc128"
+    assert template(192, False, 1, "arrival", 64) == (
+        "dense_proj_gemm_atomic_nn_n192_kc64"
     )
     for arch in ("sm_100a", "sm_103a", "sm_107a"):
         _register(
             monkeypatch,
             arch,
             *K1_PROMOTED_TEMPLATES,
-            "dense_proj_gemm_atomic_nn_n64_f32_t_kc128",
-            "dense_proj_gemm_atomic_nn_n64_t_c2_kc128",
-            "dense_proj_gemm_atomic_nn_n192_kc128",
+            "dense_proj_gemm_atomic_nn_n64_f32_t_kc64",
+            "dense_proj_gemm_atomic_nn_n64_t_c2_kc64",
+            "dense_proj_gemm_atomic_nn_n192_kc64",
         )
 
         def rule(K, block_n=64, splits=2, chains=1, f32=False, arch=arch):
@@ -3213,16 +3213,16 @@ def test_k1_promote_template_and_rule(monkeypatch):
             )
 
         for bn in (64, 128, 256):
-            # two splits: 256 K blocks are 128 per split; 257 make 129 in the larger one
-            assert (rule(16384, bn), rule(16385, bn), rule(65535, bn)) == (0, 128, 128)
-            # one split: 128 and 129 K blocks
-            assert (rule(8192, bn, 1), rule(8193, bn, 1)) == (0, 128)
-            assert (rule(1, bn, 1), rule(65535 * 4, bn, 4)) == (0, 128)
+            # two splits: 128 K blocks are 64 per split; 129 make 65 in the larger one
+            assert (rule(8192, bn), rule(8193, bn), rule(65535, bn)) == (0, 64, 64)
+            # one split: 64 and 65 K blocks
+            assert (rule(4096, bn, 1), rule(4097, bn, 1)) == (0, 64)
+            assert (rule(1, bn, 1), rule(65535 * 4, bn, 4)) == (0, 64)
         assert rule(65535, chains=2) == 0
         assert rule(65535, f32=True) == 0
         assert rule(65535, block_n=192, splits=1) == 0
     table = dict(cake_jit.KERNELS["sm_100a"])
-    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc128")
+    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc64")
     monkeypatch.setitem(cake_jit.KERNELS, "sm_100a", table)
     assert (
         cake_backend.k1_promote_blocks(
@@ -3233,13 +3233,13 @@ def test_k1_promote_template_and_rule(monkeypatch):
 
 
 def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
-    """A one-chain BF16 transposed-store plan whose largest split holds more than 128 K blocks of 64 tokens runs the
-    promoted program (``promote_blocks`` 128, template ``..._kc128``; not on the rows of
+    """A one-chain BF16 transposed-store plan whose largest split holds more than 64 K blocks of 64 tokens runs the
+    promoted program (``promote_blocks`` 64, template ``..._kc64``; not on the rows of
     :data:`K1_PROMOTE_EXEMPT_ROWS`), as the planner's choice and as an explicit one:
     the 148-SM sm_100a weight gradient ``4096 -> 64`` BF16 at 65535 tokens (``G [65535, 64]``, ``X [65535, 4096]``:
     two splits of 64-wide tiles, 512 K blocks each), where one accumulator per split missed the naive BF16 tier; the
-    plan is the one without promotion but for the template.  At 16384 tokens (128 blocks per split) the row keeps the
-    program without promotion, at 16385 (129) it promotes.  FP32 out (the planner's two-split plan and an explicit
+    plan is the one without promotion but for the template.  At 8192 tokens (64 blocks per split) the row keeps the
+    program without promotion, at 8193 (65) it promotes.  FP32 out (the planner's two-split plan and an explicit
     one), more than one chain (the 148-SM BF16 ``4096 -> 1024`` two-chain program, 256 K blocks in one split, and an
     explicit three in BF16 and in FP32) and the row-major store never promote, with the promoted template of each
     registered.
@@ -3258,10 +3258,10 @@ def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
         "dense_proj_gemm_atomic_nn_n128_t_c3",
         "dense_proj_gemm_atomic_nn_n128_f32_t_c3",
         # the promoted templates of plans that never promote: the rule, not the registry, refuses them
-        "dense_proj_gemm_atomic_nn_n64_f32_t_kc128",
-        "dense_proj_gemm_atomic_nn_n256_t_c2_kc128",
-        "dense_proj_gemm_atomic_nn_n128_t_c3_kc128",
-        "dense_proj_gemm_atomic_nn_n192_kc128",
+        "dense_proj_gemm_atomic_nn_n64_f32_t_kc64",
+        "dense_proj_gemm_atomic_nn_n256_t_c2_kc64",
+        "dense_proj_gemm_atomic_nn_n128_t_c3_kc64",
+        "dense_proj_gemm_atomic_nn_n192_kc64",
     )
     kw = dict(transposed_out=True, arch=arch, sm_count=148)
 
@@ -3281,7 +3281,7 @@ def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
 
     row = _wgrad_views(65535, 4096, 64)
     plan = plan_of(row)
-    assert fields(plan) == ("dense_proj_gemm_atomic_nn_n64_t_kc128", 64, 2, 1, 128)
+    assert fields(plan) == ("dense_proj_gemm_atomic_nn_n64_t_kc64", 64, 2, 1, 64)
     assert plan.out_t and not plan.dsm and plan.reproducible
     assert (plan.M, plan.N, plan.K, plan.split_order) == (4096, 64, 65535, "arrival")
     assert plan.workspace and plan.ws_f32_elems == 16 * 2 * 256 * 64
@@ -3291,30 +3291,30 @@ def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
     # the same knobs given explicitly promote alike; promote=True names the same program
     assert plan_of(row, splits=2, block_n=64) == plan
     assert plan_of(row, promote=True) == plan
-    # 128 K blocks per split: the program without promotion (promote=True: the promoted one, one chunk per split)
-    short = _wgrad_views(16384, 4096, 64)
+    # 64 K blocks per split: the program without promotion (promote=True: the promoted one, one chunk per split)
+    short = _wgrad_views(8192, 4096, 64)
     assert fields(plan_of(short)) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
     assert fields(plan_of(short, promote=True)) == (
-        "dense_proj_gemm_atomic_nn_n64_t_kc128",
+        "dense_proj_gemm_atomic_nn_n64_t_kc64",
         64,
         2,
         1,
-        128,
+        64,
     )
-    assert fields(plan_of(_wgrad_views(16385, 4096, 64))) == (
-        "dense_proj_gemm_atomic_nn_n64_t_kc128",
+    assert fields(plan_of(_wgrad_views(8193, 4096, 64))) == (
+        "dense_proj_gemm_atomic_nn_n64_t_kc64",
         64,
         2,
         1,
-        128,
+        64,
     )
-    # one split of 256-wide tiles at 129 K blocks, given explicitly
-    assert fields(plan_of(_wgrad_views(8193, 4096, 1024), splits=1, block_n=256)) == (
-        "dense_proj_gemm_atomic_nn_n256_t_kc128",
+    # one split of 256-wide tiles at 65 K blocks, given explicitly
+    assert fields(plan_of(_wgrad_views(4097, 4096, 1024), splits=1, block_n=256)) == (
+        "dense_proj_gemm_atomic_nn_n256_t_kc64",
         256,
         1,
         1,
-        128,
+        64,
     )
     # FP32 out never promotes
     row32 = _wgrad_views(65535, 4096, 64, torch.float32)
@@ -3378,15 +3378,15 @@ def test_k1_long_splits_plan_the_promoted_program(monkeypatch):
     # 4096 -> 64 from 65536 tokens: no BF16 entry is open-ended, the promoted two-split program
     for T in (65536, 65537, 131072):
         assert fields(plan_of(_wgrad_views(T, 4096, 64))) == (
-            "dense_proj_gemm_atomic_nn_n64_t_kc128",
+            "dense_proj_gemm_atomic_nn_n64_t_kc64",
             64,
             2,
             1,
-            128,
+            64,
         ), T
     # a checkout that does not register the promoted program: the program without promotion
     table = dict(cake_jit.KERNELS[arch])
-    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc128")
+    table.pop("dense_proj_gemm_atomic_nn_n64_t_kc64")
     monkeypatch.setitem(cake_jit.KERNELS, arch, table)
     assert fields(plan_of(row)) == ("dense_proj_gemm_atomic_nn_n64_t", 64, 2, 1, 0)
     with pytest.raises(ValueError, match="not registered"):
@@ -3406,7 +3406,7 @@ def test_k1_promote_exempt_rows_keep_the_program_without_promotion(monkeypatch):
     _register_k1(monkeypatch, arch)
     _register(monkeypatch, arch, *K1_PROMOTED_TEMPLATES)
     plain = ("dense_proj_gemm_atomic_nn_n256_t", 256, 1, 1, 0)
-    promoted = ("dense_proj_gemm_atomic_nn_n256_t_kc128", 256, 1, 1, 128)
+    promoted = ("dense_proj_gemm_atomic_nn_n256_t_kc64", 256, 1, 1, 64)
 
     def fields(T, d_in, d_out, sm_count, **knobs):
         plan, *_, reason = cake_backend.plan_atomic_gemm(
@@ -3443,10 +3443,10 @@ def test_k1_promote_exempt_rows_keep_the_program_without_promotion(monkeypatch):
             cake_backend.k1_promote_blocks(
                 arch=arch, K=T, block_n=256, splits=1, chains=1, out_f32=False
             )
-            == 128
+            == 64
         ), what
-    # at 128 K blocks the row's explicit plan is the same program either way
-    assert fields(8192, 5120, 1024, 212, **one) == plain
+    # at 64 K blocks the row's explicit plan is the same program either way
+    assert fields(4096, 5120, 1024, 212, **one) == plain
 
 
 def test_k1_promote_reaches_the_planner_from_the_plan_and_prepare_entries(
@@ -3514,7 +3514,7 @@ def test_k1_promote_off_keeps_the_route(monkeypatch):
 def test_k1_promoted_programs_are_registered():
     """The promoted programs (:data:`K1_PROMOTE_BLOCKS`) ship on sm_100a, sm_103a and sm_107a and no other promoted
     program does: each is the build of the one-chain BF16 transposed-store program of its tile width with
-    ``promote_blocks`` 128 (``split_order`` at its default, "arrival", whether the record names it or not), with that
+    ``promote_blocks`` 64 (``split_order`` at its default, "arrival", whether the record names it or not), with that
     program's argument plan and launch geometry, so a plan binds and launches it as it does that program."""
     arches = ("sm_100a", "sm_103a", "sm_107a")
     got = {}
@@ -3526,7 +3526,7 @@ def test_k1_promoted_programs_are_registered():
         K1_PROMOTED_TEMPLATES, arches
     )
     for template in K1_PROMOTED_TEMPLATES:
-        one = template[: -len("_kc128")]
+        one = template[: -len("_kc64")]
         for arch in arches:
             promoted = cake_jit.MODULES[cake_jit.KERNELS[arch][template]]
             single = cake_jit.MODULES[cake_jit.KERNELS[arch][one]]
@@ -3534,7 +3534,7 @@ def test_k1_promoted_programs_are_registered():
             assert {"split_order": "arrival", **promoted["build"]["kwargs"]} == {
                 "split_order": "arrival",
                 **single["build"]["kwargs"],
-                "promote_blocks": 128,
+                "promote_blocks": 64,
             }
             assert promoted["arg_plan"] == single["arg_plan"]
             assert promoted["launch"] == single["launch"]
@@ -10170,7 +10170,7 @@ def test_registered_templates_are_the_ones_the_planners_name():
     """Every template this checkout registers is one the host plans: the K1 programs of each tile width
     (``dense_proj_gemm_atomic_nn_n<64|128|256>[_f32]_t`` and the row-major ``dense_proj_gemm_atomic_nn_n192[_f32]``)
     and their FP32 programs of several accumulation chains (``..._c<chains>``, :data:`K1_CHAINS_CHOICES`), the
-    promoted programs of the one-chain BF16 transposed-store programs (``..._t_kc128``, :func:`k1_promote_blocks`),
+    promoted programs of the one-chain BF16 transposed-store programs (``..._t_kc64``, :func:`k1_promote_blocks`),
     the K1 cluster programs the ranges of :data:`K1_DSM_RANGES_BY_SM` name (each registered for the architecture of its
     table, and for no other: ``dense_proj_gemm_dsm_nn_n<block_n>_f32_t_s<splits>``; also the cluster tiles of
     :data:`K1_DSM_ODD_BLOCK_RANGES_BY_SM`; the three-CTA programs stay registered where no range names them: the ranges
@@ -10741,14 +10741,14 @@ def test_gpu_k1_explicit_split_counts(splits, record_property):
 
 
 # The promoted-chunk programs at explicit split counts: ``(row, T, splits, block_n, promoted)``.  Two splits of 32768
-# tokens hold 256 K blocks of 64 tokens each (two chunks of 128), three splits of 65535 tokens 342 (three chunks), one
-# split of 16384 tokens 256; two splits of 16385 tokens hold 129 in the larger one (the shortest split that promotes),
-# of 16384 tokens 128 (no promotion).
+# tokens hold 256 K blocks of 64 tokens each (four chunks of 64), three splits of 65535 tokens 342 (six chunks), one
+# split of 16384 tokens 256 (four chunks); two splits of 8193 tokens hold 65 in the larger one (the shortest split
+# that promotes), of 8192 tokens 64 (no promotion).
 K1_PROMOTED_CASES = (
     ("indexer_hw", 32768, 2, 64, True),
     ("indexer_hw", 65535, 3, 64, True),
-    ("thin_48", 16385, 2, 64, True),
-    ("thin_48", 16384, 2, 64, False),
+    ("thin_48", 8193, 2, 64, True),
+    ("thin_48", 8192, 2, 64, False),
     ("indexer_k", 32768, 2, 128, True),
     ("wide_512", 16384, 1, 256, True),
 )
@@ -10758,10 +10758,10 @@ K1_PROMOTED_CASES = (
     "case", K1_PROMOTED_CASES, ids=lambda c: f"{c[0]}-T{c[1]}-s{c[2]}"
 )
 def test_gpu_k1_promoted_programs(case, record_property):
-    """Each promoted-chunk program (``..._t_kc128``, 64-, 128- and 256-wide tiles) runs where a split holds more than
+    """Each promoted-chunk program (``..._t_kc64``, 64-, 128- and 256-wide tiles) runs where a split holds more than
     :data:`K1_PROMOTE_BLOCKS` K blocks, at one, two and three splits, and meets the naive BF16 tier against FP64 over
     the judge's draws, each launch into a NaN-poisoned ``out`` (three on the first draw), leaving the tickets zero; the
-    profiler shows the promoted program.  At 128 K blocks per split the same launch keeps the program without
+    profiler shows the promoted program.  At 64 K blocks per split the same launch keeps the program without
     promotion."""
     device, arch = _atomic_device_or_skip()
     row, T, splits, block_n, promoted = case
@@ -16026,7 +16026,7 @@ def test_k1_rows_follow_the_deterministic_routing_of_0_3_4():
                 5120,
                 128,
                 T,
-                "dense_proj_det_gemm_nn_n128_hen_t_sks_kc128_pro7",
+                "dense_proj_det_gemm_nn_n128_hen_t_sks_kc64_pro7",
             )
             for sms in (148, 152)
             for T in (32768, 65535, 98304)
@@ -20276,12 +20276,13 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
     knobs (:func:`k1_program_knobs`) carry ``promote=False``, so with the twin of the BF16 program registered the
     deterministic planner plans exactly the named program at its token counts.  The same knobs without ``promote``
     (the deterministic planner's automatic rule) plan the twin, their segments holding more than the default
-    threshold's 128 K blocks, and plan the program at a threshold of 256 K blocks (that of versions up to 0.3.5), which
-    no segment exceeds; the named knobs plan the program at both.  The rows stay on the deterministic program
-    (:func:`plan_atomic_gemm`), and the convenience call binds the table's knobs (:func:`_wgrad_det_args`)."""
+    threshold's 64 K blocks, also at a threshold of 128 K blocks (that of versions 0.3.6 to 0.3.20), and plan the
+    program at a threshold of 256 K blocks (that of versions up to 0.3.5), which no segment exceeds; the named knobs
+    plan the program at all three.  The rows stay on the deterministic program (:func:`plan_atomic_gemm`), and the
+    convenience call binds the table's knobs (:func:`_wgrad_det_args`)."""
     rows = cake_backend.K1_WGRAD_DET_RULES_BY_SM[("sm_100a", 148)]
     program = det_backend._TEMPLATE_PREFIX + "nn_n192_bz64_hne_sks_sb2_pro15"
-    twin = program.replace("_pro15", "_kc128_pro15")
+    twin = program.replace("_pro15", "_kc64_pro15")
     table = dict(det_jit.KERNELS["sm_100a"])
     table[twin] = table[program]
     monkeypatch.setitem(det_jit.KERNELS, "sm_100a", table)
@@ -20292,7 +20293,7 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         lambda device=None: SimpleNamespace(arch="sm_100a", sm_count=148),
     )
     default = det_backend.K1_PROMOTE_MIN_SEGMENT
-    assert default == 128
+    assert default == 64
     bf16 = torch.bfloat16
     seen = 0
     for (d_in, d_out, T, dt), name in rows.items():
@@ -20305,7 +20306,11 @@ def test_k1_wgrad_det_rules_keep_their_program_without_promotion(monkeypatch):
         A, B, transposed = det_backend.wgrad_views(G, X, arch="sm_100a")
         automatic = dict(knobs)
         del automatic["promote"]
-        for threshold, promoted in ((default, (twin, 128)), (256, (program, 0))):
+        for threshold, promoted in (
+            (default, (twin, 64)),
+            (128, (twin, 64)),
+            (256, (program, 0)),
+        ):
             monkeypatch.setattr(det_backend, "K1_PROMOTE_MIN_SEGMENT", threshold)
             plan = _plan_of_knobs(
                 A, B, out, "sm_100a", 148, knobs, transposed_out=transposed
@@ -21295,13 +21300,19 @@ def test_gpu_k1_wgrad_changed_rows_run_their_route(record_property):
         ), what
 
 
-#: The cells of ``LONG_SEGMENT_MISSED_CELLS`` of the deterministic package's tests, restated: the BF16 weight-gradient
-#: cells that missed the naive BF16 tier on deterministic plans whose longest segment held 129 to 256 K blocks without
-#: promoted chunks (that package's threshold up to version 0.3.5), per device class: (arch, SM count) ->
+#: The cells of ``LONG_SEGMENT_MISSED_CELLS`` of the deterministic package's tests, restated, plus cells of this
+#: package's own programs (last sentence): the BF16 weight-gradient cells that missed the naive BF16 tier on
+#: deterministic plans whose longest segment held 129 to 256 K blocks without promoted chunks (that package's threshold
+#: up to version 0.3.5), and the cells that missed it on the plans of version 0.3.20 (a longest segment of at most 128 K
+#: blocks without promoted chunks, or chunks of 128 K blocks) in the full re-judge and the pre-registered screen, with a
+#: class of the R200 board (a 216-SM sm_107a part), per device class: (arch, SM count) ->
 #: ``((d_in, d_out, T, seeds), ...)``: a row at one token count with the seeds it missed on, one cell per seed
-#: (``LONG_SEGMENT_SEED``: the seed of that package's tests).  This package's weight gradient missed the tier with the
-#: deterministic plan's errors on 28 of the 77 B200 cells, 28 of the 58 GB200 cells, 28 of the 61 B300 cells, 28 of the
-#: 51 GB300 cells and 58 of the 61 VR200 cells (all but 8192 -> 128).
+#: (``LONG_SEGMENT_SEED``: the seed of that package's tests).  Of the cells of the threshold up to version 0.3.5, this
+#: package's weight gradient missed the tier with the deterministic plan's errors on 28 of the 77 B200 cells, 28 of the
+#: 58 GB200 cells, 28 of the 61 B300 cells, 28 of the 51 GB300 cells and 58 of the 61 VR200 cells (all but
+#: 8192 -> 128).  The B200 and B300 classes also hold the cells this package's own two-split programs missed on
+#: version 0.3.20: ``5120 -> 32`` at 16172 and 16231 tokens (127 K blocks in the larger split, without promoted
+#: chunks) and ``5120 -> 64`` at 65535 tokens (chunks of 128 K blocks).
 LONG_SEGMENT_SEED = 20260930
 # fmt: off
 LONG_SEGMENT_MISSED_CELLS = {
@@ -21314,11 +21325,12 @@ LONG_SEGMENT_MISSED_CELLS = {
         (4096, 64, 31744, (758,)), (4096, 64, 32768, (LONG_SEGMENT_SEED, 3)),
         (4096, 96, 31744, (1,)), (4096, 96, 31745, (LONG_SEGMENT_SEED,)), (4096, 96, 32768, (LONG_SEGMENT_SEED,)),
         (4096, 128, 31744, (LONG_SEGMENT_SEED, 1, 2, 758)), (4096, 128, 32768, (LONG_SEGMENT_SEED, 2, 3, 758)),
+        (5120, 32, 16172, (5,)), (5120, 32, 16231, (4,)),
         (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3)), (5120, 32, 31745, (1, 2)),
         (5120, 32, 32768, (LONG_SEGMENT_SEED, 1)),
         (5120, 48, 28672, (2,)), (5120, 48, 31744, (1, 2, 3, 758)), (5120, 48, 31745, (1,)),
         (5120, 48, 32768, (LONG_SEGMENT_SEED, 1, 2, 3, 758)),
-        (5120, 64, 16231, (LONG_SEGMENT_SEED,)), (5120, 64, 16384, (3,)),
+        (5120, 64, 16231, (LONG_SEGMENT_SEED,)), (5120, 64, 16384, (3,)), (5120, 64, 65535, (8,)),
         (5120, 128, 13312, (LONG_SEGMENT_SEED,)), (5120, 128, 15361, (758,)), (5120, 128, 16172, (1,)),
         (5120, 128, 16231, (758,)), (5120, 128, 16383, (758,)), (5120, 128, 16384, (LONG_SEGMENT_SEED,)),
         (6144, 32, 13312, (LONG_SEGMENT_SEED,)), (6144, 32, 15360, (LONG_SEGMENT_SEED,)), (6144, 32, 15361, (3, 758)),
@@ -21354,9 +21366,10 @@ LONG_SEGMENT_MISSED_CELLS = {
         (4096, 64, 31744, (758,)), (4096, 64, 32768, (LONG_SEGMENT_SEED, 3)),
         (4096, 96, 31744, (1,)), (4096, 96, 31745, (LONG_SEGMENT_SEED,)), (4096, 96, 32768, (LONG_SEGMENT_SEED,)),
         (4096, 128, 31744, (LONG_SEGMENT_SEED, 1, 2, 758)), (4096, 128, 32768, (LONG_SEGMENT_SEED, 2, 3, 758)),
-        (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3, 758)),
+        (5120, 32, 16172, (5,)), (5120, 32, 16231, (4,)), (5120, 32, 31744, (LONG_SEGMENT_SEED, 1, 3, 758)),
         (5120, 48, 28672, (2,)), (5120, 48, 31744, (3,)),
-        (5120, 64, 31744, (LONG_SEGMENT_SEED, 2, 3, 758)),
+        (5120, 64, 31744, (LONG_SEGMENT_SEED, 2, 3, 758)), (5120, 64, 65535, (8,)),
+        (5120, 128, 15360, (10,)),
         (6144, 32, 13312, (LONG_SEGMENT_SEED,)), (6144, 32, 15360, (LONG_SEGMENT_SEED,)), (6144, 32, 15361, (3, 758)),
         (6144, 32, 16172, (LONG_SEGMENT_SEED, 2, 3, 758)), (6144, 32, 16231, (2,)),
         (6144, 128, 12288, (1,)), (6144, 128, 14336, (3,)), (6144, 128, 15361, (1,)), (6144, 128, 16172, (1,)),
@@ -21381,22 +21394,29 @@ LONG_SEGMENT_MISSED_CELLS = {
         (6144, 128, 16384, (LONG_SEGMENT_SEED,)),
     ),
     ("sm_107a", 212): (
-        (4096, 16, 31744, (3,)), (4096, 16, 31745, (2, 3)), (4096, 16, 32768, (758,)),
+        (4096, 16, 16172, (2,)), (4096, 16, 31744, (3,)), (4096, 16, 31745, (2, 3)), (4096, 16, 32768, (758,)),
         (4096, 32, 40960, (2,)),
-        (4096, 96, 31744, (2,)), (4096, 96, 31745, (1, 2)), (4096, 96, 32768, (2, 758)),
+        (4096, 96, 16384, (3,)), (4096, 96, 31744, (2,)), (4096, 96, 31745, (1, 2)), (4096, 96, 32768, (2, 758)),
         (4096, 512, 16172, (1,)), (4096, 512, 16231, (3,)),
         (5120, 32, 31744, (LONG_SEGMENT_SEED, 3)), (5120, 32, 31745, (LONG_SEGMENT_SEED, 3)),
         (5120, 32, 32768, (LONG_SEGMENT_SEED, 2)),
         (5120, 48, 31744, (2, 3)), (5120, 48, 31745, (LONG_SEGMENT_SEED, 758)), (5120, 48, 32768, (1, 2, 758)),
-        (5120, 64, 31744, (2,)), (5120, 64, 31745, (2, 3)), (5120, 64, 32768, (3, 758)),
+        (5120, 64, 31744, (2,)), (5120, 64, 31745, (2, 3)), (5120, 64, 32768, (3, 758)), (5120, 64, 65536, (19,)),
         (5120, 128, 31744, (LONG_SEGMENT_SEED, 2, 758)), (5120, 128, 31745, (1,)),
         (5120, 128, 32768, (LONG_SEGMENT_SEED, 1, 2, 3, 758)),
         (6144, 32, 40960, (2,)), (6144, 32, 49152, (758,)),
-        (6144, 48, 31744, (2, 3, 758)), (6144, 48, 32768, (2, 3, 758)),
+        (6144, 48, 16384, (LONG_SEGMENT_SEED, 13)), (6144, 48, 31744, (2, 3, 758)), (6144, 48, 32768, (2, 3, 758)),
         (6144, 64, 28672, (LONG_SEGMENT_SEED,)), (6144, 64, 31744, (2, 758)), (6144, 64, 31745, (1, 3)),
         (6144, 64, 32768, (1, 3)),
         (6144, 128, 31745, (1, 2)), (6144, 128, 32768, (LONG_SEGMENT_SEED, 758)),
         (8192, 128, 31744, (3, 758)), (8192, 128, 31745, (1,)),
+    ),
+    ("sm_107a", 216): (
+        (4096, 16, 16384, (8,)),
+        (4096, 96, 16172, (17,)),
+        (5120, 64, 65535, (13,)),
+        (6144, 64, 65536, (2,)),
+        (6144, 128, 49152, (10,)),
     ),
 }
 # fmt: on
@@ -21462,11 +21482,12 @@ def _segment_edge(plan_at, threshold, lo=1024, hi=65536):
 
 def _long_segment_gpu_cases(arch, sm_count, l2_bytes):
     """The cases of the deterministic package's ``test_gpu_long_segment_wgrad_rows_meet_the_naive_tier`` on a part of
-    ``arch`` with ``sm_count`` SMs, ``(d_in, d_out, T, seeds)``: the cells of ``LONG_SEGMENT_MISSED_CELLS`` of the
-    class, and for each promoted twin the deterministic planner runs at its threshold's edge (``_segment_edge``), on
-    the first row of ``_long_segment_rows`` that does, three token counts on ``LONG_SEGMENT_SEED``: the edge (a
-    longest segment of at most 128 K blocks), the next token count (more than 128) and the last token count whose
-    plan's longest segment holds at most 256 K blocks."""
+    ``arch`` with ``sm_count`` SMs, ``(d_in, d_out, T, seeds)``: the cells of ``LONG_SEGMENT_MISSED_CELLS`` (with the
+    B200 and B300 cells of this package's own programs) of the class, and for each promoted twin the deterministic
+    planner runs at its threshold's edge (``_segment_edge``), on the first row of ``_long_segment_rows`` that does,
+    three token counts on ``LONG_SEGMENT_SEED``: the edge (a longest segment of at most 64 K blocks), the next token
+    count (more than 64) and the last token count whose plan's longest segment holds at most 128 K blocks (that
+    package's threshold from version 0.3.6 to 0.3.20)."""
     cases = list(LONG_SEGMENT_MISSED_CELLS.get((arch, sm_count), ()))
     forms = set()
     for d_in, d_out in _long_segment_rows():
@@ -21478,7 +21499,7 @@ def _long_segment_gpu_cases(arch, sm_count, l2_bytes):
         if not edge.promote_blocks or edge.template in forms:
             continue
         forms.add(edge.template)
-        top = _segment_edge(plan_at, 256)
+        top = _segment_edge(plan_at, 128)
         cases += [
             (d_in, d_out, t, (LONG_SEGMENT_SEED,))
             for t in (T, T + 1, top)
@@ -21533,13 +21554,14 @@ def _judge_long_segment_wgrad(record_property, name, launch, X, G, out, seed):
 
 def test_gpu_long_segment_wgrad_rows_meet_the_naive_tier(record_property):
     """The cases of the deterministic package's test of the same name (``_long_segment_gpu_cases``: the cells of
-    ``LONG_SEGMENT_MISSED_CELLS`` and three token counts around that package's promotion threshold per promoted twin)
-    through this package's weight-gradient entry, whatever program its tables choose: the output is judged against the
-    FP64 oracle beside the naive BF16 tier over the draws of each listed seed (:func:`_judge_long_segment_wgrad`), and
-    every failing cell is reported.  Where the call binds the deterministic plan (its ``_K1_ATOMIC_CACHE`` entry has no
-    plan of this package) and no row of :data:`K1_WGRAD_DET_RULES_BY_SM` names the program, that plan runs the promoted
-    twin exactly where its longest segment holds more than that package's ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the
-    architecture registers the twin (every missed cell bound there does).  A class without cases skips."""
+    ``LONG_SEGMENT_MISSED_CELLS`` (with the B200 and B300 cells of this package's own programs) and three token counts
+    around that package's promotion threshold per promoted twin) through this package's weight-gradient entry, whatever
+    program its tables choose: the output is judged against the FP64 oracle beside the naive BF16 tier over the draws of
+    each listed seed (:func:`_judge_long_segment_wgrad`), and every failing cell is reported.  Where the call binds the
+    deterministic plan (its ``_K1_ATOMIC_CACHE`` entry has no plan of this package) and no row of
+    :data:`K1_WGRAD_DET_RULES_BY_SM` names the program, that plan runs the promoted twin exactly where its longest
+    segment holds more than that package's ``K1_PROMOTE_MIN_SEGMENT`` K blocks and the architecture registers the twin
+    (every missed cell bound there does).  A class without cases skips."""
     device, arch, sms = _part_or_skip()
     l2_bytes = det_backend.device_facts(device).l2_bytes
     cases = _long_segment_gpu_cases(arch, sms, l2_bytes)
