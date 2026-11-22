@@ -1994,7 +1994,10 @@ def test_rlab_zero_step_follows_the_producers():
     dz = [("gemm_logits_dz", 0), ("gemm_dx", 0), ("dx_slab_sum", 0)]
     # an uncounted dz arm over tiling chunks: no step; counted, or over chunks that leave a row: the step
     assert cake_backend._with_rlab_zero(stub(((0, 64),)), list(dz)) == dz
-    assert cake_backend._with_rlab_zero(stub(((0, 64),), dcnt=True), list(dz)) == [zero] + dz
+    assert (
+        cake_backend._with_rlab_zero(stub(((0, 64),), dcnt=True), list(dz))
+        == [zero] + dz
+    )
     assert cake_backend._with_rlab_zero(stub(((0, 32),)), list(dz)) == [zero] + dz
     assert cake_backend._with_rlab_zero(stub(((0, 64),), dcnt=True), list(rg)) == rg
     assert cake_backend._rlab_fresh_zero(stub(((0, 64),)), tuple(dz))
@@ -2245,6 +2248,7 @@ def test_device_logprob_graph_rlab(glm_weight):
         labels[: edge.numel()] = edge
         dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
         out = {}
+        dz = None  # whether the bindings' backward runs a dz arm: set by the own pass
         cake_backend.BINDING_CACHE.clear()
         for own in (True, False):
             if not own:
