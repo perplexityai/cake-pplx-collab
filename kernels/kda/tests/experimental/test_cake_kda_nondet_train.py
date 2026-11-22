@@ -3704,6 +3704,12 @@ def _pass_bytes_per_th(gate_fused: bool) -> int:
 # whole-sequence set
 LEAN_SINGLE_BYTES = {False: {False: 4108, True: 3340}, True: {False: 4104, True: 3336}}
 LEAN_WHOLE_BYTES = {False: 2820, True: 2052}
+# what an in-kernel Q/K L2 norm mode adds to the whole-sequence set from two passes on: the dAqk the dav_l2n*
+# records write on every row (A32), whole instead of per pass (3076 B per internal token-head, tape 2308)
+L2N_LEAN_DAQK_BYTES = 256
+# rows of H 9-15 (the serial rows whose flag-off backward launches the separate dav program, which a lean arena
+# refuses; in an l2n mode a lean arena serves them)
+L2N_LEAN_ROWS = [((2000, 2000, 2000), 12), ((129, 300), 9), ((63, 1, 65), 15)]
 SEG_NAMES = frozenset(("seg_b", "seg_m", "hseg", "dseg", "dhseg"))
 # the tail stages' operands the tail split hands over per range: offset views of the whole-sequence buffers, the
 # range's table slices and count, the per-pass buffers; everything else they bind is addressed through the
@@ -3794,14 +3800,22 @@ def _slot_bytes(slots, R: int, H: int, NSEG: int, R_b: int) -> int:
 
 
 def _expected_lean_bytes(
-    tape: bool, t: int, R: int, H: int, NC: int, NSEG: int, gate_fused: bool = False
+    tape: bool,
+    t: int,
+    R: int,
+    H: int,
+    NC: int,
+    NSEG: int,
+    gate_fused: bool = False,
+    l2n: bool = False,
 ) -> int:
     """The lean layout's bytes from the documented rule: one pass is the saved-set layout without the replay's
     dout copy (4108 B per internal token-head, tape 3340; the fused architectures 4104 / 3336: no db_int slot);
     from two passes on the whole-sequence set (2820 B per internal token-head, tape 2052) plus the per-pass set
     (without dg_int / db_int where the gate epilogue is fused) packed first-fit, in order, into the dead ``qg`` /
     ``kg`` (512) and ``w`` (256) slots, the rest into an overflow slot shared with the segmented route's three
-    state blocks."""
+    state blocks.  In an in-kernel Q/K L2 norm mode (``l2n``) the whole-sequence set holds ``dAqk`` too
+    (:data:`L2N_LEAN_DAQK_BYTES` more: 3076, tape 2308) and the per-pass set packs none; one pass is unchanged."""
     block = NSEG * H * D * D * 4
     if t == 1:
         single = LEAN_SINGLE_BYTES[gate_fused][tape]
@@ -3810,7 +3824,9 @@ def _expected_lean_bytes(
     capacity = {"qg": 512 * R * H, "w": 256 * R * H}
     used = {"qg": 0, "w": 0}
     overflow = 0
-    for _name, kind, _sub, _life in _pass_occupants(gate_fused):
+    for name, kind, _sub, _life in _pass_occupants(gate_fused):
+        if l2n and name == "dAqk":
+            continue  # whole-sequence in the l2n modes
         nbytes = R_b * H * KIND_BYTES_PER_TH[cake_backend.PASS_KINDS[kind]]
         for host in ("qg", "w"):
             if used[host] + nbytes <= capacity[host]:
@@ -3819,7 +3835,8 @@ def _expected_lean_bytes(
         else:
             overflow += nbytes
     extra = max(overflow, 3 * block) if (overflow or NSEG) else 0
-    return LEAN_WHOLE_BYTES[tape] * R * H + extra
+    whole = LEAN_WHOLE_BYTES[tape] + (L2N_LEAN_DAQK_BYTES if l2n else 0)
+    return whole * R * H + extra
 
 
 def _lean_rows():
@@ -4114,6 +4131,149 @@ def test_lean_layouts_follow_the_byte_formulas() -> None:
         assert cake_backend.memory_report(
             S, N, heads, arena=off, **q
         ) == cake_backend.memory_report(S, N, heads, **q)
+
+
+def test_lean_arena_serves_the_l2n_rows_with_their_dav_program() -> None:
+    """In an in-kernel Q/K L2 norm mode every backward path launches a ``dav`` record of
+    that mode (``dav_l2n*``: ``dAqk`` alone, which every lean layout holds whole), so a
+    lean arena serves every head count there, H 9-15 included (the rows the flag-off
+    test above refuses), in both gate modes, and ``arena_for_budget`` takes its lean
+    steps on those rows."""
+    modes = itertools.product(ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for arch, gate, l2n in modes:
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        for H in range(1, 65):
+            case = (arch, gate, l2n, H)
+            p = cake_backend.plan(2000, 3, H, 148, arch, gate=gate, l2n=l2n)
+            for path in p.records:
+                if path in ("fwd", "fwd_nosave"):
+                    continue
+                assert p.dispatched("dav", path), (case, path)
+                served = cake_jit.MODULES[p.record("dav", path)].get("l2n", [])
+                assert l2n in served, (case, path)
+            for t in (1, 4):
+                lean = cake_backend.CakeKDANondetArena(lean=True, tail_passes=t)
+                p.check_arena(lean)
+                want = p.workspace_bytes("bwd_lean", t)
+                assert p.arena_bytes(arena=lean) == want, (case, t)
+                got = cake_backend.workspace_bytes(2000, 3, H, arena=lean, **q)
+                assert got == want, (case, t)
+                report = cake_backend.memory_report(2000, 3, H, arena=lean, **q)
+                assert report["arena_bwd_configured"] == want, (case, t)
+            if 9 <= H <= 15:
+                got = cake_backend.arena_for_budget(p, p.arena_bytes() - 1)
+                assert got.lean, (case, got)
+
+
+def test_lean_layouts_follow_the_byte_formulas_in_the_l2n_modes() -> None:
+    """The lean layouts of the in-kernel Q/K L2 norm modes (both modes, both gate modes,
+    every architecture: the gate epilogue is fused on all of them), H 9-15 among the
+    rows: one pass is the fused saved-set layout without the replay's dout copy (4104 B
+    per internal token-head, tape 3336; its ``dAqk`` is whole in every mode); from two
+    passes on ``dAqk`` (written whole by the ``dav_l2n*`` records at 4, read per range by
+    GLM intra at 7) is a whole-sequence buffer, 256 B per internal token-head more (3076,
+    tape 2308), and leaves the per-pass set; ``memory_report``'s floors take 3076 / 2308
+    in place of 2820 / 2052."""
+    assert cake_backend._L2N_LEAN_DAQK_BYTES == L2N_LEAN_DAQK_BYTES
+    pass_names = frozenset(n for n, *_ in _pass_occupants(True)) - {"dAqk"}
+    rows = _lean_rows() + L2N_LEAN_ROWS
+    cases = itertools.product(rows, ARCHES, ("g", "raw"), ("fused", "fallback"))
+    for (lengths, heads), arch, gate, l2n in cases:
+        S, N = sum(lengths), len(lengths)
+        p = cake_backend.plan(S, N, heads, 148, arch, gate=gate, l2n=l2n)
+        q = {"sm_count": 148, "arch": arch, "gate": gate, "l2n": l2n}
+        R, H, NC, NSEG = p.R, p.H, p.NC_pad, p.NSEG
+        block = NSEG * H * D * D * 4
+        blocks_over = max(0, 3 * block - 256 * R * H)
+        assert p.gate_fused is True and p.l2n == l2n
+        nc_min = -(-max(lengths) // BT) + 1
+        rows_min = BT * (nc_min + nc_min % 2)
+        block_min = p.P * H * D * D * 4 if p.recur == "seg" else 0
+        for tape in (False, True):
+            mode = "bwd_tape_lean" if tape else "bwd_lean"
+            save_mode = "tape" if tape else "light"
+            whole = LEAN_WHOLE_BYTES[tape] + L2N_LEAN_DAQK_BYTES
+            assert whole == (2308 if tape else 3076)
+            default = cake_backend.memory_report(
+                S,
+                N,
+                heads,
+                save_mode,
+                doc_lengths=lengths,
+                **q,
+            )
+            assert default["arena_floor"] == whole * R * H + 3 * block
+            floor_batched = whole * rows_min * H + 3 * block_min
+            assert default["arena_floor_batched"] == floor_batched
+            for t in (1, 2, 3, 4, 8):
+                arena = cake_backend.CakeKDANondetArena(lean=True, tail_passes=t)
+                p.check_arena(arena)
+                regions = p.layout(mode, t)
+                R_b = BT * -(-NC // t)
+                want = p.workspace_bytes(mode, t)
+                assert want == max(r.offset + r.nbytes for r in regions)
+                slots = cake_backend._slots_of(mode, t, R, H, NC, NSEG, l2n)
+                slots = _gate_fused_slots(slots)
+                assert want == _slot_bytes(slots, R, H, NSEG, R_b), (mode, t)
+                by_name = {r.name: r for r in regions}
+                # dAqk is whole on every layout of the mode
+                assert by_name["dAqk"].shape[0] == R, (mode, t)
+                assert not set(GATE_BUFFERS) & set(by_name), (mode, t)
+                if t == 1:
+                    single = LEAN_SINGLE_BYTES[True][tape]
+                    assert want == single * R * H + blocks_over, (mode, t)
+                else:
+                    assert by_name["dAqk"].lifetime == (4, 7), (mode, t)
+                    assert by_name["dAqk"].nbytes == 256 * R * H, (mode, t)
+                    assert pass_names <= set(by_name), (mode, t)
+                    for name in pass_names:
+                        assert by_name[name].shape[0] == R_b, (mode, t, name)
+                    expect = _expected_lean_bytes(
+                        tape,
+                        t,
+                        R,
+                        H,
+                        NC,
+                        NSEG,
+                        gate_fused=True,
+                        l2n=True,
+                    )
+                    assert want == expect, (mode, t)
+                    # the lifetime table of the plan's multi-pass layout: dAqk whole
+                    table = cake_backend.lifetime_table(mode, t, plan=p)
+                    rows_by = {row["buffer"]: row for row in table}
+                    assert set(rows_by) == set(by_name), (mode, t)
+                    daqk = rows_by["dAqk"]
+                    assert daqk["unit"] == "R*H", (mode, t)
+                    assert (daqk["first_write"], daqk["last_read"]) == (4, 7), (mode, t)
+                    if t == 2:
+                        # dq_f / dk_f fill the qg slot, dg_f the w slot; dAkk and db_f
+                        # overflow: 130 B per token-head (258 with the per-pass dAqk)
+                        over = max(130 * R * H, 3 * block)
+                        assert want == whole * R * H + over, (mode, t)
+                    elif t >= 4 and NC % t == 0:  # from four passes on everything fits
+                        assert want == whole * R * H + 3 * block, (mode, t)
+                floor = whole * R * H + 3 * block
+                report = cake_backend.memory_report(
+                    S,
+                    N,
+                    heads,
+                    save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert report["arena_bwd_configured"] == want, (mode, t)
+                assert report["arena_floor"] == floor <= want, (mode, t)
+                assert want <= report["arena_bwd"], (mode, t)
+                got = cake_backend.workspace_bytes(
+                    S,
+                    N,
+                    heads,
+                    save_mode=save_mode,
+                    arena=arena,
+                    **q,
+                )
+                assert got == want == p.arena_bytes(save_mode=save_mode, arena=arena)
 
 
 def test_lifetime_table_renders_the_lean_layouts() -> None:

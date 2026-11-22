@@ -603,6 +603,45 @@ def test_l2n_plans_need_l2n_records(arch: str) -> None:
 
 
 @pytest.mark.parametrize("arch", list(cake_jit.ARCHES))
+def test_l2n_plans_refuse_a_backward_path_without_an_l2n_dav_record(
+    arch: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``_check_l2n_dav``: the fused gradient of an l2n mode (``davq`` 0) stores no
+    ``dAqk``, so an l2n plan whose backward path launches no ``dav`` record of its mode
+    (none, or a flag-off one) is refused with ``ValueError`` naming the path; a path
+    without a ``dav`` stage (the forward) and the flag-off plans are not checked.
+    Through ``plan``: a registry whose ``dav_l2n_replay`` rule admits no problem leaves
+    the replay of an H 12 row without a ``dav`` record, and every l2n plan of the row
+    is refused in both gate modes while its flag-off plan still builds."""
+    check = cake_backend._check_l2n_dav
+    fwd = {"fwd": {"fwd_intra": "fwd_intra_l2n"}}
+    match = "path 'replay' launches no dav record"
+    for mode in ("fused", "fallback"):
+        check(fwd, arch=arch, H=12, l2n=mode)
+        check({**fwd, "replay": {"dav": "dav_l2n_replay"}}, arch=arch, H=12, l2n=mode)
+        for name in (None, "dav_serial_replay"):
+            records = {**fwd, "replay": {"dav": name}}
+            check(records, arch=arch, H=12, l2n="off")
+            with pytest.raises(ValueError, match=match):
+                check(records, arch=arch, H=12, l2n=mode)
+    narrowed = dict(cake_jit.MODULES["dav_l2n_replay"])
+    narrowed["select_rule"] = {"kind": "heads_at_least", "min": 1 << 20}
+    monkeypatch.setitem(cake_jit.MODULES, "dav_l2n_replay", narrowed)
+    cake_backend._plan.cache_clear()  # no plan of the real registry answers below
+    try:
+        for gate in ("g", "raw"):
+            for mode in ("fused", "fallback"):
+                with pytest.raises(ValueError, match=match):
+                    cake_backend.plan(2000, 3, 12, 148, arch, gate=gate, l2n=mode)
+        p = cake_backend.plan(2000, 3, 12, 148, arch)
+        assert p.record("dav", "replay") == "dav_serial_replay"
+    finally:
+        monkeypatch.undo()
+        cake_backend._plan.cache_clear()  # nor a plan of the narrowed one after it
+
+
+@pytest.mark.parametrize("arch", list(cake_jit.ARCHES))
 def test_fallback_replay_counts_no_qk_apply(arch: str) -> None:
     """The fallback plan selects a ``qk_apply`` record on the replay path too (the KCP's local backward plans on
     that path), but the replay normalizes q / k with ``qk_l2norm`` and never launches ``qk_apply``: the replay's
