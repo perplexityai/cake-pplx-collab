@@ -108,12 +108,17 @@ The roles, in launch order:
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
-Grids come from host scalars only (``G``, ``S``): the host never reads
-``cu_seqlens`` or ``cu_pairs``.  :func:`launch_grid` sizes them from the
-record's ``grid_rule`` and its launch block: ``one_cta`` is ``(1, 1, 1)``;
-``rows`` covers ``rows`` rows with ``block_x // lanes_per_row *
-rows_per_lane_group`` rows per CTA (``lanes_per_row`` threads share one
-512-wide row, ``rows_per_lane_group`` rows per group of them).
+Grids come from host scalars only (``G``, ``S``) and the device's
+multiprocessor count: the host never reads ``cu_seqlens`` or ``cu_pairs``.
+:func:`launch_grid` sizes them from the record's ``grid_rule`` and its launch
+block: ``one_cta`` is ``(1, 1, 1)``; ``rows`` covers ``rows`` rows with
+``block_x // lanes_per_row * rows_per_lane_group`` rows per CTA
+(``lanes_per_row`` threads share one 512-wide row, ``rows_per_lane_group``
+rows per group of them); ``rows_capped`` (the ``fwd_unfused`` records) is
+``rows`` but for a launch of ``capped_min_docs <= S <= capped_max_docs``
+documents (:func:`capped_leaves`), whose grid is at most ``ctas_per_sm``
+CTAs a multiprocessor (:func:`sm_count`): its CTAs stride over the row
+blocks, so every grid writes the same bytes.
 """
 
 from __future__ import annotations
@@ -139,7 +144,7 @@ ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_sma
 # Role -> the architectures it is served on, for a role not served on every architecture: none, every role is served
 # on the three.
 ROLE_ARCHES: dict[str, tuple[str, ...]] = {}
-GRID_KINDS = ("one_cta", "rows")
+GRID_KINDS = ("one_cta", "rows", "rows_capped")
 
 # Columns of C, Z, dC, dZ, out and dout; ``cz`` holds C in columns [0, 512) and Z in [512, 1024).
 WIDTH = 512
@@ -177,9 +182,11 @@ MAX_TOKENS = INT32_MAX
 # ``pair_table_small`` (the most documents a pair-table launch runs it for), the ``bwd_small_docs`` of the
 # ``bwd_small`` records (the most documents a backward launch runs it for below ``bwd``), the ``bwd_max_docs`` of
 # the ``bwd_sm_107a`` record (the most documents a backward launch runs ``bwd`` for there), the ``bwd_warp_docs`` of
-# the ``bwd_warp`` records (the most documents a backward launch runs ``bwd`` or ``bwd_small`` for) and the
+# the ``bwd_warp`` records (the most documents a backward launch runs ``bwd`` or ``bwd_small`` for), the
 # ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` of the ``bwd_warp_sm_103a`` record (the documents below that a
-# backward launch also runs ``bwd_warp`` for) are rewritten by the generator; every other field is host plan.
+# backward launch also runs ``bwd_warp`` for) and the ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm`` of
+# the ``fwd_unfused`` records (the documents a forward launch caps their grid for, and the CTAs a multiprocessor it
+# keeps) are rewritten by the generator; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -309,8 +316,11 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
+        "capped_max_docs": 16385,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 6,
         "ffi_entry": "run",
-        "grid_rule": {"kind": "rows", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 1},
         "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
         "launch": {
             "block": (256, 1, 1),
@@ -339,8 +349,11 @@ MODULES: dict[str, dict[str, Any]] = {
             ["grid", "grid_y"],
             ["grid", "grid_z"],
         ],
+        "capped_max_docs": 16385,
+        "capped_min_docs": 8193,
+        "ctas_per_sm": 4,
         "ffi_entry": "run",
-        "grid_rule": {"kind": "rows", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 64, "rows_per_lane_group": 1},
         "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_64aae35cfb0e308d103a",
         "launch": {
             "block": (256, 1, 1),
@@ -676,6 +689,32 @@ def bwd_warp_region(arch: str) -> tuple[int | None, int | None, int] | None:
 
 
 @functools.cache
+def capped_leaves(name: str) -> tuple[int, int, int] | None:
+    """The capped grid of record ``name``: ``(lo, hi, ctas_per_sm)``, its ``capped_min_docs``, ``capped_max_docs`` and
+    ``ctas_per_sm`` leaves, for a ``rows_capped`` grid rule (a launch of ``lo <= S <= hi`` documents runs at most
+    ``ctas_per_sm`` CTAs a multiprocessor); ``None`` for another rule.  Cached per record."""
+    found = record(name)
+    if found["grid_rule"]["kind"] != "rows_capped":
+        return None
+    return (int(found["capped_min_docs"]), int(found["capped_max_docs"]), int(found["ctas_per_sm"]))
+
+
+@functools.cache
+def sm_count(device_index: int) -> int:
+    """The multiprocessor count of CUDA device ``device_index`` (the cap of a ``rows_capped`` grid is ``ctas_per_sm``
+    times it).  Cached per device index: a launch reads it at most once a process."""
+    import torch
+
+    return int(torch.cuda.get_device_properties(device_index).multi_processor_count)
+
+
+def pair_table_role(S: int, arch: str) -> str:
+    """The pair-table role of a launch of ``S`` documents on ``arch``: ``pair_table_small`` for ``S <=``
+    :func:`small_docs`, ``pair_table`` for more (the same bytes)."""
+    return "pair_table_small" if S <= small_docs(arch) else "pair_table"
+
+
+@functools.cache
 def fuse_docs(arch: str) -> int:
     """The most documents a forward launch on ``arch`` builds the pair table for itself (the ``fuse_docs`` leaf of the
     ``fwd`` record serving ``arch``; 0 when the record has none): the host launches ``fwd`` for at most that many
@@ -741,28 +780,37 @@ def parameters(name: str) -> tuple[str, ...]:
 
 
 def rows_per_cta(name: str) -> int:
-    """Rows one CTA of record ``name`` covers (a ``rows`` grid rule): ``block_x // lanes_per_row *
+    """Rows one CTA of record ``name`` covers (a ``rows`` or ``rows_capped`` grid rule): ``block_x // lanes_per_row *
     rows_per_lane_group``."""
     found = record(name)
     rule = found["grid_rule"]
-    if rule["kind"] != "rows":
-        raise ValueError(f"record {name} has a {rule['kind']!r} grid rule, not 'rows'")
+    if rule["kind"] not in ("rows", "rows_capped"):
+        raise ValueError(f"record {name} has a {rule['kind']!r} grid rule, not 'rows' or 'rows_capped'")
     rows = int(found["launch"]["block"][0]) // int(rule["lanes_per_row"]) * int(rule["rows_per_lane_group"])
     if rows < 1:
         raise ValueError(f"record {name}: its block {found['launch']['block']} covers no row ({rule})")
     return rows
 
 
-def launch_grid(name: str, rows: int) -> tuple[int, int, int]:
+def launch_grid(name: str, rows: int, num_docs: int | None = None, sms: int | None = None) -> tuple[int, int, int]:
     """The grid of record ``name``: ``(1, 1, 1)`` for a ``one_cta`` rule; for a ``rows`` rule, one CTA per
-    :func:`rows_per_cta` rows of ``rows`` (``G`` for the forward, ``G + S`` for the backward), at least one."""
+    :func:`rows_per_cta` rows of ``rows`` (``G`` for the forward, ``G + S`` for the backward), at least one; for a
+    ``rows_capped`` rule the same, but at most ``ctas_per_sm * sms`` CTAs for ``lo <= num_docs <= hi``
+    (:func:`capped_leaves`; ``sms``, the device's multiprocessor count, is needed only then)."""
     rule = record(name)["grid_rule"]
     kind = rule["kind"]
     if kind == "one_cta":
         return (1, 1, 1)
-    if kind == "rows":
-        per = rows_per_cta(name)
-        return (max(1, -(-int(rows) // per)), 1, 1)
+    if kind in ("rows", "rows_capped"):
+        blocks = max(1, -(-int(rows) // rows_per_cta(name)))
+        leaves = capped_leaves(name) if kind == "rows_capped" else None
+        if leaves is not None and num_docs is not None:
+            lo, hi, ctas = leaves
+            if blocks > ctas and lo <= int(num_docs) <= hi:
+                if sms is None:
+                    raise ValueError(f"record {name}: the capped grid of {num_docs} documents needs the SM count")
+                blocks = min(blocks, ctas * int(sms))
+        return (blocks, 1, 1)
     raise ValueError(f"unknown Cake gated KV compression grid rule {kind!r} (known: {GRID_KINDS})")
 
 
@@ -804,20 +852,22 @@ _GRID_AXES = ("grid_x", "grid_y", "grid_z")
 
 
 @functools.cache
-def _launch_plan(name: str) -> tuple[int, tuple[tuple[int, Any, str], ...]]:
-    """``(per, slots)`` of record ``name``, made once per process (the records are constant).  ``per`` is
-    :func:`rows_per_cta` for a ``rows`` grid rule and 0 for a ``one_cta`` rule, so the grid of ``rows`` rows is
-    :func:`launch_grid`'s.  ``slots`` is the argument plan in ``run`` order: ``(0, axis, key)`` for a grid dimension
-    (``axis`` 0, 1 or 2), ``(1, key, key)`` for a launch option and ``(2, name in values, key)`` for a kernel
-    parameter (through the record's ``logical`` map)."""
+def _launch_plan(name: str) -> tuple[int, bool, tuple[tuple[int, Any, str], ...]]:
+    """``(per, capped, slots)`` of record ``name``, made once per process (the records are constant).  ``per`` is
+    :func:`rows_per_cta` for a ``rows`` or ``rows_capped`` grid rule and 0 for a ``one_cta`` rule, and ``capped`` is
+    whether the rule is ``rows_capped``, so the grid of ``rows`` rows is :func:`launch_grid`'s.  ``slots`` is the
+    argument plan in ``run`` order: ``(0, axis, key)`` for a grid dimension (``axis`` 0, 1 or 2), ``(1, key, key)``
+    for a launch option and ``(2, name in values, key)`` for a kernel parameter (through the record's ``logical``
+    map)."""
     found = record(name)
     kind = found["grid_rule"]["kind"]
     if kind == "one_cta":
         per = 0
-    elif kind == "rows":
+    elif kind in ("rows", "rows_capped"):
         per = rows_per_cta(name)
     else:
         raise ValueError(f"unknown Cake gated KV compression grid rule {kind!r} (known: {GRID_KINDS})")
+    capped = kind == "rows_capped"
     logical = found.get("logical", {})
     slots: list[tuple[int, Any, str]] = []
     for kind, key in found["arg_plan"]:
@@ -827,7 +877,7 @@ def _launch_plan(name: str) -> tuple[int, tuple[tuple[int, Any, str], ...]]:
             slots.append((1, key, key))
         else:
             slots.append((2, logical.get(key, key), key))
-    return per, tuple(slots)
+    return per, capped, tuple(slots)
 
 
 @functools.cache
@@ -851,9 +901,10 @@ def _entry(name: str, arch: str) -> Any:
 
 def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index: int, arch: str | None = None) -> None:
     """Launch the record serving ``role`` on the architecture of device ``device_index`` (:func:`role_record`) with
-    its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives ``rows``, on the current torch
-    stream of that device.  ``arch``: that architecture when the caller has looked it up
-    (``device_arch(device_index)``); ``None`` looks it up here.
+    its kernel arguments named in ``values`` on the grid :func:`launch_grid` gives ``rows`` (and, for a
+    ``rows_capped`` record, ``values["num_docs"]`` and the device's :func:`sm_count`, read only when the grid has
+    more CTAs than ``ctas_per_sm``), on the current torch stream of that device.  ``arch``: that architecture when
+    the caller has looked it up (``device_arch(device_index)``); ``None`` looks it up here.
 
     ``values`` maps the kernel parameter names of the record (through its ``logical`` map when the record has one) to
     tensors and Python scalars.  A ``["launch", "enable_pdl"]`` entry of the argument plan (a binding whose PDL launch
@@ -862,8 +913,14 @@ def run_module(role: str, values: Mapping[str, Any], *, rows: int, device_index:
     if arch is None:
         arch = device_arch(device_index)
     name = role_record(role, arch)
-    per, slots = _launch_plan(name)
-    grid = (max(1, -(-int(rows) // per)) if per else 1, 1, 1)
+    per, capped, slots = _launch_plan(name)
+    blocks = max(1, -(-int(rows) // per)) if per else 1
+    if capped:
+        leaves = capped_leaves(name)
+        docs = values.get("num_docs")
+        if leaves is not None and docs is not None and blocks > leaves[2] and leaves[0] <= int(docs) <= leaves[1]:
+            blocks = min(blocks, leaves[2] * sm_count(device_index))
+    grid = (blocks, 1, 1)
     try:
         args = [
             grid[slot] if kind == 0 else values[slot] if kind == 2 else int(bool(values.get(slot, True)))
@@ -901,16 +958,19 @@ __all__ = [
     "bwd_max_docs",
     "bwd_small_docs",
     "bwd_warp_region",
+    "capped_leaves",
     "device_arch",
     "fuse_docs",
     "launch_grid",
     "library_name",
     "load",
+    "pair_table_role",
     "parameters",
     "record",
     "role_record",
     "rows_per_cta",
     "run_module",
+    "sm_count",
     "small_docs",
     "specs_for_arch",
 ]

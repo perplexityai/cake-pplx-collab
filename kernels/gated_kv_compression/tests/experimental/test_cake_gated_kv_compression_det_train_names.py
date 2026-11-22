@@ -293,12 +293,13 @@ def test_the_forward_record_follows_the_architecture(monkeypatch):
     """The ``fwd`` role resolves to ``fwd`` on sm_100a and sm_103a and to ``fwd_sm_107a`` on sm_107a (also from the
     device capability), and the ``fwd_unfused`` role to ``fwd_unfused`` and ``fwd_unfused_sm_107a``; each pair is two
     distinct programs whose rendered kernels read ``C`` and ``Z`` with 128-bit and 256-bit loads, and whose grid rules
-    give a row 128 and 64 lanes."""
+    give a row 128 and 64 lanes (``rows_capped`` for the ``fwd_unfused`` records)."""
     jit = _backend("cake_jit")
     for role, records in (("fwd", FORWARD), ("fwd_unfused", UNFUSED)):
         for arch, (name, lanes, _) in records.items():
             assert jit.role_record(role, arch) == name, (role, arch)
-            assert jit.MODULES[name]["grid_rule"] == {"kind": "rows", "lanes_per_row": lanes, "rows_per_lane_group": 1}
+            kind = "rows_capped" if role == "fwd_unfused" else "rows"
+            assert jit.MODULES[name]["grid_rule"] == {"kind": kind, "lanes_per_row": lanes, "rows_per_lane_group": 1}
     assert jit.MODULES["fwd"]["library"] != jit.MODULES["fwd_sm_107a"]["library"]
     assert jit.MODULES["fwd_unfused"]["library"] != jit.MODULES["fwd_unfused_sm_107a"]["library"]
     for capability, arch in ARCH_BY_CAPABILITY.items():
