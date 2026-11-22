@@ -196,8 +196,8 @@ Host design (the knobs are keywords; no environment variable):
   KCP forward launches its single-rank program with 0.
 - Host plan: the first call of a row (architecture, route, ``C``, device,
   ``bwd_grid_mult``; the forward: the taps' dtype) selects its program,
-  splits ``C`` into channel tiles, reads the row's ``TILE_OVERRIDES`` or
-  ``NARROW_TILES`` entry (the forward: its ``forward_narrow_min_s`` and
+  splits ``C`` into channel tiles, reads the row's ``TILE_OVERRIDES`` and
+  ``NARROW_TILES`` entries (the forward: its ``forward_narrow_min_s`` and
   ``FORWARD_WIDTH_FLOORS`` token floors and its single-tile range)
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
