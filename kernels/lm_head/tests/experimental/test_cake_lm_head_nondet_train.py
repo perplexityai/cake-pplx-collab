@@ -2269,6 +2269,7 @@ def test_device_logprob_graph_rlab(glm_weight):
             W = inp.W.detach().requires_grad_(True)
             lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
             node = _graph_rlab_node(lp)
+            kind = type(node).__name__  # the kept-logits Function stores every row through row_grad
             holder = node.rlab
             if own:
                 node.rlab = None  # each backward's binding allocates its own rlab
@@ -2322,15 +2323,15 @@ def test_device_logprob_graph_rlab(glm_weight):
             out[own] = grads
             del lp, node, holder
             if own:
-                # the default form's backward recomputes through the dz arm where the program registers it (the
-                # remembered backward bindings' sequences); the kept forms' row_grad stores every row, the small call's
-                # staged rows included
+                # the default Function's backward recomputes through the dz arm where the program registers it (the
+                # remembered backward bindings' sequences); the kept-logits Functions' row_grad stores every row (the
+                # small call's staged rows included)
                 backward = [
                     b
                     for key, b in cake_backend.BINDING_CACHE._bindings.items()
                     if key[0] == "bwd"
                 ]
-                dz = entry is default and any(
+                dz = entry is default and "Keep" not in kind and any(
                     k[0] in cake_backend.DZ_PRODUCER_STAGES and k[0] != "row_grad"
                     for b in backward
                     for k in b.backward_order
