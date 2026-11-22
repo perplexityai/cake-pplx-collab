@@ -238,9 +238,9 @@ def prepare_mok_bf16(
     ``dot(dh, a)`` (``dh`` the gradient of ``h``), defined at a zero weight.
     ``"before_down"`` runs clamped SwiGLU only (``clamped_swiglu=True`` and a
     ``swiglu_limit`` on every call), BF16 routed weights only, FP32
-    weight-gradient accumulation only (``fp32_wgrad=True``), on sm_100a and
-    sm_103a; ``recompute_forward_context`` then takes the forward's
-    ``router_weights``.
+    weight-gradient accumulation only (``fp32_wgrad=True``), on sm_100a,
+    sm_103a and sm_107a; ``recompute_forward_context`` then takes the
+    forward's ``router_weights``.
 
     Prepare and warm up outside graph capture. Supported scheduler layouts
     (EP, local experts) are (1, 4) and (4, 4) for diagnostics (top-k 2 in

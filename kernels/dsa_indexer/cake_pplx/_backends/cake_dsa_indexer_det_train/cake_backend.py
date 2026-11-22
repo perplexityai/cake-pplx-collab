@@ -1997,7 +1997,7 @@ def plan_dsa_indexer_det_topk_in_candidates(
         arch = arch_for(device)
         if arch is None:
             raise ValueError(
-                "the candidate-restricted top-k needs an sm_100a / sm_103a device (or an explicit arch)"
+                "the candidate-restricted top-k needs an sm_100a / sm_103a / sm_107a device (or an explicit arch)"
             )
     if arch not in PROGRAM_KEYS:
         raise NotImplementedError(

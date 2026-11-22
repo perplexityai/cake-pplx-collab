@@ -17,7 +17,7 @@ Measurements of the router weight before the down projection (``router_weight_po
 requester's inputs: a report, not a test (no pass or fail; pytest does not collect it).  The accuracy judgement is
 ``test_mok_accuracy.py`` (the naive tier).
 
-Run from the directory that holds ``tests`` on an SM100a or SM103a GPU::
+Run from the directory that holds ``tests`` on an SM100a, SM103a or SM107a GPU::
 
     python -m tests.experimental.report_mok_wbd --out report.txt
 

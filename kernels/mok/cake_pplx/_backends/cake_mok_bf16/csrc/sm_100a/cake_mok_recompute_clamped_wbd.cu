@@ -102,7 +102,8 @@ __device__ __forceinline__ void mbarrier_arrive_expect_tx(int mbar_addr, uint32_
         :: "r"(mbar_addr), "r"(bytes) : "memory");
 }
 
-#if __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1000
+#else
 
 
 
@@ -627,8 +628,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) % 4);
                                     int _parity_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived) * 8, _parity_gemm_arrived);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_4 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
                                     int _smem_desc_lo_5 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_4 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+                                    int _smem_desc_lo_5 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -670,8 +676,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                                 #pragma unroll 1
                                 for (int idx_2 = 0; idx_2 < head; idx_2++) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_6 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
                                     int _smem_desc_lo_7 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_6 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+                                    int _smem_desc_lo_7 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -714,8 +725,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) % 4);
                                     int _parity_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_1) * 8, _parity_gemm_arrived_1);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_8 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_9 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_8 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_9 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -750,8 +766,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_8), "r"(_smem_desc_lo_9), "r"(tmem_accumulator), "r"(((idx_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_10 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_11 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_10 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_11 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -794,8 +815,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) % 4);
                                     int _parity_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_2) * 8, _parity_gemm_arrived_2);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_12 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
                                     int _smem_desc_lo_13 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_12 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+                                    int _smem_desc_lo_13 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -834,8 +860,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                 #pragma unroll 1
                                 for (int idx_5 = iterations - tail_1; idx_5 < iterations; idx_5++) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_14 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
                                     int _smem_desc_lo_15 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_14 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+                                    int _smem_desc_lo_15 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4419,8 +4450,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived_3 = (int)((unsigned int)(gemm_wide + idx_7) % 4);
                                     int _parity_gemm_arrived_3 = (int)((unsigned int)(gemm_wide + idx_7) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_3) * 8, _parity_gemm_arrived_3);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_299 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_7) % 4) * 1024;
                                     int _smem_desc_lo_300 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_299 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+                                    int _smem_desc_lo_300 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4462,8 +4498,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                                 #pragma unroll 1
                                 for (int idx_8 = 0; idx_8 < head_1; idx_8++) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_301 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_8) % 4) * 1024;
                                     int _smem_desc_lo_302 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_301 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+                                    int _smem_desc_lo_302 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4506,8 +4547,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived_4 = (int)((unsigned int)(gemm_wide + idx_9) % 4);
                                     int _parity_gemm_arrived_4 = (int)((unsigned int)(gemm_wide + idx_9) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_4) * 8, _parity_gemm_arrived_4);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_303 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
                                     int _smem_desc_lo_304 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_303 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+                                    int _smem_desc_lo_304 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4542,8 +4588,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_303), "r"(_smem_desc_lo_304), "r"(tmem_accumulator), "r"(((idx_9 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_305 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
                                     int _smem_desc_lo_306 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_305 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+                                    int _smem_desc_lo_306 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4586,8 +4637,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     int _stage_gemm_arrived_5 = (int)((unsigned int)(gemm_wide + idx_10) % 4);
                                     int _parity_gemm_arrived_5 = (int)((unsigned int)(gemm_wide + idx_10) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_5) * 8, _parity_gemm_arrived_5);
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_307 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_10) % 4) * 1024;
                                     int _smem_desc_lo_308 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_307 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+                                    int _smem_desc_lo_308 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4626,8 +4682,13 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                 #pragma unroll 1
                                 for (int idx_11 = iterations_1 - tail_2; idx_11 < iterations_1; idx_11++) {
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                                     int _smem_desc_lo_309 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_11) % 4) * 1024;
                                     int _smem_desc_lo_310 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+#else
+                                    int _smem_desc_lo_309 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+                                    int _smem_desc_lo_310 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4973,7 +5034,616 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         :: "r"((output_finished_addr + ((int)((unsigned int)(gemm_acc_tiles + h) % 2)) * 8) & 0xFEFFFFFF) : "memory");
                                 }
                                 unsigned int hidden_packed_3[32];
-#if __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1000
+                                float2 _cvt_f32_128 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[0]));
+                                float2 _cvt_f32_256_128 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[0]));
+                                float gate_x_1_128 = _cvt_f32_128.x;
+                                float gate_y_1_128 = _cvt_f32_128.y;
+                                float up_x_1_128 = _cvt_f32_256_128.x;
+                                float up_y_1_128 = _cvt_f32_256_128.y;
+                                gate_x_1_128 = fminf(gate_x_1_128, swiglu_limit);
+                                gate_y_1_128 = fminf(gate_y_1_128, swiglu_limit);
+                                up_x_1_128 = fminf(fmaxf(up_x_1_128, -swiglu_limit), swiglu_limit);
+                                up_y_1_128 = fminf(fmaxf(up_y_1_128, -swiglu_limit), swiglu_limit);
+                                float _exp_312 = expf(gate_x_1_128 * -1.0f);
+                                float denominator_x_1_128 = _exp_312 + 1.0f;
+                                float _exp_313 = expf(gate_y_1_128 * -1.0f);
+                                float denominator_y_1_128 = _exp_313 + 1.0f;
+                                float hidden_x_1_128 = gate_x_1_128 / denominator_x_1_128 * up_x_1_128;
+                                float hidden_y_1_128 = gate_y_1_128 / denominator_y_1_128 * up_y_1_128;
+                                hidden_x_1_128 = hidden_x_1_128 * row_weight[0];
+                                hidden_y_1_128 = hidden_y_1_128 * row_weight[0];
+                                hidden_packed_3[0] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_128, hidden_y_1_128)));
+                                float2 _cvt_f32_129 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[1]));
+                                float2 _cvt_f32_256_129 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[1]));
+                                float gate_x_1_129 = _cvt_f32_129.x;
+                                float gate_y_1_129 = _cvt_f32_129.y;
+                                float up_x_1_129 = _cvt_f32_256_129.x;
+                                float up_y_1_129 = _cvt_f32_256_129.y;
+                                gate_x_1_129 = fminf(gate_x_1_129, swiglu_limit);
+                                gate_y_1_129 = fminf(gate_y_1_129, swiglu_limit);
+                                up_x_1_129 = fminf(fmaxf(up_x_1_129, -swiglu_limit), swiglu_limit);
+                                up_y_1_129 = fminf(fmaxf(up_y_1_129, -swiglu_limit), swiglu_limit);
+                                float _exp_314 = expf(gate_x_1_129 * -1.0f);
+                                float denominator_x_1_129 = _exp_314 + 1.0f;
+                                float _exp_315 = expf(gate_y_1_129 * -1.0f);
+                                float denominator_y_1_129 = _exp_315 + 1.0f;
+                                float hidden_x_1_129 = gate_x_1_129 / denominator_x_1_129 * up_x_1_129;
+                                float hidden_y_1_129 = gate_y_1_129 / denominator_y_1_129 * up_y_1_129;
+                                hidden_x_1_129 = hidden_x_1_129 * row_weight[1];
+                                hidden_y_1_129 = hidden_y_1_129 * row_weight[1];
+                                hidden_packed_3[1] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_129, hidden_y_1_129)));
+                                float2 _cvt_f32_130 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[2]));
+                                float2 _cvt_f32_256_130 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[2]));
+                                float gate_x_1_130 = _cvt_f32_130.x;
+                                float gate_y_1_130 = _cvt_f32_130.y;
+                                float up_x_1_130 = _cvt_f32_256_130.x;
+                                float up_y_1_130 = _cvt_f32_256_130.y;
+                                gate_x_1_130 = fminf(gate_x_1_130, swiglu_limit);
+                                gate_y_1_130 = fminf(gate_y_1_130, swiglu_limit);
+                                up_x_1_130 = fminf(fmaxf(up_x_1_130, -swiglu_limit), swiglu_limit);
+                                up_y_1_130 = fminf(fmaxf(up_y_1_130, -swiglu_limit), swiglu_limit);
+                                float _exp_316 = expf(gate_x_1_130 * -1.0f);
+                                float denominator_x_1_130 = _exp_316 + 1.0f;
+                                float _exp_317 = expf(gate_y_1_130 * -1.0f);
+                                float denominator_y_1_130 = _exp_317 + 1.0f;
+                                float hidden_x_1_130 = gate_x_1_130 / denominator_x_1_130 * up_x_1_130;
+                                float hidden_y_1_130 = gate_y_1_130 / denominator_y_1_130 * up_y_1_130;
+                                hidden_x_1_130 = hidden_x_1_130 * row_weight[0];
+                                hidden_y_1_130 = hidden_y_1_130 * row_weight[0];
+                                hidden_packed_3[2] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_130, hidden_y_1_130)));
+                                float2 _cvt_f32_131 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[3]));
+                                float2 _cvt_f32_256_131 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[3]));
+                                float gate_x_1_131 = _cvt_f32_131.x;
+                                float gate_y_1_131 = _cvt_f32_131.y;
+                                float up_x_1_131 = _cvt_f32_256_131.x;
+                                float up_y_1_131 = _cvt_f32_256_131.y;
+                                gate_x_1_131 = fminf(gate_x_1_131, swiglu_limit);
+                                gate_y_1_131 = fminf(gate_y_1_131, swiglu_limit);
+                                up_x_1_131 = fminf(fmaxf(up_x_1_131, -swiglu_limit), swiglu_limit);
+                                up_y_1_131 = fminf(fmaxf(up_y_1_131, -swiglu_limit), swiglu_limit);
+                                float _exp_318 = expf(gate_x_1_131 * -1.0f);
+                                float denominator_x_1_131 = _exp_318 + 1.0f;
+                                float _exp_319 = expf(gate_y_1_131 * -1.0f);
+                                float denominator_y_1_131 = _exp_319 + 1.0f;
+                                float hidden_x_1_131 = gate_x_1_131 / denominator_x_1_131 * up_x_1_131;
+                                float hidden_y_1_131 = gate_y_1_131 / denominator_y_1_131 * up_y_1_131;
+                                hidden_x_1_131 = hidden_x_1_131 * row_weight[1];
+                                hidden_y_1_131 = hidden_y_1_131 * row_weight[1];
+                                hidden_packed_3[3] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_131, hidden_y_1_131)));
+                                float2 _cvt_f32_132 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[4]));
+                                float2 _cvt_f32_256_132 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[4]));
+                                float gate_x_1_132 = _cvt_f32_132.x;
+                                float gate_y_1_132 = _cvt_f32_132.y;
+                                float up_x_1_132 = _cvt_f32_256_132.x;
+                                float up_y_1_132 = _cvt_f32_256_132.y;
+                                gate_x_1_132 = fminf(gate_x_1_132, swiglu_limit);
+                                gate_y_1_132 = fminf(gate_y_1_132, swiglu_limit);
+                                up_x_1_132 = fminf(fmaxf(up_x_1_132, -swiglu_limit), swiglu_limit);
+                                up_y_1_132 = fminf(fmaxf(up_y_1_132, -swiglu_limit), swiglu_limit);
+                                float _exp_320 = expf(gate_x_1_132 * -1.0f);
+                                float denominator_x_1_132 = _exp_320 + 1.0f;
+                                float _exp_321 = expf(gate_y_1_132 * -1.0f);
+                                float denominator_y_1_132 = _exp_321 + 1.0f;
+                                float hidden_x_1_132 = gate_x_1_132 / denominator_x_1_132 * up_x_1_132;
+                                float hidden_y_1_132 = gate_y_1_132 / denominator_y_1_132 * up_y_1_132;
+                                hidden_x_1_132 = hidden_x_1_132 * row_weight[0];
+                                hidden_y_1_132 = hidden_y_1_132 * row_weight[0];
+                                hidden_packed_3[4] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_132, hidden_y_1_132)));
+                                float2 _cvt_f32_133 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[5]));
+                                float2 _cvt_f32_256_133 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[5]));
+                                float gate_x_1_133 = _cvt_f32_133.x;
+                                float gate_y_1_133 = _cvt_f32_133.y;
+                                float up_x_1_133 = _cvt_f32_256_133.x;
+                                float up_y_1_133 = _cvt_f32_256_133.y;
+                                gate_x_1_133 = fminf(gate_x_1_133, swiglu_limit);
+                                gate_y_1_133 = fminf(gate_y_1_133, swiglu_limit);
+                                up_x_1_133 = fminf(fmaxf(up_x_1_133, -swiglu_limit), swiglu_limit);
+                                up_y_1_133 = fminf(fmaxf(up_y_1_133, -swiglu_limit), swiglu_limit);
+                                float _exp_322 = expf(gate_x_1_133 * -1.0f);
+                                float denominator_x_1_133 = _exp_322 + 1.0f;
+                                float _exp_323 = expf(gate_y_1_133 * -1.0f);
+                                float denominator_y_1_133 = _exp_323 + 1.0f;
+                                float hidden_x_1_133 = gate_x_1_133 / denominator_x_1_133 * up_x_1_133;
+                                float hidden_y_1_133 = gate_y_1_133 / denominator_y_1_133 * up_y_1_133;
+                                hidden_x_1_133 = hidden_x_1_133 * row_weight[1];
+                                hidden_y_1_133 = hidden_y_1_133 * row_weight[1];
+                                hidden_packed_3[5] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_133, hidden_y_1_133)));
+                                float2 _cvt_f32_134 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[6]));
+                                float2 _cvt_f32_256_134 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[6]));
+                                float gate_x_1_134 = _cvt_f32_134.x;
+                                float gate_y_1_134 = _cvt_f32_134.y;
+                                float up_x_1_134 = _cvt_f32_256_134.x;
+                                float up_y_1_134 = _cvt_f32_256_134.y;
+                                gate_x_1_134 = fminf(gate_x_1_134, swiglu_limit);
+                                gate_y_1_134 = fminf(gate_y_1_134, swiglu_limit);
+                                up_x_1_134 = fminf(fmaxf(up_x_1_134, -swiglu_limit), swiglu_limit);
+                                up_y_1_134 = fminf(fmaxf(up_y_1_134, -swiglu_limit), swiglu_limit);
+                                float _exp_324 = expf(gate_x_1_134 * -1.0f);
+                                float denominator_x_1_134 = _exp_324 + 1.0f;
+                                float _exp_325 = expf(gate_y_1_134 * -1.0f);
+                                float denominator_y_1_134 = _exp_325 + 1.0f;
+                                float hidden_x_1_134 = gate_x_1_134 / denominator_x_1_134 * up_x_1_134;
+                                float hidden_y_1_134 = gate_y_1_134 / denominator_y_1_134 * up_y_1_134;
+                                hidden_x_1_134 = hidden_x_1_134 * row_weight[0];
+                                hidden_y_1_134 = hidden_y_1_134 * row_weight[0];
+                                hidden_packed_3[6] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_134, hidden_y_1_134)));
+                                float2 _cvt_f32_135 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[7]));
+                                float2 _cvt_f32_256_135 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[7]));
+                                float gate_x_1_135 = _cvt_f32_135.x;
+                                float gate_y_1_135 = _cvt_f32_135.y;
+                                float up_x_1_135 = _cvt_f32_256_135.x;
+                                float up_y_1_135 = _cvt_f32_256_135.y;
+                                gate_x_1_135 = fminf(gate_x_1_135, swiglu_limit);
+                                gate_y_1_135 = fminf(gate_y_1_135, swiglu_limit);
+                                up_x_1_135 = fminf(fmaxf(up_x_1_135, -swiglu_limit), swiglu_limit);
+                                up_y_1_135 = fminf(fmaxf(up_y_1_135, -swiglu_limit), swiglu_limit);
+                                float _exp_326 = expf(gate_x_1_135 * -1.0f);
+                                float denominator_x_1_135 = _exp_326 + 1.0f;
+                                float _exp_327 = expf(gate_y_1_135 * -1.0f);
+                                float denominator_y_1_135 = _exp_327 + 1.0f;
+                                float hidden_x_1_135 = gate_x_1_135 / denominator_x_1_135 * up_x_1_135;
+                                float hidden_y_1_135 = gate_y_1_135 / denominator_y_1_135 * up_y_1_135;
+                                hidden_x_1_135 = hidden_x_1_135 * row_weight[1];
+                                hidden_y_1_135 = hidden_y_1_135 * row_weight[1];
+                                hidden_packed_3[7] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_135, hidden_y_1_135)));
+                                float2 _cvt_f32_136 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[8]));
+                                float2 _cvt_f32_256_136 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[8]));
+                                float gate_x_1_136 = _cvt_f32_136.x;
+                                float gate_y_1_136 = _cvt_f32_136.y;
+                                float up_x_1_136 = _cvt_f32_256_136.x;
+                                float up_y_1_136 = _cvt_f32_256_136.y;
+                                gate_x_1_136 = fminf(gate_x_1_136, swiglu_limit);
+                                gate_y_1_136 = fminf(gate_y_1_136, swiglu_limit);
+                                up_x_1_136 = fminf(fmaxf(up_x_1_136, -swiglu_limit), swiglu_limit);
+                                up_y_1_136 = fminf(fmaxf(up_y_1_136, -swiglu_limit), swiglu_limit);
+                                float _exp_328 = expf(gate_x_1_136 * -1.0f);
+                                float denominator_x_1_136 = _exp_328 + 1.0f;
+                                float _exp_329 = expf(gate_y_1_136 * -1.0f);
+                                float denominator_y_1_136 = _exp_329 + 1.0f;
+                                float hidden_x_1_136 = gate_x_1_136 / denominator_x_1_136 * up_x_1_136;
+                                float hidden_y_1_136 = gate_y_1_136 / denominator_y_1_136 * up_y_1_136;
+                                hidden_x_1_136 = hidden_x_1_136 * row_weight[2];
+                                hidden_y_1_136 = hidden_y_1_136 * row_weight[2];
+                                hidden_packed_3[8] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_136, hidden_y_1_136)));
+                                float2 _cvt_f32_137 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[9]));
+                                float2 _cvt_f32_256_137 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[9]));
+                                float gate_x_1_137 = _cvt_f32_137.x;
+                                float gate_y_1_137 = _cvt_f32_137.y;
+                                float up_x_1_137 = _cvt_f32_256_137.x;
+                                float up_y_1_137 = _cvt_f32_256_137.y;
+                                gate_x_1_137 = fminf(gate_x_1_137, swiglu_limit);
+                                gate_y_1_137 = fminf(gate_y_1_137, swiglu_limit);
+                                up_x_1_137 = fminf(fmaxf(up_x_1_137, -swiglu_limit), swiglu_limit);
+                                up_y_1_137 = fminf(fmaxf(up_y_1_137, -swiglu_limit), swiglu_limit);
+                                float _exp_330 = expf(gate_x_1_137 * -1.0f);
+                                float denominator_x_1_137 = _exp_330 + 1.0f;
+                                float _exp_331 = expf(gate_y_1_137 * -1.0f);
+                                float denominator_y_1_137 = _exp_331 + 1.0f;
+                                float hidden_x_1_137 = gate_x_1_137 / denominator_x_1_137 * up_x_1_137;
+                                float hidden_y_1_137 = gate_y_1_137 / denominator_y_1_137 * up_y_1_137;
+                                hidden_x_1_137 = hidden_x_1_137 * row_weight[3];
+                                hidden_y_1_137 = hidden_y_1_137 * row_weight[3];
+                                hidden_packed_3[9] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_137, hidden_y_1_137)));
+                                float2 _cvt_f32_138 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[10]));
+                                float2 _cvt_f32_256_138 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[10]));
+                                float gate_x_1_138 = _cvt_f32_138.x;
+                                float gate_y_1_138 = _cvt_f32_138.y;
+                                float up_x_1_138 = _cvt_f32_256_138.x;
+                                float up_y_1_138 = _cvt_f32_256_138.y;
+                                gate_x_1_138 = fminf(gate_x_1_138, swiglu_limit);
+                                gate_y_1_138 = fminf(gate_y_1_138, swiglu_limit);
+                                up_x_1_138 = fminf(fmaxf(up_x_1_138, -swiglu_limit), swiglu_limit);
+                                up_y_1_138 = fminf(fmaxf(up_y_1_138, -swiglu_limit), swiglu_limit);
+                                float _exp_332 = expf(gate_x_1_138 * -1.0f);
+                                float denominator_x_1_138 = _exp_332 + 1.0f;
+                                float _exp_333 = expf(gate_y_1_138 * -1.0f);
+                                float denominator_y_1_138 = _exp_333 + 1.0f;
+                                float hidden_x_1_138 = gate_x_1_138 / denominator_x_1_138 * up_x_1_138;
+                                float hidden_y_1_138 = gate_y_1_138 / denominator_y_1_138 * up_y_1_138;
+                                hidden_x_1_138 = hidden_x_1_138 * row_weight[2];
+                                hidden_y_1_138 = hidden_y_1_138 * row_weight[2];
+                                hidden_packed_3[10] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_138, hidden_y_1_138)));
+                                float2 _cvt_f32_139 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[11]));
+                                float2 _cvt_f32_256_139 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[11]));
+                                float gate_x_1_139 = _cvt_f32_139.x;
+                                float gate_y_1_139 = _cvt_f32_139.y;
+                                float up_x_1_139 = _cvt_f32_256_139.x;
+                                float up_y_1_139 = _cvt_f32_256_139.y;
+                                gate_x_1_139 = fminf(gate_x_1_139, swiglu_limit);
+                                gate_y_1_139 = fminf(gate_y_1_139, swiglu_limit);
+                                up_x_1_139 = fminf(fmaxf(up_x_1_139, -swiglu_limit), swiglu_limit);
+                                up_y_1_139 = fminf(fmaxf(up_y_1_139, -swiglu_limit), swiglu_limit);
+                                float _exp_334 = expf(gate_x_1_139 * -1.0f);
+                                float denominator_x_1_139 = _exp_334 + 1.0f;
+                                float _exp_335 = expf(gate_y_1_139 * -1.0f);
+                                float denominator_y_1_139 = _exp_335 + 1.0f;
+                                float hidden_x_1_139 = gate_x_1_139 / denominator_x_1_139 * up_x_1_139;
+                                float hidden_y_1_139 = gate_y_1_139 / denominator_y_1_139 * up_y_1_139;
+                                hidden_x_1_139 = hidden_x_1_139 * row_weight[3];
+                                hidden_y_1_139 = hidden_y_1_139 * row_weight[3];
+                                hidden_packed_3[11] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_139, hidden_y_1_139)));
+                                float2 _cvt_f32_140 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[12]));
+                                float2 _cvt_f32_256_140 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[12]));
+                                float gate_x_1_140 = _cvt_f32_140.x;
+                                float gate_y_1_140 = _cvt_f32_140.y;
+                                float up_x_1_140 = _cvt_f32_256_140.x;
+                                float up_y_1_140 = _cvt_f32_256_140.y;
+                                gate_x_1_140 = fminf(gate_x_1_140, swiglu_limit);
+                                gate_y_1_140 = fminf(gate_y_1_140, swiglu_limit);
+                                up_x_1_140 = fminf(fmaxf(up_x_1_140, -swiglu_limit), swiglu_limit);
+                                up_y_1_140 = fminf(fmaxf(up_y_1_140, -swiglu_limit), swiglu_limit);
+                                float _exp_336 = expf(gate_x_1_140 * -1.0f);
+                                float denominator_x_1_140 = _exp_336 + 1.0f;
+                                float _exp_337 = expf(gate_y_1_140 * -1.0f);
+                                float denominator_y_1_140 = _exp_337 + 1.0f;
+                                float hidden_x_1_140 = gate_x_1_140 / denominator_x_1_140 * up_x_1_140;
+                                float hidden_y_1_140 = gate_y_1_140 / denominator_y_1_140 * up_y_1_140;
+                                hidden_x_1_140 = hidden_x_1_140 * row_weight[2];
+                                hidden_y_1_140 = hidden_y_1_140 * row_weight[2];
+                                hidden_packed_3[12] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_140, hidden_y_1_140)));
+                                float2 _cvt_f32_141 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[13]));
+                                float2 _cvt_f32_256_141 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[13]));
+                                float gate_x_1_141 = _cvt_f32_141.x;
+                                float gate_y_1_141 = _cvt_f32_141.y;
+                                float up_x_1_141 = _cvt_f32_256_141.x;
+                                float up_y_1_141 = _cvt_f32_256_141.y;
+                                gate_x_1_141 = fminf(gate_x_1_141, swiglu_limit);
+                                gate_y_1_141 = fminf(gate_y_1_141, swiglu_limit);
+                                up_x_1_141 = fminf(fmaxf(up_x_1_141, -swiglu_limit), swiglu_limit);
+                                up_y_1_141 = fminf(fmaxf(up_y_1_141, -swiglu_limit), swiglu_limit);
+                                float _exp_338 = expf(gate_x_1_141 * -1.0f);
+                                float denominator_x_1_141 = _exp_338 + 1.0f;
+                                float _exp_339 = expf(gate_y_1_141 * -1.0f);
+                                float denominator_y_1_141 = _exp_339 + 1.0f;
+                                float hidden_x_1_141 = gate_x_1_141 / denominator_x_1_141 * up_x_1_141;
+                                float hidden_y_1_141 = gate_y_1_141 / denominator_y_1_141 * up_y_1_141;
+                                hidden_x_1_141 = hidden_x_1_141 * row_weight[3];
+                                hidden_y_1_141 = hidden_y_1_141 * row_weight[3];
+                                hidden_packed_3[13] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_141, hidden_y_1_141)));
+                                float2 _cvt_f32_142 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[14]));
+                                float2 _cvt_f32_256_142 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[14]));
+                                float gate_x_1_142 = _cvt_f32_142.x;
+                                float gate_y_1_142 = _cvt_f32_142.y;
+                                float up_x_1_142 = _cvt_f32_256_142.x;
+                                float up_y_1_142 = _cvt_f32_256_142.y;
+                                gate_x_1_142 = fminf(gate_x_1_142, swiglu_limit);
+                                gate_y_1_142 = fminf(gate_y_1_142, swiglu_limit);
+                                up_x_1_142 = fminf(fmaxf(up_x_1_142, -swiglu_limit), swiglu_limit);
+                                up_y_1_142 = fminf(fmaxf(up_y_1_142, -swiglu_limit), swiglu_limit);
+                                float _exp_340 = expf(gate_x_1_142 * -1.0f);
+                                float denominator_x_1_142 = _exp_340 + 1.0f;
+                                float _exp_341 = expf(gate_y_1_142 * -1.0f);
+                                float denominator_y_1_142 = _exp_341 + 1.0f;
+                                float hidden_x_1_142 = gate_x_1_142 / denominator_x_1_142 * up_x_1_142;
+                                float hidden_y_1_142 = gate_y_1_142 / denominator_y_1_142 * up_y_1_142;
+                                hidden_x_1_142 = hidden_x_1_142 * row_weight[2];
+                                hidden_y_1_142 = hidden_y_1_142 * row_weight[2];
+                                hidden_packed_3[14] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_142, hidden_y_1_142)));
+                                float2 _cvt_f32_143 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[15]));
+                                float2 _cvt_f32_256_143 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[15]));
+                                float gate_x_1_143 = _cvt_f32_143.x;
+                                float gate_y_1_143 = _cvt_f32_143.y;
+                                float up_x_1_143 = _cvt_f32_256_143.x;
+                                float up_y_1_143 = _cvt_f32_256_143.y;
+                                gate_x_1_143 = fminf(gate_x_1_143, swiglu_limit);
+                                gate_y_1_143 = fminf(gate_y_1_143, swiglu_limit);
+                                up_x_1_143 = fminf(fmaxf(up_x_1_143, -swiglu_limit), swiglu_limit);
+                                up_y_1_143 = fminf(fmaxf(up_y_1_143, -swiglu_limit), swiglu_limit);
+                                float _exp_342 = expf(gate_x_1_143 * -1.0f);
+                                float denominator_x_1_143 = _exp_342 + 1.0f;
+                                float _exp_343 = expf(gate_y_1_143 * -1.0f);
+                                float denominator_y_1_143 = _exp_343 + 1.0f;
+                                float hidden_x_1_143 = gate_x_1_143 / denominator_x_1_143 * up_x_1_143;
+                                float hidden_y_1_143 = gate_y_1_143 / denominator_y_1_143 * up_y_1_143;
+                                hidden_x_1_143 = hidden_x_1_143 * row_weight[3];
+                                hidden_y_1_143 = hidden_y_1_143 * row_weight[3];
+                                hidden_packed_3[15] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_143, hidden_y_1_143)));
+                                float2 _cvt_f32_144 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[16]));
+                                float2 _cvt_f32_256_144 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[16]));
+                                float gate_x_1_144 = _cvt_f32_144.x;
+                                float gate_y_1_144 = _cvt_f32_144.y;
+                                float up_x_1_144 = _cvt_f32_256_144.x;
+                                float up_y_1_144 = _cvt_f32_256_144.y;
+                                gate_x_1_144 = fminf(gate_x_1_144, swiglu_limit);
+                                gate_y_1_144 = fminf(gate_y_1_144, swiglu_limit);
+                                up_x_1_144 = fminf(fmaxf(up_x_1_144, -swiglu_limit), swiglu_limit);
+                                up_y_1_144 = fminf(fmaxf(up_y_1_144, -swiglu_limit), swiglu_limit);
+                                float _exp_344 = expf(gate_x_1_144 * -1.0f);
+                                float denominator_x_1_144 = _exp_344 + 1.0f;
+                                float _exp_345 = expf(gate_y_1_144 * -1.0f);
+                                float denominator_y_1_144 = _exp_345 + 1.0f;
+                                float hidden_x_1_144 = gate_x_1_144 / denominator_x_1_144 * up_x_1_144;
+                                float hidden_y_1_144 = gate_y_1_144 / denominator_y_1_144 * up_y_1_144;
+                                hidden_x_1_144 = hidden_x_1_144 * row_weight[0];
+                                hidden_y_1_144 = hidden_y_1_144 * row_weight[0];
+                                hidden_packed_3[16] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_144, hidden_y_1_144)));
+                                float2 _cvt_f32_145 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[17]));
+                                float2 _cvt_f32_256_145 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[17]));
+                                float gate_x_1_145 = _cvt_f32_145.x;
+                                float gate_y_1_145 = _cvt_f32_145.y;
+                                float up_x_1_145 = _cvt_f32_256_145.x;
+                                float up_y_1_145 = _cvt_f32_256_145.y;
+                                gate_x_1_145 = fminf(gate_x_1_145, swiglu_limit);
+                                gate_y_1_145 = fminf(gate_y_1_145, swiglu_limit);
+                                up_x_1_145 = fminf(fmaxf(up_x_1_145, -swiglu_limit), swiglu_limit);
+                                up_y_1_145 = fminf(fmaxf(up_y_1_145, -swiglu_limit), swiglu_limit);
+                                float _exp_346 = expf(gate_x_1_145 * -1.0f);
+                                float denominator_x_1_145 = _exp_346 + 1.0f;
+                                float _exp_347 = expf(gate_y_1_145 * -1.0f);
+                                float denominator_y_1_145 = _exp_347 + 1.0f;
+                                float hidden_x_1_145 = gate_x_1_145 / denominator_x_1_145 * up_x_1_145;
+                                float hidden_y_1_145 = gate_y_1_145 / denominator_y_1_145 * up_y_1_145;
+                                hidden_x_1_145 = hidden_x_1_145 * row_weight[1];
+                                hidden_y_1_145 = hidden_y_1_145 * row_weight[1];
+                                hidden_packed_3[17] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_145, hidden_y_1_145)));
+                                float2 _cvt_f32_146 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[18]));
+                                float2 _cvt_f32_256_146 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[18]));
+                                float gate_x_1_146 = _cvt_f32_146.x;
+                                float gate_y_1_146 = _cvt_f32_146.y;
+                                float up_x_1_146 = _cvt_f32_256_146.x;
+                                float up_y_1_146 = _cvt_f32_256_146.y;
+                                gate_x_1_146 = fminf(gate_x_1_146, swiglu_limit);
+                                gate_y_1_146 = fminf(gate_y_1_146, swiglu_limit);
+                                up_x_1_146 = fminf(fmaxf(up_x_1_146, -swiglu_limit), swiglu_limit);
+                                up_y_1_146 = fminf(fmaxf(up_y_1_146, -swiglu_limit), swiglu_limit);
+                                float _exp_348 = expf(gate_x_1_146 * -1.0f);
+                                float denominator_x_1_146 = _exp_348 + 1.0f;
+                                float _exp_349 = expf(gate_y_1_146 * -1.0f);
+                                float denominator_y_1_146 = _exp_349 + 1.0f;
+                                float hidden_x_1_146 = gate_x_1_146 / denominator_x_1_146 * up_x_1_146;
+                                float hidden_y_1_146 = gate_y_1_146 / denominator_y_1_146 * up_y_1_146;
+                                hidden_x_1_146 = hidden_x_1_146 * row_weight[0];
+                                hidden_y_1_146 = hidden_y_1_146 * row_weight[0];
+                                hidden_packed_3[18] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_146, hidden_y_1_146)));
+                                float2 _cvt_f32_147 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[19]));
+                                float2 _cvt_f32_256_147 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[19]));
+                                float gate_x_1_147 = _cvt_f32_147.x;
+                                float gate_y_1_147 = _cvt_f32_147.y;
+                                float up_x_1_147 = _cvt_f32_256_147.x;
+                                float up_y_1_147 = _cvt_f32_256_147.y;
+                                gate_x_1_147 = fminf(gate_x_1_147, swiglu_limit);
+                                gate_y_1_147 = fminf(gate_y_1_147, swiglu_limit);
+                                up_x_1_147 = fminf(fmaxf(up_x_1_147, -swiglu_limit), swiglu_limit);
+                                up_y_1_147 = fminf(fmaxf(up_y_1_147, -swiglu_limit), swiglu_limit);
+                                float _exp_350 = expf(gate_x_1_147 * -1.0f);
+                                float denominator_x_1_147 = _exp_350 + 1.0f;
+                                float _exp_351 = expf(gate_y_1_147 * -1.0f);
+                                float denominator_y_1_147 = _exp_351 + 1.0f;
+                                float hidden_x_1_147 = gate_x_1_147 / denominator_x_1_147 * up_x_1_147;
+                                float hidden_y_1_147 = gate_y_1_147 / denominator_y_1_147 * up_y_1_147;
+                                hidden_x_1_147 = hidden_x_1_147 * row_weight[1];
+                                hidden_y_1_147 = hidden_y_1_147 * row_weight[1];
+                                hidden_packed_3[19] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_147, hidden_y_1_147)));
+                                float2 _cvt_f32_148 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[20]));
+                                float2 _cvt_f32_256_148 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[20]));
+                                float gate_x_1_148 = _cvt_f32_148.x;
+                                float gate_y_1_148 = _cvt_f32_148.y;
+                                float up_x_1_148 = _cvt_f32_256_148.x;
+                                float up_y_1_148 = _cvt_f32_256_148.y;
+                                gate_x_1_148 = fminf(gate_x_1_148, swiglu_limit);
+                                gate_y_1_148 = fminf(gate_y_1_148, swiglu_limit);
+                                up_x_1_148 = fminf(fmaxf(up_x_1_148, -swiglu_limit), swiglu_limit);
+                                up_y_1_148 = fminf(fmaxf(up_y_1_148, -swiglu_limit), swiglu_limit);
+                                float _exp_352 = expf(gate_x_1_148 * -1.0f);
+                                float denominator_x_1_148 = _exp_352 + 1.0f;
+                                float _exp_353 = expf(gate_y_1_148 * -1.0f);
+                                float denominator_y_1_148 = _exp_353 + 1.0f;
+                                float hidden_x_1_148 = gate_x_1_148 / denominator_x_1_148 * up_x_1_148;
+                                float hidden_y_1_148 = gate_y_1_148 / denominator_y_1_148 * up_y_1_148;
+                                hidden_x_1_148 = hidden_x_1_148 * row_weight[0];
+                                hidden_y_1_148 = hidden_y_1_148 * row_weight[0];
+                                hidden_packed_3[20] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_148, hidden_y_1_148)));
+                                float2 _cvt_f32_149 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[21]));
+                                float2 _cvt_f32_256_149 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[21]));
+                                float gate_x_1_149 = _cvt_f32_149.x;
+                                float gate_y_1_149 = _cvt_f32_149.y;
+                                float up_x_1_149 = _cvt_f32_256_149.x;
+                                float up_y_1_149 = _cvt_f32_256_149.y;
+                                gate_x_1_149 = fminf(gate_x_1_149, swiglu_limit);
+                                gate_y_1_149 = fminf(gate_y_1_149, swiglu_limit);
+                                up_x_1_149 = fminf(fmaxf(up_x_1_149, -swiglu_limit), swiglu_limit);
+                                up_y_1_149 = fminf(fmaxf(up_y_1_149, -swiglu_limit), swiglu_limit);
+                                float _exp_354 = expf(gate_x_1_149 * -1.0f);
+                                float denominator_x_1_149 = _exp_354 + 1.0f;
+                                float _exp_355 = expf(gate_y_1_149 * -1.0f);
+                                float denominator_y_1_149 = _exp_355 + 1.0f;
+                                float hidden_x_1_149 = gate_x_1_149 / denominator_x_1_149 * up_x_1_149;
+                                float hidden_y_1_149 = gate_y_1_149 / denominator_y_1_149 * up_y_1_149;
+                                hidden_x_1_149 = hidden_x_1_149 * row_weight[1];
+                                hidden_y_1_149 = hidden_y_1_149 * row_weight[1];
+                                hidden_packed_3[21] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_149, hidden_y_1_149)));
+                                float2 _cvt_f32_150 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[22]));
+                                float2 _cvt_f32_256_150 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[22]));
+                                float gate_x_1_150 = _cvt_f32_150.x;
+                                float gate_y_1_150 = _cvt_f32_150.y;
+                                float up_x_1_150 = _cvt_f32_256_150.x;
+                                float up_y_1_150 = _cvt_f32_256_150.y;
+                                gate_x_1_150 = fminf(gate_x_1_150, swiglu_limit);
+                                gate_y_1_150 = fminf(gate_y_1_150, swiglu_limit);
+                                up_x_1_150 = fminf(fmaxf(up_x_1_150, -swiglu_limit), swiglu_limit);
+                                up_y_1_150 = fminf(fmaxf(up_y_1_150, -swiglu_limit), swiglu_limit);
+                                float _exp_356 = expf(gate_x_1_150 * -1.0f);
+                                float denominator_x_1_150 = _exp_356 + 1.0f;
+                                float _exp_357 = expf(gate_y_1_150 * -1.0f);
+                                float denominator_y_1_150 = _exp_357 + 1.0f;
+                                float hidden_x_1_150 = gate_x_1_150 / denominator_x_1_150 * up_x_1_150;
+                                float hidden_y_1_150 = gate_y_1_150 / denominator_y_1_150 * up_y_1_150;
+                                hidden_x_1_150 = hidden_x_1_150 * row_weight[0];
+                                hidden_y_1_150 = hidden_y_1_150 * row_weight[0];
+                                hidden_packed_3[22] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_150, hidden_y_1_150)));
+                                float2 _cvt_f32_151 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[23]));
+                                float2 _cvt_f32_256_151 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[23]));
+                                float gate_x_1_151 = _cvt_f32_151.x;
+                                float gate_y_1_151 = _cvt_f32_151.y;
+                                float up_x_1_151 = _cvt_f32_256_151.x;
+                                float up_y_1_151 = _cvt_f32_256_151.y;
+                                gate_x_1_151 = fminf(gate_x_1_151, swiglu_limit);
+                                gate_y_1_151 = fminf(gate_y_1_151, swiglu_limit);
+                                up_x_1_151 = fminf(fmaxf(up_x_1_151, -swiglu_limit), swiglu_limit);
+                                up_y_1_151 = fminf(fmaxf(up_y_1_151, -swiglu_limit), swiglu_limit);
+                                float _exp_358 = expf(gate_x_1_151 * -1.0f);
+                                float denominator_x_1_151 = _exp_358 + 1.0f;
+                                float _exp_359 = expf(gate_y_1_151 * -1.0f);
+                                float denominator_y_1_151 = _exp_359 + 1.0f;
+                                float hidden_x_1_151 = gate_x_1_151 / denominator_x_1_151 * up_x_1_151;
+                                float hidden_y_1_151 = gate_y_1_151 / denominator_y_1_151 * up_y_1_151;
+                                hidden_x_1_151 = hidden_x_1_151 * row_weight[1];
+                                hidden_y_1_151 = hidden_y_1_151 * row_weight[1];
+                                hidden_packed_3[23] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_151, hidden_y_1_151)));
+                                float2 _cvt_f32_152 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[24]));
+                                float2 _cvt_f32_256_152 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[24]));
+                                float gate_x_1_152 = _cvt_f32_152.x;
+                                float gate_y_1_152 = _cvt_f32_152.y;
+                                float up_x_1_152 = _cvt_f32_256_152.x;
+                                float up_y_1_152 = _cvt_f32_256_152.y;
+                                gate_x_1_152 = fminf(gate_x_1_152, swiglu_limit);
+                                gate_y_1_152 = fminf(gate_y_1_152, swiglu_limit);
+                                up_x_1_152 = fminf(fmaxf(up_x_1_152, -swiglu_limit), swiglu_limit);
+                                up_y_1_152 = fminf(fmaxf(up_y_1_152, -swiglu_limit), swiglu_limit);
+                                float _exp_360 = expf(gate_x_1_152 * -1.0f);
+                                float denominator_x_1_152 = _exp_360 + 1.0f;
+                                float _exp_361 = expf(gate_y_1_152 * -1.0f);
+                                float denominator_y_1_152 = _exp_361 + 1.0f;
+                                float hidden_x_1_152 = gate_x_1_152 / denominator_x_1_152 * up_x_1_152;
+                                float hidden_y_1_152 = gate_y_1_152 / denominator_y_1_152 * up_y_1_152;
+                                hidden_x_1_152 = hidden_x_1_152 * row_weight[2];
+                                hidden_y_1_152 = hidden_y_1_152 * row_weight[2];
+                                hidden_packed_3[24] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_152, hidden_y_1_152)));
+                                float2 _cvt_f32_153 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[25]));
+                                float2 _cvt_f32_256_153 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[25]));
+                                float gate_x_1_153 = _cvt_f32_153.x;
+                                float gate_y_1_153 = _cvt_f32_153.y;
+                                float up_x_1_153 = _cvt_f32_256_153.x;
+                                float up_y_1_153 = _cvt_f32_256_153.y;
+                                gate_x_1_153 = fminf(gate_x_1_153, swiglu_limit);
+                                gate_y_1_153 = fminf(gate_y_1_153, swiglu_limit);
+                                up_x_1_153 = fminf(fmaxf(up_x_1_153, -swiglu_limit), swiglu_limit);
+                                up_y_1_153 = fminf(fmaxf(up_y_1_153, -swiglu_limit), swiglu_limit);
+                                float _exp_362 = expf(gate_x_1_153 * -1.0f);
+                                float denominator_x_1_153 = _exp_362 + 1.0f;
+                                float _exp_363 = expf(gate_y_1_153 * -1.0f);
+                                float denominator_y_1_153 = _exp_363 + 1.0f;
+                                float hidden_x_1_153 = gate_x_1_153 / denominator_x_1_153 * up_x_1_153;
+                                float hidden_y_1_153 = gate_y_1_153 / denominator_y_1_153 * up_y_1_153;
+                                hidden_x_1_153 = hidden_x_1_153 * row_weight[3];
+                                hidden_y_1_153 = hidden_y_1_153 * row_weight[3];
+                                hidden_packed_3[25] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_153, hidden_y_1_153)));
+                                float2 _cvt_f32_154 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[26]));
+                                float2 _cvt_f32_256_154 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[26]));
+                                float gate_x_1_154 = _cvt_f32_154.x;
+                                float gate_y_1_154 = _cvt_f32_154.y;
+                                float up_x_1_154 = _cvt_f32_256_154.x;
+                                float up_y_1_154 = _cvt_f32_256_154.y;
+                                gate_x_1_154 = fminf(gate_x_1_154, swiglu_limit);
+                                gate_y_1_154 = fminf(gate_y_1_154, swiglu_limit);
+                                up_x_1_154 = fminf(fmaxf(up_x_1_154, -swiglu_limit), swiglu_limit);
+                                up_y_1_154 = fminf(fmaxf(up_y_1_154, -swiglu_limit), swiglu_limit);
+                                float _exp_364 = expf(gate_x_1_154 * -1.0f);
+                                float denominator_x_1_154 = _exp_364 + 1.0f;
+                                float _exp_365 = expf(gate_y_1_154 * -1.0f);
+                                float denominator_y_1_154 = _exp_365 + 1.0f;
+                                float hidden_x_1_154 = gate_x_1_154 / denominator_x_1_154 * up_x_1_154;
+                                float hidden_y_1_154 = gate_y_1_154 / denominator_y_1_154 * up_y_1_154;
+                                hidden_x_1_154 = hidden_x_1_154 * row_weight[2];
+                                hidden_y_1_154 = hidden_y_1_154 * row_weight[2];
+                                hidden_packed_3[26] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_154, hidden_y_1_154)));
+                                float2 _cvt_f32_155 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[27]));
+                                float2 _cvt_f32_256_155 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[27]));
+                                float gate_x_1_155 = _cvt_f32_155.x;
+                                float gate_y_1_155 = _cvt_f32_155.y;
+                                float up_x_1_155 = _cvt_f32_256_155.x;
+                                float up_y_1_155 = _cvt_f32_256_155.y;
+                                gate_x_1_155 = fminf(gate_x_1_155, swiglu_limit);
+                                gate_y_1_155 = fminf(gate_y_1_155, swiglu_limit);
+                                up_x_1_155 = fminf(fmaxf(up_x_1_155, -swiglu_limit), swiglu_limit);
+                                up_y_1_155 = fminf(fmaxf(up_y_1_155, -swiglu_limit), swiglu_limit);
+                                float _exp_366 = expf(gate_x_1_155 * -1.0f);
+                                float denominator_x_1_155 = _exp_366 + 1.0f;
+                                float _exp_367 = expf(gate_y_1_155 * -1.0f);
+                                float denominator_y_1_155 = _exp_367 + 1.0f;
+                                float hidden_x_1_155 = gate_x_1_155 / denominator_x_1_155 * up_x_1_155;
+                                float hidden_y_1_155 = gate_y_1_155 / denominator_y_1_155 * up_y_1_155;
+                                hidden_x_1_155 = hidden_x_1_155 * row_weight[3];
+                                hidden_y_1_155 = hidden_y_1_155 * row_weight[3];
+                                hidden_packed_3[27] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_155, hidden_y_1_155)));
+                                float2 _cvt_f32_156 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[28]));
+                                float2 _cvt_f32_256_156 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[28]));
+                                float gate_x_1_156 = _cvt_f32_156.x;
+                                float gate_y_1_156 = _cvt_f32_156.y;
+                                float up_x_1_156 = _cvt_f32_256_156.x;
+                                float up_y_1_156 = _cvt_f32_256_156.y;
+                                gate_x_1_156 = fminf(gate_x_1_156, swiglu_limit);
+                                gate_y_1_156 = fminf(gate_y_1_156, swiglu_limit);
+                                up_x_1_156 = fminf(fmaxf(up_x_1_156, -swiglu_limit), swiglu_limit);
+                                up_y_1_156 = fminf(fmaxf(up_y_1_156, -swiglu_limit), swiglu_limit);
+                                float _exp_368 = expf(gate_x_1_156 * -1.0f);
+                                float denominator_x_1_156 = _exp_368 + 1.0f;
+                                float _exp_369 = expf(gate_y_1_156 * -1.0f);
+                                float denominator_y_1_156 = _exp_369 + 1.0f;
+                                float hidden_x_1_156 = gate_x_1_156 / denominator_x_1_156 * up_x_1_156;
+                                float hidden_y_1_156 = gate_y_1_156 / denominator_y_1_156 * up_y_1_156;
+                                hidden_x_1_156 = hidden_x_1_156 * row_weight[2];
+                                hidden_y_1_156 = hidden_y_1_156 * row_weight[2];
+                                hidden_packed_3[28] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_156, hidden_y_1_156)));
+                                float2 _cvt_f32_157 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[29]));
+                                float2 _cvt_f32_256_157 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[29]));
+                                float gate_x_1_157 = _cvt_f32_157.x;
+                                float gate_y_1_157 = _cvt_f32_157.y;
+                                float up_x_1_157 = _cvt_f32_256_157.x;
+                                float up_y_1_157 = _cvt_f32_256_157.y;
+                                gate_x_1_157 = fminf(gate_x_1_157, swiglu_limit);
+                                gate_y_1_157 = fminf(gate_y_1_157, swiglu_limit);
+                                up_x_1_157 = fminf(fmaxf(up_x_1_157, -swiglu_limit), swiglu_limit);
+                                up_y_1_157 = fminf(fmaxf(up_y_1_157, -swiglu_limit), swiglu_limit);
+                                float _exp_370 = expf(gate_x_1_157 * -1.0f);
+                                float denominator_x_1_157 = _exp_370 + 1.0f;
+                                float _exp_371 = expf(gate_y_1_157 * -1.0f);
+                                float denominator_y_1_157 = _exp_371 + 1.0f;
+                                float hidden_x_1_157 = gate_x_1_157 / denominator_x_1_157 * up_x_1_157;
+                                float hidden_y_1_157 = gate_y_1_157 / denominator_y_1_157 * up_y_1_157;
+                                hidden_x_1_157 = hidden_x_1_157 * row_weight[3];
+                                hidden_y_1_157 = hidden_y_1_157 * row_weight[3];
+                                hidden_packed_3[29] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_157, hidden_y_1_157)));
+                                float2 _cvt_f32_158 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[30]));
+                                float2 _cvt_f32_256_158 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[30]));
+                                float gate_x_1_158 = _cvt_f32_158.x;
+                                float gate_y_1_158 = _cvt_f32_158.y;
+                                float up_x_1_158 = _cvt_f32_256_158.x;
+                                float up_y_1_158 = _cvt_f32_256_158.y;
+                                gate_x_1_158 = fminf(gate_x_1_158, swiglu_limit);
+                                gate_y_1_158 = fminf(gate_y_1_158, swiglu_limit);
+                                up_x_1_158 = fminf(fmaxf(up_x_1_158, -swiglu_limit), swiglu_limit);
+                                up_y_1_158 = fminf(fmaxf(up_y_1_158, -swiglu_limit), swiglu_limit);
+                                float _exp_372 = expf(gate_x_1_158 * -1.0f);
+                                float denominator_x_1_158 = _exp_372 + 1.0f;
+                                float _exp_373 = expf(gate_y_1_158 * -1.0f);
+                                float denominator_y_1_158 = _exp_373 + 1.0f;
+                                float hidden_x_1_158 = gate_x_1_158 / denominator_x_1_158 * up_x_1_158;
+                                float hidden_y_1_158 = gate_y_1_158 / denominator_y_1_158 * up_y_1_158;
+                                hidden_x_1_158 = hidden_x_1_158 * row_weight[2];
+                                hidden_y_1_158 = hidden_y_1_158 * row_weight[2];
+                                hidden_packed_3[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_158, hidden_y_1_158)));
+                                float2 _cvt_f32_159 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[31]));
+                                float2 _cvt_f32_256_159 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[31]));
+                                float gate_x_1_159 = _cvt_f32_159.x;
+                                float gate_y_1_159 = _cvt_f32_159.y;
+                                float up_x_1_159 = _cvt_f32_256_159.x;
+                                float up_y_1_159 = _cvt_f32_256_159.y;
+                                gate_x_1_159 = fminf(gate_x_1_159, swiglu_limit);
+                                gate_y_1_159 = fminf(gate_y_1_159, swiglu_limit);
+                                up_x_1_159 = fminf(fmaxf(up_x_1_159, -swiglu_limit), swiglu_limit);
+                                up_y_1_159 = fminf(fmaxf(up_y_1_159, -swiglu_limit), swiglu_limit);
+                                float _exp_374 = expf(gate_x_1_159 * -1.0f);
+                                float denominator_x_1_159 = _exp_374 + 1.0f;
+                                float _exp_375 = expf(gate_y_1_159 * -1.0f);
+                                float denominator_y_1_159 = _exp_375 + 1.0f;
+                                float hidden_x_1_159 = gate_x_1_159 / denominator_x_1_159 * up_x_1_159;
+                                float hidden_y_1_159 = gate_y_1_159 / denominator_y_1_159 * up_y_1_159;
+                                hidden_x_1_159 = hidden_x_1_159 * row_weight[3];
+                                hidden_y_1_159 = hidden_y_1_159 * row_weight[3];
+                                hidden_packed_3[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_159, hidden_y_1_159)));
+#else
                                 float2 gate_a_2_0 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[0]));
                                 float2 up_a_2_0 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[0]));
                                 float2 gate_b_2_0 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[1]));
@@ -5662,615 +6332,6 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 asm("mul.rn.ftz.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&hidden_y_2_15) : "l"(*(const unsigned long long*)&activation_y_2_15), "l"(*(const unsigned long long*)&weight_pair_2_15));
                                 hidden_packed_3[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_2_15.x, hidden_y_2_15.x)));
                                 hidden_packed_3[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_2_15.y, hidden_y_2_15.y)));
-#else
-                                float2 _cvt_f32_128 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[0]));
-                                float2 _cvt_f32_256_128 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[0]));
-                                float gate_x_1_128 = _cvt_f32_128.x;
-                                float gate_y_1_128 = _cvt_f32_128.y;
-                                float up_x_1_128 = _cvt_f32_256_128.x;
-                                float up_y_1_128 = _cvt_f32_256_128.y;
-                                gate_x_1_128 = fminf(gate_x_1_128, swiglu_limit);
-                                gate_y_1_128 = fminf(gate_y_1_128, swiglu_limit);
-                                up_x_1_128 = fminf(fmaxf(up_x_1_128, -swiglu_limit), swiglu_limit);
-                                up_y_1_128 = fminf(fmaxf(up_y_1_128, -swiglu_limit), swiglu_limit);
-                                float _exp_312 = expf(gate_x_1_128 * -1.0f);
-                                float denominator_x_1_128 = _exp_312 + 1.0f;
-                                float _exp_313 = expf(gate_y_1_128 * -1.0f);
-                                float denominator_y_1_128 = _exp_313 + 1.0f;
-                                float hidden_x_1_128 = gate_x_1_128 / denominator_x_1_128 * up_x_1_128;
-                                float hidden_y_1_128 = gate_y_1_128 / denominator_y_1_128 * up_y_1_128;
-                                hidden_x_1_128 = hidden_x_1_128 * row_weight[0];
-                                hidden_y_1_128 = hidden_y_1_128 * row_weight[0];
-                                hidden_packed_3[0] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_128, hidden_y_1_128)));
-                                float2 _cvt_f32_129 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[1]));
-                                float2 _cvt_f32_256_129 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[1]));
-                                float gate_x_1_129 = _cvt_f32_129.x;
-                                float gate_y_1_129 = _cvt_f32_129.y;
-                                float up_x_1_129 = _cvt_f32_256_129.x;
-                                float up_y_1_129 = _cvt_f32_256_129.y;
-                                gate_x_1_129 = fminf(gate_x_1_129, swiglu_limit);
-                                gate_y_1_129 = fminf(gate_y_1_129, swiglu_limit);
-                                up_x_1_129 = fminf(fmaxf(up_x_1_129, -swiglu_limit), swiglu_limit);
-                                up_y_1_129 = fminf(fmaxf(up_y_1_129, -swiglu_limit), swiglu_limit);
-                                float _exp_314 = expf(gate_x_1_129 * -1.0f);
-                                float denominator_x_1_129 = _exp_314 + 1.0f;
-                                float _exp_315 = expf(gate_y_1_129 * -1.0f);
-                                float denominator_y_1_129 = _exp_315 + 1.0f;
-                                float hidden_x_1_129 = gate_x_1_129 / denominator_x_1_129 * up_x_1_129;
-                                float hidden_y_1_129 = gate_y_1_129 / denominator_y_1_129 * up_y_1_129;
-                                hidden_x_1_129 = hidden_x_1_129 * row_weight[1];
-                                hidden_y_1_129 = hidden_y_1_129 * row_weight[1];
-                                hidden_packed_3[1] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_129, hidden_y_1_129)));
-                                float2 _cvt_f32_130 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[2]));
-                                float2 _cvt_f32_256_130 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[2]));
-                                float gate_x_1_130 = _cvt_f32_130.x;
-                                float gate_y_1_130 = _cvt_f32_130.y;
-                                float up_x_1_130 = _cvt_f32_256_130.x;
-                                float up_y_1_130 = _cvt_f32_256_130.y;
-                                gate_x_1_130 = fminf(gate_x_1_130, swiglu_limit);
-                                gate_y_1_130 = fminf(gate_y_1_130, swiglu_limit);
-                                up_x_1_130 = fminf(fmaxf(up_x_1_130, -swiglu_limit), swiglu_limit);
-                                up_y_1_130 = fminf(fmaxf(up_y_1_130, -swiglu_limit), swiglu_limit);
-                                float _exp_316 = expf(gate_x_1_130 * -1.0f);
-                                float denominator_x_1_130 = _exp_316 + 1.0f;
-                                float _exp_317 = expf(gate_y_1_130 * -1.0f);
-                                float denominator_y_1_130 = _exp_317 + 1.0f;
-                                float hidden_x_1_130 = gate_x_1_130 / denominator_x_1_130 * up_x_1_130;
-                                float hidden_y_1_130 = gate_y_1_130 / denominator_y_1_130 * up_y_1_130;
-                                hidden_x_1_130 = hidden_x_1_130 * row_weight[0];
-                                hidden_y_1_130 = hidden_y_1_130 * row_weight[0];
-                                hidden_packed_3[2] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_130, hidden_y_1_130)));
-                                float2 _cvt_f32_131 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[3]));
-                                float2 _cvt_f32_256_131 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[3]));
-                                float gate_x_1_131 = _cvt_f32_131.x;
-                                float gate_y_1_131 = _cvt_f32_131.y;
-                                float up_x_1_131 = _cvt_f32_256_131.x;
-                                float up_y_1_131 = _cvt_f32_256_131.y;
-                                gate_x_1_131 = fminf(gate_x_1_131, swiglu_limit);
-                                gate_y_1_131 = fminf(gate_y_1_131, swiglu_limit);
-                                up_x_1_131 = fminf(fmaxf(up_x_1_131, -swiglu_limit), swiglu_limit);
-                                up_y_1_131 = fminf(fmaxf(up_y_1_131, -swiglu_limit), swiglu_limit);
-                                float _exp_318 = expf(gate_x_1_131 * -1.0f);
-                                float denominator_x_1_131 = _exp_318 + 1.0f;
-                                float _exp_319 = expf(gate_y_1_131 * -1.0f);
-                                float denominator_y_1_131 = _exp_319 + 1.0f;
-                                float hidden_x_1_131 = gate_x_1_131 / denominator_x_1_131 * up_x_1_131;
-                                float hidden_y_1_131 = gate_y_1_131 / denominator_y_1_131 * up_y_1_131;
-                                hidden_x_1_131 = hidden_x_1_131 * row_weight[1];
-                                hidden_y_1_131 = hidden_y_1_131 * row_weight[1];
-                                hidden_packed_3[3] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_131, hidden_y_1_131)));
-                                float2 _cvt_f32_132 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[4]));
-                                float2 _cvt_f32_256_132 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[4]));
-                                float gate_x_1_132 = _cvt_f32_132.x;
-                                float gate_y_1_132 = _cvt_f32_132.y;
-                                float up_x_1_132 = _cvt_f32_256_132.x;
-                                float up_y_1_132 = _cvt_f32_256_132.y;
-                                gate_x_1_132 = fminf(gate_x_1_132, swiglu_limit);
-                                gate_y_1_132 = fminf(gate_y_1_132, swiglu_limit);
-                                up_x_1_132 = fminf(fmaxf(up_x_1_132, -swiglu_limit), swiglu_limit);
-                                up_y_1_132 = fminf(fmaxf(up_y_1_132, -swiglu_limit), swiglu_limit);
-                                float _exp_320 = expf(gate_x_1_132 * -1.0f);
-                                float denominator_x_1_132 = _exp_320 + 1.0f;
-                                float _exp_321 = expf(gate_y_1_132 * -1.0f);
-                                float denominator_y_1_132 = _exp_321 + 1.0f;
-                                float hidden_x_1_132 = gate_x_1_132 / denominator_x_1_132 * up_x_1_132;
-                                float hidden_y_1_132 = gate_y_1_132 / denominator_y_1_132 * up_y_1_132;
-                                hidden_x_1_132 = hidden_x_1_132 * row_weight[0];
-                                hidden_y_1_132 = hidden_y_1_132 * row_weight[0];
-                                hidden_packed_3[4] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_132, hidden_y_1_132)));
-                                float2 _cvt_f32_133 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[5]));
-                                float2 _cvt_f32_256_133 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[5]));
-                                float gate_x_1_133 = _cvt_f32_133.x;
-                                float gate_y_1_133 = _cvt_f32_133.y;
-                                float up_x_1_133 = _cvt_f32_256_133.x;
-                                float up_y_1_133 = _cvt_f32_256_133.y;
-                                gate_x_1_133 = fminf(gate_x_1_133, swiglu_limit);
-                                gate_y_1_133 = fminf(gate_y_1_133, swiglu_limit);
-                                up_x_1_133 = fminf(fmaxf(up_x_1_133, -swiglu_limit), swiglu_limit);
-                                up_y_1_133 = fminf(fmaxf(up_y_1_133, -swiglu_limit), swiglu_limit);
-                                float _exp_322 = expf(gate_x_1_133 * -1.0f);
-                                float denominator_x_1_133 = _exp_322 + 1.0f;
-                                float _exp_323 = expf(gate_y_1_133 * -1.0f);
-                                float denominator_y_1_133 = _exp_323 + 1.0f;
-                                float hidden_x_1_133 = gate_x_1_133 / denominator_x_1_133 * up_x_1_133;
-                                float hidden_y_1_133 = gate_y_1_133 / denominator_y_1_133 * up_y_1_133;
-                                hidden_x_1_133 = hidden_x_1_133 * row_weight[1];
-                                hidden_y_1_133 = hidden_y_1_133 * row_weight[1];
-                                hidden_packed_3[5] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_133, hidden_y_1_133)));
-                                float2 _cvt_f32_134 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[6]));
-                                float2 _cvt_f32_256_134 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[6]));
-                                float gate_x_1_134 = _cvt_f32_134.x;
-                                float gate_y_1_134 = _cvt_f32_134.y;
-                                float up_x_1_134 = _cvt_f32_256_134.x;
-                                float up_y_1_134 = _cvt_f32_256_134.y;
-                                gate_x_1_134 = fminf(gate_x_1_134, swiglu_limit);
-                                gate_y_1_134 = fminf(gate_y_1_134, swiglu_limit);
-                                up_x_1_134 = fminf(fmaxf(up_x_1_134, -swiglu_limit), swiglu_limit);
-                                up_y_1_134 = fminf(fmaxf(up_y_1_134, -swiglu_limit), swiglu_limit);
-                                float _exp_324 = expf(gate_x_1_134 * -1.0f);
-                                float denominator_x_1_134 = _exp_324 + 1.0f;
-                                float _exp_325 = expf(gate_y_1_134 * -1.0f);
-                                float denominator_y_1_134 = _exp_325 + 1.0f;
-                                float hidden_x_1_134 = gate_x_1_134 / denominator_x_1_134 * up_x_1_134;
-                                float hidden_y_1_134 = gate_y_1_134 / denominator_y_1_134 * up_y_1_134;
-                                hidden_x_1_134 = hidden_x_1_134 * row_weight[0];
-                                hidden_y_1_134 = hidden_y_1_134 * row_weight[0];
-                                hidden_packed_3[6] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_134, hidden_y_1_134)));
-                                float2 _cvt_f32_135 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[7]));
-                                float2 _cvt_f32_256_135 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[7]));
-                                float gate_x_1_135 = _cvt_f32_135.x;
-                                float gate_y_1_135 = _cvt_f32_135.y;
-                                float up_x_1_135 = _cvt_f32_256_135.x;
-                                float up_y_1_135 = _cvt_f32_256_135.y;
-                                gate_x_1_135 = fminf(gate_x_1_135, swiglu_limit);
-                                gate_y_1_135 = fminf(gate_y_1_135, swiglu_limit);
-                                up_x_1_135 = fminf(fmaxf(up_x_1_135, -swiglu_limit), swiglu_limit);
-                                up_y_1_135 = fminf(fmaxf(up_y_1_135, -swiglu_limit), swiglu_limit);
-                                float _exp_326 = expf(gate_x_1_135 * -1.0f);
-                                float denominator_x_1_135 = _exp_326 + 1.0f;
-                                float _exp_327 = expf(gate_y_1_135 * -1.0f);
-                                float denominator_y_1_135 = _exp_327 + 1.0f;
-                                float hidden_x_1_135 = gate_x_1_135 / denominator_x_1_135 * up_x_1_135;
-                                float hidden_y_1_135 = gate_y_1_135 / denominator_y_1_135 * up_y_1_135;
-                                hidden_x_1_135 = hidden_x_1_135 * row_weight[1];
-                                hidden_y_1_135 = hidden_y_1_135 * row_weight[1];
-                                hidden_packed_3[7] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_135, hidden_y_1_135)));
-                                float2 _cvt_f32_136 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[8]));
-                                float2 _cvt_f32_256_136 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[8]));
-                                float gate_x_1_136 = _cvt_f32_136.x;
-                                float gate_y_1_136 = _cvt_f32_136.y;
-                                float up_x_1_136 = _cvt_f32_256_136.x;
-                                float up_y_1_136 = _cvt_f32_256_136.y;
-                                gate_x_1_136 = fminf(gate_x_1_136, swiglu_limit);
-                                gate_y_1_136 = fminf(gate_y_1_136, swiglu_limit);
-                                up_x_1_136 = fminf(fmaxf(up_x_1_136, -swiglu_limit), swiglu_limit);
-                                up_y_1_136 = fminf(fmaxf(up_y_1_136, -swiglu_limit), swiglu_limit);
-                                float _exp_328 = expf(gate_x_1_136 * -1.0f);
-                                float denominator_x_1_136 = _exp_328 + 1.0f;
-                                float _exp_329 = expf(gate_y_1_136 * -1.0f);
-                                float denominator_y_1_136 = _exp_329 + 1.0f;
-                                float hidden_x_1_136 = gate_x_1_136 / denominator_x_1_136 * up_x_1_136;
-                                float hidden_y_1_136 = gate_y_1_136 / denominator_y_1_136 * up_y_1_136;
-                                hidden_x_1_136 = hidden_x_1_136 * row_weight[2];
-                                hidden_y_1_136 = hidden_y_1_136 * row_weight[2];
-                                hidden_packed_3[8] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_136, hidden_y_1_136)));
-                                float2 _cvt_f32_137 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[9]));
-                                float2 _cvt_f32_256_137 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[9]));
-                                float gate_x_1_137 = _cvt_f32_137.x;
-                                float gate_y_1_137 = _cvt_f32_137.y;
-                                float up_x_1_137 = _cvt_f32_256_137.x;
-                                float up_y_1_137 = _cvt_f32_256_137.y;
-                                gate_x_1_137 = fminf(gate_x_1_137, swiglu_limit);
-                                gate_y_1_137 = fminf(gate_y_1_137, swiglu_limit);
-                                up_x_1_137 = fminf(fmaxf(up_x_1_137, -swiglu_limit), swiglu_limit);
-                                up_y_1_137 = fminf(fmaxf(up_y_1_137, -swiglu_limit), swiglu_limit);
-                                float _exp_330 = expf(gate_x_1_137 * -1.0f);
-                                float denominator_x_1_137 = _exp_330 + 1.0f;
-                                float _exp_331 = expf(gate_y_1_137 * -1.0f);
-                                float denominator_y_1_137 = _exp_331 + 1.0f;
-                                float hidden_x_1_137 = gate_x_1_137 / denominator_x_1_137 * up_x_1_137;
-                                float hidden_y_1_137 = gate_y_1_137 / denominator_y_1_137 * up_y_1_137;
-                                hidden_x_1_137 = hidden_x_1_137 * row_weight[3];
-                                hidden_y_1_137 = hidden_y_1_137 * row_weight[3];
-                                hidden_packed_3[9] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_137, hidden_y_1_137)));
-                                float2 _cvt_f32_138 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[10]));
-                                float2 _cvt_f32_256_138 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[10]));
-                                float gate_x_1_138 = _cvt_f32_138.x;
-                                float gate_y_1_138 = _cvt_f32_138.y;
-                                float up_x_1_138 = _cvt_f32_256_138.x;
-                                float up_y_1_138 = _cvt_f32_256_138.y;
-                                gate_x_1_138 = fminf(gate_x_1_138, swiglu_limit);
-                                gate_y_1_138 = fminf(gate_y_1_138, swiglu_limit);
-                                up_x_1_138 = fminf(fmaxf(up_x_1_138, -swiglu_limit), swiglu_limit);
-                                up_y_1_138 = fminf(fmaxf(up_y_1_138, -swiglu_limit), swiglu_limit);
-                                float _exp_332 = expf(gate_x_1_138 * -1.0f);
-                                float denominator_x_1_138 = _exp_332 + 1.0f;
-                                float _exp_333 = expf(gate_y_1_138 * -1.0f);
-                                float denominator_y_1_138 = _exp_333 + 1.0f;
-                                float hidden_x_1_138 = gate_x_1_138 / denominator_x_1_138 * up_x_1_138;
-                                float hidden_y_1_138 = gate_y_1_138 / denominator_y_1_138 * up_y_1_138;
-                                hidden_x_1_138 = hidden_x_1_138 * row_weight[2];
-                                hidden_y_1_138 = hidden_y_1_138 * row_weight[2];
-                                hidden_packed_3[10] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_138, hidden_y_1_138)));
-                                float2 _cvt_f32_139 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[11]));
-                                float2 _cvt_f32_256_139 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[11]));
-                                float gate_x_1_139 = _cvt_f32_139.x;
-                                float gate_y_1_139 = _cvt_f32_139.y;
-                                float up_x_1_139 = _cvt_f32_256_139.x;
-                                float up_y_1_139 = _cvt_f32_256_139.y;
-                                gate_x_1_139 = fminf(gate_x_1_139, swiglu_limit);
-                                gate_y_1_139 = fminf(gate_y_1_139, swiglu_limit);
-                                up_x_1_139 = fminf(fmaxf(up_x_1_139, -swiglu_limit), swiglu_limit);
-                                up_y_1_139 = fminf(fmaxf(up_y_1_139, -swiglu_limit), swiglu_limit);
-                                float _exp_334 = expf(gate_x_1_139 * -1.0f);
-                                float denominator_x_1_139 = _exp_334 + 1.0f;
-                                float _exp_335 = expf(gate_y_1_139 * -1.0f);
-                                float denominator_y_1_139 = _exp_335 + 1.0f;
-                                float hidden_x_1_139 = gate_x_1_139 / denominator_x_1_139 * up_x_1_139;
-                                float hidden_y_1_139 = gate_y_1_139 / denominator_y_1_139 * up_y_1_139;
-                                hidden_x_1_139 = hidden_x_1_139 * row_weight[3];
-                                hidden_y_1_139 = hidden_y_1_139 * row_weight[3];
-                                hidden_packed_3[11] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_139, hidden_y_1_139)));
-                                float2 _cvt_f32_140 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[12]));
-                                float2 _cvt_f32_256_140 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[12]));
-                                float gate_x_1_140 = _cvt_f32_140.x;
-                                float gate_y_1_140 = _cvt_f32_140.y;
-                                float up_x_1_140 = _cvt_f32_256_140.x;
-                                float up_y_1_140 = _cvt_f32_256_140.y;
-                                gate_x_1_140 = fminf(gate_x_1_140, swiglu_limit);
-                                gate_y_1_140 = fminf(gate_y_1_140, swiglu_limit);
-                                up_x_1_140 = fminf(fmaxf(up_x_1_140, -swiglu_limit), swiglu_limit);
-                                up_y_1_140 = fminf(fmaxf(up_y_1_140, -swiglu_limit), swiglu_limit);
-                                float _exp_336 = expf(gate_x_1_140 * -1.0f);
-                                float denominator_x_1_140 = _exp_336 + 1.0f;
-                                float _exp_337 = expf(gate_y_1_140 * -1.0f);
-                                float denominator_y_1_140 = _exp_337 + 1.0f;
-                                float hidden_x_1_140 = gate_x_1_140 / denominator_x_1_140 * up_x_1_140;
-                                float hidden_y_1_140 = gate_y_1_140 / denominator_y_1_140 * up_y_1_140;
-                                hidden_x_1_140 = hidden_x_1_140 * row_weight[2];
-                                hidden_y_1_140 = hidden_y_1_140 * row_weight[2];
-                                hidden_packed_3[12] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_140, hidden_y_1_140)));
-                                float2 _cvt_f32_141 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[13]));
-                                float2 _cvt_f32_256_141 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[13]));
-                                float gate_x_1_141 = _cvt_f32_141.x;
-                                float gate_y_1_141 = _cvt_f32_141.y;
-                                float up_x_1_141 = _cvt_f32_256_141.x;
-                                float up_y_1_141 = _cvt_f32_256_141.y;
-                                gate_x_1_141 = fminf(gate_x_1_141, swiglu_limit);
-                                gate_y_1_141 = fminf(gate_y_1_141, swiglu_limit);
-                                up_x_1_141 = fminf(fmaxf(up_x_1_141, -swiglu_limit), swiglu_limit);
-                                up_y_1_141 = fminf(fmaxf(up_y_1_141, -swiglu_limit), swiglu_limit);
-                                float _exp_338 = expf(gate_x_1_141 * -1.0f);
-                                float denominator_x_1_141 = _exp_338 + 1.0f;
-                                float _exp_339 = expf(gate_y_1_141 * -1.0f);
-                                float denominator_y_1_141 = _exp_339 + 1.0f;
-                                float hidden_x_1_141 = gate_x_1_141 / denominator_x_1_141 * up_x_1_141;
-                                float hidden_y_1_141 = gate_y_1_141 / denominator_y_1_141 * up_y_1_141;
-                                hidden_x_1_141 = hidden_x_1_141 * row_weight[3];
-                                hidden_y_1_141 = hidden_y_1_141 * row_weight[3];
-                                hidden_packed_3[13] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_141, hidden_y_1_141)));
-                                float2 _cvt_f32_142 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[14]));
-                                float2 _cvt_f32_256_142 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[14]));
-                                float gate_x_1_142 = _cvt_f32_142.x;
-                                float gate_y_1_142 = _cvt_f32_142.y;
-                                float up_x_1_142 = _cvt_f32_256_142.x;
-                                float up_y_1_142 = _cvt_f32_256_142.y;
-                                gate_x_1_142 = fminf(gate_x_1_142, swiglu_limit);
-                                gate_y_1_142 = fminf(gate_y_1_142, swiglu_limit);
-                                up_x_1_142 = fminf(fmaxf(up_x_1_142, -swiglu_limit), swiglu_limit);
-                                up_y_1_142 = fminf(fmaxf(up_y_1_142, -swiglu_limit), swiglu_limit);
-                                float _exp_340 = expf(gate_x_1_142 * -1.0f);
-                                float denominator_x_1_142 = _exp_340 + 1.0f;
-                                float _exp_341 = expf(gate_y_1_142 * -1.0f);
-                                float denominator_y_1_142 = _exp_341 + 1.0f;
-                                float hidden_x_1_142 = gate_x_1_142 / denominator_x_1_142 * up_x_1_142;
-                                float hidden_y_1_142 = gate_y_1_142 / denominator_y_1_142 * up_y_1_142;
-                                hidden_x_1_142 = hidden_x_1_142 * row_weight[2];
-                                hidden_y_1_142 = hidden_y_1_142 * row_weight[2];
-                                hidden_packed_3[14] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_142, hidden_y_1_142)));
-                                float2 _cvt_f32_143 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[15]));
-                                float2 _cvt_f32_256_143 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[15]));
-                                float gate_x_1_143 = _cvt_f32_143.x;
-                                float gate_y_1_143 = _cvt_f32_143.y;
-                                float up_x_1_143 = _cvt_f32_256_143.x;
-                                float up_y_1_143 = _cvt_f32_256_143.y;
-                                gate_x_1_143 = fminf(gate_x_1_143, swiglu_limit);
-                                gate_y_1_143 = fminf(gate_y_1_143, swiglu_limit);
-                                up_x_1_143 = fminf(fmaxf(up_x_1_143, -swiglu_limit), swiglu_limit);
-                                up_y_1_143 = fminf(fmaxf(up_y_1_143, -swiglu_limit), swiglu_limit);
-                                float _exp_342 = expf(gate_x_1_143 * -1.0f);
-                                float denominator_x_1_143 = _exp_342 + 1.0f;
-                                float _exp_343 = expf(gate_y_1_143 * -1.0f);
-                                float denominator_y_1_143 = _exp_343 + 1.0f;
-                                float hidden_x_1_143 = gate_x_1_143 / denominator_x_1_143 * up_x_1_143;
-                                float hidden_y_1_143 = gate_y_1_143 / denominator_y_1_143 * up_y_1_143;
-                                hidden_x_1_143 = hidden_x_1_143 * row_weight[3];
-                                hidden_y_1_143 = hidden_y_1_143 * row_weight[3];
-                                hidden_packed_3[15] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_143, hidden_y_1_143)));
-                                float2 _cvt_f32_144 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[16]));
-                                float2 _cvt_f32_256_144 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[16]));
-                                float gate_x_1_144 = _cvt_f32_144.x;
-                                float gate_y_1_144 = _cvt_f32_144.y;
-                                float up_x_1_144 = _cvt_f32_256_144.x;
-                                float up_y_1_144 = _cvt_f32_256_144.y;
-                                gate_x_1_144 = fminf(gate_x_1_144, swiglu_limit);
-                                gate_y_1_144 = fminf(gate_y_1_144, swiglu_limit);
-                                up_x_1_144 = fminf(fmaxf(up_x_1_144, -swiglu_limit), swiglu_limit);
-                                up_y_1_144 = fminf(fmaxf(up_y_1_144, -swiglu_limit), swiglu_limit);
-                                float _exp_344 = expf(gate_x_1_144 * -1.0f);
-                                float denominator_x_1_144 = _exp_344 + 1.0f;
-                                float _exp_345 = expf(gate_y_1_144 * -1.0f);
-                                float denominator_y_1_144 = _exp_345 + 1.0f;
-                                float hidden_x_1_144 = gate_x_1_144 / denominator_x_1_144 * up_x_1_144;
-                                float hidden_y_1_144 = gate_y_1_144 / denominator_y_1_144 * up_y_1_144;
-                                hidden_x_1_144 = hidden_x_1_144 * row_weight[0];
-                                hidden_y_1_144 = hidden_y_1_144 * row_weight[0];
-                                hidden_packed_3[16] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_144, hidden_y_1_144)));
-                                float2 _cvt_f32_145 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[17]));
-                                float2 _cvt_f32_256_145 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[17]));
-                                float gate_x_1_145 = _cvt_f32_145.x;
-                                float gate_y_1_145 = _cvt_f32_145.y;
-                                float up_x_1_145 = _cvt_f32_256_145.x;
-                                float up_y_1_145 = _cvt_f32_256_145.y;
-                                gate_x_1_145 = fminf(gate_x_1_145, swiglu_limit);
-                                gate_y_1_145 = fminf(gate_y_1_145, swiglu_limit);
-                                up_x_1_145 = fminf(fmaxf(up_x_1_145, -swiglu_limit), swiglu_limit);
-                                up_y_1_145 = fminf(fmaxf(up_y_1_145, -swiglu_limit), swiglu_limit);
-                                float _exp_346 = expf(gate_x_1_145 * -1.0f);
-                                float denominator_x_1_145 = _exp_346 + 1.0f;
-                                float _exp_347 = expf(gate_y_1_145 * -1.0f);
-                                float denominator_y_1_145 = _exp_347 + 1.0f;
-                                float hidden_x_1_145 = gate_x_1_145 / denominator_x_1_145 * up_x_1_145;
-                                float hidden_y_1_145 = gate_y_1_145 / denominator_y_1_145 * up_y_1_145;
-                                hidden_x_1_145 = hidden_x_1_145 * row_weight[1];
-                                hidden_y_1_145 = hidden_y_1_145 * row_weight[1];
-                                hidden_packed_3[17] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_145, hidden_y_1_145)));
-                                float2 _cvt_f32_146 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[18]));
-                                float2 _cvt_f32_256_146 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[18]));
-                                float gate_x_1_146 = _cvt_f32_146.x;
-                                float gate_y_1_146 = _cvt_f32_146.y;
-                                float up_x_1_146 = _cvt_f32_256_146.x;
-                                float up_y_1_146 = _cvt_f32_256_146.y;
-                                gate_x_1_146 = fminf(gate_x_1_146, swiglu_limit);
-                                gate_y_1_146 = fminf(gate_y_1_146, swiglu_limit);
-                                up_x_1_146 = fminf(fmaxf(up_x_1_146, -swiglu_limit), swiglu_limit);
-                                up_y_1_146 = fminf(fmaxf(up_y_1_146, -swiglu_limit), swiglu_limit);
-                                float _exp_348 = expf(gate_x_1_146 * -1.0f);
-                                float denominator_x_1_146 = _exp_348 + 1.0f;
-                                float _exp_349 = expf(gate_y_1_146 * -1.0f);
-                                float denominator_y_1_146 = _exp_349 + 1.0f;
-                                float hidden_x_1_146 = gate_x_1_146 / denominator_x_1_146 * up_x_1_146;
-                                float hidden_y_1_146 = gate_y_1_146 / denominator_y_1_146 * up_y_1_146;
-                                hidden_x_1_146 = hidden_x_1_146 * row_weight[0];
-                                hidden_y_1_146 = hidden_y_1_146 * row_weight[0];
-                                hidden_packed_3[18] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_146, hidden_y_1_146)));
-                                float2 _cvt_f32_147 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[19]));
-                                float2 _cvt_f32_256_147 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[19]));
-                                float gate_x_1_147 = _cvt_f32_147.x;
-                                float gate_y_1_147 = _cvt_f32_147.y;
-                                float up_x_1_147 = _cvt_f32_256_147.x;
-                                float up_y_1_147 = _cvt_f32_256_147.y;
-                                gate_x_1_147 = fminf(gate_x_1_147, swiglu_limit);
-                                gate_y_1_147 = fminf(gate_y_1_147, swiglu_limit);
-                                up_x_1_147 = fminf(fmaxf(up_x_1_147, -swiglu_limit), swiglu_limit);
-                                up_y_1_147 = fminf(fmaxf(up_y_1_147, -swiglu_limit), swiglu_limit);
-                                float _exp_350 = expf(gate_x_1_147 * -1.0f);
-                                float denominator_x_1_147 = _exp_350 + 1.0f;
-                                float _exp_351 = expf(gate_y_1_147 * -1.0f);
-                                float denominator_y_1_147 = _exp_351 + 1.0f;
-                                float hidden_x_1_147 = gate_x_1_147 / denominator_x_1_147 * up_x_1_147;
-                                float hidden_y_1_147 = gate_y_1_147 / denominator_y_1_147 * up_y_1_147;
-                                hidden_x_1_147 = hidden_x_1_147 * row_weight[1];
-                                hidden_y_1_147 = hidden_y_1_147 * row_weight[1];
-                                hidden_packed_3[19] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_147, hidden_y_1_147)));
-                                float2 _cvt_f32_148 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[20]));
-                                float2 _cvt_f32_256_148 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[20]));
-                                float gate_x_1_148 = _cvt_f32_148.x;
-                                float gate_y_1_148 = _cvt_f32_148.y;
-                                float up_x_1_148 = _cvt_f32_256_148.x;
-                                float up_y_1_148 = _cvt_f32_256_148.y;
-                                gate_x_1_148 = fminf(gate_x_1_148, swiglu_limit);
-                                gate_y_1_148 = fminf(gate_y_1_148, swiglu_limit);
-                                up_x_1_148 = fminf(fmaxf(up_x_1_148, -swiglu_limit), swiglu_limit);
-                                up_y_1_148 = fminf(fmaxf(up_y_1_148, -swiglu_limit), swiglu_limit);
-                                float _exp_352 = expf(gate_x_1_148 * -1.0f);
-                                float denominator_x_1_148 = _exp_352 + 1.0f;
-                                float _exp_353 = expf(gate_y_1_148 * -1.0f);
-                                float denominator_y_1_148 = _exp_353 + 1.0f;
-                                float hidden_x_1_148 = gate_x_1_148 / denominator_x_1_148 * up_x_1_148;
-                                float hidden_y_1_148 = gate_y_1_148 / denominator_y_1_148 * up_y_1_148;
-                                hidden_x_1_148 = hidden_x_1_148 * row_weight[0];
-                                hidden_y_1_148 = hidden_y_1_148 * row_weight[0];
-                                hidden_packed_3[20] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_148, hidden_y_1_148)));
-                                float2 _cvt_f32_149 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[21]));
-                                float2 _cvt_f32_256_149 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[21]));
-                                float gate_x_1_149 = _cvt_f32_149.x;
-                                float gate_y_1_149 = _cvt_f32_149.y;
-                                float up_x_1_149 = _cvt_f32_256_149.x;
-                                float up_y_1_149 = _cvt_f32_256_149.y;
-                                gate_x_1_149 = fminf(gate_x_1_149, swiglu_limit);
-                                gate_y_1_149 = fminf(gate_y_1_149, swiglu_limit);
-                                up_x_1_149 = fminf(fmaxf(up_x_1_149, -swiglu_limit), swiglu_limit);
-                                up_y_1_149 = fminf(fmaxf(up_y_1_149, -swiglu_limit), swiglu_limit);
-                                float _exp_354 = expf(gate_x_1_149 * -1.0f);
-                                float denominator_x_1_149 = _exp_354 + 1.0f;
-                                float _exp_355 = expf(gate_y_1_149 * -1.0f);
-                                float denominator_y_1_149 = _exp_355 + 1.0f;
-                                float hidden_x_1_149 = gate_x_1_149 / denominator_x_1_149 * up_x_1_149;
-                                float hidden_y_1_149 = gate_y_1_149 / denominator_y_1_149 * up_y_1_149;
-                                hidden_x_1_149 = hidden_x_1_149 * row_weight[1];
-                                hidden_y_1_149 = hidden_y_1_149 * row_weight[1];
-                                hidden_packed_3[21] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_149, hidden_y_1_149)));
-                                float2 _cvt_f32_150 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[22]));
-                                float2 _cvt_f32_256_150 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[22]));
-                                float gate_x_1_150 = _cvt_f32_150.x;
-                                float gate_y_1_150 = _cvt_f32_150.y;
-                                float up_x_1_150 = _cvt_f32_256_150.x;
-                                float up_y_1_150 = _cvt_f32_256_150.y;
-                                gate_x_1_150 = fminf(gate_x_1_150, swiglu_limit);
-                                gate_y_1_150 = fminf(gate_y_1_150, swiglu_limit);
-                                up_x_1_150 = fminf(fmaxf(up_x_1_150, -swiglu_limit), swiglu_limit);
-                                up_y_1_150 = fminf(fmaxf(up_y_1_150, -swiglu_limit), swiglu_limit);
-                                float _exp_356 = expf(gate_x_1_150 * -1.0f);
-                                float denominator_x_1_150 = _exp_356 + 1.0f;
-                                float _exp_357 = expf(gate_y_1_150 * -1.0f);
-                                float denominator_y_1_150 = _exp_357 + 1.0f;
-                                float hidden_x_1_150 = gate_x_1_150 / denominator_x_1_150 * up_x_1_150;
-                                float hidden_y_1_150 = gate_y_1_150 / denominator_y_1_150 * up_y_1_150;
-                                hidden_x_1_150 = hidden_x_1_150 * row_weight[0];
-                                hidden_y_1_150 = hidden_y_1_150 * row_weight[0];
-                                hidden_packed_3[22] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_150, hidden_y_1_150)));
-                                float2 _cvt_f32_151 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[23]));
-                                float2 _cvt_f32_256_151 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[23]));
-                                float gate_x_1_151 = _cvt_f32_151.x;
-                                float gate_y_1_151 = _cvt_f32_151.y;
-                                float up_x_1_151 = _cvt_f32_256_151.x;
-                                float up_y_1_151 = _cvt_f32_256_151.y;
-                                gate_x_1_151 = fminf(gate_x_1_151, swiglu_limit);
-                                gate_y_1_151 = fminf(gate_y_1_151, swiglu_limit);
-                                up_x_1_151 = fminf(fmaxf(up_x_1_151, -swiglu_limit), swiglu_limit);
-                                up_y_1_151 = fminf(fmaxf(up_y_1_151, -swiglu_limit), swiglu_limit);
-                                float _exp_358 = expf(gate_x_1_151 * -1.0f);
-                                float denominator_x_1_151 = _exp_358 + 1.0f;
-                                float _exp_359 = expf(gate_y_1_151 * -1.0f);
-                                float denominator_y_1_151 = _exp_359 + 1.0f;
-                                float hidden_x_1_151 = gate_x_1_151 / denominator_x_1_151 * up_x_1_151;
-                                float hidden_y_1_151 = gate_y_1_151 / denominator_y_1_151 * up_y_1_151;
-                                hidden_x_1_151 = hidden_x_1_151 * row_weight[1];
-                                hidden_y_1_151 = hidden_y_1_151 * row_weight[1];
-                                hidden_packed_3[23] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_151, hidden_y_1_151)));
-                                float2 _cvt_f32_152 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[24]));
-                                float2 _cvt_f32_256_152 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[24]));
-                                float gate_x_1_152 = _cvt_f32_152.x;
-                                float gate_y_1_152 = _cvt_f32_152.y;
-                                float up_x_1_152 = _cvt_f32_256_152.x;
-                                float up_y_1_152 = _cvt_f32_256_152.y;
-                                gate_x_1_152 = fminf(gate_x_1_152, swiglu_limit);
-                                gate_y_1_152 = fminf(gate_y_1_152, swiglu_limit);
-                                up_x_1_152 = fminf(fmaxf(up_x_1_152, -swiglu_limit), swiglu_limit);
-                                up_y_1_152 = fminf(fmaxf(up_y_1_152, -swiglu_limit), swiglu_limit);
-                                float _exp_360 = expf(gate_x_1_152 * -1.0f);
-                                float denominator_x_1_152 = _exp_360 + 1.0f;
-                                float _exp_361 = expf(gate_y_1_152 * -1.0f);
-                                float denominator_y_1_152 = _exp_361 + 1.0f;
-                                float hidden_x_1_152 = gate_x_1_152 / denominator_x_1_152 * up_x_1_152;
-                                float hidden_y_1_152 = gate_y_1_152 / denominator_y_1_152 * up_y_1_152;
-                                hidden_x_1_152 = hidden_x_1_152 * row_weight[2];
-                                hidden_y_1_152 = hidden_y_1_152 * row_weight[2];
-                                hidden_packed_3[24] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_152, hidden_y_1_152)));
-                                float2 _cvt_f32_153 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[25]));
-                                float2 _cvt_f32_256_153 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[25]));
-                                float gate_x_1_153 = _cvt_f32_153.x;
-                                float gate_y_1_153 = _cvt_f32_153.y;
-                                float up_x_1_153 = _cvt_f32_256_153.x;
-                                float up_y_1_153 = _cvt_f32_256_153.y;
-                                gate_x_1_153 = fminf(gate_x_1_153, swiglu_limit);
-                                gate_y_1_153 = fminf(gate_y_1_153, swiglu_limit);
-                                up_x_1_153 = fminf(fmaxf(up_x_1_153, -swiglu_limit), swiglu_limit);
-                                up_y_1_153 = fminf(fmaxf(up_y_1_153, -swiglu_limit), swiglu_limit);
-                                float _exp_362 = expf(gate_x_1_153 * -1.0f);
-                                float denominator_x_1_153 = _exp_362 + 1.0f;
-                                float _exp_363 = expf(gate_y_1_153 * -1.0f);
-                                float denominator_y_1_153 = _exp_363 + 1.0f;
-                                float hidden_x_1_153 = gate_x_1_153 / denominator_x_1_153 * up_x_1_153;
-                                float hidden_y_1_153 = gate_y_1_153 / denominator_y_1_153 * up_y_1_153;
-                                hidden_x_1_153 = hidden_x_1_153 * row_weight[3];
-                                hidden_y_1_153 = hidden_y_1_153 * row_weight[3];
-                                hidden_packed_3[25] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_153, hidden_y_1_153)));
-                                float2 _cvt_f32_154 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[26]));
-                                float2 _cvt_f32_256_154 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[26]));
-                                float gate_x_1_154 = _cvt_f32_154.x;
-                                float gate_y_1_154 = _cvt_f32_154.y;
-                                float up_x_1_154 = _cvt_f32_256_154.x;
-                                float up_y_1_154 = _cvt_f32_256_154.y;
-                                gate_x_1_154 = fminf(gate_x_1_154, swiglu_limit);
-                                gate_y_1_154 = fminf(gate_y_1_154, swiglu_limit);
-                                up_x_1_154 = fminf(fmaxf(up_x_1_154, -swiglu_limit), swiglu_limit);
-                                up_y_1_154 = fminf(fmaxf(up_y_1_154, -swiglu_limit), swiglu_limit);
-                                float _exp_364 = expf(gate_x_1_154 * -1.0f);
-                                float denominator_x_1_154 = _exp_364 + 1.0f;
-                                float _exp_365 = expf(gate_y_1_154 * -1.0f);
-                                float denominator_y_1_154 = _exp_365 + 1.0f;
-                                float hidden_x_1_154 = gate_x_1_154 / denominator_x_1_154 * up_x_1_154;
-                                float hidden_y_1_154 = gate_y_1_154 / denominator_y_1_154 * up_y_1_154;
-                                hidden_x_1_154 = hidden_x_1_154 * row_weight[2];
-                                hidden_y_1_154 = hidden_y_1_154 * row_weight[2];
-                                hidden_packed_3[26] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_154, hidden_y_1_154)));
-                                float2 _cvt_f32_155 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[27]));
-                                float2 _cvt_f32_256_155 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[27]));
-                                float gate_x_1_155 = _cvt_f32_155.x;
-                                float gate_y_1_155 = _cvt_f32_155.y;
-                                float up_x_1_155 = _cvt_f32_256_155.x;
-                                float up_y_1_155 = _cvt_f32_256_155.y;
-                                gate_x_1_155 = fminf(gate_x_1_155, swiglu_limit);
-                                gate_y_1_155 = fminf(gate_y_1_155, swiglu_limit);
-                                up_x_1_155 = fminf(fmaxf(up_x_1_155, -swiglu_limit), swiglu_limit);
-                                up_y_1_155 = fminf(fmaxf(up_y_1_155, -swiglu_limit), swiglu_limit);
-                                float _exp_366 = expf(gate_x_1_155 * -1.0f);
-                                float denominator_x_1_155 = _exp_366 + 1.0f;
-                                float _exp_367 = expf(gate_y_1_155 * -1.0f);
-                                float denominator_y_1_155 = _exp_367 + 1.0f;
-                                float hidden_x_1_155 = gate_x_1_155 / denominator_x_1_155 * up_x_1_155;
-                                float hidden_y_1_155 = gate_y_1_155 / denominator_y_1_155 * up_y_1_155;
-                                hidden_x_1_155 = hidden_x_1_155 * row_weight[3];
-                                hidden_y_1_155 = hidden_y_1_155 * row_weight[3];
-                                hidden_packed_3[27] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_155, hidden_y_1_155)));
-                                float2 _cvt_f32_156 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[28]));
-                                float2 _cvt_f32_256_156 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[28]));
-                                float gate_x_1_156 = _cvt_f32_156.x;
-                                float gate_y_1_156 = _cvt_f32_156.y;
-                                float up_x_1_156 = _cvt_f32_256_156.x;
-                                float up_y_1_156 = _cvt_f32_256_156.y;
-                                gate_x_1_156 = fminf(gate_x_1_156, swiglu_limit);
-                                gate_y_1_156 = fminf(gate_y_1_156, swiglu_limit);
-                                up_x_1_156 = fminf(fmaxf(up_x_1_156, -swiglu_limit), swiglu_limit);
-                                up_y_1_156 = fminf(fmaxf(up_y_1_156, -swiglu_limit), swiglu_limit);
-                                float _exp_368 = expf(gate_x_1_156 * -1.0f);
-                                float denominator_x_1_156 = _exp_368 + 1.0f;
-                                float _exp_369 = expf(gate_y_1_156 * -1.0f);
-                                float denominator_y_1_156 = _exp_369 + 1.0f;
-                                float hidden_x_1_156 = gate_x_1_156 / denominator_x_1_156 * up_x_1_156;
-                                float hidden_y_1_156 = gate_y_1_156 / denominator_y_1_156 * up_y_1_156;
-                                hidden_x_1_156 = hidden_x_1_156 * row_weight[2];
-                                hidden_y_1_156 = hidden_y_1_156 * row_weight[2];
-                                hidden_packed_3[28] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_156, hidden_y_1_156)));
-                                float2 _cvt_f32_157 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[29]));
-                                float2 _cvt_f32_256_157 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[29]));
-                                float gate_x_1_157 = _cvt_f32_157.x;
-                                float gate_y_1_157 = _cvt_f32_157.y;
-                                float up_x_1_157 = _cvt_f32_256_157.x;
-                                float up_y_1_157 = _cvt_f32_256_157.y;
-                                gate_x_1_157 = fminf(gate_x_1_157, swiglu_limit);
-                                gate_y_1_157 = fminf(gate_y_1_157, swiglu_limit);
-                                up_x_1_157 = fminf(fmaxf(up_x_1_157, -swiglu_limit), swiglu_limit);
-                                up_y_1_157 = fminf(fmaxf(up_y_1_157, -swiglu_limit), swiglu_limit);
-                                float _exp_370 = expf(gate_x_1_157 * -1.0f);
-                                float denominator_x_1_157 = _exp_370 + 1.0f;
-                                float _exp_371 = expf(gate_y_1_157 * -1.0f);
-                                float denominator_y_1_157 = _exp_371 + 1.0f;
-                                float hidden_x_1_157 = gate_x_1_157 / denominator_x_1_157 * up_x_1_157;
-                                float hidden_y_1_157 = gate_y_1_157 / denominator_y_1_157 * up_y_1_157;
-                                hidden_x_1_157 = hidden_x_1_157 * row_weight[3];
-                                hidden_y_1_157 = hidden_y_1_157 * row_weight[3];
-                                hidden_packed_3[29] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_157, hidden_y_1_157)));
-                                float2 _cvt_f32_158 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[30]));
-                                float2 _cvt_f32_256_158 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[30]));
-                                float gate_x_1_158 = _cvt_f32_158.x;
-                                float gate_y_1_158 = _cvt_f32_158.y;
-                                float up_x_1_158 = _cvt_f32_256_158.x;
-                                float up_y_1_158 = _cvt_f32_256_158.y;
-                                gate_x_1_158 = fminf(gate_x_1_158, swiglu_limit);
-                                gate_y_1_158 = fminf(gate_y_1_158, swiglu_limit);
-                                up_x_1_158 = fminf(fmaxf(up_x_1_158, -swiglu_limit), swiglu_limit);
-                                up_y_1_158 = fminf(fmaxf(up_y_1_158, -swiglu_limit), swiglu_limit);
-                                float _exp_372 = expf(gate_x_1_158 * -1.0f);
-                                float denominator_x_1_158 = _exp_372 + 1.0f;
-                                float _exp_373 = expf(gate_y_1_158 * -1.0f);
-                                float denominator_y_1_158 = _exp_373 + 1.0f;
-                                float hidden_x_1_158 = gate_x_1_158 / denominator_x_1_158 * up_x_1_158;
-                                float hidden_y_1_158 = gate_y_1_158 / denominator_y_1_158 * up_y_1_158;
-                                hidden_x_1_158 = hidden_x_1_158 * row_weight[2];
-                                hidden_y_1_158 = hidden_y_1_158 * row_weight[2];
-                                hidden_packed_3[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_158, hidden_y_1_158)));
-                                float2 _cvt_f32_159 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_4[31]));
-                                float2 _cvt_f32_256_159 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_4[31]));
-                                float gate_x_1_159 = _cvt_f32_159.x;
-                                float gate_y_1_159 = _cvt_f32_159.y;
-                                float up_x_1_159 = _cvt_f32_256_159.x;
-                                float up_y_1_159 = _cvt_f32_256_159.y;
-                                gate_x_1_159 = fminf(gate_x_1_159, swiglu_limit);
-                                gate_y_1_159 = fminf(gate_y_1_159, swiglu_limit);
-                                up_x_1_159 = fminf(fmaxf(up_x_1_159, -swiglu_limit), swiglu_limit);
-                                up_y_1_159 = fminf(fmaxf(up_y_1_159, -swiglu_limit), swiglu_limit);
-                                float _exp_374 = expf(gate_x_1_159 * -1.0f);
-                                float denominator_x_1_159 = _exp_374 + 1.0f;
-                                float _exp_375 = expf(gate_y_1_159 * -1.0f);
-                                float denominator_y_1_159 = _exp_375 + 1.0f;
-                                float hidden_x_1_159 = gate_x_1_159 / denominator_x_1_159 * up_x_1_159;
-                                float hidden_y_1_159 = gate_y_1_159 / denominator_y_1_159 * up_y_1_159;
-                                hidden_x_1_159 = hidden_x_1_159 * row_weight[3];
-                                hidden_y_1_159 = hidden_y_1_159 * row_weight[3];
-                                hidden_packed_3[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_159, hidden_y_1_159)));
 #endif
                                 if (tid == 0) {
                                     asm volatile("cp.async.bulk.wait_group.read 2;");
@@ -6287,16 +6348,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_24 = d_smem_addr + (unsigned int)((row_26 * 32 + col_26) * 2);
                                         address_24 = address_24 ^ (address_24 & 511) >> 7 << 4;
                                         int offset_25 = half_24 * 8 + col_tile_24 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_440 = static_cast<uint32_t>(address_24);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_376 = static_cast<uint32_t>(address_24);
+#else
+                                        uint32_t _stmatrix_addr_440 = static_cast<uint32_t>(address_24);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_440), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_376), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_440), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_25 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6325,16 +6386,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_25 = d_smem_addr + 8192 + (unsigned int)((row_27 * 32 + col_27) * 2);
                                         address_25 = address_25 ^ (address_25 & 511) >> 7 << 4;
                                         int offset_26 = half_25 * 8 + col_tile_25 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_441 = static_cast<uint32_t>(address_25);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_377 = static_cast<uint32_t>(address_25);
+#else
+                                        uint32_t _stmatrix_addr_441 = static_cast<uint32_t>(address_25);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_441), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_377), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_441), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_26 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6363,16 +6424,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_26 = d_smem_addr + 16384 + (unsigned int)((row_28 * 32 + col_28) * 2);
                                         address_26 = address_26 ^ (address_26 & 511) >> 7 << 4;
                                         int offset_27 = half_26 * 8 + col_tile_26 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_442 = static_cast<uint32_t>(address_26);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_378 = static_cast<uint32_t>(address_26);
+#else
+                                        uint32_t _stmatrix_addr_442 = static_cast<uint32_t>(address_26);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_442), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_378), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_442), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_27 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6401,16 +6462,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_27 = d_smem_addr + (unsigned int)((row_29 * 32 + col_29) * 2);
                                         address_27 = address_27 ^ (address_27 & 511) >> 7 << 4;
                                         int offset_28 = 16 + half_27 * 8 + col_tile_27 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_443 = static_cast<uint32_t>(address_27);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_379 = static_cast<uint32_t>(address_27);
+#else
+                                        uint32_t _stmatrix_addr_443 = static_cast<uint32_t>(address_27);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_443), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_379), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_443), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_4[offset_28 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6439,16 +6500,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_28 = d_smem_addr + 8192 + (unsigned int)((row_30 * 32 + col_30) * 2);
                                         address_28 = address_28 ^ (address_28 & 511) >> 7 << 4;
                                         int offset_29 = 16 + half_28 * 8 + col_tile_28 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_444 = static_cast<uint32_t>(address_28);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_380 = static_cast<uint32_t>(address_28);
+#else
+                                        uint32_t _stmatrix_addr_444 = static_cast<uint32_t>(address_28);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_444), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_380), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_444), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_4[offset_29 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6477,16 +6538,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_29 = d_smem_addr + 16384 + (unsigned int)((row_31 * 32 + col_31) * 2);
                                         address_29 = address_29 ^ (address_29 & 511) >> 7 << 4;
                                         int offset_30 = 16 + half_29 * 8 + col_tile_29 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_445 = static_cast<uint32_t>(address_29);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_381 = static_cast<uint32_t>(address_29);
+#else
+                                        uint32_t _stmatrix_addr_445 = static_cast<uint32_t>(address_29);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_445), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_381), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_445), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3[offset_30 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -6501,7 +6562,616 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                     asm volatile("cp.async.bulk.commit_group;");
                                 }
                                 unsigned int hidden_packed_3_1[32];
-#if __CUDA_ARCH__ == 1030
+#if __CUDA_ARCH__ == 1000
+                                float2 _cvt_f32_160 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[0]));
+                                float2 _cvt_f32_256_160 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[0]));
+                                float gate_x_1_160 = _cvt_f32_160.x;
+                                float gate_y_1_160 = _cvt_f32_160.y;
+                                float up_x_1_160 = _cvt_f32_256_160.x;
+                                float up_y_1_160 = _cvt_f32_256_160.y;
+                                gate_x_1_160 = fminf(gate_x_1_160, swiglu_limit);
+                                gate_y_1_160 = fminf(gate_y_1_160, swiglu_limit);
+                                up_x_1_160 = fminf(fmaxf(up_x_1_160, -swiglu_limit), swiglu_limit);
+                                up_y_1_160 = fminf(fmaxf(up_y_1_160, -swiglu_limit), swiglu_limit);
+                                float _exp_382 = expf(gate_x_1_160 * -1.0f);
+                                float denominator_x_1_160 = _exp_382 + 1.0f;
+                                float _exp_383 = expf(gate_y_1_160 * -1.0f);
+                                float denominator_y_1_160 = _exp_383 + 1.0f;
+                                float hidden_x_1_160 = gate_x_1_160 / denominator_x_1_160 * up_x_1_160;
+                                float hidden_y_1_160 = gate_y_1_160 / denominator_y_1_160 * up_y_1_160;
+                                hidden_x_1_160 = hidden_x_1_160 * row_weight[0];
+                                hidden_y_1_160 = hidden_y_1_160 * row_weight[0];
+                                hidden_packed_3_1[0] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_160, hidden_y_1_160)));
+                                float2 _cvt_f32_161 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[1]));
+                                float2 _cvt_f32_256_161 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[1]));
+                                float gate_x_1_161 = _cvt_f32_161.x;
+                                float gate_y_1_161 = _cvt_f32_161.y;
+                                float up_x_1_161 = _cvt_f32_256_161.x;
+                                float up_y_1_161 = _cvt_f32_256_161.y;
+                                gate_x_1_161 = fminf(gate_x_1_161, swiglu_limit);
+                                gate_y_1_161 = fminf(gate_y_1_161, swiglu_limit);
+                                up_x_1_161 = fminf(fmaxf(up_x_1_161, -swiglu_limit), swiglu_limit);
+                                up_y_1_161 = fminf(fmaxf(up_y_1_161, -swiglu_limit), swiglu_limit);
+                                float _exp_384 = expf(gate_x_1_161 * -1.0f);
+                                float denominator_x_1_161 = _exp_384 + 1.0f;
+                                float _exp_385 = expf(gate_y_1_161 * -1.0f);
+                                float denominator_y_1_161 = _exp_385 + 1.0f;
+                                float hidden_x_1_161 = gate_x_1_161 / denominator_x_1_161 * up_x_1_161;
+                                float hidden_y_1_161 = gate_y_1_161 / denominator_y_1_161 * up_y_1_161;
+                                hidden_x_1_161 = hidden_x_1_161 * row_weight[1];
+                                hidden_y_1_161 = hidden_y_1_161 * row_weight[1];
+                                hidden_packed_3_1[1] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_161, hidden_y_1_161)));
+                                float2 _cvt_f32_162 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[2]));
+                                float2 _cvt_f32_256_162 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[2]));
+                                float gate_x_1_162 = _cvt_f32_162.x;
+                                float gate_y_1_162 = _cvt_f32_162.y;
+                                float up_x_1_162 = _cvt_f32_256_162.x;
+                                float up_y_1_162 = _cvt_f32_256_162.y;
+                                gate_x_1_162 = fminf(gate_x_1_162, swiglu_limit);
+                                gate_y_1_162 = fminf(gate_y_1_162, swiglu_limit);
+                                up_x_1_162 = fminf(fmaxf(up_x_1_162, -swiglu_limit), swiglu_limit);
+                                up_y_1_162 = fminf(fmaxf(up_y_1_162, -swiglu_limit), swiglu_limit);
+                                float _exp_386 = expf(gate_x_1_162 * -1.0f);
+                                float denominator_x_1_162 = _exp_386 + 1.0f;
+                                float _exp_387 = expf(gate_y_1_162 * -1.0f);
+                                float denominator_y_1_162 = _exp_387 + 1.0f;
+                                float hidden_x_1_162 = gate_x_1_162 / denominator_x_1_162 * up_x_1_162;
+                                float hidden_y_1_162 = gate_y_1_162 / denominator_y_1_162 * up_y_1_162;
+                                hidden_x_1_162 = hidden_x_1_162 * row_weight[0];
+                                hidden_y_1_162 = hidden_y_1_162 * row_weight[0];
+                                hidden_packed_3_1[2] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_162, hidden_y_1_162)));
+                                float2 _cvt_f32_163 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[3]));
+                                float2 _cvt_f32_256_163 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[3]));
+                                float gate_x_1_163 = _cvt_f32_163.x;
+                                float gate_y_1_163 = _cvt_f32_163.y;
+                                float up_x_1_163 = _cvt_f32_256_163.x;
+                                float up_y_1_163 = _cvt_f32_256_163.y;
+                                gate_x_1_163 = fminf(gate_x_1_163, swiglu_limit);
+                                gate_y_1_163 = fminf(gate_y_1_163, swiglu_limit);
+                                up_x_1_163 = fminf(fmaxf(up_x_1_163, -swiglu_limit), swiglu_limit);
+                                up_y_1_163 = fminf(fmaxf(up_y_1_163, -swiglu_limit), swiglu_limit);
+                                float _exp_388 = expf(gate_x_1_163 * -1.0f);
+                                float denominator_x_1_163 = _exp_388 + 1.0f;
+                                float _exp_389 = expf(gate_y_1_163 * -1.0f);
+                                float denominator_y_1_163 = _exp_389 + 1.0f;
+                                float hidden_x_1_163 = gate_x_1_163 / denominator_x_1_163 * up_x_1_163;
+                                float hidden_y_1_163 = gate_y_1_163 / denominator_y_1_163 * up_y_1_163;
+                                hidden_x_1_163 = hidden_x_1_163 * row_weight[1];
+                                hidden_y_1_163 = hidden_y_1_163 * row_weight[1];
+                                hidden_packed_3_1[3] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_163, hidden_y_1_163)));
+                                float2 _cvt_f32_164 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[4]));
+                                float2 _cvt_f32_256_164 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[4]));
+                                float gate_x_1_164 = _cvt_f32_164.x;
+                                float gate_y_1_164 = _cvt_f32_164.y;
+                                float up_x_1_164 = _cvt_f32_256_164.x;
+                                float up_y_1_164 = _cvt_f32_256_164.y;
+                                gate_x_1_164 = fminf(gate_x_1_164, swiglu_limit);
+                                gate_y_1_164 = fminf(gate_y_1_164, swiglu_limit);
+                                up_x_1_164 = fminf(fmaxf(up_x_1_164, -swiglu_limit), swiglu_limit);
+                                up_y_1_164 = fminf(fmaxf(up_y_1_164, -swiglu_limit), swiglu_limit);
+                                float _exp_390 = expf(gate_x_1_164 * -1.0f);
+                                float denominator_x_1_164 = _exp_390 + 1.0f;
+                                float _exp_391 = expf(gate_y_1_164 * -1.0f);
+                                float denominator_y_1_164 = _exp_391 + 1.0f;
+                                float hidden_x_1_164 = gate_x_1_164 / denominator_x_1_164 * up_x_1_164;
+                                float hidden_y_1_164 = gate_y_1_164 / denominator_y_1_164 * up_y_1_164;
+                                hidden_x_1_164 = hidden_x_1_164 * row_weight[0];
+                                hidden_y_1_164 = hidden_y_1_164 * row_weight[0];
+                                hidden_packed_3_1[4] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_164, hidden_y_1_164)));
+                                float2 _cvt_f32_165 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[5]));
+                                float2 _cvt_f32_256_165 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[5]));
+                                float gate_x_1_165 = _cvt_f32_165.x;
+                                float gate_y_1_165 = _cvt_f32_165.y;
+                                float up_x_1_165 = _cvt_f32_256_165.x;
+                                float up_y_1_165 = _cvt_f32_256_165.y;
+                                gate_x_1_165 = fminf(gate_x_1_165, swiglu_limit);
+                                gate_y_1_165 = fminf(gate_y_1_165, swiglu_limit);
+                                up_x_1_165 = fminf(fmaxf(up_x_1_165, -swiglu_limit), swiglu_limit);
+                                up_y_1_165 = fminf(fmaxf(up_y_1_165, -swiglu_limit), swiglu_limit);
+                                float _exp_392 = expf(gate_x_1_165 * -1.0f);
+                                float denominator_x_1_165 = _exp_392 + 1.0f;
+                                float _exp_393 = expf(gate_y_1_165 * -1.0f);
+                                float denominator_y_1_165 = _exp_393 + 1.0f;
+                                float hidden_x_1_165 = gate_x_1_165 / denominator_x_1_165 * up_x_1_165;
+                                float hidden_y_1_165 = gate_y_1_165 / denominator_y_1_165 * up_y_1_165;
+                                hidden_x_1_165 = hidden_x_1_165 * row_weight[1];
+                                hidden_y_1_165 = hidden_y_1_165 * row_weight[1];
+                                hidden_packed_3_1[5] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_165, hidden_y_1_165)));
+                                float2 _cvt_f32_166 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[6]));
+                                float2 _cvt_f32_256_166 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[6]));
+                                float gate_x_1_166 = _cvt_f32_166.x;
+                                float gate_y_1_166 = _cvt_f32_166.y;
+                                float up_x_1_166 = _cvt_f32_256_166.x;
+                                float up_y_1_166 = _cvt_f32_256_166.y;
+                                gate_x_1_166 = fminf(gate_x_1_166, swiglu_limit);
+                                gate_y_1_166 = fminf(gate_y_1_166, swiglu_limit);
+                                up_x_1_166 = fminf(fmaxf(up_x_1_166, -swiglu_limit), swiglu_limit);
+                                up_y_1_166 = fminf(fmaxf(up_y_1_166, -swiglu_limit), swiglu_limit);
+                                float _exp_394 = expf(gate_x_1_166 * -1.0f);
+                                float denominator_x_1_166 = _exp_394 + 1.0f;
+                                float _exp_395 = expf(gate_y_1_166 * -1.0f);
+                                float denominator_y_1_166 = _exp_395 + 1.0f;
+                                float hidden_x_1_166 = gate_x_1_166 / denominator_x_1_166 * up_x_1_166;
+                                float hidden_y_1_166 = gate_y_1_166 / denominator_y_1_166 * up_y_1_166;
+                                hidden_x_1_166 = hidden_x_1_166 * row_weight[0];
+                                hidden_y_1_166 = hidden_y_1_166 * row_weight[0];
+                                hidden_packed_3_1[6] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_166, hidden_y_1_166)));
+                                float2 _cvt_f32_167 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[7]));
+                                float2 _cvt_f32_256_167 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[7]));
+                                float gate_x_1_167 = _cvt_f32_167.x;
+                                float gate_y_1_167 = _cvt_f32_167.y;
+                                float up_x_1_167 = _cvt_f32_256_167.x;
+                                float up_y_1_167 = _cvt_f32_256_167.y;
+                                gate_x_1_167 = fminf(gate_x_1_167, swiglu_limit);
+                                gate_y_1_167 = fminf(gate_y_1_167, swiglu_limit);
+                                up_x_1_167 = fminf(fmaxf(up_x_1_167, -swiglu_limit), swiglu_limit);
+                                up_y_1_167 = fminf(fmaxf(up_y_1_167, -swiglu_limit), swiglu_limit);
+                                float _exp_396 = expf(gate_x_1_167 * -1.0f);
+                                float denominator_x_1_167 = _exp_396 + 1.0f;
+                                float _exp_397 = expf(gate_y_1_167 * -1.0f);
+                                float denominator_y_1_167 = _exp_397 + 1.0f;
+                                float hidden_x_1_167 = gate_x_1_167 / denominator_x_1_167 * up_x_1_167;
+                                float hidden_y_1_167 = gate_y_1_167 / denominator_y_1_167 * up_y_1_167;
+                                hidden_x_1_167 = hidden_x_1_167 * row_weight[1];
+                                hidden_y_1_167 = hidden_y_1_167 * row_weight[1];
+                                hidden_packed_3_1[7] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_167, hidden_y_1_167)));
+                                float2 _cvt_f32_168 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[8]));
+                                float2 _cvt_f32_256_168 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[8]));
+                                float gate_x_1_168 = _cvt_f32_168.x;
+                                float gate_y_1_168 = _cvt_f32_168.y;
+                                float up_x_1_168 = _cvt_f32_256_168.x;
+                                float up_y_1_168 = _cvt_f32_256_168.y;
+                                gate_x_1_168 = fminf(gate_x_1_168, swiglu_limit);
+                                gate_y_1_168 = fminf(gate_y_1_168, swiglu_limit);
+                                up_x_1_168 = fminf(fmaxf(up_x_1_168, -swiglu_limit), swiglu_limit);
+                                up_y_1_168 = fminf(fmaxf(up_y_1_168, -swiglu_limit), swiglu_limit);
+                                float _exp_398 = expf(gate_x_1_168 * -1.0f);
+                                float denominator_x_1_168 = _exp_398 + 1.0f;
+                                float _exp_399 = expf(gate_y_1_168 * -1.0f);
+                                float denominator_y_1_168 = _exp_399 + 1.0f;
+                                float hidden_x_1_168 = gate_x_1_168 / denominator_x_1_168 * up_x_1_168;
+                                float hidden_y_1_168 = gate_y_1_168 / denominator_y_1_168 * up_y_1_168;
+                                hidden_x_1_168 = hidden_x_1_168 * row_weight[2];
+                                hidden_y_1_168 = hidden_y_1_168 * row_weight[2];
+                                hidden_packed_3_1[8] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_168, hidden_y_1_168)));
+                                float2 _cvt_f32_169 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[9]));
+                                float2 _cvt_f32_256_169 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[9]));
+                                float gate_x_1_169 = _cvt_f32_169.x;
+                                float gate_y_1_169 = _cvt_f32_169.y;
+                                float up_x_1_169 = _cvt_f32_256_169.x;
+                                float up_y_1_169 = _cvt_f32_256_169.y;
+                                gate_x_1_169 = fminf(gate_x_1_169, swiglu_limit);
+                                gate_y_1_169 = fminf(gate_y_1_169, swiglu_limit);
+                                up_x_1_169 = fminf(fmaxf(up_x_1_169, -swiglu_limit), swiglu_limit);
+                                up_y_1_169 = fminf(fmaxf(up_y_1_169, -swiglu_limit), swiglu_limit);
+                                float _exp_400 = expf(gate_x_1_169 * -1.0f);
+                                float denominator_x_1_169 = _exp_400 + 1.0f;
+                                float _exp_401 = expf(gate_y_1_169 * -1.0f);
+                                float denominator_y_1_169 = _exp_401 + 1.0f;
+                                float hidden_x_1_169 = gate_x_1_169 / denominator_x_1_169 * up_x_1_169;
+                                float hidden_y_1_169 = gate_y_1_169 / denominator_y_1_169 * up_y_1_169;
+                                hidden_x_1_169 = hidden_x_1_169 * row_weight[3];
+                                hidden_y_1_169 = hidden_y_1_169 * row_weight[3];
+                                hidden_packed_3_1[9] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_169, hidden_y_1_169)));
+                                float2 _cvt_f32_170 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[10]));
+                                float2 _cvt_f32_256_170 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[10]));
+                                float gate_x_1_170 = _cvt_f32_170.x;
+                                float gate_y_1_170 = _cvt_f32_170.y;
+                                float up_x_1_170 = _cvt_f32_256_170.x;
+                                float up_y_1_170 = _cvt_f32_256_170.y;
+                                gate_x_1_170 = fminf(gate_x_1_170, swiglu_limit);
+                                gate_y_1_170 = fminf(gate_y_1_170, swiglu_limit);
+                                up_x_1_170 = fminf(fmaxf(up_x_1_170, -swiglu_limit), swiglu_limit);
+                                up_y_1_170 = fminf(fmaxf(up_y_1_170, -swiglu_limit), swiglu_limit);
+                                float _exp_402 = expf(gate_x_1_170 * -1.0f);
+                                float denominator_x_1_170 = _exp_402 + 1.0f;
+                                float _exp_403 = expf(gate_y_1_170 * -1.0f);
+                                float denominator_y_1_170 = _exp_403 + 1.0f;
+                                float hidden_x_1_170 = gate_x_1_170 / denominator_x_1_170 * up_x_1_170;
+                                float hidden_y_1_170 = gate_y_1_170 / denominator_y_1_170 * up_y_1_170;
+                                hidden_x_1_170 = hidden_x_1_170 * row_weight[2];
+                                hidden_y_1_170 = hidden_y_1_170 * row_weight[2];
+                                hidden_packed_3_1[10] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_170, hidden_y_1_170)));
+                                float2 _cvt_f32_171 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[11]));
+                                float2 _cvt_f32_256_171 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[11]));
+                                float gate_x_1_171 = _cvt_f32_171.x;
+                                float gate_y_1_171 = _cvt_f32_171.y;
+                                float up_x_1_171 = _cvt_f32_256_171.x;
+                                float up_y_1_171 = _cvt_f32_256_171.y;
+                                gate_x_1_171 = fminf(gate_x_1_171, swiglu_limit);
+                                gate_y_1_171 = fminf(gate_y_1_171, swiglu_limit);
+                                up_x_1_171 = fminf(fmaxf(up_x_1_171, -swiglu_limit), swiglu_limit);
+                                up_y_1_171 = fminf(fmaxf(up_y_1_171, -swiglu_limit), swiglu_limit);
+                                float _exp_404 = expf(gate_x_1_171 * -1.0f);
+                                float denominator_x_1_171 = _exp_404 + 1.0f;
+                                float _exp_405 = expf(gate_y_1_171 * -1.0f);
+                                float denominator_y_1_171 = _exp_405 + 1.0f;
+                                float hidden_x_1_171 = gate_x_1_171 / denominator_x_1_171 * up_x_1_171;
+                                float hidden_y_1_171 = gate_y_1_171 / denominator_y_1_171 * up_y_1_171;
+                                hidden_x_1_171 = hidden_x_1_171 * row_weight[3];
+                                hidden_y_1_171 = hidden_y_1_171 * row_weight[3];
+                                hidden_packed_3_1[11] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_171, hidden_y_1_171)));
+                                float2 _cvt_f32_172 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[12]));
+                                float2 _cvt_f32_256_172 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[12]));
+                                float gate_x_1_172 = _cvt_f32_172.x;
+                                float gate_y_1_172 = _cvt_f32_172.y;
+                                float up_x_1_172 = _cvt_f32_256_172.x;
+                                float up_y_1_172 = _cvt_f32_256_172.y;
+                                gate_x_1_172 = fminf(gate_x_1_172, swiglu_limit);
+                                gate_y_1_172 = fminf(gate_y_1_172, swiglu_limit);
+                                up_x_1_172 = fminf(fmaxf(up_x_1_172, -swiglu_limit), swiglu_limit);
+                                up_y_1_172 = fminf(fmaxf(up_y_1_172, -swiglu_limit), swiglu_limit);
+                                float _exp_406 = expf(gate_x_1_172 * -1.0f);
+                                float denominator_x_1_172 = _exp_406 + 1.0f;
+                                float _exp_407 = expf(gate_y_1_172 * -1.0f);
+                                float denominator_y_1_172 = _exp_407 + 1.0f;
+                                float hidden_x_1_172 = gate_x_1_172 / denominator_x_1_172 * up_x_1_172;
+                                float hidden_y_1_172 = gate_y_1_172 / denominator_y_1_172 * up_y_1_172;
+                                hidden_x_1_172 = hidden_x_1_172 * row_weight[2];
+                                hidden_y_1_172 = hidden_y_1_172 * row_weight[2];
+                                hidden_packed_3_1[12] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_172, hidden_y_1_172)));
+                                float2 _cvt_f32_173 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[13]));
+                                float2 _cvt_f32_256_173 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[13]));
+                                float gate_x_1_173 = _cvt_f32_173.x;
+                                float gate_y_1_173 = _cvt_f32_173.y;
+                                float up_x_1_173 = _cvt_f32_256_173.x;
+                                float up_y_1_173 = _cvt_f32_256_173.y;
+                                gate_x_1_173 = fminf(gate_x_1_173, swiglu_limit);
+                                gate_y_1_173 = fminf(gate_y_1_173, swiglu_limit);
+                                up_x_1_173 = fminf(fmaxf(up_x_1_173, -swiglu_limit), swiglu_limit);
+                                up_y_1_173 = fminf(fmaxf(up_y_1_173, -swiglu_limit), swiglu_limit);
+                                float _exp_408 = expf(gate_x_1_173 * -1.0f);
+                                float denominator_x_1_173 = _exp_408 + 1.0f;
+                                float _exp_409 = expf(gate_y_1_173 * -1.0f);
+                                float denominator_y_1_173 = _exp_409 + 1.0f;
+                                float hidden_x_1_173 = gate_x_1_173 / denominator_x_1_173 * up_x_1_173;
+                                float hidden_y_1_173 = gate_y_1_173 / denominator_y_1_173 * up_y_1_173;
+                                hidden_x_1_173 = hidden_x_1_173 * row_weight[3];
+                                hidden_y_1_173 = hidden_y_1_173 * row_weight[3];
+                                hidden_packed_3_1[13] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_173, hidden_y_1_173)));
+                                float2 _cvt_f32_174 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[14]));
+                                float2 _cvt_f32_256_174 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[14]));
+                                float gate_x_1_174 = _cvt_f32_174.x;
+                                float gate_y_1_174 = _cvt_f32_174.y;
+                                float up_x_1_174 = _cvt_f32_256_174.x;
+                                float up_y_1_174 = _cvt_f32_256_174.y;
+                                gate_x_1_174 = fminf(gate_x_1_174, swiglu_limit);
+                                gate_y_1_174 = fminf(gate_y_1_174, swiglu_limit);
+                                up_x_1_174 = fminf(fmaxf(up_x_1_174, -swiglu_limit), swiglu_limit);
+                                up_y_1_174 = fminf(fmaxf(up_y_1_174, -swiglu_limit), swiglu_limit);
+                                float _exp_410 = expf(gate_x_1_174 * -1.0f);
+                                float denominator_x_1_174 = _exp_410 + 1.0f;
+                                float _exp_411 = expf(gate_y_1_174 * -1.0f);
+                                float denominator_y_1_174 = _exp_411 + 1.0f;
+                                float hidden_x_1_174 = gate_x_1_174 / denominator_x_1_174 * up_x_1_174;
+                                float hidden_y_1_174 = gate_y_1_174 / denominator_y_1_174 * up_y_1_174;
+                                hidden_x_1_174 = hidden_x_1_174 * row_weight[2];
+                                hidden_y_1_174 = hidden_y_1_174 * row_weight[2];
+                                hidden_packed_3_1[14] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_174, hidden_y_1_174)));
+                                float2 _cvt_f32_175 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[15]));
+                                float2 _cvt_f32_256_175 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[15]));
+                                float gate_x_1_175 = _cvt_f32_175.x;
+                                float gate_y_1_175 = _cvt_f32_175.y;
+                                float up_x_1_175 = _cvt_f32_256_175.x;
+                                float up_y_1_175 = _cvt_f32_256_175.y;
+                                gate_x_1_175 = fminf(gate_x_1_175, swiglu_limit);
+                                gate_y_1_175 = fminf(gate_y_1_175, swiglu_limit);
+                                up_x_1_175 = fminf(fmaxf(up_x_1_175, -swiglu_limit), swiglu_limit);
+                                up_y_1_175 = fminf(fmaxf(up_y_1_175, -swiglu_limit), swiglu_limit);
+                                float _exp_412 = expf(gate_x_1_175 * -1.0f);
+                                float denominator_x_1_175 = _exp_412 + 1.0f;
+                                float _exp_413 = expf(gate_y_1_175 * -1.0f);
+                                float denominator_y_1_175 = _exp_413 + 1.0f;
+                                float hidden_x_1_175 = gate_x_1_175 / denominator_x_1_175 * up_x_1_175;
+                                float hidden_y_1_175 = gate_y_1_175 / denominator_y_1_175 * up_y_1_175;
+                                hidden_x_1_175 = hidden_x_1_175 * row_weight[3];
+                                hidden_y_1_175 = hidden_y_1_175 * row_weight[3];
+                                hidden_packed_3_1[15] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_175, hidden_y_1_175)));
+                                float2 _cvt_f32_176 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[16]));
+                                float2 _cvt_f32_256_176 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[16]));
+                                float gate_x_1_176 = _cvt_f32_176.x;
+                                float gate_y_1_176 = _cvt_f32_176.y;
+                                float up_x_1_176 = _cvt_f32_256_176.x;
+                                float up_y_1_176 = _cvt_f32_256_176.y;
+                                gate_x_1_176 = fminf(gate_x_1_176, swiglu_limit);
+                                gate_y_1_176 = fminf(gate_y_1_176, swiglu_limit);
+                                up_x_1_176 = fminf(fmaxf(up_x_1_176, -swiglu_limit), swiglu_limit);
+                                up_y_1_176 = fminf(fmaxf(up_y_1_176, -swiglu_limit), swiglu_limit);
+                                float _exp_414 = expf(gate_x_1_176 * -1.0f);
+                                float denominator_x_1_176 = _exp_414 + 1.0f;
+                                float _exp_415 = expf(gate_y_1_176 * -1.0f);
+                                float denominator_y_1_176 = _exp_415 + 1.0f;
+                                float hidden_x_1_176 = gate_x_1_176 / denominator_x_1_176 * up_x_1_176;
+                                float hidden_y_1_176 = gate_y_1_176 / denominator_y_1_176 * up_y_1_176;
+                                hidden_x_1_176 = hidden_x_1_176 * row_weight[0];
+                                hidden_y_1_176 = hidden_y_1_176 * row_weight[0];
+                                hidden_packed_3_1[16] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_176, hidden_y_1_176)));
+                                float2 _cvt_f32_177 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[17]));
+                                float2 _cvt_f32_256_177 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[17]));
+                                float gate_x_1_177 = _cvt_f32_177.x;
+                                float gate_y_1_177 = _cvt_f32_177.y;
+                                float up_x_1_177 = _cvt_f32_256_177.x;
+                                float up_y_1_177 = _cvt_f32_256_177.y;
+                                gate_x_1_177 = fminf(gate_x_1_177, swiglu_limit);
+                                gate_y_1_177 = fminf(gate_y_1_177, swiglu_limit);
+                                up_x_1_177 = fminf(fmaxf(up_x_1_177, -swiglu_limit), swiglu_limit);
+                                up_y_1_177 = fminf(fmaxf(up_y_1_177, -swiglu_limit), swiglu_limit);
+                                float _exp_416 = expf(gate_x_1_177 * -1.0f);
+                                float denominator_x_1_177 = _exp_416 + 1.0f;
+                                float _exp_417 = expf(gate_y_1_177 * -1.0f);
+                                float denominator_y_1_177 = _exp_417 + 1.0f;
+                                float hidden_x_1_177 = gate_x_1_177 / denominator_x_1_177 * up_x_1_177;
+                                float hidden_y_1_177 = gate_y_1_177 / denominator_y_1_177 * up_y_1_177;
+                                hidden_x_1_177 = hidden_x_1_177 * row_weight[1];
+                                hidden_y_1_177 = hidden_y_1_177 * row_weight[1];
+                                hidden_packed_3_1[17] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_177, hidden_y_1_177)));
+                                float2 _cvt_f32_178 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[18]));
+                                float2 _cvt_f32_256_178 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[18]));
+                                float gate_x_1_178 = _cvt_f32_178.x;
+                                float gate_y_1_178 = _cvt_f32_178.y;
+                                float up_x_1_178 = _cvt_f32_256_178.x;
+                                float up_y_1_178 = _cvt_f32_256_178.y;
+                                gate_x_1_178 = fminf(gate_x_1_178, swiglu_limit);
+                                gate_y_1_178 = fminf(gate_y_1_178, swiglu_limit);
+                                up_x_1_178 = fminf(fmaxf(up_x_1_178, -swiglu_limit), swiglu_limit);
+                                up_y_1_178 = fminf(fmaxf(up_y_1_178, -swiglu_limit), swiglu_limit);
+                                float _exp_418 = expf(gate_x_1_178 * -1.0f);
+                                float denominator_x_1_178 = _exp_418 + 1.0f;
+                                float _exp_419 = expf(gate_y_1_178 * -1.0f);
+                                float denominator_y_1_178 = _exp_419 + 1.0f;
+                                float hidden_x_1_178 = gate_x_1_178 / denominator_x_1_178 * up_x_1_178;
+                                float hidden_y_1_178 = gate_y_1_178 / denominator_y_1_178 * up_y_1_178;
+                                hidden_x_1_178 = hidden_x_1_178 * row_weight[0];
+                                hidden_y_1_178 = hidden_y_1_178 * row_weight[0];
+                                hidden_packed_3_1[18] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_178, hidden_y_1_178)));
+                                float2 _cvt_f32_179 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[19]));
+                                float2 _cvt_f32_256_179 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[19]));
+                                float gate_x_1_179 = _cvt_f32_179.x;
+                                float gate_y_1_179 = _cvt_f32_179.y;
+                                float up_x_1_179 = _cvt_f32_256_179.x;
+                                float up_y_1_179 = _cvt_f32_256_179.y;
+                                gate_x_1_179 = fminf(gate_x_1_179, swiglu_limit);
+                                gate_y_1_179 = fminf(gate_y_1_179, swiglu_limit);
+                                up_x_1_179 = fminf(fmaxf(up_x_1_179, -swiglu_limit), swiglu_limit);
+                                up_y_1_179 = fminf(fmaxf(up_y_1_179, -swiglu_limit), swiglu_limit);
+                                float _exp_420 = expf(gate_x_1_179 * -1.0f);
+                                float denominator_x_1_179 = _exp_420 + 1.0f;
+                                float _exp_421 = expf(gate_y_1_179 * -1.0f);
+                                float denominator_y_1_179 = _exp_421 + 1.0f;
+                                float hidden_x_1_179 = gate_x_1_179 / denominator_x_1_179 * up_x_1_179;
+                                float hidden_y_1_179 = gate_y_1_179 / denominator_y_1_179 * up_y_1_179;
+                                hidden_x_1_179 = hidden_x_1_179 * row_weight[1];
+                                hidden_y_1_179 = hidden_y_1_179 * row_weight[1];
+                                hidden_packed_3_1[19] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_179, hidden_y_1_179)));
+                                float2 _cvt_f32_180 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[20]));
+                                float2 _cvt_f32_256_180 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[20]));
+                                float gate_x_1_180 = _cvt_f32_180.x;
+                                float gate_y_1_180 = _cvt_f32_180.y;
+                                float up_x_1_180 = _cvt_f32_256_180.x;
+                                float up_y_1_180 = _cvt_f32_256_180.y;
+                                gate_x_1_180 = fminf(gate_x_1_180, swiglu_limit);
+                                gate_y_1_180 = fminf(gate_y_1_180, swiglu_limit);
+                                up_x_1_180 = fminf(fmaxf(up_x_1_180, -swiglu_limit), swiglu_limit);
+                                up_y_1_180 = fminf(fmaxf(up_y_1_180, -swiglu_limit), swiglu_limit);
+                                float _exp_422 = expf(gate_x_1_180 * -1.0f);
+                                float denominator_x_1_180 = _exp_422 + 1.0f;
+                                float _exp_423 = expf(gate_y_1_180 * -1.0f);
+                                float denominator_y_1_180 = _exp_423 + 1.0f;
+                                float hidden_x_1_180 = gate_x_1_180 / denominator_x_1_180 * up_x_1_180;
+                                float hidden_y_1_180 = gate_y_1_180 / denominator_y_1_180 * up_y_1_180;
+                                hidden_x_1_180 = hidden_x_1_180 * row_weight[0];
+                                hidden_y_1_180 = hidden_y_1_180 * row_weight[0];
+                                hidden_packed_3_1[20] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_180, hidden_y_1_180)));
+                                float2 _cvt_f32_181 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[21]));
+                                float2 _cvt_f32_256_181 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[21]));
+                                float gate_x_1_181 = _cvt_f32_181.x;
+                                float gate_y_1_181 = _cvt_f32_181.y;
+                                float up_x_1_181 = _cvt_f32_256_181.x;
+                                float up_y_1_181 = _cvt_f32_256_181.y;
+                                gate_x_1_181 = fminf(gate_x_1_181, swiglu_limit);
+                                gate_y_1_181 = fminf(gate_y_1_181, swiglu_limit);
+                                up_x_1_181 = fminf(fmaxf(up_x_1_181, -swiglu_limit), swiglu_limit);
+                                up_y_1_181 = fminf(fmaxf(up_y_1_181, -swiglu_limit), swiglu_limit);
+                                float _exp_424 = expf(gate_x_1_181 * -1.0f);
+                                float denominator_x_1_181 = _exp_424 + 1.0f;
+                                float _exp_425 = expf(gate_y_1_181 * -1.0f);
+                                float denominator_y_1_181 = _exp_425 + 1.0f;
+                                float hidden_x_1_181 = gate_x_1_181 / denominator_x_1_181 * up_x_1_181;
+                                float hidden_y_1_181 = gate_y_1_181 / denominator_y_1_181 * up_y_1_181;
+                                hidden_x_1_181 = hidden_x_1_181 * row_weight[1];
+                                hidden_y_1_181 = hidden_y_1_181 * row_weight[1];
+                                hidden_packed_3_1[21] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_181, hidden_y_1_181)));
+                                float2 _cvt_f32_182 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[22]));
+                                float2 _cvt_f32_256_182 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[22]));
+                                float gate_x_1_182 = _cvt_f32_182.x;
+                                float gate_y_1_182 = _cvt_f32_182.y;
+                                float up_x_1_182 = _cvt_f32_256_182.x;
+                                float up_y_1_182 = _cvt_f32_256_182.y;
+                                gate_x_1_182 = fminf(gate_x_1_182, swiglu_limit);
+                                gate_y_1_182 = fminf(gate_y_1_182, swiglu_limit);
+                                up_x_1_182 = fminf(fmaxf(up_x_1_182, -swiglu_limit), swiglu_limit);
+                                up_y_1_182 = fminf(fmaxf(up_y_1_182, -swiglu_limit), swiglu_limit);
+                                float _exp_426 = expf(gate_x_1_182 * -1.0f);
+                                float denominator_x_1_182 = _exp_426 + 1.0f;
+                                float _exp_427 = expf(gate_y_1_182 * -1.0f);
+                                float denominator_y_1_182 = _exp_427 + 1.0f;
+                                float hidden_x_1_182 = gate_x_1_182 / denominator_x_1_182 * up_x_1_182;
+                                float hidden_y_1_182 = gate_y_1_182 / denominator_y_1_182 * up_y_1_182;
+                                hidden_x_1_182 = hidden_x_1_182 * row_weight[0];
+                                hidden_y_1_182 = hidden_y_1_182 * row_weight[0];
+                                hidden_packed_3_1[22] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_182, hidden_y_1_182)));
+                                float2 _cvt_f32_183 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[23]));
+                                float2 _cvt_f32_256_183 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[23]));
+                                float gate_x_1_183 = _cvt_f32_183.x;
+                                float gate_y_1_183 = _cvt_f32_183.y;
+                                float up_x_1_183 = _cvt_f32_256_183.x;
+                                float up_y_1_183 = _cvt_f32_256_183.y;
+                                gate_x_1_183 = fminf(gate_x_1_183, swiglu_limit);
+                                gate_y_1_183 = fminf(gate_y_1_183, swiglu_limit);
+                                up_x_1_183 = fminf(fmaxf(up_x_1_183, -swiglu_limit), swiglu_limit);
+                                up_y_1_183 = fminf(fmaxf(up_y_1_183, -swiglu_limit), swiglu_limit);
+                                float _exp_428 = expf(gate_x_1_183 * -1.0f);
+                                float denominator_x_1_183 = _exp_428 + 1.0f;
+                                float _exp_429 = expf(gate_y_1_183 * -1.0f);
+                                float denominator_y_1_183 = _exp_429 + 1.0f;
+                                float hidden_x_1_183 = gate_x_1_183 / denominator_x_1_183 * up_x_1_183;
+                                float hidden_y_1_183 = gate_y_1_183 / denominator_y_1_183 * up_y_1_183;
+                                hidden_x_1_183 = hidden_x_1_183 * row_weight[1];
+                                hidden_y_1_183 = hidden_y_1_183 * row_weight[1];
+                                hidden_packed_3_1[23] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_183, hidden_y_1_183)));
+                                float2 _cvt_f32_184 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[24]));
+                                float2 _cvt_f32_256_184 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[24]));
+                                float gate_x_1_184 = _cvt_f32_184.x;
+                                float gate_y_1_184 = _cvt_f32_184.y;
+                                float up_x_1_184 = _cvt_f32_256_184.x;
+                                float up_y_1_184 = _cvt_f32_256_184.y;
+                                gate_x_1_184 = fminf(gate_x_1_184, swiglu_limit);
+                                gate_y_1_184 = fminf(gate_y_1_184, swiglu_limit);
+                                up_x_1_184 = fminf(fmaxf(up_x_1_184, -swiglu_limit), swiglu_limit);
+                                up_y_1_184 = fminf(fmaxf(up_y_1_184, -swiglu_limit), swiglu_limit);
+                                float _exp_430 = expf(gate_x_1_184 * -1.0f);
+                                float denominator_x_1_184 = _exp_430 + 1.0f;
+                                float _exp_431 = expf(gate_y_1_184 * -1.0f);
+                                float denominator_y_1_184 = _exp_431 + 1.0f;
+                                float hidden_x_1_184 = gate_x_1_184 / denominator_x_1_184 * up_x_1_184;
+                                float hidden_y_1_184 = gate_y_1_184 / denominator_y_1_184 * up_y_1_184;
+                                hidden_x_1_184 = hidden_x_1_184 * row_weight[2];
+                                hidden_y_1_184 = hidden_y_1_184 * row_weight[2];
+                                hidden_packed_3_1[24] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_184, hidden_y_1_184)));
+                                float2 _cvt_f32_185 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[25]));
+                                float2 _cvt_f32_256_185 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[25]));
+                                float gate_x_1_185 = _cvt_f32_185.x;
+                                float gate_y_1_185 = _cvt_f32_185.y;
+                                float up_x_1_185 = _cvt_f32_256_185.x;
+                                float up_y_1_185 = _cvt_f32_256_185.y;
+                                gate_x_1_185 = fminf(gate_x_1_185, swiglu_limit);
+                                gate_y_1_185 = fminf(gate_y_1_185, swiglu_limit);
+                                up_x_1_185 = fminf(fmaxf(up_x_1_185, -swiglu_limit), swiglu_limit);
+                                up_y_1_185 = fminf(fmaxf(up_y_1_185, -swiglu_limit), swiglu_limit);
+                                float _exp_432 = expf(gate_x_1_185 * -1.0f);
+                                float denominator_x_1_185 = _exp_432 + 1.0f;
+                                float _exp_433 = expf(gate_y_1_185 * -1.0f);
+                                float denominator_y_1_185 = _exp_433 + 1.0f;
+                                float hidden_x_1_185 = gate_x_1_185 / denominator_x_1_185 * up_x_1_185;
+                                float hidden_y_1_185 = gate_y_1_185 / denominator_y_1_185 * up_y_1_185;
+                                hidden_x_1_185 = hidden_x_1_185 * row_weight[3];
+                                hidden_y_1_185 = hidden_y_1_185 * row_weight[3];
+                                hidden_packed_3_1[25] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_185, hidden_y_1_185)));
+                                float2 _cvt_f32_186 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[26]));
+                                float2 _cvt_f32_256_186 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[26]));
+                                float gate_x_1_186 = _cvt_f32_186.x;
+                                float gate_y_1_186 = _cvt_f32_186.y;
+                                float up_x_1_186 = _cvt_f32_256_186.x;
+                                float up_y_1_186 = _cvt_f32_256_186.y;
+                                gate_x_1_186 = fminf(gate_x_1_186, swiglu_limit);
+                                gate_y_1_186 = fminf(gate_y_1_186, swiglu_limit);
+                                up_x_1_186 = fminf(fmaxf(up_x_1_186, -swiglu_limit), swiglu_limit);
+                                up_y_1_186 = fminf(fmaxf(up_y_1_186, -swiglu_limit), swiglu_limit);
+                                float _exp_434 = expf(gate_x_1_186 * -1.0f);
+                                float denominator_x_1_186 = _exp_434 + 1.0f;
+                                float _exp_435 = expf(gate_y_1_186 * -1.0f);
+                                float denominator_y_1_186 = _exp_435 + 1.0f;
+                                float hidden_x_1_186 = gate_x_1_186 / denominator_x_1_186 * up_x_1_186;
+                                float hidden_y_1_186 = gate_y_1_186 / denominator_y_1_186 * up_y_1_186;
+                                hidden_x_1_186 = hidden_x_1_186 * row_weight[2];
+                                hidden_y_1_186 = hidden_y_1_186 * row_weight[2];
+                                hidden_packed_3_1[26] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_186, hidden_y_1_186)));
+                                float2 _cvt_f32_187 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[27]));
+                                float2 _cvt_f32_256_187 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[27]));
+                                float gate_x_1_187 = _cvt_f32_187.x;
+                                float gate_y_1_187 = _cvt_f32_187.y;
+                                float up_x_1_187 = _cvt_f32_256_187.x;
+                                float up_y_1_187 = _cvt_f32_256_187.y;
+                                gate_x_1_187 = fminf(gate_x_1_187, swiglu_limit);
+                                gate_y_1_187 = fminf(gate_y_1_187, swiglu_limit);
+                                up_x_1_187 = fminf(fmaxf(up_x_1_187, -swiglu_limit), swiglu_limit);
+                                up_y_1_187 = fminf(fmaxf(up_y_1_187, -swiglu_limit), swiglu_limit);
+                                float _exp_436 = expf(gate_x_1_187 * -1.0f);
+                                float denominator_x_1_187 = _exp_436 + 1.0f;
+                                float _exp_437 = expf(gate_y_1_187 * -1.0f);
+                                float denominator_y_1_187 = _exp_437 + 1.0f;
+                                float hidden_x_1_187 = gate_x_1_187 / denominator_x_1_187 * up_x_1_187;
+                                float hidden_y_1_187 = gate_y_1_187 / denominator_y_1_187 * up_y_1_187;
+                                hidden_x_1_187 = hidden_x_1_187 * row_weight[3];
+                                hidden_y_1_187 = hidden_y_1_187 * row_weight[3];
+                                hidden_packed_3_1[27] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_187, hidden_y_1_187)));
+                                float2 _cvt_f32_188 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[28]));
+                                float2 _cvt_f32_256_188 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[28]));
+                                float gate_x_1_188 = _cvt_f32_188.x;
+                                float gate_y_1_188 = _cvt_f32_188.y;
+                                float up_x_1_188 = _cvt_f32_256_188.x;
+                                float up_y_1_188 = _cvt_f32_256_188.y;
+                                gate_x_1_188 = fminf(gate_x_1_188, swiglu_limit);
+                                gate_y_1_188 = fminf(gate_y_1_188, swiglu_limit);
+                                up_x_1_188 = fminf(fmaxf(up_x_1_188, -swiglu_limit), swiglu_limit);
+                                up_y_1_188 = fminf(fmaxf(up_y_1_188, -swiglu_limit), swiglu_limit);
+                                float _exp_438 = expf(gate_x_1_188 * -1.0f);
+                                float denominator_x_1_188 = _exp_438 + 1.0f;
+                                float _exp_439 = expf(gate_y_1_188 * -1.0f);
+                                float denominator_y_1_188 = _exp_439 + 1.0f;
+                                float hidden_x_1_188 = gate_x_1_188 / denominator_x_1_188 * up_x_1_188;
+                                float hidden_y_1_188 = gate_y_1_188 / denominator_y_1_188 * up_y_1_188;
+                                hidden_x_1_188 = hidden_x_1_188 * row_weight[2];
+                                hidden_y_1_188 = hidden_y_1_188 * row_weight[2];
+                                hidden_packed_3_1[28] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_188, hidden_y_1_188)));
+                                float2 _cvt_f32_189 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[29]));
+                                float2 _cvt_f32_256_189 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[29]));
+                                float gate_x_1_189 = _cvt_f32_189.x;
+                                float gate_y_1_189 = _cvt_f32_189.y;
+                                float up_x_1_189 = _cvt_f32_256_189.x;
+                                float up_y_1_189 = _cvt_f32_256_189.y;
+                                gate_x_1_189 = fminf(gate_x_1_189, swiglu_limit);
+                                gate_y_1_189 = fminf(gate_y_1_189, swiglu_limit);
+                                up_x_1_189 = fminf(fmaxf(up_x_1_189, -swiglu_limit), swiglu_limit);
+                                up_y_1_189 = fminf(fmaxf(up_y_1_189, -swiglu_limit), swiglu_limit);
+                                float _exp_440 = expf(gate_x_1_189 * -1.0f);
+                                float denominator_x_1_189 = _exp_440 + 1.0f;
+                                float _exp_441 = expf(gate_y_1_189 * -1.0f);
+                                float denominator_y_1_189 = _exp_441 + 1.0f;
+                                float hidden_x_1_189 = gate_x_1_189 / denominator_x_1_189 * up_x_1_189;
+                                float hidden_y_1_189 = gate_y_1_189 / denominator_y_1_189 * up_y_1_189;
+                                hidden_x_1_189 = hidden_x_1_189 * row_weight[3];
+                                hidden_y_1_189 = hidden_y_1_189 * row_weight[3];
+                                hidden_packed_3_1[29] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_189, hidden_y_1_189)));
+                                float2 _cvt_f32_190 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[30]));
+                                float2 _cvt_f32_256_190 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[30]));
+                                float gate_x_1_190 = _cvt_f32_190.x;
+                                float gate_y_1_190 = _cvt_f32_190.y;
+                                float up_x_1_190 = _cvt_f32_256_190.x;
+                                float up_y_1_190 = _cvt_f32_256_190.y;
+                                gate_x_1_190 = fminf(gate_x_1_190, swiglu_limit);
+                                gate_y_1_190 = fminf(gate_y_1_190, swiglu_limit);
+                                up_x_1_190 = fminf(fmaxf(up_x_1_190, -swiglu_limit), swiglu_limit);
+                                up_y_1_190 = fminf(fmaxf(up_y_1_190, -swiglu_limit), swiglu_limit);
+                                float _exp_442 = expf(gate_x_1_190 * -1.0f);
+                                float denominator_x_1_190 = _exp_442 + 1.0f;
+                                float _exp_443 = expf(gate_y_1_190 * -1.0f);
+                                float denominator_y_1_190 = _exp_443 + 1.0f;
+                                float hidden_x_1_190 = gate_x_1_190 / denominator_x_1_190 * up_x_1_190;
+                                float hidden_y_1_190 = gate_y_1_190 / denominator_y_1_190 * up_y_1_190;
+                                hidden_x_1_190 = hidden_x_1_190 * row_weight[2];
+                                hidden_y_1_190 = hidden_y_1_190 * row_weight[2];
+                                hidden_packed_3_1[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_190, hidden_y_1_190)));
+                                float2 _cvt_f32_191 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[31]));
+                                float2 _cvt_f32_256_191 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[31]));
+                                float gate_x_1_191 = _cvt_f32_191.x;
+                                float gate_y_1_191 = _cvt_f32_191.y;
+                                float up_x_1_191 = _cvt_f32_256_191.x;
+                                float up_y_1_191 = _cvt_f32_256_191.y;
+                                gate_x_1_191 = fminf(gate_x_1_191, swiglu_limit);
+                                gate_y_1_191 = fminf(gate_y_1_191, swiglu_limit);
+                                up_x_1_191 = fminf(fmaxf(up_x_1_191, -swiglu_limit), swiglu_limit);
+                                up_y_1_191 = fminf(fmaxf(up_y_1_191, -swiglu_limit), swiglu_limit);
+                                float _exp_444 = expf(gate_x_1_191 * -1.0f);
+                                float denominator_x_1_191 = _exp_444 + 1.0f;
+                                float _exp_445 = expf(gate_y_1_191 * -1.0f);
+                                float denominator_y_1_191 = _exp_445 + 1.0f;
+                                float hidden_x_1_191 = gate_x_1_191 / denominator_x_1_191 * up_x_1_191;
+                                float hidden_y_1_191 = gate_y_1_191 / denominator_y_1_191 * up_y_1_191;
+                                hidden_x_1_191 = hidden_x_1_191 * row_weight[3];
+                                hidden_y_1_191 = hidden_y_1_191 * row_weight[3];
+                                hidden_packed_3_1[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_191, hidden_y_1_191)));
+#else
                                 float2 gate_a_2_16 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[0]));
                                 float2 up_a_2_16 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[0]));
                                 float2 gate_b_2_16 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[1]));
@@ -7190,615 +7860,6 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                 asm("mul.rn.ftz.f32x2 %0, %1, %2;" : "=l"(*(unsigned long long*)&hidden_y_2_31) : "l"(*(const unsigned long long*)&activation_y_2_31), "l"(*(const unsigned long long*)&weight_pair_2_31));
                                 hidden_packed_3_1[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_2_31.x, hidden_y_2_31.x)));
                                 hidden_packed_3_1[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_2_31.y, hidden_y_2_31.y)));
-#else
-                                float2 _cvt_f32_160 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[0]));
-                                float2 _cvt_f32_256_160 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[0]));
-                                float gate_x_1_160 = _cvt_f32_160.x;
-                                float gate_y_1_160 = _cvt_f32_160.y;
-                                float up_x_1_160 = _cvt_f32_256_160.x;
-                                float up_y_1_160 = _cvt_f32_256_160.y;
-                                gate_x_1_160 = fminf(gate_x_1_160, swiglu_limit);
-                                gate_y_1_160 = fminf(gate_y_1_160, swiglu_limit);
-                                up_x_1_160 = fminf(fmaxf(up_x_1_160, -swiglu_limit), swiglu_limit);
-                                up_y_1_160 = fminf(fmaxf(up_y_1_160, -swiglu_limit), swiglu_limit);
-                                float _exp_382 = expf(gate_x_1_160 * -1.0f);
-                                float denominator_x_1_160 = _exp_382 + 1.0f;
-                                float _exp_383 = expf(gate_y_1_160 * -1.0f);
-                                float denominator_y_1_160 = _exp_383 + 1.0f;
-                                float hidden_x_1_160 = gate_x_1_160 / denominator_x_1_160 * up_x_1_160;
-                                float hidden_y_1_160 = gate_y_1_160 / denominator_y_1_160 * up_y_1_160;
-                                hidden_x_1_160 = hidden_x_1_160 * row_weight[0];
-                                hidden_y_1_160 = hidden_y_1_160 * row_weight[0];
-                                hidden_packed_3_1[0] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_160, hidden_y_1_160)));
-                                float2 _cvt_f32_161 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[1]));
-                                float2 _cvt_f32_256_161 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[1]));
-                                float gate_x_1_161 = _cvt_f32_161.x;
-                                float gate_y_1_161 = _cvt_f32_161.y;
-                                float up_x_1_161 = _cvt_f32_256_161.x;
-                                float up_y_1_161 = _cvt_f32_256_161.y;
-                                gate_x_1_161 = fminf(gate_x_1_161, swiglu_limit);
-                                gate_y_1_161 = fminf(gate_y_1_161, swiglu_limit);
-                                up_x_1_161 = fminf(fmaxf(up_x_1_161, -swiglu_limit), swiglu_limit);
-                                up_y_1_161 = fminf(fmaxf(up_y_1_161, -swiglu_limit), swiglu_limit);
-                                float _exp_384 = expf(gate_x_1_161 * -1.0f);
-                                float denominator_x_1_161 = _exp_384 + 1.0f;
-                                float _exp_385 = expf(gate_y_1_161 * -1.0f);
-                                float denominator_y_1_161 = _exp_385 + 1.0f;
-                                float hidden_x_1_161 = gate_x_1_161 / denominator_x_1_161 * up_x_1_161;
-                                float hidden_y_1_161 = gate_y_1_161 / denominator_y_1_161 * up_y_1_161;
-                                hidden_x_1_161 = hidden_x_1_161 * row_weight[1];
-                                hidden_y_1_161 = hidden_y_1_161 * row_weight[1];
-                                hidden_packed_3_1[1] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_161, hidden_y_1_161)));
-                                float2 _cvt_f32_162 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[2]));
-                                float2 _cvt_f32_256_162 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[2]));
-                                float gate_x_1_162 = _cvt_f32_162.x;
-                                float gate_y_1_162 = _cvt_f32_162.y;
-                                float up_x_1_162 = _cvt_f32_256_162.x;
-                                float up_y_1_162 = _cvt_f32_256_162.y;
-                                gate_x_1_162 = fminf(gate_x_1_162, swiglu_limit);
-                                gate_y_1_162 = fminf(gate_y_1_162, swiglu_limit);
-                                up_x_1_162 = fminf(fmaxf(up_x_1_162, -swiglu_limit), swiglu_limit);
-                                up_y_1_162 = fminf(fmaxf(up_y_1_162, -swiglu_limit), swiglu_limit);
-                                float _exp_386 = expf(gate_x_1_162 * -1.0f);
-                                float denominator_x_1_162 = _exp_386 + 1.0f;
-                                float _exp_387 = expf(gate_y_1_162 * -1.0f);
-                                float denominator_y_1_162 = _exp_387 + 1.0f;
-                                float hidden_x_1_162 = gate_x_1_162 / denominator_x_1_162 * up_x_1_162;
-                                float hidden_y_1_162 = gate_y_1_162 / denominator_y_1_162 * up_y_1_162;
-                                hidden_x_1_162 = hidden_x_1_162 * row_weight[0];
-                                hidden_y_1_162 = hidden_y_1_162 * row_weight[0];
-                                hidden_packed_3_1[2] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_162, hidden_y_1_162)));
-                                float2 _cvt_f32_163 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[3]));
-                                float2 _cvt_f32_256_163 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[3]));
-                                float gate_x_1_163 = _cvt_f32_163.x;
-                                float gate_y_1_163 = _cvt_f32_163.y;
-                                float up_x_1_163 = _cvt_f32_256_163.x;
-                                float up_y_1_163 = _cvt_f32_256_163.y;
-                                gate_x_1_163 = fminf(gate_x_1_163, swiglu_limit);
-                                gate_y_1_163 = fminf(gate_y_1_163, swiglu_limit);
-                                up_x_1_163 = fminf(fmaxf(up_x_1_163, -swiglu_limit), swiglu_limit);
-                                up_y_1_163 = fminf(fmaxf(up_y_1_163, -swiglu_limit), swiglu_limit);
-                                float _exp_388 = expf(gate_x_1_163 * -1.0f);
-                                float denominator_x_1_163 = _exp_388 + 1.0f;
-                                float _exp_389 = expf(gate_y_1_163 * -1.0f);
-                                float denominator_y_1_163 = _exp_389 + 1.0f;
-                                float hidden_x_1_163 = gate_x_1_163 / denominator_x_1_163 * up_x_1_163;
-                                float hidden_y_1_163 = gate_y_1_163 / denominator_y_1_163 * up_y_1_163;
-                                hidden_x_1_163 = hidden_x_1_163 * row_weight[1];
-                                hidden_y_1_163 = hidden_y_1_163 * row_weight[1];
-                                hidden_packed_3_1[3] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_163, hidden_y_1_163)));
-                                float2 _cvt_f32_164 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[4]));
-                                float2 _cvt_f32_256_164 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[4]));
-                                float gate_x_1_164 = _cvt_f32_164.x;
-                                float gate_y_1_164 = _cvt_f32_164.y;
-                                float up_x_1_164 = _cvt_f32_256_164.x;
-                                float up_y_1_164 = _cvt_f32_256_164.y;
-                                gate_x_1_164 = fminf(gate_x_1_164, swiglu_limit);
-                                gate_y_1_164 = fminf(gate_y_1_164, swiglu_limit);
-                                up_x_1_164 = fminf(fmaxf(up_x_1_164, -swiglu_limit), swiglu_limit);
-                                up_y_1_164 = fminf(fmaxf(up_y_1_164, -swiglu_limit), swiglu_limit);
-                                float _exp_390 = expf(gate_x_1_164 * -1.0f);
-                                float denominator_x_1_164 = _exp_390 + 1.0f;
-                                float _exp_391 = expf(gate_y_1_164 * -1.0f);
-                                float denominator_y_1_164 = _exp_391 + 1.0f;
-                                float hidden_x_1_164 = gate_x_1_164 / denominator_x_1_164 * up_x_1_164;
-                                float hidden_y_1_164 = gate_y_1_164 / denominator_y_1_164 * up_y_1_164;
-                                hidden_x_1_164 = hidden_x_1_164 * row_weight[0];
-                                hidden_y_1_164 = hidden_y_1_164 * row_weight[0];
-                                hidden_packed_3_1[4] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_164, hidden_y_1_164)));
-                                float2 _cvt_f32_165 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[5]));
-                                float2 _cvt_f32_256_165 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[5]));
-                                float gate_x_1_165 = _cvt_f32_165.x;
-                                float gate_y_1_165 = _cvt_f32_165.y;
-                                float up_x_1_165 = _cvt_f32_256_165.x;
-                                float up_y_1_165 = _cvt_f32_256_165.y;
-                                gate_x_1_165 = fminf(gate_x_1_165, swiglu_limit);
-                                gate_y_1_165 = fminf(gate_y_1_165, swiglu_limit);
-                                up_x_1_165 = fminf(fmaxf(up_x_1_165, -swiglu_limit), swiglu_limit);
-                                up_y_1_165 = fminf(fmaxf(up_y_1_165, -swiglu_limit), swiglu_limit);
-                                float _exp_392 = expf(gate_x_1_165 * -1.0f);
-                                float denominator_x_1_165 = _exp_392 + 1.0f;
-                                float _exp_393 = expf(gate_y_1_165 * -1.0f);
-                                float denominator_y_1_165 = _exp_393 + 1.0f;
-                                float hidden_x_1_165 = gate_x_1_165 / denominator_x_1_165 * up_x_1_165;
-                                float hidden_y_1_165 = gate_y_1_165 / denominator_y_1_165 * up_y_1_165;
-                                hidden_x_1_165 = hidden_x_1_165 * row_weight[1];
-                                hidden_y_1_165 = hidden_y_1_165 * row_weight[1];
-                                hidden_packed_3_1[5] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_165, hidden_y_1_165)));
-                                float2 _cvt_f32_166 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[6]));
-                                float2 _cvt_f32_256_166 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[6]));
-                                float gate_x_1_166 = _cvt_f32_166.x;
-                                float gate_y_1_166 = _cvt_f32_166.y;
-                                float up_x_1_166 = _cvt_f32_256_166.x;
-                                float up_y_1_166 = _cvt_f32_256_166.y;
-                                gate_x_1_166 = fminf(gate_x_1_166, swiglu_limit);
-                                gate_y_1_166 = fminf(gate_y_1_166, swiglu_limit);
-                                up_x_1_166 = fminf(fmaxf(up_x_1_166, -swiglu_limit), swiglu_limit);
-                                up_y_1_166 = fminf(fmaxf(up_y_1_166, -swiglu_limit), swiglu_limit);
-                                float _exp_394 = expf(gate_x_1_166 * -1.0f);
-                                float denominator_x_1_166 = _exp_394 + 1.0f;
-                                float _exp_395 = expf(gate_y_1_166 * -1.0f);
-                                float denominator_y_1_166 = _exp_395 + 1.0f;
-                                float hidden_x_1_166 = gate_x_1_166 / denominator_x_1_166 * up_x_1_166;
-                                float hidden_y_1_166 = gate_y_1_166 / denominator_y_1_166 * up_y_1_166;
-                                hidden_x_1_166 = hidden_x_1_166 * row_weight[0];
-                                hidden_y_1_166 = hidden_y_1_166 * row_weight[0];
-                                hidden_packed_3_1[6] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_166, hidden_y_1_166)));
-                                float2 _cvt_f32_167 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[7]));
-                                float2 _cvt_f32_256_167 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[7]));
-                                float gate_x_1_167 = _cvt_f32_167.x;
-                                float gate_y_1_167 = _cvt_f32_167.y;
-                                float up_x_1_167 = _cvt_f32_256_167.x;
-                                float up_y_1_167 = _cvt_f32_256_167.y;
-                                gate_x_1_167 = fminf(gate_x_1_167, swiglu_limit);
-                                gate_y_1_167 = fminf(gate_y_1_167, swiglu_limit);
-                                up_x_1_167 = fminf(fmaxf(up_x_1_167, -swiglu_limit), swiglu_limit);
-                                up_y_1_167 = fminf(fmaxf(up_y_1_167, -swiglu_limit), swiglu_limit);
-                                float _exp_396 = expf(gate_x_1_167 * -1.0f);
-                                float denominator_x_1_167 = _exp_396 + 1.0f;
-                                float _exp_397 = expf(gate_y_1_167 * -1.0f);
-                                float denominator_y_1_167 = _exp_397 + 1.0f;
-                                float hidden_x_1_167 = gate_x_1_167 / denominator_x_1_167 * up_x_1_167;
-                                float hidden_y_1_167 = gate_y_1_167 / denominator_y_1_167 * up_y_1_167;
-                                hidden_x_1_167 = hidden_x_1_167 * row_weight[1];
-                                hidden_y_1_167 = hidden_y_1_167 * row_weight[1];
-                                hidden_packed_3_1[7] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_167, hidden_y_1_167)));
-                                float2 _cvt_f32_168 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[8]));
-                                float2 _cvt_f32_256_168 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[8]));
-                                float gate_x_1_168 = _cvt_f32_168.x;
-                                float gate_y_1_168 = _cvt_f32_168.y;
-                                float up_x_1_168 = _cvt_f32_256_168.x;
-                                float up_y_1_168 = _cvt_f32_256_168.y;
-                                gate_x_1_168 = fminf(gate_x_1_168, swiglu_limit);
-                                gate_y_1_168 = fminf(gate_y_1_168, swiglu_limit);
-                                up_x_1_168 = fminf(fmaxf(up_x_1_168, -swiglu_limit), swiglu_limit);
-                                up_y_1_168 = fminf(fmaxf(up_y_1_168, -swiglu_limit), swiglu_limit);
-                                float _exp_398 = expf(gate_x_1_168 * -1.0f);
-                                float denominator_x_1_168 = _exp_398 + 1.0f;
-                                float _exp_399 = expf(gate_y_1_168 * -1.0f);
-                                float denominator_y_1_168 = _exp_399 + 1.0f;
-                                float hidden_x_1_168 = gate_x_1_168 / denominator_x_1_168 * up_x_1_168;
-                                float hidden_y_1_168 = gate_y_1_168 / denominator_y_1_168 * up_y_1_168;
-                                hidden_x_1_168 = hidden_x_1_168 * row_weight[2];
-                                hidden_y_1_168 = hidden_y_1_168 * row_weight[2];
-                                hidden_packed_3_1[8] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_168, hidden_y_1_168)));
-                                float2 _cvt_f32_169 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[9]));
-                                float2 _cvt_f32_256_169 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[9]));
-                                float gate_x_1_169 = _cvt_f32_169.x;
-                                float gate_y_1_169 = _cvt_f32_169.y;
-                                float up_x_1_169 = _cvt_f32_256_169.x;
-                                float up_y_1_169 = _cvt_f32_256_169.y;
-                                gate_x_1_169 = fminf(gate_x_1_169, swiglu_limit);
-                                gate_y_1_169 = fminf(gate_y_1_169, swiglu_limit);
-                                up_x_1_169 = fminf(fmaxf(up_x_1_169, -swiglu_limit), swiglu_limit);
-                                up_y_1_169 = fminf(fmaxf(up_y_1_169, -swiglu_limit), swiglu_limit);
-                                float _exp_400 = expf(gate_x_1_169 * -1.0f);
-                                float denominator_x_1_169 = _exp_400 + 1.0f;
-                                float _exp_401 = expf(gate_y_1_169 * -1.0f);
-                                float denominator_y_1_169 = _exp_401 + 1.0f;
-                                float hidden_x_1_169 = gate_x_1_169 / denominator_x_1_169 * up_x_1_169;
-                                float hidden_y_1_169 = gate_y_1_169 / denominator_y_1_169 * up_y_1_169;
-                                hidden_x_1_169 = hidden_x_1_169 * row_weight[3];
-                                hidden_y_1_169 = hidden_y_1_169 * row_weight[3];
-                                hidden_packed_3_1[9] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_169, hidden_y_1_169)));
-                                float2 _cvt_f32_170 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[10]));
-                                float2 _cvt_f32_256_170 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[10]));
-                                float gate_x_1_170 = _cvt_f32_170.x;
-                                float gate_y_1_170 = _cvt_f32_170.y;
-                                float up_x_1_170 = _cvt_f32_256_170.x;
-                                float up_y_1_170 = _cvt_f32_256_170.y;
-                                gate_x_1_170 = fminf(gate_x_1_170, swiglu_limit);
-                                gate_y_1_170 = fminf(gate_y_1_170, swiglu_limit);
-                                up_x_1_170 = fminf(fmaxf(up_x_1_170, -swiglu_limit), swiglu_limit);
-                                up_y_1_170 = fminf(fmaxf(up_y_1_170, -swiglu_limit), swiglu_limit);
-                                float _exp_402 = expf(gate_x_1_170 * -1.0f);
-                                float denominator_x_1_170 = _exp_402 + 1.0f;
-                                float _exp_403 = expf(gate_y_1_170 * -1.0f);
-                                float denominator_y_1_170 = _exp_403 + 1.0f;
-                                float hidden_x_1_170 = gate_x_1_170 / denominator_x_1_170 * up_x_1_170;
-                                float hidden_y_1_170 = gate_y_1_170 / denominator_y_1_170 * up_y_1_170;
-                                hidden_x_1_170 = hidden_x_1_170 * row_weight[2];
-                                hidden_y_1_170 = hidden_y_1_170 * row_weight[2];
-                                hidden_packed_3_1[10] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_170, hidden_y_1_170)));
-                                float2 _cvt_f32_171 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[11]));
-                                float2 _cvt_f32_256_171 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[11]));
-                                float gate_x_1_171 = _cvt_f32_171.x;
-                                float gate_y_1_171 = _cvt_f32_171.y;
-                                float up_x_1_171 = _cvt_f32_256_171.x;
-                                float up_y_1_171 = _cvt_f32_256_171.y;
-                                gate_x_1_171 = fminf(gate_x_1_171, swiglu_limit);
-                                gate_y_1_171 = fminf(gate_y_1_171, swiglu_limit);
-                                up_x_1_171 = fminf(fmaxf(up_x_1_171, -swiglu_limit), swiglu_limit);
-                                up_y_1_171 = fminf(fmaxf(up_y_1_171, -swiglu_limit), swiglu_limit);
-                                float _exp_404 = expf(gate_x_1_171 * -1.0f);
-                                float denominator_x_1_171 = _exp_404 + 1.0f;
-                                float _exp_405 = expf(gate_y_1_171 * -1.0f);
-                                float denominator_y_1_171 = _exp_405 + 1.0f;
-                                float hidden_x_1_171 = gate_x_1_171 / denominator_x_1_171 * up_x_1_171;
-                                float hidden_y_1_171 = gate_y_1_171 / denominator_y_1_171 * up_y_1_171;
-                                hidden_x_1_171 = hidden_x_1_171 * row_weight[3];
-                                hidden_y_1_171 = hidden_y_1_171 * row_weight[3];
-                                hidden_packed_3_1[11] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_171, hidden_y_1_171)));
-                                float2 _cvt_f32_172 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[12]));
-                                float2 _cvt_f32_256_172 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[12]));
-                                float gate_x_1_172 = _cvt_f32_172.x;
-                                float gate_y_1_172 = _cvt_f32_172.y;
-                                float up_x_1_172 = _cvt_f32_256_172.x;
-                                float up_y_1_172 = _cvt_f32_256_172.y;
-                                gate_x_1_172 = fminf(gate_x_1_172, swiglu_limit);
-                                gate_y_1_172 = fminf(gate_y_1_172, swiglu_limit);
-                                up_x_1_172 = fminf(fmaxf(up_x_1_172, -swiglu_limit), swiglu_limit);
-                                up_y_1_172 = fminf(fmaxf(up_y_1_172, -swiglu_limit), swiglu_limit);
-                                float _exp_406 = expf(gate_x_1_172 * -1.0f);
-                                float denominator_x_1_172 = _exp_406 + 1.0f;
-                                float _exp_407 = expf(gate_y_1_172 * -1.0f);
-                                float denominator_y_1_172 = _exp_407 + 1.0f;
-                                float hidden_x_1_172 = gate_x_1_172 / denominator_x_1_172 * up_x_1_172;
-                                float hidden_y_1_172 = gate_y_1_172 / denominator_y_1_172 * up_y_1_172;
-                                hidden_x_1_172 = hidden_x_1_172 * row_weight[2];
-                                hidden_y_1_172 = hidden_y_1_172 * row_weight[2];
-                                hidden_packed_3_1[12] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_172, hidden_y_1_172)));
-                                float2 _cvt_f32_173 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[13]));
-                                float2 _cvt_f32_256_173 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[13]));
-                                float gate_x_1_173 = _cvt_f32_173.x;
-                                float gate_y_1_173 = _cvt_f32_173.y;
-                                float up_x_1_173 = _cvt_f32_256_173.x;
-                                float up_y_1_173 = _cvt_f32_256_173.y;
-                                gate_x_1_173 = fminf(gate_x_1_173, swiglu_limit);
-                                gate_y_1_173 = fminf(gate_y_1_173, swiglu_limit);
-                                up_x_1_173 = fminf(fmaxf(up_x_1_173, -swiglu_limit), swiglu_limit);
-                                up_y_1_173 = fminf(fmaxf(up_y_1_173, -swiglu_limit), swiglu_limit);
-                                float _exp_408 = expf(gate_x_1_173 * -1.0f);
-                                float denominator_x_1_173 = _exp_408 + 1.0f;
-                                float _exp_409 = expf(gate_y_1_173 * -1.0f);
-                                float denominator_y_1_173 = _exp_409 + 1.0f;
-                                float hidden_x_1_173 = gate_x_1_173 / denominator_x_1_173 * up_x_1_173;
-                                float hidden_y_1_173 = gate_y_1_173 / denominator_y_1_173 * up_y_1_173;
-                                hidden_x_1_173 = hidden_x_1_173 * row_weight[3];
-                                hidden_y_1_173 = hidden_y_1_173 * row_weight[3];
-                                hidden_packed_3_1[13] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_173, hidden_y_1_173)));
-                                float2 _cvt_f32_174 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[14]));
-                                float2 _cvt_f32_256_174 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[14]));
-                                float gate_x_1_174 = _cvt_f32_174.x;
-                                float gate_y_1_174 = _cvt_f32_174.y;
-                                float up_x_1_174 = _cvt_f32_256_174.x;
-                                float up_y_1_174 = _cvt_f32_256_174.y;
-                                gate_x_1_174 = fminf(gate_x_1_174, swiglu_limit);
-                                gate_y_1_174 = fminf(gate_y_1_174, swiglu_limit);
-                                up_x_1_174 = fminf(fmaxf(up_x_1_174, -swiglu_limit), swiglu_limit);
-                                up_y_1_174 = fminf(fmaxf(up_y_1_174, -swiglu_limit), swiglu_limit);
-                                float _exp_410 = expf(gate_x_1_174 * -1.0f);
-                                float denominator_x_1_174 = _exp_410 + 1.0f;
-                                float _exp_411 = expf(gate_y_1_174 * -1.0f);
-                                float denominator_y_1_174 = _exp_411 + 1.0f;
-                                float hidden_x_1_174 = gate_x_1_174 / denominator_x_1_174 * up_x_1_174;
-                                float hidden_y_1_174 = gate_y_1_174 / denominator_y_1_174 * up_y_1_174;
-                                hidden_x_1_174 = hidden_x_1_174 * row_weight[2];
-                                hidden_y_1_174 = hidden_y_1_174 * row_weight[2];
-                                hidden_packed_3_1[14] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_174, hidden_y_1_174)));
-                                float2 _cvt_f32_175 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[15]));
-                                float2 _cvt_f32_256_175 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[15]));
-                                float gate_x_1_175 = _cvt_f32_175.x;
-                                float gate_y_1_175 = _cvt_f32_175.y;
-                                float up_x_1_175 = _cvt_f32_256_175.x;
-                                float up_y_1_175 = _cvt_f32_256_175.y;
-                                gate_x_1_175 = fminf(gate_x_1_175, swiglu_limit);
-                                gate_y_1_175 = fminf(gate_y_1_175, swiglu_limit);
-                                up_x_1_175 = fminf(fmaxf(up_x_1_175, -swiglu_limit), swiglu_limit);
-                                up_y_1_175 = fminf(fmaxf(up_y_1_175, -swiglu_limit), swiglu_limit);
-                                float _exp_412 = expf(gate_x_1_175 * -1.0f);
-                                float denominator_x_1_175 = _exp_412 + 1.0f;
-                                float _exp_413 = expf(gate_y_1_175 * -1.0f);
-                                float denominator_y_1_175 = _exp_413 + 1.0f;
-                                float hidden_x_1_175 = gate_x_1_175 / denominator_x_1_175 * up_x_1_175;
-                                float hidden_y_1_175 = gate_y_1_175 / denominator_y_1_175 * up_y_1_175;
-                                hidden_x_1_175 = hidden_x_1_175 * row_weight[3];
-                                hidden_y_1_175 = hidden_y_1_175 * row_weight[3];
-                                hidden_packed_3_1[15] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_175, hidden_y_1_175)));
-                                float2 _cvt_f32_176 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[16]));
-                                float2 _cvt_f32_256_176 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[16]));
-                                float gate_x_1_176 = _cvt_f32_176.x;
-                                float gate_y_1_176 = _cvt_f32_176.y;
-                                float up_x_1_176 = _cvt_f32_256_176.x;
-                                float up_y_1_176 = _cvt_f32_256_176.y;
-                                gate_x_1_176 = fminf(gate_x_1_176, swiglu_limit);
-                                gate_y_1_176 = fminf(gate_y_1_176, swiglu_limit);
-                                up_x_1_176 = fminf(fmaxf(up_x_1_176, -swiglu_limit), swiglu_limit);
-                                up_y_1_176 = fminf(fmaxf(up_y_1_176, -swiglu_limit), swiglu_limit);
-                                float _exp_414 = expf(gate_x_1_176 * -1.0f);
-                                float denominator_x_1_176 = _exp_414 + 1.0f;
-                                float _exp_415 = expf(gate_y_1_176 * -1.0f);
-                                float denominator_y_1_176 = _exp_415 + 1.0f;
-                                float hidden_x_1_176 = gate_x_1_176 / denominator_x_1_176 * up_x_1_176;
-                                float hidden_y_1_176 = gate_y_1_176 / denominator_y_1_176 * up_y_1_176;
-                                hidden_x_1_176 = hidden_x_1_176 * row_weight[0];
-                                hidden_y_1_176 = hidden_y_1_176 * row_weight[0];
-                                hidden_packed_3_1[16] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_176, hidden_y_1_176)));
-                                float2 _cvt_f32_177 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[17]));
-                                float2 _cvt_f32_256_177 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[17]));
-                                float gate_x_1_177 = _cvt_f32_177.x;
-                                float gate_y_1_177 = _cvt_f32_177.y;
-                                float up_x_1_177 = _cvt_f32_256_177.x;
-                                float up_y_1_177 = _cvt_f32_256_177.y;
-                                gate_x_1_177 = fminf(gate_x_1_177, swiglu_limit);
-                                gate_y_1_177 = fminf(gate_y_1_177, swiglu_limit);
-                                up_x_1_177 = fminf(fmaxf(up_x_1_177, -swiglu_limit), swiglu_limit);
-                                up_y_1_177 = fminf(fmaxf(up_y_1_177, -swiglu_limit), swiglu_limit);
-                                float _exp_416 = expf(gate_x_1_177 * -1.0f);
-                                float denominator_x_1_177 = _exp_416 + 1.0f;
-                                float _exp_417 = expf(gate_y_1_177 * -1.0f);
-                                float denominator_y_1_177 = _exp_417 + 1.0f;
-                                float hidden_x_1_177 = gate_x_1_177 / denominator_x_1_177 * up_x_1_177;
-                                float hidden_y_1_177 = gate_y_1_177 / denominator_y_1_177 * up_y_1_177;
-                                hidden_x_1_177 = hidden_x_1_177 * row_weight[1];
-                                hidden_y_1_177 = hidden_y_1_177 * row_weight[1];
-                                hidden_packed_3_1[17] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_177, hidden_y_1_177)));
-                                float2 _cvt_f32_178 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[18]));
-                                float2 _cvt_f32_256_178 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[18]));
-                                float gate_x_1_178 = _cvt_f32_178.x;
-                                float gate_y_1_178 = _cvt_f32_178.y;
-                                float up_x_1_178 = _cvt_f32_256_178.x;
-                                float up_y_1_178 = _cvt_f32_256_178.y;
-                                gate_x_1_178 = fminf(gate_x_1_178, swiglu_limit);
-                                gate_y_1_178 = fminf(gate_y_1_178, swiglu_limit);
-                                up_x_1_178 = fminf(fmaxf(up_x_1_178, -swiglu_limit), swiglu_limit);
-                                up_y_1_178 = fminf(fmaxf(up_y_1_178, -swiglu_limit), swiglu_limit);
-                                float _exp_418 = expf(gate_x_1_178 * -1.0f);
-                                float denominator_x_1_178 = _exp_418 + 1.0f;
-                                float _exp_419 = expf(gate_y_1_178 * -1.0f);
-                                float denominator_y_1_178 = _exp_419 + 1.0f;
-                                float hidden_x_1_178 = gate_x_1_178 / denominator_x_1_178 * up_x_1_178;
-                                float hidden_y_1_178 = gate_y_1_178 / denominator_y_1_178 * up_y_1_178;
-                                hidden_x_1_178 = hidden_x_1_178 * row_weight[0];
-                                hidden_y_1_178 = hidden_y_1_178 * row_weight[0];
-                                hidden_packed_3_1[18] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_178, hidden_y_1_178)));
-                                float2 _cvt_f32_179 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[19]));
-                                float2 _cvt_f32_256_179 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[19]));
-                                float gate_x_1_179 = _cvt_f32_179.x;
-                                float gate_y_1_179 = _cvt_f32_179.y;
-                                float up_x_1_179 = _cvt_f32_256_179.x;
-                                float up_y_1_179 = _cvt_f32_256_179.y;
-                                gate_x_1_179 = fminf(gate_x_1_179, swiglu_limit);
-                                gate_y_1_179 = fminf(gate_y_1_179, swiglu_limit);
-                                up_x_1_179 = fminf(fmaxf(up_x_1_179, -swiglu_limit), swiglu_limit);
-                                up_y_1_179 = fminf(fmaxf(up_y_1_179, -swiglu_limit), swiglu_limit);
-                                float _exp_420 = expf(gate_x_1_179 * -1.0f);
-                                float denominator_x_1_179 = _exp_420 + 1.0f;
-                                float _exp_421 = expf(gate_y_1_179 * -1.0f);
-                                float denominator_y_1_179 = _exp_421 + 1.0f;
-                                float hidden_x_1_179 = gate_x_1_179 / denominator_x_1_179 * up_x_1_179;
-                                float hidden_y_1_179 = gate_y_1_179 / denominator_y_1_179 * up_y_1_179;
-                                hidden_x_1_179 = hidden_x_1_179 * row_weight[1];
-                                hidden_y_1_179 = hidden_y_1_179 * row_weight[1];
-                                hidden_packed_3_1[19] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_179, hidden_y_1_179)));
-                                float2 _cvt_f32_180 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[20]));
-                                float2 _cvt_f32_256_180 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[20]));
-                                float gate_x_1_180 = _cvt_f32_180.x;
-                                float gate_y_1_180 = _cvt_f32_180.y;
-                                float up_x_1_180 = _cvt_f32_256_180.x;
-                                float up_y_1_180 = _cvt_f32_256_180.y;
-                                gate_x_1_180 = fminf(gate_x_1_180, swiglu_limit);
-                                gate_y_1_180 = fminf(gate_y_1_180, swiglu_limit);
-                                up_x_1_180 = fminf(fmaxf(up_x_1_180, -swiglu_limit), swiglu_limit);
-                                up_y_1_180 = fminf(fmaxf(up_y_1_180, -swiglu_limit), swiglu_limit);
-                                float _exp_422 = expf(gate_x_1_180 * -1.0f);
-                                float denominator_x_1_180 = _exp_422 + 1.0f;
-                                float _exp_423 = expf(gate_y_1_180 * -1.0f);
-                                float denominator_y_1_180 = _exp_423 + 1.0f;
-                                float hidden_x_1_180 = gate_x_1_180 / denominator_x_1_180 * up_x_1_180;
-                                float hidden_y_1_180 = gate_y_1_180 / denominator_y_1_180 * up_y_1_180;
-                                hidden_x_1_180 = hidden_x_1_180 * row_weight[0];
-                                hidden_y_1_180 = hidden_y_1_180 * row_weight[0];
-                                hidden_packed_3_1[20] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_180, hidden_y_1_180)));
-                                float2 _cvt_f32_181 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[21]));
-                                float2 _cvt_f32_256_181 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[21]));
-                                float gate_x_1_181 = _cvt_f32_181.x;
-                                float gate_y_1_181 = _cvt_f32_181.y;
-                                float up_x_1_181 = _cvt_f32_256_181.x;
-                                float up_y_1_181 = _cvt_f32_256_181.y;
-                                gate_x_1_181 = fminf(gate_x_1_181, swiglu_limit);
-                                gate_y_1_181 = fminf(gate_y_1_181, swiglu_limit);
-                                up_x_1_181 = fminf(fmaxf(up_x_1_181, -swiglu_limit), swiglu_limit);
-                                up_y_1_181 = fminf(fmaxf(up_y_1_181, -swiglu_limit), swiglu_limit);
-                                float _exp_424 = expf(gate_x_1_181 * -1.0f);
-                                float denominator_x_1_181 = _exp_424 + 1.0f;
-                                float _exp_425 = expf(gate_y_1_181 * -1.0f);
-                                float denominator_y_1_181 = _exp_425 + 1.0f;
-                                float hidden_x_1_181 = gate_x_1_181 / denominator_x_1_181 * up_x_1_181;
-                                float hidden_y_1_181 = gate_y_1_181 / denominator_y_1_181 * up_y_1_181;
-                                hidden_x_1_181 = hidden_x_1_181 * row_weight[1];
-                                hidden_y_1_181 = hidden_y_1_181 * row_weight[1];
-                                hidden_packed_3_1[21] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_181, hidden_y_1_181)));
-                                float2 _cvt_f32_182 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[22]));
-                                float2 _cvt_f32_256_182 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[22]));
-                                float gate_x_1_182 = _cvt_f32_182.x;
-                                float gate_y_1_182 = _cvt_f32_182.y;
-                                float up_x_1_182 = _cvt_f32_256_182.x;
-                                float up_y_1_182 = _cvt_f32_256_182.y;
-                                gate_x_1_182 = fminf(gate_x_1_182, swiglu_limit);
-                                gate_y_1_182 = fminf(gate_y_1_182, swiglu_limit);
-                                up_x_1_182 = fminf(fmaxf(up_x_1_182, -swiglu_limit), swiglu_limit);
-                                up_y_1_182 = fminf(fmaxf(up_y_1_182, -swiglu_limit), swiglu_limit);
-                                float _exp_426 = expf(gate_x_1_182 * -1.0f);
-                                float denominator_x_1_182 = _exp_426 + 1.0f;
-                                float _exp_427 = expf(gate_y_1_182 * -1.0f);
-                                float denominator_y_1_182 = _exp_427 + 1.0f;
-                                float hidden_x_1_182 = gate_x_1_182 / denominator_x_1_182 * up_x_1_182;
-                                float hidden_y_1_182 = gate_y_1_182 / denominator_y_1_182 * up_y_1_182;
-                                hidden_x_1_182 = hidden_x_1_182 * row_weight[0];
-                                hidden_y_1_182 = hidden_y_1_182 * row_weight[0];
-                                hidden_packed_3_1[22] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_182, hidden_y_1_182)));
-                                float2 _cvt_f32_183 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[23]));
-                                float2 _cvt_f32_256_183 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[23]));
-                                float gate_x_1_183 = _cvt_f32_183.x;
-                                float gate_y_1_183 = _cvt_f32_183.y;
-                                float up_x_1_183 = _cvt_f32_256_183.x;
-                                float up_y_1_183 = _cvt_f32_256_183.y;
-                                gate_x_1_183 = fminf(gate_x_1_183, swiglu_limit);
-                                gate_y_1_183 = fminf(gate_y_1_183, swiglu_limit);
-                                up_x_1_183 = fminf(fmaxf(up_x_1_183, -swiglu_limit), swiglu_limit);
-                                up_y_1_183 = fminf(fmaxf(up_y_1_183, -swiglu_limit), swiglu_limit);
-                                float _exp_428 = expf(gate_x_1_183 * -1.0f);
-                                float denominator_x_1_183 = _exp_428 + 1.0f;
-                                float _exp_429 = expf(gate_y_1_183 * -1.0f);
-                                float denominator_y_1_183 = _exp_429 + 1.0f;
-                                float hidden_x_1_183 = gate_x_1_183 / denominator_x_1_183 * up_x_1_183;
-                                float hidden_y_1_183 = gate_y_1_183 / denominator_y_1_183 * up_y_1_183;
-                                hidden_x_1_183 = hidden_x_1_183 * row_weight[1];
-                                hidden_y_1_183 = hidden_y_1_183 * row_weight[1];
-                                hidden_packed_3_1[23] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_183, hidden_y_1_183)));
-                                float2 _cvt_f32_184 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[24]));
-                                float2 _cvt_f32_256_184 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[24]));
-                                float gate_x_1_184 = _cvt_f32_184.x;
-                                float gate_y_1_184 = _cvt_f32_184.y;
-                                float up_x_1_184 = _cvt_f32_256_184.x;
-                                float up_y_1_184 = _cvt_f32_256_184.y;
-                                gate_x_1_184 = fminf(gate_x_1_184, swiglu_limit);
-                                gate_y_1_184 = fminf(gate_y_1_184, swiglu_limit);
-                                up_x_1_184 = fminf(fmaxf(up_x_1_184, -swiglu_limit), swiglu_limit);
-                                up_y_1_184 = fminf(fmaxf(up_y_1_184, -swiglu_limit), swiglu_limit);
-                                float _exp_430 = expf(gate_x_1_184 * -1.0f);
-                                float denominator_x_1_184 = _exp_430 + 1.0f;
-                                float _exp_431 = expf(gate_y_1_184 * -1.0f);
-                                float denominator_y_1_184 = _exp_431 + 1.0f;
-                                float hidden_x_1_184 = gate_x_1_184 / denominator_x_1_184 * up_x_1_184;
-                                float hidden_y_1_184 = gate_y_1_184 / denominator_y_1_184 * up_y_1_184;
-                                hidden_x_1_184 = hidden_x_1_184 * row_weight[2];
-                                hidden_y_1_184 = hidden_y_1_184 * row_weight[2];
-                                hidden_packed_3_1[24] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_184, hidden_y_1_184)));
-                                float2 _cvt_f32_185 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[25]));
-                                float2 _cvt_f32_256_185 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[25]));
-                                float gate_x_1_185 = _cvt_f32_185.x;
-                                float gate_y_1_185 = _cvt_f32_185.y;
-                                float up_x_1_185 = _cvt_f32_256_185.x;
-                                float up_y_1_185 = _cvt_f32_256_185.y;
-                                gate_x_1_185 = fminf(gate_x_1_185, swiglu_limit);
-                                gate_y_1_185 = fminf(gate_y_1_185, swiglu_limit);
-                                up_x_1_185 = fminf(fmaxf(up_x_1_185, -swiglu_limit), swiglu_limit);
-                                up_y_1_185 = fminf(fmaxf(up_y_1_185, -swiglu_limit), swiglu_limit);
-                                float _exp_432 = expf(gate_x_1_185 * -1.0f);
-                                float denominator_x_1_185 = _exp_432 + 1.0f;
-                                float _exp_433 = expf(gate_y_1_185 * -1.0f);
-                                float denominator_y_1_185 = _exp_433 + 1.0f;
-                                float hidden_x_1_185 = gate_x_1_185 / denominator_x_1_185 * up_x_1_185;
-                                float hidden_y_1_185 = gate_y_1_185 / denominator_y_1_185 * up_y_1_185;
-                                hidden_x_1_185 = hidden_x_1_185 * row_weight[3];
-                                hidden_y_1_185 = hidden_y_1_185 * row_weight[3];
-                                hidden_packed_3_1[25] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_185, hidden_y_1_185)));
-                                float2 _cvt_f32_186 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[26]));
-                                float2 _cvt_f32_256_186 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[26]));
-                                float gate_x_1_186 = _cvt_f32_186.x;
-                                float gate_y_1_186 = _cvt_f32_186.y;
-                                float up_x_1_186 = _cvt_f32_256_186.x;
-                                float up_y_1_186 = _cvt_f32_256_186.y;
-                                gate_x_1_186 = fminf(gate_x_1_186, swiglu_limit);
-                                gate_y_1_186 = fminf(gate_y_1_186, swiglu_limit);
-                                up_x_1_186 = fminf(fmaxf(up_x_1_186, -swiglu_limit), swiglu_limit);
-                                up_y_1_186 = fminf(fmaxf(up_y_1_186, -swiglu_limit), swiglu_limit);
-                                float _exp_434 = expf(gate_x_1_186 * -1.0f);
-                                float denominator_x_1_186 = _exp_434 + 1.0f;
-                                float _exp_435 = expf(gate_y_1_186 * -1.0f);
-                                float denominator_y_1_186 = _exp_435 + 1.0f;
-                                float hidden_x_1_186 = gate_x_1_186 / denominator_x_1_186 * up_x_1_186;
-                                float hidden_y_1_186 = gate_y_1_186 / denominator_y_1_186 * up_y_1_186;
-                                hidden_x_1_186 = hidden_x_1_186 * row_weight[2];
-                                hidden_y_1_186 = hidden_y_1_186 * row_weight[2];
-                                hidden_packed_3_1[26] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_186, hidden_y_1_186)));
-                                float2 _cvt_f32_187 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[27]));
-                                float2 _cvt_f32_256_187 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[27]));
-                                float gate_x_1_187 = _cvt_f32_187.x;
-                                float gate_y_1_187 = _cvt_f32_187.y;
-                                float up_x_1_187 = _cvt_f32_256_187.x;
-                                float up_y_1_187 = _cvt_f32_256_187.y;
-                                gate_x_1_187 = fminf(gate_x_1_187, swiglu_limit);
-                                gate_y_1_187 = fminf(gate_y_1_187, swiglu_limit);
-                                up_x_1_187 = fminf(fmaxf(up_x_1_187, -swiglu_limit), swiglu_limit);
-                                up_y_1_187 = fminf(fmaxf(up_y_1_187, -swiglu_limit), swiglu_limit);
-                                float _exp_436 = expf(gate_x_1_187 * -1.0f);
-                                float denominator_x_1_187 = _exp_436 + 1.0f;
-                                float _exp_437 = expf(gate_y_1_187 * -1.0f);
-                                float denominator_y_1_187 = _exp_437 + 1.0f;
-                                float hidden_x_1_187 = gate_x_1_187 / denominator_x_1_187 * up_x_1_187;
-                                float hidden_y_1_187 = gate_y_1_187 / denominator_y_1_187 * up_y_1_187;
-                                hidden_x_1_187 = hidden_x_1_187 * row_weight[3];
-                                hidden_y_1_187 = hidden_y_1_187 * row_weight[3];
-                                hidden_packed_3_1[27] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_187, hidden_y_1_187)));
-                                float2 _cvt_f32_188 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[28]));
-                                float2 _cvt_f32_256_188 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[28]));
-                                float gate_x_1_188 = _cvt_f32_188.x;
-                                float gate_y_1_188 = _cvt_f32_188.y;
-                                float up_x_1_188 = _cvt_f32_256_188.x;
-                                float up_y_1_188 = _cvt_f32_256_188.y;
-                                gate_x_1_188 = fminf(gate_x_1_188, swiglu_limit);
-                                gate_y_1_188 = fminf(gate_y_1_188, swiglu_limit);
-                                up_x_1_188 = fminf(fmaxf(up_x_1_188, -swiglu_limit), swiglu_limit);
-                                up_y_1_188 = fminf(fmaxf(up_y_1_188, -swiglu_limit), swiglu_limit);
-                                float _exp_438 = expf(gate_x_1_188 * -1.0f);
-                                float denominator_x_1_188 = _exp_438 + 1.0f;
-                                float _exp_439 = expf(gate_y_1_188 * -1.0f);
-                                float denominator_y_1_188 = _exp_439 + 1.0f;
-                                float hidden_x_1_188 = gate_x_1_188 / denominator_x_1_188 * up_x_1_188;
-                                float hidden_y_1_188 = gate_y_1_188 / denominator_y_1_188 * up_y_1_188;
-                                hidden_x_1_188 = hidden_x_1_188 * row_weight[2];
-                                hidden_y_1_188 = hidden_y_1_188 * row_weight[2];
-                                hidden_packed_3_1[28] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_188, hidden_y_1_188)));
-                                float2 _cvt_f32_189 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[29]));
-                                float2 _cvt_f32_256_189 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[29]));
-                                float gate_x_1_189 = _cvt_f32_189.x;
-                                float gate_y_1_189 = _cvt_f32_189.y;
-                                float up_x_1_189 = _cvt_f32_256_189.x;
-                                float up_y_1_189 = _cvt_f32_256_189.y;
-                                gate_x_1_189 = fminf(gate_x_1_189, swiglu_limit);
-                                gate_y_1_189 = fminf(gate_y_1_189, swiglu_limit);
-                                up_x_1_189 = fminf(fmaxf(up_x_1_189, -swiglu_limit), swiglu_limit);
-                                up_y_1_189 = fminf(fmaxf(up_y_1_189, -swiglu_limit), swiglu_limit);
-                                float _exp_440 = expf(gate_x_1_189 * -1.0f);
-                                float denominator_x_1_189 = _exp_440 + 1.0f;
-                                float _exp_441 = expf(gate_y_1_189 * -1.0f);
-                                float denominator_y_1_189 = _exp_441 + 1.0f;
-                                float hidden_x_1_189 = gate_x_1_189 / denominator_x_1_189 * up_x_1_189;
-                                float hidden_y_1_189 = gate_y_1_189 / denominator_y_1_189 * up_y_1_189;
-                                hidden_x_1_189 = hidden_x_1_189 * row_weight[3];
-                                hidden_y_1_189 = hidden_y_1_189 * row_weight[3];
-                                hidden_packed_3_1[29] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_189, hidden_y_1_189)));
-                                float2 _cvt_f32_190 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[30]));
-                                float2 _cvt_f32_256_190 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[30]));
-                                float gate_x_1_190 = _cvt_f32_190.x;
-                                float gate_y_1_190 = _cvt_f32_190.y;
-                                float up_x_1_190 = _cvt_f32_256_190.x;
-                                float up_y_1_190 = _cvt_f32_256_190.y;
-                                gate_x_1_190 = fminf(gate_x_1_190, swiglu_limit);
-                                gate_y_1_190 = fminf(gate_y_1_190, swiglu_limit);
-                                up_x_1_190 = fminf(fmaxf(up_x_1_190, -swiglu_limit), swiglu_limit);
-                                up_y_1_190 = fminf(fmaxf(up_y_1_190, -swiglu_limit), swiglu_limit);
-                                float _exp_442 = expf(gate_x_1_190 * -1.0f);
-                                float denominator_x_1_190 = _exp_442 + 1.0f;
-                                float _exp_443 = expf(gate_y_1_190 * -1.0f);
-                                float denominator_y_1_190 = _exp_443 + 1.0f;
-                                float hidden_x_1_190 = gate_x_1_190 / denominator_x_1_190 * up_x_1_190;
-                                float hidden_y_1_190 = gate_y_1_190 / denominator_y_1_190 * up_y_1_190;
-                                hidden_x_1_190 = hidden_x_1_190 * row_weight[2];
-                                hidden_y_1_190 = hidden_y_1_190 * row_weight[2];
-                                hidden_packed_3_1[30] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_190, hidden_y_1_190)));
-                                float2 _cvt_f32_191 = cake_bf16x2_to_f32x2(__as_bf16x2(gate_packed_5[31]));
-                                float2 _cvt_f32_256_191 = cake_bf16x2_to_f32x2(__as_bf16x2(up_packed_5[31]));
-                                float gate_x_1_191 = _cvt_f32_191.x;
-                                float gate_y_1_191 = _cvt_f32_191.y;
-                                float up_x_1_191 = _cvt_f32_256_191.x;
-                                float up_y_1_191 = _cvt_f32_256_191.y;
-                                gate_x_1_191 = fminf(gate_x_1_191, swiglu_limit);
-                                gate_y_1_191 = fminf(gate_y_1_191, swiglu_limit);
-                                up_x_1_191 = fminf(fmaxf(up_x_1_191, -swiglu_limit), swiglu_limit);
-                                up_y_1_191 = fminf(fmaxf(up_y_1_191, -swiglu_limit), swiglu_limit);
-                                float _exp_444 = expf(gate_x_1_191 * -1.0f);
-                                float denominator_x_1_191 = _exp_444 + 1.0f;
-                                float _exp_445 = expf(gate_y_1_191 * -1.0f);
-                                float denominator_y_1_191 = _exp_445 + 1.0f;
-                                float hidden_x_1_191 = gate_x_1_191 / denominator_x_1_191 * up_x_1_191;
-                                float hidden_y_1_191 = gate_y_1_191 / denominator_y_1_191 * up_y_1_191;
-                                hidden_x_1_191 = hidden_x_1_191 * row_weight[3];
-                                hidden_y_1_191 = hidden_y_1_191 * row_weight[3];
-                                hidden_packed_3_1[31] = __as_u32(__float22bfloat162_rn(make_float2(hidden_x_1_191, hidden_y_1_191)));
 #endif
                                 if (tid == 0) {
                                     asm volatile("cp.async.bulk.wait_group.read 2;");
@@ -7815,16 +7876,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_30 = d_smem_addr + (unsigned int)((row_32 * 32 + col_32) * 2);
                                         address_30 = address_30 ^ (address_30 & 511) >> 7 << 4;
                                         int offset_31 = half_30 * 8 + col_tile_30 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_574 = static_cast<uint32_t>(address_30);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_446 = static_cast<uint32_t>(address_30);
+#else
+                                        uint32_t _stmatrix_addr_574 = static_cast<uint32_t>(address_30);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_574), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_446), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_574), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_31 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -7853,16 +7914,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_31 = d_smem_addr + 8192 + (unsigned int)((row_33 * 32 + col_33) * 2);
                                         address_31 = address_31 ^ (address_31 & 511) >> 7 << 4;
                                         int offset_32 = half_31 * 8 + col_tile_31 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_575 = static_cast<uint32_t>(address_31);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_447 = static_cast<uint32_t>(address_31);
+#else
+                                        uint32_t _stmatrix_addr_575 = static_cast<uint32_t>(address_31);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_575), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_447), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_575), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_32 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -7891,16 +7952,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_32 = d_smem_addr + 16384 + (unsigned int)((row_34 * 32 + col_34) * 2);
                                         address_32 = address_32 ^ (address_32 & 511) >> 7 << 4;
                                         int offset_33 = half_32 * 8 + col_tile_32 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_576 = static_cast<uint32_t>(address_32);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_448 = static_cast<uint32_t>(address_32);
+#else
+                                        uint32_t _stmatrix_addr_576 = static_cast<uint32_t>(address_32);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_576), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_448), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_576), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_33 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -7929,16 +7990,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_33 = d_smem_addr + (unsigned int)((row_35 * 32 + col_35) * 2);
                                         address_33 = address_33 ^ (address_33 & 511) >> 7 << 4;
                                         int offset_34 = 16 + half_33 * 8 + col_tile_33 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_577 = static_cast<uint32_t>(address_33);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_449 = static_cast<uint32_t>(address_33);
+#else
+                                        uint32_t _stmatrix_addr_577 = static_cast<uint32_t>(address_33);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_577), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_449), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_577), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&gate_packed_5[offset_34 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -7967,16 +8028,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_34 = d_smem_addr + 8192 + (unsigned int)((row_36 * 32 + col_36) * 2);
                                         address_34 = address_34 ^ (address_34 & 511) >> 7 << 4;
                                         int offset_35 = 16 + half_34 * 8 + col_tile_34 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_578 = static_cast<uint32_t>(address_34);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_450 = static_cast<uint32_t>(address_34);
+#else
+                                        uint32_t _stmatrix_addr_578 = static_cast<uint32_t>(address_34);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_578), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_450), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_578), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&up_packed_5[offset_35 + 3]))
 #endif
                                             : "memory");
                                     }
@@ -8005,16 +8066,16 @@ kernel_cake_mok_recompute_clamped_wbd(const __grid_constant__ CUtensorMap x_shar
                                         unsigned int address_35 = d_smem_addr + 16384 + (unsigned int)((row_37 * 32 + col_37) * 2);
                                         address_35 = address_35 ^ (address_35 & 511) >> 7 << 4;
                                         int offset_36 = 16 + half_35 * 8 + col_tile_35 * 4;
-#if __CUDA_ARCH__ == 1030
-                                        uint32_t _stmatrix_addr_579 = static_cast<uint32_t>(address_35);
-#else
+#if __CUDA_ARCH__ == 1000
                                         uint32_t _stmatrix_addr_451 = static_cast<uint32_t>(address_35);
+#else
+                                        uint32_t _stmatrix_addr_579 = static_cast<uint32_t>(address_35);
 #endif
                                         asm volatile("stmatrix.sync.aligned.m8n8.x4.shared.b16 [%0], {%1, %2, %3, %4};\n"
-#if __CUDA_ARCH__ == 1030
-                                            :: "r"(_stmatrix_addr_579), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 3]))
-#else
+#if __CUDA_ARCH__ == 1000
                                             :: "r"(_stmatrix_addr_451), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 3]))
+#else
+                                            :: "r"(_stmatrix_addr_579), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 1])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 2])), "r"(*reinterpret_cast<const uint32_t*>(&hidden_packed_3_1[offset_36 + 3]))
 #endif
                                             : "memory");
                                     }

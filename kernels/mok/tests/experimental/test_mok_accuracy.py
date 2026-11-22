@@ -21,8 +21,8 @@ The oracle and the naive implementation are defined in :mod:`tests.experimental.
 BF16 training cases (three geometries, ring replay with several macrobatches, empty experts, clamped SwiGLU, FP32
 weight-gradient accumulation onto nonzero starts, 36 and 9 local experts at top-8), the fused MXFP8 training cases
 (plain and clamped, BF16 and FP32 weight gradients, 36 and 9 local experts at top-8), the forward epilogue, and the
-router weight before the down projection on SM100a / SM103a (clamped SwiGLU, FP32 weight gradients): top-2 over the
-three geometries, top-6 over 6 to 96 local experts, half of the weights exactly zero, the requester's input
+router weight before the down projection on SM100a, SM103a and SM107a (clamped SwiGLU, FP32 weight gradients): top-2
+over the three geometries, top-6 over 6 to 96 local experts, half of the weights exactly zero, the requester's input
 distribution at hidden 5120 / intermediate 2304 over 6 and 48 local experts
 (:func:`tests.experimental._mok_reference.production_inputs`, its gate and up exactly at the limit on one route), and
 the adapter's top-6 step at each 384-expert layout as rank 0 of its EP group emulated on one GPU
@@ -509,10 +509,12 @@ def test_epilogue_forward_accuracy(record_property, topk, tokens, hidden):
 
 
 def _require_before_down():
-    """Skip on a target without the router-weight-before-down kernels (SM100a and SM103a have them)."""
+    """Skip on a target without the router-weight-before-down kernels (``BEFORE_DOWN_TARGETS``: SM100a, SM103a and
+    SM107a have them)."""
     require_gpu()
-    if gaps.TARGETS[torch.cuda.get_device_capability()] not in kernels.BEFORE_DOWN_TARGETS:
-        pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+    arch = gaps.TARGETS[torch.cuda.get_device_capability()]
+    if arch not in kernels.BEFORE_DOWN_TARGETS:
+        pytest.skip(f"The router weight before the down projection has no {arch} build")
 
 
 def _before_down_weights(tokens, topk, zeros):
