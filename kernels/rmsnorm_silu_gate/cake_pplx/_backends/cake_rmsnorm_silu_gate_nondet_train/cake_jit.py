@@ -2874,14 +2874,19 @@ ROUTES: dict[str, dict[str, str]] = {
 # fit in L2 the step's later kernels read them from memory again and this
 # package's own forwards make the step faster, though the pipelined forward
 # alone is faster.  On sm_100a each band runs the program of the fastest
-# step.  On sm_103a the mid forward up to 240 rows per SM and the extra-long
-# forward up to 600 make the step 4 to 10 % faster than the pipelined
-# forward, which alone is at most 4.5 % faster; past 600 the pipelined
-# forward runs, but the mid forward from 6001 to 8192 rows per SM, where the
-# pipelined forward still launches a CTA per block.  One cut is not the
-# step's: on sm_107a the pipelined forward runs past 280 rows per SM, where
-# it is about 10 % faster alone than the extra-long forward and makes the
-# step at most about 3.5 % slower.  The tiny forwards end where beside a
+# step, but past 520 rows per SM the pipelined forward runs: up to 0.2.13 the
+# mid forward ran past 6500, where it made the forward alone 0.8 to 3.3 %
+# and the step up to 1.3 % slower than the deterministic package's (B200 and
+# GB200), and the pipelined forward ties both there (the plain forward makes
+# the step up to about 1 % faster past about 9500 rows per SM but is up to
+# about 1.5 % slower alone).  On sm_103a the mid forward up to 240 rows per SM
+# and the extra-long forward up to 600 make the step 4 to 10 % faster than
+# the pipelined forward, which alone is at most 4.5 % faster; past 600 the
+# pipelined forward runs, but the mid forward from 6001 to 8192 rows per SM,
+# where the pipelined forward still launches a CTA per block.  One cut is not
+# the step's: on sm_107a the pipelined forward runs past 280 rows per SM,
+# where it is about 10 % faster alone than the extra-long forward and makes
+# the step at most about 3.5 % slower.  The tiny forwards end where beside a
 # kernel holding 16 SMs they still end no later than the deterministic
 # package's forward as it routes the rows.  The 32-lane tiny forward (that
 # package's tiny row blocks: 32 lanes a row, one 4-row block per CTA) runs on
@@ -2904,8 +2909,7 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
         (160, "fwd_mid"),
         (400, "fwd_long"),
         (520, "fwd_xlong"),
-        (6500, "fwd_pipe"),
-        (None, "fwd_mid"),
+        (None, "fwd_pipe"),
     ),
     "sm_103a": (
         (12, "fwd_l32_tiny"),

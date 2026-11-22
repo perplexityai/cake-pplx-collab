@@ -104,6 +104,13 @@ the tiny forward's band (up to 36 rows per SM on `sm_100a` and `sm_103a` and
 of packed rows read rows past the broadcast token.  At every other row
 count such a call runs, as in 0.2.11, the program of packed rows, which
 reads the token stride.
+Version 0.2.14 changes the `y` bits of some calls: on `sm_100a` the
+forward of packed rows from 6501 rows per SM (up to `PACKED_ROWS` rows)
+runs the pipelined forward in the place of the mid forward, so the
+deterministic package's `y` bits where that package's gate does not flush
+to 0, from which the mid forward's `y` differed in some elements.  Every
+other call, and every call on `sm_103a` and `sm_107a`, runs the program and
+gives the bits of 0.2.13.
 A band runs a program whose `dw` may vary
 only where the band-selection measurement found the checkpointed training
 step (2 x forward + backward) about 3 % or more faster than with the
@@ -392,7 +399,13 @@ packed rows) it runs the band of other layouts.  The cuts
 follow the checkpointed training step (two forwards and the backward) on
 every architecture: the pipelined forward loads `x` and `z` with the L2
 `evict_first` policy, so where the rows fit in L2 it is faster alone but
-makes the step slower.  On `sm_103a` the mid forward up to 240 rows per SM
+makes the step slower.  On `sm_100a` the pipelined forward runs packed rows
+past 520 rows per SM: up to 0.2.13 the mid forward ran them past 6500, where
+it made the forward alone 0.8 % .. 3.3 % and the step up to 1.3 % slower
+than the deterministic package's (B200 and GB200), and the pipelined
+forward ties both there (the plain forward makes the step up to about 1 %
+faster past about 9500 rows per SM but is up to about 1.5 % slower alone).
+On `sm_103a` the mid forward up to 240 rows per SM
 and the extra-long forward up to 600 make the step 4 % .. 10 % faster than
 the pipelined forward, which alone is at most 4.5 % faster.  On `sm_107a`
 the pipelined forward runs packed rows past 280 rows per SM, where alone it
@@ -412,7 +425,7 @@ rows in L2, it is slower.  The bands:
 
 | architecture | packed rows (rows per SM) | other layouts (rows per SM) |
 | --- | --- | --- |
-| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, 521-6500 `pipe`, past 6500 `mid` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
+| `sm_100a` | 1-4 `l32_tiny`, 5-36 `tiny`, 37-85 `pipe`, 86-160 `mid`, 161-400 `long`, 401-520 `xlong`, past 520 `pipe` | 1-12 `short`, 13-140 `mid`, 141-400 `long`, 401-700 `xlong`, past 700 `fwd` |
 | `sm_103a` | 1-12 `l32_tiny`, 13-36 `tiny`, 37-240 `mid`, 241-600 `xlong`, 601-6000 `pipe`, 6001-8192 `mid`, past 8192 `pipe` | 1-12 `short`, 13-250 `mid`, 251-700 `xlong`, past 700 `fwd` |
 | `sm_107a` | 1-65 `tiny`, 66-175 `mid`, 176-280 `xlong`, past 280 `pipe_packed` | 1-59 `short`, 60-480 `mid`, past 480 `fwd` |
 

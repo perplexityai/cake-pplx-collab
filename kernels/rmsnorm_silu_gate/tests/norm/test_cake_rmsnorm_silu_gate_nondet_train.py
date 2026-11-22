@@ -3167,8 +3167,7 @@ FORWARD_BANDS = {
         (160, "fwd_mid"),
         (400, "fwd_long"),
         (520, "fwd_xlong"),
-        (6500, "fwd_pipe"),
-        (None, "fwd_mid"),
+        (None, "fwd_pipe"),
     ),
     "sm_103a": (
         (12, "fwd_l32_tiny"),
@@ -3444,10 +3443,10 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
     # the forward on sm_100a: packed rows the 32-lane tiny forward up to 4
     # rows per SM, the tiny forward up to 36, the pipelined forward up to 85,
     # the mid forward up to 160, the long forward up to 400, the extra-long
-    # forward up to 520, the pipelined forward up to 6500, the mid forward
-    # past it; other layouts the short forward up to 12 rows per SM, the mid
-    # forward up to 140, the long forward up to 400, the extra-long forward up
-    # to 700, the plain forward past it
+    # forward up to 520, the pipelined forward past it (the mid forward past
+    # 6500 up to 0.2.13); other layouts the short forward up to 12 rows per
+    # SM, the mid forward up to 140, the long forward up to 400, the
+    # extra-long forward up to 700, the plain forward past it
     routes = loader.ROUTES["sm_100a"]
     for rows, packed, strided in (
         (1, "fwd_l32_tiny", "fwd_short"),
@@ -3470,8 +3469,8 @@ def test_forward_and_backward_modules_run_in_their_bands(sm_count):
         (700 * sm_count, "fwd_pipe", "fwd_xlong"),
         (700 * sm_count + 1, "fwd_pipe", "fwd"),
         (6500 * sm_count, "fwd_pipe", "fwd"),
-        (6500 * sm_count + 1, "fwd_mid", "fwd"),
-        (PACKED_ROWS - 1, "fwd_mid", "fwd"),
+        (6500 * sm_count + 1, "fwd_pipe", "fwd"),
+        (PACKED_ROWS - 1, "fwd_pipe", "fwd"),
         (PACKED_ROWS, "fwd", "fwd"),
         (2**31 - 1, "fwd", "fwd"),
     ):
@@ -4121,7 +4120,7 @@ MID_FORWARD_GRIDS = [
     (976 * 148, 148, 5328),  # 9028 blocks, 6 waves
     (2400 * 148 - 1, 148, 11544),  # 22200 blocks, 13 waves
     (4097 * 48, 148, 6216),  # 12291 blocks, 7 waves of 888
-    (6500 * 148 + 1, 148, 30192),  # B200 last packed mid band: 34 waves
+    (6500 * 148 + 1, 148, 30192),  # 60126 blocks, 34 waves
     (36 * 152 + 1, 152, 343),  # GB300 first packed mid band's first row
     (240 * 152, 152, 1824),  # GB300 first packed mid band's last row: 2 waves
     (250 * 152, 152, 1824),  # GB300 strided mid band's last row: 2 waves
@@ -4180,10 +4179,11 @@ PIPE_FORWARD_GRIDS = [
     (36 * 148 + 1, 148, 334),  # B200 first pipelined band's first row
     (85 * 148, 148, 787),  # its last row: 787 blocks
     (520 * 148 + 1, 148, 4811),  # B200 second pipelined band's first row
-    (6500 * 148, 148, 60125),  # its last row: 60125 blocks
+    (6500 * 148, 148, 60125),  # 60125 blocks, a CTA a block
     (8192 * 148 - 1, 148, 75776),  # below 8192 rows per SM: a CTA a block
     (8192 * 148, 148, 38184),  # from 8192 rows per SM: 75776 blocks, 43 waves
     (32737 * 48, 148, 49728),  # 98211 blocks, 56 waves of 888
+    (2**24 - 1, 148, 524808),  # B200 second pipelined band's last row: 591 waves
     (600 * 152 + 1, 152, 5701),  # GB300 first pipelined band's first row
     (6000 * 152, 152, 57000),  # its last row: 57000 blocks
     (8192 * 152 + 1, 152, 39216),  # GB300 last band's first row: 43 waves

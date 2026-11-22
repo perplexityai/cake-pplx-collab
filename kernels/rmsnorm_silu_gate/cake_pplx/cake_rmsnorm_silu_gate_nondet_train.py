@@ -118,6 +118,13 @@ takes contiguous ``x`` and ``z`` only, so a ``ValueError``), and on SM107
 past 280 rows per SM its pipelined forward of packed rows read rows past the
 broadcast token.  At every other row count such a call runs, as in 0.2.11,
 the forward of packed rows, which reads the token stride.
+Version 0.2.14 changes the ``y`` bits of some calls: on SM100 the forward
+of packed rows from 6501 rows per SM (up to ``PACKED_ROWS`` rows) runs the
+pipelined forward (the deterministic package's forward program) in the place
+of the mid forward, so the deterministic package's ``y`` bits where that
+package's gate does not flush to 0, from which the mid forward's ``y``
+differed in some elements.  Every other call, and every call on SM103 and
+SM107, runs the program and gives the bits of 0.2.13.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)

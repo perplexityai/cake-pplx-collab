@@ -108,6 +108,13 @@ sm_100a and sm_103a and 65 on sm_107a: the tiny forward takes contiguous
 per SM its pipelined forward of packed rows read rows past the broadcast
 token.  At every other row count such a call runs, as in 0.2.11, the
 program of packed rows, which reads the token stride.
+Version 0.2.14 changes the ``y`` bits of some calls: on sm_100a the
+forward of packed rows from 6501 rows per SM (up to ``PACKED_ROWS`` rows)
+runs the pipelined forward in the place of the mid forward, so the
+deterministic package's ``y`` bits where that package's gate does not flush
+to 0, from which the mid forward's ``y`` differed in some elements.  Every
+other call, and every call on sm_103a and sm_107a, runs the program and
+gives the bits of 0.2.13.
 A band runs a
 backward whose weight gradient may vary only where the band-selection
 measurement found the checkpointed training step (2 x forward + backward)
@@ -357,7 +364,7 @@ Host design (the input layout rules are the deterministic package's):
   its program of packed rows).  The bands past the tiny forwards' (packed
   rows): on sm_100a the pipelined forward up to 85 rows per SM, the mid
   forward up to 160, the long forward up to 400, the extra-long forward up to
-  520, the pipelined forward up to 6500 and the mid forward past it; on
+  520 and the pipelined forward past it; on
   sm_103a the mid forward up to 240, the extra-long forward up to 600, the
   pipelined forward up to 6000, the mid forward up to 8192 and the pipelined
   forward past it; on sm_107a the mid forward up to 175, the extra-long

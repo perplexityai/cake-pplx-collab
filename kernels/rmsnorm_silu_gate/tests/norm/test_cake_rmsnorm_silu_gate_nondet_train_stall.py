@@ -39,8 +39,7 @@ extra-long forward launch whole waves of 3 CTAs per SM that each walk at most
 6 blocks of 32 rows.  Their bands past the tiny forwards' or the short
 forward's: packed rows on SM100 run the pipelined forward up to 85 rows per
 SM, the mid forward up to 160, the long forward up to 400, the extra-long
-forward up to 520, the pipelined forward up to 6500 and the mid forward past
-it; on SM103 the mid
+forward up to 520 and the pipelined forward past it; on SM103 the mid
 forward up to 240, the extra-long forward up to 600, the pipelined forward up
 to 6000, the mid forward up to 8192 and the pipelined forward past it; on
 SM107 the mid forward up to 175, the extra-long forward up to 280 and the
