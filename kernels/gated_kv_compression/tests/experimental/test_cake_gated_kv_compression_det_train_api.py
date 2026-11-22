@@ -871,12 +871,16 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         "pair_table_scan8",
         "pair_table_totals1",
         "pair_table_scan1",
+        "fwd_unfused_r2",
+        "fwd_unfused_ahead",
     ]
     assert sorted(entry["name"] for entry in entries) == sorted(
         f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in roles
     )
     assert jit.role_record("fwd", "sm_107a") == "fwd_sm_107a"
     assert jit.role_record("fwd_unfused", "sm_107a") == "fwd_unfused_sm_107a"
+    assert jit.role_record("fwd_unfused_r2", "sm_107a") == "fwd_unfused_r2_sm_107a"
+    assert jit.role_record("fwd_unfused_ahead", "sm_107a") == "fwd_unfused_ahead_sm_107a"
     assert jit.role_record("bwd", "sm_107a") == "bwd_sm_107a"
     assert jit.role_record("bwd_small", "sm_107a") == "bwd_small_sm_107a"
     assert jit.bwd_small_docs("sm_107a") == 125

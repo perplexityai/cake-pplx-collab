@@ -117,6 +117,17 @@ The roles, in launch order:
   chunk)`` int32 words, then each chunk's scan).  A pair table of chunks has
   the ``rows`` rule over its ``S`` documents with one lane a row and
   ``items`` rows a lane group, a chunk a CTA.
+* the forward bodies of large packs, the bytes of ``fwd_unfused`` by other
+  programs, two roles of one record an architecture each, which no call
+  launches yet: ``fwd_unfused_r2`` (``fwd_unfused_r2`` on ``sm_100a``,
+  ``fwd_unfused_r2_sm_103a`` on ``sm_103a``, one program, and
+  ``fwd_unfused_r2_sm_107a`` on ``sm_107a``), the schedule of
+  ``fwd_unfused`` with two rows a lane group, and ``fwd_unfused_ahead``
+  (``fwd_unfused_ahead``, ``fwd_unfused_ahead_sm_103a``,
+  ``fwd_unfused_ahead_sm_107a``), that schedule issuing the row searches
+  and loads of a CTA's next block before the arithmetic and the store of
+  its block.  Each has the ``rows_capped`` rule with the ``ctas_per_sm`` of
+  its own program.
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
@@ -126,7 +137,8 @@ multiprocessor count: the host never reads ``cu_seqlens`` or ``cu_pairs``.
 block: ``one_cta`` is ``(1, 1, 1)``; ``rows`` covers ``rows`` rows with
 ``block_x // lanes_per_row * rows_per_lane_group`` rows per CTA
 (``lanes_per_row`` threads share one 512-wide row, ``rows_per_lane_group``
-rows per group of them); ``rows_capped`` (the ``fwd_unfused`` records) is
+rows per group of them); ``rows_capped`` (the ``fwd_unfused`` records and
+the forward bodies of large packs) is
 ``rows`` but for a launch of ``capped_min_docs <= S <= capped_max_docs``
 documents (:func:`capped_leaves`), whose grid is at most ``ctas_per_sm``
 CTAs a multiprocessor (:func:`sm_count`): its CTAs stride over the row
@@ -150,7 +162,8 @@ MANIFEST = "build.json"
 # and ``fwd_unfused`` for more, or the backward, ``bwd_warp`` for more than ``bwd_warp_docs`` documents and for the
 # ``bwd_warp_min_docs`` to ``bwd_warp_max_docs`` documents of its record where it has them, else ``bwd`` for more
 # than ``bwd_small_docs`` and at most ``bwd_max_docs`` documents and ``bwd_small`` for the others), then the
-# large-pack pair tables, which no call launches yet (``pair_table_role`` keeps the two pair tables above).  Every
+# large-pack pair tables and the forward bodies of large packs, which no call launches yet (``pair_table_role`` keeps
+# the two pair tables above, and the forward launches ``fwd`` or ``fwd_unfused``).  Every
 # role is served on every architecture of ROLE_ARCHES (of ARCHES for a role it does not name) by exactly one record
 # of MODULES (``role_record``).
 ROLES = (
@@ -169,6 +182,8 @@ ROLES = (
     "pair_table_scan8",
     "pair_table_totals1",
     "pair_table_scan1",
+    "fwd_unfused_r2",
+    "fwd_unfused_ahead",
 )
 # Role -> the architectures it is served on, for a role not served on every architecture: none, every role is served
 # on the three.
@@ -214,8 +229,8 @@ MAX_TOKENS = INT32_MAX
 # the ``bwd_warp`` records (the most documents a backward launch runs ``bwd`` or ``bwd_small`` for), the
 # ``bwd_warp_min_docs`` and ``bwd_warp_max_docs`` of the ``bwd_warp_sm_103a`` record (the documents below that a
 # backward launch also runs ``bwd_warp`` for) and the ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm`` of
-# the ``fwd_unfused`` records (the documents a forward launch caps their grid for, and the CTAs a multiprocessor it
-# keeps) are rewritten by the generator; every other field is host plan.
+# the ``fwd_unfused`` records and of the forward bodies of large packs (the documents a forward launch caps their grid
+# for, and the CTAs a multiprocessor it keeps) are rewritten by the generator; every other field is host plan.
 MODULES: dict[str, dict[str, Any]] = {
     "pair_table": {
         "arches": ["sm_100a", "sm_103a", "sm_107a"],
@@ -833,6 +848,204 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_c82665f54344c397fa6e",
         "role": "pair_table_scan1",
+    },
+    "fwd_unfused_r2": {
+        "arches": ["sm_100a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 5,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 2},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+        "role": "fwd_unfused_r2",
+    },
+    "fwd_unfused_r2_sm_103a": {
+        "arches": ["sm_103a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 5,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 2},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+        "role": "fwd_unfused_r2",
+    },
+    "fwd_unfused_r2_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 8193,
+        "ctas_per_sm": 3,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 64, "rows_per_lane_group": 2},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_017e97929579103c9388",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_017e97929579103c9388",
+        "role": "fwd_unfused_r2",
+    },
+    "fwd_unfused_ahead": {
+        "arches": ["sm_100a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 4,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+        "role": "fwd_unfused_ahead",
+    },
+    "fwd_unfused_ahead_sm_103a": {
+        "arches": ["sm_103a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 2048,
+        "ctas_per_sm": 4,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 128, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+        "role": "fwd_unfused_ahead",
+    },
+    "fwd_unfused_ahead_sm_107a": {
+        "arches": ["sm_107a"],
+        "arg_plan": [
+            ["buffer", "c"],
+            ["buffer", "z"],
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "out"],
+            ["parameter", "num_docs"],
+            ["parameter", "G"],
+            ["parameter", "c_ld"],
+            ["parameter", "z_ld"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "capped_max_docs": 16777216,
+        "capped_min_docs": 8193,
+        "ctas_per_sm": 3,
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows_capped", "lanes_per_row": 64, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_9828d3eb760f78f3e9cf",
+        "launch": {
+            "block": (256, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 0,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_9828d3eb760f78f3e9cf",
+        "role": "fwd_unfused_ahead",
     },
 }
 

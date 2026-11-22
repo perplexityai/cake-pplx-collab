@@ -24,7 +24,9 @@ two backward roles, each served on each of the three architectures by exactly on
 the forward by ``fwd`` on sm_100a / sm_103a and ``fwd_sm_107a`` on sm_107a, each building the pair table of up to 256
 documents, and by ``fwd_unfused`` / ``fwd_unfused_sm_107a`` (the warp row search), the backward by ``bwd`` /
 ``bwd_sm_107a`` (two-level search), ``bwd_small`` / ``bwd_small_sm_107a`` (one-level search) and ``bwd_warp`` /
-``bwd_warp_sm_103a`` / ``bwd_warp_sm_107a`` (the warp row search, one program); the launch facts,
+``bwd_warp_sm_103a`` / ``bwd_warp_sm_107a`` (the warp row search, one program), and the forward bodies of large packs
+that no call launches, ``fwd_unfused_r2`` and ``fwd_unfused_ahead``, with the lanes and arguments of ``fwd_unfused``;
+the launch facts,
 the kernel parameters each record takes), the record each role launches on each architecture, the pair-table role of
 512 and 513 documents, the forward role of 256, 257, 512, 513 and more documents, the backward role on either side of
 each architecture's bounds of documents, the launch grids (every row covered, the pair tables on one CTA, the unfused
@@ -45,7 +47,8 @@ forward (``out``) and the backward (``dC``, ``dZ``, the tail rows exactly +0.0) 
 column halves of one ``[T, 1024]`` tensor (the gradients written into the halves of one ``[T, 1024]`` buffer), on
 small packs with empty and one-token documents, close pairs, gate extremes, many small odd documents and the two
 performance packs; the forward rows past the pair count stored as +0.0, and a forward ``G`` below the pair count
-giving the first ``G`` rows.  Then the documented invariances, bit for bit: repeated calls, the two layouts, one call
+giving the first ``G`` rows; the forward bodies of large packs giving the bits of ``fwd_unfused`` below and in their
+capped range of documents.  Then the documented invariances, bit for bit: repeated calls, the two layouts, one call
 with four different row strides (judged too), a ``G`` past the pair count in the explicit and autograd backward, each
 document alone against the pack, the tail tokens' values, and the records each call launches (no pair table before a
 forward of at most 256 documents, which runs ``fwd``; ``fwd_unfused`` after the pair table for more; the small pair
@@ -114,13 +117,16 @@ ROLES = (
     "pair_table_scan8",
     "pair_table_totals1",
     "pair_table_scan1",
+    "fwd_unfused_r2",
+    "fwd_unfused_ahead",
 )
 # The architectures of a role not served on all three: none, every role is served on the three.
 ROLE_ARCHES: dict[str, tuple[str, ...]] = {}
 # Record -> (its role, the architectures it serves, the lanes of a 512-wide row): both forwards ship 128-bit lanes
 # (4 FP32 channels) on sm_100a / sm_103a and 256-bit lanes (8 channels) on sm_107a; the backward 256-bit lanes, with
 # the two-level search in ``bwd``, the one-level search in ``bwd_small`` and the warp search in ``bwd_warp``; the
-# large-pack pair tables one record each on the three, of one lane a document when they run a CTA a chunk.
+# large-pack pair tables one record each on the three, of one lane a document when they run a CTA a chunk; the forward
+# bodies of large packs one record each on the three, with the lanes of ``fwd_unfused``.
 RECORDS = {
     "pair_table": ("pair_table", ARCHES, None),
     "pair_table_small": ("pair_table_small", ARCHES, None),
@@ -143,6 +149,12 @@ RECORDS = {
     "pair_table_scan8": ("pair_table_scan8", ARCHES, 1),
     "pair_table_totals1": ("pair_table_totals1", ARCHES, 1),
     "pair_table_scan1": ("pair_table_scan1", ARCHES, 1),
+    "fwd_unfused_r2": ("fwd_unfused_r2", ("sm_100a",), 128),
+    "fwd_unfused_r2_sm_103a": ("fwd_unfused_r2", ("sm_103a",), 128),
+    "fwd_unfused_r2_sm_107a": ("fwd_unfused_r2", ("sm_107a",), 64),
+    "fwd_unfused_ahead": ("fwd_unfused_ahead", ("sm_100a",), 128),
+    "fwd_unfused_ahead_sm_103a": ("fwd_unfused_ahead", ("sm_103a",), 128),
+    "fwd_unfused_ahead_sm_107a": ("fwd_unfused_ahead", ("sm_107a",), 64),
 }
 # The large-pack pair tables, which no call launches yet -> the documents of a CTA (``None``: one CTA): 1024 threads of
 # 32 and of 40 documents on one CTA, a CTA a chunk of 8192 (1024 threads of 8) and of 1024 documents otherwise.
@@ -177,8 +189,19 @@ BWD_WARP_RANGES = {"sm_100a": None, "sm_103a": (15, 32), "sm_107a": None}
 BWD_WARP_REGIONS = {arch: (*(BWD_WARP_RANGES[arch] or (None, None)), BWD_WARP_DOCS[arch]) for arch in ARCHES}
 # Record -> its capped grid (the rendered ``capped_min_docs``, ``capped_max_docs`` and ``ctas_per_sm``, what
 # :func:`cake_jit.capped_leaves` reads): a forward of 2048 to 16385 documents on sm_100a / sm_103a and of 8193 to 16385
-# on sm_107a runs the unfused forward on at most 6 and 4 CTAs a multiprocessor; no other record has one.
-CAPPED = {"fwd_unfused": (2048, 16385, 6), "fwd_unfused_sm_107a": (8193, 16385, 4)}
+# on sm_107a runs the unfused forward on at most 6 and 4 CTAs a multiprocessor; the forward bodies of large packs cap
+# their grid from those lower bounds up to the most documents of a pack, on the CTAs a multiprocessor of their own
+# programs (5 and 4 on sm_100a / sm_103a, 3 on sm_107a); no other record has one.
+CAPPED = {
+    "fwd_unfused": (2048, 16385, 6),
+    "fwd_unfused_sm_107a": (8193, 16385, 4),
+    "fwd_unfused_r2": (2048, 1 << 24, 5),
+    "fwd_unfused_r2_sm_103a": (2048, 1 << 24, 5),
+    "fwd_unfused_r2_sm_107a": (8193, 1 << 24, 3),
+    "fwd_unfused_ahead": (2048, 1 << 24, 4),
+    "fwd_unfused_ahead_sm_103a": (2048, 1 << 24, 4),
+    "fwd_unfused_ahead_sm_107a": (8193, 1 << 24, 3),
+}
 # Multiprocessors of a B200 (sm_100a), a GB300 (sm_103a) and a VR200 (sm_107a), as the capped-grid tests stub them.
 SMS = {"sm_100a": 148, "sm_103a": 152, "sm_107a": 212}
 # Backward packs on either side of the documents bounds and of the forward's fused bound (``FUSE_DOCS``, 256).
@@ -232,6 +255,20 @@ UNFUSED_LIBRARIES = {
     "fwd_unfused": "cake_gated_kv_compression_det_train_2ac79e6766ca09bf2903",
     "fwd_unfused_sm_107a": "cake_gated_kv_compression_det_train_64aae35cfb0e308d103a",
 }
+# The forward bodies of large packs, which no call launches yet: the warp search with two rows a lane group
+# (``fwd_unfused_r2``) and with the next block's searches and loads ahead (``fwd_unfused_ahead``), one program on
+# sm_100a and sm_103a and one on sm_107a each.
+FW_ROLES = ("fwd_unfused_r2", "fwd_unfused_ahead")
+FW_LIBRARIES = {
+    "fwd_unfused_r2": "cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+    "fwd_unfused_r2_sm_103a": "cake_gated_kv_compression_det_train_105b10bb60b65b062334",
+    "fwd_unfused_r2_sm_107a": "cake_gated_kv_compression_det_train_017e97929579103c9388",
+    "fwd_unfused_ahead": "cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+    "fwd_unfused_ahead_sm_103a": "cake_gated_kv_compression_det_train_ba739036f0660d4cd1b6",
+    "fwd_unfused_ahead_sm_107a": "cake_gated_kv_compression_det_train_9828d3eb760f78f3e9cf",
+}
+# The rows a lane group of each forward body of large packs.
+FW_ROWS = {"fwd_unfused_r2": 2, "fwd_unfused_ahead": 1}
 # The records of each grid kind.
 ROW_RECORDS = tuple(name for name in RECORDS if not name.startswith("pair_table"))
 # The kernel parameters of each role (the argument plan without the grid), in any order: the host passes them by name.
@@ -240,6 +277,8 @@ PARAMETERS = {
     "pair_table_small": {"cu_seqlens", "cu_pairs", "num_docs"},
     "fwd": {"c", "z", "cu_seqlens", "cu_pairs", "out", "num_docs", "G", "c_ld", "z_ld"},
     "fwd_unfused": {"c", "z", "cu_seqlens", "cu_pairs", "out", "num_docs", "G", "c_ld", "z_ld"},
+    "fwd_unfused_r2": {"c", "z", "cu_seqlens", "cu_pairs", "out", "num_docs", "G", "c_ld", "z_ld"},
+    "fwd_unfused_ahead": {"c", "z", "cu_seqlens", "cu_pairs", "out", "num_docs", "G", "c_ld", "z_ld"},
     "bwd": {
         "dout",
         "c",
@@ -382,8 +421,9 @@ def test_registry_records_are_well_formed() -> None:
         assert cake_jit.MODULES[name]["grid_rule"]["kind"] == ("rows_capped" if name in CAPPED else "rows"), name
     if rendered:
         # one program a record, but the three backward programs, two each the program of two records and the warp
-        # search the program of three, on disjoint architectures
-        assert len(libraries) == len(cake_jit.MODULES) - 4
+        # search the program of three, and the two forward bodies of large packs of sm_100a / sm_103a, each the program
+        # of two records, on disjoint architectures
+        assert len(libraries) == len(cake_jit.MODULES) - 6
         for name, library in BACKWARD_LIBRARIES.items():
             assert cake_jit.MODULES[name]["library"] == library, name
 
@@ -458,6 +498,26 @@ def test_the_unfused_forward_records_are_the_warp_search_programs() -> None:
         assert rec["arg_plan"] == fused["arg_plan"], name
         assert rec["launch"]["dynamic_smem_bytes"] == 0, name
         assert rec["library"] != fused["library"], name
+
+
+def test_the_forward_bodies_of_large_packs_are_unfused_forward_programs() -> None:
+    """``fwd_unfused_r2`` and ``fwd_unfused_ahead`` are one record an architecture, with the lanes, arguments and
+    launch of the ``fwd_unfused`` record of that architecture, their own rows a lane group and a capped grid
+    (``rows_capped``); the records of sm_100a and sm_103a are one program, other than ``fwd_unfused``'s.  No call
+    launches them: the forward's role is ``fwd`` or ``fwd_unfused``."""
+    for role in FW_ROLES:
+        assert [cake_jit.role_record(role, arch) for arch in ARCHES] == [role, f"{role}_sm_103a", f"{role}_sm_107a"]
+        for arch in ARCHES:
+            name, unfused = cake_jit.role_record(role, arch), cake_jit.role_record("fwd_unfused", arch)
+            rec, base = cake_jit.MODULES[name], cake_jit.MODULES[unfused]
+            assert rec["arg_plan"] == base["arg_plan"], name
+            assert rec["grid_rule"] == {**base["grid_rule"], "rows_per_lane_group": FW_ROWS[role]}, name
+            assert cake_jit.rows_per_cta(name) == cake_jit.rows_per_cta(unfused) * FW_ROWS[role], name
+            assert rec["launch"]["dynamic_smem_bytes"] == 0 and rec.get("fuse_docs") is None, name
+            if (PACKAGE_DIR / "build.json").is_file():
+                assert rec["launch"] == base["launch"], name
+                assert rec["library"] == FW_LIBRARIES[name] != base["library"], name
+                assert rec["kernel_symbol"] == f"kernel_{rec['library']}", name
 
 
 def test_the_small_pair_table_serves_at_most_512_documents() -> None:
@@ -1511,6 +1571,34 @@ def test_forward_rows_past_the_pair_count_are_zero(device) -> None:
         cake_backend.launch_fwd(c=x.c, z=x.z, cu_seqlens=x.cu, cu_pairs=table, out=wide, **_lds(x))
         assert_bitwise(wide[: pack.G], exact, f"{pack.id}: the rows below the pair count")
         assert_zero_rows(wide, range(pack.G, pack.G + 37), f"{pack.id}: the rows past the pair count")
+
+
+# Packs of more documents than ``fuse_docs`` for the forward bodies of large packs: many small odd documents (300, below
+# every capped range) and packs of 2048 and 8193 documents, in the capped range of sm_100a / sm_103a and of all three,
+# whose capped grids hold fewer CTAs than their rows need.
+FW_PACKS = (
+    Pack((1, 3, 5, 7) * 75, "small-odd-S300"),
+    Pack((2, 5, 1, 4) * 512, "T6144-S2048"),
+    Pack((2, 3, 1, 4) * 2048 + (5,), "T20485-S8193"),
+)
+
+
+@pytest.mark.parametrize("layout", LAYOUTS)
+def test_the_forward_bodies_of_large_packs_give_the_bits_of_the_unfused_forward(layout, device) -> None:
+    """``fwd_unfused_r2`` and ``fwd_unfused_ahead`` (``out`` NaN first) give the bits of ``fwd_unfused`` on the same
+    pair table, with ``G`` the pair count, above it and below it."""
+    for pack in FW_PACKS:
+        x = make_inputs(pack, seed=29, device=device, layout=layout)
+        table = pair_table_of(pack.lengths, device)
+        for rows in (pack.G, pack.G + 37, pack.G // 2 + 1):
+            want = nan_like_rows(rows, torch.bfloat16, device)
+            cake_backend.launch_fwd(
+                c=x.c, z=x.z, cu_seqlens=x.cu, cu_pairs=table, out=want, role="fwd_unfused", **_lds(x)
+            )
+            for role in FW_ROLES:
+                got = nan_like_rows(rows, torch.bfloat16, device)
+                cake_backend.launch_fwd(c=x.c, z=x.z, cu_seqlens=x.cu, cu_pairs=table, out=got, role=role, **_lds(x))
+                assert_bitwise(got, want, f"{pack.id} {layout} G={rows}: {role} against fwd_unfused")
 
 
 def test_forward_with_fewer_rows_than_pairs_gives_the_first_rows(device) -> None:
