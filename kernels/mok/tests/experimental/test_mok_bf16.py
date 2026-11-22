@@ -588,7 +588,7 @@ def test_build_schedule_plan_matches_the_unplanned_launches(count):
     ]
     plan = workspace.storage.launch_plans[key]
     assert len([k for k in workspace.storage.launch_plans if k[0] == "schedule"]) == 1
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = fields(
@@ -644,7 +644,7 @@ def test_build_schedule_plan_built_under_inference_mode():
             functional.build_schedule(workspace, config, ids, num_local_experts=experts), experts
         )
     assert workspace.storage.launch_plans[key] is plan
-    rank, token, total, counts, layout = functional._schedule_launches(
+    rank, token, total, counts, layout, _ = functional._schedule_launches(
         workspace.storage, config, ids, count
     )
     unplanned = _schedule_fields(
