@@ -101,7 +101,9 @@ run-to-run repeats, the same bits with the pooled segment maps poisoned (NaN map
 what the call wrote), and a CUDA graph capture with the eager bits.  The two-CTA form of those maps
 (``dhu_tc2_dvl32_gm2``, grid z 2, where that grid fits one wave of the SMs, :func:`cake_chain.split_map_launch`, switch
 ``ADJOINT_MAP_SPLIT_ARCHS``): without a device its record and the launch rule (gm2 always with z 2, gm with z 1); on a
-device each map launch's grid against the rule and the one-CTA form's bits.
+device each map launch's grid against the rule and the one-CTA form's bits.  On ``sm_107a`` a grid that fits one wave
+keeps the pre-scan (switch ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS``): without a device the launch rule; on a device the
+pre-scan's launches and bits where the rule keeps it; the tests of the maps' bits turn the switch off.
 
 Accuracy has no tolerance.  Each judged output is measured against the FP64 recurrence (:func:`_reference`) beside
 the naive BF16 recurrence on the same inputs (``token_recurrence`` of ``test_helpers/cake_gdn_naive.py``) over the
@@ -698,10 +700,12 @@ def _tc2(heads) -> str:
     return cake_chain.dhu_tc2_stage(_current_arch(), *heads)
 
 
-def _split_maps(heads) -> str:
+def _split_maps(heads, seq_lens=(), segment_chunks: int = 0) -> str:
     """The stage that forms the segment maps of a split pass 2 of ``heads`` on the tcgen05 scan on this device
     (:func:`cake_chain.split_map_stage`): dhu_tc2_dvl32_gm for a value-head group of three on dhu_tc2_dvl32 on the
-    architectures of ``ADJOINT_MAP_ARCHS``, where the registry must deliver it; else the fused pre-scan."""
+    architectures of ``ADJOINT_MAP_ARCHS``, where the registry must deliver it; else the fused pre-scan.  Given a
+    layout (``seq_lens``) and its segment length, the fused pre-scan also where :func:`cake_chain.split_map_launch`
+    keeps it for the layout's map entries (every segment but each sequence's first) on this device's SMs."""
     arch = _current_arch()
     stage = cake_chain.split_map_stage(arch, *heads)
     if (
@@ -710,6 +714,15 @@ def _split_maps(heads) -> str:
         and _tc2(heads) == "dhu_tc2_dvl32"
     ):
         assert stage == "dhu_tc2_dvl32_gm", (arch, heads, stage)
+    if stage == "dhu_tc2_dvl32_gm" and segment_chunks > 0:
+        chunks = [-(-n // cake_chain.CHUNK) for n in seq_lens]
+        entries = sum(
+            len(cake_chain.segment_bounds(c, segment_chunks)) - 2 for c in chunks
+        )
+        props = torch.cuda.get_device_properties(torch.cuda.current_device())
+        sms = props.multi_processor_count
+        if cake_chain.split_map_launch(arch, entries, heads[1], sms) is None:
+            return "dhu_pre_dvl_r64k1"
     return stage
 
 
@@ -1305,6 +1318,7 @@ def test_the_split_map_rule(monkeypatch) -> None:
     assert cake_chain.SPLIT_WARM == 16
     for name in (
         "ADJOINT_MAP_ARCHS",
+        "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS",
         "ADJOINT_MAP_SPLIT_ARCHS",
         "ADJOINT_MAP_SPLIT_STAGE",
         "ADJOINT_MAP_STAGE",
@@ -1340,37 +1354,51 @@ def test_the_split_map_launch_rule(monkeypatch) -> None:
     # the gm maps of entries x HV run on two CTAs per (entry, value head), grid z 2 (dhu_tc2_dvl32_gm2), where those
     # 2 x entries x HV CTAs fit one wave of the SMs on the architectures of ADJOINT_MAP_SPLIT_ARCHS (every architecture
     # of the package); else on one, grid z 1 (dhu_tc2_dvl32_gm): also with the switch off or a registry without the
-    # record.  Every answer pairs gm2 with z 2 and gm with z 1; the entry bound is cached per (switch, architecture,
-    # HV, SMs), so a call reads no registry and no environment
+    # record.  On the architectures of ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS (sm_107a) a grid that fits one wave launches
+    # no map (None: the fused pre-scan forms them), whatever the other switch and the registry; off, the rule above.
+    # Every answer pairs gm2 with z 2 and gm with z 1; the entry bound is cached per (switches, architecture, HV, SMs),
+    # so a call reads no registry and no environment
     assert set(cake_chain.ADJOINT_MAP_SPLIT_ARCHS) == set(ARCHES)
+    prescan = cake_chain.ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS
+    assert prescan == ("sm_107a",)
     launch = cake_chain.split_map_launch
     two, one = ("dhu_tc2_dvl32_gm2", 2), ("dhu_tc2_dvl32_gm", 1)
     cake_chain._split_map_entries.cache_clear()
     monkeypatch.setattr(cake_chain, "_available", lambda _stage, _arch: True)
     for arch in ARCHES:
+        fit = None if arch in prescan else two
         for sms in (148, 152, 212):
             for hv in (3, 6, 12, 24, 48, 96):
                 for entries in range(1, 40):
                     got = launch(arch, entries, hv, sms)
-                    want = two if 2 * entries * hv <= sms else one
+                    want = fit if 2 * entries * hv <= sms else one
                     assert got == want, (arch, sms, hv, entries, got)
-        assert launch(arch, 12, 6, 148) == two and launch(arch, 13, 6, 148) == one
-        assert launch(arch, 17, 6, 212) == two and launch(arch, 18, 6, 212) == one
+        assert launch(arch, 12, 6, 148) == fit and launch(arch, 13, 6, 148) == one
+        assert launch(arch, 17, 6, 212) == fit and launch(arch, 18, 6, 212) == one
         with monkeypatch.context() as m:
             m.setattr(cake_chain, "ADJOINT_MAP_SPLIT_ARCHS", ())
-            assert all(launch(arch, n, 6, 212) == one for n in (1, 7, 17))
+            gm_fit = None if arch in prescan else one
+            assert all(launch(arch, n, 6, 212) == gm_fit for n in (1, 7, 17))
+            assert launch(arch, 18, 6, 212) == one
+        with monkeypatch.context() as m:
+            m.setattr(cake_chain, "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS", ())
+            assert launch(arch, 17, 6, 212) == two and launch(arch, 18, 6, 212) == one
+            assert launch(arch, 30, 3, 212) == two and launch(arch, 36, 3, 212) == one
     cake_chain._split_map_entries.cache_clear()
     with monkeypatch.context() as m:
         m.setattr(cake_chain, "_available", lambda stage, _arch: stage != two[0])
-        assert all(launch(arch, 1, 3, 212) == one for arch in ARCHES)
+        for arch in ARCHES:
+            assert launch(arch, 1, 3, 212) == (None if arch in prescan else one)
     cake_chain._split_map_entries.cache_clear()
     calls = []
     with monkeypatch.context() as m:
         m.setattr(cake_chain, "_available", lambda *key: calls.append(key) or True)
         for _ in range(3):
-            assert launch(ARCHES[0], 7, 6, 148) == two
-            assert launch(ARCHES[0], 30, 6, 148) == one
-        assert calls == [(two[0], ARCHES[0])], calls
+            for arch in ARCHES:
+                fit = None if arch in prescan else two
+                assert launch(arch, 7, 6, 148) == fit
+                assert launch(arch, 30, 6, 148) == one
+        assert calls == [(two[0], a) for a in ARCHES if a not in prescan], calls
     cake_chain._split_map_entries.cache_clear()
 
 
@@ -2884,18 +2912,18 @@ def test_table_routes_split_tc_on_dhu_tc2_dvl32_naive_tier_verdict(
     device, monkeypatch, record_property
 ) -> None:
     # the split-64x1-tc pins with DVL32_ARCHS on: the host-built table runs pass 2 on dhu_tc2_dvl32 (after the segment
-    # maps of dhu_tc2_dvl32_gm, split_map_stage: no pre-scan, no dv_local stage), the device-built one dv_local + the
-    # register pass 2.  o keeps one set of bits; each route repeats bitwise and is judged ("host.*", "device.*"; the
-    # 640-token sequence splits into two segments)
+    # maps of dhu_tc2_dvl32_gm, split_map_stage, or on sm_107a, where their grid fits one wave, the fused pre-scan:
+    # _split_maps; no dv_local stage), the device-built one dv_local + the register pass 2.  o keeps one set of bits;
+    # each route repeats bitwise and is judged ("host.*", "device.*"; the 640-token sequence splits into two segments)
     arch = _current_arch()
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
     heads = (2, 6)
     assert _tc2(heads) == "dhu_tc2_dvl32"
-    maps = _split_maps(heads)
-    other_maps = tuple(m for m in SPLIT_MAPS if m != maps)
     pins = {"scan_config": (64, 1), "segment_chunks": 6, "dhu_scan": "tc"}
     seq_lens = (300, 77, 640)
+    maps = _split_maps(heads, seq_lens, pins["segment_chunks"])
+    other_maps = tuple(m for m in SPLIT_MAPS if m != maps)
     stages = _record_launches(monkeypatch)
 
     def draw(j, s):
@@ -3345,7 +3373,8 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     # the same plan with the FP32 dv_local adjoint (dhu_tc2_dvl32 rounds dv2 once; a value-head group of three): o and
     # the final state keep the register pass 2's bits; both pass 2s are judged ("tc.*", "reg.*"; the 640-token
     # sequence splits into two segments).  The tc form's segment maps come from dhu_tc2_dvl32_gm (split_map_stage; the
-    # suite's gates end every map within its first chunks); both runs take the round-once tail
+    # suite's gates end every map within its first chunks), or on sm_107a, where their grid fits one wave, from the
+    # fused pre-scan (_split_maps); both runs take the round-once tail
     arch = _current_arch()
     if arch not in cake_chain.DVL32_ARCHS:
         pytest.skip(f"{arch} runs the adjoint without the FP32 dv_local values")
@@ -3354,7 +3383,7 @@ def test_split_pass2_on_dhu_tc2_dvl32_and_the_register_pass2_naive_tier_verdict(
     names = OUTPUT_NAMES + ("final_state", "dh0")
     assert _tc2(heads) == "dhu_tc2_dvl32"
     tail = _device_tail(heads, beta_dtype, seq_lens)
-    maps = _split_maps(heads)
+    maps = _split_maps(heads, seq_lens, 6)
     tc_stages = (maps, "dhu_tc2_dvl32")
     reg_stages = ("dv_local", "dhu_pre_r64k1", "dhu_r64k1")
     tc_other = reg_stages + tuple(m for m in SPLIT_MAPS if m != maps)
@@ -3445,14 +3474,16 @@ def _poison_segment_maps(device) -> tuple[int, int]:
 def test_split_maps_under_slow_gates_naive_tier_verdict(
     cell, device, monkeypatch, record_property
 ) -> None:
-    # The cell's split pass 2 on dhu_tc2_dvl32 forms its segment maps on dhu_tc2_dvl32_gm (no pre-scan) and repeats
-    # bitwise (SLOW_MAP_REPEATS more calls, the first uncached).  With the pooled seg_state poisoned (NaN) and every
-    # seg_flag set to 1 after the first call, the call gives the same bits: the stitch reads only the maps and flags
-    # that dhu_tc2_dvl32_gm wrote (never a sequence's first map, never the M half of a bounded map).  With
-    # ADJOINT_MAP_ARCHS off the fused pre-scan forms the maps: o, dq and the final state keep their bits, and on the
-    # first draw a gradient of dk / dv / dg / dbeta takes other bits (the maps carry state).  Both forms are judged
-    # ("maps.*", "prescan.*")
+    # The cell's split pass 2 on dhu_tc2_dvl32 forms its segment maps on dhu_tc2_dvl32_gm (no pre-scan; with
+    # ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS off on every grid) and repeats bitwise (SLOW_MAP_REPEATS more calls, the first
+    # uncached).  With the pooled seg_state poisoned (NaN) and every seg_flag set to 1 after the first call, the call
+    # gives the same bits: the stitch reads only the maps and flags that dhu_tc2_dvl32_gm wrote (never a sequence's
+    # first map, never the M half of a bounded map).  With ADJOINT_MAP_ARCHS off the fused pre-scan forms the maps: o,
+    # dq and the final state keep their bits, and on the first draw a gradient of dk / dv / dg / dbeta takes other bits
+    # (the maps carry state).  Both forms are judged ("maps.*", "prescan.*")
     seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
+    # the maps on every grid (sm_107a keeps the pre-scan on one wave: test_split_maps_launch_their_grid)
+    monkeypatch.setattr(cake_chain, "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS", ())
     names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
     kept = ("o", "dq", "final_state") if with_state else ("o", "dq")
     stages = _record_launches(monkeypatch)
@@ -3494,9 +3525,11 @@ def test_split_maps_under_slow_gates_naive_tier_verdict(
 @pytest.mark.parametrize("cell", ["gL-4seg", "gL-state-bf16beta", "gL-long"])
 def test_split_maps_under_cuda_graph_capture(cell, device, monkeypatch) -> None:
     # A CUDA graph capture of the cell's forward and backward, after two eager calls on the capture's side stream (the
-    # chunk tables with their map entries cached), launches dhu_tc2_dvl32_gm and no pre-scan; two replays give the
-    # eager call's bits on every output, and launch nothing from the host
+    # chunk tables with their map entries cached), launches dhu_tc2_dvl32_gm and no pre-scan (with
+    # ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS off on every grid); two replays give the eager call's bits on every output,
+    # and launch nothing from the host
     seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
+    monkeypatch.setattr(cake_chain, "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS", ())
     names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
     inputs = _inputs(seq_lens, heads, beta_dtype, device, seed=seed)
     inputs["g"] = _slow_gates(seq_lens, heads, gates, device, seed + 3)
@@ -3553,10 +3586,13 @@ def test_split_maps_under_cuda_graph_capture(cell, device, monkeypatch) -> None:
 
 @pytest.mark.parametrize("cell", ["gL-4seg", "gL-state-bf16beta", "gL-long"])
 def test_split_maps_launch_their_grid(cell, device, monkeypatch) -> None:
-    # The cell's gm maps launch once per call, on (entries, HV, z) with z the form's: 2 for dhu_tc2_dvl32_gm2, 1 for
-    # dhu_tc2_dvl32_gm, the form split_map_launch names for the call's entries, HV and the device's SMs (gm2 where its
-    # grid fits one wave: the 7- and 4-entry cells here; the 15-entry long layout on 212 SMs, gm on 148 / 152).  With
-    # ADJOINT_MAP_SPLIT_ARCHS off every grid takes gm on z 1, and the two forms give the same bits on every output
+    # With ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS off ("maps") the cell's gm maps launch once per call, on (entries, HV, z)
+    # with z the form's: 2 for dhu_tc2_dvl32_gm2, 1 for dhu_tc2_dvl32_gm, the form split_map_launch names for the call's
+    # entries, HV and the device's SMs (gm2 where its grid fits one wave: the 7- and 4-entry cells here; the 15-entry
+    # long layout on 212 SMs, gm on 148 / 152).  With ADJOINT_MAP_SPLIT_ARCHS off too ("gm") every grid takes gm on
+    # z 1, and the two forms give the same bits on every output.  With the switches as shipped ("rule") a grid that
+    # fits one wave on sm_107a launches no map but the fused pre-scan, with the launch and bits of ADJOINT_MAP_ARCHS
+    # off ("prescan", the 0.2.7 route); every other grid the map launch and bits of "maps"
     seq_lens, heads, beta_dtype, with_state, pins, gates, seed = _slow_map_cell(cell)
     names = OUTPUT_NAMES + (("final_state", "dh0") if with_state else ())
     arch, hv = _current_arch(), heads[1]
@@ -3569,25 +3605,48 @@ def test_split_maps_launch_their_grid(cell, device, monkeypatch) -> None:
         state = {"initial_state": h0, "dht": dht}
     call = {**state, "output_final_state": with_state, **pins}
     launches = _record_grids(monkeypatch)
-    runs, forms = {}, {}
-    for switch in ("rule", "off"):
+    # the switches each arm turns off
+    arms = {
+        "maps": ("ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS",),
+        "gm": ("ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS", "ADJOINT_MAP_SPLIT_ARCHS"),
+        "prescan": ("ADJOINT_MAP_ARCHS",),
+        "rule": (),
+    }
+    runs, grids, answers = {}, {}, {}
+    entries = 0
+    for arm, off in arms.items():
         with monkeypatch.context() as m:
-            if switch == "off":
-                m.setattr(cake_chain, "ADJOINT_MAP_SPLIT_ARCHS", ())
+            for name in off:
+                m.setattr(cake_chain, name, ())
             launches.clear()
-            runs[switch] = _run(inputs, seq_lens, **call)
-            maps = [(stage, grid) for stage, grid in launches if stage in MAP_FORMS]
-            assert len(maps) == 1, (switch, launches)
-            stage, (entries, gy, gz) = maps[0]
-            assert gy == hv and gz == MAP_FORMS[stage], (switch, maps)
-            want = cake_chain.split_map_launch(arch, entries, hv, sms)
-            assert (stage, gz) == want, (switch, maps, sms)
-            forms[switch] = stage
+            runs[arm] = _run(inputs, seq_lens, **call)
+            grids[arm] = [
+                (stage, grid)
+                for stage, grid in launches
+                if stage in MAP_FORMS or stage == "dhu_pre_dvl_r64k1"
+            ]
+            if arm == "maps":
+                # the map grid's x: the call's entries
+                assert grids[arm], (arm, launches)
+                entries = grids[arm][0][1][0]
+            answers[arm] = cake_chain.split_map_launch(arch, entries, hv, sms)
     one_wave = 2 * entries * hv <= sms
-    assert forms["off"] == "dhu_tc2_dvl32_gm", forms
-    assert forms["rule"] == MAP_NAMES[one_wave], (forms, entries, sms)
-    assert one_wave or cell == "gL-long", (forms, entries, sms)
-    _assert_bitwise(runs["rule"], runs["off"], names)
+    assert one_wave or cell == "gL-long", (entries, sms)
+    for arm, form in (("maps", MAP_NAMES[one_wave]), ("gm", "dhu_tc2_dvl32_gm")):
+        assert len(grids[arm]) == 1, (arm, grids[arm])
+        stage, (n, gy, gz) = grids[arm][0]
+        assert (n, gy, gz) == (entries, hv, MAP_FORMS[stage]), (arm, grids[arm])
+        assert stage == form and (stage, gz) == answers[arm], (arm, grids[arm], sms)
+    _assert_bitwise(runs["maps"], runs["gm"], names)
+    assert [stage for stage, _grid in grids["prescan"]] == ["dhu_pre_dvl_r64k1"]
+    if answers["rule"] is None:
+        assert arch in cake_chain.ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS and one_wave
+        same = "prescan"
+    else:
+        assert arch not in cake_chain.ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS or not one_wave
+        same = "maps"
+    assert grids["rule"] == grids[same], (same, grids)
+    _assert_bitwise(runs["rule"], runs[same], names)
 
 
 @pytest.mark.parametrize("heads", [(8, 16), (8, 24)], ids=["g2", "g3"])
@@ -3623,7 +3682,8 @@ def test_tc_priced_table_changes_only_the_adjoint_table(
         _assert_bitwise(runs[1], runs[0], OUTPUT_NAMES)
         if rec["select"]:
             tc2 = _tc2(heads)
-            want = (_split_maps(heads), tc2) if rec["segment_len"] else (tc2,)
+            seg = rec["segment_len"]
+            want = (_split_maps(heads, seq_lens, seg), tc2) if seg else (tc2,)
             other = ("dv_local", *(m for m in SPLIT_MAPS if m not in want))
             got = _maps_route(stages)
             assert all(x in got for x in want), (rec, stages)
