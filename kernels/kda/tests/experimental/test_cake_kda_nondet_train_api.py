@@ -1464,21 +1464,24 @@ L2N_PARAM = {"param_finalize_l2n": "param_finalize"}
 
 
 def _det_name(name: str | None) -> str | None:
-    """The deterministic record a record of this package copies: the fused gradient's raw and l2n classes are the
-    deterministic ``dqkg`` records with a class suffix, ``param_finalize_l2n`` is ``param_finalize``; every other copy
-    keeps its name."""
+    """The deterministic record a record of this package copies: the fused gradient's raw class is the
+    deterministic ``dqkg`` records with the class suffix (``_raw``; its l2n twins ``_raw_l2n``: the deterministic
+    ``_l2n`` records), ``param_finalize_l2n`` is ``param_finalize``; every other copy keeps its name."""
     if name in L2N_PARAM:
         return L2N_PARAM[name]
     if name is not None and name.startswith("dqkg"):
-        return name.removesuffix("_raw").removesuffix("_l2n")
+        # the raw class's l2n twins: the deterministic l2n records; the raw class: the deterministic records
+        if name.endswith("_raw_l2n"):
+            return name.removesuffix("_raw_l2n") + "_l2n"
+        return name.removesuffix("_raw")
     return name
 
 
 def test_the_l2n_modes_select_the_deterministic_pair() -> None:
     """Over architecture x path x heads 1..128 (two packings each), both gate modes and both in-kernel Q/K L2 norm
     modes (``"fused"``, ``"fallback"``): the plan's records are the deterministic package's plan of the same mode,
-    record for record (the fused gradient's raw and l2n classes and ``param_finalize_l2n`` by their deterministic
-    names), never an S1 record,
+    record for record (the fused gradient's raw class, its l2n twins and ``param_finalize_l2n`` by their
+    deterministic names), never an S1 record,
     never the gate epilogue; on the l2n stages each is the only record of its mode class whose rule admits the
     problem; and every program of the pair stages serving an l2n mode runs on exactly the architectures it ships
     for, but the deterministic glm_intra_l2n's sm_103a build (kept beside its sm_103a form)."""

@@ -2166,7 +2166,9 @@ def test_l2n_local_stage_values_cover_the_records(
     every logical name of every record they launch; no record outside the mode's own (``_l2n`` twins, the ``qk_*``
     programs) binds ``q_raw`` / ``k_raw``; the first reader gets the saved rstd with (1, 0), a fresh one with (0, 1)
     or none with (0, 0); no gate epilogue launches; stage for stage the records are the flag-off plan's or the mode's
-    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged.  ``fuse``: the
+    twins, the KCP-owned records and the KCP walk / merge / collective sequence unchanged but the mode's output
+    backward ``kcp_dav_l2n``, launched once on every backward (before the fused gradient, in place of the flag-off
+    ``kcp_dav`` of the rows whose plan dispatches ``dav``) and never on a forward.  ``fuse``: the
     ``fwd_o_fuse`` knob (1 shipped): a forward that keeps no tape walks ``kcp_fwdh_o``, whose local operands the
     values carry, and launches no ``kcp_fwd_o``; under 0 (and in the replay forward) the tape walk and ``kcp_fwd_o``."""
     missing = cake_kcp_plan.qk_l2norm_missing(form, gate, arch)
@@ -2341,6 +2343,17 @@ def test_l2n_local_stage_values_cover_the_records(
             for s, r, _g, _v in res_off
             if not (s == "backend" and mod(s, r)["stage"] == "gate_epilogue")
         ]
+        # the mode's output backward: kcp_dav_l2n once on a backward, before the fused gradient; the flag-off
+        # kcp_dav only where the flag-off plan dispatches dav
+        dav_l2n, dav_off = ("kcp", "kcp_dav_l2n"), ("kcp", "kcp_dav")
+        assert on_l.count(dav_l2n) == int(kind.startswith("bwd")), (kind, on_l)
+        if dav_l2n in on_l:
+            stages_on = [mod(s, r)["stage"] if s == "backend" else r for s, r in on_l]
+            assert "dqkg" in stages_on, (kind, on_l)
+            assert on_l.index(dav_l2n) < stages_on.index("dqkg"), (kind, on_l)
+        assert dav_off not in on_l, (kind, on_l)
+        on_l = [x for x in on_l if x != dav_l2n]
+        off_l = [x for x in off_l if x != dav_off]
         assert len(on_l) == len(off_l), (kind, on_l, off_l)
         on_stages = collections.Counter(
             mod(s, r)["stage"] if s == "backend" else r for s, r in on_l

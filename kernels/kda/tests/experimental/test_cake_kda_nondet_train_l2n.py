@@ -72,8 +72,9 @@ ARCHES = tuple(cake_jit.ARCHES)
 L2N_MODES = ("off", "fused", "fallback")
 L2N_ON = ("fused", "fallback")
 GATES = ("g", "raw")
-# the fused gradient's raw and l2n classes: the deterministic dqkg records with a class suffix
-DQKG_CLASS_SUFFIXES = ("_raw", "_l2n")
+# the fused gradient's raw class: the deterministic dqkg records with the class suffix (its l2n twins: the
+# deterministic l2n records with ``_raw_l2n`` in place of ``_l2n``)
+DQKG_RAW_SUFFIX, DQKG_RAW_L2N_SUFFIX = "_raw", "_raw_l2n"
 # the tape path's w-only WY twin of this package (launched in place of its record where its rule admits it)
 TAPE_TWINS = {"wy_bwd": "wy_bwd_v9"}
 # the raw class's parameter finalize of the l2n modes -> the deterministic record it copies
@@ -103,8 +104,9 @@ def _det_name(name: str | None) -> str | None:
         if name == twin:
             return parent
     if name.startswith("dqkg"):
-        for suffix in DQKG_CLASS_SUFFIXES:
-            name = name.removesuffix(suffix)
+        if name.endswith(DQKG_RAW_L2N_SUFFIX):
+            return name.removesuffix(DQKG_RAW_L2N_SUFFIX) + "_l2n"
+        return name.removesuffix(DQKG_RAW_SUFFIX)
     return name
 
 
@@ -212,15 +214,17 @@ def test_mode_keyword_must_be_a_bool(bad) -> None:
 
 def test_l2n_vocabulary_is_the_deterministic_packages() -> None:
     """The modes, the token-local stages and the logical names of the l2n programs are the deterministic package's;
-    the l2n stages add the fused gradient (whose S1 records serve the flag-off mode alone) and the parameter finalize
-    (``param_finalize`` serves the flag-off mode, ``param_finalize_l2n`` the l2n modes: one deterministic program)."""
+    the l2n stages are the deterministic package's (the output backward and the fused gradient among them; the
+    fused gradient's S1 records serve the flag-off mode alone) and the parameter finalize (``param_finalize``
+    serves the flag-off mode, ``param_finalize_l2n`` the l2n modes: one deterministic program)."""
     assert (
         tuple(cake_backend.L2N_MODES)
         == tuple(cake_jit.L2N_MODES)
         == tuple(det_jit.L2N_MODES)
         == L2N_MODES
     )
-    nd_only = {"dqkg", "param_finalize"}
+    assert {"dav", "dqkg"} <= set(det_jit.L2N_STAGES)
+    nd_only = {"param_finalize"}
     assert set(cake_jit.L2N_STAGES) == set(det_jit.L2N_STAGES) | nd_only
     assert not nd_only & set(det_jit.L2N_STAGES)
     for stage in ("qk_l2norm", "qk_apply", "qk_pullback"):

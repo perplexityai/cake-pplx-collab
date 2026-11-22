@@ -399,7 +399,8 @@ GRID_KINDS = (
 # the records delivered for a subset of the architectures (every other record ships on all three, the two-level
 # carry and the no-kb prep among them): the gate epilogue and its unfused GLM intra program on sm_100a, the fused
 # ones on sm_103a (glm_intra_v14) and sm_107a (glm_intra_v18), the fused gradient's hints-off builds on sm_107a,
-# the one architecture their rule admits, and the replay prep's saved-rstd twin on sm_100a / sm_103a
+# the one architecture their rule admits (the in-kernel Q/K L2 norm's two among them), and the replay prep's
+# saved-rstd twin on sm_100a / sm_103a
 RECORD_ARCHES = {
     "glm_intra": ("sm_100a",),
     "glm_intra_v14": ("sm_103a",),
@@ -409,6 +410,8 @@ RECORD_ARCHES = {
     "glm_intra_v30_l2n": ("sm_103a",),
     "dqkg_davq_nohint": ("sm_107a",),
     "dqkg_int_davq_nohint": ("sm_107a",),
+    "dqkg_nohint_l2n": ("sm_107a",),
+    "dqkg_int_nohint_l2n": ("sm_107a",),
     "bwd_prep_g8_replay_saved_l2n": ("sm_100a", "sm_103a"),
 }
 # The records of the segmented adjoint recurrence launch twice per stage (the carry between the passes); the
@@ -506,9 +509,10 @@ def test_registry_records_are_well_formed() -> None:
     # in-kernel Q/K L2 norm's fallback route and its 2 GLM intra capture forms (g, raw), and the 14 records of its
     # fused class (FUSED_L2N_RECORDS: 7 g, 7 raw, each its own library), the raw class's kb-once replay prep
     # (FUSED_L2N_RAW_KBONCE, its own library), its sm_103a forward intra and GLM intra forms (FUSED_L2N_SM103) and
-    # the replay prep's saved-rstd twin (FUSED_L2N_TWINS): 98 records, 96 libraries (two pairs share one)
-    assert len(cake_jit.MODULES) == 98
-    assert len({r["library"] for r in cake_jit.MODULES.values()}) == 96
+    # the replay prep's saved-rstd twin (FUSED_L2N_TWINS), the 5 records of its output backward (dav_l2n*) and the
+    # 4 of its fused gradient (dqkg_*l2n, davq 0): 107 records, 105 libraries (two pairs share one)
+    assert len(cake_jit.MODULES) == 107
+    assert len({r["library"] for r in cake_jit.MODULES.values()}) == 105
     assert tuple(cake_jit.PATHS) == PATHS
     assert tuple(cake_jit.OPTIONAL_STAGES) == OPTIONAL_STAGES
     assert frozenset(cake_jit.GATE_STAGES) == GATE_STAGES
@@ -3805,18 +3809,19 @@ def test_manifest_is_well_formed(manifest: dict) -> None:
     assert set(ARCHES) <= set(arch_flags)
     libraries = manifest["libraries"]
     names = [entry["name"] for entry in libraries]
-    # The 96 programs of cake_jit.MODULES (65 of the g gate, the 8 raw-gate programs, the 5 of the Q/K L2 norm's
-    # fallback route and the 18 of its fused class, the raw class's kb-once replay prep among them), each built for
-    # the architectures its record delivers (87 on all three, eight of RECORD_ARCHES on one each, the saved-rstd
-    # twin on two: 87 * 3 + 8 + 2 = 271 libraries); the KCP programs have their own package.
+    # The 105 programs of cake_jit.MODULES (65 of the g gate, the 8 raw-gate programs, the 5 of the Q/K L2 norm's
+    # fallback route and the 27 of its fused class, the raw class's kb-once replay prep, the 5 of its output
+    # backward and the 4 of its fused gradient among them), each built for the architectures its record delivers
+    # (94 on all three, ten of RECORD_ARCHES on one each, the saved-rstd twin on two: 94 * 3 + 10 + 2 = 294
+    # libraries); the KCP programs have their own package.
     train_libraries = {
         (record["library"], arch)
         for record in cake_jit.MODULES.values()
         for arch in record["arches"]
     }
-    assert len({library for library, _arch in train_libraries}) == 96
-    assert len(train_libraries) == 87 * 3 + 8 + 2 == 271
-    assert len(names) == len(set(names)) == 271
+    assert len({library for library, _arch in train_libraries}) == 105
+    assert len(train_libraries) == 94 * 3 + 10 + 2 == 294
+    assert len(names) == len(set(names)) == 294
     for entry in libraries:
         assert entry["arch"] in ARCHES
         assert entry["entry"] == "run"
