@@ -1140,8 +1140,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) % 4);
                                     int _parity_gemm_arrived = (int)((unsigned int)(gemm_wide + idx_1) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived) * 8, _parity_gemm_arrived);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_31 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+                                    int _smem_desc_lo_32 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#else
                                     int _smem_desc_lo_31 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
                                     int _smem_desc_lo_32 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_1) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -1183,8 +1188,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                                 #pragma unroll 1
                                 for (int idx_2 = 0; idx_2 < head; idx_2++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_33 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+                                    int _smem_desc_lo_34 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#else
                                     int _smem_desc_lo_33 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
                                     int _smem_desc_lo_34 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_2) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -1227,8 +1237,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) % 4);
                                     int _parity_gemm_arrived_1 = (int)((unsigned int)(gemm_wide + idx_3) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_1) * 8, _parity_gemm_arrived_1);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_35 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_36 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
                                     int _smem_desc_lo_35 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_36 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -1263,8 +1278,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_35), "r"(_smem_desc_lo_36), "r"(tmem_accumulator), "r"(((idx_3 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_37 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+                                    int _smem_desc_lo_38 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#else
                                     int _smem_desc_lo_37 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
                                     int _smem_desc_lo_38 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_3) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -1307,8 +1327,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) % 4);
                                     int _parity_gemm_arrived_2 = (int)((unsigned int)(gemm_wide + idx_4) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_2) * 8, _parity_gemm_arrived_2);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_39 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+                                    int _smem_desc_lo_40 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#else
                                     int _smem_desc_lo_39 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
                                     int _smem_desc_lo_40 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_4) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -1347,8 +1372,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                 tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                 #pragma unroll 1
                                 for (int idx_5 = iterations - tail_1; idx_5 < iterations; idx_5++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_41 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+                                    int _smem_desc_lo_42 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#else
                                     int _smem_desc_lo_41 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
                                     int _smem_desc_lo_42 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_5) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4415,8 +4445,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived_3 = (int)((unsigned int)(gemm_wide + idx_7) % 4);
                                     int _parity_gemm_arrived_3 = (int)((unsigned int)(gemm_wide + idx_7) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_3) * 8, _parity_gemm_arrived_3);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_309 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+                                    int _smem_desc_lo_310 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+#else
                                     int _smem_desc_lo_309 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_7) % 4) * 1024;
                                     int _smem_desc_lo_310 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_7) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4458,8 +4493,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                 asm volatile("tcgen05.fence::after_thread_sync;");
                                 #pragma unroll 1
                                 for (int idx_8 = 0; idx_8 < head_1; idx_8++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_311 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+                                    int _smem_desc_lo_312 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+#else
                                     int _smem_desc_lo_311 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_8) % 4) * 1024;
                                     int _smem_desc_lo_312 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_8) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4502,8 +4542,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived_4 = (int)((unsigned int)(gemm_wide + idx_9) % 4);
                                     int _parity_gemm_arrived_4 = (int)((unsigned int)(gemm_wide + idx_9) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_4) * 8, _parity_gemm_arrived_4);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_313 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+                                    int _smem_desc_lo_314 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#else
                                     int _smem_desc_lo_313 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
                                     int _smem_desc_lo_314 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4538,8 +4583,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_313), "r"(_smem_desc_lo_314), "r"(tmem_accumulator), "r"(((idx_9 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_315 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+                                    int _smem_desc_lo_316 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#else
                                     int _smem_desc_lo_315 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
                                     int _smem_desc_lo_316 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_9) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4582,8 +4632,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     int _stage_gemm_arrived_5 = (int)((unsigned int)(gemm_wide + idx_10) % 4);
                                     int _parity_gemm_arrived_5 = (int)((unsigned int)(gemm_wide + idx_10) / 4 % 2);
                                     mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_5) * 8, _parity_gemm_arrived_5);
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_317 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+                                    int _smem_desc_lo_318 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+#else
                                     int _smem_desc_lo_317 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_10) % 4) * 1024;
                                     int _smem_desc_lo_318 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_10) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4622,8 +4677,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                 tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                 #pragma unroll 1
                                 for (int idx_11 = iterations_1 - tail_2; idx_11 < iterations_1; idx_11++) {
+#if __CUDA_ARCH__ == 1070
+                                    int _smem_desc_lo_319 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+                                    int _smem_desc_lo_320 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+#else
                                     int _smem_desc_lo_319 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_11) % 4) * 1024;
                                     int _smem_desc_lo_320 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_11) % 4) * 1024;
+#endif
                                     asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -4967,8 +5027,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_6 = (int)((unsigned int)(gemm_wide + idx_13) % 4);
                                         int _parity_gemm_arrived_6 = (int)((unsigned int)(gemm_wide + idx_13) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_6) * 8, _parity_gemm_arrived_6);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_327 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_13) % 4) * 1024;
+                                        int _smem_desc_lo_328 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_13) % 4) * 1024;
+#else
                                         int _smem_desc_lo_327 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_13) % 4) * 1024;
                                         int _smem_desc_lo_328 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_13) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -5010,8 +5075,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     asm volatile("tcgen05.fence::after_thread_sync;");
                                     #pragma unroll 1
                                     for (int idx_14 = 0; idx_14 < head_2; idx_14++) {
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_329 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_14) % 4) * 1024;
+                                        int _smem_desc_lo_330 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_14) % 4) * 1024;
+#else
                                         int _smem_desc_lo_329 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_14) % 4) * 1024;
                                         int _smem_desc_lo_330 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_14) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -5054,8 +5124,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_7 = (int)((unsigned int)(gemm_wide + idx_15) % 4);
                                         int _parity_gemm_arrived_7 = (int)((unsigned int)(gemm_wide + idx_15) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_7) * 8, _parity_gemm_arrived_7);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_331 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+                                        int _smem_desc_lo_332 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+#else
                                         int _smem_desc_lo_331 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_15) % 4) * 1024;
                                         int _smem_desc_lo_332 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -5090,8 +5165,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_331), "r"(_smem_desc_lo_332), "r"(tmem_accumulator), "r"(((idx_15 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_333 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+                                        int _smem_desc_lo_334 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+#else
                                         int _smem_desc_lo_333 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_15) % 4) * 1024;
                                         int _smem_desc_lo_334 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_15) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -5134,8 +5214,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_8 = (int)((unsigned int)(gemm_wide + idx_16) % 4);
                                         int _parity_gemm_arrived_8 = (int)((unsigned int)(gemm_wide + idx_16) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_8) * 8, _parity_gemm_arrived_8);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_335 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_16) % 4) * 1024;
+                                        int _smem_desc_lo_336 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_16) % 4) * 1024;
+#else
                                         int _smem_desc_lo_335 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_16) % 4) * 1024;
                                         int _smem_desc_lo_336 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_16) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -5174,8 +5259,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                     #pragma unroll 1
                                     for (int idx_17 = iterations_2 - tail_3; idx_17 < iterations_2; idx_17++) {
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_337 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_17) % 4) * 1024;
+                                        int _smem_desc_lo_338 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_17) % 4) * 1024;
+#else
                                         int _smem_desc_lo_337 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_17) % 4) * 1024;
                                         int _smem_desc_lo_338 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_17) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7113,8 +7203,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_9 = (int)((unsigned int)(gemm_wide + idx_19) % 4);
                                         int _parity_gemm_arrived_9 = (int)((unsigned int)(gemm_wide + idx_19) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_9) * 8, _parity_gemm_arrived_9);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_603 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_19) % 4) * 1024;
+                                        int _smem_desc_lo_604 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_19) % 4) * 1024;
+#else
                                         int _smem_desc_lo_603 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_19) % 4) * 1024;
                                         int _smem_desc_lo_604 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_19) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7156,8 +7251,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     asm volatile("tcgen05.fence::after_thread_sync;");
                                     #pragma unroll 1
                                     for (int idx_20 = 0; idx_20 < head_3; idx_20++) {
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_605 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_20) % 4) * 1024;
+                                        int _smem_desc_lo_606 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_20) % 4) * 1024;
+#else
                                         int _smem_desc_lo_605 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_20) % 4) * 1024;
                                         int _smem_desc_lo_606 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_20) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7200,8 +7300,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_10 = (int)((unsigned int)(gemm_wide + idx_21) % 4);
                                         int _parity_gemm_arrived_10 = (int)((unsigned int)(gemm_wide + idx_21) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_10) * 8, _parity_gemm_arrived_10);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_607 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+                                        int _smem_desc_lo_608 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+#else
                                         int _smem_desc_lo_607 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_21) % 4) * 1024;
                                         int _smem_desc_lo_608 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7236,8 +7341,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
             "tcgen05.mma.cta_group::2.kind::f16 [%2], da, db, id, {m0, m1, m2, m3, m4, m5, m6, m7}, p1;\n\t"
             "}\n"
             :: "r"(_smem_desc_lo_607), "r"(_smem_desc_lo_608), "r"(tmem_accumulator), "r"(((idx_21 == 0) ? 0 : 1)) : "memory");
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_609 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+                                        int _smem_desc_lo_610 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+#else
                                         int _smem_desc_lo_609 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_21) % 4) * 1024;
                                         int _smem_desc_lo_610 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_21) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7280,8 +7390,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                         int _stage_gemm_arrived_11 = (int)((unsigned int)(gemm_wide + idx_22) % 4);
                                         int _parity_gemm_arrived_11 = (int)((unsigned int)(gemm_wide + idx_22) / 4 % 2);
                                         mbarrier_wait(gemm_arrived_addr + (_stage_gemm_arrived_11) * 8, _parity_gemm_arrived_11);
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_611 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_22) % 4) * 1024;
+                                        int _smem_desc_lo_612 = (((b_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_22) % 4) * 1024;
+#else
                                         int _smem_desc_lo_611 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_22) % 4) * 1024;
                                         int _smem_desc_lo_612 = (((b_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_22) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"
@@ -7320,8 +7435,13 @@ kernel_cake_mok_forward_clamped_noctx_wbd(const __grid_constant__ CUtensorMap x_
                                     tcgen05_commit_cg2_multicast(output_arrived_addr, (uint16_t)(3));
                                     #pragma unroll 1
                                     for (int idx_23 = iterations_3 - tail_4; idx_23 < iterations_3; idx_23++) {
+#if __CUDA_ARCH__ == 1070
+                                        int _smem_desc_lo_613 = (((a_smem_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_23) % 4) * 1024;
+                                        int _smem_desc_lo_614 = (((b_hi_addr) >> 4) & 0x7FFF) + ((gemm_wide + idx_23) % 4) * 1024;
+#else
                                         int _smem_desc_lo_613 = (((a_smem_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_23) % 4) * 1024;
                                         int _smem_desc_lo_614 = (((b_hi_addr) >> 4) & 0x3FFF) + ((gemm_wide + idx_23) % 4) * 1024;
+#endif
                                         asm volatile(
             "{\n\t"
             ".reg .pred p0, p1;\n\t"

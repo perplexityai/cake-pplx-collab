@@ -21,10 +21,10 @@ this process sees fewer GPUs than its group has ranks (the ``ep8`` items on a no
 The workers live in :mod:`tests.experimental._mok_dist`: the complete training step eager and under CUDA Graph
 replay, unequal source counts per rank (empty ranks included), the training features (clamped SwiGLU, recompute and
 the context-free forward, FP32 weight-gradient accumulation, native MXFP8), the adapter's source-length guards and
-scratch lifetime, and the router weight before the down projection through the adapter on SM100a / SM103a: at EP1
-and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and (8, 48) with
-top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow multiplier, the trap
-of a schedule past its capacity and the bytes of separate group launches.
+scratch lifetime, and the router weight before the down projection through the adapter on SM100a, SM103a and
+SM107a: at EP1 and the diagnostic EP4 layout, and on the requester's inputs at the 384-expert layouts (4, 96) and
+(8, 48) with top-6 over changing source counts, chosen placements, a full skew at the requester's no-overflow
+multiplier, the trap of a schedule past its capacity and the bytes of separate group launches.
 Each worker checks the contract and repeatability in every rank; the accuracy verdicts of each case (the whole
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
@@ -38,9 +38,12 @@ Backend suite: the package is imported only through :func:`tests.cake.test_helpe
 import pytest
 import torch
 
+from tests.cake.test_helpers.cake_package import cake_package
 from tests.experimental import _mok_dist as workers
 from tests.experimental import _mok_gaps as gaps
 from tests.experimental._mok_spawn import run_ranks, run_ranks_isolated
+
+kernels = cake_package("cake_mok_bf16", "_kernels")
 
 
 def _run(world, worker, *args):
@@ -145,10 +148,14 @@ OVERFLOW_TIMEOUT = 600
 
 
 def _require_before_down(world):
-    """Skip on SM107a before any process starts: the router weight before the down projection has no build there."""
+    """Skip before any process starts unless every rank's device has the router-weight-before-down builds
+    (``BEFORE_DOWN_TARGETS``: SM100a, SM103a and SM107a have them)."""
     if torch.cuda.is_available() and torch.cuda.device_count() >= world:
-        if any(torch.cuda.get_device_capability(index) == (10, 7) for index in range(world)):
-            pytest.skip("The router weight before the down projection has SM100a and SM103a builds only")
+        for index in range(world):
+            capability = torch.cuda.get_device_capability(index)
+            arch = gaps.TARGETS.get(capability, f"sm_{capability[0]}{capability[1]}")
+            if arch not in kernels.BEFORE_DOWN_TARGETS:
+                pytest.skip(f"The router weight before the down projection has no {arch} build")
 
 
 @pytest.mark.parametrize(

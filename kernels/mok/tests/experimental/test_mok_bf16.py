@@ -19,11 +19,11 @@ Covers the fused forward/backward (ring replay, empty experts, variable widths, 
 FP32 weight-gradient accumulation, 36 and 9 local experts at top-8, context-only recompute, the context-free forward,
 every exported scheduler layout and the epilogues, plus the host-only communication-split tables, resolvers and
 configuration switches.  The router weight before the down projection (``router_weight_position="before_down"``):
-its launchers' arguments against the registry, its refusals before device work (no GPU) and on an SM107a device, and
-on SM100a / SM103a its fused training at top-2 and top-6 (6 to 96 local experts; also with another communication-SM
-split), zero weights, recompute and the context-free forward, the exact limit, the 384-expert scheduler layouts, and
-the scheduler and the adapter at the requested worst-case schedule capacity (the routed weight gradients from ring
-rows past 2^31 bytes exactly).
+its launchers' arguments against the registry, its refusals before device work and its targets (no GPU: every target
+has its builds), and on SM100a, SM103a and SM107a its fused training at top-2 and top-6 (6 to 96 local experts; also
+with another communication-SM split), zero weights, recompute and the context-free forward, the exact limit, the
+384-expert scheduler layouts, and the scheduler and the adapter at the requested worst-case schedule capacity (the
+routed weight gradients from ring rows past 2^31 bytes exactly).
 Every kernel output is checked against its contract (finite; exact integer and table outputs; documented bitwise
 route forms such as recompute == saved context and graph replay == eager launch) and for run-to-run repeatability
 (five launches on the same inputs give the same bytes).  The accuracy of every floating output against the float64
@@ -85,9 +85,9 @@ def _same(a, b):
 
 def _require_role(role):
     """Skip a role of :data:`BEFORE_DOWN_ROLES` (the router-weight-before-down kernels, top-k 6 and the 384-expert
-    scheduler layouts: SM100a and SM103a builds) on a device whose target has no build of it.  Every other role is
-    built for every target (:func:`test_before_down_roles_are_registry_records`), so a missing build fails at load
-    instead of skipping."""
+    scheduler layouts: builds for the targets of ``BEFORE_DOWN_TARGETS``) on a device whose target has no build of
+    it.  Every other role is built for every target (:func:`test_before_down_roles_are_registry_records`), so a
+    missing build fails at load instead of skipping."""
     require_gpu()
     arch = jit.target_arch()
     if role in BEFORE_DOWN_ROLES and arch not in jit._registry()[role]["arches"]:
@@ -1811,7 +1811,7 @@ def test_comm_split_log_prints_each_split_change(capsys):
 
 
 # ---------------------------------------------------------------------------------------------------------------------
-# The router weight before the down projection: host checks (no GPU), then the kernels on SM100a / SM103a
+# The router weight before the down projection: host checks (no GPU), then the kernels on SM100a, SM103a and SM107a
 # ---------------------------------------------------------------------------------------------------------------------
 
 #: The roles only the router-weight-before-down mode, top-k 6 and the 384-expert layouts load.
@@ -1857,9 +1857,9 @@ def _stub_loader(monkeypatch, loaded=None):
 
 def test_before_down_roles_are_registry_records():
     """Every role a launcher of either router-weight position can load is a registry record, with the suffixes in
-    the registry's order; the router-weight-before-down, top-k 6 and 384-expert roles are built for exactly
-    SM100a and SM103a, every other such role for exactly SM100a, SM103a and SM107a, and top-k 6 has no weighted
-    forward epilogue."""
+    the registry's order; the router-weight-before-down, top-k 6 and 384-expert roles are built for exactly the
+    targets of ``BEFORE_DOWN_TARGETS`` (SM100a, SM103a and SM107a), every other such role for exactly SM100a, SM103a
+    and SM107a, and top-k 6 has no weighted forward epilogue."""
     registry = jit._registry()
     role = kernels._role
     assert role("forward", True, noctx=True) == "forward_clamped_noctx"
@@ -2073,43 +2073,31 @@ def test_before_down_call_refusals_come_before_device_work(monkeypatch):
     assert events == []
 
 
-def test_before_down_is_refused_on_sm107a_before_any_kernel_loads(monkeypatch):
-    """Host only: ``"before_down"`` has no SM107a build; the adapter refuses it on such a device before it loads a
-    kernel, and ``"after_down"`` keeps every target."""
-    with pytest.raises(ValueError, match="no sm_107a build"):
-        kernels.check_target("before_down", "sm_107a")
+def test_before_down_is_accepted_on_sm107a(monkeypatch):
+    """Host only: ``"before_down"`` has SM100a, SM103a and SM107a builds; ``check_target`` accepts both positions on
+    each of them and refuses ``"before_down"`` on any other target with a message that names the three.  On an SM107a
+    device the adapter prepares the requester's EP64 top-6 layout, an EP8 384-expert layout and a diagnostic top-2
+    layout, and every kernel it loads has an sm_107a build."""
+    assert kernels.BEFORE_DOWN_TARGETS == ("sm_100a", "sm_103a", "sm_107a")
     for arch in kernels.BEFORE_DOWN_TARGETS:
         kernels.check_target("before_down", arch)
-    for arch in ("sm_100a", "sm_103a", "sm_107a"):
         kernels.check_target("after_down", arch)
+    with pytest.raises(ValueError, match="no sm_90a build .* use an sm_100a, sm_103a or sm_107a device"):
+        kernels.check_target("before_down", "sm_90a")
+    registry = jit._registry()
     loaded = []
     _stub_loader(monkeypatch, loaded)
     monkeypatch.setattr(torch.cuda, "current_device", lambda: 0)
     monkeypatch.setattr(jit, "target_arch", lambda device=None: "sm_107a")
     for ep, experts, topk in ((64, 6, 6), (8, 48, 6), (1, 4, 2)):
-        with pytest.raises(ValueError, match="no sm_107a build"):
-            backend.MoKFunctional(
-                ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
-            )
-    assert loaded == []
-
-
-def test_before_down_is_refused_on_an_sm107a_device():
-    """On an SM107a device (other devices run the mode and skip): ``prepare_mok_bf16`` with
-    ``router_weight_position="before_down"`` on the requester's EP64 top-6 layout, an EP8 384-expert layout and a
-    diagnostic top-2 layout raises the ``ValueError`` that names the missing sm_107a build, and loads no kernel."""
-    require_gpu()
-    if jit.target_arch() != "sm_107a":
-        pytest.skip("checks the refusal on an sm_107a device")
-    before = jit._load.cache_info()
-    for ep, experts, topk in ((64, 6, 6), (8, 48, 6), (1, 4, 2)):
-        with pytest.raises(ValueError, match="has no sm_107a build"):
-            api.prepare_mok_bf16(
-                ep_size=ep, local_experts=experts, topk=topk, clamped_swiglu=True, fp32_wgrad=True,
-                router_weight_position="before_down",
-            )  # fmt: skip
-    after = jit._load.cache_info()
-    assert (after.hits, after.misses) == (before.hits, before.misses)
+        loaded.clear()
+        functional = backend.MoKFunctional(
+            ep, experts, topk, clamped_swiglu=True, fp32_wgrad=True, router_weight_position="before_down"
+        )
+        assert functional.weight_before_down
+        expected = {"forward_clamped_wbd", "backward_clamped_fp32_wbd", f"count_{ep}_{experts}", f"rows_{ep}_{experts}"}
+        assert expected | {f"epilogue_backward_{topk}"} <= set(loaded), sorted(loaded)
+        assert [role for role in loaded if "sm_107a" not in registry[role]["arches"]] == []
 
 
 def test_top6_epilogues_have_the_unweighted_sum_only(monkeypatch):
