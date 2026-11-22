@@ -103,7 +103,9 @@ what the call wrote), and a CUDA graph capture with the eager bits.  The two-CTA
 ``ADJOINT_MAP_SPLIT_ARCHS``): without a device its record and the launch rule (gm2 always with z 2, gm with z 1); on a
 device each map launch's grid against the rule and the one-CTA form's bits.  On ``sm_107a`` a grid that fits one wave
 keeps the pre-scan (switch ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS``): without a device the launch rule; on a device the
-pre-scan's launches and bits where the rule keeps it; the tests of the maps' bits turn the switch off.
+pre-scan's launches and bits where the rule keeps it; the tests of the maps' bits turn the switch off.  The backward
+reads its map launch with one cached lookup (``cake_chain._split_map_call``): without a device, its answers against the
+two rules with each switch they read on and off.
 
 Accuracy has no tolerance.  Each judged output is measured against the FP64 recurrence (:func:`_reference`) beside
 the naive BF16 recurrence on the same inputs (``token_recurrence`` of ``test_helpers/cake_gdn_naive.py``) over the
@@ -1400,6 +1402,44 @@ def test_the_split_map_launch_rule(monkeypatch) -> None:
                 assert launch(arch, 30, 6, 148) == one
         assert calls == [(two[0], a) for a in ARCHES if a not in prescan], calls
     cake_chain._split_map_entries.cache_clear()
+
+
+def test_the_backward_map_launch_lookup(monkeypatch) -> None:
+    # the backward reads its map launch with one lookup (cake_chain._split_map_call): split_map_launch where
+    # split_map_stage names dhu_tc2_dvl32_gm, else None (the fused pre-scan forms the maps), for every architecture,
+    # value-head group, entries and SM count, with each switch the two rules read on and off (the switches' values are
+    # the lookup's key, so a switch set after a lookup holds at the next one)
+    stage = cake_chain.split_map_stage
+    launch = cake_chain.split_map_launch
+    call = cake_chain._split_map_call
+    switches = (
+        "ADJOINT_MAP_ARCHS",
+        "DVL32_ARCHS",
+        "ADJOINT_MAP_SPLIT_ARCHS",
+        "ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS",
+    )
+    cake_chain._split_map_entries.cache_clear()
+    call.cache_clear()
+    monkeypatch.setattr(cake_chain, "_available", lambda _stage, _arch: True)
+    seen = set()
+    for off in (None, *switches):
+        with monkeypatch.context() as m:
+            if off is not None:
+                m.setattr(cake_chain, off, ())
+            key = tuple(getattr(cake_chain, n) for n in switches)
+            for arch in ARCHES:
+                for heads in ((1, 3), (2, 6), (16, 48), (2, 4), (1, 1)):
+                    for sms in (148, 152, 212):
+                        for entries in (1, 17, 18, 35, 36, 200):
+                            want = None
+                            if stage(arch, *heads) == "dhu_tc2_dvl32_gm":
+                                want = launch(arch, entries, heads[1], sms)
+                            got = call(*key, arch, *heads, entries, sms)
+                            assert got == want, (off, arch, heads, sms, entries, got)
+                            seen.add(want)
+    assert seen == {None, ("dhu_tc2_dvl32_gm", 1), ("dhu_tc2_dvl32_gm2", 2)}, seen
+    cake_chain._split_map_entries.cache_clear()
+    call.cache_clear()
 
 
 def test_host_tables_carry_the_map_entries() -> None:

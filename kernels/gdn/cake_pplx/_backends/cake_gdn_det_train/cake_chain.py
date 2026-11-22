@@ -1693,16 +1693,20 @@ ADJOINT_MAP_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 ADJOINT_MAP_STAGE = "dhu_tc2_dvl32_gm"
 # The same maps over two CTAs per (entry, value head) (``dhu_tc2_dvl32_gm2``, grid z 2: ``B`` and ``seg_flag`` on z 0,
 # ``M`` on z 1, each CTA with gm's products, roundings and orders on its half: the same bits) on the architectures of
-# ``ADJOINT_MAP_SPLIT_ARCHS`` (off value ``()``: gm for every grid), where its ``2 x entries x HV`` CTAs fit one wave
-# of the SMs (:func:`split_map_launch`).  The bound is measured: past one wave gm2 is still faster than gm where the
-# gates decay slowly (whole maps), but slower where they decay fast (maps that end within their first chunks); the
-# gates are on the device and the rule reads host facts only, so a grid of more than one wave keeps gm.
+# ``ADJOINT_MAP_SPLIT_ARCHS`` (off value ``()``: gm for every grid that takes a map form; on the architectures of
+# ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` a grid that fits one wave still keeps the pre-scan while that switch is on),
+# where its ``2 x entries x HV`` CTAs fit one wave of the SMs (:func:`split_map_launch`).  The bound is measured: past
+# one wave gm2 is still faster than gm where the gates decay slowly (whole maps), but slower where they decay fast (maps
+# that end within their first chunks); the gates are on the device and the rule reads host facts only, so a grid of
+# more than one wave keeps gm.
 ADJOINT_MAP_SPLIT_ARCHS: tuple[str, ...] = ("sm_100a", "sm_103a", "sm_107a")
 ADJOINT_MAP_SPLIT_STAGE = "dhu_tc2_dvl32_gm2"
 # On the architectures of ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`` (off value ``()``: the maps on every grid) a grid
 # that fits one wave keeps the fused pre-scan ``SDT_PRESCAN`` instead of either map form, the 0.2.7 route with its
-# bits: measured on ``sm_107a`` at such a grid, each map form ran slower than the pre-scan under some gates (gm2 where
-# they decay fast), and the pre-scan under none.
+# bits.  Measured on ``sm_107a`` at such a grid, gm2 ran faster than the pre-scan where the gates decay slowly (whole
+# maps) and slower where they decay fast (maps that end within their first chunks); the gates are on the device and
+# the rule reads host facts only, so such a grid keeps the pre-scan under every gate, and gives up gm2's gain where
+# the gates decay slowly.
 ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS: tuple[str, ...] = ("sm_107a",)
 # the mode bit of a map entry: bound the map by the warm-up threshold and write its seg_flag
 SPLIT_WARM = 16
@@ -1766,6 +1770,29 @@ def split_map_stage(arch: str, num_heads: int, num_v_heads: int) -> str:
     ):
         return ADJOINT_MAP_STAGE
     return SDT_PRESCAN
+
+
+@lru_cache(maxsize=1024)
+def _split_map_call(
+    map_archs: tuple[str, ...],
+    dvl32_archs: tuple[str, ...],
+    split_archs: tuple[str, ...],
+    prescan_archs: tuple[str, ...],
+    arch: str,
+    num_heads: int,
+    num_v_heads: int,
+    num_summary: int,
+    sm_count: int,
+) -> tuple[str, int] | None:
+    """The map launch of a backward whose split pass 2 runs on the tcgen05 scan over a table of ``num_summary`` map
+    entries: :func:`split_map_launch` where :func:`split_map_stage` names ``ADJOINT_MAP_STAGE``, else None (the fused
+    pre-scan forms the maps).  ``map_archs``, ``dvl32_archs``, ``split_archs`` and ``prescan_archs`` are the values of
+    the switches those rules read (``ADJOINT_MAP_ARCHS``, ``DVL32_ARCHS``, ``ADJOINT_MAP_SPLIT_ARCHS``,
+    ``ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS``), so the answer is decided once per (switches, architecture, heads, entries,
+    SMs) and a backward reads it with one lookup."""
+    if split_map_stage(arch, num_heads, num_v_heads) != ADJOINT_MAP_STAGE:
+        return None
+    return split_map_launch(arch, num_summary, num_v_heads, sm_count)
 
 
 # --------------------------------------------------------------------------- #
@@ -4135,9 +4162,6 @@ def cake_gdn_det_train_backward(
                                   finalize=options.finalize or forward.get("finalize_stage"))  # fmt: skip
     # the tcgen05 adjoint scan (dhu_tc2_stage): dhu_tc2_dvl32 for any group but two on DVL32_ARCHS, else dhu_tc2
     tc_stage = dhu_tc2_stage(arch, num_heads, num_v_heads)
-    # the segment maps of a split pass 2 on the tcgen05 scan (split_map_stage): dhu_tc2_dvl32_gm for a group of three on
-    # dhu_tc2_dvl32, else the fused pre-scan
-    map_stage = split_map_stage(arch, num_heads, num_v_heads)
     # two groups: the tcgen05 adjoint scan feeding the fused tail, for a serial plan beside tail_g2 (beside a group of
     # three's tail on the architectures of TWO_STREAM_SERIAL_G3_ARCHS) and for the pass 2 of a split plan beside a
     # group of three's tail (a split plan beside tail_g2 runs one stream); either form of a group's tail is its kind;
@@ -4217,12 +4241,15 @@ def cake_gdn_det_train_backward(
             table, "b_seg_flag", (segs.num_segments, num_v_heads), torch.int32, device
         )
         # the launch of the maps that split_map_stage names (split_map_launch): on two CTAs per (entry, value head),
-        # grid z 2, where that grid fits one wave (the same bits), else on one; None where such a grid keeps the
-        # pre-scan (ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS)
-        map_launch = None
-        if split_tc and segs.summary is not None and map_stage == ADJOINT_MAP_STAGE:
-            sms = _device_props(index)[0]
-            map_launch = split_map_launch(arch, segs.num_summary, num_v_heads, sms)
+        # grid z 2, where that grid fits one wave (the same bits), else on one; None where split_map_stage names the
+        # fused pre-scan or such a grid keeps it (ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS); read with one lookup of the
+        # answer decided once per (switches, architecture, heads, entries, SMs) (_split_map_call)
+        map_launch = (
+            _split_map_call(ADJOINT_MAP_ARCHS, DVL32_ARCHS, ADJOINT_MAP_SPLIT_ARCHS, ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS,
+                            arch, num_heads, num_v_heads, segs.num_summary, _device_props(index)[0])
+            if split_tc and segs.summary is not None
+            else None
+        )  # fmt: skip
         if map_launch is not None:
             # the maps [B | M] of every segment but each sequence's first on the tcgen05 walk of dhu_tc2_dvl32, with
             # the pre-scan's warm-up threshold (a bound in a segment's last chunk keeps the whole map; the same

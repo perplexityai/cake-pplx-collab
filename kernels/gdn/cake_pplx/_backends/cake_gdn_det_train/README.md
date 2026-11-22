@@ -253,9 +253,11 @@ and `G >= 4`), `DVL32_ARCHS` (off: `dhu_tc2` for every group, `G = 3`
 included), `F32X_TAIL_ARCHS` (off: `tail_g3` at `G = 3`), `ADJOINT_MAP_ARCHS`
 (off: the fused pre-scan forms the segment maps at `G = 3`, the 0.2.7 route
 with its bits), `ADJOINT_MAP_SPLIT_ARCHS` (off: `dhu_tc2_dvl32_gm` on every
-grid, the same bits) and `ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS` (off: the maps
-on every grid, `dhu_tc2_dvl32_gm2` where it fits one wave, with the bits of
-the maps).  With the first two off, `G = 1` and `G >= 4` run their
+grid that takes a map form, the same bits; on `sm_107a` a grid that fits one
+wave still keeps the fused pre-scan while `ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS`
+is on) and `ADJOINT_MAP_ONE_WAVE_PRESCAN_ARCHS` (off: the maps on every grid,
+`dhu_tc2_dvl32_gm2` where it fits one wave, with the bits of the maps).  With
+the first two off, `G = 1` and `G >= 4` run their
 0.2.6 route, the unfused tail on `dhu_tc2`, with its bits.  `PACKAGE_TAIL_MIN_TOKENS_PER_SEQ` maps an
 architecture to its threshold; an architecture missing from it, or 0, has
 none.
