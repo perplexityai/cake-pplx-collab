@@ -18,7 +18,7 @@ typedef signed char        int8_t;
 typedef unsigned char      uint8_t;
 typedef unsigned short     uint16_t;
 typedef unsigned int       uint32_t;
-#if defined(__CUDACC_RTC__)
+#if defined(__CUDACC_RTC__) || defined(_MSC_VER)
 typedef unsigned long long uint64_t;
 #else
 typedef unsigned long      uint64_t;
@@ -497,14 +497,24 @@ kernel_cake_rmsnorm_train_6a428da2227972ae18ae(__nv_bfloat16* __restrict__ g, __
             int sg = my_g + slot * 24576;
             #pragma unroll
             for (int v_1 = 0; v_1 < 2; v_1++) {
+#if defined(_MSC_VER)
+                uint64_t _smem_raw_17[2];
+                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_17[0]), "=l"(_smem_raw_17[1]) : "r"(sg + v_1 * 1536));
+#else
                 __int128_t _smem_raw_17;
                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_17) : "r"(sg + v_1 * 1536));
+#endif
                 gw[v_1 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[0];
                 gw[(v_1 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[1];
                 gw[(v_1 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[2];
                 gw[(v_1 * 4) + 3] = reinterpret_cast<const uint32_t*>(&_smem_raw_17)[3];
+#if defined(_MSC_VER)
+                uint64_t _smem_raw_18[2];
+                asm volatile("{ .reg .b128 b; ld.shared.b128 b, [%2]; mov.b128 {%0, %1}, b; }" : "=l"(_smem_raw_18[0]), "=l"(_smem_raw_18[1]) : "r"(sg + (12288 + v_1 * 1536)));
+#else
                 __int128_t _smem_raw_18;
                 asm volatile("ld.shared.b128 %0, [%1];" : "=q"(_smem_raw_18) : "r"(sg + (12288 + v_1 * 1536)));
+#endif
                 xw[v_1 * 4] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[0];
                 xw[(v_1 * 4) + 1] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[1];
                 xw[(v_1 * 4) + 2] = reinterpret_cast<const uint32_t*>(&_smem_raw_18)[2];
