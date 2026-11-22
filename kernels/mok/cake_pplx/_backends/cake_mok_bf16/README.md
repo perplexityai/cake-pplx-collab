@@ -529,6 +529,62 @@ across communication-SM splits and under CUDA Graph replay.
   MXFP8 key, which has no row on B300 (40 / 40), whatever precision the
   workspace was created with.
 
+  Table: this package against the previous version (main, 40 / 40 on B300) on
+  one B300 node, EP8, one process per arm and configuration, the two arms and an
+  identical second main arm interleaved over six rounds with the order reversed
+  in every second round, eager (CUDA Graph where stated: captured once on a
+  balanced step, then replayed), no CPU binding, BF16 routed experts unless
+  stated, FP32 accumulators; the slowest rank's median of timed repetitions 1-20
+  after 3 warm-up repetitions, median over the rounds; the table prints those
+  medians and change = printed package ms / printed main ms - 1; band = the
+  noise band of the identical arms and of the round spread; 'faster' or 'slower'
+  = beyond the band in every round and on the GPU-paired interval, 'noise' =
+  inside the band, 'unresolved' = beyond the band but not in every round; steady
+  = the change of the medians of timed repetitions 41-60 of 60. Forward =
+  schedule and forward without context for the router weight before the down
+  projection (H 5120 / I 2304, clamped SwiGLU), the forward otherwise (H
+  6144 / I 2048 plain, H 4096 / I 2048 clamped); checkpointed step = schedule,
+  forward, context recompute and backward. Every configuration of the table with
+  per-rank output digests (all except the CUDA Graph row) gives the same bits at
+  main and with this row, and every line repeats its outputs bitwise. Not
+  measured: EP sizes other than 8 on B300; hottest-rank ratios other than those
+  in the table; BF16 weight-gradient accumulators; complete training steps of a
+  model; Rubin MXFP8 launches on a workspace created for BF16 at EP8, which take
+  the MXFP8 row (60 / 60) from this version (two Rubin nodes needed).
+
+  | device | EP | configuration | routing | tokens per rank | forward main (ms) | forward, this package (ms) | change | checkpointed step main (ms) | this package (ms) | change |
+  | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+  | B300 | 8 | before down, 384 experts, top 6 | uniform | 4,096 | 2.205 | 2.130 | -3.4 % (band 10.3 %, noise; steady -4.5 %) | 9.070 | 8.964 | -1.2 % (band 2.1 %, noise; steady -1.1 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 4,096 | 2.817 | 2.714 | -3.7 % (band 5.7 %, noise; steady -2.7 %) | 11.621 | 11.530 | -0.8 % (band 3.8 %, noise; steady -1.1 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | ragged | 2,048-6,143 | 2.024 | 1.993 | -1.5 % (band 10.0 %, noise; steady +0.8 %) | 8.458 | 8.463 | +0.1 % (band 1.9 %, noise; steady +1.4 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | uniform | 16,384 | 7.751 | 7.556 | -2.5 % (band 2.3 %, faster; steady -4.8 %) | 29.035 | 28.720 | -1.1 % (band 1.3 %, noise; steady -0.7 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | 1.5x hot rank | 16,384 | 10.636 | 10.352 | -2.7 % (band 2.6 %, noise; steady -3.0 %) | 38.499 | 38.637 | +0.4 % (band 1.1 %, noise; steady -0.3 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | ragged | 8,192-24,575 | 6.861 | 6.767 | -1.4 % (band 5.3 %, noise; steady -1.8 %) | 25.796 | 25.445 | -1.4 % (band 1.2 %, faster; steady -0.9 %) |
+  | B300 | 8 | before down, 384 experts, top 6, CUDA Graph | uniform | 16,384 | 7.568 | 7.370 | -2.6 % (band 5.4 %, noise; steady -3.7 %) | 28.643 | 28.375 | -0.9 % (band 1.2 %, noise; steady -0.8 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | 3.0x hot rank | 4,096 | 5.177 | 4.892 | -5.5 % (band 8.7 %, noise; steady -2.8 %) | 19.471 | 19.366 | -0.5 % (band 3.7 %, noise; steady -0.9 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | 3.0x hot rank | 16,384 | 20.035 | 19.545 | -2.4 % (band 3.4 %, noise; steady -2.1 %) | 75.551 | 74.539 | -1.3 % (band 1.3 %, noise; steady -1.2 %) |
+  | B300 | 8 | before down, 384 experts, top 6 | 5.6x hot rank | 16,384 | 36.770 | 35.689 | -2.9 % (band 0.7 %, faster; steady -2.9 %) | 136.300 | 135.010 | -0.9 % (band 0.6 %, faster; steady -0.9 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | uniform | 16,384 | 10.300 | 10.009 | -2.8 % (band 2.6 %, faster; steady -3.3 %) | 38.151 | 37.249 | -2.4 % (band 1.4 %, faster; steady -1.6 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | 1.7x hot rank | 16,384 | 16.152 | 15.434 | -4.4 % (band 1.1 %, faster; steady -3.3 %) | 58.500 | 57.490 | -1.7 % (band 1.4 %, faster; steady -2.2 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | 1.8x hot rank | 16,384 | 16.987 | 16.310 | -4.0 % (band 0.9 %, faster; steady -3.4 %) | 60.668 | 60.228 | -0.7 % (band 0.9 %, noise; steady -0.5 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | 2.0x hot rank | 16,384 | 19.069 | 18.223 | -4.4 % (band 2.1 %, faster; steady -3.5 %) | 69.353 | 68.761 | -0.9 % (band 1.4 %, noise; steady -0.4 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | 3.0x hot rank | 16,384 | 27.669 | 26.754 | -3.3 % (band 1.5 %, faster; steady -3.6 %) | 99.806 | 99.470 | -0.3 % (band 0.9 %, noise; steady -0.8 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8 | 5.6x hot rank | 16,384 | 50.213 | 48.369 | -3.7 % (band 0.6 %, faster; steady -3.9 %) | 184.414 | 182.364 | -1.1 % (band 0.6 %, faster; steady -1.0 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 2 | uniform | 16,384 | 3.450 | 3.350 | -2.9 % (band 5.5 %, noise; steady -4.8 %) | 13.710 | 13.568 | -1.0 % (band 1.7 %, noise; steady -1.3 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 2 | 2.0x hot rank | 16,384 | 5.550 | 5.401 | -2.7 % (band 6.6 %, noise; steady -3.7 %) | 20.797 | 20.550 | -1.2 % (band 1.1 %, faster; steady -1.2 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 2 | 3.0x hot rank | 16,384 | 7.750 | 7.428 | -4.2 % (band 4.5 %, noise; steady -3.2 %) | 28.365 | 27.930 | -1.5 % (band 0.9 %, faster; steady -1.2 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 8 | uniform | 16,384 | 7.039 | 6.640 | -5.7 % (band 2.7 %, faster; steady -4.9 %) | 25.690 | 25.335 | -1.4 % (band 1.1 %, faster; steady -1.3 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 8 | 1.7x hot rank | 16,384 | 10.827 | 10.261 | -5.2 % (band 2.2 %, faster; steady -4.0 %) | 39.063 | 38.918 | -0.4 % (band 1.7 %, noise; steady +0.0 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 8 | 2.0x hot rank | 16,384 | 12.570 | 12.007 | -4.5 % (band 2.0 %, faster; steady -4.4 %) | 47.177 | 46.641 | -1.1 % (band 0.8 %, faster; steady -1.3 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 8 | 3.0x hot rank | 16,384 | 18.405 | 17.296 | -6.0 % (band 2.1 %, faster; steady -4.1 %) | 68.063 | 67.568 | -0.7 % (band 0.6 %, noise; steady -0.8 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 2 | uniform | 16,384 | 2.284 | 2.172 | -4.9 % (band 5.7 %, noise; steady -5.4 %) | 9.169 | 9.125 | -0.5 % (band 3.5 %, noise; steady -0.7 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 2 | 2.0x hot rank | 16,384 | 3.622 | 3.590 | -0.9 % (band 11.8 %, noise; steady -3.6 %) | 14.551 | 14.237 | -2.2 % (band 1.3 %, faster; steady -1.3 %) |
+  | B300 | 8 | H 4096 / 288 experts, top 2 | 3.0x hot rank | 16,384 | 5.211 | 4.936 | -5.3 % (band 4.9 %, faster; steady -3.9 %) | 19.201 | 19.010 | -1.0 % (band 1.9 %, noise; steady +0.2 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8, workspace precision mxfp8 | uniform | 16,384 | 10.311 | 9.947 | -3.5 % (band 2.8 %, faster; steady -3.6 %) | 38.206 | 37.260 | -2.5 % (band 1.7 %, faster; steady -2.1 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8, workspace precision mxfp8 | 2.0x hot rank | 16,384 | 18.966 | 18.143 | -4.3 % (band 2.8 %, faster; steady -3.4 %) | 69.278 | 68.779 | -0.7 % (band 0.7 %, noise; steady -0.5 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8, MXFP8 weights, workspace precision bf16 | uniform | 16,384 | 7.451 | 7.447 | -0.1 % (band 2.8 %, noise; steady -0.8 %) | 26.378 | 26.349 | -0.1 % (band 1.1 %, noise; steady -0.4 %) |
+  | B300 | 8 | H 6144 / 256 experts, top 8, MXFP8 weights, workspace precision bf16 | 2.0x hot rank | 16,384 | 13.684 | 13.698 | +0.1 % (band 0.7 %, noise; steady +0.4 %) | 47.841 | 47.842 | +0.0 % (band 1.0 %, noise; steady -0.2 %) |
+
 - Mini-batches are multiples of 256; macro-batches are multiples of the
   mini-batch. Schedule capacity must hold every padded route; overflow traps.
   The capacity is `T * topk * max(2, ceil(EP * m))` rows for
