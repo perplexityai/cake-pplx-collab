@@ -223,9 +223,14 @@ fewest whole waves from there and four times that: on packed rows 67, 68 and
 272 on SM100, 58, 60 and 240 on SM103 and 85, 86 and 344 on SM107; on
 broadcast rows 10, 12 and 48) and at the cut itself, one-head tokens whose
 rows are exactly the cut times the SMs (the first row count of whole waves:
-on SM100 the band of packed rows ends there).  The forwards of the first
-bands, the 32-lane tiny forward of packed rows (at 1 and 4 rows per SM on
-SM100, 1 and 12 on SM103), the tiny forward of packed
+on SM100 the band of packed rows ends there).  On broadcast rows busy and
+alone are each ``_held_mean`` of ``HELD_RUNS`` samples, not a median of
+seven (``HELD_MEAN_FORWARD_LAYOUTS``): such a call reads one token and
+writes only ``y``, a few microseconds near its cut, where beside one held
+SM the bound is less than one step of the event timer (about 1 microsecond
+on SM100 and SM103) above the ratio of the extra round of CTAs.  The
+forwards of the first bands, the 32-lane tiny forward of packed rows (at 1
+and 4 rows per SM on SM100, 1 and 12 on SM103), the tiny forward of packed
 rows (at 5, 12, 24, 25, 31 and 36 rows per SM on SM100, 13, 24, 32, 33 and 36
 on SM103, 1, 10, 30, 43 and 65 on SM107) and
 the short forward of the strided layout (at 1 and 12 rows per SM on SM100 and
@@ -1514,25 +1519,35 @@ def _forward_slows_in_proportion(
     assert _launched(call) == [name], (role, layout, tokens)
 
     spin = _spin(None, ctas=ctas, threads=threads)
-    alone_ms, busy_ms, alone, busy = _paired_medians(call, spin, PROPORTIONAL_RUNS)
+    if layout in HELD_MEAN_FORWARD_LAYOUTS:
+        ((alone_ms, busy_ms, alone, busy),) = _interleaved_held_means(
+            (call,), spin, HELD_RUNS
+        )
+        stat = f"held_mean runs={HELD_RUNS} trim={HELD_TRIM}"
+    else:
+        alone_ms, busy_ms, alone, busy = _paired_medians(call, spin, PROPORTIONAL_RUNS)
+        stat = f"median runs={PROPORTIONAL_RUNS}"
     ideal = spin.sms / (spin.sms - ctas)
     bound = ideal + cta_share + PROPORTIONAL_SLACK
     ratio = busy_ms / alone_ms
+    alone_min_ms = min(t for t, _ in alone)
+    alone_max_ms = max(t for t, _ in alone)
     print(
         f"HELD stage=forward tokens={tokens} heads={heads} "
         f"blocks_per_slot={blocks_per_slot:g} side={ctas}x{threads} "
         f"alone_ms={alone_ms:.4f} busy_ms={busy_ms:.4f} ratio={ratio:.3f} "
         f"ideal={ideal:.3f} cta_share={cta_share:.4f} "
         f"excess={ratio - ideal - cta_share:.4f} role={role} layout={layout} "
-        f"edge={edge}"
+        f"edge={edge} alone_min_ms={alone_min_ms:.4f} "
+        f"alone_max_ms={alone_max_ms:.4f} stat={stat}"
     )
     _check_outputs("forward", tokens, alone, busy)
     assert ratio <= bound, (
         f"tokens={tokens} ({blocks_per_slot:g} row blocks per CTA slot): {role} "
         f"alone {alone_ms:.4f} ms, beside {ctas} x {threads} side CTAs "
-        f"on {ctas} SMs {busy_ms:.4f} ms: ratio {ratio:.3f} > {bound:.3f} "
-        f"(proportional {ideal:.3f} + one CTA's blocks {cta_share:.4f} + "
-        f"{PROPORTIONAL_SLACK})"
+        f"on {ctas} SMs {busy_ms:.4f} ms ({stat}): ratio {ratio:.3f} > "
+        f"{bound:.3f} (proportional {ideal:.3f} + one CTA's blocks "
+        f"{cta_share:.4f} + {PROPORTIONAL_SLACK})"
     )
 
 
@@ -1599,6 +1614,18 @@ def test_mid_forward_slows_in_proportion_to_the_sms_held(
 # probe outside the band skips.
 PIPELINED_FORWARD_EDGES = ("band_first", "band_last", "below", "first", "last", "cut")
 PIPELINED_FORWARD_LAYOUTS = (*FORWARD_LAYOUTS, "broadcast")
+# The layouts whose probes compare ``_held_mean`` of ``HELD_RUNS`` alone and
+# busy samples (as the first-band tests do), not the medians of
+# ``PROPORTIONAL_RUNS`` pairs, with the same bound.  A call on rows broadcast
+# over tokens reads one token and writes only ``y``, so near the cut of such
+# rows ("below", "first", "cut") it takes a few microseconds, and on SM100 and
+# SM103 the event timer reads a call that short on steps about 1 microsecond
+# apart.  There one CTA's share of the blocks is small, and beside one held SM
+# the bound is only a few percent above the ratio of the extra round of CTAs:
+# for such a call less than one step of the timer.  A median of seven samples
+# lands on one step or another; the mean weighs the steps as often as they
+# occur.
+HELD_MEAN_FORWARD_LAYOUTS = ("broadcast",)
 
 
 def _pipelined_forward_tokens(
@@ -1726,8 +1753,9 @@ SHORT_FORWARD_SIDES = ((1, 128, None), (16, 640, None), (32, 640, None)) + (
 SHORT_EXTRA_MS = 0.0015
 # Samples per call of a held measurement (alone and beside the side kernel,
 # the compared calls interleaved round by round, an even count so that each
-# call goes first as often), and the share of the fastest and of the slowest
-# that _held_mean leaves out at each end (2 of 20).
+# call goes first as often; the pipelined forwards' probes of
+# HELD_MEAN_FORWARD_LAYOUTS take one call's), and the share of the fastest and
+# of the slowest that _held_mean leaves out at each end (2 of 20).
 HELD_RUNS = 20
 HELD_TRIM = 0.1
 # A held measurement counts when each compared call's alone mean is at most

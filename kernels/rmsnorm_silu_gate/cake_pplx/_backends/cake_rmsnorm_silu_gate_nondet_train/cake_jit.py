@@ -2960,8 +2960,9 @@ FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
 # 64-thread CTA per 8-row block) runs past the persistent forwards' bands,
 # from 701 rows per SM on sm_100a and sm_103a and from 481 on sm_107a: where
 # measured there (from 1000 rows per SM on sm_100a and sm_103a, from 520 on
-# sm_107a) it is the fastest forward alone and makes the step 1 to 6 %
-# faster.  No band of this table runs a pipelined forward, which makes the
+# sm_107a) it was the fastest forward alone and made the step 1 to 6 %
+# faster (measured with the pipelined forward's one-CTA-per-block grid of
+# 0.2.13).  No band of this table runs a pipelined forward, which made the
 # step slower at every rows per SM measured (with its grid of 0.2.13; on
 # sm_103a 3 to 7 % slower than the mid forward from 13 to 100 rows per SM).
 STRIDED_FORWARD_BANDS: dict[str, tuple[tuple[int | None, str], ...]] = {
