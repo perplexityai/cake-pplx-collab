@@ -252,7 +252,7 @@ KNOWN_GAPS: dict[str, dict[str, Gap]] = {
         "tests/experimental/test_cake_moe_grouped_gemm_nondet_train_reproducibility.py::test_repeat_launches_and_naive_tier[wgrad_edge_e3_long_empty_down_bf16]": _near_tie({"dW[sampled]": (1.0051, 1.0065)}),
     },
     "GB300": {
-        "tests/experimental/test_cake_moe_grouped_gemm_det_train.py::test_wgrad_queue_walk_gives_the_selected_stage_bits[e4_one_empty-out_dtype0]": Gap({"dW": (1.0051, NEAR_TIE)}, _SAMPLED_REASON),
+        "tests/experimental/test_cake_moe_grouped_gemm_det_train.py::test_wgrad_queue_walk_gives_the_selected_stage_bits[e4_one_empty-out_dtype0]": Gap({"dW[sampled]": (1.0051, NEAR_TIE)}, _SAMPLED_REASON),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e32_hot_down_wgrad_bf16]": _near_tie({"dW[sample]": (1.0203, 1.0207)}),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e32_hot_gate_up_wgrad_bf16]": _near_tie({"dW[sample]": (1.0181, NEAR_TIE)}),
         "tests/experimental/test_cake_moe_grouped_gemm_det_train_acceptance.py::test_error_vs_fp64_per_output[e4_m112576_down_wgrad_bf16]": _near_tie({"dW[sample]": (1.0115, NEAR_TIE)}),
