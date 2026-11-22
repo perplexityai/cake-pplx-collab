@@ -75,23 +75,27 @@ are the deterministic package's.
 
 The forward programs (each the deterministic package's program of the same row):
 at C = 512 to 1024, inside the token range of a row of the backend's
-``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` (by architecture and
-route), the static program (a fixed token range per CTA) or the direct
-program (the next token blocks per CTA, no shared memory) runs, neither with
-``work`` counters: a passed forward ``workspace`` is checked and not passed
-to the program, and such a call zeroes no package buffer.  Each row gives its
-own token range.  From release 0.2.10, every architecture and route has a row
-at each ``C`` = 512 to 1024 (0.2.6 to 0.2.9: at each ``C`` = 576 to 768;
-0.2.5 had none for sm_100a ``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at
-C = 576 and 712, and sm_103a ``fwd`` at C = 768).  For most ``C`` the first
-range starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example
-the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to
-24576), the static program runs over the key's whole range.  The sm_103a
-``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and
-have only a static range.  Every other call (outside a row's range, or where an
-architecture, route and ``C`` have no row) runs the dynamic program, as in
-0.2.4, which takes its token chunks from zeroed int32 counters.  The forward
-workspace size is the same in every case.
+``cake_jit.FALLBACK_ROWS``, ``cake_jit.DIRECT_ROWS`` or, from release 0.2.12,
+``cake_jit.PAIR_ROWS`` (by architecture and route), the static program (a
+fixed token range per CTA), the direct program (the next token blocks per CTA,
+no shared memory) or the pair direct program (the direct program with each
+thread on a pair of channels) runs, none with ``work`` counters: a passed
+forward ``workspace`` is checked and not passed to the program, and such a call
+zeroes no package buffer.  Each row gives its own token range; a ``PAIR_ROWS``
+range runs ahead of the other two tables where it holds the call.  From release
+0.2.10, every architecture and route has a row at each ``C`` = 512 to 1024
+(0.2.6 to 0.2.9: at each ``C`` = 576 to 768; 0.2.5 had none for sm_100a
+``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a
+``fwd`` at C = 768).  For most ``C`` the first range starts at S = 1.  Where a
+key has no ``DIRECT_ROWS`` range (for example the sm_107a ``fwd_bias`` rows at
+C = 584, 600, 616 and 632, from S = 1 to 24576), the static program runs over
+the key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
+at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
+program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
+14336).  Every other call (outside a row's range, or where an architecture,
+route and ``C`` have no row) runs the dynamic program, as in 0.2.4, which takes
+its token chunks from zeroed int32 counters.  The forward workspace size is the
+same in every case.
 
 The backward workspace holds zeroed accumulators and counters that every
 launch leaves zero (:func:`cake_causal_conv1d_nondet_train_backward_workspace`
@@ -106,7 +110,8 @@ its instantiations are destroyed and their launches have completed; it
 returns to the package, zero again, at the package's next refill).  The
 replays of one graph must not overlap.  Only eager calls without
 ``workspace=`` that take counters zero these buffers (a forward inside the
-token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` takes none), the
+token range of a row of ``FALLBACK_ROWS`` / ``DIRECT_ROWS`` / ``PAIR_ROWS``
+takes none), the
 forward's and the backward's separately, sized to the largest need of such a call whose
 zeroing succeeded (one that runs out of memory keeps no new buffer and keeps
 their size).

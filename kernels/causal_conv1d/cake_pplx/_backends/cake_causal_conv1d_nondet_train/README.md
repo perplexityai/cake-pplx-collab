@@ -114,10 +114,11 @@ The forward runs two programs:
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and the rank's token count. It takes each of the rank's
    fragments as a document of its own and launches as the single-rank forward does: at a row of
-   `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 512 to 1024, inside the row's token range) the static or the
-   direct program, with no counters (the direct program's grid capped at its token blocks); elsewhere the dynamic
-   program on its record's full co-resident grid, which takes its token chunks from zeroed counters (a multi call's
-   tensors share one counter buffer, which the static and direct programs do not read). It launches without
+   `cake_jit.FALLBACK_ROWS`, `cake_jit.DIRECT_ROWS` or `cake_jit.PAIR_ROWS` (C 512 to 1024, inside the row's token
+   range; a `PAIR_ROWS` range first) the static, the direct or the pair direct program, with no counters (a direct
+   or pair direct program's grid capped at its token blocks); elsewhere the dynamic program on its record's full
+   co-resident grid, which takes its token chunks from zeroed counters (a multi call's tensors share one counter
+   buffer, which the static, direct and pair direct programs do not read). It launches without
    programmatic dependent launch (its `enable_pdl` launch scalar is 0), in every mode.
 2. The history-row program (`kcp_fwd_halo`) runs after the exchange's wait. It writes `y` of the first
    `min(3, len)` rows of every fragment with a history row again, from the received pool, with the `kcp_fwd`
@@ -211,7 +212,7 @@ Both programs use the package's cached backward workspace for the device and
 current stream. The workspace is zero before and after every launch. Inside a CUDA Graph capture the
 package uses a buffer it zeroed before the capture, one per capture and stream (the graph holds it until the graph
 is destroyed). Only eager calls that omit `workspace=` and take counters zero these buffers (a forward inside the
-token range of a row of `FALLBACK_ROWS` / `DIRECT_ROWS` takes none), the forward's and the backward's
+token range of a row of `FALLBACK_ROWS` / `DIRECT_ROWS` / `PAIR_ROWS` takes none), the forward's and the backward's
 separately, sized to the largest need of such a call whose zeroing succeeded (one that runs out of memory keeps no
 new buffer and keeps their size); a capture with no such eager call of the kind before it, or after earlier captures took
 the `_POOL_DEPTH` ready buffers, or needing more, or begun before their zero fills completed

@@ -74,19 +74,23 @@ Host design (the knobs are keywords; no environment variable):
   captured with the launch), so a graph never shares counters with eager
   calls or with another graph.
 - Inside the token range of a forward small-S row (``cake_jit.FALLBACK_ROWS``
-  / ``DIRECT_ROWS``: C = 512 to 1024, by architecture and route) the forward
-  runs the route's static program on the route's plan, or its direct program
-  on the channel tiles of ``cake_jit.DIRECT_PLANS`` with at most one CTA per
-  token block; neither takes counters, so the call zeroes and uses no buffer
-  there (eager or captured), and a passed ``workspace`` is checked and not
-  read.  Each row gives its own token range.  Every architecture and route has
-  a row at each C = 512 to 1024.  For most C the first range starts at S = 1.
-  Where a key has no ``DIRECT_ROWS`` range (for example the sm_107a
-  ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576), the
-  static program runs over the key's whole range.  The sm_103a ``fwd_bias``
-  rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
-  static range.  Outside a row's range, and where an architecture, route and C
-  have no row, the forward takes its counters from the workspace, as in 0.2.4.
+  / ``DIRECT_ROWS`` / ``PAIR_ROWS``: C = 512 to 1024, by architecture and
+  route) the forward runs the route's static program on the route's plan, its
+  direct program on the channel tiles of ``cake_jit.DIRECT_PLANS``, or its
+  pair direct program (two channels per thread) on the channel tiles of
+  ``cake_jit.PAIR_PLANS``, with at most one CTA per token block; none takes
+  counters, so the call zeroes and uses no buffer there (eager or captured),
+  and a passed ``workspace`` is checked and not read.  Each row gives its own
+  token range; a ``PAIR_ROWS`` range runs ahead of the other two tables where
+  it holds the call.  Every architecture and route has a row at each C = 512
+  to 1024.  For most C the first range starts at S = 1.  Where a key has no
+  ``DIRECT_ROWS`` range (for example the sm_107a ``fwd_bias`` rows at C = 584,
+  600, 616 and 632, from S = 1 to 24576), the static program runs over the
+  key's range outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows
+  at C = 720 to 768 have no ``DIRECT_ROWS`` range: they run the pair direct
+  program from S = 16 to 1536 and the static program from S = 13824 (C = 736:
+  14336).  Outside a row's range, and where an architecture, route and C have
+  no row, the forward takes its counters from the workspace, as in 0.2.4.
   Every forward program writes the same ``y`` bits.
 """
 
@@ -496,7 +500,8 @@ def _launch(
     width from the architecture's token floor (``cake_jit.NARROW_WIDTH_FLOORS``),
     a forward row of ``cake_jit.NARROW_ROW_FLOORS`` (C = 520 to 568) keeps
     one tile below its own floor, and a forward row of ``cake_jit.DIRECT_ROWS``
-    runs the direct program's tiles (``cake_jit.direct_split``).
+    or ``cake_jit.PAIR_ROWS`` runs the tiles of its direct or pair direct
+    program (``cake_jit.direct_split``).
     """
 
     arch = _loader.device_arch(device_index)
@@ -632,17 +637,18 @@ def cake_causal_conv1d_det_train_forward_workspace_bytes(
     ``cake_jit.NARROW_WIDTH_FLOORS`` and ``cake_jit.NARROW_ROW_FLOORS``), so
     one buffer serves every route and token count; the size depends on ``C``
     only (``S`` is checked and otherwise unused, as for the backward helper).
-    The static and the direct programs of the small-S rows take no counters, so
-    the releases that add such rows (0.2.5, 0.2.6 and 0.2.10) keep 0.2.4's
-    size.  From release 0.2.4 the rows of C = 520 to 568 take 6 to 12 words (2
-    before), so a buffer sized by an earlier release raises ``ValueError``
-    there at each token count from the row's token floor up that no small-S
-    range holds: from the floor where no range holds it, and above the ranges
-    where they hold it (release 0.2.10: most of these floors).  The buffer must
-    be zero before its first launch; every launch leaves it zero, so one buffer
-    serves every later forward call of one stream, CUDA Graph replays included,
-    without zeroing.  Two launches that may run at once (on two streams, or
-    two graphs replayed concurrently) need two buffers.
+    The static, the direct and the pair direct programs of the small-S rows
+    take no counters, so the releases that add such rows (0.2.5, 0.2.6, 0.2.10
+    and 0.2.12) keep 0.2.4's size.  From release 0.2.4 the rows of C = 520 to
+    568 take 6 to 12 words (2 before), so a buffer sized by an earlier release
+    raises ``ValueError`` there at each token count from the row's token floor
+    up that no small-S range holds: from the floor where no range holds it,
+    and above the ranges where they hold it (release 0.2.10: most of these
+    floors).  The buffer must be zero before its first launch; every launch
+    leaves it zero, so one buffer serves every later forward call of one
+    stream, CUDA Graph replays included, without zeroing.  Two launches that
+    may run at once (on two streams, or two graphs replayed concurrently) need
+    two buffers.
     """
 
     device = torch.device(device)
@@ -786,9 +792,9 @@ def cake_causal_conv1d_det_train_forward(
         that may run at once need two buffers.  When omitted the package
         uses a zeroed buffer it keeps per (device, current stream), or a
         fresh zeroed one inside a CUDA Graph capture.  Inside the token range
-        of a small-S row (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS``) the
-        program takes no counters: a passed buffer is checked, then not read,
-        and none is zeroed.
+        of a small-S row (``cake_jit.FALLBACK_ROWS`` / ``DIRECT_ROWS`` /
+        ``PAIR_ROWS``) the program takes no counters: a passed buffer is
+        checked, then not read, and none is zeroed.
 
     Returns
     -------

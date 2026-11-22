@@ -97,8 +97,9 @@ Host design (the knobs are keywords; no environment variable):
   to ``_POOL_DEPTH`` buffers of the largest need of such a call so far,
   refilled by the next such call after a capture took one or when a call needs
   more (a forward inside the token range of a row of
-  ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` takes no counters and
-  zeroes none).  A captured call finds none ready when no such eager call of
+  ``cake_jit.FALLBACK_ROWS``, ``cake_jit.DIRECT_ROWS`` or ``cake_jit.PAIR_ROWS``
+  takes no counters and zeroes none).  A captured call finds none ready when no
+  such eager call of
   its kind ran before the capture, when the captures since the last one took
   them all, when it needs more than that eager need, or when their zero fills
   have not completed yet (a
@@ -159,27 +160,32 @@ Host design (the knobs are keywords; no environment variable):
   rules and size, which cover every plan; at C = 520 to 568 it is larger than
   0.2.3's (6 to 12 words instead of 2), so a buffer sized by 0.2.3 for those
   rows is refused (``ValueError``) at each token count from the row's token
-  floor up that no forward range of ``cake_jit.FALLBACK_ROWS`` or
-  ``cake_jit.DIRECT_ROWS`` holds: from the floor where no range holds it, and
-  above the ranges where they hold it (0.2.10: most of these floors), as
-  inside a range the forward takes no counters.
+  floor up that no forward range of ``cake_jit.FALLBACK_ROWS``,
+  ``cake_jit.DIRECT_ROWS`` or ``cake_jit.PAIR_ROWS`` holds: from the floor
+  where no range holds it, and above the ranges where they hold it (0.2.10:
+  most of these floors), as inside a range the forward takes no counters.
 - At C = 512 to 1024, inside the token range of a forward row, the forward
-  runs two other det programs of its route: the static program in the
-  forward ranges of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token range
-  of its channel tile, on the route's plan above) and the direct program in
-  the ranges of ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of
+  runs one of three other det programs of its route: the static program in
+  the forward ranges of ``cake_jit.FALLBACK_ROWS`` (each CTA a fixed token
+  range of its channel tile, on the route's plan above), the direct program
+  in the ranges of ``cake_jit.DIRECT_ROWS`` (each CTA the next token blocks of
   its channel tile, on the route's tiles of ``cake_jit.DIRECT_PLANS``, at
-  most one CTA per token block).  Neither takes counters: a passed
-  ``workspace`` is checked and not passed to the program, and the workspace
-  size is unchanged.  Each row gives its own token range.  Every architecture
-  and route has a row at each C = 512 to 1024.  For most C the first range
-  starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example the
-  sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to 24576),
-  the static program runs over the key's whole range.  The sm_103a ``fwd_bias``
-  rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and have only a
-  static range.  Outside a row's range, and where an architecture, route and C
-  have no row, the forward runs the dynamic program, which takes counters, as
-  in 0.2.4.  ``y`` is the same bits on every forward program and plan.
+  most one CTA per token block), and the pair direct program (the direct
+  program with each thread on a pair of channels, on the route's tiles of
+  ``cake_jit.PAIR_PLANS``) in the ranges of ``cake_jit.PAIR_ROWS``, which
+  run ahead of the other two tables where they hold the call.  None takes
+  counters: a passed ``workspace`` is checked and not passed to the program,
+  and the workspace size is unchanged.  Each row gives its own token range.
+  Every architecture and route has a row at each C = 512 to 1024.  For most
+  C the first range starts at S = 1.  Where a key has no ``DIRECT_ROWS``
+  range (for example the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and
+  632, from S = 1 to 24576), the static program runs over the key's range
+  outside the ``PAIR_ROWS`` range.  The sm_103a ``fwd_bias`` rows at C = 720
+  to 768 have no ``DIRECT_ROWS`` range: they run the pair direct program from
+  S = 16 to 1536 and the static program from S = 13824 (C = 736: 14336).
+  Outside a row's range, and where an architecture, route and C have no row,
+  the forward runs the dynamic program, which takes counters, as in 0.2.4.
+  ``y`` is the same bits on every forward program and plan.
 - Programmatic dependent launch: a program whose record's
   ``launch.use_pdl`` is ``"runtime"`` (every single-rank forward and
   backward program but those of the pair routes) takes the ``enable_pdl``
@@ -202,11 +208,13 @@ Host design (the knobs are keywords; no environment variable):
   and sizes the grid (``cake_jit.plan_row``); later calls of the row only
   compare ``S`` with the entry's token ranges (and size the grid where
   ``launch_grid`` trims it by ``S``), so they launch the values a per-call
-  plan gives.  A row a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS``
-  key covers is planned for every side of its token ranges at its first call
-  (``cake_jit.row_sides``: an SM-wide segment's program, the route's fallback
-  program inside the fallback range, the rules' program outside them); a
-  later call picks its side with a few compares of ``S``.  A row whose
+  plan gives.  A row a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``,
+  ``cake_jit.DIRECT_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers is planned
+  for every side of its token ranges at its first call (``cake_jit.row_sides``:
+  an SM-wide segment's program, the pair direct program inside the pair range,
+  the direct program inside the direct range, the route's fallback program
+  inside the fallback range, the rules' program outside them); a later call
+  picks its side with a few compares of ``S``.  A row whose
   program selection reads ``S`` through a token floor of the selection rules
   plans every call (on that side).
   :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` drops the rows.
@@ -368,8 +376,9 @@ _ACCUMULATOR_VIEWS: dict[int, tuple[weakref.ref, dict]] = {}
 # The host plan of each call row, planned by the row's first call: ``(arch, route kind, C, device index,
 # bwd_grid_mult, bf16_taps) -> ((s_lo, s_hi, cake_jit.RowPlan or None, {n_ch_tiles: the forward's counter words or the
 # backward's accumulator layout}), ...)``, one entry per side of ``cake_jit.row_sides`` (ascending token ranges from
-# 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS`` or ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges
-# then cut the token axis).  Selecting the route's program, splitting C into channel tiles, looking
+# 0 up; one side unless a ``cake_jit.SM_WIDE_ROWS``, ``cake_jit.PAIR_ROWS``, ``cake_jit.DIRECT_ROWS`` or
+# ``cake_jit.FALLBACK_ROWS`` key covers the row, whose ranges then cut the token axis).  Selecting the route's program,
+# splitting C into channel tiles, looking
 # up the TILE_OVERRIDES / NARROW_TILES row (the forward: its token floors) and sizing the grid cost several us of host
 # time in front of every launch; with the row's plan a call only compares ``S`` with the sides' ranges and the side's
 # token ranges (``cake_jit.row_launch``).  A side whose program selection reads ``S`` through a token floor
@@ -877,9 +886,9 @@ def _call_plan(
     of each channel tile count (empty and not kept for a row planned per call).  ``policy`` is the backward's
     ``silu_grad_preactivation`` (``None`` for the forward) and only names the route in an error; ``bf16_taps`` (the
     forward's taps are BF16; ``False`` for every backward call) is part of the row.  A row a
-    :data:`cake_jit.SM_WIDE_ROWS`, :data:`cake_jit.DIRECT_ROWS` or :data:`cake_jit.FALLBACK_ROWS` key covers is
-    planned for every side of :func:`cake_jit.row_sides` by its first call; the call's side is a few compares of
-    ``S`` with the sides' ranges."""
+    :data:`cake_jit.SM_WIDE_ROWS`, :data:`cake_jit.PAIR_ROWS`, :data:`cake_jit.DIRECT_ROWS` or
+    :data:`cake_jit.FALLBACK_ROWS` key covers is planned for every side of :func:`cake_jit.row_sides` by its first
+    call; the call's side is a few compares of ``S`` with the sides' ranges."""
 
     key = (arch, kind, C, device_index, bwd_grid_mult, bf16_taps)
     sides = _ROW_PLANS.get(key)
@@ -940,8 +949,8 @@ def cake_causal_conv1d_nondet_train_plan_cache_clear() -> int:
     """Drop the host plans of the single-rank calls (``_ROW_PLANS``), planned again by the next call of each row;
     returns the number of rows dropped.  Call it after changing what the rows were planned from: the registry
     tables of ``cake_jit`` (``MODULES``, ``ROUTES``, ``TILE_OVERRIDES``, ``NARROW_TILES``, ``FALLBACK_ROWS``,
-    ``SM_WIDE_ROWS``, ``DIRECT_ROWS``, ``DIRECT_PLANS``, the forward's ``FORWARD_NARROW_MIN_S``,
-    ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``,
+    ``SM_WIDE_ROWS``, ``PAIR_ROWS``, ``DIRECT_ROWS``, ``PAIR_PLANS``, ``DIRECT_PLANS``, the forward's
+    ``FORWARD_NARROW_MIN_S``, ``FORWARD_NARROW_ROW_MIN_S``, ``FORWARD_NARROW_ROW_FLOORS``, ``FORWARD_SINGLE_TILE_ROWS``,
     ``FORWARD_NARROW_WIDTHS`` and ``FORWARD_WIDTH_FLOORS``, the grid-trim tables), its ``sm_count`` or
     ``device_arch``.  The programmatic dependent launch policy (``PDL_EAGER`` / ``PDL_GRAPH`` / ``PDL_OFF_ROWS``) is
     read by every call, not planned."""
