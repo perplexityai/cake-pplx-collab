@@ -855,7 +855,23 @@ def test_a_device_of_capability_10_7_is_served(monkeypatch) -> None:
         jit.device_arch.cache_clear()
     entries = [entry for entry in json.loads(path.read_text())["libraries"] if entry["arch"] == "sm_107a"]
     roles = [role for role in jit.ROLES if "sm_107a" in jit.ROLE_ARCHES.get(role, jit.ARCHES)]
-    assert roles == ["pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp"]
+    assert roles == [
+        "pair_table",
+        "pair_table_small",
+        "fwd",
+        "fwd_unfused",
+        "bwd",
+        "bwd_small",
+        "bwd_warp",
+        "pair_table_w32",
+        "pair_table_w40",
+        "pair_table_chunks8",
+        "pair_table_chunks1",
+        "pair_table_totals8",
+        "pair_table_scan8",
+        "pair_table_totals1",
+        "pair_table_scan1",
+    ]
     assert sorted(entry["name"] for entry in entries) == sorted(
         f"{jit.MODULES[jit.role_record(role, 'sm_107a')]['library']}_sm_107a" for role in roles
     )

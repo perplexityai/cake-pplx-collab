@@ -105,6 +105,18 @@ The roles, in launch order:
   ``sm_100a`` and ``sm_103a``; the leaves of the records serving the roles
   on the architecture).  Every search finds the same document for every
   row, so every backward writes the same bytes.
+* the large-pack pair tables, the bytes of ``pair_table`` by other
+  programs, one role and one record each on the three architectures, which no
+  call launches yet: ``pair_table_w32`` and ``pair_table_w40`` (one CTA of
+  1024 threads of 32 and of 40 documents in the warp layout, ``one_cta``);
+  ``pair_table_chunks8`` and ``pair_table_chunks1`` (one CTA a chunk of
+  8192 and of 1024 documents, each also summing the earlier documents' pair
+  counts); ``pair_table_totals8`` then ``pair_table_scan8`` and
+  ``pair_table_totals1`` then ``pair_table_scan1`` (two kernels on one
+  stream: each chunk's pair count into a ``workspace`` of ``ceil(S /
+  chunk)`` int32 words, then each chunk's scan).  A pair table of chunks has
+  the ``rows`` rule over its ``S`` documents with one lane a row and
+  ``items`` rows a lane group, a chunk a CTA.
 
 Every output element depends on its own pair (or token) only: no reduction
 across threads, CTAs or calls, no atomic, so every output repeats bit for bit.
@@ -137,10 +149,27 @@ MANIFEST = "build.json"
 # ``small_docs`` documents and ``pair_table`` for more, then the forward, ``fwd`` for at most ``fuse_docs`` documents
 # and ``fwd_unfused`` for more, or the backward, ``bwd_warp`` for more than ``bwd_warp_docs`` documents and for the
 # ``bwd_warp_min_docs`` to ``bwd_warp_max_docs`` documents of its record where it has them, else ``bwd`` for more
-# than ``bwd_small_docs`` and at most ``bwd_max_docs`` documents and ``bwd_small`` for the others).  Every role is
-# served on every architecture of ROLE_ARCHES (of ARCHES for a role it does not name) by exactly one record of
-# MODULES (``role_record``).
-ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp")
+# than ``bwd_small_docs`` and at most ``bwd_max_docs`` documents and ``bwd_small`` for the others), then the
+# large-pack pair tables, which no call launches yet (``pair_table_role`` keeps the two pair tables above).  Every
+# role is served on every architecture of ROLE_ARCHES (of ARCHES for a role it does not name) by exactly one record
+# of MODULES (``role_record``).
+ROLES = (
+    "pair_table",
+    "pair_table_small",
+    "fwd",
+    "fwd_unfused",
+    "bwd",
+    "bwd_small",
+    "bwd_warp",
+    "pair_table_w32",
+    "pair_table_w40",
+    "pair_table_chunks8",
+    "pair_table_chunks1",
+    "pair_table_totals8",
+    "pair_table_scan8",
+    "pair_table_totals1",
+    "pair_table_scan1",
+)
 # Role -> the architectures it is served on, for a role not served on every architecture: none, every role is served
 # on the three.
 ROLE_ARCHES: dict[str, tuple[str, ...]] = {}
@@ -610,6 +639,200 @@ MODULES: dict[str, dict[str, Any]] = {
         },
         "library": "cake_gated_kv_compression_det_train_aa24263114554decff8e",
         "role": "bwd_warp",
+    },
+    "pair_table_w32": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "one_cta"},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_d6f5418d1fb4178ac86e",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_d6f5418d1fb4178ac86e",
+        "role": "pair_table_w32",
+    },
+    "pair_table_w40": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "one_cta"},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_5f7825c43f90800bc2d2",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_5f7825c43f90800bc2d2",
+        "role": "pair_table_w40",
+    },
+    "pair_table_chunks8": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 8},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_fc6fdb5c0559f4f65a10",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_fc6fdb5c0559f4f65a10",
+        "role": "pair_table_chunks8",
+    },
+    "pair_table_chunks1": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_a2652ccddb86ddab3d08",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_a2652ccddb86ddab3d08",
+        "role": "pair_table_chunks1",
+    },
+    "pair_table_totals8": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "workspace"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 8},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_7f1086e2d261582c7740",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_7f1086e2d261582c7740",
+        "role": "pair_table_totals8",
+    },
+    "pair_table_scan8": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "workspace"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 8},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_b2e8112209b0598a0643",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_b2e8112209b0598a0643",
+        "role": "pair_table_scan8",
+    },
+    "pair_table_totals1": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "workspace"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_226d77a045d657b1ed90",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 128,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_226d77a045d657b1ed90",
+        "role": "pair_table_totals1",
+    },
+    "pair_table_scan1": {
+        "arches": ["sm_100a", "sm_103a", "sm_107a"],
+        "arg_plan": [
+            ["buffer", "cu_seqlens"],
+            ["buffer", "cu_pairs"],
+            ["buffer", "workspace"],
+            ["parameter", "num_docs"],
+            ["launch", "enable_pdl"],
+            ["grid", "grid_x"],
+            ["grid", "grid_y"],
+            ["grid", "grid_z"],
+        ],
+        "ffi_entry": "run",
+        "grid_rule": {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": 1},
+        "kernel_symbol": "kernel_cake_gated_kv_compression_det_train_c82665f54344c397fa6e",
+        "launch": {
+            "block": (1024, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "dynamic_smem_bytes": 256,
+            "use_pdl": "runtime",
+        },
+        "library": "cake_gated_kv_compression_det_train_c82665f54344c397fa6e",
+        "role": "pair_table_scan1",
     },
 }
 

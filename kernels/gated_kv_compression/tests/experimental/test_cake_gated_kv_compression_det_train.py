@@ -98,12 +98,29 @@ cake_jit = cake_package(PACKAGE_KEY, "cake_jit")
 PACKAGE_DIR = Path(cake_jit.__file__).resolve().parent
 PACKAGE_IMPORT = cake_jit.PACKAGE
 ARCHES = ("sm_100a", "sm_103a", "sm_107a")
-ROLES = ("pair_table", "pair_table_small", "fwd", "fwd_unfused", "bwd", "bwd_small", "bwd_warp")
+ROLES = (
+    "pair_table",
+    "pair_table_small",
+    "fwd",
+    "fwd_unfused",
+    "bwd",
+    "bwd_small",
+    "bwd_warp",
+    "pair_table_w32",
+    "pair_table_w40",
+    "pair_table_chunks8",
+    "pair_table_chunks1",
+    "pair_table_totals8",
+    "pair_table_scan8",
+    "pair_table_totals1",
+    "pair_table_scan1",
+)
 # The architectures of a role not served on all three: none, every role is served on the three.
 ROLE_ARCHES: dict[str, tuple[str, ...]] = {}
 # Record -> (its role, the architectures it serves, the lanes of a 512-wide row): both forwards ship 128-bit lanes
 # (4 FP32 channels) on sm_100a / sm_103a and 256-bit lanes (8 channels) on sm_107a; the backward 256-bit lanes, with
-# the two-level search in ``bwd``, the one-level search in ``bwd_small`` and the warp search in ``bwd_warp``.
+# the two-level search in ``bwd``, the one-level search in ``bwd_small`` and the warp search in ``bwd_warp``; the
+# large-pack pair tables one record each on the three, of one lane a document when they run a CTA a chunk.
 RECORDS = {
     "pair_table": ("pair_table", ARCHES, None),
     "pair_table_small": ("pair_table_small", ARCHES, None),
@@ -118,6 +135,26 @@ RECORDS = {
     "bwd_warp": ("bwd_warp", ("sm_100a",), 64),
     "bwd_warp_sm_103a": ("bwd_warp", ("sm_103a",), 64),
     "bwd_warp_sm_107a": ("bwd_warp", ("sm_107a",), 64),
+    "pair_table_w32": ("pair_table_w32", ARCHES, None),
+    "pair_table_w40": ("pair_table_w40", ARCHES, None),
+    "pair_table_chunks8": ("pair_table_chunks8", ARCHES, 1),
+    "pair_table_chunks1": ("pair_table_chunks1", ARCHES, 1),
+    "pair_table_totals8": ("pair_table_totals8", ARCHES, 1),
+    "pair_table_scan8": ("pair_table_scan8", ARCHES, 1),
+    "pair_table_totals1": ("pair_table_totals1", ARCHES, 1),
+    "pair_table_scan1": ("pair_table_scan1", ARCHES, 1),
+}
+# The large-pack pair tables, which no call launches yet -> the documents of a CTA (``None``: one CTA): 1024 threads of
+# 32 and of 40 documents on one CTA, a CTA a chunk of 8192 (1024 threads of 8) and of 1024 documents otherwise.
+PT_CHUNKS = {
+    "pair_table_w32": None,
+    "pair_table_w40": None,
+    "pair_table_chunks8": 8192,
+    "pair_table_chunks1": 1024,
+    "pair_table_totals8": 8192,
+    "pair_table_scan8": 8192,
+    "pair_table_totals1": 1024,
+    "pair_table_scan1": 1024,
 }
 # The most documents a pair-table launch runs ``pair_table_small`` for (the rendered ``small_docs``).
 SMALL_DOCS = 512
@@ -220,6 +257,13 @@ PARAMETERS = {
     },
 }
 PARAMETERS["bwd_small"] = PARAMETERS["bwd_warp"] = PARAMETERS["bwd"]
+for _name in PT_CHUNKS:
+    PARAMETERS[_name] = {
+        "cu_seqlens",
+        "num_docs",
+        *(("workspace",) if "totals" in _name or "scan" in _name else ()),
+        *(() if "totals" in _name else ("cu_pairs",)),
+    }
 LAUNCHER_KEYWORDS = {
     "launch_pair_table": ("cu_seqlens", "cu_pairs"),
     "launch_fwd": ("c", "z", "cu_seqlens", "cu_pairs", "out", "c_ld", "z_ld"),
@@ -544,6 +588,32 @@ def test_the_unfused_forward_grid_is_capped_in_its_range() -> None:
         if name not in CAPPED:
             for rows in (1, 10**6):
                 assert cake_jit.launch_grid(name, rows, 8193, 148) == cake_jit.launch_grid(name, rows), name
+
+
+def test_the_large_pack_pair_tables_run_a_cta_a_chunk() -> None:
+    """The large-pack pair tables of one CTA (``pair_table_w32``, ``pair_table_w40``) have the ``one_cta`` rule; the
+    others cover the ``S`` documents of a pack with a CTA a chunk (``PT_CHUNKS``: the ``rows`` rule, one lane a
+    document, ``items`` documents a lane group), at each chunk bound, one past it and up to the most documents of a
+    pack; the two phases of a chunk size have the same grid.  No call launches them: :func:`cake_jit.pair_table_role`
+    never gives one."""
+    for name, chunk in PT_CHUNKS.items():
+        rec = cake_jit.MODULES[name]
+        assert rec["role"] == name and cake_jit.capped_leaves(name) is None, name
+        assert tuple(rec["launch"]["block"]) == (1024, 1, 1), name
+        if chunk is None:
+            assert rec["grid_rule"] == {"kind": "one_cta"}, name
+            for rows in (1, 8193, cake_jit.MAX_DOCS):
+                assert cake_jit.launch_grid(name, rows) == (1, 1, 1), (name, rows)
+            continue
+        assert rec["grid_rule"] == {"kind": "rows", "lanes_per_row": 1, "rows_per_lane_group": chunk // 1024}, name
+        assert cake_jit.rows_per_cta(name) == chunk, name
+        for rows in (1, chunk - 1, chunk, chunk + 1, 1 << 17, (1 << 17) + 1, cake_jit.MAX_DOCS):
+            assert cake_jit.launch_grid(name, rows) == (-(-rows // chunk), 1, 1), (name, rows)
+    for size in (8, 1):
+        totals, scan = (cake_jit.MODULES[f"pair_table_{phase}{size}"] for phase in ("totals", "scan"))
+        assert totals["grid_rule"] == scan["grid_rule"], size
+    roles = {cake_jit.pair_table_role(docs, arch) for arch in ARCHES for docs in (1, 8193, 1 << 17, cake_jit.MAX_DOCS)}
+    assert roles == {"pair_table_small", "pair_table"}
 
 
 def test_the_pair_table_role_follows_small_docs() -> None:
@@ -950,7 +1020,7 @@ def test_the_first_lookup_on_an_architecture_loads_every_role(monkeypatch) -> No
             loaded.clear()
             cake_jit._entry(cake_jit.role_record("pair_table_small", arch), arch)
             served = [role for role in ROLES if arch in ROLE_ARCHES.get(role, ARCHES)]
-            assert len(served) == 7, arch
+            assert served == list(ROLES), arch
             every = [(cake_jit.role_record(role, arch), arch) for role in served]
             assert loaded[: len(every)] == every, arch
             seen = set(loaded)
