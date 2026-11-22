@@ -204,9 +204,9 @@ per SM and at the token counts that give the module's CTA slots the fewest
 whole row blocks each past the previous band's end and the most up to its
 band's end, or four times the fewest in the last band, which has no end: the
 mid forward of the strided layout 1 block of 16 rows on SM100, 1 and 2 on
-SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 in its first band
-and 68 and 272 in its second on SM100, 1 and 2 in its first band and 63 and 85
-in its second on SM103 and 1 on SM107; the long forward 2 and 4 blocks of 32
+SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 on SM100 (one
+band), 1 and 2 in its first band and 63 and 85 in its second on SM103 and 1 on
+SM107; the long forward 2 and 4 blocks of 32
 rows on SM100; the extra-long forward of the strided layout 5 and 7 on SM100
 and 3 and 7 on SM103, of packed rows 5 on SM100, 3 and 6 on SM103 and 2 on
 SM107.  The pipelined forwards by the same
@@ -1365,9 +1365,9 @@ def test_repeatable_backward_long_role_slows_in_proportion_to_the_sms_held(
 # past the previous band's end ("first") and at the most up to the band's end,
 # or four times "first" in the last band, which has no end ("last"): the mid
 # forward of other layouts 1 block per slot on SM100 (its fewest and most), 1
-# and 2 on SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 in its
-# first band and 68 and 272 in its second on SM100, 1 and 2 in its first band
-# and 63 and 85 in its second on SM103 and 1 on SM107; the long forward 2 and
+# and 2 on SM103 and 1 and 5 on SM107 (one band each), of packed rows 1 on
+# SM100 (one band), 1 and 2 in its first band and 63 and 85 in its second on
+# SM103 and 1 on SM107; the long forward 2 and
 # 4 on SM100; the extra-long forward of other layouts 5 and 7 on SM100 and 3
 # and 7 on SM103, of packed rows 5 on SM100, 3 and 6 on SM103 and 2 on SM107.
 # A probe outside the band skips, and so does a last probe that is the band's

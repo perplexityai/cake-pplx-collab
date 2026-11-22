@@ -66,8 +66,9 @@ deterministic package's FP32 backward) past that, but on SM100 and SM103 the
 static backward past 64 and up to 128 rows per SM, and the repeatable
 backward's long program on packed rows from the same cuts.  At
 ``--heads 48`` the default token counts reach
-every forward kernel of packed rows but the extra-long one (401 to 520 rows
-per SM, 1234 to 1603 tokens) and every BF16 backward kernel that a band of a
+every forward kernel of packed rows but the mid one (86 to 160 rows per SM,
+263 to 493 tokens) and the extra-long one (401 to 520 rows per SM, 1234 to
+1603 tokens) and every BF16 backward kernel that a band of a
 148-SM B200 runs (2048 tokens: the pipelined forward).
 
 Timing uses CUPTI kernel activity with a cold L2 (``torch.profiler``, 100

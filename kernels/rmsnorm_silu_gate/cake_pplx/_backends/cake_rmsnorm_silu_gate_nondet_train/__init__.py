@@ -109,7 +109,7 @@ per SM its pipelined forward of packed rows read rows past the broadcast
 token.  At every other row count such a call runs, as in 0.2.11, the
 program of packed rows, which reads the token stride.
 Version 0.2.14 changes the ``y`` bits of some calls: on sm_100a the
-forward of packed rows from 6501 rows per SM (up to ``PACKED_ROWS`` rows)
+forward of packed rows from 6501 rows per SM (fewer than ``PACKED_ROWS`` rows)
 runs the pipelined forward in the place of the mid forward, so the
 deterministic package's ``y`` bits where that package's gate does not flush
 to 0, from which the mid forward's ``y`` differed in some elements.  Every
