@@ -25,9 +25,12 @@ without it, which the backward entry finds by passing its route, ``C`` and ``S``
 ordinary launch (no reduce program) that owns an ``accumulators`` workspace (one FP32 word per sum and accumulator
 copy on every route, :data:`ACC_SLOTS` copies; ``[C, 4]`` taps then ``[C]`` bias words; uint32 ticket counters per
 channel tile), and the workspace byte
-layout and size depend on ``C`` and the route only.  The public names (each carries the mode word ``nondet``; no
-entry point takes a mode keyword), and the package's wiring (test-helper key, package data, no ``__init__.py`` at
-the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
+layout and size depend on ``C`` and the route only.  The direct backward programs (the backward keys of
+``DIRECT_ROWS``, which have no deterministic twin): their records, keys and tile forms, their selection ahead of every
+other backward table, their plans and capped grids at and around their keys at every ``bwd_grid_mult``, and every
+backward plan, the public workspace and the KCP routes as without them outside those keys.  The public names
+(each carries the mode word ``nondet``; no entry point takes a mode keyword), and the package's wiring (test-helper
+key, package data, no ``__init__.py`` at the ``cake_pplx`` / ``cake_pplx._backends`` namespace levels).
 No device is needed; nothing is built or launched.  The ``build.json`` checks skip until the exporter renders the
 package.
 """
@@ -806,6 +809,383 @@ PAIR_PLANS_OF_RECORD = {
 PAIR_CTAS_PER_SM = {"fwd": 7, "fwd_dt": 7, "fwd_bias": 6}
 # The geometry ``vec`` (channels per thread) of the direct and the pair direct programs.
 FORM_VEC = {"static": 8, "direct": 8, "pair": 2}
+# The direct backward program of each backward route that has one (one record for every architecture): one ordinary
+# launch without TMA or a staged pipeline, 128 threads, 2 CTAs per SM, each CTA the next token blocks of ``n_sub x 4``
+# tokens of its channel tile.  It has no deterministic twin; it runs only at its route's keys of
+# :data:`BACKWARD_DIRECT_ROWS_OF_RECORD`.
+BACKWARD_DIRECT_PROGRAMS = {
+    "bwd": "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+    "bwd_dt": "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+    "bwd_bias": "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+}
+# The backward keys of ``DIRECT_ROWS`` (the registry holds them after the forward keys of
+# :data:`DIRECT_ROWS_OF_RECORD`): arch -> (route, C_lo, C_hi) -> (S_lo, S_hi, program), every multiple of 8 from C_lo
+# to C_hi at S_lo to S_hi.  Measured at C 512, 520, 576, 600, 640, 704, 768, 832, 896, 960, 1016 and 1024 and S 1,
+# 128, 1000, 2048 and 4096 (every storage of the route; the backward, the training step and the checkpointed step,
+# eager and under CUDA Graph), a key holds the measured points where no cell of the direct program ran slower than the
+# programs the other tables and the thresholds pick, beyond the spread of a copy of those programs: per channel count
+# the longest run of such token counts, one key over consecutive measured channel counts with the same run, no key
+# across a change of the run and none for a single token count.
+# Each architecture's keys were then timed again at those channel counts and at C 544, 616, 672, 736, 800, 864, 928
+# and 992 (B200 and GB200 for sm_100a, GB300 for sm_103a, VR200 for sm_107a): a point slower there in two runs on one
+# GPU leaves the table by the same rules over all 20 channel counts, inside the first keys.
+BACKWARD_DIRECT_ROWS_OF_RECORD = {
+    "sm_100a": {
+        ("bwd", 512, 832): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 896, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd_dt", 512, 616): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 640, 736): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 768, 768): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 800, 800): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 832, 832): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 864, 864): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 896, 896): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 960, 1016): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 1024, 1024): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_bias", 512, 512): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 520, 576): (
+            1000,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 1024, 1024): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+    },
+    "sm_103a": {
+        ("bwd", 512, 896): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 960, 1016): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 1024, 1024): (1, 4096, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd_dt", 512, 640): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 672, 672): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 704, 768): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 800, 832): (
+            128,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 864, 896): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 960, 1016): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 1024, 1024): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_bias", 512, 512): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 520, 576): (
+            1000,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 768, 768): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 960, 960): (
+            128,
+            2048,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 1024, 1024): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+    },
+    "sm_107a": {
+        ("bwd", 512, 512): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 520, 576): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+        ),
+        ("bwd", 600, 616): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+        ),
+        ("bwd", 640, 640): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 704, 704): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+        ),
+        ("bwd", 768, 768): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+        ),
+        ("bwd", 832, 832): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_a9deef7249fb422bc28a",
+        ),
+        ("bwd", 992, 992): (1, 1000, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd", 1024, 1024): (1, 2048, "cake_causal_conv1d_train_a9deef7249fb422bc28a"),
+        ("bwd_dt", 512, 512): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 520, 520): (
+            1000,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 576, 576): (
+            1000,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 600, 640): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 704, 704): (
+            1000,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 768, 832): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 896, 896): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 928, 960): (
+            1,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 1016, 1016): (
+            1,
+            1000,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_dt", 1024, 1024): (
+            1,
+            4096,
+            "cake_causal_conv1d_train_6a1e78e37349abd841ff",
+        ),
+        ("bwd_bias", 512, 512): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 520, 832): (
+            1000,
+            2048,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+        ("bwd_bias", 1024, 1024): (
+            1,
+            2048,
+            "cake_causal_conv1d_train_2a2c48dec0406daa9e81",
+        ),
+    },
+}
+# The tile forms of the direct backward programs, arch -> route -> ((ct_vec, n_sub), ...): 128-channel tiles, then
+# 64-channel tiles; a call takes the first form whose tiles pad C to the fewest channel vectors.
+BACKWARD_DIRECT_FORMS = {
+    arch: {route: ((16, 8), (8, 16)) for route in BACKWARD_DIRECT_PROGRAMS}
+    for arch in ARCHES
+}
+# The direct split ``(ct_vec, n_sub, n_ch_tiles)`` of a backward direct row by C (every route and architecture): C 576
+# runs nine 64-channel tiles (five 128-channel tiles would leave 64 channels idle), a C that 128 divides 128-channel
+# tiles, and a tie (C 600, 640, 1016) the 128-channel tiles; at most 15 tiles (C 960).
+BACKWARD_DIRECT_SPLITS = {
+    512: (16, 8, 4),
+    520: (8, 16, 9),
+    576: (8, 16, 9),
+    600: (16, 8, 5),
+    640: (16, 8, 5),
+    704: (8, 16, 11),
+    768: (16, 8, 6),
+    832: (8, 16, 13),
+    896: (16, 8, 7),
+    960: (8, 16, 15),
+    1016: (16, 8, 8),
+    1024: (16, 8, 8),
+}
+# The program and split of record of a backward call just outside a backward direct key (the plan the package runs
+# there with or without the direct rows): (arch, route, C, S) -> (program, (ct_vec, n_sub, n_ch_tiles)).
+BACKWARD_OUTSIDE_PLANS_OF_RECORD = {
+    ("sm_100a", "bwd", 1024, 4097): (
+        "cake_causal_conv1d_train_461d358d7090642c65de",
+        (128, 1, 1),
+    ),
+    ("sm_100a", "bwd", 504, 1): (
+        "cake_causal_conv1d_train_e8e950fb254d3376db52",
+        (63, 2, 1),
+    ),
+    ("sm_100a", "bwd", 1016, 4097): (
+        "cake_causal_conv1d_train_ea326ebe0f84d8cf2adb",
+        (32, 4, 4),
+    ),
+    ("sm_103a", "bwd_dt", 768, 4097): (
+        "cake_causal_conv1d_train_7035e23df8c9bf3c11e8",
+        (32, 4, 3),
+    ),
+    ("sm_107a", "bwd_dt", 1024, 4097): (
+        "cake_causal_conv1d_train_092af77575f0fdbf3615",
+        (128, 1, 1),
+    ),
+    ("sm_107a", "bwd_bias", 1024, 2049): (
+        "cake_causal_conv1d_train_4c8b21939791ace6e830",
+        (128, 1, 1),
+    ),
+}
+
+
+def _direct_rows_of_record() -> dict:
+    """The literal ``DIRECT_ROWS``: per architecture the forward keys of :data:`DIRECT_ROWS_OF_RECORD`, then the
+    backward keys of :data:`BACKWARD_DIRECT_ROWS_OF_RECORD`."""
+
+    return {
+        arch: {
+            **DIRECT_ROWS_OF_RECORD.get(arch, {}),
+            **BACKWARD_DIRECT_ROWS_OF_RECORD[arch],
+        }
+        for arch in ARCHES
+    }
+
+
+def _backward_direct_split(C: int) -> tuple[int, int, int]:
+    """The direct split of a backward direct row of ``C`` channels by the rule: of :data:`BACKWARD_DIRECT_FORMS` the
+    first form whose tiles pad ``C / 8`` channel vectors to the fewest, ``ceil(C / 8 / ct_vec)`` tiles."""
+
+    cv = C // 8
+    best = None
+    for ct_vec, n_sub in BACKWARD_DIRECT_FORMS["sm_100a"]["bwd"]:
+        padded = -(-cv // ct_vec) * ct_vec
+        if best is None or padded < best[0]:
+            best = (padded, ct_vec, n_sub)
+    _, ct_vec, n_sub = best
+    return ct_vec, n_sub, -(-cv // ct_vec)
+
+
+def _backward_direct_cell(arch: str, route: str, C: int, S: int) -> str | None:
+    """The direct backward program a call of ``route`` with ``(C, S)`` on ``arch`` runs by
+    :data:`BACKWARD_DIRECT_ROWS_OF_RECORD` (``C`` a multiple of 8 inside a key's channels, ``S`` inside its tokens),
+    ``None`` elsewhere."""
+
+    if C % 8:
+        return None
+    for (name, c_lo, c_hi), (s_lo, s_hi, program) in BACKWARD_DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        if name == route and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
+            return program
+    return None
+
+
+@contextmanager
+def _without_backward_direct_rows():
+    """Inside the block the registry is the package's without its direct backward programs: ``DIRECT_ROWS`` keeps its
+    forward keys only and no route lists a program of :data:`BACKWARD_DIRECT_PROGRAMS`.  The host's row plans and its
+    route lookup cache are dropped on entry and on exit."""
+
+    directs = set(BACKWARD_DIRECT_PROGRAMS.values())
+    rows = {
+        arch: {
+            key: value
+            for key, value in table.items()
+            if cake_jit.route_role(key[0]) == "fwd"
+        }
+        for arch, table in cake_jit.DIRECT_ROWS.items()
+    }
+    routes = {
+        arch: {
+            kind: [name for name in names if name not in directs]
+            for kind, names in by_kind.items()
+        }
+        for arch, by_kind in cake_jit.ROUTES.items()
+    }
+    pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+    cake_jit._library_route.cache_clear()
+    try:
+        with pytest.MonkeyPatch.context() as m:
+            m.setattr(cake_jit, "DIRECT_ROWS", rows)
+            m.setattr(cake_jit, "ROUTES", routes)
+            yield
+    finally:
+        pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
+        cake_jit._library_route.cache_clear()
+
+
 # Measured sm_103a forward cells at C 704 to 768 that lie inside a ``DIRECT_ROWS`` range: (route, taps, bias, C, S).
 # At each cell a call selects the route's direct program and plans its direct tiles.
 SM103_DIRECT_PLAN_CELLS = (
@@ -962,8 +1342,8 @@ def _args(record: dict) -> set[str]:
 PDL_FIELDS = ("launch", "arg_plan", "logical")
 PDL_ARG = ["launch", "enable_pdl"]
 # The single-rank programs that take the scalar: every record but the opt-in pair routes' (18 forward: the static, direct
-# and pair direct program of each forward route among them; 29 backward).
-RUNTIME_PDL_PROGRAMS = 47
+# and pair direct program of each forward route among them; 32 backward: the three direct backward programs among them).
+RUNTIME_PDL_PROGRAMS = 50
 
 
 def _pdl_program_of(det: dict) -> dict:
@@ -1013,7 +1393,8 @@ def _channels(registry, name: str, arch: str) -> int | None:
 def _bands():
     """``(arch, kind, band name, twin name, det twin name)`` of every channel-band program: a program a route lists
     after the deterministic route's programs (but this package's copies of deterministic programs,
-    :data:`OWN_COPIES`, and its SM-wide programs, :data:`SM_WIDE_COPIES`).  Its twin is the program of the route whose
+    :data:`OWN_COPIES`, its SM-wide programs, :data:`SM_WIDE_COPIES`, and its direct backward programs,
+    :data:`BACKWARD_DIRECT_PROGRAMS`).  Its twin is the program of the route whose
     channel threshold on ``arch`` is no longer the deterministic one: the band program owns the twin's lowest channel
     counts there, from the deterministic threshold up to the twin's new one."""
 
@@ -1026,7 +1407,11 @@ def _bands():
                 if _channels(cake_jit, name, arch) != _channels(det_jit, det_name, arch)
             ]
             for band in new[len(det) :]:
-                if band in OWN_COPIES.values() or band in SM_WIDE_COPIES:
+                if (
+                    band in OWN_COPIES.values()
+                    or band in SM_WIDE_COPIES
+                    or band in BACKWARD_DIRECT_PROGRAMS.values()
+                ):
                     continue
                 (twin,) = [
                     pair
@@ -1667,7 +2052,7 @@ def _forward_edges(arch: str) -> tuple[set[int], set[int]]:
 
 def _backward_edges(arch: str) -> tuple[set[int], set[int]]:
     """The channel counts (both sides of every channel bound) and token counts (both sides of every token bound) of
-    the backward keys of ``arch`` in :data:`FALLBACK_ROWS_OF_RECORD`."""
+    the backward keys of ``arch`` in :data:`FALLBACK_ROWS_OF_RECORD` and :data:`BACKWARD_DIRECT_ROWS_OF_RECORD`."""
 
     channels, tokens = set(), set()
     for (route, c_lo, c_hi), (s_lo, s_hi) in FALLBACK_ROWS_OF_RECORD.get(
@@ -1676,6 +2061,11 @@ def _backward_edges(arch: str) -> tuple[set[int], set[int]]:
         if route not in FORWARD_ROUTES:
             channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
             tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
+    for (_, c_lo, c_hi), (s_lo, s_hi, _) in BACKWARD_DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
+        tokens |= {s_lo - 1, s_lo, s_hi, s_hi + 1}
     return {C for C in channels if C > 0}, {S for S in tokens if S > 0}
 
 
@@ -1695,7 +2085,9 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     ``DIRECT_ROWS`` and ``PAIR_ROWS`` exist in both packages: inside and outside every range (both sides of each
     bound, :func:`_forward_edges`) both select the program at the same route position, the static program inside a
     static range, the direct program inside a direct range and the pair direct program inside a pair range, which
-    runs ahead of the other two."""
+    runs ahead of the other two.  Inside a backward key of :data:`BACKWARD_DIRECT_ROWS_OF_RECORD` this package selects
+    the route's direct backward program, which has no deterministic twin; on both sides of each of its bounds
+    (:func:`_backward_edges`) the rules above hold."""
 
     twin_of = {
         band: twin for band_arch, _, band, twin, _ in _bands() if band_arch == arch
@@ -1704,6 +2096,7 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     replaced = set()
     sm_wide_replaced = set()
     forward_hits = set()
+    direct_hits = set()
     edge_channels, edge_tokens = _forward_edges(arch)
     backward_channels, backward_tokens = _backward_edges(arch)
     for kind in cake_jit.KINDS:
@@ -1729,6 +2122,12 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
                     with monkeypatch.context() as m:
                         m.setitem(det_jit.ROUTES[arch], kind, copied)
                         (det_name,) = det_jit.selected_modules(arch, kind, C=C, S=S)
+                direct = _backward_direct_cell(arch, kind, C, S)
+                if direct is not None:
+                    # The route's direct backward program, ahead of every other table; it has no deterministic twin.
+                    assert name == direct, (arch, kind, C, S, name)
+                    direct_hits.add(kind)
+                    continue
                 bounds = cake_jit.fallback_row_range(arch, kind, C)
                 segment = [
                     program
@@ -1783,6 +2182,9 @@ def test_selection_matches_the_deterministic_package(arch, monkeypatch) -> None:
     assert forward_hits == {(route, form) for route, *_, form in _forward_rows(arch)}, (
         arch
     )
+    assert direct_hits == {
+        route for route, _, _ in BACKWARD_DIRECT_ROWS_OF_RECORD[arch]
+    }, arch
 
 
 # The FP32 accumulator slots each backward route keeps (one FP32 word per sum and slot): the fp32g routes spread a
@@ -1890,8 +2292,8 @@ def test_accumulators_are_sized_from_the_rule(kind, C) -> None:
 
 def _owner_tiles(record: dict, arch: str, C: int) -> int:
     """The largest channel tile count a backward ``record`` launches with at ``C`` on ``arch``, whatever ``S``:
-    the split's, or its route's :data:`cake_jit.TILE_OVERRIDES` or :data:`cake_jit.NARROW_TILES` row's when that
-    has more."""
+    the split's, or its route's :data:`cake_jit.TILE_OVERRIDES`, :data:`cake_jit.NARROW_TILES` or backward
+    ``DIRECT_ROWS`` row's (:data:`BACKWARD_DIRECT_SPLITS`, by the rule) when that has more."""
 
     geometry = record["grid_rule"]["geometry"]
     route = cake_jit.record_route(record, arch)
@@ -1904,6 +2306,14 @@ def _owner_tiles(record: dict, arch: str, C: int) -> int:
         and geometry["threads"] == 128
     ):
         n_ch_tiles = max(n_ch_tiles, -(-(C // geometry["vec"]) // 32))
+    if (
+        any(
+            name == route and c_lo <= C <= c_hi and C % 8 == 0
+            for name, c_lo, c_hi in BACKWARD_DIRECT_ROWS_OF_RECORD.get(arch, {})
+        )
+        and geometry["threads"] == 128
+    ):
+        n_ch_tiles = max(n_ch_tiles, _backward_direct_split(C)[2])
     return n_ch_tiles
 
 
@@ -1994,7 +2404,8 @@ def test_tile_overrides_are_backward_rows() -> None:
 def test_tile_override_bounds_and_plan() -> None:
     """A row's ``ct_vec`` applies from ``S_min`` through ``S_max`` (both included) and to no other token count,
     route or architecture; ``plan`` of a backward record given its architecture and route then plans ``(ct_vec,
-    threads // ct_vec, ceil(C / vec / ct_vec))``, and :func:`cake_jit.channel_split`'s split outside the range, for
+    threads // ct_vec, ceil(C / vec / ct_vec))`` (but the direct tiles of :data:`BACKWARD_DIRECT_SPLITS` at 128
+    threads inside a backward direct key), and :func:`cake_jit.channel_split`'s split outside the range, for
     the forward role without a route, under ``legacy`` and without the architecture or the route; the forward role
     refuses a backward route (``ValueError``, as the deterministic plan does)."""
 
@@ -2027,7 +2438,20 @@ def test_tile_override_bounds_and_plan() -> None:
                     got = cake_jit.plan(
                         S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
                     )
-                    assert {k: got[k] for k in wanted} == wanted, (label, S)
+                    want = wanted
+                    if (
+                        _backward_direct_cell(arch, route, C, S) is not None
+                        and threads == 128
+                    ):
+                        # Inside a backward direct key the direct tiles.
+                        want = dict(
+                            zip(
+                                ("ct_vec", "n_sub", "n_ch_tiles"),
+                                BACKWARD_DIRECT_SPLITS[C],
+                                strict=True,
+                            )
+                        )
+                    assert {k: got[k] for k in want} == want, (label, S)
                 for S in (s_min - 1, s_max + 1):
                     got = cake_jit.plan(
                         S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
@@ -2068,16 +2492,17 @@ def test_tile_override_bounds_and_plan() -> None:
 @pytest.mark.cpu_only
 def test_backward_workspace_covers_every_override_row() -> None:
     """The public workspace of a row's ``C`` holds the layout of every program of the row's route (every route plans
-    by its own rows) at the row's tile count (one ticket per tile), whatever ``S``."""
+    by its own rows) at the row's tile count (one ticket per tile), whatever ``S``: planned at the row's ``S_max``,
+    above every backward direct key."""
 
     for arch, rows in cake_jit.TILE_OVERRIDES.items():
-        for (route, C), (_, s_min, _) in rows.items():
+        for (route, C), (_, _, s_max) in rows.items():
             nbytes = cake_jit.backward_workspace_bytes(arch, C)
             for name in cake_jit.route_modules(arch, route):
                 record = cake_jit.MODULES[name]
                 geometry = record["grid_rule"]["geometry"]
                 tiles = cake_jit.plan(
-                    s_min,
+                    s_max,
                     C,
                     3,
                     geometry=geometry,
@@ -2126,9 +2551,10 @@ def test_c768_backward_rows_are_the_literal_rows() -> None:
     """The C 768 rows of the rendered ``TILE_OVERRIDES`` are the literal :data:`C768_TILE_OVERRIDES` on every
     architecture.  On the architectures of :data:`C768_NARROW_RANGES` the ``NARROW_TILES`` keys covering C 768 are
     exactly one per route of the literal, with its token range; no other backward route has a narrow range at C 768;
-    a range at a ``(route, 768)`` of ``TILE_OVERRIDES`` ends below the row's ``S_min``; and ``plan`` gives the 32-vector
-    tiles up to the range's end, the one tile from the next token to the row's ``S_min - 1``, and the row's tiles from
-    its ``S_min``."""
+    a range at a ``(route, 768)`` of ``TILE_OVERRIDES`` ends below the row's ``S_min``; and ``plan`` gives the direct
+    tiles inside the route's backward direct key covering C 768 (:data:`BACKWARD_DIRECT_SPLITS`), elsewhere the
+    32-vector tiles up to the range's end, the one tile from the next token to the row's ``S_min - 1``, and the row's
+    tiles from its ``S_min``."""
 
     assert set(C768_TILE_OVERRIDES) == set(ARCHES)
     for arch in ARCHES:
@@ -2159,6 +2585,23 @@ def test_c768_backward_rows_are_the_literal_rows() -> None:
                 row[1] - 1: one_tile,
                 row[1]: override,
             }
+            # Inside the route's backward direct key covering C 768 the direct tiles; one token outside it the tiles
+            # the other tables give there.
+            for (name, c_lo, c_hi), (s_lo, s_hi, _) in BACKWARD_DIRECT_ROWS_OF_RECORD[
+                arch
+            ].items():
+                if name != route or not c_lo <= 768 <= c_hi:
+                    continue
+                tokens.update({S: BACKWARD_DIRECT_SPLITS[768] for S in (s_lo, s_hi)})
+                for S in (s_lo - 1, s_hi + 1):
+                    if S >= 1:
+                        tokens[S] = (
+                            narrow
+                            if want[0] <= S <= want[1]
+                            else one_tile
+                            if S < row[1]
+                            else override
+                        )
             for S, tiles in tokens.items():
                 got = cake_jit.plan(
                     S, 768, 1, geometry=geometry, role="bwd", arch=arch, route=route
@@ -2197,21 +2640,21 @@ def _rules_pick(arch: str, kind: str, C: int, S: int) -> str:
 
 
 def _table_pick(arch: str, kind: str, C: int, S: int) -> str | None:
-    """The program the registry's ``SM_WIDE_ROWS`` segment, else its ``PAIR_ROWS`` range, else its ``DIRECT_ROWS``
-    range, else its ``FALLBACK_ROWS`` range, holding ``(C, S)`` of route ``kind`` on ``arch`` names (read from the four
-    tables, not through the selection), ``None`` outside all four."""
+    """The program the registry's ``PAIR_ROWS`` range, else its ``DIRECT_ROWS`` range, else its ``SM_WIDE_ROWS``
+    segment, else its ``FALLBACK_ROWS`` range, holding ``(C, S)`` of route ``kind`` on ``arch`` names (read from the
+    four tables, not through the selection), ``None`` outside all four."""
 
     if C % 8:
         return None
+    for table in (cake_jit.PAIR_ROWS, cake_jit.DIRECT_ROWS):
+        for (route, c_lo, c_hi), (s_lo, s_hi, name) in table.get(arch, {}).items():
+            if route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
+                return name
     for (route, c_lo, c_hi), segments in cake_jit.SM_WIDE_ROWS.get(arch, {}).items():
         if route == kind and c_lo <= C <= c_hi:
             for s_lo, s_hi, name in segments:
                 if s_lo <= S <= s_hi:
                     return name
-    for table in (cake_jit.PAIR_ROWS, cake_jit.DIRECT_ROWS):
-        for (route, c_lo, c_hi), (s_lo, s_hi, name) in table.get(arch, {}).items():
-            if route == kind and c_lo <= C <= c_hi and s_lo <= S <= s_hi:
-                return name
     for (route, c_lo, c_hi), (s_min, s_max) in cake_jit.FALLBACK_ROWS.get(arch, {}).items():
         if route == kind and c_lo <= C <= c_hi and s_min <= S <= s_max:
             return _route_fallback(arch, kind)
@@ -2251,22 +2694,24 @@ def test_fallback_rows_are_the_literal_rows() -> None:
 
 @pytest.mark.cpu_only
 def test_direct_rows_are_the_literal_rows() -> None:
-    """``DIRECT_ROWS`` is the literal :data:`DIRECT_ROWS_OF_RECORD` and ``DIRECT_PLANS`` the literal
-    :data:`DIRECT_PLANS_OF_RECORD`.  Every key names an exported architecture, one of its forward routes, a closed
-    range of channel counts (multiples of 8), a closed range of token counts inside ``S >= 1`` and the route's
+    """``DIRECT_ROWS`` is the literal :data:`DIRECT_ROWS_OF_RECORD` with the backward keys of
+    :data:`BACKWARD_DIRECT_ROWS_OF_RECORD` (:func:`_direct_rows_of_record`) and ``DIRECT_PLANS`` the literal
+    :data:`DIRECT_PLANS_OF_RECORD`.  Every forward key names an exported architecture, one of its forward routes, a
+    closed range of channel counts (multiples of 8), a closed range of token counts inside ``S >= 1`` and the route's
     direct program (selection-rule kind ``rows``), which ships for the architecture; the keys of one architecture and
     route are disjoint; no ``(C, S)`` of a direct range lies in a ``FALLBACK_ROWS`` range, and where a
     ``FALLBACK_ROWS`` key covers the same channel counts its static range lies below the direct range.
     ``DIRECT_PLANS`` names a form
-    ``(ct_vec, n_sub)`` for exactly the routes the architecture's keys name, within 128 threads."""
+    ``(ct_vec, n_sub)`` for exactly the forward routes the architecture's keys name, within 128 threads (the backward
+    keys: :func:`test_backward_direct_rows_are_the_literal_rows`)."""
 
-    assert cake_jit.DIRECT_ROWS == DIRECT_ROWS_OF_RECORD
+    assert cake_jit.DIRECT_ROWS == _direct_rows_of_record()
     assert cake_jit.DIRECT_PLANS == DIRECT_PLANS_OF_RECORD
     assert set(cake_jit.DIRECT_ROWS) <= set(ARCHES) and set(
         cake_jit.DIRECT_PLANS
     ) <= set(ARCHES)
     for arch in ARCHES:
-        rows = cake_jit.DIRECT_ROWS.get(arch, {})
+        rows = DIRECT_ROWS_OF_RECORD.get(arch, {})
         spans: dict[str, list[tuple[int, int]]] = {}
         for (route, c_lo, c_hi), (s_lo, s_hi, name) in rows.items():
             label = (arch, route, c_lo, c_hi)
@@ -2484,8 +2929,9 @@ def test_pair_module_refuses_registry_errors(arch, monkeypatch) -> None:
 def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
     """Inside a key (``C_lo <= C <= C_hi``, ``C`` a multiple of 8, ``S_min <= S <= S_max``) a call of the key's route
     selects the route's fallback program (a forward route's static program), inside a ``DIRECT_ROWS`` range the
-    route's direct program, inside a ``PAIR_ROWS`` range (ahead of the other two) the route's pair direct program,
-    inside an ``SM_WIDE_ROWS`` segment the segment's program, and the program the selection
+    route's direct program (a backward one also where a ``FALLBACK_ROWS`` range holds the same ``(C, S)``), inside a
+    ``PAIR_ROWS`` range (ahead of the other two) the route's pair direct program, inside an ``SM_WIDE_ROWS`` segment
+    the segment's program, and the program the selection
     rules pick everywhere else: both sides of every channel and token bound, on every forward and backward route of
     the architecture.  ``fallback_row_range`` holds the key's token range at its channel counts only; ``S`` of
     ``None`` is a ``ValueError`` where a key covers ``C``.  ``plan_row`` needs ``at`` there (``ValueError`` without
@@ -2516,7 +2962,7 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                 _forward_program(arch, kind, "pair"),
             )
             if kind in FORWARD_ROUTES
-            else (None, None)
+            else (BACKWARD_DIRECT_PROGRAMS.get(kind), None)
         )
         for C in sorted(C for C in channels if C > 0):
             keys = [
@@ -2528,7 +2974,12 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
             bounds = keys[0] if keys else None
             assert cake_jit.fallback_row_range(arch, kind, C) == bounds, (kind, C)
             for S in sorted(S for S in tokens if 0 < S <= cake_jit.INT32_MAX):
-                inside = bounds is not None and bounds[0] <= S <= bounds[1]
+                # A backward direct range runs ahead of the fallback range it shares ``(C, S)`` with.
+                inside = (
+                    bounds is not None
+                    and bounds[0] <= S <= bounds[1]
+                    and not cake_jit.direct_row(arch, kind, C, S)
+                )
                 want = _table_pick(arch, kind, C, S) or _rules_pick(arch, kind, C, S)
                 paired = _in_pair_of_record(arch, kind, C, S)
                 # A pair range runs ahead of the fallback and the direct range it covers.
@@ -2570,7 +3021,13 @@ def test_fallback_rows_select_the_route_fallback(arch, fake_device) -> None:
                     assert planned is None, (kind, C, s_lo)
                     continue
                 assert planned.names == (picked or _rules_pick(arch, kind, C, s_lo),), (kind, C, s_lo)
-                if picked is None and s_lo > 0:
+                # Above a backward direct range with no FALLBACK_ROWS key at ``C`` the rules may pick the
+                # route's fallback program itself (sm_107a ``bwd_dt`` at C 512).
+                if (
+                    picked is None
+                    and s_lo > 0
+                    and (kind in FORWARD_ROUTES or bounds is not None)
+                ):
                     assert planned.names != (fallback,), (kind, C, s_lo)
     assert bool(inside_calls) is bool(rows), arch
     assert bool(direct_calls) is bool(DIRECT_ROWS_OF_RECORD.get(arch)), arch
@@ -2587,8 +3044,8 @@ def test_sm_wide_rows_are_the_literal_rows() -> None:
     its ``bwd`` route and a closed range of channel counts (multiples of 8) on which the route's rules plan one
     channel tile at 128 threads (no ``TILE_OVERRIDES`` row); its segments ascend, are contiguous and end at
     ``INT32_MAX``; each names a program of the route of selection-rule kind ``rows`` that ships for the architecture
-    only, every such program of the route is named by exactly one segment, and no ``(C, S)`` of a segment lies in a
-    ``FALLBACK_ROWS`` range."""
+    only, every such program of the route but its direct backward program is named by exactly one segment, and no
+    ``(C, S)`` of a segment lies in a ``FALLBACK_ROWS`` range."""
 
     assert cake_jit.SM_WIDE_ROWS == SM_WIDE_ROWS_OF_RECORD
     for arch in ARCHES:
@@ -2622,6 +3079,7 @@ def test_sm_wide_rows_are_the_literal_rows() -> None:
             for kind in cake_jit.backward_kinds(arch)
             for name in cake_jit.route_modules(arch, kind)
             if (cake_jit.select_rule(cake_jit.MODULES[name]) or {}).get("kind") == "rows"
+            and name not in BACKWARD_DIRECT_PROGRAMS.values()
         ]
         assert sorted(named) == sorted(rows_programs) == sorted(set(named)), arch
 
@@ -2629,7 +3087,8 @@ def test_sm_wide_rows_are_the_literal_rows() -> None:
 @pytest.mark.cpu_only
 def test_sm_wide_programs_are_rows_records_of_their_det_twins() -> None:
     """Each SM-wide program (:data:`SM_WIDE_COPIES`) is a ``bwd`` record of one architecture with the selection rule
-    ``{"kind": "rows"}``, listed after its route's other programs: the deterministic SM-wide program's build geometry,
+    ``{"kind": "rows"}``, listed after its route's other programs but the direct backward program, which comes last:
+    the deterministic SM-wide program's build geometry,
     one CTA per SM, block, cluster and architecture; an ordinary occupancy launch with the per-call PDL scalar; the
     arguments and logical names of its route's fallback (the one-launch backward with ``dw_acc`` / ``work``); an
     ``accumulators`` workspace of :data:`SM_WIDE_SLOTS` copies of four FP32 taps.  No channel threshold or token
@@ -2677,8 +3136,10 @@ def test_sm_wide_programs_are_rows_records_of_their_det_twins() -> None:
             for S in (None, 1, cake_jit.INT32_MAX):
                 assert cake_jit._admits(cake_jit.select_rule(record), arch=arch, C=C, S=S) is False, (label, C, S)
     for arch, names in by_arch.items():
+        # The route's direct backward program comes last, after the SM-wide programs.
         route = cake_jit.route_modules(arch, "bwd")
-        assert list(route[-len(names) :]) == names, arch
+        assert route[-1] == BACKWARD_DIRECT_PROGRAMS["bwd"], arch
+        assert list(route[-len(names) - 1 : -1]) == names, arch
         assert not set(names) & {n for k in cake_jit.KINDS if k != "bwd" for n in cake_jit.ROUTES[arch].get(k, ())}
     assert set(by_arch) == set(ARCHES)
     for name, record in kcp_jit.MODULES.items():
@@ -2735,9 +3196,9 @@ def test_sm_wide_module_refuses_registry_errors(arch, monkeypatch) -> None:
 @pytest.mark.parametrize("arch", ARCHES)
 def test_row_sides_are_the_selection_edges(arch) -> None:
     """``row_sides`` cuts the token axis of every forward and backward route and ``C`` at the bounds of the route's
-    ``SM_WIDE_ROWS`` segments, ``PAIR_ROWS`` range, ``DIRECT_ROWS`` range and ``FALLBACK_ROWS`` range covering ``C``
-    (from 0, the last side to ``sys.maxsize``), and the selection holds one program on every side outside the rules'
-    token floors: the program at both ends of a side is the one at its first token count."""
+    ``SM_WIDE_ROWS`` segments, ``PAIR_ROWS`` range, ``DIRECT_ROWS`` range (forward or backward) and ``FALLBACK_ROWS``
+    range covering ``C`` (from 0, the last side to ``sys.maxsize``), and the selection holds one program on every
+    side outside the rules' token floors: the program at both ends of a side is the one at its first token count."""
 
     edge_channels, _ = _forward_edges(arch)
     for kind in (*cake_jit.forward_kinds(arch), *cake_jit.backward_kinds(arch)):
@@ -2748,7 +3209,7 @@ def test_row_sides_are_the_selection_edges(arch) -> None:
             for (route, c_lo, c_hi), segments in SM_WIDE_ROWS_OF_RECORD.get(arch, {}).items():
                 if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
                     cuts |= {bound for s_lo, s_hi, _ in segments for bound in (s_lo, s_hi + 1)}
-            for table in (PAIR_ROWS_OF_RECORD, DIRECT_ROWS_OF_RECORD):
+            for table in (PAIR_ROWS_OF_RECORD, _direct_rows_of_record()):
                 for (route, c_lo, c_hi), (s_lo, s_hi, _) in table.get(arch, {}).items():
                     if route == kind and c_lo <= C <= c_hi and C % 8 == 0:
                         cuts |= {s_lo, s_hi + 1}
@@ -2851,7 +3312,8 @@ def test_narrow_tiles_are_backward_rows() -> None:
 def _check_narrow_plan(table: dict, arch: str, route: str, C: int, S: int) -> int:
     """One ``(route, C, S)`` call of ``arch`` against ``table``: the narrow-row reading on every architecture, and
     ``plan`` of every program of the route with and without the architecture / route, under ``legacy`` and at
-    another thread count.  Returns the number of programs checked."""
+    another thread count (inside a backward direct key the direct tiles at 128 threads only).  Returns the number of
+    programs checked."""
 
     for other in ARCHES:
         bounds = _covering(table, other, route, C)
@@ -2867,7 +3329,10 @@ def _check_narrow_plan(table: dict, arch: str, route: str, C: int, S: int) -> in
         threads, vec = geometry["threads"], geometry["vec"]
         label = (arch, route, C, S, name)
         split = cake_jit.channel_split(C, geometry=geometry, role="bwd")
-        if override is not None:
+        if _backward_direct_cell(arch, route, C, S) is not None and threads == 128:
+            # Inside a backward direct key the direct tiles, ahead of the override and the narrow tiles.
+            want = _backward_direct_split(C)
+        elif override is not None:
             want = (override, threads // override, -(-(C // vec) // override))
         elif inside and threads == 128:
             want = (32, threads // 32, -(-(C // vec) // 32))
@@ -2898,7 +3363,8 @@ def test_narrow_tile_bounds_and_plan(narrow_table) -> None:
     """A key covers its channel counts from ``C_lo`` through ``C_hi`` and its token counts from ``S_min`` through
     ``S_max`` (both ends included; never a ``TILE_OVERRIDES`` row) on its architecture and route only.  ``plan`` of a
     backward record given its architecture and route then plans 32-vector tiles at 128 threads, ``(32, threads //
-    32, ceil(C / vec / 32))``; :func:`cake_jit.channel_split`'s split (or the override's) everywhere else, at
+    32, ceil(C / vec / 32))``, but the direct tiles inside a backward direct key; :func:`cake_jit.channel_split`'s
+    split (or the override's) everywhere else, at
     another thread count, under ``legacy`` and without the architecture or the route.  ``narrow_tiles`` (the
     workspace bound) holds the key's tile count whatever ``S``."""
 
@@ -4194,8 +4660,8 @@ def test_row_plans_follow_a_replaced_override_table(
 ) -> None:
     """A row planned before ``TILE_OVERRIDES`` changes keeps its plan until
     :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache; after it, with the rows of every architecture on ``arch``, every row's calls on both
-    sides of its token range plan as a per-call plan does, the override's tiles inside the range, on the row's route
-    (every route plans by its own rows)."""
+    sides of its token range plan as a per-call plan does, the override's tiles inside the range (the direct tiles
+    inside a backward direct key), on the row's route (every route plans by its own rows)."""
 
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
     shipped = dict(cake_jit.TILE_OVERRIDES.get(arch, {}))
@@ -4231,7 +4697,17 @@ def test_row_plans_follow_a_replaced_override_table(
                 want = _per_call(arch, route, S, C, 3, gm, policy_of(route))
                 got = _row_planned(arch, route, S, C, 3, gm, policy_of(route))
                 assert got == want, (route, C, S, gm)
-                if s_min <= S <= s_max and isinstance(got[1], dict):
+                if _backward_direct_cell(arch, route, C, S) is not None and isinstance(
+                    got[1], dict
+                ):
+                    # A backward direct key runs its direct tiles ahead of the override.
+                    assert _split3(got[1]) == BACKWARD_DIRECT_SPLITS[C], (
+                        route,
+                        C,
+                        S,
+                        gm,
+                    )
+                elif s_min <= S <= s_max and isinstance(got[1], dict):
                     assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
                 checked += 1
     assert checked
@@ -4415,6 +4891,552 @@ def test_row_plans_follow_a_replaced_forward_floor(arch, fake_device, monkeypatc
                                 checked += 1
     pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
     assert checked
+
+
+# ----------------------------------------------------------------------------------------------------------------
+# The direct backward rows (the backward keys of ``DIRECT_ROWS``): one ordinary launch per call without TMA or a staged
+# pipeline, ahead of every other backward table, on the tiles of ``BACKWARD_DIRECT_PLANS``.
+
+# The grid rule of every direct backward record: a co-resident grid of 2 CTAs per SM of 128 threads x 8-vectors,
+# capped at one CTA per token block of ``n_sub x 4`` tokens; no ``grid_mult`` (the call's ``bwd_grid_mult`` multiplies
+# the capped grid).
+BACKWARD_DIRECT_GRID_RULE = {
+    "block_tokens": 4,
+    "cap": "token_blocks",
+    "cooperative": False,
+    "ctas_per_sm": 2,
+    "geometry": {"threads": 128, "vec": 8},
+    "kind": "co_resident",
+}
+# The channel counts the edge tests plan at besides both sides of every channel bound of the backward keys: around C 512
+# and 1024, 64-channel tiles (C 520 and 576), a tie of the two forms (C 600) and 128-channel tiles (C 768 and 1016, the
+# last tile partial).
+BACKWARD_DIRECT_EDGE_CHANNELS = (504, 512, 520, 576, 600, 768, 1016, 1024, 1032)
+
+
+def _backward_direct_edges(
+    arch: str, route: str | None = None
+) -> tuple[list[int], list[int]]:
+    """``(channel counts, token counts)``, ascending: both sides of every channel bound and the token counts below,
+    at, one above the first and at and above the last token count of every backward direct key of ``arch`` (of
+    ``route`` only when given), the channel counts with :data:`BACKWARD_DIRECT_EDGE_CHANNELS`."""
+
+    channels, tokens = set(BACKWARD_DIRECT_EDGE_CHANNELS), set()
+    for (name, c_lo, c_hi), (s_lo, s_hi, _) in BACKWARD_DIRECT_ROWS_OF_RECORD.get(
+        arch, {}
+    ).items():
+        if route is None or name == route:
+            channels |= {c_lo - 8, c_lo, c_hi, c_hi + 8}
+            tokens |= {s_lo - 1, s_lo, s_lo + 1, s_hi, s_hi + 1}
+    return sorted(C for C in channels if C > 0), sorted(S for S in tokens if S > 0)
+
+
+def _direct_grid(sms: int, C: int, S: int) -> int:
+    """The grid of a direct backward call at ``bwd_grid_mult`` 1: at least one CTA per channel tile, at most one per
+    token block of ``n_sub x 4`` tokens, and at most the co-resident 2 CTAs per SM."""
+
+    _, n_sub, tiles = _backward_direct_split(C)
+    return max(tiles, min(2 * sms, tiles * max(1, -(-S // (4 * n_sub)))))
+
+
+@pytest.mark.cpu_only
+def test_backward_direct_records() -> None:
+    """Each direct backward program is one record for every architecture: ``ffi_entry`` ``run``, its name as kernel
+    and library, ``kernel_`` + name as symbol, role ``bwd``, selection rule ``{"kind": "rows"}``, the grid rule
+    :data:`BACKWARD_DIRECT_GRID_RULE`, a 128-thread ordinary launch with shared memory and the per-call PDL scalar,
+    one plain FP32 accumulator copy of 4 taps (5 on ``bwd_bias``) with uint32 tickets, and the arguments and logical
+    names of its route's fallback without the TMA maps (``x_map`` / ``dy_map``).  Every architecture's route lists
+    it last, no other route lists it, and no channel threshold or token floor admits it."""
+
+    assert cake_jit.BACKWARD_DIRECT_THREADS == 128
+    for route, name in BACKWARD_DIRECT_PROGRAMS.items():
+        record = cake_jit.MODULES[name]
+        label = (route, name)
+        assert PROGRAM_NAME.fullmatch(name) and name not in det_jit.MODULES, label
+        assert record["arches"] == list(ARCHES) and record["ffi_entry"] == "run", label
+        assert (
+            record["kernel"] == record["library"] == name
+            and record["kernel_symbol"] == f"kernel_{name}"
+        ), label
+        assert record["role"] == "bwd" and cake_jit.select_rule(record) == {
+            "kind": "rows"
+        }, label
+        assert record["grid_rule"] == BACKWARD_DIRECT_GRID_RULE, label
+        launch = record["launch"]
+        assert {
+            key: launch[key] for key in ("block", "cluster", "cooperative", "use_pdl")
+        } == {
+            "block": (128, 1, 1),
+            "cluster": (1, 1, 1),
+            "cooperative": False,
+            "use_pdl": "runtime",
+        }, label
+        assert (
+            isinstance(launch["dynamic_smem_bytes"], int)
+            and launch["dynamic_smem_bytes"] > 0
+        ), label
+        assert record["workspace_rule"] == {
+            "acc": "float32",
+            "slots": 1,
+            "kind": "accumulators",
+            "taps": 5 if route == "bwd_bias" else 4,
+            "work": "uint32",
+        }, label
+        maps = ("x_map", "dy_map")
+        for arch in ARCHES:
+            fallback = cake_jit.MODULES[_route_fallback(arch, route)]
+            assert record["arg_plan"] == [
+                entry for entry in fallback["arg_plan"] if entry[1] not in maps
+            ], (
+                label,
+                arch,
+            )
+            assert record["logical"] == {
+                k: v for k, v in fallback["logical"].items() if k not in maps
+            }, (label, arch)
+            names = cake_jit.route_modules(arch, route)
+            assert names[-1] == name and names.count(name) == 1, (label, arch)
+            others = {
+                n
+                for kind, listed in cake_jit.ROUTES[arch].items()
+                if kind != route
+                for n in listed
+            }
+            assert name not in others, (label, arch)
+            assert cake_jit.record_route(record, arch) == route, (label, arch)
+            for C in (*CHANNELS, *BACKWARD_DIRECT_SPLITS):
+                candidates, fallback_name = cake_jit._ranked_candidates(arch, route, C)
+                assert name not in candidates and name != fallback_name, (
+                    label,
+                    arch,
+                    C,
+                )
+                for S in (None, 1, cake_jit.INT32_MAX):
+                    assert (
+                        cake_jit._admits(
+                            cake_jit.select_rule(record), arch=arch, C=C, S=S
+                        )
+                        is False
+                    ), (label, C, S)
+    assert not set(BACKWARD_DIRECT_PROGRAMS.values()) & set(kcp_jit.MODULES)
+
+
+@pytest.mark.cpu_only
+def test_backward_direct_rows_are_the_literal_rows() -> None:
+    """The backward keys of ``DIRECT_ROWS`` are :data:`BACKWARD_DIRECT_ROWS_OF_RECORD` (each naming its route's
+    direct backward program), ``BACKWARD_DIRECT_PLANS`` is :data:`BACKWARD_DIRECT_FORMS` (forms for exactly the routes
+    of the keys, each within 128 threads).  The keys of a route are disjoint, in channel order, within C 512 to 1024
+    and S 1 to 4096, each over at least two token counts.  Every key covers each multiple of 8 from its ``C_lo`` to
+    its ``C_hi`` (``direct_row_range``), and next to it (``C_lo - 8``, ``C_hi + 8``) only a neighbouring key of the
+    route does; ``direct_module`` names the program at both channel and token ends and ``None`` one token below and
+    above; no ``(C, S)`` of a key lies in an ``SM_WIDE_ROWS`` segment."""
+
+    assert cake_jit.BACKWARD_DIRECT_PLANS == BACKWARD_DIRECT_FORMS
+    for arch in ARCHES:
+        backward = {
+            key: value
+            for key, value in cake_jit.DIRECT_ROWS[arch].items()
+            if cake_jit.route_role(key[0]) == "bwd"
+        }
+        assert backward == BACKWARD_DIRECT_ROWS_OF_RECORD[arch], arch
+        assert set(cake_jit.BACKWARD_DIRECT_PLANS[arch]) == {
+            key[0] for key in backward
+        }, arch
+        for route in {key[0] for key in backward}:
+            ends = [(c_lo, c_hi) for other, c_lo, c_hi in backward if other == route]
+            assert all(a[1] < b[0] for a, b in zip(ends, ends[1:])), (arch, route)
+        for (route, c_lo, c_hi), (s_lo, s_hi, name) in backward.items():
+            label = (arch, route)
+            assert name == BACKWARD_DIRECT_PROGRAMS[route], label
+            assert 512 <= c_lo <= c_hi <= 1024, (label, c_lo, c_hi)
+            assert 1 <= s_lo < s_hi <= 4096, (label, c_lo, s_lo, s_hi)
+            for ct_vec, n_sub in cake_jit.BACKWARD_DIRECT_PLANS[arch][route]:
+                assert ct_vec * n_sub == 128, label
+            for C in range(c_lo, c_hi + 1, 8):
+                assert cake_jit.direct_row_range(arch, route, C) == (s_lo, s_hi), (
+                    label,
+                    C,
+                )
+                for s_seg_lo, s_seg_hi, _ in (
+                    cake_jit.sm_wide_segments(arch, route, C) or ()
+                ):
+                    assert s_hi < s_seg_lo or s_seg_hi < s_lo, (label, C)
+            assert cake_jit.direct_row_range(arch, route, c_lo + 4) is None, label
+            for C in (c_lo - 8, c_hi + 8):
+                near = [
+                    (lo, hi)
+                    for (other, c_near_lo, c_near_hi), (lo, hi, _) in backward.items()
+                    if other == route and c_near_lo <= C <= c_near_hi
+                ]
+                want = near[0] if near else None
+                assert cake_jit.direct_row_range(arch, route, C) == want, (label, C)
+            for C in (c_lo, c_hi):
+                for S in (s_lo, s_hi):
+                    assert cake_jit.direct_module(arch, route, C, S) == name, (
+                        label,
+                        C,
+                        S,
+                    )
+                for S in (s_lo - 1, s_hi + 1):
+                    assert cake_jit.direct_module(arch, route, C, S) is None, (
+                        label,
+                        C,
+                        S,
+                    )
+                assert cake_jit.direct_module(arch, route, C, 0) is None, (label, C)
+        for route in cake_jit.backward_kinds(arch):
+            if route not in BACKWARD_DIRECT_PROGRAMS:
+                assert cake_jit.direct_row_range(arch, route, 768) is None, (
+                    arch,
+                    route,
+                )
+
+
+@pytest.mark.cpu_only
+def test_backward_direct_split_by_channel_count() -> None:
+    """A backward direct row of ``C`` channels runs the first form of ``BACKWARD_DIRECT_PLANS`` whose tiles pad ``C``
+    to the fewest channel vectors (:data:`BACKWARD_DIRECT_SPLITS`, by the rule at every multiple of 8 from 512 to
+    1024: at most 15 tiles), whatever ``S`` and the architecture; ``direct_tiles`` (the workspace bound) is that tile
+    count at a channel count a key covers, 0 outside every key, at another thread count and on a route without a
+    key.  The forward routes keep their one form of ``DIRECT_PLANS``.  A form beyond the geometry's threads, a route
+    without a form and ``C`` off the 8-channel grid are ``ValueError``."""
+
+    geometry = {"threads": 128, "vec": 8}
+    for C, split in BACKWARD_DIRECT_SPLITS.items():
+        assert _backward_direct_split(C) == split, C
+    for arch in ARCHES:
+        for route in BACKWARD_DIRECT_PROGRAMS:
+            for C in range(512, 1025, 8):
+                split = cake_jit.direct_split(
+                    C, geometry=geometry, route=route, arch=arch
+                )
+                assert split == _backward_direct_split(C), (arch, route, C)
+                assert split[0] * split[2] >= C // 8 and split[2] <= 15, (
+                    arch,
+                    route,
+                    C,
+                )
+                covered = any(
+                    name == route and c_lo <= C <= c_hi
+                    for name, c_lo, c_hi in BACKWARD_DIRECT_ROWS_OF_RECORD[arch]
+                )
+                assert cake_jit.direct_tiles(arch, route, C, geometry) == (
+                    split[2] if covered else 0
+                ), (arch, route, C)
+                assert (
+                    cake_jit.direct_tiles(arch, route, C, {**geometry, "threads": 256})
+                    == 0
+                ), (arch, route, C)
+            for C in (504, 1032, 2048):
+                assert cake_jit.direct_tiles(arch, route, C, geometry) == 0, (
+                    arch,
+                    route,
+                    C,
+                )
+            with pytest.raises(ValueError, match="does not fit"):
+                cake_jit.direct_split(
+                    576, geometry={"threads": 64, "vec": 8}, route=route, arch=arch
+                )
+            with pytest.raises(ValueError):
+                cake_jit.direct_split(580, geometry=geometry, route=route, arch=arch)
+        for route in ("bwd_fp32g", "bwd_bias_fp32g"):
+            assert cake_jit.direct_tiles(arch, route, 768, geometry) == 0, (arch, route)
+            with pytest.raises(ValueError, match="no direct plan"):
+                cake_jit.direct_split(768, geometry=geometry, route=route, arch=arch)
+        for route, (ct_vec, n_sub) in DIRECT_PLANS_OF_RECORD[arch].items():
+            want = (ct_vec, n_sub, -(-96 // ct_vec))
+            assert (
+                cake_jit.direct_split(768, geometry=geometry, route=route, arch=arch)
+                == want
+            ), (arch, route)
+            assert cake_jit.direct_tiles(arch, route, 768, geometry) == 0, (arch, route)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_backward_direct_rows_run_ahead_of_every_other_table(arch, monkeypatch) -> None:
+    """Inside a backward direct key the route's direct program runs on its direct tiles even where ``SM_WIDE_ROWS``,
+    ``FALLBACK_ROWS``, ``TILE_OVERRIDES`` and ``NARROW_TILES`` keys cover the same ``(C, S)`` (each replaced here by a
+    key over every token count), at C 768 of the ``bwd`` route; one token above the key those tables decide again, in
+    that order.  ``plan`` of a record of another thread count keeps its own plan there."""
+
+    route, C = "bwd", 768
+    keys = BACKWARD_DIRECT_ROWS_OF_RECORD[arch]
+    ((s_lo, s_hi),) = [
+        (lo, hi)
+        for (name, c_lo, c_hi), (lo, hi, _) in keys.items()
+        if name == route and c_lo <= C <= c_hi
+    ]
+    sm_wide = next(
+        name
+        for name, det in SM_WIDE_COPIES.items()
+        if arch in det_jit.MODULES[det]["arches"]
+    )
+    geometry = {"threads": 128, "vec": 8}
+    direct = BACKWARD_DIRECT_PROGRAMS[route]
+    tables = (
+        ("SM_WIDE_ROWS", {(route, 512, 1024): ((1, cake_jit.INT32_MAX, sm_wide),)}),
+        ("FALLBACK_ROWS", {(route, 512, 1024): (1, cake_jit.INT32_MAX)}),
+        ("TILE_OVERRIDES", {(route, C): (32, 1, cake_jit.INT32_MAX)}),
+        ("NARROW_TILES", {(route, 512, 1024): (1, cake_jit.INT32_MAX)}),
+    )
+    for table, rows in tables:
+        with monkeypatch.context() as m:
+            m.setitem(getattr(cake_jit, table), arch, rows)
+            for S in sorted({s_lo, s_hi, *(S for S in (1000,) if s_lo <= S <= s_hi)}):
+                assert cake_jit.selected_modules(arch, route, C=C, S=S) == (direct,), (
+                    table,
+                    S,
+                )
+                got = cake_jit.plan(
+                    S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
+                )
+                assert _split3(got) == BACKWARD_DIRECT_SPLITS[C], (table, S)
+                wide = cake_jit.plan(
+                    S,
+                    C,
+                    3,
+                    geometry={**geometry, "threads": 256},
+                    role="bwd",
+                    arch=arch,
+                    route=route,
+                )
+                assert _split3(wide) != BACKWARD_DIRECT_SPLITS[C], (table, S)
+            (above,) = cake_jit.selected_modules(arch, route, C=C, S=s_hi + 1)
+            got = cake_jit.plan(
+                s_hi + 1, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
+            )
+            if table == "SM_WIDE_ROWS":
+                assert above == sm_wide, table
+            elif table == "FALLBACK_ROWS":
+                assert above == _route_fallback(arch, route), table
+            else:
+                assert above != direct and _split3(got) == (32, 4, 3), (
+                    table,
+                    above,
+                    _split3(got),
+                )
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_backward_direct_rows_select_and_plan_at_their_edges(arch, fake_device) -> None:
+    """At the channel and token counts around the bounds of each backward direct key of the route
+    (:func:`_backward_direct_edges`), at every ``bwd_grid_mult``, a call inside a key launches the route's direct
+    program on the direct split with the capped grid times ``bwd_grid_mult`` (:func:`_direct_grid`); a call outside
+    every key launches what the package without the direct rows launches (:func:`_without_backward_direct_rows`), with
+    the same plan and grid.  The row plan equals the per-call plan everywhere."""
+
+    sms = PLAN_SWEEP_SMS[arch][0]
+    fake_device(arch, sms)
+    calls = {}
+    for route, name in BACKWARD_DIRECT_PROGRAMS.items():
+        channels, tokens = _backward_direct_edges(arch, route)
+        for C in channels:
+            for S in tokens:
+                for gm in pkg.BWD_GRID_MULTS:
+                    got = _row_planned(arch, route, S, C, 3, gm, "bf16")
+                    assert got == _per_call(arch, route, S, C, 3, gm, "bf16"), (
+                        route,
+                        C,
+                        S,
+                        gm,
+                    )
+                    if _backward_direct_cell(arch, route, C, S) is not None:
+                        assert got[0] == (name,), (route, C, S, gm)
+                        assert _split3(got[1]) == _backward_direct_split(C), (
+                            route,
+                            C,
+                            S,
+                            gm,
+                        )
+                        assert got[2] == (_direct_grid(sms, C, S) * gm, 1, 1), (
+                            route,
+                            C,
+                            S,
+                            gm,
+                        )
+                    else:
+                        assert got[0] != (name,), (route, C, S, gm)
+                        calls[(route, C, S, gm)] = got
+    assert calls
+    with _without_backward_direct_rows():
+        for (route, C, S, gm), got in calls.items():
+            assert _row_planned(arch, route, S, C, 3, gm, "bf16") == got, (
+                route,
+                C,
+                S,
+                gm,
+            )
+            assert _per_call(arch, route, S, C, 3, gm, "bf16") == got, (route, C, S, gm)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_backward_direct_grid_and_bwd_grid_mult(arch, fake_device) -> None:
+    """At the cells a backward direct key holds (its channel and token bounds among them), a direct backward record's
+    grid is ``max(n_ch_tiles, min(2 x SMs, n_ch_tiles x max(1, ceil(S / (4 x n_sub)))))`` (``block_tokens`` 4 of its
+    grid rule), on every SM count of :data:`PLAN_SWEEP_SMS` and on a device too small for one CTA per tile at 2 per SM;
+    ``bwd_grid_mult`` 1 to 4 multiplies it, in the row plan and the per-call plan alike.  Without ``C`` and ``S``
+    ``launch_grid`` refuses to size it."""
+
+    planned_cells = 0
+    for sms in (*PLAN_SWEEP_SMS[arch], 2):
+        fake_device(arch, sms)
+        for route, name in BACKWARD_DIRECT_PROGRAMS.items():
+            record = cake_jit.MODULES[name]
+            rows = BACKWARD_DIRECT_ROWS_OF_RECORD[arch]
+            keys = [
+                (c_lo, c_hi, s_lo, s_hi)
+                for (key_route, c_lo, c_hi), (s_lo, s_hi, _) in rows.items()
+                if key_route == route
+            ]
+            channels = {512, 520, 576, 768, 960, 1024}
+            channels.update(c for c_lo, c_hi, _, _ in keys for c in (c_lo, c_hi))
+            tokens = {1, 2, 5, 33, 64, 65, 1000}
+            tokens.update(s for _, _, s_lo, s_hi in keys for s in (s_lo, s_hi))
+            for C in sorted(channels):
+                for S in sorted(tokens):
+                    if _backward_direct_cell(arch, route, C, S) is None:
+                        continue
+                    planned_cells += 1
+                    want = _direct_grid(sms, C, S)
+                    assert want >= _backward_direct_split(C)[2], (sms, route, C, S)
+                    got = cake_jit.launch_grid(
+                        record, device_index=FAKE_DEVICE, C=C, S=S
+                    )
+                    assert got == (want, 1, 1), (sms, route, C, S)
+                    for gm in pkg.BWD_GRID_MULTS:
+                        planned = _row_planned(arch, route, S, C, 3, gm, "bf16")
+                        assert planned[2] == (want * gm, 1, 1), (sms, route, C, S, gm)
+                        assert _per_call(arch, route, S, C, 3, gm, "bf16") == planned, (
+                            sms,
+                            route,
+                            C,
+                            S,
+                            gm,
+                        )
+            for kwargs in ({}, {"C": 512}, {"S": 1}):
+                with pytest.raises(ValueError, match="needs C and S"):
+                    cake_jit.launch_grid(record, device_index=FAKE_DEVICE, **kwargs)
+    assert planned_cells, arch
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_backward_plans_outside_the_direct_rows_are_unchanged(
+    arch, fake_device
+) -> None:
+    """Outside the backward direct keys every backward call of every route (the fp32g and pair routes included) plans
+    the program, scalars and grid of the package without its direct backward programs
+    (:func:`_without_backward_direct_rows`), in the row plan and the per-call plan, at every ``bwd_grid_mult``: channel
+    counts at and around the keys' channel bounds and token counts around their token bounds.  The cells of
+    :data:`BACKWARD_OUTSIDE_PLANS_OF_RECORD` keep their program and split."""
+
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    edge_channels, edge_tokens = _backward_direct_edges(arch)
+    channels = sorted({*CHANNELS, *edge_channels, *BACKWARD_DIRECT_SPLITS})
+    tokens = sorted(
+        {1, 2, 1000, 2048, 2049, 4096, 4097, 16384, 16385, 62585, 250340, *edge_tokens}
+    )
+
+    def policy_of(route: str) -> str:
+        return "fp32" if "fp32g" in route else "bf16"
+
+    def sweep() -> dict:
+        planned = {}
+        for route in cake_jit.backward_kinds(arch):
+            for C in channels:
+                for S in tokens:
+                    if _backward_direct_cell(arch, route, C, S) is not None:
+                        continue
+                    for gm in pkg.BWD_GRID_MULTS:
+                        got = _row_planned(arch, route, S, C, 3, gm, policy_of(route))
+                        assert got == _per_call(
+                            arch, route, S, C, 3, gm, policy_of(route)
+                        ), (route, C, S, gm)
+                        planned[(route, C, S, gm)] = got
+        return planned
+
+    shipped = sweep()
+    with _without_backward_direct_rows():
+        base = sweep()
+    assert shipped == base, arch
+    checked = 0
+    for (cell_arch, route, C, S), (
+        program,
+        split,
+    ) in BACKWARD_OUTSIDE_PLANS_OF_RECORD.items():
+        if cell_arch != arch:
+            continue
+        assert _backward_direct_cell(arch, route, C, S) is None, (route, C, S)
+        names, scalars, _ = _row_planned(arch, route, S, C, 3, 1, "bf16")
+        assert names == (program,) and _split3(scalars) == split, (
+            route,
+            C,
+            S,
+            names,
+            _split3(scalars),
+        )
+        checked += 1
+    assert checked, arch
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_public_backward_workspace_is_unchanged_by_the_direct_rows(arch) -> None:
+    """The public backward workspace (``backward_workspace_bytes``) is the same with and without the direct backward
+    programs at every channel count (the fp32g programs' sixteen accumulator copies set it), and holds every direct
+    backward program's layout at its direct tiles: ``acc`` of 4 (5) FP32 words per channel and one ticket per tile."""
+
+    channels = sorted({*CHANNELS, *range(8, 2049, 8)})
+    shipped = {C: cake_jit.backward_workspace_bytes(arch, C) for C in channels}
+    with _without_backward_direct_rows():
+        base = {C: cake_jit.backward_workspace_bytes(arch, C) for C in channels}
+    assert shipped == base, arch
+    for route, name in BACKWARD_DIRECT_PROGRAMS.items():
+        record = cake_jit.MODULES[name]
+        taps = 5 if route == "bwd_bias" else 4
+        for C in range(512, 1025, 8):
+            tiles = _backward_direct_split(C)[2]
+            layout = cake_jit.accumulator_layout(record, C, tiles)
+            assert (
+                layout["acc_bytes"] == 4 * taps * C and layout["work_words"] == tiles
+            ), (route, C)
+            assert layout["total_bytes"] < shipped[C], (route, C)
+
+
+@pytest.mark.cpu_only
+@pytest.mark.parametrize("arch", ARCHES)
+def test_kcp_is_unchanged_by_the_backward_direct_rows(arch, fake_device) -> None:
+    """The KCP routes select, plan and size their workspace as without the direct backward programs: every KCP route's
+    selection, the KCP workspace and the KCP forward's single-rank main program (``kcp._sr_main``) at channel and
+    token counts inside and around the backward direct keys."""
+
+    kcp = cake_package(KEY, "kcp")
+    fake_device(arch, PLAN_SWEEP_SMS[arch][0])
+    channels = (504, 512, 576, 768, 1024, 1032, 2048)
+    tokens = (1, 2, 1000, 2048, 2049, 4096, 4097, 65536)
+
+    def read() -> dict:
+        out = {}
+        for C in channels:
+            out[("workspace", C)] = kcp_jit.workspace_bytes(arch, C)
+            for S in tokens:
+                for kind in kcp_jit.ROUTES.get(arch, {}):
+                    out[(kind, C, S)] = kcp_jit.selected_modules(arch, kind, C=C, S=S)
+                out[("main", C, S)] = kcp._sr_main(
+                    arch, S=S, C=C, n_frag=3, device_index=FAKE_DEVICE
+                )
+        return out
+
+    shipped = read()
+    with _without_backward_direct_rows():
+        base = read()
+    assert shipped == base, arch
+    assert not {
+        name for names in kcp_jit.ROUTES.get(arch, {}).values() for name in names
+    } & set(BACKWARD_DIRECT_PROGRAMS.values())
 
 
 # ----------------------------------------------------------------------------------------------------------------

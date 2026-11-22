@@ -33,8 +33,14 @@ rows of ``cake_jit.FALLBACK_ROWS`` (the default backward route at C = 520 to
 ``bwd_dt`` route, at C = 520 to 1016 and small S, ``bwd_dt`` at C = 768 on
 sm_103a from release 0.2.11; each row up to its own token bound), that launch
 runs the route's fallback program, the one the route runs at its smallest
-channel counts, in place of the program its channel thresholds pick.  This
-module never runs the deterministic package.
+channel counts, in place of the program its channel thresholds pick.  At the
+backward rows of ``cake_jit.DIRECT_ROWS`` (the ``bwd``, ``bwd_dt`` and
+``bwd_bias`` routes; per architecture and route, channel ranges within C = 512
+to 1024, each with its own token range within S = 1 to 4096) that launch runs
+the route's direct program, ahead of every table above and the thresholds: no
+TMA and no staged pipeline, each CTA the next token blocks of its channel tile,
+``dx`` bit for bit the route's staged programs', and the same accumulators and
+counters.  This module never runs the deterministic package.
 
 Numerical mode (the same rule as every non-deterministic training package):
 the module name chooses the package, and no entry point takes a mode keyword.

@@ -113,7 +113,7 @@ The forward runs two programs:
 1. The main program reads no received history row. It writes every row, and it writes the first rows of a
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and the rank's token count. It takes each of the rank's
-   fragments as a document of its own and launches as the single-rank forward does: at a row of
+   fragments as a document of its own and launches as the single-rank forward does: at a forward row of
    `cake_jit.FALLBACK_ROWS`, `cake_jit.DIRECT_ROWS` or `cake_jit.PAIR_ROWS` (C 512 to 1024, inside the row's token
    range; a `PAIR_ROWS` range first) the static, the direct or the pair direct program, with no counters (a direct
    or pair direct program's grid capped at its token blocks); elsewhere the dynamic program on its record's full
@@ -147,6 +147,10 @@ the architecture (`kcp.FWD_RESERVE_SMS`): on sm_107a it is one SM short of the c
 holds every channel tile, and on sm_100a and sm_103a it is the full co-resident grid.
 
 ### The backward
+
+The backward rows of `cake_jit.DIRECT_ROWS` (channel ranges within C 512 to 1024 at small S, where the single-rank
+backward runs its route's direct program) do not apply to this route: the KCP backward runs the programs below at
+every `C` and `S`.
 
 The head program writes the FP32 derivative of each continuing fragment's
 first tokens (the halo adjoints) into the send layout. It matches the
