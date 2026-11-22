@@ -61,6 +61,9 @@ from tests.experimental._mok_one_gpu import (
 from tests.experimental._mok_reference import (
     mxfp8_quantize,
     production_inputs,
+    rand,
+    randn,
+    randn_like,
     require_gpu,
     single_rank_schedule,
 )
@@ -89,20 +92,20 @@ def _segments(s):
 
 def _weights(experts, hidden, intermediate, options):
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
     return shared, routed
 
 
 def _scores(tokens, topk):
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     return scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
 
 
@@ -122,7 +125,7 @@ ACCUMULATOR = (0, 3, 1, 4, 2, 5)
 
 def _accumulators(shared, routed):
     """Nonzero FP32 starts of the ``(*shared, *routed)`` weight-gradient accumulators, and the accumulators."""
-    initial = [torch.randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
+    initial = [randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
     return initial, [value.clone() for value in initial]
 
 
@@ -196,8 +199,8 @@ def _bf16_case(
     naive_values = {}
 
     def run(j, _seed):
-        x = torch.randn(tokens, hidden, **options) * 0.125
-        dy = torch.randn_like(x) * 0.125
+        x = randn(tokens, hidden, **options) * 0.125
+        dy = randn_like(x) * 0.125
         shared, routed = _weights(experts, hidden, intermediate, options)
         scores = _scores(tokens, topk)
         combine = torch.zeros(tokens * topk, hidden, **options)
@@ -335,8 +338,8 @@ def _mxfp8_case(
     naive_values = {}
 
     def run(j, _seed):
-        x = torch.randn(tokens, hidden, **options)
-        dy = torch.randn(tokens, hidden, **options) * 0.125
+        x = randn(tokens, hidden, **options)
+        dy = randn(tokens, hidden, **options) * 0.125
         shared, routed = _weights(experts, hidden, intermediate, options)
         scores = _scores(tokens, topk)
         q = [mxfp8_quantize(w) for w in routed]
@@ -493,9 +496,9 @@ def test_epilogue_forward_accuracy(record_property, topk, tokens, hidden):
     naive_values = {}
 
     def run(j, _seed):
-        shared = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-        routed = torch.randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
-        scores = torch.rand(tokens, topk, device="cuda")
+        shared = randn(tokens, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+        routed = randn(tokens * topk, hidden, device="cuda", dtype=torch.bfloat16) * 0.125
+        scores = rand(tokens, topk, device="cuda")
         y = epilogues.forward(shared, routed, scores)
         naive_values[j] = dict(y=naive.epilogue_forward(shared, routed, scores, naive.NAIVE))
         return dict(y=y), dict(y=naive.epilogue_forward(shared, routed, scores, naive.ORACLE))
@@ -517,7 +520,7 @@ def _require_before_down():
 def _before_down_weights(tokens, topk, zeros):
     """FP32 router weights in [0, 1.5): every 5th token's first weight and every weight of token 3 exactly 0; with
     ``zeros`` also every second slot's."""
-    scores = torch.rand(tokens, topk, device="cuda") * 1.5
+    scores = rand(tokens, topk, device="cuda") * 1.5
     scores[::5, 0] = 0.0
     scores[3] = 0.0
     if zeros:
@@ -560,8 +563,8 @@ def _before_down_case(
             p = production_inputs(tokens, hidden, intermediate, experts, topk, swiglu_limit, seed=draw)
             x, dy, scores, shared, routed, routes = p["x"], p["dy"], p["weights"], p["shared"], p["routed"], p["ids"]
         else:
-            x = torch.randn(tokens, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
+            x = randn(tokens, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
             shared, routed = _weights(experts, hidden, intermediate, options)
             scores = _before_down_weights(tokens, topk, zeros)
             routes = fixed
@@ -704,11 +707,11 @@ def _before_down_adapter_case(
     naive_values = {}
 
     def run(j, _draw):
-        x = torch.randn(tokens, hidden, **options) * 0.125
-        dy = torch.randn_like(x) * 0.125
+        x = randn(tokens, hidden, **options) * 0.125
+        dy = randn_like(x) * 0.125
         shared, routed = _weights(experts, hidden, intermediate, options)
         scores = _before_down_weights(tokens, topk, False)
-        ids = torch.rand(tokens, experts, device=device).argsort(-1)[:, :topk].contiguous()
+        ids = rand(tokens, experts, device=device).argsort(-1)[:, :topk].contiguous()
         weights = (*shared, *routed)
         accumulators = [torch.zeros(w.shape, device=device) for w in weights]
         schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
@@ -786,10 +789,10 @@ def _before_down_adapter_counts_case(
         weights = (*shared, *routed)
         outputs, oracle, naive_values[j] = {}, {}, {}
         for count in CHANGED_COUNTS:
-            x = torch.randn(count, hidden, **options) * 0.125
-            dy = torch.randn_like(x) * 0.125
+            x = randn(count, hidden, **options) * 0.125
+            dy = randn_like(x) * 0.125
             scores = _before_down_weights(count, topk, False)
-            ids = torch.rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
+            ids = rand(count, experts, device=device).argsort(-1)[:, :topk].contiguous()
             accumulators = [torch.zeros(w.shape, device=device) for w in weights]
             schedule = functional.build_schedule(workspace, config, ids, num_local_experts=experts)
             assert schedule.num_source_tokens == count and int(schedule.num_tokens.item()) > macro

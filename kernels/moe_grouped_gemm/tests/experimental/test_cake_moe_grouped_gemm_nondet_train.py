@@ -225,6 +225,12 @@ def _bounds(sizes):
 OUT_NAMES = {"fwd": "Y", "dgrad": "dX", "wgrad": "dW"}
 
 
+def _tile_k(name):
+    """The k tile of weight-gradient route ``name``, a public route or its lead twin."""
+    base = name.removesuffix(cake_jit.LEAD_SUFFIX)
+    return 512 if base.endswith("_k512") else 256
+
+
 def _operands(op, x, w, g):
     """The operands of ``op``: fwd (x, w), dgrad (g, w), wgrad (g, x)."""
     return {"fwd": (x, w), "dgrad": (g, w), "wgrad": (g, x)}[op]
@@ -719,10 +725,10 @@ def test_ordered_tail_archs_bind_the_ordered_k512_builds():
     for name, route in ROUTES.items():
         if route["op"] != "wgrad":
             continue
-        if name.endswith("_k512"):
+        if _tile_k(name) == 512:
             k512_arches |= set(route["arches"])
             assert set(route["arches"]) <= set(c["ordered_tail_archs"]), name
-        tile_k = 512 if name.endswith("_k512") else 256
+        tile_k = _tile_k(name)
         for arch in route["arches"]:
             ordered = cb.wgrad_ordered_tail(tile_k, arch, c)
             assert ordered == (tile_k == 512 and arch in c["ordered_tail_archs"])
@@ -938,7 +944,7 @@ def test_workspace_arguments_of_the_argument_plans():
         for stage in route["stages"]:
             program = PROGRAMS[stage["program"]]
             plan = [tuple(item) for item in program["arg_plan"]]
-            tile_k = 512 if name.endswith("_k512") else 256
+            tile_k = _tile_k(name)
             one_launch = route["op"] == "wgrad" and any(
                 cb.wgrad_ordered_tail(tile_k, arch)
                 or cb.wgrad_unordered_tail(tile_k, arch)
@@ -1022,6 +1028,9 @@ def test_bind_accepts_row_strided_operands_of_the_row_base_programs(monkeypatch)
             if not rows:
                 continue
             host = cb.HOST_ARGUMENTS[cb.host_binding(route["op"], stage["name"])]
+            # ``m_begin`` goes to a lead twin only (``_bind`` refuses it elsewhere).
+            if cb.M_BEGIN not in plan_args:
+                host = host - {cb.M_BEGIN}
             for arch in program["arches"]:
                 if arch not in route["arches"]:
                     continue
@@ -2070,20 +2079,52 @@ def _m_indptr(sizes, device):
     return torch.tensor([0] + ends, dtype=torch.int32, device=device)
 
 
+def _bits(t):
+    """The integer view of ``t``'s elements (a bitwise comparison: ``-0.0`` differs from
+    ``+0.0``, and a NaN equals only its own payload)."""
+    return t.view(_BIT_VIEWS[t.dtype])
+
+
+def _assert_lead_binding(lead, base):
+    """``lead`` (an ``m_indptr`` call) binds the lead twins of what ``base`` (the ``[E]``
+    call over the same shapes) binds: the same plan and stages, every launch on the lead
+    twin of its route, every program the twin of the base program."""
+    assert lead.record_name == base.record_name
+    assert lead.plan == base.plan and lead.stages == base.stages
+    assert base.bound_routes and not any(
+        cake_jit.is_lead_route(r) for r in base.bound_routes
+    )
+    assert lead.bound_routes == tuple(cake_jit.lead_route(r) for r in base.bound_routes)
+    assert lead.bound_programs == tuple(
+        cake_jit.lead_twin(p) for p in base.bound_programs
+    )
+
+
 def test_m_indptr_form_matches_offs_form(record_property):
+    """An ``m_indptr`` from 0 binds the lead twins (``_assert_lead_binding``) and gives the
+    bits of the ``[E]`` form, which binds the programs themselves; its weight gradient is
+    judged over the draws; a table of neither ``E`` nor ``E + 1`` entries is refused."""
     _require_program("fwd")
     _require_program("dgrad")
     device = _require_program("wgrad", torch.bfloat16)
     x, w, g, offs = _inputs(RAGGED_E6, 512, 256, device)
     m_indptr = _m_indptr(RAGGED_E6, device)
-    assert torch.equal(
-        pkg.cake_moe_grouped_gemm_nondet_train_forward(x, w, m_indptr),
-        pkg.cake_moe_grouped_gemm_nondet_train_forward(x, w, offs),
-    )
-    assert torch.equal(
-        pkg.cake_moe_grouped_gemm_nondet_train_dgrad(g, w, m_indptr),
-        pkg.cake_moe_grouped_gemm_nondet_train_dgrad(g, w, offs),
-    )
+    for prepare, a, b, kwargs in (
+        (cb.cake_moe_grouped_gemm_nondet_train_prepare_forward, x, w, {}),
+        (cb.cake_moe_grouped_gemm_nondet_train_prepare_dgrad, g, w, {}),
+        (
+            cb.cake_moe_grouped_gemm_nondet_train_prepare_wgrad,
+            g,
+            x,
+            {"num_groups": len(RAGGED_E6)},
+        ),
+    ):
+        lead = prepare(a, b, m_indptr, **kwargs)
+        base = prepare(a, b, offs)
+        _assert_lead_binding(lead, base)
+        lead.out.fill_(float("nan"))
+        base.out.fill_(float("nan"))
+        assert torch.equal(_bits(lead.launch()), _bits(base.launch())), prepare.__name__
 
     def draw(d):
         x1, _w1, g1, _ = _inputs(RAGGED_E6, 512, 256, device, seed=d.seed)

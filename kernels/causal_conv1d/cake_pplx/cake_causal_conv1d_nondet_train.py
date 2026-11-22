@@ -74,16 +74,19 @@ output dtypes, masks, layouts, dynamic shapes and parameter-gradient ownership
 are the deterministic package's.
 
 The forward programs (each the deterministic package's program of the same row):
-at C = 576 to 768, inside the token range of a row of the backend's
+at C = 512 to 1024, inside the token range of a row of the backend's
 ``cake_jit.FALLBACK_ROWS`` or ``cake_jit.DIRECT_ROWS`` (by architecture and
 route), the static program (a fixed token range per CTA) or the direct
 program (the next token blocks per CTA, no shared memory) runs, neither with
 ``work`` counters: a passed forward ``workspace`` is checked and not passed
 to the program, and such a call zeroes no package buffer.  Each row gives its
-own token range.  From release 0.2.6, every architecture and route has a row
-at each ``C`` = 576 to 768 (0.2.5 had none for sm_100a ``fwd_bias`` at
-C = 640, sm_103a ``fwd_bias`` at C = 576 and 712, and sm_103a ``fwd`` at
-C = 768).  For most ``C`` the first range starts at S = 1.  The sm_103a
+own token range.  From release 0.2.10, every architecture and route has a row
+at each ``C`` = 512 to 1024 (0.2.6 to 0.2.9: at each ``C`` = 576 to 768;
+0.2.5 had none for sm_100a ``fwd_bias`` at C = 640, sm_103a ``fwd_bias`` at
+C = 576 and 712, and sm_103a ``fwd`` at C = 768).  For most ``C`` the first
+range starts at S = 1.  Where a key has no ``DIRECT_ROWS`` range (for example
+the sm_107a ``fwd_bias`` rows at C = 584, 600, 616 and 632, from S = 1 to
+24576), the static program runs over the key's whole range.  The sm_103a
 ``fwd_bias`` rows at C = 720 to 768 start at S = 13824 (C = 736: 14336) and
 have only a static range.  Every other call (outside a row's range, or where an
 architecture, route and ``C`` have no row) runs the dynamic program, as in

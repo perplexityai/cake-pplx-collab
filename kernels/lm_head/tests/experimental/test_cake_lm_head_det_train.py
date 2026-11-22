@@ -24,6 +24,7 @@ import contextlib
 import functools
 import gc
 import inspect
+import json
 import math
 import os
 import re
@@ -31,6 +32,7 @@ import subprocess
 import sys
 import threading
 import warnings
+import weakref
 from dataclasses import fields, replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -122,7 +124,8 @@ _STAGE_VALUES = {
     | (_GEMM_VALUES if stage.startswith("gemm") else set())
     | ({"n_slabs", "row_vecs", "lr"} if stage == "slab_sum" else set())
     | ({"num_chunks"} if stage == cake_backend.ZERO_DLOGP_PARTITION_STAGE else set())
-    | ({"row_vecs", "num_rows"} if stage == "scale_cast_scatter_bf16" else set())
+    | ({"row_vecs", "num_rows"} if stage.startswith("scale_cast_scatter") else set())
+    | ({"row_vecs", "fold_lo", "fold_hi"} if "_fold" in stage else set())
     | (
         {"ld_x_words", "row_vecs", "num_rows"}
         if stage == cake_backend.HIDDEN_COUNT_STAGE
@@ -152,6 +155,25 @@ def _require_program(*, entry: str = "loss"):
         pytest.skip(
             f"generated chunked LM-head program ({entry} entry) not registered for this device"
         )
+
+
+def _require_holding_gate():
+    """The holding-stream tests run with the allocator gate open (``_rlab_holding_ok``): torch's native caching
+    allocator with fixed segments.  Otherwise the package takes an ordinary allocation by design and these tests cannot
+    see a holding stream: they fail here, naming the allocator state of this process and the settings they need."""
+    if cake_backend._rlab_holding_ok():
+        return
+    query = getattr(torch._C, "_cuda_getAllocatorBackend", None)
+    backend = "unknown" if query is None else query()
+    query = getattr(torch._C, "_accelerator_getAllocatorSettings", None)
+    settings = "unknown" if query is None else query()
+    raise AssertionError(
+        "the holding-stream tests need torch's native caching allocator with fixed segments (the allocator gate "
+        f"_rlab_holding_ok); this process has allocator backend {backend!r}, settings {settings!r}, "
+        f"PYTORCH_CUDA_ALLOC_CONF={os.environ.get('PYTORCH_CUDA_ALLOC_CONF')!r}, "
+        f"PYTORCH_ALLOC_CONF={os.environ.get('PYTORCH_ALLOC_CONF')!r}: run them without expandable_segments:True and "
+        "without backend:cudaMallocAsync"
+    )
 
 
 def _require_hidden_count():
@@ -416,6 +438,8 @@ def test_registry_records_are_well_formed():
         "scale_cast_bf16",
         "scale_cast_f32",
         "scale_cast_scatter_bf16",
+        "scale_cast_fold_bf16",
+        "scale_cast_scatter_fold_bf16",
     )
     # the temperature forms of the log-probability entry have tables of their own: a call
     # without a temperature reads STAGES / GEMM_STAGES / ROW_STAGES / STAGE_TENSORS, which carry none of them
@@ -1240,7 +1264,7 @@ def test_geometry_cluster_ctas():
 
 def test_stage_variant_grammar():
     bases = cake_jit.BASE_STAGES
-    assert len(bases) == 17 and set(bases) <= set(cake_jit.STAGES)
+    assert len(bases) == 19 and set(bases) <= set(cake_jit.STAGES)
     assert cake_backend.STAGE_KNOBS == (
         "count",
         "sliced",
@@ -3292,7 +3316,7 @@ def test_reachable_variants_complete_the_rule_closure():
         | rv(bases, "sm_100a", 4)
         | counted
     )
-    assert len(cake_jit.STAGES) == 38
+    assert len(cake_jit.STAGES) == 40
     # no rule reaches a temperature form (the call's temperature selects it)
     assert not set(TAU_STAGES) & (rv(bases, "sm_103a", 4) | rv(bases, "sm_100a", 4))
     assert (
@@ -3770,6 +3794,22 @@ def test_binding_keys_cover_pointer_shape_stride_dtype_and_options():
         need_dw=True,
         valid_rows=4,
     )
+    # the label residual fold in the compact dX cast (:func:`cast_fold_rows`): the log-probability backward's key and
+    # the opt-in loss forward's key carry it (a kept backward's key still ends with ``"keep"``)
+    assert bwd != logprob_backward_binding_key(
+        X,
+        W,
+        labels,
+        lse,
+        dlogp,
+        chunk_size=4096,
+        need_dx=True,
+        need_dw=True,
+        cast_fold=True,
+    )
+    assert opt_in.forward_binding_key(
+        X, W, labels, **common
+    ) != opt_in.forward_binding_key(X, W, labels, cast_fold=True, **common)
 
 
 def test_binding_cache_is_lru_and_bounded():
@@ -5536,6 +5576,259 @@ def test_dx_finalize_switch_is_bitwise_on_the_reference_backend(objective, entry
             assert torch.equal(a, b)
     if frac == "all":
         assert torch.all(out["1"]["dX"] == 0) and torch.all(out["1"]["dW"] == 0)
+
+
+def test_cast_fold_plan_keys():
+    """The label residual fold in the compact dX cast (:func:`cake_backend.cast_fold_rows`, :attr:`Plan.cast_fold`): a
+    compacted plan under the fused dX finalize whose dX the scatter cast finalizes (a loss plan, or a log-probability
+    plan with ``dx_cast=False``) launches no slab sum on the longest run of adjacent one-slice chunks -- the scatter
+    cast folds those rows -- and keeps it on every other chunk.  Without ``cast_fold``, without the finalize, or on a
+    compacted log-probability plan that casts dX itself, every chunk keeps its slab sum (an uncompacted plan folds in
+    the flat cast, :func:`test_flat_cast_fold_plan_keys`)."""
+    g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+
+    def plan_of(
+        entry="loss", *, valid=4000, finalize=True, dx_cast=True, cast_fold=True
+    ):
+        plan = cake_backend.make_plan(
+            _problem(4096, 6144, 154880, 1024, entry=entry),
+            need_dx=True,
+            need_dw=True,
+            geometry=g,
+            num_sms=148,
+            valid_rows=valid,
+            fuse_dw_cast=True,
+            arch="sm_100a",
+            dx_finalize=finalize,
+            dx_cast=dx_cast,
+        )
+        return replace(plan, cast_fold=cast_fold)
+
+    def slab_chunks(plan):
+        keys = (
+            cake_backend.forward_keys(plan)
+            if plan.problem.entry == "loss"
+            else cake_backend.recompute_keys(plan)
+        )
+        dx = [i for s, i in keys if isinstance(i, int) and s == plan.dx_stage_of(i)]
+        assert dx == list(range(plan.num_chunks))
+        return [i for s, i in keys if s == "slab_sum"]
+
+    plan = plan_of()
+    n = plan.num_chunks
+    assert n == 4 and all(plan.dx_slices_of(i) == 1 for i in range(n))
+    assert cake_backend.cast_fold_rows(plan) == (0, plan.rows)
+    assert slab_chunks(plan) == []
+    every = list(range(n))
+    for other in (
+        plan_of(cast_fold=False),
+        plan_of(finalize=False),
+        plan_of("logprob"),
+    ):
+        assert cake_backend.cast_fold_rows(other) == (0, 0)
+        assert slab_chunks(other) == every
+    logprob = plan_of("logprob", dx_cast=False)
+    assert cake_backend.cast_fold_rows(logprob) == (0, logprob.rows)
+    assert slab_chunks(logprob) == []
+    # a K-sliced chunk keeps its slab sum (the slab adds) and splits the one-slice chunks: the longer run folds in the
+    # cast, the other keeps its fold-alone slab sum
+    mixed = replace(plan, dx_slices=(1, 4) + (1,) * (n - 2))
+    assert cake_backend.cast_fold_rows(mixed) == (int(plan.chunks[2][0]), plan.rows)
+    assert slab_chunks(mixed) == [0, 1]
+    # the fold operands handed to the cast: the call's compact labels, residuals and head for those rows
+    t = dict(labels=object(), rlab=object(), W=object())
+    fold = cake_backend.cast_fold_operands(mixed, t)
+    assert fold == dict(
+        labels=t["labels"],
+        rlab=t["rlab"],
+        W=t["W"],
+        lo=int(plan.chunks[2][0]),
+        hi=plan.rows,
+    )
+    assert cake_backend.cast_fold_operands(plan_of(cast_fold=False), t) is None
+
+
+def test_cast_fold_range_is_formed_once_per_plan(monkeypatch):
+    """``make_plan(cast_fold=True)`` builds the plan the cast fold runs (the plan of ``replace(plan, cast_fold=True)``,
+    no second plan) and :func:`cake_backend.cast_fold_rows` forms its range once per plan (:attr:`Plan.cast_fold_range`):
+    the key sequences, the fold operands and every later read take the kept range, the same rows as before; a plan
+    without the fold forms none."""
+    g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+    formed = []
+    real = cake_backend._cast_fold_range
+
+    def counted(plan):
+        formed.append(plan)
+        return real(plan)
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", counted)
+    for module in (cake_backend, opt_in):
+        for valid, slices in (
+            (4000, None),
+            (4000, (1, 4, 1, 1)),
+            (16, None),
+            (16, (3,)),
+        ):
+            kw = dict(
+                need_dx=True,
+                need_dw=True,
+                geometry=g,
+                num_sms=148,
+                valid_rows=valid,
+                fuse_dw_cast=True,
+                arch="sm_100a",
+                dx_finalize=True,
+            )
+            problem = _problem(4096 if valid > 16 else 16, 6144, 154880, 1024)
+            plain = module.make_plan(problem, **kw)
+            plan = module.make_plan(problem, cast_fold=True, **kw)
+            assert plan == replace(plain, cast_fold=True) and type(plan) is type(plain)
+            if slices is not None:
+                plan = replace(plan, dx_slices=slices)
+            formed.clear()
+            want = real(plan)
+            formed.clear()
+            keys = module.forward_keys(plan)
+            rows = [cake_backend.cast_fold_rows(plan) for _ in range(3)]
+            t = dict(labels=object(), rlab=object(), W=object())
+            fold = cake_backend.cast_fold_operands(plan, t)
+            assert formed == [plan] and all(r == want for r in rows), module
+            lo, hi = want
+            assert (fold is None) == (hi <= lo)
+            assert fold is None or (fold["lo"], fold["hi"]) == want
+            folded = [
+                i
+                for i, (row0, rows_c) in enumerate(plan.chunks)
+                if hi > lo and lo <= row0 and row0 + rows_c <= hi
+            ]
+            assert [i for s, i in keys if s == "slab_sum"] == [
+                i for i in range(plan.num_chunks) if i not in folded
+            ]
+            formed.clear()
+            assert cake_backend.cast_fold_rows(plain) == (0, 0) and formed == []
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_template_loss_runner_binds_no_backward_keys(module):
+    """The backward keys a runner binds (``_runner_backward_keys``): a template-only runner of the loss entry -- the
+    eager entry points' binding build, whose remembered binding serves the loss forward only (the loss backward
+    finalizes through the eager casts) -- binds none; every other runner binds the log-probability backward and the
+    output casts as before."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    g = Geometry.from_record({"geometry": {"hidden": 6144, "vocab": 154880}})
+    forms = [
+        (entry, fuse, valid, cast)
+        for entry in ("loss", "logprob")
+        for fuse in (True, False)
+        for valid in (None, 4000)
+        for cast in (True, False)
+    ]
+    for entry, fuse, valid, cast in forms:
+        plan = mod.make_plan(
+            _problem(4096, 6144, 154880, 1024, entry=entry),
+            need_dx=True,
+            need_dw=True,
+            geometry=g,
+            num_sms=148,
+            valid_rows=valid,
+            fuse_dw_cast=fuse,
+            arch="sm_100a",
+            dx_finalize=True,
+            dx_cast=cast,
+        )
+        full = (
+            cake_backend.recompute_keys(plan) if entry == "logprob" else ()
+        ) + mod.cast_keys(plan)
+        assert full and mod._runner_backward_keys(plan) == full
+        assert mod._runner_backward_keys(plan, False) == full
+        assert mod._runner_backward_keys(plan, True) == (
+            () if entry == "loss" else full
+        )
+
+
+def test_eager_form_slots_the_fold_rows(monkeypatch):
+    """The scatter cast's fold program's eager form (``_eager_form``) is keyed by every host value but the tensors and its fold rows
+    ``[fold_lo, fold_hi)`` (``EAGER_CALL_SCALARS``), so a call with another valid-row count and fold range finds the
+    remembered form; ``V`` (the fold's head rows), the output rows and the row width still key it.
+    The remembered launch (``_eager_template``) holds no tensor and leaves the fold rows to each call: slotting a call's
+    values gives the argument list a fresh binding of those values gives, element for element."""
+    stage = cake_backend.DX_FINALIZE_FOLD_STAGE
+    assert cake_backend.EAGER_CALL_SCALARS[stage] == ("fold_lo", "fold_hi")
+    assert "scale_cast_scatter_bf16" not in cake_backend.EAGER_CALL_SCALARS
+    name = next(n for n, record in cake_jit.MODULES.items() if stage in record)
+    physical = cake_jit.MODULES[name][stage]
+    entries = SimpleNamespace(
+        **{physical["ffi_entry"]: lambda *args: None},
+        **(
+            {physical["tma_prepare_entry"]: lambda *args: None}
+            if physical.get("tma_prepare_entry")
+            else {}
+        ),
+    )
+    monkeypatch.setattr(
+        cake_backend, "load_cake_lm_head_det_loss_module", lambda *args: entries
+    )
+    H, V, T = 6144, 512, 256
+
+    def values_of(T_v, lo, hi, *, v=V, rows=T, width=H // 8):
+        values = {n: None for n in COMMON_TENSORS}
+        values.update({n: 0 for n in COMMON_SCALARS})
+        values.update(
+            acc=torch.zeros(T_v, H),
+            g=torch.ones(1),
+            scan=torch.zeros(rows, dtype=torch.int32),
+            idx_lo=torch.zeros(2 * T_v, dtype=torch.int32),
+            out=torch.zeros(rows, H, dtype=torch.bfloat16),
+            row_vecs=width,
+            num_rows=rows,
+            loss_div=1.0,
+            labels=torch.zeros(T_v, dtype=torch.int64),
+            rlab=torch.zeros(T_v),
+            W=torch.zeros(v, H, dtype=torch.bfloat16),
+            V=v,
+            fold_lo=lo,
+            fold_hi=hi,
+        )
+        return values
+
+    first = values_of(243, 0, 243)
+    form = cake_backend._eager_form(name, stage, "cuda:0", first)
+    launch = cake_backend._eager_template(bind_stage(name, stage, first, (1, 1, 1)))
+    assert not any(isinstance(a, torch.Tensor) for a in launch.arguments)
+    plan = [n for _, n in physical["arg_plan"]]
+    slotted = {n for _, n in launch.slots}
+    assert {"fold_lo", "fold_hi"} <= slotted and all(
+        launch.arguments[plan.index(n)] is None for n in ("fold_lo", "fold_hi")
+    )
+    for T_v, lo, hi in ((15, 0, 15), (30, 7, 30), (100, 36, 100), (243, 0, 243)):
+        values = values_of(T_v, lo, hi)
+        assert cake_backend._eager_form(name, stage, "cuda:0", values) == form
+        got = launch.arguments_for(values)
+        want = list(bind_stage(name, stage, values, (1, 1, 1)).arguments)
+        assert len(got) == len(want)
+        for a, b in zip(got, want, strict=True):
+            assert (
+                a is b if isinstance(b, torch.Tensor) else (type(a), a) == (type(b), b)
+            )
+        assert got[plan.index("fold_lo")] == lo and got[plan.index("fold_hi")] == hi
+    for other in (
+        values_of(30, 0, 0, v=0),
+        values_of(30, 0, 30, rows=T + 1),
+        values_of(30, 0, 30, width=H // 8 + 1),
+    ):
+        assert cake_backend._eager_form(name, stage, "cuda:0", other) != form
+    # every other eager stage keys all of its scalar values, as before
+    cast = {
+        "acc": torch.zeros(1),
+        "g": torch.ones(1),
+        "out": torch.zeros(1),
+        "num_vecs": 4,
+    }
+    assert cake_backend._eager_form(name, "scale_cast_bf16", "cuda:0", cast) != (
+        cake_backend._eager_form(
+            name, "scale_cast_bf16", "cuda:0", dict(cast, num_vecs=5)
+        )
+    )
 
 
 def test_dx_finalize_plan_keys():
@@ -8762,6 +9055,160 @@ def _assert_same_bits(a, b, keys=("loss", "logp", "dX", "dW")):
             assert torch.equal(_bits(x), _bits(y)), key
 
 
+@pytest.mark.parametrize("chunk", [4096, 1024])
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_loss_binding_binds_no_cast_launch(
+    glm_weight, monkeypatch, module, chunk
+):
+    """A loss forward that misses the binding cache prepares a template-only runner that binds no backward launch
+    (``_runner_backward_keys``): the binding it remembers -- on the host-count path and, where it runs, on the hidden
+    valid-row count's (``chunk`` 1024: four chunks) -- holds the forward's launches only, and the step's loss, logp, dX
+    and dW (the eager dX finalize and weight-gradient cast) are bitwise those of the same step whose runner binds the
+    output casts as before."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    inp = _device_inputs(4097, W=glm_weight)
+    kw = dict(objective="ce", loss_div=inp.loss_div, chunk_size=chunk, backend="cake")
+    bound = []
+    real_bind, real_keys = mod._bind_all, mod._runner_backward_keys
+
+    def recording(record, module_name, keys, *args, **kwargs):
+        bound.extend(keys)
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_bind_all", recording)
+
+    def step():
+        cache = BindingCache()
+        monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+        bound.clear()
+        fr = mod.forward_loss(inp.X, inp.W, inp.labels, **kw)
+        forward_bound = list(bound)
+        [binding] = [b for k, b in cache._bindings.items() if k[:2] == ("fwd", "loss")]
+        dx, dw = fr.backward(None)
+        torch.cuda.synchronize()
+        return binding, forward_bound, dict(loss=fr.loss, logp=fr.logp, dX=dx, dW=dw)
+
+    binding, forward_bound, new = step()
+    cast = mod.cast_keys(binding.plan)
+    kernels = [key for key in cast if key[0] not in mod.HOST_STAGES]
+    assert kernels, cast
+    assert binding.backward_order == ()
+    assert set(binding.launches) <= set(binding.forward_order) | {("row_grad", 0)}
+    assert not set(kernels) & set(forward_bound)
+    # the same step with the output casts bound as before (every runner binds its backward keys)
+    monkeypatch.setattr(
+        mod,
+        "_runner_backward_keys",
+        lambda plan, template_only=False: real_keys(plan, False),
+    )
+    old_binding, old_bound, old = step()
+    assert old_binding.plan == binding.plan
+    assert old_binding.backward_order == cast and set(kernels) <= set(old_bound)
+    assert all(key in old_binding.launches for key in kernels)
+    _assert_same_bits(new, old)
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_scatter_fold_form_serves_every_valid_row_count(monkeypatch, module):
+    """The compact dX scatter cast with a label residual fold binds one eager form for an output of ``num_rows`` rows,
+    whatever the call's valid-row count and fold rows: ``[fold_lo, fold_hi)`` are per-call slots of the form
+    (``EAGER_CALL_SCALARS``), so each later call slots its tensors and its rows into the remembered launch -- the
+    entry, grid and argument list, element for element, of a fresh binding of the call's own values, and the bits of a
+    call with the binding cache disabled.  A call without a fold (none given, or an empty range) binds the program
+    without a fold operand (``scale_cast_scatter_bf16``) once."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    stage = "scale_cast_scatter_bf16"
+    calls, binds = [], []
+    real_eager, real_bind = mod._eager_launch, mod._bind_all
+
+    def eager(record, module_name, name, values, device, geometry, form=None):
+        launch, arguments = real_eager(
+            record, module_name, name, values, device, geometry, form=form
+        )
+        calls.append(
+            (
+                record,
+                module_name,
+                name,
+                dict(values),
+                device,
+                geometry,
+                launch,
+                arguments,
+            )
+        )
+        return launch, arguments
+
+    def bind(record, module_name, keys, *args, **kwargs):
+        binds.append(tuple(key[0] for key in keys))
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_eager_launch", eager)
+    monkeypatch.setattr(mod, "_bind_all", bind)
+    cache = BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    T, V, H = 256, 512, DEFAULT_H
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 83)
+    W = (0.05 * torch.randn(V, H, generator=gen)).to(torch.bfloat16).to(CUDA)
+    g = torch.tensor(0.75, device=CUDA)
+    cases = []
+    for T_v, lo, hi in (
+        (243, 0, 243),
+        (15, 0, 15),
+        (30, 7, 30),
+        (100, 36, 100),
+        (243, 0, 243),
+        (30, 0, 0),
+    ):
+        valid = torch.zeros(T, dtype=torch.bool)
+        valid[torch.randperm(T, generator=gen)[:T_v]] = True
+        acc = torch.randn(T_v, H, generator=gen).to(CUDA)
+        labels = torch.randint(0, V, (T_v,), generator=gen).to(CUDA)
+        rlab = (1e-3 * torch.randn(T_v, generator=gen)).to(CUDA)
+        fold = dict(labels=labels, rlab=rlab, W=W, lo=lo, hi=hi) if hi > lo else None
+        cases.append(
+            (
+                acc,
+                valid.nonzero().squeeze(1).to(CUDA),
+                torch.cumsum(valid.to(CUDA), 0, dtype=torch.int32),
+                fold,
+            )
+        )
+    got = [
+        mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake", fold=fold)
+        for acc, idx, scan, fold in cases
+    ]
+    torch.cuda.synchronize()
+    # the fold program at the first call, the program without a fold operand at the last; every other call slots into a
+    # remembered form
+    assert binds == [(cake_backend.DX_FINALIZE_FOLD_STAGE,), (stage,)]
+    assert len(cache._eager) == 2 and len(calls) == len(cases)
+    assert not any(
+        isinstance(a, torch.Tensor)
+        for _, launch in cache._eager.values()
+        for a in launch.arguments
+    )
+    for record, module_name, name, values, device, geometry, launch, arguments in calls:
+        key = (name, "eager")
+        bound = real_bind(record, module_name, (key,), {key: values}, device, geometry)
+        fresh = bound[key]
+        assert fresh.entry is launch.entry and fresh.grid == launch.grid
+        assert len(arguments) == len(fresh.arguments)
+        for a, b in zip(arguments, fresh.arguments, strict=True):
+            assert (
+                a is b if isinstance(b, torch.Tensor) else (type(a), a) == (type(b), b)
+            )
+    off = BindingCache()
+    off.configure(enabled=False)
+    monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    for out, (acc, idx, scan, fold) in zip(got, cases, strict=True):
+        want = mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake", fold=fold)
+        assert torch.equal(_bits(out), _bits(want))
+    torch.cuda.synchronize()
+
+
 def test_device_swab_dx_is_bitwise_the_shipped_form(glm_weight):
     """The swapped dX tile (SM103: the rule on whole chunks of a cross-entropy call of >= 3 chunks, or an explicit
     ``swap_ab=True`` with ``tile_n=512`` on every chunk -- ragged last chunks included -- and objective) gives the bits
@@ -8923,7 +9370,10 @@ def test_device_dx_finalize_is_bitwise(glm_weight, monkeypatch):
                 res["pair"] = dict(dX=dx, dW=dw)
                 torch.cuda.synchronize()
             slabs = bound.count("slab_sum")
-            scatters = bound.count("scale_cast_scatter_bf16")
+            # the scatter cast: its program without a fold operand or its fold program (a fold range)
+            scatters = bound.count("scale_cast_scatter_bf16") + bound.count(
+                cake_backend.DX_FINALIZE_FOLD_STAGE
+            )
             # every chunk's dX rows end with the slab sum (the label residual fold; the slab adds under the switch)
             assert slabs > 0, bound
             if env == "0":
@@ -9271,6 +9721,127 @@ def test_device_row_grad_alone_needs_no_rlab_zero(glm_weight):
         assert bool(torch.isfinite(rlab).all()), compact
         assert bool((_bits(rlab)[~live] == 0).all()), compact
         assert bool((rlab[live] != 0).any()), compact
+
+
+def _graph_rlab_node(lp: torch.Tensor):
+    """The log-probability autograd node behind ``lp`` that holds the graph's label residuals (``rlab``)."""
+    pending, seen = [lp.grad_fn], set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if hasattr(node, "rlab"):
+            return node
+        pending.extend(n for n, _ in node.next_functions)
+    raise AssertionError("no log-probability node holds rlab")
+
+
+def test_device_logprob_graph_rlab(glm_weight):
+    """The log-probability autograd graph's label residuals (``_GraphRlab``): the forward leaves the holder empty; the
+    first backward takes them, zero-filled for the ``dz`` arm's recompute and uninitialized for the kept logits'
+    ``row_grad``; every later backward of a retained graph binds that tensor (no allocation, no zero fill, no
+    ``rlab_zero`` host step in the remembered sequences) with +0 on every row without a label column in the head.  dX /
+    dW of four backwards (two ``dlogp`` draws) equal those of the same backwards whose bindings allocate their own
+    ``rlab`` (``node.rlab = None``) bit for bit -- the default form (one chunk and two, compacted and not), the kept
+    form and the opt-in module's automatic form (its one-chunk kept logits); a held tensor with NaN on its rows with a
+    label column is bound and every such row is stored again; one that is not clean is not bound."""
+    _require_program(entry="logprob")
+    V = int(glm_weight.shape[0])
+    edge = torch.tensor([-1, -100, V, V + 5, 2 * V, 2**40, 0, V - 1], device=CUDA)
+    default = cake_backend.cake_lm_head_det_train_logprob
+    keep = cake_backend.cake_lm_head_det_train_logprob_keep
+    # the automatic memory form: here its one-chunk kept logits
+    auto = opt_in.cake_lm_head_det_train_logprob
+    # (entry, T, chunk_size, compact): T = 1500 stays below the zero-gradient row skip's floor; 768-row chunks: two
+    cases = (
+        (default, 1500, 4096, True),
+        (default, 1500, 4096, False),
+        (default, 1500, 768, True),
+        (default, 1500, 768, False),
+        (keep, 256, 4096, True),
+        (keep, 256, 4096, False),
+        (auto, 1500, 4096, True),
+    )
+
+    def same(a, b):
+        return (
+            a.dtype == b.dtype
+            and a.shape == b.shape
+            and torch.equal(_bits(a), _bits(b))
+        )
+
+    for entry, T, chunk, compact in cases:
+        case = (entry.__name__, T, chunk, compact)
+        inp = make_inputs(
+            T, seed=SEED + 67 + T, device=CUDA, W=glm_weight, ignore_frac=0.05
+        )
+        labels = inp.labels.clone()
+        labels[: edge.numel()] = edge
+        dlogps = (inp.dlogp, inp.dlogp.flip(0) * 2.0) * 2
+        out = {}
+        for own in (True, False):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+            lp = entry(X, W, labels, chunk_size=chunk, compact_rows=compact)
+            node = _graph_rlab_node(lp)
+            holder = node.rlab
+            if own:
+                node.rlab = None  # each backward's binding allocates its own rlab
+            else:
+                assert isinstance(holder, cake_backend._GraphRlab), case
+                # the forward leaves the holder empty; the first backward takes the tensor
+                held = holder.tensor
+                assert held is None and holder.own is None, case
+                saved = node.saved_tensors
+                rows_labels = saved[2] if saved[4] is None else saved[2][saved[4]]
+                live = (rows_labels >= 0) & (rows_labels < V)
+                assert bool((~live).any()) and bool(live.any()), case
+            grads = []
+            for i, dlogp in enumerate(dlogps):
+                X.grad = W.grad = None
+                lp.backward(dlogp, retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                if not own:
+                    if held is None:
+                        held = holder.tensor
+                        assert held is not None and holder.own is not None, case
+                    assert held.dtype == torch.float32, case
+                    assert held.numel() == rows_labels.numel(), case
+                    # bound, not reallocated; clean after every backward
+                    assert holder.tensor is held and holder.clean, (case, i)
+                    assert bool((_bits(held)[~live] == 0).all()), (case, i)
+            if not own:
+                # NaN on the rows with a label column of a clean tensor: the producers store every such row again
+                held[live] = float("nan")
+                X.grad = W.grad = None
+                lp.backward(dlogps[0], retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                assert holder.tensor is held and bool(torch.isfinite(held).all()), case
+                # a held tensor that is not clean is not bound: the call allocates a zero-filled one for the graph
+                held[~live] = float("nan")
+                holder.clean = False
+                X.grad = W.grad = None
+                lp.backward(dlogps[0], retain_graph=True)
+                torch.cuda.synchronize()
+                grads.append((X.grad.clone(), W.grad.clone()))
+                assert holder.tensor is not held and holder.clean, case
+                assert bool((_bits(holder.tensor)[~live] == 0).all()), case
+            out[own] = grads
+            del lp, node, holder
+        bindings = list(cake_backend.BINDING_CACHE._bindings.values())
+        assert bindings, case
+        for b in bindings:
+            assert not any(
+                k[0] == cake_backend.RLAB_ZERO_STAGE
+                for k in b.forward_order + b.backward_order
+            ), case
+        ref = out[True] + [out[True][0], out[True][0]]
+        assert len(out[False]) == len(ref), case
+        for i, (got, want) in enumerate(zip(out[False], ref)):
+            assert same(got[0], want[0]) and same(got[1], want[1]), (case, i)
 
 
 def test_reference_slab_sum_folds_the_label_residual():
@@ -16492,3 +17063,1950 @@ def test_device_eager_default_forward_is_the_fast_form(glm_weight):
             assert mplan is not None and mplan.fits, mplan
         else:
             assert mplan is None, (mode, mplan)
+
+
+def test_device_graph_rlab_holding_streams(monkeypatch):
+    """The graphs' label residuals (``_graph_rlab_tensor``) switch to a holding stream with torch's own ``set_stream``
+    call on the tensor's current device, and the caller's current device and stream are the same after the call.  A
+    call on the device's default stream lies in the default holding stream's segment and marks no stream on the tensor
+    (``record_stream``): that segment serves calls on the default stream only.  A call on another stream, and a call
+    from another current device, lie in the side holding stream's segment and mark the tensor as used on the caller's
+    stream.  The tensor is zero-filled when asked.  Each holding stream is a stream of its own, whatever ran before:
+    made here afresh, by eight threads at once (all eight get the same pair), after more streams than one of torch's
+    stream pools holds were taken from every pool, the two differ from each other and from every pooled stream."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    pooled = _pooled_streams(device)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    kinds = (cake_backend._RLAB_STREAMS, cake_backend._RLAB_SIDE_STREAMS)
+    barrier, made = threading.Barrier(8), []
+
+    def first_use():
+        barrier.wait(timeout=60)
+        made.append(tuple(cake_backend._rlab_stream(s, index) for s in kinds))
+
+    threads = [threading.Thread(target=first_use) for _ in range(8)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=60)
+    assert len(made) == 8 and set(made) == {tuple(s[index] for s in kinds)}, made
+
+    def segment_stream(t):
+        ptr = t.data_ptr()
+        for seg in torch.cuda.memory_snapshot():
+            if seg["device"] == index and 0 <= ptr - seg["address"] < seg["total_size"]:
+                return seg["stream"]
+        raise AssertionError(f"no segment holds {ptr:#x}")
+
+    marked = []
+    real_record = torch.Tensor.record_stream
+
+    def record(self, stream):
+        marked.append(stream)
+        return real_record(self, stream)
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", record)
+    default = torch.cuda.default_stream(index)
+    caller = torch.cuda.Stream(device=device)
+    held = {}
+    for name, stream, zero, other_device in (
+        ("default", default, True, False),
+        ("default_empty", default, False, False),
+        ("caller", caller, True, False),
+        ("other_device", default, False, True),
+    ):
+        if other_device:
+            monkeypatch.setattr(cake_backend, "_CUDA_GET_DEVICE", lambda: index + 1)
+        marked.clear()
+        with torch.cuda.stream(stream):
+            t = cake_backend._graph_rlab_tensor(300, zero, device)
+            assert torch.cuda.current_device() == index
+            assert torch.cuda.current_stream(index) == stream
+            if zero:
+                assert int(torch.count_nonzero(t)) == 0
+        assert marked == ([] if name.startswith("default") else [stream]), name
+        held[name] = t
+    torch.cuda.synchronize()
+    holding = cake_backend._RLAB_STREAMS[index]
+    side = cake_backend._RLAB_SIDE_STREAMS[index]
+    assert holding.cuda_stream != side.cuda_stream
+    others = {s.cuda_stream for s in pooled + [caller, default]}
+    ours = {holding.cuda_stream, side.cuda_stream}
+    assert not ours & others, [hex(s) for s in ours & others]
+    for name, t in held.items():
+        want = holding if name.startswith("default") else side
+        assert segment_stream(t) == want.cuda_stream, name
+
+
+def _pooled_streams(device):
+    """33 ``torch.cuda.Stream`` objects of each priority torch offers on ``device``: every one of its pooled streams
+    (a pool holds 32 per device and priority, handed out round-robin)."""
+    least, greatest = torch.cuda.Stream.priority_range()
+    return [
+        torch.cuda.Stream(device=device, priority=priority)
+        for priority in range(least, greatest - 1, -1)
+        for _ in range(33)
+    ]
+
+
+def test_device_graph_rlab_holding_block_kept(monkeypatch):
+    """A block of the default holding stream's segment is handed to no request on another stream: the label
+    residuals of a call on the device's default stream (``_graph_rlab_tensor``, no ``record_stream``), once freed, are
+    not where a same-size request on any of torch's pooled streams lands, nor in that segment, whatever ran before (the
+    holding streams made afresh after every pooled stream was taken)."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    pooled = _pooled_streams(device)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    with torch.cuda.stream(torch.cuda.default_stream(index)):
+        held = cake_backend._graph_rlab_tensor(300, True, device)
+    torch.cuda.synchronize()
+    holding, ptr = cake_backend._RLAB_STREAMS[index].cuda_stream, held.data_ptr()
+    del held
+    got = []
+    for stream in pooled:
+        with torch.cuda.stream(stream):
+            got.append(torch.empty((300,), dtype=torch.float32, device=device))
+    segments = [
+        (seg["address"], seg["total_size"], seg["stream"])
+        for seg in torch.cuda.memory_snapshot()
+        if seg["device"] == index
+    ]
+
+    def in_holding(t):
+        p = t.data_ptr()
+        return p == ptr or any(s == holding and 0 <= p - a < n for a, n, s in segments)
+
+    shared = [hex(s.cuda_stream) for s, t in zip(pooled, got) if in_holding(t)]
+    assert not shared, (hex(holding), shared)
+
+
+def test_graph_rlab_stream_made_between_reads(monkeypatch):
+    """A holding stream that another thread makes right after a call's lock-free read found none is the stream that
+    call returns (``_rlab_stream`` reads the streams again under its lock), and the call makes none itself."""
+    made = object()
+
+    class Racing(dict):
+        def get(self, key, *default):
+            value = super().get(key, *default)
+            self.setdefault(key, made)  # the other thread stores the stream it made
+            return value
+
+    def make(index):
+        raise AssertionError(f"a second holding stream made for device {index}")
+
+    monkeypatch.setattr(cake_backend, "_rlab_new_stream", make)
+    assert cake_backend._rlab_stream(Racing(), 0) is made
+
+
+def _rlab_segment_stream(t, index):
+    """The stream of the caching-allocator segment that holds tensor ``t`` on device ``index``."""
+    ptr = t.data_ptr()
+    for seg in torch.cuda.memory_snapshot():
+        if seg["device"] == index and 0 <= ptr - seg["address"] < seg["total_size"]:
+            return seg["stream"]
+    raise AssertionError(f"no segment holds {ptr:#x}")
+
+
+def test_device_graph_rlab_allocator_gate(monkeypatch):
+    """The graphs' label residuals take a holding stream only where torch's native caching allocator is shown to use
+    fixed segments (``_rlab_holding_ok``): the backend is ``native`` and the last allocator settings string names
+    ``expandable_segments`` with the last value ``False``, or is empty.  Under another backend, with
+    ``expandable_segments:True``, and after any other settings string (an earlier True may still hold), a request on
+    the default stream and one on another stream are ordinary allocations on the caller's stream: in that stream's
+    segment, no stream marked on the tensor, no holding stream made before the first holding case.  Every tensor is
+    zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    query = {}
+    monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_BACKEND", lambda: query["backend"])
+    monkeypatch.setattr(cake_backend, "_CUDA_ALLOC_SETTINGS", lambda: query["settings"])
+    marked = []
+    real_record = torch.Tensor.record_stream
+
+    def record(self, stream):
+        marked.append(stream)
+        return real_record(self, stream)
+
+    monkeypatch.setattr(torch.Tensor, "record_stream", record)
+    default = torch.cuda.default_stream(index)
+    caller = torch.cuda.Stream(device=device)
+    held, made = [], False
+    split = "max_split_size_mb:512"
+    for backend, settings, holding in (
+        ("cudaMallocAsync", "", False),
+        ("pluggable", "", False),
+        ("native", "expandable_segments:True", False),
+        ("native", "garbage_collection_threshold:0.6", False),
+        ("native", split, False),
+        ("native", split + ",expandable_segments:False", True),
+        ("native", "", True),
+        ("native", "expandable_segments:False,expandable_segments:True", False),
+    ):
+        monkeypatch.setattr(cake_backend, "_RLAB_SETTINGS", (None, False))
+        query.update(backend=backend, settings=settings)
+        made = made or holding
+        for stream in (default, caller):
+            marked.clear()
+            with torch.cuda.stream(stream):
+                t = cake_backend._graph_rlab_tensor(300, True, device)
+                assert int(torch.count_nonzero(t)) == 0
+            torch.cuda.synchronize()
+            held.append(t)
+            case = (backend, settings, stream == default)
+            if not holding:
+                assert marked == [], case
+                assert _rlab_segment_stream(t, index) == stream.cuda_stream, case
+                assert made or index not in cake_backend._RLAB_STREAMS, case
+                assert made or index not in cake_backend._RLAB_SIDE_STREAMS, case
+            elif stream == default:
+                assert marked == [], case
+                want = cake_backend._RLAB_STREAMS[index].cuda_stream
+                assert _rlab_segment_stream(t, index) == want, case
+            else:
+                assert marked == [stream], case
+                want = cake_backend._RLAB_SIDE_STREAMS[index].cuda_stream
+                assert _rlab_segment_stream(t, index) == want, case
+
+
+_RLAB_ALLOCATOR_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+for settings in {pre!r}:  # before the package is imported
+    torch._C._accelerator_setAllocatorSettings(settings)
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+index = torch.cuda.current_device()
+device = torch.device("cuda", index)
+marked = []
+real_record = torch.Tensor.record_stream
+
+
+def record(self, stream):
+    marked.append(stream.cuda_stream)
+    return real_record(self, stream)
+
+
+def made(streams):
+    s = streams.get(index)
+    return None if s is None else s.cuda_stream
+
+
+torch.Tensor.record_stream = record
+caller = torch.cuda.Stream(device=device)
+held, out = [], []
+for before in {rows!r}:  # the settings calls before each pair of requests
+    for settings in before:
+        torch._C._accelerator_setAllocatorSettings(settings)
+    calls = []
+    for stream in (torch.cuda.default_stream(index), caller):
+        marked.clear()
+        with torch.cuda.stream(stream):
+            t = be._graph_rlab_tensor(300, True, device)
+        torch.cuda.synchronize()
+        held.append(t)
+        zero = int(torch.count_nonzero(t)) == 0
+        calls.append([stream.cuda_stream, t.data_ptr(), zero, list(marked)])
+    out.append([before, calls, made(be._RLAB_STREAMS), made(be._RLAB_SIDE_STREAMS)])
+segments = []
+if torch._C._cuda_getAllocatorBackend() == "native":
+    segments = [
+        [s["address"], s["total_size"], s["stream"], bool(s.get("is_expandable"))]
+        for s in torch.cuda.memory_snapshot()
+        if s["device"] == index
+    ]
+print("ALLOCATOR " + json.dumps(dict(rows=out, segments=segments)))
+"""
+
+
+def test_device_graph_rlab_allocator_configs():
+    """Under real allocator configurations, in fresh processes (``_rlab_holding_ok``), the graphs' label residuals of a
+    request on the default stream and of one on another stream are ordinary allocations (no holding stream made, no
+    stream marked on the tensor) with ``expandable_segments:True`` from ``PYTORCH_CUDA_ALLOC_CONF`` or
+    ``PYTORCH_ALLOC_CONF`` (in an expandable segment of the caller's stream), with ``backend:cudaMallocAsync``, with
+    ``expandable_segments:True`` from the environment and an unrelated settings call before the package is imported,
+    with a settings call of ``expandable_segments:True`` and an unrelated one (in either order) before the first
+    request, and with environment settings that do not name ``expandable_segments`` (fixed segments, but not shown by
+    an empty settings string).  With no environment and no settings call they take the holding streams; they are
+    ordinary allocations once ``expandable_segments:True`` is set and after a later unrelated setting, and take the
+    holding streams again (in their fixed segments) once ``expandable_segments:False`` is set.  Every tensor is
+    zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    es, gc, off, nonnative, split = (
+        "expandable_segments:True",
+        "garbage_collection_threshold:0.6",
+        "expandable_segments:False",
+        "backend:cudaMallocAsync",
+        "max_split_size_mb:512",
+    )
+    for conf, pre, rows, holding, expandable in (
+        ({"PYTORCH_CUDA_ALLOC_CONF": es}, [], [[]], [False], [True]),
+        ({"PYTORCH_ALLOC_CONF": es}, [], [[]], [False], [True]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": nonnative}, [], [[]], [False], [None]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": es}, [gc], [[]], [False], [True]),
+        ({}, [], [[es, gc]], [False], [None]),
+        ({}, [], [[gc, es]], [False], [None]),
+        ({"PYTORCH_CUDA_ALLOC_CONF": split}, [], [[]], [False], [False]),
+        ({}, [], [[], [es], [gc], [off]], [True, False, False, True], [None] * 4),
+    ):
+        env = {
+            k: v
+            for k, v in os.environ.items()
+            if k not in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+        }
+        env.update(conf)
+        env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
+        script = _RLAB_ALLOCATOR_SCRIPT.format(
+            root=root, package="cake_lm_head_det_train", pre=pre, rows=rows
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=900,
+        )
+        case = (conf, pre)
+        assert proc.returncode == 0, (
+            f"fresh process {case} failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("ALLOCATOR ")][-1]
+        got = json.loads(line[len("ALLOCATOR ") :])
+        out, segments = got["rows"], got["segments"]
+        assert len(out) == len(rows), case
+        assert bool(segments) == (nonnative not in conf.values()), case
+
+        def segment(ptr):
+            for address, size, stream, is_expandable in segments:
+                if 0 <= ptr - address < size:
+                    return stream, is_expandable
+            raise AssertionError(f"no segment holds {ptr:#x}")
+
+        for (before, calls, main, side), want, exp in zip(
+            out, holding, expandable, strict=True
+        ):
+            row = case + (before,)
+            if not any(holding):
+                assert main is None and side is None, row
+            for (stream, ptr, zero, marks), on in zip(calls, (main, side), strict=True):
+                assert zero, row
+                if want:
+                    assert on is not None and on != stream, row
+                    assert marks == ([] if on == main else [stream]), row
+                    assert segment(ptr) == (on, False), row
+                else:
+                    assert marks == [], row
+                    if segments:
+                        on_stream, is_expandable = segment(ptr)
+                        assert on_stream == stream, row
+                        assert exp is None or is_expandable == exp, row
+
+
+_RLAB_DEFAULT_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+index = torch.cuda.current_device()
+device = torch.device("cuda", index)
+query = be._CUDA_ALLOC_SETTINGS, be._CUDA_ALLOC_BACKEND
+settings, backend = [None if q is None else q() for q in query]
+ok = be._rlab_holding_ok()
+default = torch.cuda.default_stream(index)
+with torch.cuda.stream(default):
+    t = be._graph_rlab_tensor(300, True, device)
+torch.cuda.synchronize()
+main = be._RLAB_STREAMS.get(index)
+ptr = t.data_ptr()
+segments = [
+    [s["stream"], s.get("is_expandable")]
+    for s in torch.cuda.memory_snapshot()
+    if s["device"] == index and 0 <= ptr - s["address"] < s["total_size"]
+]
+print("DEFAULT " + json.dumps(dict(
+    settings=settings,
+    backend=backend,
+    ok=ok,
+    default=default.cuda_stream,
+    main=None if main is None else main.cuda_stream,
+    zero=int(torch.count_nonzero(t)) == 0,
+    segments=segments,
+)))
+"""
+
+
+def test_device_graph_rlab_torch_default_fixed_segments():
+    """With torch's default allocator configuration (no ``PYTORCH_CUDA_ALLOC_CONF`` / ``PYTORCH_ALLOC_CONF``, no
+    settings call; a fresh process), the allocator settings string is empty, the backend is ``native``, and the
+    graphs' label residuals of a request on the default stream take the holding stream (``_rlab_holding_ok``) in a
+    fixed segment: the segment that holds the tensor is the holding stream's and is not expandable.  A torch whose
+    default (empty) settings mean expandable segments fails here: the holding streams' ordering argument holds only
+    for fixed segments.  The tensor is zero-filled."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = {
+        k: v
+        for k, v in os.environ.items()
+        if k not in ("PYTORCH_CUDA_ALLOC_CONF", "PYTORCH_ALLOC_CONF")
+    }
+    env["PYTHONPATH"] = root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    script = _RLAB_DEFAULT_SCRIPT.format(root=root, package="cake_lm_head_det_train")
+    proc = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True,
+        text=True,
+        env=env,
+        cwd=root,
+        timeout=900,
+    )
+    assert proc.returncode == 0, (
+        f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+    )
+    line = [x for x in proc.stdout.splitlines() if x.startswith("DEFAULT ")][-1]
+    got = json.loads(line[len("DEFAULT ") :])
+    assert got["settings"] == "" and got["backend"] == "native", got
+    assert got["ok"] is True and got["zero"], got
+    assert got["main"] is not None and got["main"] != got["default"], got
+    assert got["segments"] == [[got["main"], False]], got
+
+
+def test_device_graph_rlab_stream_error_cleared(monkeypatch):
+    """A holding stream whose ``cudaStreamCreate`` fails in the CUDA runtime (here a null result pointer: a real
+    runtime error) is ``None`` (``_rlab_new_stream``), and the runtime's last error the call set is cleared: the
+    ordinary allocation of the graphs' label residuals that follows (its zero fill a kernel launch, checked by torch)
+    and the launches after it run without raising that error."""
+    if not _device_supported():
+        pytest.skip("requires a compute capability 10.0 / 10.3 / 10.7 device")
+    _require_holding_gate()
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    real = torch.cuda.cudart()
+    errors = []
+
+    class Failing:
+        @staticmethod
+        def cudaStreamCreate(ptr):
+            errors.append(int(real.cudaStreamCreate(0)))
+            return errors[-1]
+
+    monkeypatch.setattr(torch.cuda, "cudart", lambda: Failing)
+    monkeypatch.delitem(cake_backend._RLAB_STREAMS, index, raising=False)
+    monkeypatch.delitem(cake_backend._RLAB_SIDE_STREAMS, index, raising=False)
+    with torch.cuda.stream(torch.cuda.default_stream(index)):
+        t = cake_backend._graph_rlab_tensor(300, True, device)
+        u = torch.ones((4,), device=device) * 2
+    torch.cuda.synchronize()
+    assert len(errors) == 1 and errors[0] != 0, errors
+    assert cake_backend._RLAB_STREAMS[index] is None
+    assert int(torch.count_nonzero(t)) == 0 and u.tolist() == [2.0] * 4
+
+
+_RLAB_PLACEMENT_SCRIPT = """
+import json, sys, torch
+sys.path.insert(0, {root!r})
+from torch.utils._python_dispatch import TorchDispatchMode
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+real, held, rows = be._graph_rlab_tensor, [], []
+if {context!r}:
+    # the round-8 request: the torch.cuda.stream context on the holding stream, the tensor marked as used on the
+    # caller's stream
+    def real(n, zero, device):
+        if n * 4 > be._SMALL_BLOCK_BYTES or torch.cuda.is_current_stream_capturing():
+            return (torch.zeros if zero else torch.empty)((n,), dtype=torch.float32, device=device)
+        index = torch.cuda.current_device() if device.index is None else int(device.index)
+        current = torch.cuda.current_stream(index)
+        with torch.cuda.stream(be._rlab_stream(be._RLAB_STREAMS, index)):
+            t = torch.empty((n,), dtype=torch.float32, device=device)
+        t.record_stream(current)
+        if zero:
+            t.zero_()
+        return t
+
+
+def logged(n, zero, device):
+    t = real(n, zero, device)
+    held.append(t.data_ptr())
+    return t
+
+
+be._graph_rlab_tensor = logged
+
+
+class Log(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        r = func(*args, **(kwargs or {{}}))
+        for t in r if isinstance(r, (tuple, list)) else (r,):
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                rows.append([str(func), list(t.shape), t.data_ptr()])
+        return r
+
+
+W = make_inputs(1, seed={seed}, device="cuda", ignore_frac=0.0).W
+for T in (32, 16, 256, 32, 1):
+    inp = make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
+    with Log():
+        lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
+        torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
+        del lps
+    torch.cuda.synchronize()
+# A device address differs between two processes (each lays out its own virtual address space); the caching
+# allocator's placement is the segment, numbered in the order the log first reaches it, and the offset in it.
+segs = torch.cuda.memory_snapshot()
+stream = be._RLAB_STREAMS[torch.cuda.current_device()].cuda_stream
+order = {{}}
+
+
+def where(p):
+    for s in segs:
+        if 0 <= p - s["address"] < s["total_size"]:
+            kind = "holding" if s["stream"] == stream else "default" if s["stream"] == 0 else "other"
+            return [order.setdefault(s["address"], len(order)), p - s["address"], s["total_size"], kind]
+    return None
+
+
+rows = [[op, shape, where(p)] for op, shape, p in rows]
+held = [where(p) for p in held]
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held)))
+"""
+
+
+def test_device_graph_rlab_holding_placement(glm_weight, tmp_path):
+    """The default-stream request of the graphs' label residuals (the holding stream switched with ``set_stream``, no
+    ``record_stream``) places every block as the round-8 request (the ``torch.cuda.stream`` context, the tensor marked
+    as used on the caller's stream) does: two fresh processes run the same log-probability forwards (two graphs alive
+    at a time) and backwards at 32, 16, 256, 32 and 1 rows, one with each request, and every CUDA tensor an operator
+    returns -- the compact rows, the logits, the statistics, every buffer of the forward and the backward -- and every
+    graph's label residuals lie in the same caching-allocator segment at the same offset in both (a device address
+    itself differs between processes), the residuals in a segment of the holding stream."""
+    _require_program(entry="logprob")
+    _require_holding_gate()
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(
+        os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    got = {}
+    for context in (False, True):
+        script = _RLAB_PLACEMENT_SCRIPT.format(
+            root=root,
+            package="cake_lm_head_det_train",
+            entry="cake_lm_head_det_train_logprob",
+            seed=SEED,
+            context=context,
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert proc.returncode == 0, (
+            f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("PLACEMENT ")][-1]
+        got[context] = json.loads(line[len("PLACEMENT ") :])
+    fast, context = got[False], got[True]
+    for held in (fast["held"], context["held"]):
+        assert held and all(h is not None and h[3] == "holding" for h in held)
+    assert fast["held"] == context["held"]
+    assert len(fast["rows"]) == len(context["rows"])
+    for a, b in zip(fast["rows"], context["rows"], strict=True):
+        assert a == b
+
+
+def _pool_free(be, stream=None):
+    """The free list of ``stream``'s graph label residual buffers (the current stream when ``None``), [] when none."""
+    index = torch.cuda.current_device()
+    key = (
+        be._CUDA_GET_STREAM(index)
+        if stream is None
+        else (stream.stream_id, stream.device_index, stream.device_type)
+    )
+    return be._RLAB_POOL.get(key, [])
+
+
+def _pool_same(a, b):
+    """Equal bits of two sequences of tensors (bit views, :func:`_bits`)."""
+    return len(a) == len(b) and all(torch.equal(x, y) for x, y in zip(a, b))
+
+
+def _pool_span(holder):
+    """The device byte range ``[start, end)`` of a holder's buffer (its owned entry's ``[capacity]`` tensor)."""
+    buffer = holder.own[1][3]
+    return buffer.data_ptr(), buffer.data_ptr() + buffer.numel() * 4
+
+
+def _check_graph_rlab_pool(be, default, keep, glm_weight, monkeypatch, seed):
+    """Shared body of the det / nondet pool tests (see ``test_device_graph_rlab_pool``)."""
+    _require_program(entry="logprob")
+    index = torch.cuda.current_device()
+    device = torch.device("cuda", index)
+    be._RLAB_POOL.clear()
+    gc.collect()
+    inputs = {
+        T: make_inputs(T, seed=seed + T, device=CUDA, W=glm_weight, ignore_frac=0.05)
+        for T in (16, 300)
+    }
+
+    def forward(entry, T, **kw):
+        inp = inputs[T]
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        lp = entry(X, W, inp.labels, chunk_size=4096, **kw)
+        node = _graph_rlab_node(lp)
+        saved = node.saved_tensors
+        rows = int(saved[2].numel() if saved[4] is None else saved[4].numel())
+        holder = node.rlab
+        # the forward takes no buffer: the first backward that binds the holder takes one
+        assert holder.tensor is None and holder.own is None and not holder.clean
+        return dict(X=X, W=W, lp=lp, dlogp=inp.dlogp, holder=holder, rows=rows)
+
+    def backward(g, retain=False):
+        g["X"].grad = g["W"].grad = None
+        g["lp"].backward(g["dlogp"], retain_graph=retain)
+        torch.cuda.synchronize()
+        return _bits(g["X"].grad).clone(), _bits(g["W"].grad).clone()
+
+    def owned(g):
+        """The byte range of the buffer the graph's holder owns (after a backward: bound as its tensor)."""
+        h = g["holder"]
+        assert h.own is not None and h.tensor is h.own[1][1]
+        assert h.tensor.numel() == g["rows"] <= h.own[1][2] and h.own[1][2] % 128 == 0
+        return _pool_span(h)
+
+    # the first backward of a call key (a binding-cache miss) runs the runner's own path -- its own residuals, as K's
+    # backward allocates them: no pool buffer taken, the holder left unbound -- unless the form builds its binding
+    # before its launches (then the binding binds the holder at once); either way it remembers the binding, so every
+    # backward below binds its graph's holder
+    be.BINDING_CACHE.clear()
+    takes, bound = [], []
+    real_take, real_call = be._graph_rlab, be._Binding._call_rlab
+
+    def take(rows, zero, dev):
+        takes.append(rows)
+        return real_take(rows, zero, dev)
+
+    def call_rlab(self, zero, graph=None, filled=False):
+        bound.append(graph)
+        return real_call(self, zero, graph, filled)
+
+    monkeypatch.setattr(be, "_graph_rlab", take)
+    monkeypatch.setattr(be._Binding, "_call_rlab", call_rlab)
+    runner_path = 0
+    for entry, T in ((default, 16), (default, 300), (keep, 16)):
+        g = forward(entry, T)
+        h, misses = g["holder"], be.BINDING_CACHE.misses
+        del takes[:], bound[:]
+        backward(g)
+        what = (entry.__name__, T, takes)
+        assert be.BINDING_CACHE.misses > misses, what
+        if any(x is h for x in bound):
+            assert takes == [g["rows"]] and h.own is not None, what
+        else:
+            runner_path += 1
+            assert takes == [] and h.tensor is None and h.own is None, what
+        del g, h
+    monkeypatch.undo()
+    assert runner_path >= 1
+    gc.collect()
+    be._RLAB_POOL.clear()
+    gc.collect()
+    # two live (retained) graphs: two buffers, disjoint, each owned by one holder; the stream's list is empty while
+    # both live
+    a, b = forward(default, 16), forward(default, 16)
+    ref_a = backward(a, retain=True)
+    backward(b, retain=True)
+    for g in (a, b):
+        owned(g)
+        assert g["holder"].own[1][2] == -(-g["rows"] // 128) * 128
+    (a0, a1), (b0, b1) = owned(a), owned(b)
+    assert a1 <= b0 or b1 <= a0
+    assert _pool_free(be) == []
+    # a freed graph puts its buffer back; the next graph takes that buffer
+    a_ptr = a0
+    del a, g
+    gc.collect()
+    free = _pool_free(be)
+    assert len(free) == 1 and free[0][3].data_ptr() == a_ptr
+    # a stale buffer (NaN everywhere) is never read: the next graph's outputs are the bits of a fresh buffer's
+    free[0][3].fill_(float("nan"))
+    c = forward(default, 16)
+    # a retained graph keeps its buffer through every backward; another graph meanwhile takes another buffer
+    got_c = [backward(c, retain=True), backward(c, retain=True)]
+    assert owned(c)[0] == a_ptr and _pool_free(be) == []
+    d = forward(default, 16)
+    backward(d, retain=True)
+    assert owned(d)[0] not in (a_ptr, b0)
+    # every holder owns an ordinary tensor
+    monkeypatch.setattr(be, "_RLAB_POOL_ON", False)
+    e = forward(default, 16)
+    ref_c = [backward(e, retain=True), backward(e, retain=True)]
+    assert e["holder"].own is None and e["holder"].tensor is not None
+    monkeypatch.undo()
+    assert all(_pool_same(x, y) for x, y in zip(got_c, ref_c))
+    assert _pool_same(got_c[0], ref_a)
+    del b, c, d, e
+    gc.collect()
+    # the kept form (no zero fill) binds a poisoned buffer; rows past a buffer's capacity take a new, larger one,
+    # and a smaller call then binds the [rows] view of the larger buffer
+    poisoned = set()
+    for buf in _pool_free(be):
+        buf[3].fill_(float("nan"))
+        poisoned.add(buf[3].data_ptr())
+    k = forward(keep, 16)
+    assert k["holder"].tensor is None and not k["holder"].clean
+    got_k = backward(k)
+    assert owned(k)[0] in poisoned and k["holder"].clean
+    del k
+    big = forward(default, 300)
+    got_big = backward(big)
+    rows = big["rows"]
+    assert rows > 128 and big["holder"].own[1][2] == -(-rows // 128) * 128
+    big_ptr = owned(big)[0]
+    # two bindings' graphs alive at once: disjoint buffers
+    mid = forward(default, 16)
+    backward(mid, retain=True)
+    (m0, m1), (g0, g1) = owned(mid), owned(big)
+    assert m1 <= g0 or g1 <= m0
+    del mid
+    gc.collect()
+    del big
+    gc.collect()
+    small = forward(default, 16)
+    got_small = backward(small)
+    assert owned(small)[0] == big_ptr
+    assert small["holder"].tensor.data_ptr() == big_ptr
+    del small
+    gc.collect()
+    monkeypatch.setattr(be, "_RLAB_POOL_ON", False)
+    assert _pool_same(backward(forward(keep, 16)), got_k)
+    assert _pool_same(backward(forward(default, 300)), got_big)
+    assert _pool_same(backward(forward(default, 16)), got_small)
+    assert _pool_same(got_small, ref_a)
+    monkeypatch.undo()
+    # at most _RLAB_POOL_MAX free buffers per stream
+    live = [forward(default, 16) for _ in range(be._RLAB_POOL_MAX + 2)]
+    for g in live:
+        backward(g, retain=True)
+    del live, g
+    gc.collect()
+    assert len(_pool_free(be)) == be._RLAB_POOL_MAX
+    # another stream takes from its own list, never the default stream's
+    side = torch.cuda.Stream(device=device)
+    before = [e[3].data_ptr() for e in _pool_free(be)]
+    side.wait_stream(torch.cuda.current_stream())
+    with torch.cuda.stream(side):
+        s = forward(default, 16)
+        got_s = backward(s)
+        assert s["holder"].own[0] is _pool_free(be, side)
+        del s
+    gc.collect()
+    torch.cuda.current_stream().wait_stream(side)
+    assert [e[3].data_ptr() for e in _pool_free(be)] == before
+    assert len(_pool_free(be, side)) == 1 and _pool_same(got_s, ref_a)
+    # under a CUDA graph capture the free lists give no buffer (the caller takes an ordinary tensor of the capture's
+    # pool) and no list changes
+    sizes = {k: len(v) for k, v in be._RLAB_POOL.items()}
+    graph = torch.cuda.CUDAGraph()
+    with torch.cuda.graph(graph):
+        scratch = torch.zeros((16,), dtype=torch.float32, device=device)
+        assert be._graph_rlab(16, True, device) is None
+    assert {k: len(v) for k, v in be._RLAB_POOL.items()} == sizes
+    del graph, scratch
+    # no forward takes a buffer -- a plain call, a call without a gradient, a checkpoint's first pass or its
+    # recomputation: one take, in the backward that binds the holder (the checkpointed call's, or the reentrant
+    # recomputation's graph's); the bits are the plain step's
+    calls = []
+    phase = ["forward"]
+    real = be._graph_rlab
+
+    def counted(rows, zero, dev):
+        calls.append(phase[0])
+        return real(rows, zero, dev)
+
+    monkeypatch.setattr(be, "_graph_rlab", counted)
+    for entry in (default, keep):
+        inp = inputs[16]
+        plain = None
+        for kind in ("plain", "nonreentrant", "reentrant"):
+            X = inp.X.detach().requires_grad_(True)
+            W = inp.W.detach().requires_grad_(True)
+
+            def call(x, w, entry=entry, inp=inp):
+                return entry(x, w, inp.labels, chunk_size=4096)
+
+            if kind == "reentrant":
+                # a call without a gradient: no take
+                del calls[:]
+                phase[0] = "forward"
+                with torch.no_grad():
+                    call(X, W)
+                assert calls == [], (entry.__name__, calls)
+            del calls[:]
+            phase[0] = "forward"
+            if kind == "plain":
+                lp = call(X, W)
+            else:
+                lp = torch.utils.checkpoint.checkpoint(
+                    call, X, W, use_reentrant=kind == "reentrant"
+                )
+            assert calls == [], (entry.__name__, kind, calls)
+            phase[0] = "backward"
+            lp.backward(inp.dlogp)
+            torch.cuda.synchronize()
+            assert calls == ["backward"], (entry.__name__, kind, calls)
+            out = (_bits(lp.detach()), _bits(X.grad), _bits(W.grad))
+            if plain is None:
+                plain = out
+            same = all(torch.equal(x, y) for x, y in zip(out, plain))
+            assert same, (entry.__name__, kind)
+            del lp
+    monkeypatch.undo()
+    # another device: its current stream's list while it is the current device; no buffer from another current device
+    if torch.cuda.device_count() > 1:
+        other = (index + 1) % torch.cuda.device_count()
+        with torch.cuda.device(other):
+            own = be._graph_rlab(16, True, torch.device("cuda", other))
+            assert own is not None and own[1][1].device.index == other
+            assert own[0] is be._RLAB_POOL[be._CUDA_GET_STREAM(other)]
+            assert int(torch.count_nonzero(own[1][1])) == 0
+            # a holder that owns the entry puts it back when it is freed (here at once)
+            be._GraphRlab(own[1][1], True, own)
+            del own
+            gc.collect()
+            assert len(_pool_free(be)) == 1
+        assert be._graph_rlab(16, True, torch.device("cuda", other)) is None
+    be._RLAB_POOL.clear()
+    gc.collect()
+
+
+def test_device_graph_rlab_pool(glm_weight, monkeypatch):
+    """The graphs' label residual buffers come from the free list of the caller's stream (``_graph_rlab``,
+    ``_RLAB_POOL``) and go back when the graph is freed -- taken by the first backward that binds the graph's holder
+    (zero-filled there for the ``dz`` arm; the kept logits' unfilled): two live graphs hold disjoint buffers; a freed
+    graph's buffer is the next graph's; a retained graph keeps its buffer through every backward while another graph
+    meanwhile takes another; a buffer left with NaN on every row gives the bits of an ordinary tensor (``_RLAB_POOL_ON``
+    off) -- the default entry's form, whose backward fill overwrites it, and the kept form, whose backward binds it
+    unfilled; a call past a buffer's capacity takes a larger one and a smaller call then binds its view; at most
+    ``_RLAB_POOL_MAX`` buffers stay free per stream; another stream takes its own list; a CUDA graph capture takes no
+    buffer and changes no list; no forward takes one (a plain call, a call without a gradient, a checkpoint's first pass
+    or recomputation), the binding backward does, with the plain step's bits; another device takes its own stream's
+    list, and no buffer comes from another current device.  Each call key runs one step first, from an empty binding
+    cache: a first backward that runs the runner's own path takes no buffer and binds no holder (as K allocates its own
+    residuals), one whose binding is built before its launches binds the holder at once."""
+    _check_graph_rlab_pool(
+        cake_backend,
+        cake_backend.cake_lm_head_det_train_logprob,
+        cake_backend.cake_lm_head_det_train_logprob_keep,
+        glm_weight,
+        monkeypatch,
+        SEED + 73,
+    )
+
+
+_RLAB_POOL_PLACEMENT_SCRIPT = """
+import gc, json, sys, torch
+sys.path.insert(0, {root!r})
+from torch.utils._python_dispatch import TorchDispatchMode
+from tests.experimental.test_helpers.cake_lm_head_loss_reference import make_inputs
+from tests.cake.test_helpers.cake_package import cake_package
+be = cake_package("cake.{package}", "cake_backend")
+be._RLAB_POOL_ON = {pool!r}
+rows, held, held_rows, requests = [], [], [], []
+real = be._graph_rlab_tensor
+
+
+def request(n, zero, device):
+    requests.append(n)
+    return real(n, zero, device)
+
+
+be._graph_rlab_tensor = request
+
+
+class Log(TorchDispatchMode):
+    def __torch_dispatch__(self, func, types, args=(), kwargs=None):
+        r = func(*args, **(kwargs or {{}}))
+        for t in r if isinstance(r, (tuple, list)) else (r,):
+            if isinstance(t, torch.Tensor) and t.is_cuda:
+                rows.append([str(func), list(t.shape), t.data_ptr()])
+        return r
+
+
+def holder(lp):
+    pending, seen = [lp.grad_fn], set()
+    while pending:
+        node = pending.pop()
+        if node is None or id(node) in seen:
+            continue
+        seen.add(id(node))
+        if hasattr(node, "rlab"):
+            return node.rlab
+        pending.extend(n for n, _ in node.next_functions)
+    return None
+
+
+W = make_inputs(1, seed={seed}, device="cuda", ignore_frac=0.0).W
+steps = (32, 16, 256, 32, 1, 300, 16)
+inputs = {{
+    T: make_inputs(T, seed={seed} + T, device="cuda", W=W, ignore_frac=0.05)
+    for T in sorted(set(steps))
+}}
+# the first backward of a call key (the tensors' addresses are part of it) may run the runner's own path (its own
+# residuals, no holder bound) and remembers the binding: one call per key first, then the free lists and the request
+# log start empty, so that every logged graph's backward binds its holder
+for T in sorted(set(steps)):
+    inp = inputs[T]
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
+    warm = be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake")
+    torch.autograd.backward([warm], [inp.dlogp])
+    del warm
+gc.collect()
+torch.cuda.synchronize()
+be._RLAB_POOL.clear()
+del requests[:]
+for T in steps:
+    inp = inputs[T]
+    X = inp.X.detach().requires_grad_(True)
+    Wg = inp.W.detach().requires_grad_(True)
+    with Log():
+        lps = [be.{entry}(X, Wg, inp.labels, chunk_size=4096, backend="cake") for _ in range(2)]
+        hs = [holder(lp) for lp in lps]
+        torch.autograd.backward(lps, [inp.dlogp, inp.dlogp])
+        # each graph's residuals: taken by the backward that binds them
+        took = [h.tensor for h in hs if h is not None and h.tensor is not None]
+        held.extend(t.data_ptr() for t in took)
+        held_rows.extend(t.numel() for t in took)
+        del took
+        del hs, lps
+    torch.cuda.synchronize()
+# the placement: per segment kind (the holding stream's, the default stream's, another's), the segment's number in the
+# order the log first reaches a segment of that kind, and the offset in it (a device address differs between processes)
+segs = torch.cuda.memory_snapshot()
+stream = be._RLAB_STREAMS[torch.cuda.current_device()].cuda_stream
+order = {{}}
+
+
+def where(p):
+    for s in segs:
+        if 0 <= p - s["address"] < s["total_size"]:
+            kind = "holding" if s["stream"] == stream else "default" if s["stream"] == 0 else "other"
+            n = order.setdefault((kind, s["address"]), sum(k == kind for k, _ in order))
+            return [kind, n, p - s["address"], s["total_size"]]
+    return None
+
+
+rows = [[op, shape, where(p)] for op, shape, p in rows]
+held = [where(p) for p in held]
+print("PLACEMENT " + json.dumps(dict(rows=rows, held=held, held_rows=held_rows, requests=len(requests))))
+"""
+
+
+def _check_graph_rlab_pool_placement(package, entry):
+    """Shared body of the det / nondet pool placement tests (see ``test_device_graph_rlab_pool_placement``)."""
+    _require_program(entry="logprob")
+    _require_holding_gate()
+    root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    env = dict(
+        os.environ, PYTHONPATH=root + os.pathsep + os.environ.get("PYTHONPATH", "")
+    )
+    got = {}
+    for pool in (False, True):
+        script = _RLAB_POOL_PLACEMENT_SCRIPT.format(
+            root=root, package=package, entry=entry, seed=SEED, pool=pool
+        )
+        proc = subprocess.run(
+            [sys.executable, "-c", script],
+            capture_output=True,
+            text=True,
+            env=env,
+            cwd=root,
+            timeout=1800,
+        )
+        assert proc.returncode == 0, (
+            f"fresh process failed ({proc.returncode}):\n{proc.stdout[-2000:]}\n{proc.stderr[-4000:]}"
+        )
+        line = [x for x in proc.stdout.splitlines() if x.startswith("PLACEMENT ")][-1]
+        got[pool] = json.loads(line[len("PLACEMENT ") :])
+    for pool, g in got.items():
+        held = g["held"]
+        assert held and all(h is not None and h[0] == "holding" for h in held), pool
+        assert all(w is not None for _, _, w in g["rows"]), pool
+    # the free lists make no request on another stream's segments: every block outside the holding stream's is the
+    # per-call path's
+    on = [r for r in got[True]["rows"] if r[2][0] != "holding"]
+    off = [r for r in got[False]["rows"] if r[2][0] != "holding"]
+    assert on and len(on) == len(off)
+    for a, b in zip(on, off, strict=True):
+        assert a == b
+    # every graph holds residuals, each of the per-call path's from its own holding-stream request; the free lists
+    # request a buffer only when the stream's last free one is missing or too small: a step's two graphs (alive at a
+    # time, the same rows) take the two buffers the step before freed, else request two of their rows rounded up to
+    # 128; every other graph reuses a freed buffer
+    held_rows = got[True]["held_rows"]
+    assert held_rows == got[False]["held_rows"] and held_rows[::2] == held_rows[1::2]
+    assert len(got[True]["held"]) == len(got[False]["held"]) == got[False]["requests"]
+    capacity = want = 0
+    for n in held_rows[::2]:
+        if n > capacity:
+            capacity, want = -(-n // 128) * 128, want + 2
+    assert got[True]["requests"] == want < got[False]["requests"]
+
+
+def test_device_graph_rlab_pool_placement(glm_weight):
+    """The graphs' label residual buffers taken from the free lists (``_graph_rlab``) leave every other block where the
+    per-call request puts it: two fresh processes run the same log-probability forwards (two graphs alive at a time) and
+    backwards at 32, 16, 256, 32, 1, 300 and 16 rows, one with the free lists on and one with them off
+    (``_RLAB_POOL_ON``), and every CUDA tensor an operator returns on the default stream's segments -- the compact rows,
+    the logits, the statistics, every buffer of the forward and the backward -- lies in the same segment at the same
+    offset in both; every graph's residuals lie in a segment of the holding stream; the free lists request two buffers
+    only where a step's rows pass the capacity the steps before left (rows rounded up to 128), where the per-call path
+    requests one per graph.  Each call key runs one call first (a key's first backward may run the runner's own path,
+    which binds no holder); the free lists and the request count start empty after it."""
+    _check_graph_rlab_pool_placement(
+        "cake_lm_head_det_train", "cake_lm_head_det_train_logprob"
+    )
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_eager_launch_formed_key_reuse(monkeypatch, module):
+    """An eager launch of the output boundary keyed by its caller (``form``: ``_EAGER_FORMED``, the module, the stage,
+    the device index and the host values the stage varies) never forms :func:`_eager_form` over every value: the first
+    call of a form binds, every later call of it slots its own values into the remembered launch, a call without a
+    form keeps :func:`_eager_form`, and a disabled cache binds every call.  The stand-ins every caller starts from
+    (``_EAGER_BASE``) are the values each built before: no common tensor, every common scalar 0, in that order."""
+    mod = cake_backend if module == "cake_backend" else opt_in
+    base = cake_backend._EAGER_BASE
+    assert list(base) == [*cake_backend.COMMON_TENSORS, *cake_backend.COMMON_SCALARS]
+    assert base == {
+        **{name: None for name in cake_backend.COMMON_TENSORS},
+        **{name: 0 for name in cake_backend.COMMON_SCALARS},
+    }
+    binds, generic = [], []
+
+    def bind_all(record, module_name, keys, values, device, geometry):
+        v = values[keys[0]]
+        binds.append(keys[0])
+        launch = cake_backend._Launch(
+            stage=keys[0][0],
+            module=module_name,
+            entry=lambda *args: None,
+            arguments=(v["a"], v["c"], v["b"]),
+            grid=(1, 1, 1),
+            slots=((0, "a"), (2, "b")),
+        )
+        return {keys[0]: launch}
+
+    def eager_form(module_name, stage, device, values):
+        generic.append(stage)
+        return ("generic", module_name, stage, str(device))
+
+    monkeypatch.setattr(mod, "_bind_all", bind_all)
+    monkeypatch.setattr(cake_backend, "_eager_form", eager_form)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    record = {}
+    form = (cake_backend._EAGER_FORMED, "m", "s", 0, 3)
+    a1, b1, a2, b2 = (torch.zeros(1) for _ in range(4))
+    first = mod._eager_launch(
+        record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None, form=form
+    )
+    again = mod._eager_launch(
+        record, "m", "s", dict(a=a2, b=b2, c=7), "cuda:0", None, form=form
+    )
+    assert binds == [("s", "eager")] and generic == []
+    assert first[1] == [a1, 7, b1] and again[1] == [a2, 7, b2]
+    assert list(cache._eager) == [form]
+    assert again[0].arguments == (None, 7, None)
+    mod._eager_launch(record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None)
+    assert generic == ["s"] and len(binds) == 2 and len(cache._eager) == 2
+    cache.configure(enabled=False)
+    mod._eager_launch(
+        record, "m", "s", dict(a=a1, b=b1, c=7), "cuda:0", None, form=form
+    )
+    assert len(binds) == 3 and len(cache._eager) == 0
+
+
+@pytest.mark.parametrize("module", ["cake_backend", "opt_in"])
+def test_device_eager_cast_formed_keys_match_eager_form(monkeypatch, module):
+    """The output boundary's casts (``scale_cast``, ``scale_cast_scatter``, ``dw_cast``) key their eager launches
+    themselves (``_EAGER_FORMED``): over calls of several shapes, fold rows, accumulators and output types, two calls
+    share a formed key exactly when :func:`_eager_form` over their full host values is the same, so the cache keeps
+    one launch per form as before; a repeated call binds nothing, and every output is bitwise the output with the
+    binding cache disabled."""
+    _require_program(entry="loss")
+    mod = cake_backend if module == "cake_backend" else opt_in
+    calls, binds = [], []
+    real_eager, real_bind = mod._eager_launch, mod._bind_all
+
+    def eager(record, module_name, stage, values, device, geometry, form=None):
+        calls.append((module_name, stage, device, dict(values), form))
+        return real_eager(
+            record, module_name, stage, values, device, geometry, form=form
+        )
+
+    def bind(record, module_name, keys, *args, **kwargs):
+        binds.append(tuple(key[0] for key in keys))
+        return real_bind(record, module_name, keys, *args, **kwargs)
+
+    monkeypatch.setattr(mod, "_eager_launch", eager)
+    monkeypatch.setattr(mod, "_bind_all", bind)
+    cache = cake_backend.BindingCache()
+    monkeypatch.setattr(mod, "BINDING_CACHE", cache)
+    H, V = DEFAULT_H, DEFAULT_V
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 89)
+    dgen = torch.Generator(device=CUDA).manual_seed(SEED + 89)
+    head = (0.05 * torch.randn(512, H, generator=gen)).to(torch.bfloat16).to(CUDA)
+    g = torch.tensor(0.75, device=CUDA)
+    accs = [torch.randn(rows, H, generator=gen).to(CUDA) for rows in (5, 12)]
+    scatters = []
+    for num_rows, T_v, lo, hi in (
+        (64, 15, 0, 15),
+        (64, 30, 7, 30),
+        (64, 30, 0, 0),
+        (65, 15, 0, 15),
+    ):
+        valid = torch.zeros(num_rows, dtype=torch.bool)
+        valid[torch.randperm(num_rows, generator=gen)[:T_v]] = True
+        acc = torch.randn(T_v, H, generator=gen).to(CUDA)
+        labels = torch.randint(0, 512, (T_v,), generator=gen).to(CUDA)
+        rlab = (1e-3 * torch.randn(T_v, generator=gen)).to(CUDA)
+        fold = dict(labels=labels, rlab=rlab, W=head, lo=lo, hi=hi) if hi > lo else None
+        scan = torch.cumsum(valid.to(CUDA), 0, dtype=torch.int32)
+        scatters.append(
+            (acc, valid.nonzero().squeeze(1).to(CUDA), scan, num_rows, fold)
+        )
+    dws = [
+        (
+            torch.randn((rows, V), device=CUDA, generator=dgen).to(torch.bfloat16),
+            torch.randn((rows, H), device=CUDA, generator=dgen).to(torch.bfloat16),
+        )
+        for rows in (3, 5)
+    ]
+    dw_acc = torch.randn((V, H), device=CUDA, generator=dgen)
+
+    def run():
+        out = []
+        for acc in accs:
+            out.append(mod.scale_cast(acc, g, torch.bfloat16))
+            out.append(mod.scale_cast(acc, g, torch.float32))
+        for acc, idx, scan, num_rows, fold in scatters:
+            out.append(
+                mod.scale_cast_scatter(
+                    acc, g, idx, scan, num_rows, backend="cake", fold=fold
+                )
+            )
+        for k, (dz, x) in enumerate(dws):
+            out.append(mod.dw_cast(dz, x, None, g, torch.bfloat16))
+            out.append(mod.dw_cast(dz, x, dw_acc, g, torch.bfloat16))
+            if k == 0:
+                out.append(mod.dw_cast(dz, x, None, g, torch.float32))
+        torch.cuda.synchronize()
+        return out
+
+    cache.configure(enabled=False)
+    fresh = run()
+    cache.configure(enabled=True)
+    calls.clear()
+    binds.clear()
+    first = run()
+    assert calls and all(form is not None for *_, form in calls), [
+        stage for _, stage, _, _, form in calls if form is None
+    ]
+    generic = [
+        cake_backend._eager_form(name, stage, device, values)
+        for name, stage, device, values, _ in calls
+    ]
+    formed = [form for *_, form in calls]
+    for i in range(len(calls)):
+        for j in range(len(calls)):
+            assert (formed[i] == formed[j]) == (generic[i] == generic[j]), (
+                calls[i][1],
+                calls[j][1],
+            )
+    assert len(binds) == len(set(formed)) == len(cache._eager)
+    assert set(cache._eager) == set(formed)
+    for a, b in zip(fresh, first, strict=True):
+        assert a.dtype == b.dtype and torch.equal(a, b)
+    del first
+    binds.clear()
+    again = run()
+    assert binds == [] and len(cache._eager) == len(set(formed))
+    for a, b in zip(fresh, again, strict=True):
+        assert a.dtype == b.dtype and torch.equal(a, b)
+
+
+# --------------------------------------------------------------------------- the casts' fold programs (L1 / L2)
+
+
+def test_cast_fold_programs_are_registered():
+    """Every record registers the casts' fold programs beside the programs without a fold operand: the scatter cast
+    ``scale_cast_scatter_bf16`` takes no fold operand (the argument plan of the previous release),
+    ``scale_cast_scatter_fold_bf16`` the scatter's plus the labels, residuals, head, ``V`` and the fold rows, and
+    ``scale_cast_fold_bf16`` the flat cast's plus the row width and the same fold operands.  Only the scatter fold
+    program's rows are per-call scalars of an eager form (the flat fold program runs in the chunk loop only), and only
+    the fold programs read the fold tensors."""
+    fold_args = ["labels", "rlab", "W", "V", "fold_lo", "fold_hi"]
+    scatter_fold = cake_backend.DX_FINALIZE_FOLD_STAGE
+    flat_fold = cake_backend.DX_CAST_FOLD_STAGE
+    assert (scatter_fold, flat_fold) == (
+        "scale_cast_scatter_fold_bf16",
+        "scale_cast_fold_bf16",
+    )
+
+    def args(record, stage):
+        return [n for kind, n in record[stage]["arg_plan"] if kind != "grid"]
+
+    for name, record in cake_jit.MODULES.items():
+        assert {scatter_fold, flat_fold} <= set(cake_jit.registered_stages(name))
+        plain = args(record, "scale_cast_scatter_bf16")
+        assert plain == ["acc", "g", "scan", "idx_lo", "out", "row_vecs", "num_rows"]
+        assert args(record, scatter_fold) == plain + fold_args
+        assert args(record, "scale_cast_bf16") == ["acc", "g", "out", "num_vecs"]
+        assert args(record, flat_fold) == [
+            "acc",
+            "g",
+            "out",
+            "num_vecs",
+            "row_vecs",
+            *fold_args,
+        ]
+        for stage in (scatter_fold, flat_fold):
+            assert record[stage]["launch"] == record["scale_cast_bf16"]["launch"]
+    assert cake_backend.EAGER_CALL_SCALARS == {scatter_fold: ("fold_lo", "fold_hi")}
+    tensors = cake_backend.STAGE_TENSORS
+    assert tensors["scale_cast_scatter_bf16"] == ("acc", "g", "scan", "idx_lo", "out")
+    assert tensors[scatter_fold] == tensors["scale_cast_scatter_bf16"] + (
+        "labels",
+        "rlab",
+        "W",
+    )
+    assert tensors[flat_fold] == tensors["scale_cast_bf16"] + ("labels", "rlab", "W")
+    for stage in (scatter_fold, flat_fold):
+        assert stage in cake_jit.STAGES and stage in cake_jit.BASE_STAGES
+        assert stage in cake_jit.ROW_STAGES and cake_backend.base_stage(stage) == stage
+
+
+def test_flat_cast_fold_plan_keys():
+    """An uncompacted log-probability plan with ``cast_fold`` whose in-loop flat BF16 cast reads every row folds the
+    label residuals of the longest run of adjacent one-slice chunks in the cast's fold program: those chunks launch no
+    fold-alone slab sum, the in-loop cast's key is ``scale_cast_fold_bf16`` with the call's labels, residuals and head,
+    the head's rows, the fold rows and the row width as its host values, the plan's stages carry the program, and
+    :func:`cake_backend.finalize_dx` gets no fold operand.  An uncompacted loss plan folds none, with or without
+    ``cast_fold`` (its forward's slab sums leave ``dx_acc`` final: its backward reads neither the caller's labels nor
+    the head); a log-probability plan whose caller finalizes the FP32 accumulator itself (``dx_cast=False``: no BF16
+    cast) and a plan without ``cast_fold`` keep every fold-alone slab sum and the flat cast without a fold operand."""
+    from dataclasses import replace as _replace
+
+    g = cake_backend.Geometry.from_record(
+        {"geometry": {"hidden": 6144, "vocab": 154880}}
+    )
+    fold_stage = cake_backend.DX_CAST_FOLD_STAGE
+    slab_stages = {"slab_sum"}
+
+    def plan_of(entry="loss", *, dx_cast=True, cast_fold=True):
+        plan = cake_backend.make_plan(
+            _problem(4096, 6144, 154880, 1024, entry=entry),
+            need_dx=True,
+            need_dw=True,
+            geometry=g,
+            num_sms=148,
+            valid_rows=None,
+            fuse_dw_cast=True,
+            arch="sm_100a",
+            dx_finalize=True,
+            dx_cast=dx_cast,
+        )
+        return _replace(plan, cast_fold=cast_fold)
+
+    def keys_of(plan):
+        loop = (
+            cake_backend.forward_keys(plan)
+            if plan.problem.entry == "loss"
+            else cake_backend.recompute_keys(plan)
+        )
+        dx = [i for s, i in loop if isinstance(i, int) and s == plan.dx_stage_of(i)]
+        assert dx == list(range(plan.num_chunks))
+        return [i for s, i in loop if s in slab_stages], cake_backend.cast_keys(plan)
+
+    t = dict(labels=object(), rlab=object(), W=object())
+    plan = plan_of("logprob")
+    assert not plan.compact and plan.num_chunks == 4
+    assert all(plan.dx_slices_of(i) == 1 for i in range(4))
+    assert cake_backend.cast_fold_rows(plan) == (0, plan.rows) == (0, 4096)
+    slabs, cast = keys_of(plan)
+    assert slabs == [] and cast[0] == (fold_stage, "dx")
+    assert ("scale_cast_bf16", "dx") not in cast and fold_stage in plan.stages
+    # the in-loop cast takes its own operands: finalize_dx gets none
+    assert cake_backend.cast_fold_operands(plan, t) is None
+    every = list(range(4))
+    for other in (
+        plan_of(),  # the loss entry: the same one-slice chunks, folded by their slab sums
+        plan_of(dx_cast=False),
+        plan_of("logprob", dx_cast=False),
+        plan_of(cast_fold=False),
+        plan_of("logprob", cast_fold=False),
+    ):
+        assert not other.compact and all(other.dx_slices_of(i) == 1 for i in range(4))
+        assert cake_backend.cast_fold_rows(other) == (0, 0)
+        assert cake_backend.cast_fold_operands(other, t) is None
+        slabs, cast = keys_of(other)
+        assert slabs == every
+        assert all(s != fold_stage for s, _ in cast) and fold_stage not in other.stages
+    # a K-sliced chunk keeps its slab sum and splits the one-slice chunks: the longer run folds in the cast
+    mixed = _replace(plan_of("logprob"), dx_slices=(1, 2, 1, 1))
+    assert cake_backend.cast_fold_rows(mixed) == (int(mixed.chunks[2][0]), mixed.rows)
+    slabs, cast = keys_of(mixed)
+    assert slabs == [0, 1] and cast[0] == (fold_stage, "dx")
+    # the in-loop cast's host values (stage_values) and per-call slots (_slot_values)
+    plan = plan_of("logprob")
+    tensors = {
+        **{name: None for name in cake_backend.COMMON_TENSORS},
+        "dx_acc": torch.zeros(4, 16),
+        "dx_out": torch.zeros(4, 16, dtype=torch.bfloat16),
+        "unit_scale": torch.ones(1),
+        "labels": torch.zeros(4096, dtype=torch.int64),
+        "rlab": torch.zeros(4096),
+        "W": torch.zeros(2, 6144, dtype=torch.bfloat16),
+    }
+    v = cake_backend.stage_values(fold_stage, tensors, plan, "dx")
+    assert all(
+        v[n] is tensors[n] for n in ("labels", "rlab", "W", "unit_scale") if n in v
+    )
+    assert v["g"] is tensors["unit_scale"]
+    assert (v["V"], v["fold_lo"], v["fold_hi"], v["row_vecs"]) == (
+        154880,
+        0,
+        4096,
+        6144 // g.cast_vec,
+    )
+    slots = cake_backend._slot_values(fold_stage, tensors, plan, "dx")
+    assert all(slots[n] is tensors[n] for n in ("labels", "rlab", "W"))
+    with pytest.raises(ValueError):
+        cake_backend.stage_values(
+            fold_stage, tensors, plan_of("logprob", cast_fold=False), "dx"
+        )
+
+
+def _launch_eager(mod, stage, values):
+    """Launch one eager stage of the output boundary with ``values`` (a fresh binding, as the casts do)."""
+    module_name, record = cake_backend.record_for(CUDA)
+    geometry = cake_backend.Geometry.from_record(record)
+    launch, arguments = mod._eager_launch(
+        record, module_name, stage, values, CUDA, geometry
+    )
+    index = CUDA.index if CUDA.index is not None else torch.cuda.current_device()
+    with cake_backend._ffi_stream_context(int(index)):
+        if launch.prepare is not None:
+            launch.prepare(*arguments)
+        launch.entry(*arguments)
+
+
+def test_device_cast_fold_programs_without_a_folded_row(monkeypatch):
+    """The casts' fold programs fold no row outside ``[fold_lo, fold_hi)``, on a row of residual 0 or of a label
+    outside ``[0, V)``: with an empty range they give bitwise the outputs of the programs without a fold operand, and
+    with a range the rows of that predicate keep those bits while the folded rows change.  ``scale_cast_scatter`` with
+    no fold or an empty range launches the program without a fold operand (the main and the opt-in module's), with a
+    range the fold program; ``scale_cast`` takes no fold operand (the flat cast's fold program is the in-loop cast of
+    an uncompacted log-probability backward)."""
+    _require_program(entry="loss")
+    bound = []
+    for mod in (cake_backend, opt_in):
+        real = mod._bind_all
+
+        def spy(record, module_name, keys, *args, _real=real, **kwargs):
+            bound.extend(key[0] for key in keys)
+            return _real(record, module_name, keys, *args, **kwargs)
+
+        monkeypatch.setattr(mod, "_bind_all", spy)
+        off = type(mod.BINDING_CACHE)()
+        off.configure(enabled=False)
+        monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    _, record = cake_backend.record_for(CUDA)
+    cast_vec = cake_backend.Geometry.from_record(record).cast_vec
+    gen = torch.Generator(device="cpu").manual_seed(SEED + 101)
+    T, T_v, H, V = 64, 30, DEFAULT_H, 512
+    W = (0.5 * torch.randn(V, H, generator=gen)).to(torch.bfloat16).to(CUDA)
+    g = torch.tensor(0.75, device=CUDA)
+    valid = torch.zeros(T, dtype=torch.bool)
+    valid[torch.randperm(T, generator=gen)[:T_v]] = True
+    idx = valid.nonzero().squeeze(1).to(CUDA)
+    scan = torch.cumsum(valid.to(CUDA), 0, dtype=torch.int32)
+    acc = torch.randn(T_v, H, generator=gen).to(CUDA)
+    labels = torch.randint(0, V, (T_v,), generator=gen)
+    labels[3], labels[4] = -100, V + 5  # no label column: never folded
+    labels = labels.to(CUDA)
+    rlab = torch.randn(T_v, generator=gen)
+    rlab[5] = 0.0  # a zero residual: never folded
+    rlab = rlab.to(CUDA)
+    kept = [3, 4, 5]
+
+    def fold_values(lo, hi):
+        return dict(labels=labels, rlab=rlab, W=W, V=V, fold_lo=lo, fold_hi=hi)
+
+    def scatter_fold(lo, hi):
+        out = torch.empty((T, H), dtype=torch.bfloat16, device=CUDA)
+        values = dict(cake_backend._EAGER_BASE)
+        values.update(
+            acc=acc,
+            g=g,
+            scan=scan,
+            idx_lo=idx.view(torch.int32),
+            out=out,
+            row_vecs=H // cast_vec,
+            num_rows=T,
+            loss_div=1.0,
+            **fold_values(lo, hi),
+        )
+        _launch_eager(cake_backend, cake_backend.DX_FINALIZE_FOLD_STAGE, values)
+        return out
+
+    def flat_fold(lo, hi):
+        out = torch.empty((T_v, H), dtype=torch.bfloat16, device=CUDA)
+        values = dict(cake_backend._EAGER_BASE)
+        values.update(
+            acc=acc.reshape(-1),
+            g=g,
+            out=out.reshape(-1),
+            num_vecs=T_v * H // cast_vec,
+            row_vecs=H // cast_vec,
+            loss_div=1.0,
+            **fold_values(lo, hi),
+        )
+        _launch_eager(cake_backend, cake_backend.DX_CAST_FOLD_STAGE, values)
+        return out
+
+    for mod in (cake_backend, opt_in):
+        bound.clear()
+        plain_scatter = mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake")
+        empty = dict(labels=labels, rlab=rlab, W=W, lo=7, hi=7)
+        same = mod.scale_cast_scatter(acc, g, idx, scan, T, backend="cake", fold=empty)
+        folded = mod.scale_cast_scatter(
+            acc, g, idx, scan, T, backend="cake", fold=dict(empty, lo=0, hi=T_v)
+        )
+        torch.cuda.synchronize()
+        assert bound == [
+            "scale_cast_scatter_bf16",
+            "scale_cast_scatter_bf16",
+            cake_backend.DX_FINALIZE_FOLD_STAGE,
+        ]
+        assert torch.equal(_bits(same), _bits(plain_scatter))
+        assert torch.equal(_bits(folded), _bits(scatter_fold(0, T_v)))
+    bound.clear()
+    plain_flat = cake_backend.scale_cast(acc, g, torch.bfloat16, backend="cake")
+    torch.cuda.synchronize()
+    assert bound == ["scale_cast_bf16"]
+    # the fold programs with an empty range are the programs without a fold operand
+    for lo in (0, 11, T_v):
+        assert torch.equal(_bits(scatter_fold(lo, lo)), _bits(plain_scatter))
+        assert torch.equal(_bits(flat_fold(lo, lo)), _bits(plain_flat))
+    # with a range: the predicate's rows keep their bits, the folded rows change, rows outside the range keep theirs
+    part = flat_fold(2, 20)
+    torch.cuda.synchronize()
+    rows_equal = [torch.equal(_bits(part[r]), _bits(plain_flat[r])) for r in range(T_v)]
+    assert all(rows_equal[r] for r in kept)
+    assert all(rows_equal[r] for r in range(T_v) if not 2 <= r < 20)
+    assert not any(rows_equal[r] for r in range(2, 20) if r not in kept)
+    out_rows = idx.tolist()
+    scattered = scatter_fold(2, 20)
+    torch.cuda.synchronize()
+    for r in range(T_v):
+        same_row = torch.equal(
+            _bits(scattered[out_rows[r]]), _bits(plain_scatter[out_rows[r]])
+        )
+        assert same_row == rows_equal[r], r
+    assert torch.all(scattered[~valid.to(CUDA)] == 0)
+
+
+# the (rows, H) shapes test_device_flat_cast_fold_is_bitwise tries in this order: one chunk of an uncompacted
+# log-probability call over the inputs' default vocabulary
+_CAST_FOLD_SHAPES = (
+    (4096, 8192),
+    (8192, 8192),
+    (4096, 12288),
+    (8192, 12288),
+    (4096, 16384),
+    (8192, 16384),
+)
+
+
+def _cast_fold_shape(module_name, record, num_sms):
+    """The first ``(rows, H)`` of :data:`_CAST_FOLD_SHAPES` whose one chunk the log-probability plan of registered
+    program ``module_name`` / ``record`` on a device of ``num_sms`` SMs gives a cast-fold range (a one-slice dX chunk:
+    ``make_plan`` with the program's geometry and slice limit, the SM count and the co-resident dX clusters, then
+    ``_cast_fold_range``; the plan only, nothing runs), else ``None``; and ``(rows, H, dX slices)`` of every shape
+    tried."""
+    geometry = cake_backend.Geometry.from_record(record)
+    dx_max = cake_backend.dx_max_slices(cake_backend.registered_stages(module_name))
+    resident = cake_backend.cluster_resident(None, geometry.dx_cluster_ctas, num_sms)
+    tried = []
+    for rows, hidden in _CAST_FOLD_SHAPES:
+        plan = cake_backend.make_plan(
+            _problem(rows, hidden, DEFAULT_V, rows, entry="logprob"),
+            need_dx=True,
+            need_dw=True,
+            geometry=geometry,
+            dx_max_slices=dx_max,
+            num_sms=num_sms,
+            dx_resident=resident,
+            arch=record["arch"],
+            cast_fold=True,
+        )
+        tried.append((rows, hidden, plan.dx_slices_of(0)))
+        lo, hi = cake_backend._cast_fold_range(plan)
+        if hi > lo:
+            return (rows, hidden), tried
+    return None, tried
+
+
+def test_device_flat_cast_fold_is_bitwise(monkeypatch):
+    """An uncompacted call (every row valid) of the log-probability autograd entry folds the label residuals of its
+    one-slice chunks in its backward's in-loop flat BF16 dX cast (the cast's fold program) and launches no fold-alone
+    slab sum on those chunks: bitwise the ``loss``, ``logp``, ``dX`` and ``dW`` of the same call with the fold left to
+    the slab sums (the cast-fold range forced empty: the previous launches).  The shape is the first candidate whose
+    one chunk the running device's plan makes a one-slice chunk (:func:`_cast_fold_shape`); a device where no
+    candidate gives one skips, naming each candidate's dX slice count."""
+    entry = "logprob"
+    _require_program(entry=entry)
+    device = torch.device("cuda", torch.cuda.current_device())
+    shape, tried = _cast_fold_shape(
+        *cake_backend.record_for(device),
+        torch.cuda.get_device_properties(device).multi_processor_count,
+    )
+    if shape is None:
+        pytest.skip(
+            f"no candidate shape is a one-slice dX chunk on this device; (rows, H, dX slices): {tried}"
+        )
+    rows, hidden = shape
+    inp = make_inputs(rows, seed=SEED + 97, device=CUDA, H=hidden, ignore_frac=0.0)
+    assert bool(inp.valid.all())
+    bound = []
+    for mod in (cake_backend, opt_in):
+        real = mod._bind_all
+
+        def spy(record, module_name, keys, *args, _real=real, **kwargs):
+            bound.extend(key[0] for key in keys)
+            return _real(record, module_name, keys, *args, **kwargs)
+
+        monkeypatch.setattr(mod, "_bind_all", spy)
+        off = type(mod.BINDING_CACHE)()
+        off.configure(enabled=False)
+        monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    kw = dict(entry=entry, backend="cake")
+    ranges = []
+    real_range = cake_backend._cast_fold_range
+
+    def range_spy(plan):
+        out = real_range(plan)
+        if not plan.compact:
+            ranges.append(out)
+        return out
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
+    folded = _run(inp, rows, **kw)
+    assert any(hi > lo for lo, hi in ranges), (shape, tried, ranges)
+    with_fold = list(bound)
+    bound.clear()
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", lambda plan: (0, 0))
+    plain = _run(inp, rows, **kw)
+    without = list(bound)
+    fold_stage = cake_backend.DX_CAST_FOLD_STAGE
+    slab_stages = {"slab_sum"}
+    assert fold_stage in with_fold and fold_stage not in without
+    assert "scale_cast_bf16" in without
+    assert sum(s in slab_stages for s in with_fold) < sum(
+        s in slab_stages for s in without
+    )
+    for key in ("loss", "logp", "dX", "dW"):
+        assert torch.equal(_bits(folded[key]), _bits(plain[key])), key
+
+
+def _one_slice_shape():
+    """``(rows, H)`` of :func:`_cast_fold_shape` on the running device: one chunk of ``rows`` loop rows is a one-slice
+    dX chunk there.  An AssertionError naming every candidate's dX slice count when no candidate is one (no skip)."""
+    device = torch.device("cuda", torch.cuda.current_device())
+    shape, tried = _cast_fold_shape(
+        *cake_backend.record_for(device),
+        torch.cuda.get_device_properties(device).multi_processor_count,
+    )
+    assert shape is not None, (
+        f"no candidate shape is a one-slice dX chunk on this device; (rows, H, dX slices): {tried}"
+    )
+    return shape
+
+
+def _fold_route_spies(monkeypatch):
+    """Spies of the launches a loss step binds and runs, with both modules' binding caches disabled (every call binds
+    every launch): ``names`` -- the stage of every key ``_bind_all`` binds and of every eager launch (the dX finalize's
+    casts); ``fold_alone`` -- the slab sums of ``n_slabs`` 0 that fold the label residuals (``lr`` 1: the fold-alone
+    launch behind a one-slice dX chunk); ``ranges`` -- the cast-fold range of every plan that forms one (a plan with
+    ``cast_fold``).  ``clear()`` empties the three lists."""
+    spy = SimpleNamespace(names=[], fold_alone=[], ranges=[])
+
+    def clear():
+        del spy.names[:], spy.fold_alone[:], spy.ranges[:]
+
+    spy.clear = clear
+    for mod in (cake_backend, opt_in):
+        real_bind = mod._bind_all
+
+        def bind(record, module_name, keys, values, *args, _real=real_bind, **kwargs):
+            for key in keys:
+                spy.names.append(key[0])
+                v = values.get(key) if isinstance(values, dict) else None
+                if (
+                    key[0] in {"slab_sum"}
+                    and isinstance(v, dict)
+                    and int(v.get("n_slabs", -1)) == 0
+                    and int(v.get("lr", 0)) == 1
+                ):
+                    spy.fold_alone.append(key)
+            return _real(record, module_name, keys, values, *args, **kwargs)
+
+        monkeypatch.setattr(mod, "_bind_all", bind)
+        if hasattr(mod, "_eager_launch"):
+            real_eager = mod._eager_launch
+
+            def eager(record, module_name, stage, *args, _real=real_eager, **kwargs):
+                spy.names.append(stage)
+                return _real(record, module_name, stage, *args, **kwargs)
+
+            monkeypatch.setattr(mod, "_eager_launch", eager)
+        off = type(mod.BINDING_CACHE)()
+        off.configure(enabled=False)
+        monkeypatch.setattr(mod, "BINDING_CACHE", off)
+    real_range = cake_backend._cast_fold_range
+
+    def range_spy(plan):
+        out = real_range(plan)
+        spy.ranges.append(out)
+        return out
+
+    monkeypatch.setattr(cake_backend, "_cast_fold_range", range_spy)
+    return spy
+
+
+def _route_loss(inp, rows, X, W, labels=None):
+    """``loss`` of one call of the default training route -- the opt-in module's loss entry, where the public facade
+    sends every call whose ``W`` requires a gradient -- over ``inp`` with ``X`` / ``W`` (and ``labels``, default the
+    inputs'), in one chunk of ``rows`` loop rows."""
+    loss, _ = opt_in.cake_lm_head_det_train_loss(
+        X,
+        W,
+        inp.labels if labels is None else labels,
+        objective=inp.objective,
+        loss_div=inp.loss_div if inp.objective == "ce" else None,
+        infer_logp=inp.infer_logp,
+        loss_weights=inp.loss_weights,
+        chunk_size=rows,
+        return_logp=True,
+        backend="cake",
+    )
+    return loss
+
+
+_FOLD_STAGES = frozenset(
+    {cake_backend.DX_CAST_FOLD_STAGE, cake_backend.DX_FINALIZE_FOLD_STAGE}
+)
+
+
+@pytest.mark.parametrize("write", ["labels", "head"])
+def test_device_uncompacted_loss_backward_reads_no_labels_or_head(monkeypatch, write):
+    """An uncompacted loss call (every row valid) of the default training route (:func:`_route_loss`, with ``W`` a leaf
+    that requires a gradient) folds its label residuals in its forward's slab sums, also on its one-slice dX chunk: the
+    call binds the fold-alone slab sum there (``n_slabs`` 0 with the fold), runs no cast fold program and forms no
+    cast-fold range, and the backward reads neither the caller's labels nor the head.  Writing either in place between
+    the forward and the backward (a labels buffer refilled with the next micro-batch, a head updated in place) leaves
+    ``dX`` and ``dW`` bitwise those of the same call without the write.  The shape is the first candidate whose one
+    chunk is a one-slice dX chunk on the running device (:func:`_one_slice_shape`)."""
+    _require_program(entry="loss")
+    rows, hidden = _one_slice_shape()
+    inp = make_inputs(rows, seed=SEED + 97, device=CUDA, H=hidden, ignore_frac=0.0)
+    assert bool(inp.valid.all())
+    spy = _fold_route_spies(monkeypatch)
+
+    def step(written: bool):
+        X = inp.X.detach().clone().requires_grad_(True)
+        W = inp.W.detach().clone().requires_grad_(True)
+        labels = inp.labels.clone()
+        spy.clear()
+        loss = _route_loss(inp, rows, X, W, labels)
+        if written:
+            with torch.no_grad():
+                if write == "labels":
+                    labels.copy_(torch.roll(labels, 1))
+                else:
+                    W.neg_()
+        loss.backward()
+        torch.cuda.synchronize()
+        return X.grad, W.grad
+
+    dX, dW = step(False)
+    # the one-slice chunk exists and its fold stays in the forward: a fold-alone slab sum, no fold program, no range
+    assert spy.fold_alone, ((rows, hidden), spy.names)
+    assert not _FOLD_STAGES & set(spy.names), spy.names
+    assert all(hi <= lo for lo, hi in spy.ranges), spy.ranges
+    dX_w, dW_w = step(True)
+    assert torch.equal(_bits(dX_w), _bits(dX))
+    assert torch.equal(_bits(dW_w), _bits(dW))
+
+
+def _compacted_fold_inputs():
+    """``(inputs, rows)``: a compacted loss call's inputs -- 64 ignored rows on top of ``rows`` valid rows, the shape of
+    :func:`_one_slice_shape` -- whose valid rows form one one-slice dX chunk on the running device (``chunk_size`` =
+    ``rows``)."""
+    rows, hidden = _one_slice_shape()
+    T = rows + 64
+    inp = make_inputs(T, seed=SEED + 131, device=CUDA, H=hidden, ignore_frac=64 / T)
+    assert int(inp.valid.sum()) == rows
+    return inp, rows
+
+
+def _compacted_step(inp, rows, spy, leaf: bool, write: bool = False):
+    """One step of :func:`_route_loss` over the compacted inputs: ``W`` the leaf ``base`` (``leaf``) or a non-leaf copy
+    of it (``base.clone()``, the same bits); ``write``: ``W.neg_()`` between the forward and the backward.  Returns
+    ``dX``, ``dW`` (``base``'s gradient) and the spies' lists of the step."""
+    X = inp.X.detach().clone().requires_grad_(True)
+    base = inp.W.detach().clone().requires_grad_(True)
+    W = base if leaf else base.clone()
+    spy.clear()
+    loss = _route_loss(inp, rows, X, W)
+    if write:
+        with torch.no_grad():
+            W.neg_()
+    loss.backward()
+    torch.cuda.synchronize()
+    return X.grad, base.grad, list(spy.names), list(spy.fold_alone), list(spy.ranges)
+
+
+def test_device_compacted_loss_fold_saves_the_head(monkeypatch):
+    """A compacted loss call (some labels ignored) of the default training route (:func:`_route_loss`) whose valid rows
+    form a one-slice dX chunk, with ``W`` a leaf that requires a gradient: the forward leaves that chunk's label
+    residual fold to the backward's scatter cast (a cast-fold range, the fold program
+    ``scale_cast_scatter_fold_bf16``) and saves ``W`` through the autograd context, so an in-place write to ``W``
+    between the forward and the backward raises PyTorch's saved-tensor version error instead of changing ``dX``."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    _, _, names, _, ranges = _compacted_step(inp, rows, spy, leaf=True)
+    assert any(hi > lo for lo, hi in ranges), ranges
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    with pytest.raises(RuntimeError, match="modified by an inplace operation"):
+        _compacted_step(inp, rows, spy, leaf=True, write=True)
+
+
+def test_device_compacted_loss_nonleaf_head_folds_in_the_forward(monkeypatch):
+    """The compacted call of ``test_device_compacted_loss_fold_saves_the_head`` with a non-leaf ``W`` (a copy of the
+    same head, as a head cast or dequantized for the step) folds every label residual in its forward's slab sums: the
+    fold-alone slab sum on the one-slice chunk, no cast-fold range, no fold program -- so its backward reads no ``W``
+    -- and its ``dX`` / ``dW`` are bitwise those of the leaf call, whose backward cast folds that chunk."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, names, fold_alone, ranges = _compacted_step(inp, rows, spy, leaf=True)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    dX_n, dW_n, names_n, fold_alone_n, ranges_n = _compacted_step(
+        inp, rows, spy, leaf=False
+    )
+    assert not _FOLD_STAGES & set(names_n), names_n
+    assert not any(hi > lo for lo, hi in ranges_n), ranges_n
+    assert len(fold_alone_n) > len(fold_alone), (fold_alone, fold_alone_n)
+    assert torch.equal(_bits(dX_n), _bits(dX))
+    assert torch.equal(_bits(dW_n), _bits(dW))
+
+
+def test_device_compacted_loss_keeps_no_temporary_head(monkeypatch):
+    """The compacted call of ``test_device_compacted_loss_fold_saves_the_head`` with a non-leaf ``W`` keeps no reference
+    to ``W`` past its forward: with the loss graph alive, ``W`` is freed once the caller drops it (a weak reference to
+    it is dead), and the backward still gives the leaf call's ``dX`` / ``dW`` bit for bit."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, names, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    # the shape's one-slice chunk: the leaf call folds it in the backward (the non-leaf call below must not keep W)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    X = inp.X.detach().clone().requires_grad_(True)
+    base = inp.W.detach().clone().requires_grad_(True)
+    W = base.clone()
+    ref = weakref.ref(W)
+    loss = _route_loss(inp, rows, X, W)
+    del W
+    gc.collect()
+    assert ref() is None, "the loss graph keeps the non-leaf head alive"
+    loss.backward()
+    torch.cuda.synchronize()
+    assert torch.equal(_bits(X.grad), _bits(dX))
+    assert torch.equal(_bits(base.grad), _bits(dW))
+
+
+def _offload_hooks(packed):
+    """Saved-tensor hooks of the ``save_on_cpu`` kind -- each saved tensor copied to the host, copied back when
+    unpacked -- that record the storage of every tensor they pack in ``packed``."""
+
+    def pack(t):
+        packed.append(t.untyped_storage().data_ptr())
+        return t.device, t.to("cpu")
+
+    def unpack(saved):
+        device, t = saved
+        return t.to(device)
+
+    return torch.autograd.graph.saved_tensors_hooks(pack, unpack)
+
+
+@pytest.mark.parametrize("hooks", ["offload", "offload_in_checkpoint", "checkpoint"])
+def test_device_compacted_loss_fold_under_saved_tensor_hooks(monkeypatch, hooks):
+    """The compacted leaf-``W`` call of ``test_device_compacted_loss_fold_saves_the_head`` under saved-tensor hooks.
+    With CPU offload hooks on top (:func:`_offload_hooks`; ``offload_in_checkpoint``: inside the function of a
+    non-reentrant ``torch.utils.checkpoint``) the call folds every label residual in its forward's slab sums, as a
+    non-leaf head does -- the fold-alone slab sum, no cast-fold range, no fold program -- and the hooks never pack
+    ``W``: no copy of the head to the host and back each step.  Under a non-reentrant ``torch.utils.checkpoint`` (its
+    hooks on top, ``W`` a checkpoint argument) the recomputation keeps the backward's fold.  ``dX`` and ``dW`` are
+    bitwise those of the plain call."""
+    _require_program(entry="loss")
+    inp, rows = _compacted_fold_inputs()
+    spy = _fold_route_spies(monkeypatch)
+    dX, dW, names, _, _ = _compacted_step(inp, rows, spy, leaf=True)
+    assert cake_backend.DX_FINALIZE_FOLD_STAGE in names, names
+    X = inp.X.detach().clone().requires_grad_(True)
+    W = inp.W.detach().clone().requires_grad_(True)
+    # the head's storage address as an int (a failing assert then renders no storage)
+    head_storage = W.untyped_storage().data_ptr()
+    packed = []
+    spy.clear()
+    if hooks == "offload":
+        with _offload_hooks(packed):
+            loss = _route_loss(inp, rows, X, W)
+    else:
+
+        def head(a, b):
+            if hooks == "checkpoint":
+                return _route_loss(inp, rows, a, b)
+            with _offload_hooks(packed):
+                return _route_loss(inp, rows, a, b)
+
+        loss = torch.utils.checkpoint.checkpoint(head, X, W, use_reentrant=False)
+    loss.backward()
+    torch.cuda.synchronize()
+    if hooks == "checkpoint":
+        assert cake_backend.DX_FINALIZE_FOLD_STAGE in spy.names, spy.names
+        assert any(hi > lo for lo, hi in spy.ranges), spy.ranges
+    else:
+        assert packed, "the offload hooks packed no tensor"
+        assert head_storage not in packed, "the offload hooks packed the head"
+        assert spy.fold_alone, spy.names
+        assert not _FOLD_STAGES & set(spy.names), spy.names
+        assert not any(hi > lo for lo, hi in spy.ranges), spy.ranges
+    assert torch.equal(_bits(X.grad), _bits(dX))
+    assert torch.equal(_bits(W.grad), _bits(dW))
+
+
+def test_device_logprob_graph_rlab_freed_by_its_backward(glm_weight, monkeypatch):
+    """A log-probability graph kept alive past a backward that frees it (its output held, as a training loop that keeps
+    its losses) holds no label residual buffer: that backward drops the graph's holder (``rlab`` of the node: None), so
+    every buffer the graph took is on the free list of the stream once the backward returns -- after a first backward
+    that frees the graph, and after the last backward of a retained graph -- while a retained graph keeps its holder
+    and its buffer (off the list) through its retained backwards.  Forms: the default form, a scalar temperature, the
+    kept logits and the opt-in module's automatic form (its one-chunk kept logits); the default form, whose
+    remembered binding binds the holder, takes a buffer in every case.  Every backward's ``dX`` / ``dW`` are the first
+    one's bits."""
+    _require_program(entry="logprob")
+    be = cake_backend
+    inp = make_inputs(16, seed=SEED + 151, device=CUDA, W=glm_weight, ignore_frac=0.05)
+    entries = (
+        ("default", be.cake_lm_head_det_train_logprob, {}),
+        (
+            "temperature",
+            be.cake_lm_head_det_train_logprob_temperature,
+            dict(temperature=0.75),
+        ),
+        ("keep", be.cake_lm_head_det_train_logprob_keep, {}),
+        ("auto", opt_in.cake_lm_head_det_train_logprob, {}),
+    )
+    takes = []
+    real_take = be._graph_rlab
+
+    def take(rows, zero, device):
+        got = real_take(rows, zero, device)
+        if got is not None:
+            takes.append(got[1][3].data_ptr())
+        return got
+
+    monkeypatch.setattr(be, "_graph_rlab", take)
+
+    def call(entry, kw):
+        X = inp.X.detach().requires_grad_(True)
+        W = inp.W.detach().requires_grad_(True)
+        return X, W, entry(X, W, inp.labels, chunk_size=4096, **kw)
+
+    def backward(X, W, lp, retain):
+        X.grad = W.grad = None
+        lp.backward(inp.dlogp, retain_graph=retain)
+        torch.cuda.synchronize()
+        return _bits(X.grad).clone(), _bits(W.grad).clone()
+
+    def free_buffers():
+        return [entry[3].data_ptr() for entry in _pool_free(be)]
+
+    for name, entry, kw in entries:
+        # one step first: a binding-cache miss may run the runner's own path (no holder bound); later calls bind it
+        X, W, lp = call(entry, kw)
+        backward(X, W, lp, False)
+        del X, W, lp
+        gc.collect()
+        be._RLAB_POOL.clear()
+        gc.collect()
+        first = None
+        for retain in (False, True):
+            case = (name, retain)
+            X, W, lp = call(entry, kw)
+            node = _graph_rlab_node(lp)
+            assert isinstance(node.rlab, be._GraphRlab), case
+            del takes[:]
+            grads = []
+            if retain:
+                for _ in range(2):
+                    grads.append(backward(X, W, lp, True))
+                    assert node.rlab is not None, case
+                    own = node.rlab.own
+                    assert own is not None or name != "default", case
+                    if own is not None:
+                        assert own[1][3].data_ptr() not in free_buffers(), case
+                    del own
+            grads.append(backward(X, W, lp, False))
+            # the graph (lp) is alive and its backward freed it: no holder, every buffer it took back on the free list
+            assert node.rlab is None, case
+            free = free_buffers()
+            assert all(ptr in free for ptr in takes), (case, takes, free)
+            assert takes or name != "default", case
+            for got in grads:
+                first = got if first is None else first
+                same = torch.equal(got[0], first[0]) and torch.equal(got[1], first[1])
+                assert same, case
+            del X, W, lp, node
+            gc.collect()
+    be._RLAB_POOL.clear()
+    gc.collect()

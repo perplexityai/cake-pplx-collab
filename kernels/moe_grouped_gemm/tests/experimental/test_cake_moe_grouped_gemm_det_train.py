@@ -756,11 +756,13 @@ def test_workspace_arguments_of_the_argument_plans():
 
 # The keywords the host binds a stage's argument plan from, by the stage it binds: the
 # forward and data-gradient stages, the weight-gradient main stages and the tail reduce.
+# ``m_begin`` (the first entry of an ``m_indptr`` row table) goes to the lead twins only.
 ROW_ARGUMENTS = {
     "A",
     "B",
     "C",
     "offs",
+    "m_begin",
     "num_groups",
     "sum_m",
     "N",
@@ -774,6 +776,7 @@ WGRAD_MAIN_ARGUMENTS = {
     "B",
     "C",
     "offs",
+    "m_begin",
     "tensormap_workspace",
     "partials",
     "tail_splits",
@@ -792,6 +795,7 @@ TAIL_ARGUMENTS = {
     "partials",
     "C",
     "offs",
+    "m_begin",
     "num_groups",
     "N",
     "K",
@@ -808,7 +812,28 @@ def test_argument_plans_name_only_bound_arguments():
     """Every argument the program of a route stage names, on every architecture, is one
     the host binds for that stage: a grid dimension, a stream workspace, a keyword of the
     stage's preparation, or an operand alias (``OPERAND_ALIASES``: a row-addressed base
-    of ``A`` / ``B`` that a build takes beside its TMA descriptors)."""
+    of ``A`` / ``B`` that a build takes beside its TMA descriptors).  The sets are the
+    backend's ``HOST_ARGUMENTS``, which ``_bind`` holds the keywords to; ``m_begin`` is
+    named by the lead twins' plans only (after ``offs``)."""
+    assert cb.HOST_ARGUMENTS == {
+        "row_op": frozenset(ROW_ARGUMENTS),
+        "wgrad": frozenset(WGRAD_MAIN_ARGUMENTS),
+        "tail_reduce": frozenset(TAIL_ARGUMENTS),
+    }
+    for name, route in ROUTES.items():
+        for stage in route["stages"]:
+            assert cb.host_binding(route["op"], stage["name"]) == (
+                "row_op"
+                if route["op"] != "wgrad"
+                else "tail_reduce"
+                if stage["name"].startswith(cb.TAIL_REDUCE)
+                else "wgrad"
+            ), (name, stage["name"])
+            plan = [tuple(item) for item in PROGRAMS[stage["program"]]["arg_plan"]]
+            if cake_jit.is_lead_route(name):
+                assert plan[plan.index(("buffer", "offs")) + 1] == ("buffer", "m_begin")
+            else:
+                assert ("buffer", "m_begin") not in plan, (name, stage["name"])
     for name, route in ROUTES.items():
         for stage in route["stages"]:
             if route["op"] != "wgrad":
@@ -854,6 +879,9 @@ def test_bind_passes_each_operand_alias_its_operand(monkeypatch):
         PROGRAMS,
         program,
         {"arg_plan": arg_plan, "ffi_entry": "run", "arches": ["sm_100a", "sm_107a"]},
+    )
+    monkeypatch.setitem(
+        ROUTES, "alias_probe", {"op": "fwd", "stages": [], "arches": ["sm_100a"]}
     )
     monkeypatch.setattr(
         cb,
@@ -1952,26 +1980,52 @@ def _m_indptr(sizes, device):
     return torch.tensor([0] + ends, dtype=torch.int32, device=device)
 
 
+def _bits(t):
+    """The integer view of ``t``'s elements (a bitwise comparison: ``-0.0`` differs from
+    ``+0.0``, and a NaN equals only its own payload)."""
+    return t.view({torch.bfloat16: torch.int16, torch.float32: torch.int32}[t.dtype])
+
+
+def _assert_lead_binding(lead, base):
+    """``lead`` (an ``m_indptr`` call) binds the lead twins of what ``base`` (the ``[E]``
+    call over the same shapes) binds: the same plan and stages, every launch on the lead
+    twin of its route, every program the twin of the base program."""
+    assert lead.record_name == base.record_name
+    assert lead.plan == base.plan and lead.stages == base.stages
+    assert base.bound_routes and not any(
+        cake_jit.is_lead_route(r) for r in base.bound_routes
+    )
+    assert lead.bound_routes == tuple(cake_jit.lead_route(r) for r in base.bound_routes)
+    assert lead.bound_programs == tuple(
+        cake_jit.lead_twin(p) for p in base.bound_programs
+    )
+
+
 def test_m_indptr_form_matches_offs_form():
+    """An ``m_indptr`` from 0 binds the lead twins (``_assert_lead_binding``) and gives the
+    bits of the ``[E]`` form, which binds the programs themselves; a table of neither
+    ``E`` nor ``E + 1`` entries is refused."""
     device = _require_program("fwd")
     device = _require_program("dgrad")
     device = _require_program("wgrad", torch.bfloat16)
     x, w, g, offs = _inputs(RAGGED_E6, 512, 256, device)
     m_indptr = _m_indptr(RAGGED_E6, device)
-    assert torch.equal(
-        cake_moe_grouped_gemm_det_train_forward(x, w, m_indptr),
-        cake_moe_grouped_gemm_det_train_forward(x, w, offs),
-    )
-    assert torch.equal(
-        cake_moe_grouped_gemm_det_train_dgrad(g, w, m_indptr),
-        cake_moe_grouped_gemm_det_train_dgrad(g, w, offs),
-    )
-    assert torch.equal(
-        cake_moe_grouped_gemm_det_train_wgrad(
-            g, x, m_indptr, num_groups=len(RAGGED_E6)
+    for prepare, a, b, kwargs in (
+        (cake_moe_grouped_gemm_det_train_prepare_forward, x, w, {}),
+        (cake_moe_grouped_gemm_det_train_prepare_dgrad, g, w, {}),
+        (
+            cake_moe_grouped_gemm_det_train_prepare_wgrad,
+            g,
+            x,
+            {"num_groups": len(RAGGED_E6)},
         ),
-        cake_moe_grouped_gemm_det_train_wgrad(g, x, offs),
-    )
+    ):
+        lead = prepare(a, b, m_indptr, **kwargs)
+        base = prepare(a, b, offs)
+        _assert_lead_binding(lead, base)
+        lead.out.fill_(float("nan"))
+        base.out.fill_(float("nan"))
+        assert torch.equal(_bits(lead.launch()), _bits(base.launch())), prepare.__name__
     with pytest.raises(ValueError):  # neither E nor E + 1 entries
         cake_moe_grouped_gemm_det_train_wgrad(
             g, x, m_indptr[:-2], num_groups=len(RAGGED_E6)

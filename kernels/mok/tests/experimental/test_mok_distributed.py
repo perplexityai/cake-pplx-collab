@@ -29,7 +29,8 @@ Each worker checks the contract and repeatability in every rank; the accuracy ve
 group's outputs against the float64 oracle beside the naive BF16 implementation) are recorded here and
 printed as ``TIER`` lines.  The known accuracy gaps (:mod:`tests.experimental._mok_gaps`) are judged in items of their
 own under a strict expected-failure marker, from the same group run: the BF16 routed weight gradients of the cases
-whose experts' rows cross a macrobatch boundary and miss the tier.
+whose experts' rows cross a macrobatch boundary and miss the tier, and the EP1 MXFP8 routed gate weight gradient with
+FP32 accumulation, which misses the tier in the max norm.
 
 Backend suite: the package is imported only through :func:`tests.cake.test_helpers.cake_package.cake_package`.
 """
@@ -93,7 +94,8 @@ def test_unequal_sources(record_property, part):
 
 #: The known-gap outputs of the training features per world: at EP1 (1031 tokens, 768-row macrobatches: experts cross a
 #: macrobatch boundary) the BF16 routed dW that misses the tier, the down projection of the clamped cases and all three
-#: projections of the plain recompute case.  The MXFP8 score gradient of these cases meets the tier.
+#: projections of the plain recompute case; and the gate projection's dW of the MXFP8 case with FP32 weight gradients,
+#: which misses the max norm (its L2 norm meets the tier).  The MXFP8 score gradient of these cases meets the tier.
 FEATURE_GAPS = {
     1: (
         ("bf16-clamped:dw_routed_down", gaps.bf16_straddle_dw),
@@ -101,6 +103,7 @@ FEATURE_GAPS = {
         ("bf16-recompute:dw_routed_up", gaps.bf16_straddle_dw),
         ("bf16-recompute:dw_routed_down", gaps.bf16_straddle_dw),
         ("bf16-clamped-recompute:dw_routed_down", gaps.bf16_straddle_dw),
+        ("mxfp8-fp32-wgrad:dw_routed_gate", gaps.mxfp8_fp32_dw_gate),
     ),
     4: (),
     8: (),

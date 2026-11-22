@@ -34,6 +34,9 @@ import torch
 from tests.experimental._mok_reference import (
     mxfp8_dequantize as dequantize,
     mxfp8_quantize as quantize,
+    rand,
+    randn,
+    randn_like,
     require_gpu,
     single_rank_schedule,
     swiglu,
@@ -64,19 +67,19 @@ def _exact_matmul():
 def _setup(hidden, intermediate, seed, experts=4, tokens=512, topk=2):
     torch.manual_seed(seed)
     options = dict(device="cuda", dtype=torch.bfloat16)
-    x = torch.randn(tokens, hidden, **options)
-    dy = torch.randn(tokens, hidden, **options) * 0.125
+    x = randn(tokens, hidden, **options)
+    dy = randn(tokens, hidden, **options) * 0.125
     shared = [
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(hidden, intermediate, **options) / intermediate**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(intermediate, hidden, **options) / hidden**0.5,
+        randn(hidden, intermediate, **options) / intermediate**0.5,
     ]
     routed = [
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, intermediate, hidden, **options) / hidden**0.5,
-        torch.randn(experts, hidden, intermediate, **options) / intermediate**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, intermediate, hidden, **options) / hidden**0.5,
+        randn(experts, hidden, intermediate, **options) / intermediate**0.5,
     ]
-    scores = torch.rand(tokens, topk, device="cuda") + 0.1
+    scores = rand(tokens, topk, device="cuda") + 0.1
     scores.div_(scores.sum(-1, keepdim=True)).mul_(2.5)
     row = torch.arange(tokens, device="cuda")
     routes = torch.stack([(row * 3 + slot) % experts for slot in range(topk)], -1)
@@ -93,11 +96,11 @@ def _same(a, b):
 def test_weight_quantizer_matches_recipe():
     require_gpu()
     torch.manual_seed(17)
-    gate = torch.randn(3, 256, 512, device="cuda", dtype=torch.bfloat16)
+    gate = randn(3, 256, 512, device="cuda", dtype=torch.bfloat16)
     gate[0, 5, 64:96] = 0  # an all-zero block takes the minimum scale
     gate[1, 7, :32] *= 1e4  # large blocks saturate to the finite range
-    up = torch.randn_like(gate)
-    down = torch.randn(3, 512, 256, device="cuda", dtype=torch.bfloat16)
+    up = randn_like(gate)
+    down = randn(3, 512, 256, device="cuda", dtype=torch.bfloat16)
     forward_w, backward_w = quantize_mok_mxfp8_weights(gate, up, down)
     for weight, fwd, bwd in zip((gate, up), forward_w[:2], backward_w[:2], strict=True):
         expected = quantize(weight)
@@ -129,14 +132,14 @@ def test_weight_quantizer_chunks_are_bitwise(monkeypatch, experts_per_chunk):
     for one layout or both, and every chunking of a stack of matrices writes the same bytes."""
     require_gpu()
     torch.manual_seed(23)
-    gate = torch.randn(5, 256, 512, device="cuda", dtype=torch.bfloat16)
+    gate = randn(5, 256, 512, device="cuda", dtype=torch.bfloat16)
     gate[2, 9, 32:64] = float("nan")
     gate[3, 1, :32] = float("inf")
     gate[3, 7, 100] = -float("inf")
     gate[4, 0, 64:96] = 0
     gate[1, 201, 160:192] = torch.tensor([448.0, 449.0, -464.0, 480.0] * 8)
-    up = torch.randn_like(gate) * 1e-3
-    down = torch.randn(5, 512, 256, device="cuda", dtype=torch.bfloat16) * 1e3
+    up = randn_like(gate) * 1e-3
+    down = randn(5, 512, 256, device="cuda", dtype=torch.bfloat16) * 1e3
     for matrix in (gate[1], gate[2], down[3]):
         single = mxfp8.mxfp8_quantize(matrix)
         assert all(
@@ -287,9 +290,7 @@ def _mxfp8_training(
     schedule = (s["peers"], s["schedule"], s["num_tokens"], s["counts"])
     initial = accumulators = None
     if fp32_wgrad:
-        initial = [
-            torch.randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)
-        ]
+        initial = [randn(w.shape, device="cuda") * 0.01 for w in (*shared, *routed)]
         accumulators = [value.clone() for value in initial]
 
     def run():
