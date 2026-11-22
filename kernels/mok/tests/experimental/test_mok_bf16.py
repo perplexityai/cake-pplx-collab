@@ -2804,7 +2804,7 @@ def test_stage_routes_writes_the_unplanned_route_tensor(monkeypatch):
 
     def build(count, capture=False):
         capturing[0] = capture
-        ids = torch.randint(0, 384, (count, topk), generator=generator, dtype=torch.int64)
+        ids = randint(0, 384, (count, topk), generator=generator, dtype=torch.int64)
         fills.clear()
         monkeypatch.setattr(torch.Tensor, "fill_", lambda self, value: fills.append(value) or original(self, value))
         backend.MoKFunctional._stage_routes(plan, ids, count)
