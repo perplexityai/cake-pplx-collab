@@ -138,6 +138,17 @@ class _StepPlan:
     dy_rows: torch.Tensor | None = None
 
 
+@dataclass(slots=True, eq=False)
+class _SchedulePlan:
+    """Schedule launches of one adapter on one workspace (see
+    ``MoKFunctional._schedule_plan``)."""
+
+    routes: torch.Tensor
+    gather: object
+    barrier: object
+    scheduler: object
+
+
 def count_routed_load(routes, ep_size, local_experts):
     """Routed rows per owning rank over the gathered expert ids ``routes``.
 
@@ -273,6 +284,8 @@ class MoKFunctional:
 
         self._multimacro_target = target_arch(self.device) == "sm_107a"
         self._sm_count = {}  # device index -> multi_processor_count
+        # device index -> the last configuration build_schedule validated there.
+        self._schedule_configs = {}
         # Validated weight sets (LRU, ``_weight_key`` per weight): one entry
         # per MoE layer and operation, no reference to any weight.
         self._validated = {}
@@ -482,11 +495,90 @@ class MoKFunctional:
                 "Workspace/expert geometry differs from the compiled scheduler"
             )
         self._check_device(workspace)
-        sms = self._sm_count.get(workspace.device.index)
-        if sms is None:
-            sms = self._sm_count[workspace.device.index] = (
-                torch.cuda.get_device_properties(workspace.device).multi_processor_count
+        self._check_schedule_config(config, workspace.device)
+        if not isinstance(top_experts, torch.Tensor) or top_experts.ndim != 2:
+            raise ValueError("Expert IDs must have shape [source_tokens, topk]")
+        count = top_experts.shape[0]
+        if owner is not None and count > owner.source_capacity:
+            raise ValueError(
+                "Input length exceeds source capacity; collectively recreate the workspace"
             )
+        expected_count = count if owner is not None else workspace.num_local_tokens
+        if (
+            top_experts.device != workspace.device
+            or top_experts.dtype != torch.int64
+            or not top_experts.is_contiguous()
+            or tuple(top_experts.shape) != (expected_count, workspace.topk)
+        ):
+            raise ValueError(
+                "Expert IDs must be contiguous int64 on the workspace device with its source shape"
+            )
+        if workspace.num_local_tokens * workspace.topk * 4 % 2048:
+            raise ValueError("The route buffer must contain complete metadata chunks")
+        plan = self._schedule_plan(workspace)
+        if plan is None:
+            rank, token, num_tokens, counts, layout = self._schedule_launches(
+                workspace, config, top_experts, count
+            )
+        else:
+            with _ffi_stream():
+                # The same copies and launches as ``_schedule_launches``, in
+                # the same order, through the workspace's prebuilt plan.
+                routes = plan.routes
+                if count == workspace.num_local_tokens:
+                    routes.copy_(top_experts)
+                else:
+                    routes.fill_(-1)
+                    routes[:count].copy_(top_experts)
+                if plan.gather is None:
+                    self.communication.all_gather_top_experts(
+                        routes,
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    )
+                else:
+                    plan.gather.launch(())
+                if plan.barrier is not None:
+                    plan.barrier.launch(())
+                rank, token, num_tokens, counts, layout = self.scheduler.launch_planned(
+                    plan.scheduler
+                )
+                self._observe_load(workspace, config, num_tokens)
+                self.scheduler.layout_planned(plan.scheduler, counts, rank, layout)
+                self.scheduler.release_counts()
+        if owner is not None:
+            return MoKSourceSchedule(
+                peer_rank=rank,
+                peer_token_idx=token,
+                num_tokens=num_tokens,
+                tokens_per_expert=counts,
+                layout=layout,
+                num_source_tokens=count,
+                workspace=owner,
+            )
+        return native.MoKSchedule(
+            peer_rank=rank,
+            peer_token_idx=token,
+            num_tokens=num_tokens,
+            tokens_per_expert=counts,
+            layout=layout,
+        )
+
+    def _check_schedule_config(self, config, device):
+        """The configuration checks of :meth:`build_schedule`, once per
+        (device, configuration object): ``MoKConfig`` is frozen, so a
+        configuration that passed on a device passes again; the last one that
+        passed is kept per device index (a reference, so its identity is not
+        reused)."""
+        index = device.index
+        if self._schedule_configs.get(index) is config:
+            return
+        sms = self._sm_count.get(index)
+        if sms is None:
+            sms = self._sm_count[index] = torch.cuda.get_device_properties(
+                device
+            ).multi_processor_count
         for count in (config.fwd_num_comm_sms, config.bwd_num_comm_sms):
             if type(count) is not int or count <= 0 or count % 2 or count >= sms:
                 raise ValueError(
@@ -544,25 +636,59 @@ class MoKFunctional:
             raise ValueError(
                 "This Cake metadata pipeline currently uses the native 2048-byte chunk"
             )
-        if not isinstance(top_experts, torch.Tensor) or top_experts.ndim != 2:
-            raise ValueError("Expert IDs must have shape [source_tokens, topk]")
-        count = top_experts.shape[0]
-        if owner is not None and count > owner.source_capacity:
-            raise ValueError(
-                "Input length exceeds source capacity; collectively recreate the workspace"
-            )
-        expected_count = count if owner is not None else workspace.num_local_tokens
-        if (
-            top_experts.device != workspace.device
-            or top_experts.dtype != torch.int64
-            or not top_experts.is_contiguous()
-            or tuple(top_experts.shape) != (expected_count, workspace.topk)
-        ):
-            raise ValueError(
-                "Expert IDs must be contiguous int64 on the workspace device with its source shape"
-            )
-        if workspace.num_local_tokens * workspace.topk * 4 % 2048:
-            raise ValueError("The route buffer must contain complete metadata chunks")
+        self._schedule_configs[index] = config
+
+    def _schedule_plan(self, workspace):
+        """The workspace's schedule launches for this adapter, built and
+        validated on first use (like the operations' launch plans, they live in
+        ``workspace.launch_plans`` and die with the workspace): a persistent
+        int32 route buffer (each call overwrites it in stream order before the
+        gather reads it, as the workspace's shared buffers already require),
+        the gather and barrier plans and the scheduler plan. None during CUDA
+        Graph capture before the first eager build: the plan writes its
+        template eagerly, so that capture runs ``_schedule_launches``. The
+        plan's tensors are normal tensors also when the first build runs under
+        ``torch.inference_mode()``, so later builds in or outside inference
+        mode can write the route buffer."""
+        key = ("schedule", self.scheduler, self.communication)
+        plans = workspace.launch_plans
+        plan = plans.get(key)
+        if plan is None:
+            if torch.cuda.is_current_stream_capturing():
+                return None
+            with torch.inference_mode(False):
+                routes = torch.empty(
+                    (workspace.num_local_tokens, workspace.topk),
+                    dtype=torch.int32,
+                    device=workspace.device,
+                )
+                # A stand-in communication object without ``gather_plan``
+                # gathers through ``all_gather_top_experts`` (as at EP 1, where
+                # the gather is a copy).
+                planner = getattr(self.communication, "gather_plan", None)
+                plan = plans[key] = _SchedulePlan(
+                    routes=routes,
+                    gather=None
+                    if planner is None
+                    else planner(
+                        routes,
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.all_gather_top_experts_buffer_multicast_ptr,
+                        workspace.ep_rank,
+                    ),
+                    barrier=self._barrier_plan(workspace),
+                    scheduler=self.scheduler.plan(
+                        workspace.all_gather_top_experts_buffer,
+                        workspace.schedule_capacity,
+                        workspace.ep_rank,
+                    ),
+                )
+        return plan
+
+    def _schedule_launches(self, workspace, config, top_experts, count):
+        """The schedule's copies and launches without a plan (first build under
+        CUDA Graph capture): ``(peer_rank, peer_token, num_tokens,
+        tokens_per_expert, layout)``."""
         if count == workspace.num_local_tokens:
             top_experts_int32 = top_experts.to(torch.int32)
         else:
@@ -580,31 +706,15 @@ class MoKFunctional:
             workspace.ep_rank,
         )
         self._barrier(workspace)
-        rank, token, count, counts = self.scheduler(
+        rank, token, num_tokens, counts = self.scheduler(
             workspace.all_gather_top_experts_buffer,
             workspace.schedule_capacity,
             workspace.ep_rank,
         )
-        self._observe_load(workspace, config, count)
+        self._observe_load(workspace, config, num_tokens)
         layout = self.scheduler.layout(counts, workspace.schedule_capacity, rank)
         self.scheduler.release_counts()
-        if owner is not None:
-            return MoKSourceSchedule(
-                peer_rank=rank,
-                peer_token_idx=token,
-                num_tokens=count,
-                tokens_per_expert=counts,
-                layout=layout,
-                num_source_tokens=top_experts.shape[0],
-                workspace=owner,
-            )
-        return native.MoKSchedule(
-            peer_rank=rank,
-            peer_token_idx=token,
-            num_tokens=count,
-            tokens_per_expert=counts,
-            layout=layout,
-        )
+        return rank, token, num_tokens, counts, layout
 
     def _load_entry(self, workspace, create):
         entry = self._load_state.get(id(workspace))
