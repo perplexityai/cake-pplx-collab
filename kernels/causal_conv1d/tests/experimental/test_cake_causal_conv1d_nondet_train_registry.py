@@ -138,9 +138,9 @@ TOKENS = (
 # C 520 to 1016 run the route's fallback (the stage_pair body) up to the last measured token count at which no
 # backward, training-step or checkpointed-step row was slower than the program the thresholds pick; at C 520 to 608
 # up to the token count before the route's first ``SM_WIDE_ROWS`` segment (:data:`SM_WIDE_ROWS_OF_RECORD`).  The
-# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` routes run their fallback at small token counts by
-# the same rule (a ``bwd_bias`` key inside the ``bwd_bias_bf16_taps`` keys, whose programs plan by its tables).  The
-# forward routes' keys (C 576 to 768) run the route's static program, the deterministic package's at the same rows,
+# ``bwd_bias`` and ``bwd_dt`` routes run their fallback at small token counts by the same rule (FP32 and BF16 taps
+# alike: each route's programs evaluate SiLU' at the unrounded FP32 preactivation with either taps dtype).  The
+# forward routes' keys (C 512 to 1024) run the route's static program, the deterministic package's at the same rows,
 # over the measured token counts where it was not slower than the dynamic program; a direct range of
 # :data:`DIRECT_ROWS_OF_RECORD` starts where such a static range ends.
 FALLBACK_ROWS_OF_RECORD = {
@@ -152,27 +152,41 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_bias", 520, 568): (1, 16384),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_dt_bf16_taps", 648, 1016): (1, 16384),
-        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 16384),
+        ("bwd_dt", 576, 640): (1, 24576),
+        ("bwd_dt", 648, 1016): (1, 16384),
+        ("fwd", 512, 512): (1, 24576),
+        ("fwd", 520, 544): (1, 12288),
+        ("fwd", 552, 568): (1, 8192),
         ("fwd", 576, 576): (1, 4096),
         ("fwd", 584, 640): (1, 8192),
         ("fwd", 648, 704): (1, 12288),
         ("fwd", 712, 712): (1, 12288),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 12288),
+        ("fwd", 904, 952): (1, 8192),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 544): (1, 12288),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 4096),
         ("fwd_bias", 584, 640): (1, 4096),
         ("fwd_bias", 648, 696): (1, 8192),
         ("fwd_bias", 704, 704): (1, 17408),
         ("fwd_bias", 712, 768): (1, 16384),
+        ("fwd_bias", 776, 776): (1, 8192),
+        ("fwd_bias", 784, 896): (1, 8192),
+        ("fwd_bias", 904, 1024): (1, 12288),
+        ("fwd_dt", 512, 512): (1, 24576),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 576): (1, 4096),
         ("fwd_dt", 584, 640): (1, 8192),
         ("fwd_dt", 648, 696): (1, 8192),
         ("fwd_dt", 704, 704): (1, 12288),
         ("fwd_dt", 712, 768): (1, 16384),
+        ("fwd_dt", 776, 896): (1, 12288),
+        ("fwd_dt", 904, 1024): (1, 12288),
     },
     "sm_103a": {
         ("bwd", 520, 608): (1, 20479),
@@ -182,19 +196,28 @@ FALLBACK_ROWS_OF_RECORD = {
         ("bwd_bias", 520, 568): (1, 16384),
         ("bwd_bias", 576, 640): (1, 24576),
         ("bwd_bias", 648, 1016): (1, 16384),
-        ("bwd_dt_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_dt_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_dt_bf16_taps", 648, 760): (1, 16384),
-        ("bwd_dt_bf16_taps", 776, 1016): (1, 16384),
-        ("bwd_bias_bf16_taps", 520, 568): (1, 16384),
-        ("bwd_bias_bf16_taps", 576, 640): (1, 24576),
-        ("bwd_bias_bf16_taps", 648, 1016): (1, 16384),
+        ("bwd_dt", 520, 568): (1, 16384),
+        ("bwd_dt", 576, 640): (1, 24576),
+        ("bwd_dt", 648, 760): (1, 16384),
+        ("bwd_dt", 776, 1016): (1, 16384),
+        ("fwd", 512, 512): (1, 2048),
+        ("fwd", 520, 520): (1, 8192),
+        ("fwd", 528, 568): (1, 4096),
         ("fwd", 576, 632): (1, 2048),
         ("fwd", 640, 688): (1, 4096),
         ("fwd", 696, 696): (1, 4096),
         ("fwd", 704, 704): (1, 8192),
         ("fwd", 712, 712): (1, 8192),
         ("fwd", 720, 768): (1, 8192),
+        ("fwd", 776, 824): (1, 4096),
+        ("fwd", 832, 832): (1, 8192),
+        ("fwd", 840, 896): (1, 4096),
+        ("fwd", 904, 952): (1, 2048),
+        ("fwd", 960, 1024): (1, 24576),
+        ("fwd_bias", 512, 512): (1, 24576),
+        ("fwd_bias", 520, 520): (1, 12288),
+        ("fwd_bias", 528, 544): (1, 24576),
+        ("fwd_bias", 552, 568): (1, 8192),
         ("fwd_bias", 576, 576): (1, 2048),
         ("fwd_bias", 584, 640): (1, 4104),
         ("fwd_bias", 648, 704): (1, 16384),
@@ -203,36 +226,75 @@ FALLBACK_ROWS_OF_RECORD = {
         ("fwd_bias", 736, 736): (14336, 16383),
         ("fwd_bias", 744, 760): (13824, 16383),
         ("fwd_bias", 768, 768): (13824, 16384),
+        ("fwd_bias", 776, 896): (1, 8192),
+        ("fwd_bias", 904, 952): (1, 12288),
+        ("fwd_bias", 960, 1024): (1, 20480),
+        ("fwd_dt", 512, 512): (1, 20480),
+        ("fwd_dt", 520, 568): (1, 8192),
         ("fwd_dt", 576, 640): (1, 8192),
         ("fwd_dt", 648, 704): (1, 8192),
         ("fwd_dt", 712, 752): (1, 12800),
         ("fwd_dt", 760, 760): (1, 12288),
         ("fwd_dt", 768, 768): (1, 12288),
+        ("fwd_dt", 776, 776): (1, 12288),
+        ("fwd_dt", 784, 832): (1, 12288),
+        ("fwd_dt", 840, 888): (1, 8192),
+        ("fwd_dt", 896, 896): (1, 8192),
+        ("fwd_dt", 904, 952): (1, 8192),
+        ("fwd_dt", 960, 1016): (1, 20480),
+        ("fwd_dt", 1024, 1024): (1, 24576),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (1, 8192),
+        ("fwd", 520, 520): (1, 24575),
+        ("fwd", 528, 528): (1, 16384),
+        ("fwd", 536, 536): (1, 16384),
+        ("fwd", 544, 568): (1, 16384),
         ("fwd", 576, 704): (1, 4096),
         ("fwd", 712, 760): (1, 4096),
         ("fwd", 768, 768): (1, 2048),
+        ("fwd", 776, 824): (1, 32768),
+        ("fwd", 832, 832): (1, 4096),
+        ("fwd", 840, 888): (1, 8192),
+        ("fwd", 896, 896): (1, 16384),
+        ("fwd", 904, 1016): (1, 12288),
+        ("fwd", 1024, 1024): (1, 32768),
+        ("fwd_bias", 512, 512): (1, 32768),
+        ("fwd_bias", 520, 528): (1, 24575),
+        ("fwd_bias", 536, 568): (1, 32768),
         ("fwd_bias", 576, 576): (1, 12296),
-        ("fwd_bias", 584, 584): (1, 16392),
-        ("fwd_bias", 592, 624): (1, 16384),
-        ("fwd_bias", 632, 632): (1, 16392),
+        ("fwd_bias", 584, 584): (1, 24576),
+        ("fwd_bias", 592, 592): (1, 16384),
+        ("fwd_bias", 600, 600): (1, 24576),
+        ("fwd_bias", 608, 608): (1, 16384),
+        ("fwd_bias", 616, 616): (1, 24576),
+        ("fwd_bias", 624, 624): (1, 16384),
+        ("fwd_bias", 632, 632): (1, 24576),
         ("fwd_bias", 640, 696): (1, 24576),
         ("fwd_bias", 704, 768): (1, 32768),
+        ("fwd_bias", 776, 1024): (1, 32768),
+        ("fwd_dt", 512, 512): (1, 32768),
+        ("fwd_dt", 520, 528): (1, 16384),
+        ("fwd_dt", 536, 544): (1, 16384),
+        ("fwd_dt", 552, 568): (1, 16384),
         ("fwd_dt", 576, 640): (1, 12288),
         ("fwd_dt", 648, 704): (1, 12288),
         ("fwd_dt", 712, 712): (1, 32768),
         ("fwd_dt", 720, 768): (1, 12288),
+        ("fwd_dt", 776, 824): (1, 24576),
+        ("fwd_dt", 832, 832): (1, 20480),
+        ("fwd_dt", 840, 888): (1, 20480),
+        ("fwd_dt", 896, 896): (1, 20480),
+        ("fwd_dt", 904, 1024): (1, 32768),
     },
 }
 # The programs whose rows the fallback takes inside :data:`FALLBACK_ROWS_OF_RECORD` (named by program, not by
 # route position): the ``bwd`` program the channel thresholds pick at C 520 to 1016 on each architecture, and the
-# ``bwd_bias``, ``bwd_bias_bf16_taps`` and ``bwd_dt_bf16_taps`` programs the thresholds pick from C 512.
+# ``bwd_bias`` and ``bwd_dt`` programs the thresholds pick from C 512.
 FALLBACK_REPLACES_OF_RECORD = {
     "sm_100a": frozenset(
         {
             "cake_causal_conv1d_train_461d358d7090642c65de",
-            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
             "cake_causal_conv1d_train_92aeee41bc2e2d394937",
             "cake_causal_conv1d_train_092af77575f0fdbf3615",
         }
@@ -241,7 +303,6 @@ FALLBACK_REPLACES_OF_RECORD = {
         {
             "cake_causal_conv1d_train_461d358d7090642c65de",
             "cake_causal_conv1d_train_efd2e6f9ac3d58ab92ab",
-            "cake_causal_conv1d_train_383cb5839559d5b0e72b",
             "cake_causal_conv1d_train_92aeee41bc2e2d394937",
             "cake_causal_conv1d_train_092af77575f0fdbf3615",
         }
@@ -255,6 +316,16 @@ FALLBACK_REPLACES_OF_RECORD = {
 # keeps the same rows.
 DIRECT_ROWS_OF_RECORD = {
     "sm_100a": {
+        ("fwd", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 576): (
             4097,
             24576,
@@ -280,6 +351,31 @@ DIRECT_ROWS_OF_RECORD = {
             20480,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
+        ("fwd", 776, 888): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 520, 544): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 576, 576): (
             4097,
             24576,
@@ -299,6 +395,21 @@ DIRECT_ROWS_OF_RECORD = {
             17409,
             20480,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 776, 776): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 784, 896): (
+            8193,
+            14336,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 576): (
             4097,
@@ -325,8 +436,33 @@ DIRECT_ROWS_OF_RECORD = {
             20480,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 896): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 1024): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
     },
     "sm_103a": {
+        ("fwd", 512, 512): (
+            2049,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 520, 520): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 568): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 632): (
             2049,
             24576,
@@ -357,6 +493,36 @@ DIRECT_ROWS_OF_RECORD = {
             19456,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
+        ("fwd", 776, 824): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 832, 832): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 896): (
+            4097,
+            24576,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 952): (
+            2049,
+            20480,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd_bias", 520, 520): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 552, 568): (
+            8193,
+            16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
         ("fwd_bias", 576, 576): (
             2049,
             16384,
@@ -371,6 +537,21 @@ DIRECT_ROWS_OF_RECORD = {
             12801,
             14592,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 776, 896): (
+            8193,
+            16384,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 512, 512): (
+            20481,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 520, 568): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 640): (
             8193,
@@ -397,8 +578,53 @@ DIRECT_ROWS_OF_RECORD = {
             20480,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
+        ("fwd_dt", 776, 776): (
+            12289,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 784, 832): (
+            12289,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 840, 888): (
+            8193,
+            20480,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            8193,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 904, 952): (
+            8193,
+            16384,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
     },
     "sm_107a": {
+        ("fwd", 512, 512): (
+            8193,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 528, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 536, 536): (
+            16385,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 544, 568): (
+            16385,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
         ("fwd", 576, 704): (
             4097,
             32768,
@@ -414,25 +640,60 @@ DIRECT_ROWS_OF_RECORD = {
             24576,
             "cake_causal_conv1d_train_a81632301ba92a887c46",
         ),
+        ("fwd", 832, 832): (
+            4097,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 840, 888): (
+            8193,
+            16384,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 896, 896): (
+            16385,
+            32768,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
+        ("fwd", 904, 1016): (
+            12289,
+            16384,
+            "cake_causal_conv1d_train_a81632301ba92a887c46",
+        ),
         ("fwd_bias", 576, 576): (
             12297,
             32768,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 584, 584): (
-            16393,
-            20480,
-            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
-        ),
-        ("fwd_bias", 592, 624): (
+        ("fwd_bias", 592, 592): (
             16385,
             24576,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
         ),
-        ("fwd_bias", 632, 632): (
-            16393,
-            20480,
+        ("fwd_bias", 608, 608): (
+            16385,
+            24576,
             "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_bias", 624, 624): (
+            16385,
+            24576,
+            "cake_causal_conv1d_train_8ed855b04178bc5d90f9",
+        ),
+        ("fwd_dt", 520, 528): (
+            16385,
+            24575,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 536, 544): (
+            16385,
+            32768,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 552, 568): (
+            16385,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
         ("fwd_dt", 576, 640): (
             12289,
@@ -447,6 +708,16 @@ DIRECT_ROWS_OF_RECORD = {
         ("fwd_dt", 720, 768): (
             12289,
             24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 832, 832): (
+            20481,
+            24576,
+            "cake_causal_conv1d_train_21b9be3d1093abe38406",
+        ),
+        ("fwd_dt", 896, 896): (
+            20481,
+            32768,
             "cake_causal_conv1d_train_21b9be3d1093abe38406",
         ),
     },
@@ -595,9 +866,6 @@ DET_ONLY = frozenset(
 OWN_COPIES = {
     "cake_causal_conv1d_det_train_0d99ef0e0ed10b11dfd5": "cake_causal_conv1d_train_e5d6d187103ab6e0cbbb",
 }
-# The route whose ``TILE_OVERRIDES`` / ``NARROW_TILES`` rows each ``_bf16_taps`` route plans by: its base route, whose
-# body it runs with SiLU' at the unrounded FP32 preactivation; every other route plans by its own rows.
-TILE_ROUTE = {"bwd_dt_bf16_taps": "bwd_dt", "bwd_bias_bf16_taps": "bwd_bias"}
 
 
 @contextmanager
@@ -620,8 +888,8 @@ def _args(record: dict) -> set[str]:
 PDL_FIELDS = ("launch", "arg_plan", "logical")
 PDL_ARG = ["launch", "enable_pdl"]
 # The single-rank programs that take the scalar: every record but the opt-in pair routes' (15 forward: the static and
-# direct program of each forward route among them; 36 backward).
-RUNTIME_PDL_PROGRAMS = 51
+# direct program of each forward route among them; 29 backward).
+RUNTIME_PDL_PROGRAMS = 44
 
 
 def _pdl_program_of(det: dict) -> dict:
@@ -636,19 +904,6 @@ def _pdl_program_of(det: dict) -> dict:
         "arg_plan": [*det["arg_plan"][:-3], PDL_ARG, *det["arg_plan"][-3:]],
         "logical": {**det["logical"], "enable_pdl": "enable_pdl"},
     }
-
-
-def _planning_routes(arch: str, route: str) -> tuple[str, ...]:
-    """``route`` and the backward routes of ``arch`` that plan by its tile rows (:data:`TILE_ROUTE`)."""
-
-    return (
-        route,
-        *(
-            twin
-            for twin, base in sorted(TILE_ROUTE.items())
-            if base == route and twin in cake_jit.backward_kinds(arch)
-        ),
-    )
 
 
 def _det_route(arch: str, kind: str) -> list[str]:
@@ -954,7 +1209,6 @@ def test_channel_band_programs_take_their_twins_lowest_channels() -> None:
         ("sm_107a", "bwd"),
         ("sm_107a", "bwd_bias"),
         ("sm_107a", "bwd_fp32g"),
-        ("sm_107a", "bwd_bias_bf16_taps"),
     }
     for arch, kind, band, twin, det_twin in bands:
         record, twin_record = cake_jit.MODULES[band], cake_jit.MODULES[twin]
@@ -1438,8 +1692,6 @@ ACC_SLOTS = {
     "bwd_bias": 1,
     "bwd_fp32g": 16,
     "bwd_bias_fp32g": 16,
-    "bwd_dt_bf16_taps": 1,
-    "bwd_bias_bf16_taps": 1,
     "bwd_fp32g_pair": 8,
     "bwd_bias_fp32g_pair": 8,
 }
@@ -1542,7 +1794,7 @@ def _owner_tiles(record: dict, arch: str, C: int) -> int:
     geometry = record["grid_rule"]["geometry"]
     route = cake_jit.record_route(record, arch)
     _, _, n_ch_tiles = cake_jit.channel_split(C, geometry=geometry, role="bwd")
-    entry = cake_jit.TILE_OVERRIDES.get(arch, {}).get((TILE_ROUTE.get(route, route), C))
+    entry = cake_jit.TILE_OVERRIDES.get(arch, {}).get((route, C))
     if entry is not None:
         n_ch_tiles = max(n_ch_tiles, -(-(C // geometry["vec"]) // entry[0]))
     elif (
@@ -1608,25 +1860,15 @@ def test_backward_workspace_serves_every_backward_program(arch) -> None:
 
 
 @pytest.mark.cpu_only
-def test_bf16_taps_routes_run_their_base_routes_records() -> None:
-    """``TILE_ROUTE`` names each ``_bf16_taps`` route's base route.  On every architecture a ``_bf16_taps`` route
-    lists, position for position, its base route's records under their own names (the same selection rule, plan,
-    grid, launch, arguments and workspace rule; another program), and the tile tables name base routes only (a
-    ``_bf16_taps`` route plans by its base route's rows)."""
+def test_every_route_plans_by_its_own_tile_rows() -> None:
+    """No route plans by another route's tile rows: the package keeps no map from one route to another's rows, and
+    every key of ``TILE_OVERRIDES`` and ``NARROW_TILES`` names a route of ``KINDS``, whose calls plan by it."""
 
-    assert cake_jit.TILE_ROUTE == TILE_ROUTE
-    for arch in ARCHES:
-        for twin, base in TILE_ROUTE.items():
-            names, base_names = cake_jit.ROUTES[arch][twin], cake_jit.ROUTES[arch][base]
-            assert not set(names) & set(base_names), (arch, twin)
-            for name, base_name in zip(names, base_names, strict=True):
-                assert _strip(cake_jit.MODULES[name], *NAME_FIELDS) == _strip(
-                    cake_jit.MODULES[base_name], *NAME_FIELDS
-                ), (arch, twin, name, base_name)
+    assert not hasattr(cake_jit, "TILE_ROUTE")
     for table in (cake_jit.TILE_OVERRIDES, cake_jit.NARROW_TILES):
         for rows in table.values():
             for key in rows:
-                assert key[0] not in TILE_ROUTE, key
+                assert key[0] in cake_jit.KINDS, key
 
 
 @pytest.mark.cpu_only
@@ -1655,91 +1897,101 @@ def test_tile_override_bounds_and_plan() -> None:
     refuses a backward route (``ValueError``, as the deterministic plan does)."""
 
     for arch, rows in cake_jit.TILE_OVERRIDES.items():
-        for (base, C), (ct_vec, s_min, s_max) in rows.items():
-            for route in _planning_routes(arch, base):
-                label = (arch, route, C)
-                assert cake_jit.tile_override(arch, route, C, s_min - 1) is None, label
-                assert cake_jit.tile_override(arch, route, C, s_min) == ct_vec, label
-                assert cake_jit.tile_override(arch, route, C, s_max) == ct_vec, label
-                assert cake_jit.tile_override(arch, route, C, s_max + 1) is None, label
-                for other in ARCHES:
-                    if (base, C) not in cake_jit.TILE_OVERRIDES.get(other, {}):
-                        assert cake_jit.tile_override(other, route, C, s_min) is None
-                for name in cake_jit.route_modules(arch, route):
-                    geometry = cake_jit.MODULES[name]["grid_rule"]["geometry"]
-                    threads, vec = geometry["threads"], geometry["vec"]
-                    split = dict(
-                        zip(
-                            ("ct_vec", "n_sub", "n_ch_tiles"),
-                            cake_jit.channel_split(C, geometry=geometry, role="bwd"),
-                            strict=True,
-                        )
+        for (route, C), (ct_vec, s_min, s_max) in rows.items():
+            label = (arch, route, C)
+            assert cake_jit.tile_override(arch, route, C, s_min - 1) is None, label
+            assert cake_jit.tile_override(arch, route, C, s_min) == ct_vec, label
+            assert cake_jit.tile_override(arch, route, C, s_max) == ct_vec, label
+            assert cake_jit.tile_override(arch, route, C, s_max + 1) is None, label
+            for other in ARCHES:
+                if (route, C) not in cake_jit.TILE_OVERRIDES.get(other, {}):
+                    assert cake_jit.tile_override(other, route, C, s_min) is None
+            for name in cake_jit.route_modules(arch, route):
+                geometry = cake_jit.MODULES[name]["grid_rule"]["geometry"]
+                threads, vec = geometry["threads"], geometry["vec"]
+                split = dict(
+                    zip(
+                        ("ct_vec", "n_sub", "n_ch_tiles"),
+                        cake_jit.channel_split(C, geometry=geometry, role="bwd"),
+                        strict=True,
                     )
-                    wanted = {
-                        "ct_vec": ct_vec,
-                        "n_sub": threads // ct_vec,
-                        "n_ch_tiles": -(-(C // vec) // ct_vec),
-                    }
-                    for S in (s_min, s_max):
-                        got = cake_jit.plan(
-                            S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
-                        )
-                        assert {k: got[k] for k in wanted} == wanted, (label, S)
-                    for S in (s_min - 1, s_max + 1):
-                        got = cake_jit.plan(
-                            S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
-                        )
-                        assert {k: got[k] for k in split} == split, (label, S)
-                    for kwargs in (
-                        {"role": "bwd"},
-                        {"role": "bwd", "arch": arch},
-                        {"role": "bwd", "route": route},
-                        {"role": "fwd", "arch": arch},
-                    ):
-                        got = cake_jit.plan(s_min, C, 3, geometry=geometry, **kwargs)
-                        want = cake_jit.channel_split(
-                            C, geometry=geometry, role=kwargs["role"]
-                        )
-                        assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, (
-                            label,
-                            kwargs,
-                        )
-                    for registry in (cake_jit, det_jit):
-                        with pytest.raises(ValueError, match="is not a route of role"):
-                            registry.plan(
-                                s_min, C, 3, geometry=geometry, role="fwd", arch=arch, route=route
-                            )
+                )
+                wanted = {
+                    "ct_vec": ct_vec,
+                    "n_sub": threads // ct_vec,
+                    "n_ch_tiles": -(-(C // vec) // ct_vec),
+                }
+                for S in (s_min, s_max):
                     got = cake_jit.plan(
-                        s_min, C, 3, geometry=geometry, legacy=True, arch=arch, route=route
+                        S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
                     )
-                    want = cake_jit.channel_split(C, geometry=geometry, legacy=True)
-                    assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, label
+                    assert {k: got[k] for k in wanted} == wanted, (label, S)
+                for S in (s_min - 1, s_max + 1):
+                    got = cake_jit.plan(
+                        S, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
+                    )
+                    assert {k: got[k] for k in split} == split, (label, S)
+                for kwargs in (
+                    {"role": "bwd"},
+                    {"role": "bwd", "arch": arch},
+                    {"role": "bwd", "route": route},
+                    {"role": "fwd", "arch": arch},
+                ):
+                    got = cake_jit.plan(s_min, C, 3, geometry=geometry, **kwargs)
+                    want = cake_jit.channel_split(
+                        C, geometry=geometry, role=kwargs["role"]
+                    )
+                    assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, (
+                        label,
+                        kwargs,
+                    )
+                for registry in (cake_jit, det_jit):
+                    with pytest.raises(ValueError, match="is not a route of role"):
+                        registry.plan(
+                            s_min,
+                            C,
+                            3,
+                            geometry=geometry,
+                            role="fwd",
+                            arch=arch,
+                            route=route,
+                        )
+                got = cake_jit.plan(
+                    s_min, C, 3, geometry=geometry, legacy=True, arch=arch, route=route
+                )
+                want = cake_jit.channel_split(C, geometry=geometry, legacy=True)
+                assert (got["ct_vec"], got["n_sub"], got["n_ch_tiles"]) == want, label
 
 
 @pytest.mark.cpu_only
 def test_backward_workspace_covers_every_override_row() -> None:
-    """The public workspace of a row's ``C`` holds the layout of every program of the row's route, and of every
-    route that plans by its rows, at the row's tile count (one ticket per tile), whatever ``S``."""
+    """The public workspace of a row's ``C`` holds the layout of every program of the row's route (every route plans
+    by its own rows) at the row's tile count (one ticket per tile), whatever ``S``."""
 
     for arch, rows in cake_jit.TILE_OVERRIDES.items():
-        for (base, C), (_, s_min, _) in rows.items():
+        for (route, C), (_, s_min, _) in rows.items():
             nbytes = cake_jit.backward_workspace_bytes(arch, C)
-            for route in _planning_routes(arch, base):
-                for name in cake_jit.route_modules(arch, route):
-                    record = cake_jit.MODULES[name]
-                    geometry = record["grid_rule"]["geometry"]
-                    tiles = cake_jit.plan(
-                        s_min, C, 3, geometry=geometry, role="bwd", arch=arch, route=route
-                    )["n_ch_tiles"]
-                    assert tiles == cake_jit.override_tiles(arch, route, C, geometry)
-                    layout = cake_jit.accumulator_layout(record, C, tiles)
-                    assert layout["total_bytes"] <= nbytes, (arch, route, C, name)
+            for name in cake_jit.route_modules(arch, route):
+                record = cake_jit.MODULES[name]
+                geometry = record["grid_rule"]["geometry"]
+                tiles = cake_jit.plan(
+                    s_min,
+                    C,
+                    3,
+                    geometry=geometry,
+                    role="bwd",
+                    arch=arch,
+                    route=route,
+                )["n_ch_tiles"]
+                assert tiles == cake_jit.override_tiles(arch, route, C, geometry)
+                layout = cake_jit.accumulator_layout(record, C, tiles)
+                assert layout["total_bytes"] <= nbytes, (arch, route, C, name)
 
 
 # The C 768 rows of ``TILE_OVERRIDES`` per architecture, route -> (ct_vec, S_min, S_max): on sm_100a and sm_103a the
 # measured rows of the package's 0.2.0 release on every base route but ``bwd`` (whose C 768 runs the 32-vector tiles of
-# its ``NARROW_TILES`` key, :data:`C768_NARROW_ROUTES`), on sm_107a the ``bwd_dt`` row of every S
-# (``bwd_dt_bf16_taps`` plans by it too).
+# its ``NARROW_TILES`` key, :data:`C768_NARROW_ROUTES`), on sm_107a the ``bwd_dt`` row of every S (the route's calls
+# with FP32 and with BF16 taps plan by it).
 C768_TILE_OVERRIDES = {
     "sm_100a": {
         "bwd_dt": (32, 62585, 500680),
@@ -2284,9 +2536,8 @@ def narrow_table(request, monkeypatch):
 
 def _covering(table: dict, arch: str, route: str, C: int):
     """The ``(S_min, S_max)`` of the first key of ``table[arch]`` on ``route`` covering ``C`` (``None``: none, or
-    a ``TILE_OVERRIDES`` row of ``(route, C)``; a ``_bf16_taps`` route reads its base route's keys)."""
+    a ``TILE_OVERRIDES`` row of ``(route, C)``)."""
 
-    route = TILE_ROUTE.get(route, route)
     if C % 8 or (route, C) in cake_jit.TILE_OVERRIDES.get(arch, {}):
         return None
     for (name, c_lo, c_hi), bounds in table.get(arch, {}).items():
@@ -2381,22 +2632,20 @@ def test_narrow_tile_bounds_and_plan(narrow_table) -> None:
 
     checked = 0
     for arch, rows in narrow_table.items():
-        for (base, c_lo, c_hi), (s_min, s_max) in rows.items():
+        for (route, c_lo, c_hi), (s_min, s_max) in rows.items():
             channels = {c_lo - 8, c_lo, (c_lo + c_hi) // 16 * 8, c_hi, c_hi + 8}
-            # The key's route and every route that plans by its rows.
-            for route in _planning_routes(arch, base):
-                for C in sorted(C for C in channels if C > 0):
-                    for S in (s_min - 1, s_min, s_max, s_max + 1):
-                        checked += _check_narrow_plan(narrow_table, arch, route, C, S)
+            for C in sorted(C for C in channels if C > 0):
+                for S in (s_min - 1, s_min, s_max, s_max + 1):
+                    checked += _check_narrow_plan(narrow_table, arch, route, C, S)
     assert checked or not narrow_table
 
 
 @pytest.mark.cpu_only
 @pytest.mark.parametrize("narrow_table", NARROW_TABLES, indirect=True)
 def test_backward_workspace_covers_every_narrow_row(narrow_table) -> None:
-    """The public workspace of a key's channel counts holds the layout of every program of the key's route, and of
-    every route that plans by its rows, at the key's tile count (one ticket per tile), whatever ``S``, and is the
-    largest layout over every backward program at the largest tile count it may launch with."""
+    """The public workspace of a key's channel counts holds the layout of every program of the key's route (every
+    route plans by its own rows) at the key's tile count (one ticket per tile), whatever ``S``, and is the largest
+    layout over every backward program at the largest tile count it may launch with."""
 
     for arch, rows in narrow_table.items():
         owners = cake_jit.workspace_owners(arch)
@@ -2414,21 +2663,20 @@ def test_backward_workspace_covers_every_narrow_row(narrow_table) -> None:
                     route,
                     C,
                 )
-                for kind in _planning_routes(arch, route):
-                    for name in cake_jit.route_modules(arch, kind):
-                        record = cake_jit.MODULES[name]
-                        geometry = record["grid_rule"]["geometry"]
-                        tiles = cake_jit.plan(
-                            s_min,
-                            C,
-                            3,
-                            geometry=geometry,
-                            role="bwd",
-                            arch=arch,
-                            route=kind,
-                        )["n_ch_tiles"]
-                        layout = cake_jit.accumulator_layout(record, C, tiles)
-                        assert layout["total_bytes"] <= nbytes, (arch, kind, C, name)
+                for name in cake_jit.route_modules(arch, route):
+                    record = cake_jit.MODULES[name]
+                    geometry = record["grid_rule"]["geometry"]
+                    tiles = cake_jit.plan(
+                        s_min,
+                        C,
+                        3,
+                        geometry=geometry,
+                        role="bwd",
+                        arch=arch,
+                        route=route,
+                    )["n_ch_tiles"]
+                    layout = cake_jit.accumulator_layout(record, C, tiles)
+                    assert layout["total_bytes"] <= nbytes, (arch, route, C, name)
 
 
 # ----------------------------------------------------------------------------------------------------------------
@@ -3613,7 +3861,7 @@ def test_row_plans_follow_a_replaced_override_table(
     """A row planned before ``TILE_OVERRIDES`` changes keeps its plan until
     :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache; after it, with the rows of every architecture on ``arch``, every row's calls on both
     sides of its token range plan as a per-call plan does, the override's tiles inside the range, on the row's route
-    and on every route that plans by its rows."""
+    (every route plans by its own rows)."""
 
     fake_device(arch, PLAN_SWEEP_SMS[arch][0])
     shipped = dict(cake_jit.TILE_OVERRIDES.get(arch, {}))
@@ -3628,32 +3876,30 @@ def test_row_plans_follow_a_replaced_override_table(
 
     planned = {
         (route, C): _row_planned(arch, route, value[1], C, 3, 1, policy_of(route))
-        for (base, C), value in rows.items()
-        if base in cake_jit.ROUTES[arch]
-        for route in _planning_routes(arch, base)
+        for (route, C), value in rows.items()
+        if route in cake_jit.ROUTES[arch]
     }
     monkeypatch.setitem(cake_jit.TILE_OVERRIDES, arch, rows)
     changed = 0
     for (route, C), before in planned.items():
-        _, s_min, _ = rows[(TILE_ROUTE.get(route, route), C)]
+        _, s_min, _ = rows[(route, C)]
         now = _per_call(arch, route, s_min, C, 3, 1, policy_of(route))
         assert _row_planned(arch, route, s_min, C, 3, 1, policy_of(route)) == before
         changed += now != before
     assert changed or rows.items() <= shipped.items(), arch
     assert pkg.cake_causal_conv1d_nondet_train_plan_cache_clear() >= 1
     checked = 0
-    for (base, C), (ct_vec, s_min, s_max) in rows.items():
-        if base not in cake_jit.ROUTES[arch]:
+    for (route, C), (ct_vec, s_min, s_max) in rows.items():
+        if route not in cake_jit.ROUTES[arch]:
             continue
-        for route in _planning_routes(arch, base):
-            for S in (s_min - 1, s_min, s_max, s_max + 1):
-                for gm in pkg.BWD_GRID_MULTS:
-                    want = _per_call(arch, route, S, C, 3, gm, policy_of(route))
-                    got = _row_planned(arch, route, S, C, 3, gm, policy_of(route))
-                    assert got == want, (route, C, S, gm)
-                    if s_min <= S <= s_max and isinstance(got[1], dict):
-                        assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
-                    checked += 1
+        for S in (s_min - 1, s_min, s_max, s_max + 1):
+            for gm in pkg.BWD_GRID_MULTS:
+                want = _per_call(arch, route, S, C, 3, gm, policy_of(route))
+                got = _row_planned(arch, route, S, C, 3, gm, policy_of(route))
+                assert got == want, (route, C, S, gm)
+                if s_min <= S <= s_max and isinstance(got[1], dict):
+                    assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
+                checked += 1
     assert checked
 
 
@@ -3666,7 +3912,7 @@ def test_row_plans_follow_a_replaced_narrow_table(
     :func:`cake_causal_conv1d_nondet_train_plan_cache_clear` empties the cache; after it, with :data:`SYNTHETIC_NARROW_TILES` in place, every key's calls at its channel ends and an
     inner channel count, on both sides of its token range and at every ``bwd_grid_mult``, plan as a per-call plan
     does (the 32-vector tiles inside the range, the side-stream and whole-rank grid trims included), on fake
-    devices of the architecture's SM counts, on the key's route and on every route that plans by its rows.  At a
+    devices of the architecture's SM counts, on the key's route (every route plans by its own rows).  At a
     row of ``SM_WIDE_ROWS`` the SM-wide program runs its own split (one channel tile, ``threads // cv`` token
     sub-tiles): the narrow tiles are a split of 128-thread programs."""
 
@@ -3682,32 +3928,41 @@ def test_row_plans_follow_a_replaced_narrow_table(
     for sms in PLAN_SWEEP_SMS[arch]:
         fake_device(arch, sms)
         before = {
-            (route, value[0], key[1]): planned(route, value[0], key[1])
-            for key, value in rows.items()
-            for route in _planning_routes(arch, key[0])
+            (route, s_min, c_lo): planned(route, s_min, c_lo)
+            for (route, c_lo, _), (s_min, _) in rows.items()
         }
         with monkeypatch.context() as m:
             m.setattr(cake_jit, "NARROW_TILES", SYNTHETIC_NARROW_TILES)
             for (route, S, C), plan_before in before.items():
                 assert planned(route, S, C) == plan_before, (sms, route, S, C)
             assert pkg.cake_causal_conv1d_nondet_train_plan_cache_clear() >= 1
-            for (base, c_lo, c_hi), (s_min, s_max) in rows.items():
-                for route in _planning_routes(arch, base):
-                    for C in sorted({c_lo, (c_lo + c_hi) // 16 * 8, c_hi}):
-                        for S in (s_min - 1, s_min, s_max, s_max + 1):
-                            ct_vec = cake_jit.tile_override(arch, route, C, S) or 32
-                            for gm in pkg.BWD_GRID_MULTS:
-                                want = _per_call(arch, route, S, C, 3, gm, policy_of(route))
-                                got = planned(route, S, C, gm)
-                                assert got == want, (arch, sms, route, C, S, gm)
-                                if isinstance(got[0], tuple) and got[0][0] in SM_WIDE_COPIES:
-                                    # an SM_WIDE_ROWS row: its SM-wide program plans its own one-tile split
-                                    threads = cake_jit.MODULES[got[0][0]]["grid_rule"]["geometry"]["threads"]
-                                    split = (got[1]["ct_vec"], got[1]["n_sub"], got[1]["n_ch_tiles"])
-                                    assert split == (C // 8, threads // (C // 8), 1), (route, C, S, gm, split)
-                                elif s_min <= S <= s_max and isinstance(got[1], dict):
-                                    assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
-                                checked += 1
+            for (route, c_lo, c_hi), (s_min, s_max) in rows.items():
+                for C in sorted({c_lo, (c_lo + c_hi) // 16 * 8, c_hi}):
+                    for S in (s_min - 1, s_min, s_max, s_max + 1):
+                        ct_vec = cake_jit.tile_override(arch, route, C, S) or 32
+                        for gm in pkg.BWD_GRID_MULTS:
+                            want = _per_call(
+                                arch, route, S, C, 3, gm, policy_of(route)
+                            )
+                            got = planned(route, S, C, gm)
+                            assert got == want, (arch, sms, route, C, S, gm)
+                            if (
+                                isinstance(got[0], tuple)
+                                and got[0][0] in SM_WIDE_COPIES
+                            ):
+                                # an SM_WIDE_ROWS row: its SM-wide program plans its own one-tile split
+                                record = cake_jit.MODULES[got[0][0]]
+                                threads = record["grid_rule"]["geometry"]["threads"]
+                                split = (
+                                    got[1]["ct_vec"],
+                                    got[1]["n_sub"],
+                                    got[1]["n_ch_tiles"],
+                                )
+                                one_tile = (C // 8, threads // (C // 8), 1)
+                                assert split == one_tile, (route, C, S, gm, split)
+                            elif s_min <= S <= s_max and isinstance(got[1], dict):
+                                assert got[1]["ct_vec"] == ct_vec, (route, C, S, gm)
+                            checked += 1
             pkg.cake_causal_conv1d_nondet_train_plan_cache_clear()
     assert checked
 

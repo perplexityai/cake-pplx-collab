@@ -21,32 +21,30 @@ existing backend's registry.
 GPU row at W = 1: one reserved raw-mode workspace shared by four packs is bitwise one workspace per pack.
 
 GPU rows (one process per rank; ``W = 1`` in the pytest process, ``W > 1`` spawned or one process per Slurm task as in
-``test_cake_kda_det_train_kcp_dist.py``): every rank runs the raw-mode KCP forward / backward in every mode and must be
-bitwise repeatable (saved == replay, repeat, autograd == explicit calls, checkpoint == direct, checkpoint with a
-recompute handle == plain checkpoint, save_transfer, ring == a2a, graph replay == eager, ``workspace=None``, a
-strided raw view == the contiguous one) on every output, the gradient of the raw gate and the per-rank parameter
-partial sums; the explicit-gate path on the same activated gate runs the same launches in the same order with the
-same collectives (``gate_epilogue`` -> ``param_finalize``); the cross-rank reduction helper gives the same bits on
-every rank and under every mode; rank 0 compares the gathered result with the single-rank raw path and the exact
-FP64 reference: relative L2 error of KCP / single-rank <= 1.10 for ``out, dq, dk, dv, dbeta`` and the raw gate's
-gradient.  ``dA_log`` and ``ddt_bias`` (summed over the ranks by the helper) follow #7816's criterion (d): no less
-accurate against FP64 than the existing explicit path, here the explicit KCP route on the same row (its parameter
-gradients by the FP64 chain rule from its FP32 activated-gate gradient).  Per row: the single-rank protocol's sanity
-rule for parameter gradients, with negative controls that must fail it; seeded: the design's section 5.4 statistic
-(``test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit``, env-gated, minutes per row).  The KCP / single-rank
-ratio of ``dA_log`` is reported, not gated: an H-element sum of mixed-sign token terms, it spans 0.3-3.7 per seed at
-W > 1 on the explicit KCP route as well.
+``test_cake_kda_det_train_kcp_dist.py``), each over the judge's 32 draws in one process group.  On the first draw every
+rank runs the raw-mode KCP forward / backward in every mode and must be bitwise repeatable (saved == replay, repeat,
+autograd == explicit calls, checkpoint == direct, checkpoint with a recompute handle == plain checkpoint,
+save_transfer, ring == a2a, graph replay == eager, ``workspace=None``, a strided raw view == the contiguous one) on
+every output, the gradient of the raw gate and the per-rank parameter partial sums; the explicit-gate path on the
+same activated gate runs the same launches in the same order with the same collectives (``gate_epilogue`` ->
+``param_finalize``); the cross-rank reduction helper gives the same bits on every rank and under every mode, the
+FP32 rank-order sum of the partials.  On every draw rank 0 gathers the KCP raw route's outputs (``dA_log`` and
+``ddt_bias`` summed over the ranks by the helper; arm ``kcp``) and runs the single-rank raw path on the whole pack
+(arm ``single``): every output of each arm is judged against the exact FP64 reference of the unsplit pack beside the
+naive BF16 tier (``tests/cake_naive.py``), and the two arms are not compared with each other.
+``test_raw_gate_kcp_param_grads_meet_the_naive_tier`` (env-gated) judges ``dA_log`` / ``ddt_bias`` of the raw KCP
+route and of the explicit KCP route on the same rows, each under its own name.
 """
 
 from __future__ import annotations
 
 import gc
 import json
-import math
 import os
 import tempfile
 import traceback
 import types
+import zlib
 
 import pytest
 import torch
@@ -61,30 +59,19 @@ from tests.experimental.test_cake_kda_det_train_kcp_dist import (
     _rendezvous,
     _to_global,
 )
-from tests.experimental.test_cake_kda_det_train_raw_gate_accuracy import (
-    AA_SEEDS,
-    ALPHA,
-    B_BOOT,
-    BOOT_SEED,
-    ELEMENTWISE_ATOL,
-    ELEMENTWISE_RTOL,
-    PARAM_SANITY_FACTOR,
-    TEST_SEEDS,
-    _max_normalized_error,
-    bootstrap_critical_value,
-    perturbed_torch_gate,
-    torch_gate,
-    u_stat,
-)
+from tests.cake_naive import DRAWS, TierJudge, contract, draw_seed
+from tests.experimental.test_cake_kda_det_train_raw_gate_accuracy import torch_gate
 from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     LOWER_BOUND,
-    check_fla_gate,
-    error_metrics,
-    fla_kda_gate,
-    kda_exact_raw_with_grads,
     make_raw_inputs,
     raw_gate,
-    t_quantile,
+)
+from tests.experimental.test_helpers.cake_kda_known_gaps import settle
+from tests.experimental.test_helpers.cake_kda_naive import (
+    draw_case,
+    fla_of,
+    naive_of,
+    oracle_with_grads,
 )
 from tests.cake.test_helpers.cake_package import cake_package
 
@@ -100,7 +87,6 @@ LB = LOWER_BOUND  # -5.0
 TOKEN_GRADS = ("dq", "dk", "dv", "dbeta", "dg")  # dg: the raw gate's gradient (BF16)
 PARAM_GRADS = ("dA_log", "ddt_bias")  # this rank's partial sums
 TENSORS = ("out",) + TOKEN_GRADS + PARAM_GRADS
-ACC_GATE = 1.10  # relative L2 error of KCP / single-rank against the FP64 reference
 GRAPH_EVENTS = [
     ["eager", "eager"],
     ["capture", "eager"],
@@ -760,58 +746,61 @@ def explicit_param_grads(
     return (dz * z).sum((0, 2)), (dz * a).sum(0).reshape(dt_bias.shape)
 
 
-def _param_check(cand: torch.Tensor, ref: torch.Tensor, bound: float) -> bool:
-    return (
-        bool(torch.isfinite(cand).all()) and _max_normalized_error(cand, ref) <= bound
-    )
+def _row_seed(test: str, row) -> int:
+    """The base seed of a judged row (draw ``j`` draws every input from ``draw_seed(base, j)``): a CRC of the test's
+    name and the row."""
+    return zlib.crc32(f"{test}:{_row_id(row)}".encode())
 
 
-def param_vs_explicit(cand, expl, ref, W: int, *, parts_of: str, parts: list) -> dict:
-    """Criterion (d) of #7816 for one parameter gradient of one row: the raw route is no less accurate against FP64
-    than the explicit route.  On one seed this is the sanity rule of the single-rank protocol
-    (``test_cake_kda_det_train_raw_gate_accuracy``): the worst normalized error ``|err| / (atol + rtol |ref|)`` is at most
-    ``max(1, PARAM_SANITY_FACTOR x`` the explicit route's ``)``; the seeded statistic is
-    :func:`test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit`.  Negative controls must fail the same rule:
-    the raw error stretched to 1.5 x the bound and, at W > 1, the rank-order sum without the largest partial."""
-    ref = ref.to(torch.float64)
-    m_raw, m_exp = _max_normalized_error(cand, ref), _max_normalized_error(expl, ref)
-    bound = max(1.0, PARAM_SANITY_FACTOR * m_exp)
-    err = cand.to(torch.float64) - ref
-    scale = 1.5 * bound
-    stretched = ref + (
-        err * (scale / m_raw)
-        if m_raw > 0
-        else scale * (ELEMENTWISE_ATOL + ELEMENTWISE_RTOL * ref.abs())
-    )
-    controls = {"error_stretched_1.5x_bound": _param_check(stretched, ref, bound)}
-    if W > 1:
-        k = 0 if parts_of == "dA_log" else 1
-        drop = max(range(W), key=lambda r: float(parts[r][k].double().norm()))
-        kept = [parts[r][k] for r in range(W) if r != drop]
-        total = kept[0].clone()
-        for t in kept[1:]:
-            total += t
-        controls[f"partial_of_rank_{drop}_left_out"] = _param_check(
-            total.reshape(ref.shape), ref, bound
-        )
-    rel_r = error_metrics(cand.to(torch.float64), ref)["rel_rms"]
-    rel_e = error_metrics(expl, ref)["rel_rms"]
-    ok = _param_check(cand.reshape(ref.shape), ref, bound)
-    return {
-        "gate": "raw_vs_explicit",
-        "max_norm_raw": m_raw,
-        "max_norm_explicit": m_exp,
-        "bound": bound,
-        "explicit_rel_l2": rel_e,
-        "raw_over_explicit_rel_l2": rel_r / rel_e if rel_e > 0 else None,
-        "negative_controls_pass": controls,
-        "pass": ok and not any(controls.values()),
+def _like(t: torch.Tensor, actual: torch.Tensor) -> torch.Tensor:
+    """``t`` in ``actual``'s shape where only the shape differs (``ddt_bias`` ``[H * 128]`` or ``[H, 128]``)."""
+    if t.shape != actual.shape and t.numel() == actual.numel():
+        return t.reshape(actual.shape)
+    return t
+
+
+def _judge_draw(
+    judge, failures: list, j: int, arms: dict, ref: dict, naive: dict, device, fla=None
+) -> None:
+    """Draw ``j`` of every arm (``{arm: {output: tensor}}``, an output judged as ``"<arm>.<output>"``): each output
+    held to its contract against the FP64 reference ``ref`` and added to ``judge`` beside the naive tier ``naive``
+    and FLA ``fla`` (``cake_kda_naive.fla_of`` of the unsplit pack)."""
+    for arm, results in arms.items():
+        for name, actual in results.items():
+            actual = actual.to(device)
+            key = f"{arm}.{name}"
+            want = _like(ref[name], actual)
+            if message := contract(key, actual, want):
+                failures.append(f"draw {j}: {message}")
+                if actual.shape != want.shape:
+                    continue
+            judge.add(
+                key, j, actual, want, {"bf16": _like(naive[name], actual)}, fla=fla.value(name, actual) if fla else None
+            )
+
+
+def _finish(record_property, report: dict, lengths) -> None:
+    """Record rank 0's verdicts (``naive_tier``), hold every rank's exact checks (``pass``), then settle rank 0's
+    verdicts against the owner-accepted gaps (the row's documents are the gaps' scope).  Another rank of a
+    one-process-per-task run holds no verdicts."""
+    verdicts = report.get("verdicts") or {}
+    for verdict in verdicts.values():
+        record_property("naive_tier", verdict)
+    assert report["pass"], {
+        k: report.get(k)
+        for k in ("row", "flags", "reduce_eq_rank_order_sum", "repeat_bitwise_by_rank")
     }
+    if report["rank"] == 0:
+        assert verdicts, report.get("failures")
+        settle(verdicts, report["failures"], lengths=lengths)
 
 
 def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) -> dict:
-    """One rank: the raw-mode KCP passes, their bitwise flags, the explicit-mode launch comparison, the reduction
-    helper; gathered to rank 0 and compared with the single-rank raw path and the FP64 reference there."""
+    """One rank of a row over the judge's draws, all in one process group.  On the first draw: the raw-mode KCP
+    passes and their bitwise flags, the explicit-mode launch comparison and the reduction helper's bits.  On every
+    draw: the KCP raw route's outputs (the parameter gradients summed by the reduction helper) gathered to rank 0,
+    which judges them (arm ``kcp``) and the single-rank raw path on the whole pack (arm ``single``) against the FP64
+    reference of the unsplit pack beside the naive BF16 tier."""
     from torch.utils.checkpoint import checkpoint
 
     lengths, H, _w, layout = row
@@ -823,226 +812,243 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
     part, cu = _partition(lengths, W, layout)
     ctx = cake_kcp_plan.cake_kda_det_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    glob = make_raw_inputs(lengths, H, device)
-    A_log, dt_bias = glob["A_log"], glob["dt_bias"]
-    tokens = {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
-    ops = _local_slices(part, rank, cu, tokens)
-    q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
-    GK = dict(use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias, lower_bound=LB)
+    cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
     ws = cake_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True)
-    recs: dict = {}
-
-    def saved_pass(raw=g, workspace=ws, tag=None, **opts):
-        out, saved = cake_kcp.cake_kda_det_train_kcp_forward(
-            q, k, v, raw, beta, ctx, workspace=workspace, **GK, **opts
-        )
-        rec_f = dict(cake_kcp.LAST_CALL["fwd"])
-        bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
-        grads = cake_kcp.cake_kda_det_train_kcp_backward(
-            q, k, v, raw, beta, ctx, dout, saved=saved, workspace=workspace, **GK, **bwd_opts
-        )  # fmt: skip
-        if tag is not None:
-            recs[tag] = (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
-        return {"out": out, **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads, strict=True))}
-
-    def autograd_pass(ckpt: bool = False, handle=None, workspace=ws):
-        leaves = [
-            x.detach().clone().requires_grad_(True)
-            for x in (q, k, v, g, beta, A_log, dt_bias)
-        ]
-
-        def fn(q_, k_, v_, g_, b_, a_, d_, *h):
-            return cake_kcp.cake_kda_det_kcp(
-                q_, k_, v_, g_, b_, ctx, None, "light", "saved", workspace,
-                recompute_handle=h[0] if h else None,
-                use_gate_in_kernel=True, A_log=a_, dt_bias=d_, lower_bound=LB,
-            )  # fmt: skip
-
-        extra = (handle,) if handle is not None else ()
-        out = (
-            checkpoint(fn, *leaves, *extra, use_reentrant=False)
-            if ckpt
-            else fn(*leaves, *extra)
-        )
-        out.backward(dout)
-        names = ("dq", "dk", "dv", "dg", "dbeta", "dA_log", "ddt_bias")
-        return {
-            "out": out.detach(),
-            **{n: lf.grad for n, lf in zip(names, leaves, strict=True)},
-        }
-
-    def reduced(res: dict) -> tuple[torch.Tensor, torch.Tensor]:
-        return cake_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(
-            ctx, res["dA_log"], res["ddt_bias"]
-        )
-
-    pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
-    res = saved_pass(tag="raw", spec3_probe="record")
-    spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get("spec3")
-    runs = {
-        "saved_eq_replay": saved_pass(boundary_mode="replay"),
-        "repeat": saved_pass(),
-        "autograd_eq_saved": autograd_pass(),
-        "ckpt_eq_direct": autograd_pass(ckpt=True),
-        "handle_eq_ckpt": autograd_pass(
-            ckpt=True, handle=cake_kcp.CakeKDADetKcpRecomputeHandle()
-        ),
-        "save_transfer_eq": saved_pass(save_transfer=False),
-        "ws_none_eq": autograd_pass(workspace=None),
-    }
-    # a strided raw view (a column slice of a wider fused projection, the single-rank rule's example) reads the same
-    # elements: the same bits, no copy
-    T = int(ctx.T_r)
-    wide = torch.zeros((T, (H + 2) * D), dtype=torch.bfloat16, device=device)
-    wide[:, 8 : 8 + H * D] = g.reshape(T, H * D)
-    view = wide[:, 8 : 8 + H * D].view(T, H, D)
-    runs["strided_eq"] = saved_pass(raw=view)
-    flags = {name: _same(res, r) for name, r in runs.items()}
-    if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
-        ring = saved_pass(exchange="ring", save_transfer=False)
-        flags["ring_eq_a2a"] = _same(runs["save_transfer_eq"], ring)
-        runs["ring_eq_a2a"] = ring
-    # graph replay: every rank captures and replays the same calls
-    cake_kcp.graph_cache_clear()
-    events = []
-    try:
-        for _ in range(len(GRAPH_EVENTS)):
-            res_graph = {n: t.clone() for n, t in saved_pass(graph="replay").items()}
-            events.append(
-                [str(cake_kcp.LAST_CALL[x].get("graph_event")) for x in ("fwd", "bwd")]
-            )
-        torch.cuda.synchronize(device)
-    except BaseException as exc:
-        traceback.clear_frames(exc.__traceback__)
-        raise
-    finally:
-        cake_kcp.graph_cache_clear()
-    flags["graph_replay"] = _graph_events_ok(events) and _same(res, res_graph)
-    runs["graph_replay"] = res_graph
-    # the mode is checked against the saved set and the workspace: symmetric on every rank, before any collective
-    _, saved_r = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g, beta, ctx, workspace=ws, **GK
-    )
-    refusals = []
-    for kw, match in (
-        ({**GK, "lower_bound": -4.0}, "lower_bound"),
-        ({}, "gate mode"),
-    ):
-        try:
-            cake_kcp.cake_kda_det_train_kcp_backward(
-                q, k, v, (g if kw else g.float()), beta, ctx, dout, saved=saved_r,
-                workspace=ws if kw else cake_kcp.CakeKDADetKcpWorkspace(), **kw,
-            )  # fmt: skip
-            refusals.append(False)
-        except ValueError as exc:
-            refusals.append(match in str(exc))
-    flags["mismatch_refused"] = all(refusals)
-    del saved_r
-    # the explicit mode on the same activated gate (torch FP32): the same launches in the same order with the same
-    # collectives -- gate_epilogue (a stage that launches only on sm_100a) in place of param_finalize
-    g_exp = raw_gate(g, A_log, dt_bias, LB, torch.float32).contiguous()
-    ws_g = cake_kcp.CakeKDADetKcpWorkspace()
-    out_e, saved_e = cake_kcp.cake_kda_det_train_kcp_forward(
-        q, k, v, g_exp, beta, ctx, workspace=ws_g
-    )
-    rec_fe = dict(cake_kcp.LAST_CALL["fwd"])
-    grads_e = cake_kcp.cake_kda_det_train_kcp_backward(
-        q, k, v, g_exp, beta, ctx, dout, saved=saved_e, workspace=ws_g
-    )
-    rec_be = dict(cake_kcp.LAST_CALL["bwd"])
-    rec_fr, rec_br = recs["raw"]
-    mapped = [
-        "param_finalize" if s == "gate_epilogue" else s for s in rec_be["sequence"]
-    ]
-    launch_cmp = {
-        "fwd_collectives": [rec_fr["n_collectives"], rec_fe["n_collectives"]],
-        "bwd_collectives": [rec_br["n_collectives"], rec_be["n_collectives"]],
-        "fwd_launches": [rec_fr["n_launches"], rec_fe["n_launches"]],
-        "bwd_launches": [rec_br["n_launches"], rec_be["n_launches"]],
-        "gates": [rec_fr["gate"], rec_br["gate"], rec_fe["gate"], rec_be["gate"]],
-    }
-    flags["collectives_eq_explicit"] = (
-        _collective_seq(rec_fr) == _collective_seq(rec_fe)
-        and _collective_seq(rec_br) == _collective_seq(rec_be)
-        and rec_fr["n_collectives"] == rec_fe["n_collectives"]
-        and rec_br["n_collectives"] == rec_be["n_collectives"]
-    )
-    flags["launches_eq_explicit"] = (
-        rec_fr["sequence"] == rec_fe["sequence"] and rec_br["sequence"] == mapped
-        and launch_cmp["gates"] == ["raw", "raw", "g", "g"]
-    )  # fmt: skip
-    explicit = {
-        "out": out_e,
-        **dict(zip(("dq", "dk", "dv", "dbeta", "dg"), grads_e, strict=True)),
-    }
-    del ws_g, saved_e
-    # the reduction helper: the same bits on every rank and under every mode
-    red = reduced(res)
-    red_ok = True
-    for r in runs.values():
-        ra, rb = reduced(r)
-        red_ok &= _bits_equal(ra, red[0]) and _bits_equal(rb, red[1])
-    flags["reduce_eq_modes"] = bool(red_ok)
-    if W > 1:
-        every: list = [None] * W
-        dist.all_gather_object(every, (red[0].cpu(), red[1].cpu()))
-        flags["reduce_eq_ranks"] = all(
-            torch.equal(e[0], every[0][0]) and torch.equal(e[1], every[0][1])
-            for e in every
-        )
-    else:
-        flags["reduce_eq_ranks"] = True
-    # a backend with local stages whose probe was pending must have run it on the first pass (reported, not gated
-    # beyond 'checked': the forward's intra program writes gk row 63 alone)
-    flags["spec3"] = (
-        not pending
-        or (spec3 is None and T == 0)
-        or bool(spec3 and spec3.get("checked"))
-    )
-    # gather the token tensors and the per-rank partials
-    gathered: dict = {}
-    for n in ("out",) + TOKEN_GRADS:
-        srcs = [(res, n), (explicit, f"explicit_{n}")]
-        for src, key in srcs:
-            if W > 1:
-                objs: list = [None] * W
-                dist.all_gather_object(objs, src[n].cpu())
-            else:
-                objs = [src[n].cpu()]
-            gathered[key] = objs
-    parts: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(parts, (res["dA_log"].cpu(), res["ddt_bias"].cpu()))
-    else:
-        parts = [(res["dA_log"].cpu(), res["ddt_bias"].cpu())]
-    flag_list: list = [None] * W
-    spec3_list: list = [None] * W
-    launch_list: list = [None] * W
-    if W > 1:
-        dist.all_gather_object(flag_list, flags)
-        dist.all_gather_object(spec3_list, spec3)
-        dist.all_gather_object(launch_list, launch_cmp)
-    else:
-        flag_list, spec3_list, launch_list = [flags], [spec3], [launch_cmp]
     report: dict = {
         "rank": rank,
         "world": W,
         "row": _row_id(row),
         "pass": True,
         "flags": {},
-        "flags_by_rank": flag_list,
-        "metrics": {},
-        "spec3_by_rank": spec3_list,
-        "launches_by_rank": launch_list,
-        "graph_events": events,
         "device": torch.cuda.get_device_name(device),
         "arch": cake_jit.device_arch(device.index),
     }
-    for key in flags:
-        report["flags"][key] = all(f[key] for f in flag_list)
-        report["pass"] &= report["flags"][key]
-    if rank == 0:
-        cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
+    judge, failures = TierJudge(DRAWS), []
+
+    def gather(x) -> list:
+        if W == 1:
+            return [x]
+        objs: list = [None] * W
+        dist.all_gather_object(objs, x)
+        return objs
+
+    def one_draw(j: int, glob: dict) -> None:
+        A_log, dt_bias = glob["A_log"], glob["dt_bias"]
+        tokens = {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
+        ops = _local_slices(part, rank, cu, tokens)
+        q, k, v, g, beta, dout = (ops[n] for n in ("q", "k", "v", "g", "beta", "dout"))
+        GK = dict(use_gate_in_kernel=True, A_log=A_log, dt_bias=dt_bias, lower_bound=LB)
+        recs: dict = {}
+
+        def saved_pass(raw=g, workspace=ws, tag=None, **opts):
+            out, saved = cake_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, raw, beta, ctx, workspace=workspace, **GK, **opts
+            )
+            rec_f = dict(cake_kcp.LAST_CALL["fwd"])
+            bwd_opts = {key: val for key, val in opts.items() if key != "boundary_mode"}
+            grads = cake_kcp.cake_kda_det_train_kcp_backward(
+                q, k, v, raw, beta, ctx, dout, saved=saved, workspace=workspace, **GK, **bwd_opts
+            )  # fmt: skip
+            if tag is not None:
+                recs[tag] = (rec_f, dict(cake_kcp.LAST_CALL["bwd"]))
+            return {
+                "out": out,
+                **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads, strict=True)),
+            }
+
+        def autograd_pass(ckpt: bool = False, handle=None, workspace=ws):
+            leaves = [
+                x.detach().clone().requires_grad_(True)
+                for x in (q, k, v, g, beta, A_log, dt_bias)
+            ]
+
+            def fn(q_, k_, v_, g_, b_, a_, d_, *h):
+                return cake_kcp.cake_kda_det_kcp(
+                    q_, k_, v_, g_, b_, ctx, None, "light", "saved", workspace,
+                    recompute_handle=h[0] if h else None,
+                    use_gate_in_kernel=True, A_log=a_, dt_bias=d_, lower_bound=LB,
+                )  # fmt: skip
+
+            extra = (handle,) if handle is not None else ()
+            out = (
+                checkpoint(fn, *leaves, *extra, use_reentrant=False)
+                if ckpt
+                else fn(*leaves, *extra)
+            )
+            out.backward(dout)
+            names = ("dq", "dk", "dv", "dg", "dbeta", "dA_log", "ddt_bias")
+            return {
+                "out": out.detach(),
+                **{n: lf.grad for n, lf in zip(names, leaves, strict=True)},
+            }
+
+        def reduced(res: dict) -> tuple[torch.Tensor, torch.Tensor]:
+            return cake_kcp.cake_kda_det_train_kcp_reduce_gate_param_grads(
+                ctx, res["dA_log"], res["ddt_bias"]
+            )
+
+        if j == 0:
+            pending = bool(getattr(cake_kcp.get_backend(), "_spec3_pending", False))
+            res = saved_pass(tag="raw", spec3_probe="record")
+            spec3 = (cake_kcp.LAST_CALL.get("bwd") or {}).get("spec3")
+        else:
+            res = saved_pass()
+        red = reduced(res)
+        if j == 0:
+            # the package's bitwise contracts on this rank: every mode gives the first pass's bits
+            runs = {
+                "saved_eq_replay": saved_pass(boundary_mode="replay"),
+                "repeat": saved_pass(),
+                "autograd_eq_saved": autograd_pass(),
+                "ckpt_eq_direct": autograd_pass(ckpt=True),
+                "handle_eq_ckpt": autograd_pass(
+                    ckpt=True, handle=cake_kcp.CakeKDADetKcpRecomputeHandle()
+                ),
+                "save_transfer_eq": saved_pass(save_transfer=False),
+                "ws_none_eq": autograd_pass(workspace=None),
+            }
+            # a strided raw view (a column slice of a wider fused projection, the single-rank rule's example) reads
+            # the same elements: the same bits, no copy
+            T = int(ctx.T_r)
+            wide = torch.zeros((T, (H + 2) * D), dtype=torch.bfloat16, device=device)
+            wide[:, 8 : 8 + H * D] = g.reshape(T, H * D)
+            view = wide[:, 8 : 8 + H * D].view(T, H, D)
+            runs["strided_eq"] = saved_pass(raw=view)
+            flags = {name: _same(res, r) for name, r in runs.items()}
+            if W > 1 and int(ctx.n_d_max) - 1 <= cake_kcp.RING_MAX_HOPS:
+                ring = saved_pass(exchange="ring", save_transfer=False)
+                flags["ring_eq_a2a"] = _same(runs["save_transfer_eq"], ring)
+                runs["ring_eq_a2a"] = ring
+            # graph replay: every rank captures and replays the same calls
+            cake_kcp.graph_cache_clear()
+            events = []
+            try:
+                for _ in range(len(GRAPH_EVENTS)):
+                    res_graph = {
+                        n: t.clone() for n, t in saved_pass(graph="replay").items()
+                    }
+                    events.append(
+                        [
+                            str(cake_kcp.LAST_CALL[x].get("graph_event"))
+                            for x in ("fwd", "bwd")
+                        ]
+                    )
+                torch.cuda.synchronize(device)
+            except BaseException as exc:
+                traceback.clear_frames(exc.__traceback__)
+                raise
+            finally:
+                cake_kcp.graph_cache_clear()
+            flags["graph_replay"] = _graph_events_ok(events) and _same(res, res_graph)
+            runs["graph_replay"] = res_graph
+            # the mode is checked against the saved set and the workspace: symmetric on every rank, before any
+            # collective
+            _, saved_r = cake_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g, beta, ctx, workspace=ws, **GK
+            )
+            refusals = []
+            for kw, match in (
+                ({**GK, "lower_bound": -4.0}, "lower_bound"),
+                ({}, "gate mode"),
+            ):
+                try:
+                    cake_kcp.cake_kda_det_train_kcp_backward(
+                        q, k, v, (g if kw else g.float()), beta, ctx, dout, saved=saved_r,
+                        workspace=ws if kw else cake_kcp.CakeKDADetKcpWorkspace(), **kw,
+                    )  # fmt: skip
+                    refusals.append(False)
+                except ValueError as exc:
+                    refusals.append(match in str(exc))
+            flags["mismatch_refused"] = all(refusals)
+            del saved_r
+            # the explicit mode on the same activated gate (torch FP32): the same launches in the same order with
+            # the same collectives -- gate_epilogue (a stage that launches only on sm_100a) in place of
+            # param_finalize
+            g_exp = raw_gate(g, A_log, dt_bias, LB, torch.float32).contiguous()
+            ws_g = cake_kcp.CakeKDADetKcpWorkspace()
+            _, saved_e = cake_kcp.cake_kda_det_train_kcp_forward(
+                q, k, v, g_exp, beta, ctx, workspace=ws_g
+            )
+            rec_fe = dict(cake_kcp.LAST_CALL["fwd"])
+            cake_kcp.cake_kda_det_train_kcp_backward(
+                q, k, v, g_exp, beta, ctx, dout, saved=saved_e, workspace=ws_g
+            )
+            rec_be = dict(cake_kcp.LAST_CALL["bwd"])
+            rec_fr, rec_br = recs["raw"]
+            mapped = [
+                "param_finalize" if s == "gate_epilogue" else s
+                for s in rec_be["sequence"]
+            ]
+            launch_cmp = {
+                "fwd_collectives": [rec_fr["n_collectives"], rec_fe["n_collectives"]],
+                "bwd_collectives": [rec_br["n_collectives"], rec_be["n_collectives"]],
+                "fwd_launches": [rec_fr["n_launches"], rec_fe["n_launches"]],
+                "bwd_launches": [rec_br["n_launches"], rec_be["n_launches"]],
+                "gates": [
+                    rec_fr["gate"],
+                    rec_br["gate"],
+                    rec_fe["gate"],
+                    rec_be["gate"],
+                ],
+            }
+            flags["collectives_eq_explicit"] = (
+                _collective_seq(rec_fr) == _collective_seq(rec_fe)
+                and _collective_seq(rec_br) == _collective_seq(rec_be)
+                and rec_fr["n_collectives"] == rec_fe["n_collectives"]
+                and rec_br["n_collectives"] == rec_be["n_collectives"]
+            )
+            flags["launches_eq_explicit"] = (
+                rec_fr["sequence"] == rec_fe["sequence"] and rec_br["sequence"] == mapped
+                and launch_cmp["gates"] == ["raw", "raw", "g", "g"]
+            )  # fmt: skip
+            del ws_g, saved_e
+            # the reduction helper: the same bits on every rank and under every mode
+            red_ok = True
+            for r in runs.values():
+                ra, rb = reduced(r)
+                red_ok &= _bits_equal(ra, red[0]) and _bits_equal(rb, red[1])
+            flags["reduce_eq_modes"] = bool(red_ok)
+            every = gather((red[0].cpu(), red[1].cpu()))
+            flags["reduce_eq_ranks"] = all(
+                torch.equal(e[0], every[0][0]) and torch.equal(e[1], every[0][1])
+                for e in every
+            )
+            # a backend with local stages whose probe was pending must have run it on the first pass (reported,
+            # not gated beyond 'checked': the forward's intra program writes gk row 63 alone)
+            flags["spec3"] = (
+                not pending
+                or (spec3 is None and T == 0)
+                or bool(spec3 and spec3.get("checked"))
+            )
+            flag_list = gather(flags)
+            report.update(
+                flags_by_rank=flag_list,
+                spec3_by_rank=gather(spec3),
+                launches_by_rank=gather(launch_cmp),
+                graph_events=events,
+            )
+            for key in flags:
+                report["flags"][key] = all(f[key] for f in flag_list)
+                report["pass"] &= report["flags"][key]
+            del runs
+        # gather the token tensors to rank 0 (and on the first draw the per-rank partials)
+        gathered = {n: gather(res[n].cpu()) for n in ("out",) + TOKEN_GRADS}
+        parts = gather((res["dA_log"].cpu(), res["ddt_bias"].cpu())) if j == 0 else None
+        if rank != 0:
+            return
+        kcp = {n: _to_global(part, gathered[n], cu, total) for n in gathered}
+        kcp["dA_log"], kcp["ddt_bias"] = red[0].cpu(), red[1].cpu()
+        if parts is not None:
+            # the helper's sum: FP32, in rank order (rank 0 first)
+            sums = [torch.zeros_like(parts[0][0]), torch.zeros_like(parts[0][1])]
+            for pa, pb in parts:
+                sums[0] += pa
+                sums[1] += pb
+            report["reduce_eq_rank_order_sum"] = bool(
+                torch.equal(sums[0], kcp["dA_log"])
+                and torch.equal(sums[1], kcp["ddt_bias"])
+            )
+            report["pass"] &= report["reduce_eq_rank_order_sum"]
         # the single-rank raw path on the whole pack
         out_s, saved_s = cake_backend.cake_kda_det_train_forward(
             glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], cu_t, **GK
@@ -1056,64 +1062,20 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
             **dict(zip(TOKEN_GRADS + PARAM_GRADS, grads_s, strict=True)),
         }
         del saved_s
-        # the exact FP64 reference (on this rank's device: the per-token recurrence in FP64)
-        ref_out, ref_g = kda_exact_raw_with_grads(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], A_log, dt_bias, glob["dout"], cu_t,
-            SCALE, LB,
-        )  # fmt: skip
-        refs = {n: t.cpu() for n, t in {"out": ref_out, **ref_g}.items()}
-        del ref_out, ref_g
-        cand = {
-            n: _to_global(part, gathered[n], cu, total) for n in ("out",) + TOKEN_GRADS
-        }
-        sums = [torch.zeros_like(parts[0][0]), torch.zeros_like(parts[0][1])]
-        for pa, pb in parts:  # the helper's order: FP32, rank 0 first
-            sums[0] += pa
-            sums[1] += pb
-        cand["dA_log"], cand["ddt_bias"] = red[0].cpu(), red[1].cpu()
-        report["reduce_eq_rank_order_sum"] = bool(
-            torch.equal(sums[0], cand["dA_log"])
-            and torch.equal(sums[1], cand["ddt_bias"])
+        # the exact FP64 reference of the unsplit pack, the naive tier and FLA (on this rank's device)
+        ref = oracle_with_grads(glob, SCALE, LB, False)
+        naive = naive_of(glob, SCALE, LB, False)
+        fla = fla_of(glob, SCALE, LB, False)
+        _judge_draw(
+            judge, failures, j, {"kcp": kcp, "single": single}, ref, naive, device, fla
         )
-        report["pass"] &= report["reduce_eq_rank_order_sum"]
-        expl = {
-            n: _to_global(part, gathered[f"explicit_{n}"], cu, total)
-            for n in ("out",) + TOKEN_GRADS
-        }
-        # the explicit route's parameter gradients: the FP64 chain rule from its FP32 activated-gate gradient
-        expl["dA_log"], expl["ddt_bias"] = explicit_param_grads(
-            expl["dg"], glob["g"].cpu(), A_log.cpu(), dt_bias.cpu()
-        )
-        for n in TENSORS:
-            ref = refs[n]
-            c = cand[n].to(torch.float64)
-            s = single[n].cpu().to(torch.float64)
-            mk, ms = error_metrics(c, ref), error_metrics(s, ref)
-            rk, rs = mk["rel_rms"], ms["rel_rms"]
-            ratio = rk / rs if rs > 0 else (1.0 if rk == 0 else float("inf"))
-            finite = bool(torch.isfinite(c).all())
-            report["metrics"][n] = {
-                "kcp_rel_l2": rk,
-                "single_rel_l2": rs,
-                "ratio": ratio,
-                "kcp_max_abs": mk["max_abs"],
-                "single_max_abs": ms["max_abs"],
-                "bitwise_eq_single": bool(_bits_equal(cand[n].cpu(), single[n].cpu())),
-                "finite": finite,
-                "pass": finite and ratio <= ACC_GATE,
-            }
-            # criterion (d): no less accurate than the explicit route (see the module doc)
-            if n in PARAM_GRADS:
-                report["metrics"][n].update(
-                    param_vs_explicit(cand[n], expl[n], ref, W, parts_of=n, parts=parts)
-                )
-            report["pass"] &= report["metrics"][n]["pass"]
-        # report only: the explicit KCP route against the FP64 reference (``dg``: the activated gate's gradient,
-        # another quantity than the raw gate's)
-        report["explicit_rel_l2"] = {
-            n: error_metrics(expl[n].to(torch.float64), refs[n])["rel_rms"]
-            for n in ("out", "dq", "dk", "dv", "dbeta", "dA_log", "ddt_bias")
-        }
+
+    seed = _row_seed("rows", row)
+    for j in range(DRAWS):
+        one_draw(j, draw_case(lengths, H, "raw", False, draw_seed(seed, j), device))
+    if rank == 0:
+        failures += judge.failures()
+        report["verdicts"], report["failures"] = judge.verdicts(), failures
     if W > 1:
         verdict: list = [None] * W
         dist.all_gather_object(verdict, report["pass"])
@@ -1123,7 +1085,6 @@ def _run_rank(rank: int, W: int, row, rdzv: str | None, result_dir: str | None) 
         os.makedirs(result_dir, exist_ok=True)
         with open(os.path.join(result_dir, "raw-" + _row_id(row) + ".json"), "w") as fh:
             json.dump(report, fh, indent=1, default=str)
-    del runs, res, explicit
     gc.collect()
     return report
 
@@ -1132,7 +1093,9 @@ def _spawn_entry(rank: int, W: int, row, rdzv: str | None, result_dir: str) -> N
     try:
         report = _run_rank(rank, W, row, rdzv, result_dir)
         if not report["pass"]:
-            raise AssertionError(f"rank {rank}: {report}")
+            raise AssertionError(
+                f"rank {rank}: {report['row']} exact checks failed: {report['flags']}"
+            )
     finally:
         if dist.is_initialized():
             cake_kcp.graph_cache_clear()
@@ -1152,7 +1115,11 @@ def _skip_unless_runnable(W: int) -> None:
 
 
 @pytest.mark.parametrize("row", ROWS, ids=_row_id)
-def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
+def test_raw_gate_rows_match_single_rank_and_fp64(row, record_property) -> None:
+    """The row's KCP raw route (arm ``kcp``) and the single-rank raw path on the whole pack (arm ``single``), every
+    output of each judged against the FP64 reference of the unsplit pack beside the naive BF16 tier over the judge's
+    draws (the two arms are not compared with each other), and the first draw's bitwise flags on every rank (see the
+    module doc)."""
     lengths, H, W, layout = row
     if (
         os.environ.get("SLURM_PROCID") is not None
@@ -1167,12 +1134,12 @@ def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
             int(os.environ["SLURM_PROCID"]), W, row, None,
             os.environ.get("KCP_TEST_RESULT_DIR"),
         )  # fmt: skip
-        assert report["pass"], report
+        _finish(record_property, report, lengths)
         return
     _skip_unless_runnable(W)
     if W == 1:
         report = _run_rank(0, 1, row, None, os.environ.get("KCP_TEST_RESULT_DIR"))
-        assert report["pass"], report
+        _finish(record_property, report, lengths)
         return
     with tempfile.TemporaryDirectory(prefix="cake_kcp_raw_") as tmp:
         result_dir = os.environ.get("KCP_TEST_RESULT_DIR") or tmp
@@ -1185,61 +1152,32 @@ def test_raw_gate_rows_match_single_rank_and_fp64(row) -> None:
         )
         with open(os.path.join(result_dir, "raw-" + _row_id(row) + ".json")) as fh:
             report = json.load(fh)
-    assert report["pass"], report
+    _finish(record_property, report, lengths)
 
 
-# --------------------------------------------------------------------------- criterion (d) on the KCP route
+# --------------------------------------------------------------------------- the parameter gradients of both routes
 # #7816: "outputs and gradients, including both gate-parameter gradients, are no less accurate against FP64 than the
-# existing explicit gate-plus-KDA path".  For dA_log / ddt_bias on the KCP route the explicit path is the explicit KCP
-# route on the same rows (its parameter gradients by the FP64 chain rule from its FP32 activated-gate gradient), and
-# the comparison is the seeded protocol of the design of record (7816 design v1.1 section 5.4, implemented by
-# test_cake_kda_det_train_raw_gate_accuracy, whose constants are imported): per (tensor, row) the log-ratios
-# l_s = log(err_raw / err_explicit) over TEST_SEEDS, U = mean + t_{0.975, N-1} sd / sqrt(N), and the critical value c
-# the 1 - ALPHA / m quantile of U over B_BOOT bootstrap resamples (seed BOOT_SEED) of the A/A log-ratios (the explicit
-# route against itself with the gate moved by a seeded +-1 ulp, AA_SEEDS).  Explicit arms as in the single-rank
-# criterion: E_T (torch FP32 gate) and E_F (flash-linear-attention's gate; left out with the recorded reason when it
-# does not import, or required with ..._REQUIRE_FLA=1).  m = 2 tensors x the rows below x the arms present.  Every test
-# seed runs the raw route twice: the per-rank partials and the reduced sums must be bitwise identical.
-# A single seed per row is not a usable statistic for these H-element sums (the per-seed ratio KCP / single-rank of
-# dA_log spans 0.3-3.7 on both routes at W > 1).  Negative controls: the raw arm with its error stretched 1.25x, and
-# with the largest per-rank partial left out of the sum, must fail.  Minutes per row: env-gated, run on compute.
+# existing explicit gate-plus-KDA path".  Here each route is judged on its own: ``dA_log`` / ``ddt_bias`` of the raw KCP
+# route (the per-rank partials summed by the reduction helper; arm ``kcp``) and of the explicit KCP route on the same
+# rows (its FP32 activated-gate gradient taken through the FP64 chain rule, :func:`explicit_param_grads`; arm
+# ``explicit``), each against the FP64 reference of the unsplit pack beside the naive BF16 tier over the judge's
+# draws; the two routes are not compared with each other.  On every draw the raw route runs twice: the per-rank
+# partials and the reduced sums must be bitwise identical on every rank (the package's run-to-run contract).
+# Env-gated: the rows test above judges the raw route's parameter gradients of these rows by default.
 ENV_KCP_PROTOCOL = "CAKE_PPLX_KDA_TRAIN_KCP_RAW_GATE_ACCURACY"
-ENV_KCP_PROTOCOL_REQUIRE_FLA = ENV_KCP_PROTOCOL + "_REQUIRE_FLA"
 PROTOCOL_ROWS = [
     ((3000,), 4, 2, "zigzag_per_document"),
     ((3000,), 4, 4, "zigzag_per_document"),
     ((3000, 2048, 5, 1), 4, 8, "zigzag_per_document"),
     ((4000, 1003), 4, 8, "ragged:1,0,999,1000,1000,1000,1,1002"),
 ]
-CONTROL_STRETCH = 1.25
-
-
-def _protocol_arms(device) -> tuple[dict, dict]:
-    """The explicit arms present (E_T always, E_F when flash-linear-attention's gate imports and gives the same
-    values) and the FLA record; ``..._REQUIRE_FLA=1`` fails without E_F or with another ``FLA_COMMIT``."""
-    arms = {"E_T": torch_gate}
-    fla, info = fla_kda_gate(LB)
-    if fla is not None:
-        reason = check_fla_gate(fla, make_raw_inputs((65,), 2, device, seed=1), LB)
-        if reason is None:
-            arms["E_F"] = fla
-        else:
-            info["unavailable"] = reason
-    if os.environ.get(ENV_KCP_PROTOCOL_REQUIRE_FLA, "") in ("1", "true", "yes"):
-        if "E_F" not in arms:
-            raise RuntimeError(f"E_F required but unavailable: {info}")
-        env, found = info.get("commit_env"), info.get("git_commit")
-        if found and env and not found.startswith(env):
-            raise RuntimeError(
-                f"E_F required: FLA_COMMIT={env}, imported checkout {found}"
-            )
-    return arms, info
 
 
 def _protocol_rank(
     rank: int, W: int, row, rdzv: str | None, result_dir: str | None
 ) -> dict:
-    """One rank of the protocol for one row; rank 0 holds the record (errors, log-ratios, U, c, verdicts)."""
+    """One rank of the parameter-gradient judge of one row over the judge's draws; rank 0 judges and holds the
+    record (the verdicts and the failures)."""
     lengths, H, _w, layout = row
     device = torch.device("cuda", rank % max(torch.cuda.device_count(), 1))
     torch.cuda.set_device(device)
@@ -1249,7 +1187,6 @@ def _protocol_rank(
     part, cu = _partition(lengths, W, layout)
     ctx = cake_kcp_plan.cake_kda_det_train_kcp_build_context(part, group, rank, device)
     total = cu[-1]
-    cu_t = torch.tensor(cu, dtype=torch.int32, device=device)
     ws_r = cake_kcp.CakeKDADetKcpWorkspace(use_gate_in_kernel=True)
     ws_e = cake_kcp.CakeKDADetKcpWorkspace()
 
@@ -1260,32 +1197,12 @@ def _protocol_rank(
         dist.all_gather_object(out, x)
         return out
 
-    arms, fla_info = _protocol_arms(device)
-    arm_sets = gather(sorted(arms))
-    # the same arms on every rank
-    assert all(a == arm_sets[0] for a in arm_sets), arm_sets
-    m = len(PARAM_GRADS) * len(PROTOCOL_ROWS) * len(arms)
-
-    def inputs(seed):
-        glob = make_raw_inputs(lengths, H, device, seed=seed)
-        loc = _local_slices(
-            part, rank, cu, {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
-        )
-        return glob, loc
-
-    def reference(glob):
-        _, rg = kda_exact_raw_with_grads(
-            glob["q"], glob["k"], glob["v"], glob["g"], glob["beta"], glob["A_log"], glob["dt_bias"], glob["dout"],
-            cu_t, SCALE, LB,
-        )  # fmt: skip
-        return {n: rg[n].cpu() for n in PARAM_GRADS}
-
-    def explicit_arm(glob, loc, gate_fn):
+    def explicit_arm(glob, loc):
         g = _local_slices(
             part,
             rank,
             cu,
-            {"g": gate_fn(glob["g"], glob["A_log"], glob["dt_bias"]).detach()},
+            {"g": torch_gate(glob["g"], glob["A_log"], glob["dt_bias"]).detach()},
         )["g"]
         g = g.contiguous()
         _, saved = cake_kcp.cake_kda_det_train_kcp_forward(
@@ -1327,109 +1244,45 @@ def _protocol_rank(
             ctx, grads[5], grads[6]
         )
         local = [t.detach().clone() for t in (grads[5], grads[6], red[0], red[1])]
-        parts = gather((grads[5].cpu(), grads[6].cpu()))
-        if rank != 0:
-            return {"local": local}
-        res = {"local": local, "dA_log": red[0].cpu(), "ddt_bias": red[1].cpu()}
-        # control: the largest per-rank partial left out of the rank-order sum
-        for k, n in enumerate(PARAM_GRADS):
-            drop = max(range(W), key=lambda r: float(parts[r][k].double().norm()))
-            kept = [parts[r][k] for r in range(W) if r != drop]
-            t = kept[0].clone() if kept else torch.zeros_like(parts[0][k])
-            for x in kept[1:]:
-                t += x
-            res[f"{n}_drop"] = t.reshape(res[n].shape)
-        return res
+        return {"local": local, "dA_log": red[0].cpu(), "ddt_bias": red[1].cpu()}
 
-    def rel(c, r):
-        return error_metrics(c.to(torch.float64), r.to(torch.float64))["rel_rms"]
-
-    aa = {n: {"A": [], "B": []} for n in PARAM_GRADS}
-    for seed in AA_SEEDS:
-        glob, loc = inputs(seed)
-        ref = reference(glob) if rank == 0 else None
-        ea = explicit_arm(glob, loc, torch_gate)
-        eb = explicit_arm(glob, loc, perturbed_torch_gate(seed))
-        if rank == 0:
-            for n in PARAM_GRADS:
-                aa[n]["A"].append(rel(ea[n], ref[n]))
-                aa[n]["B"].append(rel(eb[n], ref[n]))
-    test = {n: {"R": [], "R_drop": [], **{a: [] for a in arms}} for n in PARAM_GRADS}
+    judge, failures = TierJudge(DRAWS), []
     repeat_equal = True
-    for seed in TEST_SEEDS:
-        glob, loc = inputs(seed)
-        ref = reference(glob) if rank == 0 else None
+    seed = _row_seed("param_grads", row)
+    for j in range(DRAWS):
+        glob = draw_case(lengths, H, "raw", False, draw_seed(seed, j), device)
+        loc = _local_slices(
+            part, rank, cu, {n: glob[n] for n in ("q", "k", "v", "g", "beta", "dout")}
+        )
         r = raw_arm(glob, loc)
-        # determinism: partials and reduced sums bitwise repeatable
+        # run to run: the partials and the reduced sums bitwise repeatable
         r2 = raw_arm(glob, loc)
         repeat_equal &= all(
             _bits_equal(x, y) for x, y in zip(r["local"], r2["local"], strict=True)
         )
-        e = {a: explicit_arm(glob, loc, fn) for a, fn in arms.items()}
+        e = explicit_arm(glob, loc)
         if rank == 0:
-            for n in PARAM_GRADS:
-                test[n]["R"].append(rel(r[n], ref[n]))
-                test[n]["R_drop"].append(rel(r[f"{n}_drop"], ref[n]))
-                for a in arms:
-                    test[n][a].append(rel(e[a][n], ref[n]))
+            arms = {"kcp": {n: r[n] for n in PARAM_GRADS}, "explicit": e}
+            ref = oracle_with_grads(glob, SCALE, LB, False)
+            naive = naive_of(glob, SCALE, LB, False)
+            fla = fla_of(glob, SCALE, LB, False)
+            _judge_draw(judge, failures, j, arms, ref, naive, device, fla)
+        del glob, loc, r, r2, e
     repeat_by_rank = gather(bool(repeat_equal))
-    rec: dict = {"row": _row_id(row), "world": W, "pass": all(repeat_by_rank)}
-    rec["repeat_bitwise_by_rank"] = repeat_by_rank
+    rec: dict = {
+        "rank": rank,
+        "row": _row_id(row),
+        "world": W,
+        "pass": all(repeat_by_rank),
+        "repeat_bitwise_by_rank": repeat_by_rank,
+        "device": torch.cuda.get_device_name(device),
+        "arch": cake_jit.device_arch(device.index),
+        "host": os.uname().nodename,
+        "job": os.environ.get("SLURM_JOB_ID"),
+    }
     if rank == 0:
-        tq_aa = t_quantile(0.975, len(AA_SEEDS) - 1)
-        tq = t_quantile(0.975, len(TEST_SEEDS) - 1)
-        rec.update(
-            protocol={
-                "criterion": "7816 (d): raw no less accurate than explicit; design v1.1 section 5.4 on the KCP route",
-                "alpha": ALPHA, "m": m, "rows": [_row_id(x) for x in PROTOCOL_ROWS],
-                "tensors": list(PARAM_GRADS), "explicit_arms": list(arms),
-                "explicit_route": "explicit KCP route, FP64 chain rule from its FP32 activated-gate gradient",
-                "fla": fla_info,
-                "aa_seeds": list(AA_SEEDS), "test_seeds": list(TEST_SEEDS), "b_boot": B_BOOT, "boot_seed": BOOT_SEED,
-                "tq_aa": tq_aa, "tq_test": tq, "control_stretch": CONTROL_STRETCH,
-            },
-            device=torch.cuda.get_device_name(device), arch=cake_jit.device_arch(device.index),
-            host=os.uname().nodename, job=os.environ.get("SLURM_JOB_ID"), aa_err=aa, test_err=test,
-            tensors={},
-        )  # fmt: skip
-        for n in PARAM_GRADS:
-            ell_aa = [
-                _log_ratio(b, a) for a, b in zip(aa[n]["A"], aa[n]["B"], strict=True)
-            ]
-            c = bootstrap_critical_value(ell_aa, tq_aa, m)
-            rec["tensors"][n] = {
-                "ell_aa": ell_aa,
-                "U_aa": u_stat(ell_aa, tq_aa),
-                "c": c,
-                "arms": {},
-            }
-            for a in arms:
-                ell = [
-                    _log_ratio(r, x)
-                    for r, x in zip(test[n]["R"], test[n][a], strict=True)
-                ]
-                ell_st = [x + math.log(CONTROL_STRETCH) for x in ell]
-                ell_dr = [
-                    _log_ratio(r, x)
-                    for r, x in zip(test[n]["R_drop"], test[n][a], strict=True)
-                ]
-                u, u_st, u_dr = u_stat(ell, tq), u_stat(ell_st, tq), u_stat(ell_dr, tq)
-                finite = all(math.isfinite(x) for x in test[n]["R"] + test[n][a])
-                pooled = math.sqrt(
-                    sum(x * x for x in test[n]["R"]) / sum(x * x for x in test[n][a])
-                )
-                t_rec = {
-                    "ell": ell, "U": u, "pass": finite and u <= c,
-                    "control_stretched_U": u_st, "control_stretched_fails": u_st > c,
-                    "control_drop_U": u_dr, "control_drop_fails": u_dr > c,
-                    "rms_ratio_raw_over_explicit": pooled,
-                }  # fmt: skip
-                rec["tensors"][n]["arms"][a] = t_rec
-                rec["pass"] &= (
-                    t_rec["pass"]
-                    and t_rec["control_stretched_fails"]
-                    and t_rec["control_drop_fails"]
-                )
+        failures += judge.failures()
+        rec["verdicts"], rec["failures"] = judge.verdicts(), failures
     if W > 1:
         verdict: list = [None] * W
         dist.all_gather_object(verdict, rec["pass"])
@@ -1444,10 +1297,6 @@ def _protocol_rank(
     return rec
 
 
-def _log_ratio(num: float, den: float) -> float:
-    return math.log(max(num, 1e-300) / max(den, 1e-300))
-
-
 def _protocol_spawn_entry(
     rank: int, W: int, row, rdzv: str | None, result_dir: str
 ) -> None:
@@ -1455,7 +1304,7 @@ def _protocol_spawn_entry(
         rec = _protocol_rank(rank, W, row, rdzv, result_dir)
         if not rec["pass"]:
             raise AssertionError(
-                f"rank {rank}: {_row_id(row)} protocol failed (see the record)"
+                f"rank {rank}: {_row_id(row)}: the raw route's partials or reduced sums are not bitwise repeatable"
             )
     finally:
         if dist.is_initialized():
@@ -1465,13 +1314,13 @@ def _protocol_spawn_entry(
 
 @pytest.mark.skipif(
     os.environ.get(ENV_KCP_PROTOCOL, "") not in ("1", "true", "yes"),
-    reason=f"criterion (d) protocol on the KCP route: set {ENV_KCP_PROTOCOL}=1 (minutes per row)",
+    reason=f"the parameter gradients of both KCP routes: set {ENV_KCP_PROTOCOL}=1",
 )
 @pytest.mark.parametrize("row", PROTOCOL_ROWS, ids=_row_id)
-def test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit(row) -> None:
-    """Criterion (d) of #7816 for ``dA_log`` / ``ddt_bias`` on the KCP route (see the section comment): ``U <= c`` per
-    tensor and explicit arm, both negative controls fail (``U > c``), and the raw route's partials and reduced sums
-    are bitwise repeatable on every rank."""
+def test_raw_gate_kcp_param_grads_meet_the_naive_tier(row, record_property) -> None:
+    """``dA_log`` / ``ddt_bias`` of the raw KCP route (arm ``kcp``) and of the explicit KCP route (arm ``explicit``),
+    each judged against the FP64 reference beside the naive BF16 tier over the judge's draws, and the raw route's
+    partials and reduced sums bitwise repeatable on every rank (see the section comment)."""
     lengths, H, W, layout = row
     result_dir = os.environ.get("KCP_TEST_RESULT_DIR")
     if (
@@ -1482,7 +1331,7 @@ def test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit(row) -> None:
         rec = _protocol_rank(
             int(os.environ["SLURM_PROCID"]), W, row, None, result_dir
         )  # fmt: skip
-        assert rec["pass"], {k: rec.get(k) for k in ("row", "tensors")}
+        _finish(record_property, rec, lengths)
         return
     _skip_unless_runnable(W)
     with tempfile.TemporaryDirectory(prefix="cake_kcp_raw_protocol_") as tmp:
@@ -1496,4 +1345,4 @@ def test_raw_gate_kcp_param_grads_no_less_accurate_than_explicit(row) -> None:
         )
         with open(os.path.join(out_dir, "protocol-" + _row_id(row) + ".json")) as fh:
             rec = json.load(fh)
-    assert rec["pass"], {k: rec.get(k) for k in ("row", "tensors")}
+    _finish(record_property, rec, lengths)

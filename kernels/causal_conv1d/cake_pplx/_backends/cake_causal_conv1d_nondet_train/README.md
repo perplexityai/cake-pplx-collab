@@ -59,9 +59,13 @@ q, k, v = cake_causal_conv1d_nondet_kcp_multi((xq, xk, xv), (wq, wk, wv), ctx)
 
 | operand | shape | dtype | notes |
 |---|---|---|---|
-| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
-| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `x_local`, `y`, `dx` | `[T_r, C]` or `[1, T_r, C]` | BF16 | contiguous, 16-byte aligned; the rank's fragments back to back in the partition's order; `C` a multiple of 8 |
+| `weight`, `dweight` | `[C, 4]` | FP32 | contiguous, 16-byte aligned; `weight[c, 3]` multiplies the current token; `dweight` is the rank-local partial |
+| `hist` | `[n_hist_rows, C]` | BF16 | the forward's history pool, passed back to the backward unchanged; contiguous, 16-byte aligned |
 | `ctx` | | | the context of the rank's KDA step (`CakeKDADetKcpContext`, from `cake_pplx.cake_kda_det_train_kcp.cake_kda_det_train_kcp_build_context`): fragment table, halo plan, device tables, process group |
+
+A misaligned operand raises `ValueError` before anything launches; a fresh
+tensor or a `.clone()` is aligned.
 
 Each name maps to the deterministic name with `det` in place of `nondet`. A
 recompute handle (any object with an `entries` dict) serves either package.
@@ -110,7 +114,7 @@ The forward runs two programs:
    continuing fragment as at a document start. It is the single-rank `fwd` route program: the program that this
    package's single-rank forward runs for the call's `C` and the rank's token count. It takes each of the rank's
    fragments as a document of its own and launches as the single-rank forward does: at a row of
-   `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 576 to 768, inside the row's token range) the static or the
+   `cake_jit.FALLBACK_ROWS` or `cake_jit.DIRECT_ROWS` (C 512 to 1024, inside the row's token range) the static or the
    direct program, with no counters (the direct program's grid capped at its token blocks); elsewhere the dynamic
    program on its record's full co-resident grid, which takes its token chunks from zeroed counters (a multi call's
    tensors share one counter buffer, which the static and direct programs do not read). It launches without

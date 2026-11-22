@@ -1499,8 +1499,13 @@ kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CU
                         if (i_1 * 16 < s_hdr[hb_m + 8]) {
                             mbarrier_wait(k_full_addr + (kc) * 8, _phase_k_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             int _smem_desc_lo_0 = (((smem_k_addr) >> 4) & 0x3FFF) + (kc) * 2048;
                             int _smem_desc_lo_1 = (((smem_q_addr) >> 4) & 0x3FFF) + (pc_1) * 2048;
+#else
+                            int _smem_desc_lo_0 = (((smem_k_addr) >> 4) & 0x7FFF) + (kc) * 2048;
+                            int _smem_desc_lo_1 = (((smem_q_addr) >> 4) & 0x7FFF) + (pc_1) * 2048;
+#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -1562,8 +1567,13 @@ kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CU
                         if (i_1 * 16 < s_hdr[hb_m + 8 + 1]) {
                             mbarrier_wait(k_full_addr + (kc) * 8, _phase_k_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             int _smem_desc_lo_2 = (((smem_k_addr) >> 4) & 0x3FFF) + (kc) * 2048;
                             int _smem_desc_lo_3 = (((smem_q_addr + 4096) >> 4) & 0x3FFF) + (pc_1) * 2048;
+#else
+                            int _smem_desc_lo_2 = (((smem_k_addr) >> 4) & 0x7FFF) + (kc) * 2048;
+                            int _smem_desc_lo_3 = (((smem_q_addr + 4096) >> 4) & 0x7FFF) + (pc_1) * 2048;
+#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -1625,8 +1635,13 @@ kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CU
                         if (i_1 * 16 < s_hdr[hb_m + 8 + 2]) {
                             mbarrier_wait(k_full_addr + (kc) * 8, _phase_k_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             int _smem_desc_lo_4 = (((smem_k_addr) >> 4) & 0x3FFF) + (kc) * 2048;
                             int _smem_desc_lo_5 = (((smem_q_addr + 8192) >> 4) & 0x3FFF) + (pc_1) * 2048;
+#else
+                            int _smem_desc_lo_4 = (((smem_k_addr) >> 4) & 0x7FFF) + (kc) * 2048;
+                            int _smem_desc_lo_5 = (((smem_q_addr + 8192) >> 4) & 0x7FFF) + (pc_1) * 2048;
+#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"
@@ -1688,8 +1703,13 @@ kernel_cake_dsa_indexer_det_topk_e0ccbd2fdf60bef2e73a(const __grid_constant__ CU
                         if (i_1 * 16 < s_hdr[hb_m + 8 + 3]) {
                             mbarrier_wait(k_full_addr + (kc) * 8, _phase_k_full);
                             asm volatile("tcgen05.fence::after_thread_sync;");
+#if __CUDA_ARCH__ == 1000 || __CUDA_ARCH__ == 1030
                             int _smem_desc_lo_6 = (((smem_k_addr) >> 4) & 0x3FFF) + (kc) * 2048;
                             int _smem_desc_lo_7 = (((smem_q_addr + 12288) >> 4) & 0x3FFF) + (pc_1) * 2048;
+#else
+                            int _smem_desc_lo_6 = (((smem_k_addr) >> 4) & 0x7FFF) + (kc) * 2048;
+                            int _smem_desc_lo_7 = (((smem_q_addr + 12288) >> 4) & 0x7FFF) + (pc_1) * 2048;
+#endif
                             asm volatile(
                     "{\n\t"
                     ".reg .pred p0, p1;\n\t"

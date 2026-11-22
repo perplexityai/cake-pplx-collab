@@ -19,15 +19,20 @@ dispatches its dav stage (:func:`cake_kcp_plan.kcp_dav_needed`: the fused-gradie
 
 * coverage, per gate mode x norm x H {4, 8, 12, 16, 32, 64} x path (saved, replay, ``saved_rows`` intra / wy,
   checkpoint hand-off with its tape set (``saved_rows="tape"``, recorded ``"bound"``) and with the ``"auto"`` rows
-  form (recorded ``"wy"``)): the private knob ``kcp_dav="always"`` gives every output and gradient bitwise the
-  shipped ``"auto"``; the dAqk buffer NaN-filled right after the ``dav`` stage changes no bit where ``kcp_dav`` is
-  skipped (the fused gradient stores every dAqk row before its reader) and reaches the gradients where it runs (the
-  negative control); the backward's record says ``"launched"`` / ``"skipped"`` as the plan decides; a second
-  ``"auto"`` call is bitwise the first;
-* forms: the private knob ``walk_form`` ``"full"`` and ``"split"`` bitwise ``"auto"`` at H 63 and 64 (the K2
-  offset's head rule ``cake_kcp_jit.WALK_HEADS_RULE``: ``kcp_dhu_offset`` up to 63 heads,
-  ``kcp_dhu_offset_overlap`` above), saved and replay, both gate modes, the norm off and on; the full-width run
-  launches the offset record the rule names.
+  form (recorded ``"wy"``)): the shipped ``"auto"`` (twice, repeats) and the private knob ``kcp_dav="always"`` are
+  judged; the dAqk buffer NaN-filled right after the ``dav`` stage reaches no output where ``kcp_dav`` is skipped (the
+  fused gradient stores every dAqk row before its reader: that run is judged too, a NaN breaks its contract) and
+  reaches the gradients where it runs (the negative control: an output holds a NaN or an inf); the backward's record
+  says ``"launched"`` / ``"skipped"`` as the plan decides;
+* forms: the private knob ``walk_form`` ``"auto"``, ``"full"`` and ``"split"`` judged at H 63 and 64 (the K2 offset's
+  head rule ``cake_kcp_jit.WALK_HEADS_RULE``: ``kcp_dhu_offset`` up to 63 heads, ``kcp_dhu_offset_overlap`` above),
+  saved and replay, both gate modes, the norm off and on; the full-width run launches the offset record the rule
+  names.
+
+Accuracy: this package has no bit contract, so no run is compared with another's bits.  Every output and gradient of
+every run (``"<arm>.<output>"``) is judged against the FP64 reference of the pack beside the naive BF16 tier of
+``tests/cake_naive.py`` over 32 draws of the operands (``cake_kda_naive.judge_arms``; the owner-accepted gaps only).
+The record and launch checks run on every draw.
 """
 
 from __future__ import annotations
@@ -47,6 +52,8 @@ from tests.experimental.test_helpers.cake_kda_det_train_reference import (
     make_inputs,
     make_raw_inputs,
 )
+from tests.experimental.test_helpers.cake_kda_naive import judge_arms
+from tests.experimental.test_helpers.cake_kda_naive_kcp import to_global
 from tests.cake.test_helpers.cake_package import cake_package
 
 kp = cake_package("cake.cake_kda_nondet_train_kcp", "cake_kcp_plan")
@@ -64,6 +71,8 @@ HEADS = (4, 8, 12, 16, 32, 64)
 PATHS = ("saved", "replay", "rows_intra", "rows_wy", "handoff", "handoff_rows")
 FORM_HEADS = (63, 64)
 K2_PROGRAMS = ("kcp_dhu_offset", "kcp_dhu_tape")
+# the judged operands: draw j of a case at draw_seed(SEED, j) (tests/cake_naive.py)
+SEED = 0x7817
 
 
 @pytest.fixture(scope="module")
@@ -88,16 +97,19 @@ def _ctx(pack: str, device: torch.device):
     return _CTX[key]
 
 
-def _operands(pack: str, H: int, gate: str, l2n: bool, device) -> dict:
-    """Seeded operands of the pack in the rank's fragment order (one rank: its fragments cover every token)."""
+def _operands(
+    pack: str, H: int, gate: str, l2n: bool, device, seed: int
+) -> tuple[dict, dict]:
+    """The operands of draw seed ``seed`` of the pack in the rank's fragment order (one rank: its fragments cover every
+    token), and the whole pack in the global order (the judge's operands)."""
     lengths = PACKS[pack]
     raw = gate == "raw"
     if l2n:
-        glob = _l2n_inputs(lengths, H, device, raw_gate=raw)
+        glob = _l2n_inputs(lengths, H, device, raw_gate=raw, seed=seed)
     elif raw:
-        glob = make_raw_inputs(lengths, H, device)
+        glob = make_raw_inputs(lengths, H, device, seed=seed)
     else:
-        glob = make_inputs(lengths, H, device)
+        glob = make_inputs(lengths, H, device, seed=seed)
     part, cu, _ = _ctx(pack, device)
     names = ("q", "k", "v", "g", "beta", "dout")
     ops = {}
@@ -113,7 +125,21 @@ def _operands(pack: str, H: int, gate: str, l2n: bool, device) -> dict:
             glob["A_log"].to(device),
             glob["dt_bias"].to(device),
         )
-    return ops
+    return ops, glob
+
+
+def _global(pack: str, res: dict, device) -> dict:
+    """A one-rank run's results in the global token order (``dA_log`` / ``ddt_bias`` as they are)."""
+    part, cu, _ = _ctx(pack, device)
+    return {
+        n: t if n in ("dA_log", "ddt_bias") else to_global([part.fragments[0]], [t], cu)
+        for n, t in res.items()
+    }
+
+
+def _nonfinite(res: dict) -> list[str]:
+    """The outputs that hold a NaN or an inf."""
+    return [n for n, t in res.items() if not bool(torch.isfinite(t.float()).all())]
 
 
 def _run(ctx, ops, gate: str, l2n: bool, path: str, knobs: dict, poison: bool = False):
@@ -211,74 +237,76 @@ def _run(ctx, ops, gate: str, l2n: bool, path: str, knobs: dict, poison: bool = 
     return res, rec, seen.get("needed")
 
 
-def _same(a: dict, b: dict) -> list[str]:
-    """The names whose bits differ (shape, dtype or any byte)."""
-    bad = []
-    for n in a:
-        x, y = a[n], b[n]
-        if (
-            x.shape != y.shape
-            or x.dtype != y.dtype
-            or not torch.equal(
-                x.contiguous().view(torch.uint8), y.contiguous().view(torch.uint8)
-            )
-        ):
-            bad.append(n)
-    return bad
-
-
 @pytest.mark.parametrize("path", PATHS)
 @pytest.mark.parametrize("H", HEADS)
 @pytest.mark.parametrize("l2n", (False, True), ids=("plain", "l2n"))
 @pytest.mark.parametrize("gate", ("g", "raw"))
 @pytest.mark.parametrize("pack", tuple(PACKS))
 def test_gpu_kcp_dav_runs_only_where_its_dakq_has_a_reader(
-    device, monkeypatch, pack, gate, l2n, H, path
+    device, monkeypatch, record_property, pack, gate, l2n, H, path
 ) -> None:
-    """``kcp_dav="always"`` bitwise ``"auto"``; the NaN-filled dAqk dead where ``kcp_dav`` is skipped and live where
-    it runs; the record as the plan decides; ``"auto"`` run-to-run bitwise."""
+    """Every draw: the record as the plan decides; ``"auto"`` (twice: repeats, ``auto``), ``kcp_dav="always"``
+    (``always``) and, where ``kcp_dav`` is skipped, the run with the NaN-filled dAqk (``poisoned``: no NaN reaches an
+    output) judged; where ``kcp_dav`` runs the NaN-filled dAqk reaches an output (the negative control)."""
     monkeypatch.setattr(kp, "_TEST_KNOBS_ENABLED", True)
     _, _, ctx = _ctx(pack, device)
-    ops = _operands(pack, H, gate, l2n, device)
-    auto, rec, needed = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "auto"})
-    assert needed is not None, "the backward ran no dav stage"
-    assert rec.get("kcp_dav") == ("launched" if needed else "skipped"), (
-        rec.get("kcp_dav"),
-        needed,
+
+    def draw(j, s):
+        ops, glob = _operands(pack, H, gate, l2n, device, s)
+        auto, rec, needed = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "auto"})
+        assert needed is not None, "the backward ran no dav stage"
+        assert rec.get("kcp_dav") == ("launched" if needed else "skipped"), (
+            rec.get("kcp_dav"),
+            needed,
+        )
+        if path == "handoff":
+            assert rec.get("checkpoint_handoff") == "bound", rec.get(
+                "checkpoint_handoff"
+            )
+        if path == "handoff_rows":
+            assert rec.get("saved_rows") == "wy", rec.get("saved_rows")
+        if path.startswith("rows_"):
+            assert rec.get("saved_rows") == path[5:], rec.get("saved_rows")
+        again, _rec2, _ = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "auto"})
+        always, rec_a, needed_a = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "always"})
+        assert rec_a.get("kcp_dav") == "launched" and needed_a == needed
+        poisoned, _rec_p, _ = _run(
+            ctx, ops, gate, l2n, path, {"kcp_dav": "auto"}, poison=True
+        )
+        arms = {
+            "auto": [_global(pack, auto, device), _global(pack, again, device)],
+            "always": _global(pack, always, device),
+        }
+        if needed:
+            # the negative control: kcp_dav's dAqk is the fused gradient's input here
+            assert _nonfinite(poisoned), (
+                "the NaN-filled dAqk reached no output where kcp_dav runs"
+            )
+        else:
+            arms["poisoned"] = _global(pack, poisoned, device)
+        return arms, glob
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=SEED,
+        scale=cake_kcp.SCALE,
+        l2n=l2n,
+        lower_bound=LOWER_BOUND,
     )
-    if path == "handoff":
-        assert rec.get("checkpoint_handoff") == "bound", rec.get("checkpoint_handoff")
-    if path == "handoff_rows":
-        assert rec.get("saved_rows") == "wy", rec.get("saved_rows")
-    if path.startswith("rows_"):
-        assert rec.get("saved_rows") == path[5:], rec.get("saved_rows")
-    again, rec2, _ = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "auto"})
-    assert not _same(auto, again), ("run-to-run", _same(auto, again))
-    always, rec_a, needed_a = _run(ctx, ops, gate, l2n, path, {"kcp_dav": "always"})
-    assert rec_a.get("kcp_dav") == "launched" and needed_a == needed
-    assert not _same(auto, always), ("always vs auto", _same(auto, always))
-    poisoned, rec_p, _ = _run(
-        ctx, ops, gate, l2n, path, {"kcp_dav": "auto"}, poison=True
-    )
-    bad = _same(auto, poisoned)
-    if needed:
-        # the negative control: kcp_dav's dAqk is the fused gradient's input here
-        assert bad, "the NaN-filled dAqk reached no output where kcp_dav runs"
-    else:
-        assert not bad, ("the NaN-filled dAqk reached", bad)
 
 
 @pytest.mark.parametrize("path", ("saved", "replay"))
 @pytest.mark.parametrize("H", FORM_HEADS)
 @pytest.mark.parametrize("l2n", (False, True), ids=("plain", "l2n"))
 @pytest.mark.parametrize("gate", ("g", "raw"))
-def test_gpu_adjoint_walk_forms_are_bitwise(
-    device, monkeypatch, gate, l2n, H, path
+def test_gpu_adjoint_walk_forms_judged(
+    device, monkeypatch, record_property, gate, l2n, H, path
 ) -> None:
-    """``walk_form`` ``"full"`` / ``"split"`` bitwise ``"auto"`` across the K2 offset's head rule (63 / 64 heads): every
-    run launches both K2 walks (``walk_forms``), a forced run in the forced form only; the full-width offset record
-    the registry selects at ``H`` is the one ``WALK_HEADS_RULE`` names (``kcp_dhu_offset`` at 63 heads,
-    ``kcp_dhu_offset_overlap`` at 64)."""
+    """``walk_form`` ``"auto"`` / ``"full"`` / ``"split"`` across the K2 offset's head rule (63 / 64 heads), each
+    judged (arm per form): every run launches both K2 walks (``walk_forms``), a forced run in the forced form only
+    (every draw); the full-width offset record the registry selects at ``H`` is the one ``WALK_HEADS_RULE`` names
+    (``kcp_dhu_offset`` at 63 heads, ``kcp_dhu_offset_overlap`` at 64)."""
     monkeypatch.setattr(kp, "_TEST_KNOBS_ENABLED", True)
     want = "kcp_dhu_offset" if H <= 63 else "kcp_dhu_offset_overlap"
     assert cake_kcp_jit.walk_heads_record("kcp_dhu_offset", H) == want
@@ -287,18 +315,25 @@ def test_gpu_adjoint_walk_forms_are_bitwise(
     )
     pack = "one4k"
     _, _, ctx = _ctx(pack, device)
-    ops = _operands(pack, H, gate, l2n, device)
-    runs = {}
-    for form in ("auto", "full", "split"):
-        res, rec, _ = _run(ctx, ops, gate, l2n, path, {"walk_form": form})
-        launched = [tuple(x)[:2] for x in rec.get("walk_forms") or ()]
-        k2 = [(name, f) for name, f in launched if name in K2_PROGRAMS]
-        assert {name for name, _ in k2} == set(K2_PROGRAMS), (form, launched)
-        if form != "auto":
-            assert {f for _, f in k2} == {form}, (form, k2)
-        runs[form] = res
-    for form in ("full", "split"):
-        assert not _same(runs["auto"], runs[form]), (
-            form,
-            _same(runs["auto"], runs[form]),
-        )
+
+    def draw(j, s):
+        ops, glob = _operands(pack, H, gate, l2n, device, s)
+        arms = {}
+        for form in ("auto", "full", "split"):
+            res, rec, _ = _run(ctx, ops, gate, l2n, path, {"walk_form": form})
+            launched = [tuple(x)[:2] for x in rec.get("walk_forms") or ()]
+            k2 = [(name, f) for name, f in launched if name in K2_PROGRAMS]
+            assert {name for name, _ in k2} == set(K2_PROGRAMS), (form, launched)
+            if form != "auto":
+                assert {f for _, f in k2} == {form}, (form, k2)
+            arms[form] = _global(pack, res, device)
+        return arms, glob
+
+    judge_arms(
+        record_property,
+        draw,
+        seed=SEED,
+        scale=cake_kcp.SCALE,
+        l2n=l2n,
+        lower_bound=LOWER_BOUND,
+    )
