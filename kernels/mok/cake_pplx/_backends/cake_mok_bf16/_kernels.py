@@ -653,9 +653,7 @@ def _source_split_arguments(
     reads no route total, so ``stand_in`` takes their place. ``owner_routes``,
     when given, is the schedule's int32 ``[ep_size]`` route totals."""
     rich_comm_sms, rich_threshold = (
-        (comm_sms, 3 * SOURCE_SPLIT_UNIT // 2)
-        if source_split is None
-        else source_split
+        (comm_sms, 3 * SOURCE_SPLIT_UNIT // 2) if source_split is None else source_split
     )
     if (
         type(rich_comm_sms) is not int
